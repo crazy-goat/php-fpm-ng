@@ -2824,6 +2824,20 @@ maske auto-globali i znaczniki czasu skryptow.
 - scoreboard FPM nie reprezentuje wielu requestow w jednym procesie, dlatego
   timeouty/slowlog i `pm.max_requests` sa odrzucane.
 
+### `pool.type = http-fiber`
+
+Cienka kompozycja istniejacej bramki HTTP i executora Fiber. Nie kopiuje parsera
+ani schedulera: `init_main` pochodzi z bramki, a `child_main` z `fiber`.
+Klasyczna bramka ogranicza liczbe polaczen FastCGI do liczby workerow, poniewaz
+kazde polaczenie przypina blokujacego workera. Dla `http-fiber` limit wynosi
+domyślnie 128 na pool i mozna go zmienic przez `FPM_HTTP_MAX_UPSTREAMS`.
+
+Test bezposrednio po HTTP: cztery requesty, kazdy czekajacy 500 ms na socket,
+zakonczyly sie w **514 ms**. Log potwierdzil cztery requesty in flight w jednym
+workerze Fiber i 128-polaczeniowy budzet bramki. Typy `async`, `fiber` oraz
+`http-fiber` pozostaja jawnie **eksperymentalne i nie sa przeznaczone do
+produkcji**.
+
 ### Wniosek
 
 Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP

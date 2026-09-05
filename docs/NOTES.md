@@ -669,20 +669,49 @@ a stan sesji siedzi w bramce. Wariant in-process musiałby dać każdemu workero
 własny stan TLS i obsługę certyfikatów. To praktycznie **zamyka** tamtą drogę,
 nie tylko odkłada. Nie wracać do tematu bez nowego argumentu.
 
-### Konsekwencja 2: ACME piszemy w PHP, nie w C
+### Konsekwencja 2: gdzie napisać klienta ACME — NIEROZSTRZYGNIĘTE
 
-Klient ACME to podpisy JOSE, JSON, rozmowa HTTP z Let's Encrypt i zarządzanie
-zamówieniem. W C to kilka tysięcy linii i stała powierzchnia na błędy
-bezpieczeństwa. W PHP kilkaset, a biblioteki istnieją.
+Piotr skłania się do C. Decyzja świadomie odłożona, obie drogi zapisane.
+Nie rozstrzygać bez odpowiedzi na pytania z końca tej sekcji.
 
-A my budujemy maszynerię, która to uruchomi:
-- **odnawianie certyfikatu = pool typu `cron`**
-- **wyzwanie HTTP-01 = podanie pliku spod `/.well-known/acme-challenge/`**,
-  czyli ten sam mechanizm co pliki statyczne w bramce
+**Opcja A: ACME w C, wewnątrz bramki**
 
-W C zostaje: TLS w bramce przez `bufferevent_openssl` (libevent to ma, OpenSSL
-już linkujemy statycznie — sprawdzone w sekcji 3c) plus przeładowanie
-certyfikatu bez zrywania połączeń, we wszystkich procesach bramki.
+- **Bootstrap działa naturalnie.** Nie da się serwować HTTPS bez certyfikatu,
+  a pool typu `cron` startuje po uruchomieniu poolów — pierwsze wydanie
+  certyfikatu wypada wtedy w złym momencie cyklu życia. W C to jest wewnątrz
+  procesu, który i tak musi poczekać na certyfikat.
+- **Brak sprzężenia z aplikacją.** Zepsuta albo źle skonfigurowana aplikacja
+  użytkownika nie może doprowadzić do wygaśnięcia certyfikatu.
+- **"Jedna binarka" zostaje prawdą.** Skrypt PHP musiałby gdzieś mieszkać —
+  payload self-runnera pakuje aplikację użytkownika, nie nasze rzeczy, więc albo
+  sprzęgamy dwie funkcje, albo dokładamy plik obok binarki.
+- **Brak zależności od rozszerzeń PHP.** Podpisy JOSE potrzebują `openssl_sign`,
+  do tego klient HTTP. Jeśli ktoś zbuduje fpm-ng bez tych rozszerzeń, ACME
+  przestaje działać. W C OpenSSL i tak jest zlinkowany dla samego TLS.
+- Koszt: kilka tysięcy linii C i stała powierzchnia na błędy pamięci.
+
+**Opcja B: ACME w PHP jako pool typu `cron`**
+
+- Kilkaset linii zamiast kilku tysięcy, biblioteki istnieją.
+- Reużywa maszynerii, którą i tak budujemy (`cron`, pliki statyczne dla
+  wyzwania HTTP-01 spod `/.well-known/acme-challenge/`).
+- Łatwiejsze do poprawienia bez przebudowy binarki.
+- Wady to dokładnie zalety opcji A odwrócone: bootstrap, sprzężenie
+  z aplikacją, dodatkowy plik, zależność od rozszerzeń.
+
+**Co rozstrzygnie ten wybór — do sprawdzenia przed decyzją**
+
+1. Ile realnie kodu C to jest? Obejrzeć minimalnego klienta ACME w C
+   (np. `uacme`, `acme-client`) i policzyć, ile z tego jest nam potrzebne przy
+   wyłącznie HTTP-01 i jednym CA.
+2. Czy bootstrap w opcji B da się rozwiązać sensownie — np. bramka startuje bez
+   TLS, wystawia tylko wyzwanie, a listener HTTPS wstaje po pierwszym wydaniu?
+3. Czy skrypt ACME dałoby się osadzić w binarce tym samym mechanizmem co
+   self-runner (sekcja 3a) bez sprzęgania obu funkcji?
+
+Niezależnie od wyboru: w C zostaje TLS w bramce przez `bufferevent_openssl`
+(libevent to ma, OpenSSL już linkujemy statycznie — sekcja 3c) oraz
+przeładowanie certyfikatu bez zrywania połączeń, we wszystkich procesach bramki.
 
 ### DWIE RZECZY DO ZAPROJEKTOWANIA TERAZ, NIE NA KOŃCU
 

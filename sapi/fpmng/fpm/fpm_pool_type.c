@@ -4,7 +4,6 @@
 
 #include <string.h>
 #include <stdio.h>
-#include <unistd.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -139,17 +138,6 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void)
 {
 	struct fpm_scoreboard_s *sb = fpm_scoreboard_get();
 	struct fpm_worker_pool_s *wp;
-
-	{
-		char dbgbuf[512];
-		int off = snprintf(dbgbuf, sizeof(dbgbuf), "DEBUG current_pool: pid=%d sb=%p all_pools=%p", (int) getpid(), (void *) sb, (void *) fpm_worker_all_pools);
-		for (wp = fpm_worker_all_pools; wp && off < (int) sizeof(dbgbuf); wp = wp->next) {
-			off += snprintf(dbgbuf + off, sizeof(dbgbuf) - off, " | wp=%p name=%s sb=%p",
-				(void *) wp, wp->config->name, (void *) wp->scoreboard);
-		}
-		dbgbuf[off < (int) sizeof(dbgbuf) ? off : (int) sizeof(dbgbuf) - 1] = '\n';
-		write(2, dbgbuf, (off < (int) sizeof(dbgbuf) ? off : (int) sizeof(dbgbuf) - 1) + 1);
-	}
 
 	if (!sb) {
 		return NULL;

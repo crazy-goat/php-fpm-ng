@@ -128,37 +128,37 @@ int fpm_run(int *max_requests) /* {{{ */
 
 run_child: /* only workers reach this point */
 
-	fpm_cleanups_run(FPM_CLEANUP_CHILD);
-
 	/* Typ poola moze przejac dziecko zamiast petli accept (supervisor, cron).
 	 * Pool bierzemy ze scoreboardu, bo dzieci wskrzeszane w petli zdarzen
-	 * docieraja tu bez wskaznika na swoj pool. */
+	 * docieraja tu bez wskaznika na swoj pool.
+	 *
+	 * WAZNE: to musi sie stac PRZED fpm_cleanups_run(FPM_CLEANUP_CHILD)
+	 * ponizej. fpm_worker_pool_init_main() (fpm_worker_pool.c, referencja)
+	 * rejestruje fpm_worker_pool_cleanup() na FPM_CLEANUP_ALL, czyli i na
+	 * CHILD — ta funkcja zwalnia CALA liste fpm_worker_all_pools, wlacznie
+	 * z wp->config (free()), i na koniec ustawia fpm_worker_all_pools = NULL.
+	 * Zrobione to specjalnie dla zwyklego workera FastCGI, ktory po tym
+	 * punkcie juz nigdy nie zagląda do wp/config (dziala dalej wylacznie na
+	 * fpm_globals). My (supervisor/cron) potrzebujemy wp->config przez CALY
+	 * czas zycia procesu, wiec odczytujemy go, ZANIM zniknie. */
 	{
 		struct fpm_worker_pool_s *child_wp = fpm_pool_type_current_pool();
+		const struct fpm_pool_type_s *type = child_wp ? fpm_pool_type_of(child_wp) : NULL;
 
-		{
-			char dbgbuf[256];
-			int n = snprintf(dbgbuf, sizeof(dbgbuf), "DEBUG run_child: pid=%d child_wp=%p name=%s\n",
-				(int) getpid(), (void *) child_wp, child_wp ? child_wp->config->name : "(null)");
-			write(2, dbgbuf, n);
-		}
-
-		if (child_wp) {
-			const struct fpm_pool_type_s *type = fpm_pool_type_of(child_wp);
-
-			{
-				char dbgbuf[256];
-				int n = snprintf(dbgbuf, sizeof(dbgbuf), "DEBUG run_child: type=%s child_main=%p\n",
-					type->name, (void *) type->child_main);
-				write(2, dbgbuf, n);
-			}
-
-			if (type->child_main) {
-				type->child_main(child_wp);
-				/* nie wraca */
-			}
+		if (type && type->child_main) {
+			/* Ten typ przejmuje caly proces na dobre — nie wraca, wiec
+			 * pomijamy fpm_cleanups_run(FPM_CLEANUP_CHILD) w ogole: i tak nie
+			 * ma juz kodu po tym punkcie, ktory by z niego skorzystal, a
+			 * zwolnienie wp/config pod nami zamienilyby kazdy dostep do
+			 * konfiguracji w tym procesie w use-after-free. System i tak
+			 * odzyska wszystko przy zakonczeniu procesu (exit() wolane z
+			 * child_main). */
+			type->child_main(child_wp);
+			/* nie wraca */
 		}
 	}
+
+	fpm_cleanups_run(FPM_CLEANUP_CHILD);
 
 	*max_requests = fpm_globals.max_requests;
 	return fpm_globals.listening_socket;

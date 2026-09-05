@@ -730,6 +730,109 @@ i przekierowanie, drugi na ruch. Model konfiguracji musi to obsłużyć; sprawdz
 czy "jeden pool, jeden port" wystarcza.
 
 
+## 3m. `fcgi-ng` — wyniki badania i PRAWDZIWY CEL: eksperymentalny build pod async
+
+### Cel, w którego świetle trzeba czytać wszystkie liczby
+
+`fcgi-ng` nie jest głównie o wyciśnięciu mikrosekund z dzisiejszego FPM. Ma być
+**eksperymentalnym buildem pod prawdziwy asynchron w PHP**. To zmienia wagę
+wszystkich pomiarów poniżej.
+
+**Async zmienia mianownik z czasu ściennego na czas CPU.** Refren "przy 20 ms
+requeście transport to 0,15%" zakłada, że worker jest przez te 20 ms zajęty.
+Ale typowy request PHP to ~2 ms CPU i ~18 ms czekania na bazę — dziś to czekanie
+blokuje proces. Pod asynchronem worker w tym czasie obsługuje inne requesty,
+więc liczy się CPU na request, nie ścienny: **30 µs z 2 ms to 1,5%, nie 0,15%.**
+Przy lekkim endpoincie API z cache'em (200 µs CPU) — 15%.
+
+### Wyniki badania (agent, 2026-09-05, poligon, artefakty w `~/ng-research/`)
+
+Worker FastCGI robi **26 syscalli na request keep-alive**, 33 przy nowym
+połączeniu. Dla porównania nasza bramka HTTP robi ~9 — czyli w parze
+bramka+worker to **worker był większym konsumentem**, a myśmy optymalizowali
+cieńszy koniec. Z tych 26 tylko **7 to FastCGI**; reszta to narzut PHP/Zend/FPM:
+8× `rt_sigaction` (`zend_signal_activate`), 2× `setitimer` + `rt_sigprocmask`
+(`max_execution_time`), `getcwd` + 2× `chdir`, 2× `fcntl` (blokada opcache),
+2× `times` (CPU requestu do statusu), `write(2,"\0fscf")`.
+
+Zmierzone na dwóch łatkach eksperymentalnych (rozrzut < 3%):
+
+| | syscalli | TCP µs/req | UDS µs/req |
+|---|---|---|---|
+| dziś | 26 | 65 | 54 |
+| bufor wejściowy + `accept4`, bez `poll` | 21 | 56 | 46 |
+| + zdjęta księgowość | 8 | 34 | 26 |
+| + `max_execution_time=0` | **4** | **30** | **23** |
+
+Dwie pozycje są **za darmo, samą konfiguracją**: `max_execution_time=0` (−3 µs)
+i gniazdko uniksowe zamiast loopbacku TCP (−7…−11 µs).
+
+Podłoga po wycięciu wszystkiego: ~23 µs (UDS), z czego ~9 µs to sam PHP.
+Czegoś większego nie ma: `stat` na skrypcie nie występuje wcale (opcache
+serwuje z SHM), realpath trafia w cache, scoreboard to ~0,25 µs.
+
+**Zastrzeżenie sprzętowe:** poligon ma PTI + IBRS, więc syscall kosztuje tam
+~0,9 µs. Na nowszym CPU (Ice Lake+, Zen) to 0,1–0,3 µs, czyli **zysk
+bezwzględny skurczy się 3–5×**. Te 30 µs to górna granica, nie typowa wartość.
+
+### BŁĄD UPSTREAMU: `TCP_NODELAY` nigdy nie włączane na Linuksie
+
+Potwierdzone we własnym drzewie. `main/fastcgi.c:891` przypisuje `req->tcp`
+**wyłącznie pod `#ifdef _WIN32`**, a linia 1085 używa go bezwarunkowo do decyzji
+o `TCP_NODELAY`. Poza Windows pole zostaje zerem z `calloc`, więc przy
+keep-alive po TCP odpowiedź > 8 KB idzie kilkoma `write`, a ostatni mały segment
+czeka na ACK → Nagle + delayed ACK.
+
+Zmierzone: **40 ms** zamiast 80 µs. Z prawdziwym nginx na loopbacku
+NIE odtworzone (nginx ACK-uje szybko), więc w typowym wdrożeniu nie boli — ale
+poza loopbackiem albo z innym klientem FastCGI już tak.
+
+Naprawa to jedna linia. **Zgłosić upstream niezależnie od tego projektu.**
+
+### Dwa kierunki odrzucone — ale jeden tylko WARUNKOWO
+
+**`SO_REUSEPORT` per worker — odrzucone na stałe.** Thundering herd **w ogóle
+nie istnieje**: blokujący `accept` używa kolejki wyłącznej i jądro budzi jednego
+workera (zmierzone: 1,78 przełączenia kontekstu na `accept` przy 8 workerach vs
+1,88 przy jednym). A `SO_REUSEPORT` przypina połączenie do gniazda hashem, nie
+do wolnego workera, więc pogorszyłby ogon.
+
+**`io_uring` — odrzucone TYLKO DLA OBECNEGO MODELU.** Agent oparł werdykt wprost
+na tym, że po jego łatkach cykl to `read` → PHP → `write` → `read`, więc jest
+do sklejenia najwyżej 1–2 syscalle. To poprawne dla **workera blokującego**.
+
+Pod asynchronem worker nie siedzi w blokującym `read`, tylko ma pętlę zdarzeń
+i N równoległych requestów — czyli dokładnie to, do czego io_uring powstał:
+wiele deskryptorów, wiele operacji zgłaszanych jednym `io_uring_enter`,
+multishot accept/recv, brak `epoll_ctl` na każdą zmianę zainteresowania.
+**Przy async trzeba to przeliczyć od nowa. Nie cytować samej konkluzji.**
+
+### KOREKTA: async ponownie otwiera `http-direct`
+
+W sekcji 3l napisałem, że TLS praktycznie zamyka wariant in-process, bo worker
+musiałby mieć własny stan TLS i pętlę zdarzeń. Pod asynchronem worker **i tak ma
+pętlę zdarzeń** — to jest sedno asynchrona. HTTP i TLS w workerze przestają
+wtedy być wpychaniem parsera do procesu, który nie ma gdzie go trzymać.
+
+Argument był za mocny. `http-direct` wraca do stanu **otwarte**, nie zamknięte.
+
+### Rekomendacja agenta — kolejność dla `fcgi-ng`
+
+1. Naprawa `TCP_NODELAY` (jedna linia, błąd, zgłosić upstream)
+2. Bufor wejściowy + `accept4` (~7 µs keep, ~12 µs nowe poł., zero zmian na drucie)
+3. `write(2,"\0fscf")` tylko przy `catch_workers_output` (~1 µs)
+4. Cache `chdir` w SAPI + `SAPI_OPTION_NO_CHDIR` (~5 µs, zachowuje semantykę cwd)
+5. Opt-in na CPU requestu (`times()`, ~2,6 µs)
+6. Usunięcie `poll` TYLKO razem z `SO_RCVTIMEO` na gnieździe nasłuchującym
+   (poll chroni przed milczącym klientem — stage ACCEPTING nie podlega
+   `request_terminate_timeout`)
+7. W dokumentacji: `max_execution_time=0` + UDS dla mikro-endpointów
+
+Poza `fcgi-ng`, do upstreamu: 7× `rt_sigaction` w `zend_signal_activate`
+(~6,5 µs) i 2× `fcntl` opcache (~1,7 µs) — 40% pozostałych syscalli, ale nie po
+stronie SAPI.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

@@ -87,6 +87,7 @@ const char *const fpm_pool_cron_rejects[] = {
 	"access.",
 	"security.limit_extensions",
 	"supervisor.",
+	"http.",
 	NULL
 };
 

@@ -11,6 +11,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_pool_supervisor.h"
+#include "fpm_pool_cron.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
@@ -43,6 +44,15 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.validate        = fpm_pool_supervisor_validate,
 		.init_main       = fpm_pool_supervisor_init_main,
 		.child_main      = fpm_pool_supervisor_child_main,
+	},
+	{
+		.name            = "cron",
+		.requires_listen = 0,
+		.requires_pm     = 0,	/* validate() ustawia pm=static+max_children=1 programowo, zawsze */
+		.serves_requests = 0,
+		.rejects         = fpm_pool_cron_rejects,
+		.validate        = fpm_pool_cron_validate,
+		.child_main      = fpm_pool_cron_child_main,
 	},
 };
 

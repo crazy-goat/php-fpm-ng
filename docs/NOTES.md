@@ -2991,6 +2991,10 @@ Mała odpowiedź nie wykazała poprawy (mediany 12833,55 i 12668,64 req/s), zgod
 
 Wspólna ścieżka workera nadal wykonuje około 8 `rt_sigaction`, 2 `times`, 2 `setitimer`, 2 `chdir`, 1 `getcwd` i 2 `fcntl` na request. Dla HTTP keep-alive gateway dodaje głównie 4 `epoll_ctl`, 3 `epoll_wait`, po jednym `readv`, `writev` i `ioctl`. `Connection: close` zwiększa koszt HTTP o około 9 syscalli/request: `epoll_ctl` rośnie z 4 do 8, dochodzą około 2 `accept4`, dodatkowy `epoll_wait` i `shutdown`.
 
+### Zero-copy / DMA — kierunek odłożony
+
+DMA nie jest bezpośrednim API dla odpowiedzi generowanych przez PHP. `sendfile()` ma sens tylko dla plików statycznych i należy najpierw sprawdzić, czy libevent już go używa. `MSG_ZEROCOPY` może być kandydatem dla dużych odpowiedzi TCP, ale wymaga obsługi completion queue i pomiaru przez fizyczny interfejs; loopback nie jest miarodajny. `splice()` jest mało atrakcyjne, ponieważ gateway musi parsować rekordy FastCGI i budować HTTP. Dla dynamicznych odpowiedzi pozostaje obecnie prostsze i potwierdzone benchmarkiem `writev()`.
+
 Na masterze wcześniejszy benchmark dał około **-9,3% CPU/request** i **+4,8% req/s**. Pomiar pamięci nie wykazał kosztu: mediana RSS 7812 -> 7792 KB, PSS 3921 -> 3911 KB.
 
 Końcowa regresja PHP 8.5 przeszła dla `fastcgi`, `fastcgi-ng` i `http`: mała odpowiedź, odpowiedź 262 144 B, binarny POST 65 792 B z SHA-256, keep-alive/close oraz zerwany odbiorca. Wcześniejsze porównanie bajt w bajt objęło odpowiedzi 1, 8000, 8184, 8192, 65527, 65528, 65529, 131056, 262144 i 1048576 B.

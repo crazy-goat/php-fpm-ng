@@ -2838,6 +2838,31 @@ workerze Fiber i 128-polaczeniowy budzet bramki. Typy `async`, `fiber` oraz
 `http-fiber` pozostaja jawnie **eksperymentalne i nie sa przeznaczone do
 produkcji**.
 
+### Benchmark k3d: nginx + FPM kontra `http-fiber`
+
+Ten sam release build PHP 8.6.0-dev, ten sam kod aplikacji i jeden pod na tym
+samym wezle k3d. `wrk`: 2 watki, 32 polaczenia, 8 sekund, trzy powtorzenia;
+ponizej mediana requests/s. Klasyczny wariant to nginx 1.29 + upstreamowy FPM,
+a `http-fiber` to jedna bramka i jeden worker Fiber. OPcache pozostawiono w
+realistycznej konfiguracji: dostepny dla klasycznego FPM, wylaczony dla Fiber,
+bo ten drugi odrzuca aktywny OPcache.
+
+| test | nginx + FPM, 1 worker | nginx + FPM, 8 workerow | `http-fiber`, 1 worker |
+|---|---:|---:|---:|
+| CPU: 1000 x SHA-256 | 1821 req/s | 4846 req/s | 2024 req/s |
+| `usleep(50 ms)` | 16 req/s | 157 req/s | 16 req/s |
+| socket I/O, odpowiedz po 50 ms | 16 req/s | 145 req/s | **618 req/s** |
+
+Dla socket I/O mediana p50 wyniosla odpowiednio ok. 1,65 s, 207 ms i **51,6 ms**;
+p99 ok. 1,92 s, 547 ms i **53,2 ms**. `http-fiber` nie raportowal bledow.
+Przy `usleep` warianty jednoworkerowe maja ten sam throughput; percentyle sa
+zaburzone timeoutami `wrk` i nie zmieniaja wniosku, ze `usleep` blokuje proces.
+
+Orientacyjny RSS po testach (suma procesow zawyza pamiec wspoldzielona): klasyczny
+1 worker + nginx ok. 29 MB, klasyczny 8 workerow + nginx ok. 90 MB,
+`http-fiber` (master + gateway + worker) ok. 29 MB. Backend opozniajacy socket
+zuzywal osobne zasoby i nie jest wliczony.
+
 ### Wniosek
 
 Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP

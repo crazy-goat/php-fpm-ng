@@ -87,9 +87,16 @@ struct fpm_pool_type_s {
 	void (*status)(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 };
 
-/* Typ o tej nazwie albo NULL. Pusta nazwa daje typ domyslny (fcgi) — bez tego
- * kazdy istniejacy fpm.conf przestalby dzialac. */
+/* Typ o tej nazwie albo NULL. Pusta nazwa daje typ domyslny (fastcgi) — bez
+ * tego kazdy istniejacy fpm.conf przestalby dzialac. "fcgi" pozostaje aliasem
+ * kompatybilnosci dla "fastcgi". */
 const struct fpm_pool_type_s *fpm_pool_type_get(const char *name);
+
+/* Efektywny wariant wynikajacy z pool.type + pool.executor albo NULL. */
+const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp);
+
+/* Sprawdza, czy pool.executor jest dozwolony i znany. */
+int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp);
 
 /* Nazwy znanych typow, do komunikatu o bledzie. Bufor nalezy do wolajacego. */
 void fpm_pool_type_list(char *buf, size_t len);

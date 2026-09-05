@@ -2907,3 +2907,26 @@ asynchronicznego PHP: zapewnia wspolbieznosc tylko w miejscach jawnie
 zintegrowanych ze schedulerem. Kierunek do dalszego rozwoju to worker-mode:
 aplikacja ladowana raz, izolowany obiekt request/response i rozszerzanie listy
 adapterow I/O, zamiast udawania pelnego klasycznego cyklu requestu FPM.
+
+## 3v. Rozdzielenie frontendu i executora (2026-09-05)
+
+Konfiguracja requestowych poolow ma dwa wymiary:
+
+```ini
+pool.type = fastcgi | fastcgi-ng | http
+pool.executor = classic | fiber | async
+```
+
+Brak `pool.type` oznacza `fastcgi`; jawne historyczne `fcgi` pozostaje aliasem
+kompatybilnosci. `fastcgi` zachowuje klasyczna sciezke i nie przyjmuje
+`pool.executor`. `fastcgi-ng` oznacza zoptymalizowany frontend FastCGI, a
+`http` wbudowana bramke HTTP. Dla dwoch ostatnich brak `pool.executor` oznacza
+`classic`. Executory `fiber` i `async` pozostaja eksperymentalne i nie sa
+przeznaczone do produkcji; Fiber wymaga wylaczonego OPcache, a dla Async jest
+to nadal zalecane.
+
+Dotychczasowe kombinowane typy przechodza na:
+
+- `fiber` -> `pool.type = fastcgi-ng`, `pool.executor = fiber`;
+- `async` -> `pool.type = fastcgi-ng`, `pool.executor = async`;
+- `http-fiber` -> `pool.type = http`, `pool.executor = fiber`.

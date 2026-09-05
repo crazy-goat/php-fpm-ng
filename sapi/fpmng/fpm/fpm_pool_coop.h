@@ -1,5 +1,5 @@
 /* fpm-ng: wspolny rdzen dla typow poola obslugujacych WIELE requestow FastCGI
- * w JEDNYM procesie PHP. Obecnie uzywa go pool.type = fiber.
+ * w JEDNYM procesie PHP. Obecnie uzywa go pool.executor = fiber.
  *
  * Model: dziecko robi JEDEN php_request_startup() ("request-kontener"),
  * a kazdy request FastCGI dostaje wlasny stan (SG, bufory wyjscia,

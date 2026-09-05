@@ -1,4 +1,4 @@
-/* fpm-ng: pool.type = fiber — scheduler na libevent + fibry silnika.
+/* fpm-ng: pool.executor = fiber — scheduler na libevent + fibry silnika.
  * Patrz fpm_pool_fiber.h i docs/NOTES.md 3u.
  *
  * Kto przelacza: WYLACZNIE ten plik, z kontekstu glownego (petla libevent).
@@ -39,7 +39,7 @@ int fpm_pool_fiber_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 
 void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	zlog(ZLOG_ALERT, "[pool %s] pool.type = fiber: ZTS build, this should have been rejected by validate()",
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = fiber: ZTS build, this should have been rejected by validate()",
 		wp->config->name);
 	exit(FPM_EXIT_SOFTWARE);
 }

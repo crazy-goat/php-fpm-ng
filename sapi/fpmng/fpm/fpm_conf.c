@@ -112,6 +112,7 @@ static const struct ini_value_parser_s ini_fpm_global_options[] = {
  */
 static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "pool.type",                 &fpm_conf_set_string,      WPO(type) },
+	{ "pool.executor",             &fpm_conf_set_string,      WPO(executor) },
 	{ "prefix",                    &fpm_conf_set_string,      WPO(prefix) },
 	{ "user",                      &fpm_conf_set_string,      WPO(user) },
 	{ "group",                     &fpm_conf_set_string,      WPO(group) },
@@ -718,6 +719,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 
 	free(wpc->name);
 	free(wpc->type);
+	free(wpc->executor);
 	free(wpc->set_directives);
 	free(wpc->prefix);
 	free(wpc->user);
@@ -910,14 +912,21 @@ static int fpm_conf_process_all_pools(void)
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		const struct fpm_pool_type_s *type;
 
-		/* pool.type — rozwiazane raz, dalej sterujemy sie jego wymaganiami,
-		 * zeby dodanie typu nie wymagalo dotykania tej funkcji */
+		/* pool.type + pool.executor — rozwiazane raz, dalej sterujemy sie
+		 * wymaganiami efektywnej kombinacji. */
 		type = fpm_pool_type_get(wp->config->type);
 		if (!type) {
 			char known[256];
 			fpm_pool_type_list(known, sizeof(known));
 			zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
 				wp->config->name, wp->config->type, known);
+			return -1;
+		}
+		if (0 > fpm_pool_type_validate_executor(wp)) {
+			return -1;
+		}
+		type = fpm_pool_type_resolve(wp);
+		if (!type) {
 			return -1;
 		}
 
@@ -1842,7 +1851,8 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\tprefix = %s",                     STR2STR(wp->config->prefix));
 		zlog(ZLOG_NOTICE, "\tuser = %s",                       STR2STR(wp->config->user));
 		zlog(ZLOG_NOTICE, "\tgroup = %s",                      STR2STR(wp->config->group));
-		zlog(ZLOG_NOTICE, "\tpool.type = %s",                  STR2STR(wp->config->type ? wp->config->type : "fcgi"));
+		zlog(ZLOG_NOTICE, "\tpool.type = %s",                  STR2STR(wp->config->type ? wp->config->type : "fastcgi"));
+		zlog(ZLOG_NOTICE, "\tpool.executor = %s",              STR2STR(wp->config->executor ? wp->config->executor : "classic"));
 		zlog(ZLOG_NOTICE, "\tlisten = %s",                     STR2STR(wp->config->listen_address));
 		zlog(ZLOG_NOTICE, "\tlisten.backlog = %d",             wp->config->listen_backlog);
 #ifdef HAVE_FPM_ACL

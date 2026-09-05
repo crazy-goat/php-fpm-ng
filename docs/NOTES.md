@@ -2863,6 +2863,33 @@ Orientacyjny RSS po testach (suma procesow zawyza pamiec wspoldzielona): klasycz
 `http-fiber` (master + gateway + worker) ok. 29 MB. Backend opozniajacy socket
 zuzywal osobne zasoby i nie jest wliczony.
 
+#### Porownanie apples-to-apples: 4 workery kontra 4 workery
+
+Poligon ma cztery fizyczne rdzenie. Oba warianty dostaly limit 4 CPU i po cztery
+procesy PHP; pozostale warunki jak wyzej. Mediana trzech przebiegow:
+
+| test | nginx + FPM, 4 workery | `http-fiber`, 4 workery | roznica |
+|---|---:|---:|---:|
+| CPU: 1000 x SHA-256 | 5255 req/s | **6210 req/s** | Fiber +18% |
+| `usleep(50 ms)` | 76,3 req/s | 76,8 req/s | praktycznie remis |
+
+Pierwszy test socket I/O uzywal `ThreadingTCPServer`; przy przepustowosci Fiber
+sam generator opoznienia zaczal tworzyc setki watkow i wynik spadal w kolejnych
+seriach. Tego pomiaru nie traktujemy jako miarodajnego. Powtorka uzyla
+jednowatkowego serwera `asyncio`, pieciu przebiegow po 10 sekund oraz
+naprzemiennej kolejnosci wariantow:
+
+| socket I/O 50 ms | nginx + FPM, 4 workery | `http-fiber`, 4 workery |
+|---|---:|---:|
+| requests/s (mediana) | 77,0 | **572,4** |
+| p50 | 415,2 ms | **55,4 ms** |
+| p99 | 416,6 ms | **59,7 ms** |
+
+To **7,4x throughput** i 7,5x nizsze p50 dla Fiber. Wyniki sa bliskie granicom
+modelu: cztery blokujace workery przy 50 ms daja teoretycznie 80 req/s, a 32
+polaczenia wspolbiezne daja 640 req/s. Fiber uzyskal odpowiednio ok. 95% i 89%
+tych granic. Nie bylo bledow ani timeoutow w poprawionej serii.
+
 ### Wniosek
 
 Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP

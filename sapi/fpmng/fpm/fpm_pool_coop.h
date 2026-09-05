@@ -1,14 +1,13 @@
 /* fpm-ng: wspolny rdzen dla typow poola obslugujacych WIELE requestow FastCGI
- * w JEDNYM procesie PHP (pool.type = fiber, pool.type = true-async).
+ * w JEDNYM procesie PHP. Obecnie uzywa go pool.type = fiber.
  *
  * Model: dziecko robi JEDEN php_request_startup() ("request-kontener"),
  * a kazdy request FastCGI dostaje wlasny stan (SG, bufory wyjscia,
  * EG(symbol_table), EG(included_files), superglobale, handlery bledow),
  * ktory typ poola podmienia w globalach silnika tuz przed oddaniem procesora
  * temu requestowi (enter) i tuz po jego zejsciu (leave). KTO i KIEDY
- * przelacza — to sprawa typu poola (fiber: wlasny scheduler na libevent,
- * true-async: switch-handlery forka). Rdzen nie wie nic o fibrach ani
- * korutynach.
+ * przelacza — to sprawa typu poola (fiber ma wlasny scheduler na libevent).
+ * Rdzen nie wie nic o fibrach ani korutynach.
  *
  * Co jest WSPOLNE dla requestow w locie i czego ten rdzen NIE rozdziela
  * (swiadome ograniczenie, patrz docs/NOTES.md 3t i 3u): tablice funkcji

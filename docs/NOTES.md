@@ -2769,3 +2769,66 @@ i to jest realistyczny model dla `async`, nie "kazdy request od zera");
 (b) per-korutyna `RINIT/RSHUTDOWN` albo lista rozszerzen bezpiecznych;
 (c) opcache swiadomy wielu requestow w procesie. Nasza strona (keep-alive,
 POST, scoreboard, logi dziecka) to robota na dzien i nie o nia sie rozbija.
+
+## 3u. `pool.type = fiber` — POC na upstreamowym PHP (2026-09-05)
+
+Cel: sprawdzic wariant bez forka True Async. Uzywa publicznego API Fiberow z
+upstreamowego PHP (`zend_fiber_start/resume/suspend`) oraz wlasnego schedulera
+na libevent. Jeden proces `pm = static` obsluguje wiele requestow FastCGI;
+kazdy request wykonuje sie w osobnym fiberze.
+
+### Co zostalo zaimplementowane
+
+- `fpm_pool_fiber.c`: accept, scheduler libevent, cykl zycia Fiberow i FastCGI
+  keep-alive;
+- `fpm_pool_fiber_xport.c`: przechwycenie transportow `tcp://` i `unix://` przez
+  `php_stream_xport_register()`, z zawieszeniem fibera na read/write/connect;
+- `fpm_pool_coop.c`: osobny SG, stos wyjscia, `$GLOBALS`, superglobale,
+  `included_files` i handlery bledow dla kazdego requestu;
+- walidacja wymusza NTS, `pm = static` i wylaczony OPcache.
+
+Kod buduje sie przeciw czystemu upstreamowemu PHP 8.6.0-dev (`5be4de10`, NTS,
+debug) bez True Async API ani rozszerzenia `async`.
+
+### Wyniki na poligonie `192.168.8.103`
+
+Cztery jednoczesne requesty, z ktorych kazdy robi `fsockopen()` do serwera
+odpowiadajacego po 500 ms, zakonczyly sie w **508 ms**. W jednym procesie byly
+wtedy cztery requesty in flight. Kazdy zachowal wlasne `$_GET`, `REQUEST_URI`,
+naglowek, cookie, `$GLOBALS`, zmienna z `require` i `get_included_files()`.
+
+Kontrolny test 4 x `usleep(500 ms)` trwal **2009 ms**. To oczekiwane i definiuje
+granice tego wariantu: upstreamowy PHP nie przekazuje `sleep`/`usleep`, curl,
+libpq ani zwyklych plikow do naszego schedulera. Wspolbiezne sa operacje na
+strumieniach socketowych korzystajacych z przechwyconych transportow (m.in.
+`fsockopen`, mysqlnd i typowo phpredis).
+
+Aktywny OPcache jest odrzucany juz przez `php-fpm-ng -t` z komunikatem, aby
+ustawic `php_admin_flag[opcache.enable] = off`. W tym wariancie nie jest to tylko
+rekomendacja: OPcache trzyma stan zakladajacy jeden request na proces, m.in.
+maske auto-globali i znaczniki czasu skryptow.
+
+### Ograniczenia — POC, nie zamiennik zwyklego FPM
+
+- tablice funkcji i klas sa procesowe; aplikacja ladujaca definicje przy kazdym
+  requescie trafia na redeklaracje. Realistyczny model produkcyjny wymagalby
+  zaladowania aplikacji raz i wywolywania jawnego handlera requestu;
+- brak `php_request_startup()`/`php_request_shutdown()` per request oznacza brak
+  pelnego RINIT/RSHUTDOWN rozszerzen i izolacji `ini_set`, limitow pamieci,
+  timeoutow, statyk klas oraz shutdown functions;
+- przechwycone sa tylko transporty `tcp` i `unix`; blokujace API spoza nich
+  blokuje caly proces;
+- odczyt POST jest poprawny funkcjonalnie, ale blokujacy; duze lub powoli
+  przesylane cialo blokuje wszystkie requesty;
+- fatal/bailout moze pozostawic wspolny stan silnika uszkodzony;
+- scoreboard FPM nie reprezentuje wielu requestow w jednym procesie, dlatego
+  timeouty/slowlog i `pm.max_requests` sa odrzucane.
+
+### Wniosek
+
+Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP
+upstream i usuwa zaleznosc od forka True Async. Nie daje jednak automatycznie
+asynchronicznego PHP: zapewnia wspolbieznosc tylko w miejscach jawnie
+zintegrowanych ze schedulerem. Kierunek do dalszego rozwoju to worker-mode:
+aplikacja ladowana raz, izolowany obiekt request/response i rozszerzanie listy
+adapterow I/O, zamiast udawania pelnego klasycznego cyklu requestu FPM.

@@ -12,7 +12,7 @@
 #include "fpm_cleanup.h"
 #include "fpm_php.h"
 #include "fpm_sockets.h"
-#include "fpm_http.h"
+#include "fpm_pool_type.h"
 #include "fpm_unix.h"
 #include "fpm_process_ctl.h"
 #include "fpm_conf.h"
@@ -93,8 +93,18 @@ int fpm_run(int *max_requests) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
 
-	/* HTTP gateways first, so they inherit the same final stdio as the workers */
-	fpm_http_init_main();
+	/* Inicjalizacja typow pooli przed forkiem dzieci — bramki HTTP dziedzicza
+	 * wtedy to samo koncowe stdio co workery. */
+	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+		if (type->init_main && 0 > type->init_main(wp)) {
+			zlog(ZLOG_ERROR, "[pool %s] failed to initialize pool type '%s'",
+				wp->config->name, type->name);
+			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+			fpm_event_loop(1);
+		}
+	}
 
 	/* create initial children in all pools */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
@@ -119,6 +129,22 @@ int fpm_run(int *max_requests) /* {{{ */
 run_child: /* only workers reach this point */
 
 	fpm_cleanups_run(FPM_CLEANUP_CHILD);
+
+	/* Typ poola moze przejac dziecko zamiast petli accept (supervisor, cron).
+	 * Pool bierzemy ze scoreboardu, bo dzieci wskrzeszane w petli zdarzen
+	 * docieraja tu bez wskaznika na swoj pool. */
+	{
+		struct fpm_worker_pool_s *child_wp = fpm_pool_type_current_pool();
+
+		if (child_wp) {
+			const struct fpm_pool_type_s *type = fpm_pool_type_of(child_wp);
+
+			if (type->child_main) {
+				type->child_main(child_wp);
+				/* nie wraca */
+			}
+		}
+	}
 
 	*max_requests = fpm_globals.max_requests;
 	return fpm_globals.listening_socket;

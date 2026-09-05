@@ -48,7 +48,11 @@ for p in "$REPO"/patches/*.patch; do
   name=$(basename "$p")
   # wariant wersyjny nadpisuje ogolny
   [ -f "$REPO/patches/php-$PHPMINOR/$name" ] && p="$REPO/patches/php-$PHPMINOR/$name"
-  if patch -d "$PHPSRC" -p1 --forward --silent < "$p"; then
+  if patch -d "$PHPSRC" -p1 -R --dry-run --silent < "$p" >/dev/null 2>&1; then
+    # odwrotne nalozenie przechodzi => latka juz siedzi w drzewie
+    echo "  ! latka juz nalozona na upstream: $name"
+    PATCHED=$((PATCHED + 1))
+  elif patch -d "$PHPSRC" -p1 --forward --silent < "$p"; then
     echo "  ! latka nalozona na upstream: $name"
     PATCHED=$((PATCHED + 1))
   else

@@ -1046,33 +1046,54 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 }
 /* }}} */
 
-int fpm_http_init_main(void) /* {{{ */
-{
-	struct fpm_worker_pool_s *wp;
-	char cwd[MAXPATHLEN];
-	const char *env = getenv("FPM_HTTP_GATEWAYS");
-	unsigned nproc_wanted = env && atoi(env) > 0 ? (unsigned)atoi(env) : FPM_HTTP_GATEWAYS_DEFAULT;
-	int reuseport = getenv("FPM_HTTP_REUSEPORT") && atoi(getenv("FPM_HTTP_REUSEPORT")) > 0;
-	const char *idle_env = getenv("FPM_HTTP_IDLE_MS");
+static unsigned nproc_wanted = FPM_HTTP_GATEWAYS_DEFAULT;
+static int reuseport = 0;
+static int cleanup_registered = 0;
 
-	if (idle_env) {
-		idle_ms = atoi(idle_env);
+/* Ustawienia z env, dopoki nie ma dyrektyw. Czytane raz. */
+static void fpm_http_settings_init(void)
+{
+	static int done = 0;
+	const char *env;
+
+	if (done) {
+		return;
+	}
+	done = 1;
+
+	env = getenv("FPM_HTTP_GATEWAYS");
+	if (env && atoi(env) > 0) {
+		nproc_wanted = (unsigned)atoi(env);
+	}
+	reuseport = getenv("FPM_HTTP_REUSEPORT") && atoi(getenv("FPM_HTTP_REUSEPORT")) > 0;
+
+	env = getenv("FPM_HTTP_IDLE_MS");
+	if (env) {
+		idle_ms = atoi(env);
 		idle_timeout.tv_sec = idle_ms / 1000;
 		idle_timeout.tv_usec = (idle_ms % 1000) * 1000;
 	}
+}
+
+/* Wolane raz na pool typu http, ze strony mastera, przed forkiem workerow. */
+int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	char cwd[MAXPATHLEN];
+
+	fpm_http_settings_init();
 
 	if (!getcwd(cwd, sizeof(cwd))) {
 		strcpy(cwd, "/");
 	}
 
-	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+	{
 		struct fpm_http_gateway_s *gw;
 		unsigned workers = wp->config->pm_max_children > 0 ? (unsigned)wp->config->pm_max_children : 1;
 		unsigned i;
 
 		/* a UNIX socket pool has no port to bump, so it needs an explicit HTTP address */
 		if (wp->listen_address_domain != FPM_AF_INET && !getenv("FPM_HTTP_LISTEN")) {
-			continue;
+			return 0;
 		}
 
 		gw = calloc(1, sizeof(*gw));
@@ -1087,7 +1108,7 @@ int fpm_http_init_main(void) /* {{{ */
 			free(gw->listen_address);
 			free(gw->docroot);
 			free(gw);
-			continue;
+			return 0;
 		}
 		/* every persistent connection pins a worker, so the gateways share one budget */
 		gw->nproc = MIN(nproc_wanted, workers);
@@ -1120,8 +1141,15 @@ int fpm_http_init_main(void) /* {{{ */
 		}
 	}
 
-	if (0 > fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_http_cleanup, 0)) {
-		return -1;
+	/* Sprzatanie rejestrujemy raz, przy pierwszym poolu http.
+	 * PARENT_EXEC tez, bo reload robi execvp() i bez tego bramki zostalyby
+	 * osierocone, trzymajac port, na ktorym nowy master chce sie zbindowac. */
+	if (!cleanup_registered) {
+		if (0 > fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_http_cleanup, 0) ||
+		    0 > fpm_cleanup_add(FPM_CLEANUP_PARENT_EXEC, fpm_http_cleanup, 0)) {
+			return -1;
+		}
+		cleanup_registered = 1;
 	}
 	return 0;
 }
@@ -1129,8 +1157,9 @@ int fpm_http_init_main(void) /* {{{ */
 
 #else /* HAVE_FPM_HTTP */
 
-int fpm_http_init_main(void)
+int fpm_http_init_pool(struct fpm_worker_pool_s *wp)
 {
+	(void)wp;
 	return 0;
 }
 

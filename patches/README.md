@@ -31,6 +31,7 @@ patches/php-8.4/*.patch      tylko dla tej wersji, nadpisuje łatkę o tej nazwi
 | `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (pełny PR, nie wycinek) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 przez wariant** `php-8.3/` (7 argumentów `fpm_scoreboard_update_commit`) |
 | `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | zgłoszenie do php/php-src — tekst gotowy w `0002-upstream-report.md`, jeszcze nie wysłane | 8.3, 8.4, 8.5, master |
 | `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | kandydat na PR do php/php-src, nie zgłoszone | 8.4, 8.5, master; **8.3 przez wariant** `php-8.3/` (inna sygnatura `safe_read`) |
+| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | przeniesienie przełącznika za API należące do `sapi/fpmng` | master; pozostałe wersje do weryfikacji |
 
 Stos jest kolejnościowy: 0002 i 0003 zakładają nałożone 0001 (kontekst przy
 `accept()`), choć merytorycznie są od niego niezależne. `prepare.sh` nakłada

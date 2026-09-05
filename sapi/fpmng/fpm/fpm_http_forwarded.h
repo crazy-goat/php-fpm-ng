@@ -6,10 +6,12 @@
  * podszyc sie pod adres w logach i w kontroli dostepu aplikacji (ktora czesto
  * ufa REMOTE_ADDR). Brak dyrektywy = nikomu nie ufamy = bezpieczny domyslny.
  *
- * Uproszczenie: z X-Forwarded-For bierzemy TYLKO pierwszy adres (oryginalny
- * klient). Dobre dla jednego zaufanego proxy przed brama -- typowy przypadek
- * dla tego projektu (patrz docs/NOTES.md, sekcja 1: maly VPS, nie klaster
- * proxy). Lancuch kilku proxy nie jest specjalnie rozpoznawany ponad to.
+ * Z X-Forwarded-For bierzemy pierwszy OD PRAWEJ adres, ktory sam nie jest na
+ * liscie http.trusted_proxies. Nie pierwszy z lewej: nginx z domyslnym
+ * $proxy_add_x_forwarded_for dopisuje adres klienta do naglowka, ktory
+ * klient przyslal, wiec lewa strona listy jest wprost pod kontrola klienta
+ * i wziecie jej pozwalaloby podszyc sie pod dowolny adres MIMO zaufanego
+ * proxy. Dziala tak samo dla jednego proxy i dla lancucha.
  */
 
 #ifndef FPM_HTTP_FORWARDED_H

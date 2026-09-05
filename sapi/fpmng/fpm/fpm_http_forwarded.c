@@ -43,10 +43,32 @@ void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer
 
 	xff = evhttp_find_header(headers, "X-Forwarded-For");
 	if (xff && *xff) {
-		const char *comma = strchr(xff, ',');
-		size_t first_len = comma ? (size_t) (comma - xff) : strlen(xff);
+		/* Idziemy od PRAWEJ, pomijajac adresy, ktore same sa zaufanymi proxy,
+		 * i bierzemy pierwszy, ktory nie jest -- to jedyny element, ktorego
+		 * klient nie mogl podrobic. Wziecie pierwszego z lewej byloby dziura:
+		 * nginx z domyslnym $proxy_add_x_forwarded_for DOPISUJE adres klienta
+		 * do tego, co klient przyslal, wiec lewa strona listy pochodzi wprost
+		 * od klienta. Dziala tak samo dla jednego proxy i dla lancucha. */
+		const char *end = xff + strlen(xff);
 
-		fpm_http_forwarded_trim_copy(xff, first_len, out->remote_addr, sizeof(out->remote_addr));
+		while (end > xff) {
+			const char *start = end;
+			char candidate[FPM_HTTP_FORWARDED_ADDR_LEN];
+
+			while (start > xff && start[-1] != ',') {
+				start--;
+			}
+			fpm_http_forwarded_trim_copy(start, (size_t) (end - start), candidate, sizeof(candidate));
+
+			if (candidate[0] && !fpm_http_acl_check(trusted, candidate)) {
+				memcpy(out->remote_addr, candidate, sizeof(candidate));
+				break;
+			}
+			/* element pusty albo sam jest zaufanym proxy: idziemy dalej w lewo */
+			end = (start > xff) ? start - 1 : xff;
+		}
+		/* wszystkie elementy zaufane (albo lista pusta): nie ma czym nadpisac
+		 * REMOTE_ADDR, zostaje adres bezposredniego peera */
 	}
 
 	xfp = evhttp_find_header(headers, "X-Forwarded-Proto");

@@ -170,6 +170,12 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
+	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
+	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
+	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
+	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
+	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
+	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -655,6 +661,9 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->supervisor_restart_delay = 1;
 	wp->config->supervisor_restart_delay_max = 60;
 	wp->config->supervisor_stop_timeout = 10;
+	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT w fpm_http.c */
+	wp->config->http_static = 1;
+	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS w fpm_http.c */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif
@@ -743,6 +752,8 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_schedule);
 	free(wpc->cron_script);
 	free(wpc->cron_parsed_schedule);
+	free(wpc->http_listen);
+	free(wpc->http_allowed_clients);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

@@ -46,6 +46,25 @@ const char *const fpm_coop_rejects[] = {
 	NULL
 };
 
+/* Funkcje PHP usuwane z tablicy funkcji w dziecku (zend_disable_functions —
+ * ten sam mechanizm, co php_admin_value[disable_functions] w fpm_php.c).
+ * Wszystko z ext/pcntl, co dziala na PROCESIE, a nie na requescie:
+ *  - handlery sygnalow: jedna tablica na proces (PCNTL_G(php_signal_table)
+ *    i SIGG(handlers)), resetowana w RSHUTDOWN pcntl, ktorego u nas nie ma
+ *    per request. Request B nadpisuje handler A, a sygnal trafia w ten fiber,
+ *    ktory akurat wykonuje tick — brak izolacji rowniez W TRAKCIE requestu;
+ *  - pcntl_alarm: SIGALRM procesu (na aarch64 macOS to sygnal timeoutu Zend);
+ *  - fork/exec: duplikuja albo podmieniaja caly wielorequestowy proces wraz ze
+ *    schedulerem, deskryptorami i requestami w locie.
+ * Blokada, nie naprawa — patrz docs/fiber_errors.md. Wywolanie daje
+ * "Call to undefined function", function_exists() zwraca false, wiec kod z
+ * fallbackiem dziala dalej. proc_open/popen/exec (fork+exec, dziecko nie
+ * wraca do schedulera) zostaja. */
+static const char fpm_coop_disabled_functions[] =
+	"pcntl_signal,pcntl_signal_get_handler,pcntl_signal_dispatch,pcntl_async_signals,"
+	"pcntl_sigprocmask,pcntl_sigwaitinfo,pcntl_sigtimedwait,pcntl_alarm,"
+	"pcntl_fork,pcntl_rfork,pcntl_forkx,pcntl_exec";
+
 /* Stan requestu-kontenera: to, co widzi petla zdarzen, gdy zaden request nie
  * jest na procesorze. Tablice kopiujemy PRZEZ WARTOSC (naglowek HashTable). */
 static sapi_globals_struct fpm_coop_base_sg;
@@ -74,7 +93,6 @@ unsigned fpm_coop_in_flight(void) /* {{{ */
 }
 /* }}} */
 
-/* Czy pool wylacza opcache u siebie (php_admin_value/php_value[opcache.enable] = 0). */
 static bool fpm_coop_ini_value_is_off(const char *value) /* {{{ */
 {
 	zend_string *str = zend_string_init(value, strlen(value), 0);
@@ -85,21 +103,47 @@ static bool fpm_coop_ini_value_is_off(const char *value) /* {{{ */
 }
 /* }}} */
 
-static bool fpm_coop_pool_disables_opcache(struct fpm_worker_pool_s *wp) /* {{{ */
+/* Wartosc klucza ini ustawiona w poolu (php_admin_value/php_value) albo NULL,
+ * gdy pool jej nie rusza — wtedy obowiazuje wartosc z php.ini. Kolejnosc
+ * admin-przed-value odpowiada fpm_php_apply_defines (fpm_php.c): php_values
+ * idzie pierwsze, php_admin_values nadpisuje je jako ostatnie. */
+static const char *fpm_coop_pool_ini(struct fpm_worker_pool_s *wp, const char *key) /* {{{ */
 {
 	struct key_value_s *kv;
 
 	for (kv = wp->config->php_admin_values; kv; kv = kv->next) {
-		if (!strcasecmp(kv->key, "opcache.enable")) {
-			return fpm_coop_ini_value_is_off(kv->value);
+		if (!strcasecmp(kv->key, key)) {
+			return kv->value;
 		}
 	}
 	for (kv = wp->config->php_values; kv; kv = kv->next) {
-		if (!strcasecmp(kv->key, "opcache.enable")) {
-			return fpm_coop_ini_value_is_off(kv->value);
+		if (!strcasecmp(kv->key, key)) {
+			return kv->value;
 		}
 	}
-	return false;
+	return NULL;
+}
+/* }}} */
+
+/* Czy pool wylacza opcache u siebie (php_admin_value/php_value[opcache.enable] = 0). */
+static bool fpm_coop_pool_disables_opcache(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	const char *value = fpm_coop_pool_ini(wp, "opcache.enable");
+
+	return value && fpm_coop_ini_value_is_off(value);
+}
+/* }}} */
+
+/* Efektywne max_execution_time poola: wartosc z poola albo z php.ini. Parsowanie
+ * jak OnUpdateTimeout w main.c (ZEND_ATOL). */
+static zend_long fpm_coop_pool_max_execution_time(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	const char *value = fpm_coop_pool_ini(wp, "max_execution_time");
+
+	if (value) {
+		return ZEND_ATOL(value);
+	}
+	return zend_ini_long("max_execution_time", sizeof("max_execution_time") - 1, 0);
 }
 /* }}} */
 
@@ -134,6 +178,23 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 		&& !fpm_coop_pool_disables_opcache(wp)) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: %s", wp->config->name, type_name, fpm_coop_opcache_msg);
 		return -1;
+	}
+	/* Timeout Zend to JEDEN timer na proces (setitimer/SIGPROF, zend_set_timeout),
+	 * a w tym procesie biegnie N requestow — jeden timer nie reprezentuje N
+	 * deadline'ow. Kontener i tak robi zend_unset_timeout(), wiec niezerowa
+	 * wartosc bylaby przyjeta i po cichu nieegzekwowana. Odmawiamy, tak jak
+	 * przy opcache. */
+	{
+		zend_long timeout = fpm_coop_pool_max_execution_time(wp);
+
+		if (timeout != 0) {
+			zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: max_execution_time = " ZEND_LONG_FMT
+				" is not enforced (the Zend timeout is one setitimer()/SIGPROF timer per process, "
+				"and this process runs many requests at once; see docs/fiber_errors.md); "
+				"set php_admin_value[max_execution_time] = 0 in this pool or max_execution_time = 0 in php.ini",
+				wp->config->name, type_name, timeout);
+			return -1;
+		}
 	}
 	return 0;
 #endif
@@ -257,6 +318,17 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 		/* inny hook kompilacji (opcache wylaczone zostawia swoj, ale nieaktywny) */
 		zlog(ZLOG_NOTICE, "[pool %s] coop: zend_compile_file is hooked by an extension; "
 			"anything caching compiled scripts per process will misbehave with many requests in flight", pool_name);
+	}
+
+	/* Procesowe API pcntl — patrz fpm_coop_disabled_functions. Jestesmy po
+	 * fpm_php_init_child (MINIT i php_admin_value[extension] juz za nami) i
+	 * przed pierwszym requestem: dokladnie ta faza, w ktorej fpm_php.c stosuje
+	 * php_admin_value[disable_functions]. */
+	if (zend_get_module_started("pcntl") == SUCCESS) {
+		zend_disable_functions(fpm_coop_disabled_functions);
+		zlog(ZLOG_NOTICE, "[pool %s] coop: ext/pcntl is loaded, disabled its process-wide functions (%s): "
+			"signal handlers, alarm, fork and exec act on the whole process, which here serves many requests at once; "
+			"see docs/fiber_errors.md", pool_name, fpm_coop_disabled_functions);
 	}
 
 	fpm_coop_orig_ub_write = sapi_module.ub_write;
@@ -579,6 +651,31 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 		zend_try {
 			sapi_send_headers();
 		} zend_end_try();
+	}
+
+	/* set_time_limit(N) / ini_set() w skrypcie idzie przez OnUpdateTimeout
+	 * (main.c) do zend_set_timeout() i uzbraja timer PROCESU — walidacja
+	 * odrzuca tylko konfiguracje, nie runtime. Przywracamy wpis ini tak, jak
+	 * zend_ini_deactivate() robi to w php_request_shutdown() (stage DEACTIVATE:
+	 * OnUpdateTimeout rozbraja timer i NIE uzbraja go na nowo), zeby timer ani
+	 * wartosc ini nie przezyly requestu, ktory je zmienil. Nic nie robi, gdy
+	 * request ini nie ruszal. W trakcie requestu SIGPROF nadal moze trafic w
+	 * cudzy fiber — patrz docs/fiber_errors.md. Uwaga: php_admin_value
+	 * blokuje ini_set, wiec z php_admin_value[max_execution_time] = 0
+	 * set_time_limit() zwraca false i nigdy tu nie ma czego przywracac. */
+	if (EG(modified_ini_directives)) {
+		/* Straznik jak w zend_ini_deactivate(): bez ini_set/set_time_limit
+		 * w skrypcie ta tablica jest NULL, wiec typowy request nie placi tu
+		 * ani alokacji zend_string, ani przeszukania tablicy ini. */
+		zend_string *key = ZSTR_INIT_LITERAL("max_execution_time", false);
+
+		zend_restore_ini_entry(key, ZEND_INI_STAGE_DEACTIVATE);
+		zend_string_release_ex(key, false);
+	}
+	if (EG(timeout_seconds)) {
+		/* cokolwiek innego uzbroilo timer (rozszerzenie wolajace zend_set_timeout) */
+		zend_unset_timeout();
+		EG(timeout_seconds) = 0;
 	}
 
 	/* Nieodczytane cialo POST zepsuloby nastepny request na tym polaczeniu. */

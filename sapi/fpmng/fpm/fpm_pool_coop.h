@@ -12,7 +12,12 @@
  * Co jest WSPOLNE dla requestow w locie i czego ten rdzen NIE rozdziela
  * (swiadome ograniczenie, patrz docs/NOTES.md 3t i 3u): tablice funkcji
  * i klas, ini (ini_set), memory_limit, max_execution_time, statyki klas,
- * register_shutdown_function, RINIT/RSHUTDOWN rozszerzen, opcache.
+ * register_shutdown_function, RINIT/RSHUTDOWN rozszerzen, opcache, handlery
+ * sygnalow (pcntl_signal: PCNTL_G(php_signal_table) i SIGG(handlers) to
+ * jedna tablica na proces), timer SIGALRM (pcntl_alarm), fork/exec.
+ * Z tego ostatniego wynika, co validate() ODRZUCA (opcache wlaczone,
+ * max_execution_time != 0) i co kontener BLOKUJE przez zend_disable_functions
+ * (procesowe funkcje pcntl) — patrz fpm_pool_coop.c i docs/fiber_errors.md.
  *
  * Powod istnienia osobnego pliku: zeby skasowanie jednego z dwoch typow
  * bylo skasowaniem jednego pliku i jednej linii w rejestrze, bez ruszania

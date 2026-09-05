@@ -349,6 +349,18 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	ctx->tables_live = true;
 	fpm_async_superglobals_rearm();
 
+	/* Nie polegamy na kompilatorze przy tworzeniu auto-globali: przy trafieniu
+	 * w opcache nie analizuje on ponownie odwolania do $_GET/$_SERVER. Jawna
+	 * inicjalizacja wypelnia swieza tablice symboli takze dla op_array z cache.
+	 * $_REQUEST musi powstac po $_GET, $_POST i $_COOKIE. */
+	zend_is_auto_global_str("_GET", sizeof("_GET") - 1);
+	zend_is_auto_global_str("_POST", sizeof("_POST") - 1);
+	zend_is_auto_global_str("_COOKIE", sizeof("_COOKIE") - 1);
+	zend_is_auto_global_str("_FILES", sizeof("_FILES") - 1);
+	zend_is_auto_global_str("_SERVER", sizeof("_SERVER") - 1);
+	zend_is_auto_global_str("_ENV", sizeof("_ENV") - 1);
+	zend_is_auto_global_str("_REQUEST", sizeof("_REQUEST") - 1);
+
 	/* fiber_entry w ext/async (scheduler.c) ustawia EG(error_reporting) z ini
 	 * "error_reporting" zamiast dziedziczyc — bez php.ini daje to 0 i ostrzezenia
 	 * oraz "Uncaught ..." znikaja. Dziedziczymy wartosc requestu-kontenera. */

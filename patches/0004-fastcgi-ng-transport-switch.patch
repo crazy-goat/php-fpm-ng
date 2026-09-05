@@ -1,0 +1,96 @@
+FastCGI transport: make syscall optimizations opt-in for fpm-ng workers
+
+The buffered reader and accept4 optimization from 0003 must not silently change
+pool.type=fastcgi. Add a process-local switch. FPM workers are forked per pool,
+so fpm-ng can enable it after identifying the child pool and before entering the
+request loop. The default remains the upstream-compatible transport.
+
+This is an fpm-ng integration patch and can disappear when the optimized
+transport is moved behind an API owned by sapi/fpmng.
+
+--- a/main/fastcgi.c
++++ b/main/fastcgi.c
+@@ -244,6 +244,7 @@
+ static int is_initialized = 0;
+ static int is_fastcgi = 0;
+ static int in_shutdown = 0;
++static bool optimized_transport = false;
+ static sa_t *allowed_clients = NULL;
+ static sa_t client_sa;
+ 
+@@ -447,6 +448,11 @@
+ 	in_shutdown = new_value;
+ }
+ 
++void fcgi_set_optimized_transport(bool enabled)
++{
++	optimized_transport = enabled;
++}
++
+ int fcgi_in_shutdown(void)
+ {
+ 	return in_shutdown;
+@@ -979,6 +985,18 @@
+ {
+ 	size_t n = 0;
+ 
++	if (!optimized_transport) {
++		while (n < count) {
++			ssize_t ret = fcgi_read_raw(req, ((char *) buf) + n, count - n);
++
++			if (ret <= 0) {
++				return ret < 0 ? ret : (ssize_t) n;
++			}
++			n += ret;
++		}
++		return n;
++	}
++
+ 	while (n < count) {
+ 		size_t avail = (size_t)(req->in_end - req->in_pos);
+ 
+@@ -1431,7 +1449,11 @@
+ 
+ 					FCGI_LOCK(req->listen_socket);
+ #if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
+-					req->fd = accept4(listen_socket, (struct sockaddr *)&sa, &len, SOCK_CLOEXEC);
++					if (optimized_transport) {
++						req->fd = accept4(listen_socket, (struct sockaddr *)&sa, &len, SOCK_CLOEXEC);
++					} else {
++						req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
++					}
+ #else
+ 					req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
+ #endif
+@@ -1461,7 +1483,10 @@
+ 					return -1;
+ 				}
+ 
+-#if defined(F_SETFD) && defined(FD_CLOEXEC) && !(defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC))
++#if defined(F_SETFD) && defined(FD_CLOEXEC)
++#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
++				if (!optimized_transport) {
++#endif
+ 				int fd_attrs = fcntl(req->fd, F_GETFD);
+ 				if (0 > fd_attrs) {
+ 					fcgi_log(FCGI_WARNING, "failed to get attributes of the connection socket");
+@@ -1469,6 +1494,9 @@
+ 				if (0 > fcntl(req->fd, F_SETFD, fd_attrs | FD_CLOEXEC)) {
+ 					fcgi_log(FCGI_WARNING, "failed to change attribute of the connection socket");
+ 				}
++#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
++				}
++#endif
+ #endif
+ 
+ #ifdef _WIN32
+--- a/main/fastcgi.h
++++ b/main/fastcgi.h
+@@ -96,6 +96,7 @@
+ int fcgi_finish_request(fcgi_request *req, int force_close);
+ const char *fcgi_get_last_client_ip(void);
+ void fcgi_set_in_shutdown(int new_value);
++void fcgi_set_optimized_transport(bool enabled);
+ void fcgi_request_set_keep(fcgi_request *req, int new_value);
+ 
+ #ifndef HAVE_ATTRIBUTE_WEAK

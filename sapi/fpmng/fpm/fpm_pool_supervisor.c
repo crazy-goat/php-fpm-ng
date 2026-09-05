@@ -57,6 +57,7 @@ const char *const fpm_pool_supervisor_rejects[] = {
 	"ping.",
 	"access.",
 	"security.limit_extensions",
+	"http.",
 	NULL
 };
 

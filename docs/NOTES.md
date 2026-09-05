@@ -1684,6 +1684,63 @@ ale powody warto mieć spisane, bo za pół roku ktoś (my) zapyta znowu.
    zero latek", na ktorej stoi ten projekt. Nasza rola: OBSERWOWAC jeden
    sygnal — czy stan requestu staje sie per-korutyna.
 
+### WYNIK POC (2026-09-05): dziala, ale wylacznie na forku — galaz `async-poc`
+
+`pool.type = async` zostal zbudowany i URUCHOMIONY na forku
+`true-async-stable` razem z naszym `sapi/fpmng`. Jeden proces,
+`pm.max_children = 1`, wlasny klient FastCGI:
+
+    4 x slow.php (usleep 500 ms)    503 ms   (fcgi: 2008 ms)
+    4 x net.php  (fsockopen 500 ms) 537 ms   (fcgi: 2140 ms)
+    RSS po 2000 requestach          bez wzrostu
+
+Kazdy request dostal swoj naglowek, `$_GET`, `$_SERVER`, `$GLOBALS`
+i `get_included_files()`. Pelny opis w NOTES sekcja 3t NA GALEZI `async-poc`.
+
+**KOREKTA do tej sekcji:** teza "fiber przelacza stos, nie globale, wiec zaden
+scheduler tego nie naprawi" byla ZA MOCNA. Fork ma publiczne switch-handlery
+(`zend_async_API.h:269`) i przez nie da sie podmieniac SG, `EG(symbol_table)`
+i `EG(included_files)` BEZ zmian w VM. Fork uzywa ich do `ob_*`; POC uzyl do
+reszty i to wystarczylo.
+
+**Sciana jest gdzie indziej i stoi:** tablice funkcji i klas sa PER PROCES
+(`EG(function_table)` = `CG(function_table)`, czyszczone dopiero w
+`shutdown_executor()`), wiec drugi request deklarujacy funkcje dostaje
+"Cannot redeclare" i tak zostaje. Opcache zaklada jeden request na proces
+(`ZendAccelerator.c:1958,2481`), wiec POC dziala z `opcache.enable = off`.
+Galaz `global-isolation` forka zrobila `symbol_table` per korutyna, ale NIGDY
+nie weszla do stable; statyki klas per korutyna zrobiono i cofnieto.
+
+Stad wniosek, do ktorego doszlismy tez niezaleznie od kodu: realnym ksztaltem
+tego typu nie jest "wiele niezaleznych requestow", tylko MODEL WORKERA —
+aplikacja ladowana RAZ, request jako wywolanie w nia. Wtedy tablice funkcji
+i klas nie sa problemem, bo nikt nie deklaruje ich drugi raz.
+
+### WARIANT "async bez forka" — opcja, NIE zweryfikowana
+
+To jest rozumowanie, nie wynik pomiaru — nikt tego nie probowal. Zapisane,
+bo zmienia rachunek kosztow eksperymentu: gdyby True Async nigdy nie wszedl
+do PHP, ta droga nadal istnieje.
+
+Co dzis pochodzi z forka i musialoby powstac u nas: (a) scheduler i reaktor
+(`ext/async`, 33k linii na libuv) — moglby powstac na libevent, ktorego i tak
+uzywamy w bramce; (b) przechwytywanie I/O w silniku (`xp_socket.c`,
+`network.c`, `plain_wrapper.c`, `curl_async.c`, uspienia w
+`basic_functions.c`) — czesciowo zastapialne przez
+`php_stream_xport_register()`; (c) switch-handlery — NIEPOTRZEBNE, bo w tym
+wariancie to MY jestesmy tym, kto przelacza, wiec podmieniamy stan sami tuz
+przed wznowieniem fibera. `zend_fiber_suspend`/`zend_fiber_resume` sa
+`ZEND_API` w upstreamie (`zend_fibers.h:135-136`).
+
+Zasieg takiej wersji: gniazda i tylko gniazda — mysqlnd, phpredis,
+`fsockopen`. NIE zlapie `sleep()`/`usleep()`, curl, libpq ani zwyklych plikow,
+bo to nie idzie przez warstwe streamow.
+
+Koszt: piszemy od zera to, co fork juz napisal, i bierzemy na siebie
+utrzymanie. Sciana z tablicami funkcji/klas i opcache stoi TAK SAMO —
+zadna z dwoch drog jej nie omija.
+
+
 ### Własny scheduler dla amphp — sprawdzone, nie ma czego budować
 
 Pytanie: skoro amphp stoi na fiberach, czy nie podstawić mu naszej pętli

@@ -13,7 +13,7 @@ Nasze pliki. Reszta SAPI jest kopiowana z `sapi/fpm/` upstreamu przez
 | `fpm/fpm_pool_async.h` | |
 | `fpm/fpm_pool_coop.c` | wspolny stan requestu dla eksperymentalnych poolow wielorequestowych |
 | `fpm/fpm_pool_coop.h` | |
-| `fpm/fpm_pool_fiber.c` | EKSPERYMENT: `pool.type = fiber` na upstreamowym PHP, scheduler libevent (NOTES 3u) |
+| `fpm/fpm_pool_fiber.c` | EKSPERYMENT: `pool.type = fiber` i `http-fiber` na upstreamowym PHP, scheduler libevent (NOTES 3u) |
 | `fpm/fpm_pool_fiber.h` | |
 | `fpm/fpm_pool_fiber_xport.c` | zawieszanie Fiberow na transportach `tcp` i `unix` |
 

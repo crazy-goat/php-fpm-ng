@@ -269,6 +269,9 @@ if test "$PHP_FPMNG" != "no"; then
   PHP_FPMNG_LQ
 
   AC_CHECK_FUNCS([clearenv setproctitle setproctitle_fast])
+  dnl fpm-ng: accept4(SOCK_CLOEXEC) w main/fastcgi.c (patches/0003). Upstream sprawdza
+  dnl to tylko w ext/sockets/config.m4; bez HAVE_ACCEPT4 kompiluje sie stara sciezka.
+  AC_CHECK_FUNCS([accept4])
 
   AC_CHECK_HEADER([priv.h], [AC_CHECK_FUNCS([setpflags])])
   AC_CHECK_HEADER([sys/times.h], [AC_CHECK_FUNCS([times])])

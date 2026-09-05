@@ -1326,8 +1326,10 @@ static void fpm_http_settings_init(void)
 	}
 }
 
-/* Wolane raz na pool typu http, ze strony mastera, przed forkiem workerow. */
-int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
+/* Wolane raz na pool typu http, ze strony mastera, przed forkiem workerow.
+ * capacity_override jest potrzebne executorom wielorequestowym: klasyczny
+ * worker trzyma jedno polaczenie, Fiber wiele. 0 zachowuje limit liczby dzieci. */
+static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity_override) /* {{{ */
 {
 	char cwd[MAXPATHLEN];
 
@@ -1340,7 +1342,13 @@ int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	{
 		struct fpm_http_gateway_s *gw;
 		unsigned workers = wp->config->pm_max_children > 0 ? (unsigned)wp->config->pm_max_children : 1;
+		unsigned capacity = capacity_override ? capacity_override : workers;
+		const char *capacity_env = capacity_override ? getenv("FPM_HTTP_MAX_UPSTREAMS") : NULL;
 		unsigned i;
+
+		if (capacity_env && atoi(capacity_env) > 0) {
+			capacity = (unsigned) atoi(capacity_env);
+		}
 
 		/* a UNIX socket pool has no port to bump, so it needs an explicit HTTP address */
 		if (wp->listen_address_domain != FPM_AF_INET && !getenv("FPM_HTTP_LISTEN")) {
@@ -1361,9 +1369,10 @@ int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			free(gw);
 			return 0;
 		}
-		/* every persistent connection pins a worker, so the gateways share one budget */
+		/* Klasyczny worker obsluguje jedno polaczenie naraz; executor
+		 * wielorequestowy podaje wlasna pojemnosc niezalezna od liczby dzieci. */
 		gw->nproc = MIN(nproc_wanted, workers);
-		gw->max_upstreams = workers;
+		gw->max_upstreams = capacity;
 		gw->upstreams_used = fpm_shm_alloc(sizeof(*gw->upstreams_used));
 		if (!gw->upstreams_used) {
 			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", wp->config->name);
@@ -1374,7 +1383,7 @@ int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		gw->next = gateways;
 		gateways = gw;
 		zlog(ZLOG_NOTICE, "[pool %s] HTTP listener on FastCGI port + 1: %u gateway(s)%s, %u persistent connection(s) to the pool",
-			wp->config->name, gw->nproc, reuseport ? " with SO_REUSEPORT" : "", workers);
+			wp->config->name, gw->nproc, reuseport ? " with SO_REUSEPORT" : "", capacity);
 
 		for (i = 0; i < gw->nproc; i++) {
 			gw->pids[i] = fork();
@@ -1406,11 +1415,30 @@ int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
+int fpm_http_init_pool(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	return fpm_http_init_pool_ex(wp, 0);
+}
+/* }}} */
+
+int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity) /* {{{ */
+{
+	return fpm_http_init_pool_ex(wp, capacity);
+}
+/* }}} */
+
 #else /* HAVE_FPM_HTTP */
 
 int fpm_http_init_pool(struct fpm_worker_pool_s *wp)
 {
 	(void)wp;
+	return 0;
+}
+
+int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity)
+{
+	(void)wp;
+	(void)capacity;
 	return 0;
 }
 

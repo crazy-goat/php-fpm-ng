@@ -2769,3 +2769,141 @@ i to jest realistyczny model dla `async`, nie "kazdy request od zera");
 (b) per-korutyna `RINIT/RSHUTDOWN` albo lista rozszerzen bezpiecznych;
 (c) opcache swiadomy wielu requestow w procesie. Nasza strona (keep-alive,
 POST, scoreboard, logi dziecka) to robota na dzien i nie o nia sie rozbija.
+
+## 3u. `pool.type = fiber` — POC na upstreamowym PHP (2026-09-05)
+
+Cel: sprawdzic wariant bez forka True Async. Uzywa publicznego API Fiberow z
+upstreamowego PHP (`zend_fiber_start/resume/suspend`) oraz wlasnego schedulera
+na libevent. Jeden proces `pm = static` obsluguje wiele requestow FastCGI;
+kazdy request wykonuje sie w osobnym fiberze.
+
+### Co zostalo zaimplementowane
+
+- `fpm_pool_fiber.c`: accept, scheduler libevent, cykl zycia Fiberow i FastCGI
+  keep-alive;
+- `fpm_pool_fiber_xport.c`: przechwycenie transportow `tcp://` i `unix://` przez
+  `php_stream_xport_register()`, z zawieszeniem fibera na read/write/connect;
+- `fpm_pool_coop.c`: osobny SG, stos wyjscia, `$GLOBALS`, superglobale,
+  `included_files` i handlery bledow dla kazdego requestu;
+- walidacja wymusza NTS, `pm = static` i wylaczony OPcache.
+
+Kod buduje sie przeciw czystemu upstreamowemu PHP 8.6.0-dev (`5be4de10`, NTS,
+debug) bez True Async API ani rozszerzenia `async`.
+
+### Wyniki na poligonie `192.168.8.103`
+
+Cztery jednoczesne requesty, z ktorych kazdy robi `fsockopen()` do serwera
+odpowiadajacego po 500 ms, zakonczyly sie w **508 ms**. W jednym procesie byly
+wtedy cztery requesty in flight. Kazdy zachowal wlasne `$_GET`, `REQUEST_URI`,
+naglowek, cookie, `$GLOBALS`, zmienna z `require` i `get_included_files()`.
+
+Kontrolny test 4 x `usleep(500 ms)` trwal **2009 ms**. To oczekiwane i definiuje
+granice tego wariantu: upstreamowy PHP nie przekazuje `sleep`/`usleep`, curl,
+libpq ani zwyklych plikow do naszego schedulera. Wspolbiezne sa operacje na
+strumieniach socketowych korzystajacych z przechwyconych transportow (m.in.
+`fsockopen`, mysqlnd i typowo phpredis).
+
+Aktywny OPcache jest odrzucany juz przez `php-fpm-ng -t` z komunikatem, aby
+ustawic `php_admin_flag[opcache.enable] = off`. W tym wariancie nie jest to tylko
+rekomendacja: OPcache trzyma stan zakladajacy jeden request na proces, m.in.
+maske auto-globali i znaczniki czasu skryptow.
+
+### Ograniczenia — POC, nie zamiennik zwyklego FPM
+
+- tablice funkcji i klas sa procesowe; aplikacja ladujaca definicje przy kazdym
+  requescie trafia na redeklaracje. Realistyczny model produkcyjny wymagalby
+  zaladowania aplikacji raz i wywolywania jawnego handlera requestu;
+- brak `php_request_startup()`/`php_request_shutdown()` per request oznacza brak
+  pelnego RINIT/RSHUTDOWN rozszerzen i izolacji `ini_set`, limitow pamieci,
+  timeoutow, statyk klas oraz shutdown functions;
+- przechwycone sa tylko transporty `tcp` i `unix`; blokujace API spoza nich
+  blokuje caly proces;
+- odczyt POST jest poprawny funkcjonalnie, ale blokujacy; duze lub powoli
+  przesylane cialo blokuje wszystkie requesty;
+- fatal/bailout moze pozostawic wspolny stan silnika uszkodzony;
+- scoreboard FPM nie reprezentuje wielu requestow w jednym procesie, dlatego
+  timeouty/slowlog i `pm.max_requests` sa odrzucane.
+
+### `pool.type = http-fiber`
+
+Cienka kompozycja istniejacej bramki HTTP i executora Fiber. Nie kopiuje parsera
+ani schedulera: `init_main` pochodzi z bramki, a `child_main` z `fiber`.
+Klasyczna bramka ogranicza liczbe polaczen FastCGI do liczby workerow, poniewaz
+kazde polaczenie przypina blokujacego workera. Dla `http-fiber` limit wynosi
+domyślnie 128 na pool i mozna go zmienic przez `FPM_HTTP_MAX_UPSTREAMS`.
+
+Test bezposrednio po HTTP: cztery requesty, kazdy czekajacy 500 ms na socket,
+zakonczyly sie w **514 ms**. Log potwierdzil cztery requesty in flight w jednym
+workerze Fiber i 128-polaczeniowy budzet bramki. Typy `async`, `fiber` oraz
+`http-fiber` pozostaja jawnie **eksperymentalne i nie sa przeznaczone do
+produkcji**.
+
+### Benchmark k3d: nginx + FPM kontra `http-fiber`
+
+Ten sam release build PHP 8.6.0-dev, ten sam kod aplikacji i jeden pod na tym
+samym wezle k3d. `wrk`: 2 watki, 32 polaczenia, 8 sekund, trzy powtorzenia;
+ponizej mediana requests/s. Klasyczny wariant to nginx 1.29 + upstreamowy FPM,
+a `http-fiber` to jedna bramka i jeden worker Fiber. OPcache pozostawiono w
+realistycznej konfiguracji: dostepny dla klasycznego FPM, wylaczony dla Fiber,
+bo ten drugi odrzuca aktywny OPcache.
+
+| test | nginx + FPM, 1 worker | nginx + FPM, 8 workerow | `http-fiber`, 1 worker |
+|---|---:|---:|---:|
+| CPU: 1000 x SHA-256 | 1821 req/s | 4846 req/s | 2024 req/s |
+| `usleep(50 ms)` | 16 req/s | 157 req/s | 16 req/s |
+| socket I/O, odpowiedz po 50 ms | 16 req/s | 145 req/s | **618 req/s** |
+
+Dla socket I/O mediana p50 wyniosla odpowiednio ok. 1,65 s, 207 ms i **51,6 ms**;
+p99 ok. 1,92 s, 547 ms i **53,2 ms**. `http-fiber` nie raportowal bledow.
+Przy `usleep` warianty jednoworkerowe maja ten sam throughput; percentyle sa
+zaburzone timeoutami `wrk` i nie zmieniaja wniosku, ze `usleep` blokuje proces.
+
+Orientacyjny RSS po testach (suma procesow zawyza pamiec wspoldzielona): klasyczny
+1 worker + nginx ok. 29 MB, klasyczny 8 workerow + nginx ok. 90 MB,
+`http-fiber` (master + gateway + worker) ok. 29 MB. Backend opozniajacy socket
+zuzywal osobne zasoby i nie jest wliczony.
+
+#### Porownanie apples-to-apples: 4 workery kontra 4 workery
+
+Poligon ma cztery fizyczne rdzenie. Oba warianty dostaly limit 4 CPU i po cztery
+procesy PHP; pozostale warunki jak wyzej. Mediana trzech przebiegow:
+
+| test | nginx + FPM, 4 workery | `http-fiber`, 4 workery | roznica |
+|---|---:|---:|---:|
+| CPU: 1000 x SHA-256 | 5255 req/s | **6210 req/s** | Fiber +18% |
+| `usleep(50 ms)` | 76,3 req/s | 76,8 req/s | praktycznie remis |
+
+Pierwszy test socket I/O uzywal `ThreadingTCPServer`; przy przepustowosci Fiber
+sam generator opoznienia zaczal tworzyc setki watkow i wynik spadal w kolejnych
+seriach. Tego pomiaru nie traktujemy jako miarodajnego. Powtorka uzyla
+jednowatkowego serwera `asyncio`, pieciu przebiegow po 10 sekund oraz
+naprzemiennej kolejnosci wariantow:
+
+| socket I/O 50 ms | nginx + FPM, 4 workery | `http-fiber`, 4 workery |
+|---|---:|---:|
+| requests/s (mediana) | 77,0 | **572,4** |
+| p50 | 415,2 ms | **55,4 ms** |
+| p99 | 416,6 ms | **59,7 ms** |
+
+To **7,4x throughput** i 7,5x nizsze p50 dla Fiber. Wyniki sa bliskie granicom
+modelu: cztery blokujace workery przy 50 ms daja teoretycznie 80 req/s, a 32
+polaczenia wspolbiezne daja 640 req/s. Fiber uzyskal odpowiednio ok. 95% i 89%
+tych granic. Nie bylo bledow ani timeoutow w poprawionej serii.
+
+Przy 128 klientach (`wrk -t4 -c128`, timeout 5 s, piec przeplotowych serii po
+10 s, `FPM_HTTP_MAX_UPSTREAMS=256`) klasyczny FPM pozostal przy medianie
+**76,5 req/s**, p50 **1,66 s**, p99 **1,66 s**. `http-fiber` osiagnal mediane
+**1924 req/s**, p50 **64,5 ms**, p99 **87,1 ms** — ok. **25x throughput**.
+Teoretyczna granica wynikajaca z 128 / 50 ms to 2560 req/s, wiec mediana Fiber
+to ok. 75% tej wartosci. Rozrzut miedzy przebiegami byl istotny
+(1442–2022 req/s), dlatego nie nalezy przedstawiać najlepszego wyniku jako
+stalej wydajnosci. Oba poole pozostaly bez restartow i bledow w logach.
+
+### Wniosek
+
+Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP
+upstream i usuwa zaleznosc od forka True Async. Nie daje jednak automatycznie
+asynchronicznego PHP: zapewnia wspolbieznosc tylko w miejscach jawnie
+zintegrowanych ze schedulerem. Kierunek do dalszego rozwoju to worker-mode:
+aplikacja ladowana raz, izolowany obiekt request/response i rozszerzanie listy
+adapterow I/O, zamiast udawania pelnego klasycznego cyklu requestu FPM.

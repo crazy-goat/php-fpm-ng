@@ -14,12 +14,25 @@
 #include "fpm_pool_cron.h"
 #include "fpm_pool_status.h"
 #include "fpm_pool_async.h"
+#include "fpm_pool_coop.h"
+#include "fpm_pool_fiber.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
 static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 {
 	return fpm_http_init_pool(wp);
+}
+
+static int fpm_pool_type_http_fiber_validate(struct fpm_worker_pool_s *wp)
+{
+	return fpm_coop_validate(wp, "http-fiber");
+}
+
+static int fpm_pool_type_http_fiber_init(struct fpm_worker_pool_s *wp)
+{
+	/* Jeden worker Fiber moze obslugiwac wiele polaczen jednoczesnie. */
+	return fpm_http_init_pool_with_capacity(wp, 128);
 }
 
 /* JEDYNE miejsce, ktore trzeba dotknac, dodajac typ. */
@@ -77,6 +90,25 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects         = fpm_pool_async_rejects,
 		.validate        = fpm_pool_async_validate,
 		.child_main      = fpm_pool_async_child_main,
+	},
+	{
+		.name            = "fiber",	/* EKSPERYMENT: czysty upstream, wlasny scheduler, patrz fpm_pool_fiber.h */
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.rejects         = fpm_coop_rejects,
+		.validate        = fpm_pool_fiber_validate,
+		.child_main      = fpm_pool_fiber_child_main,
+	},
+	{
+		.name            = "http-fiber",	/* EKSPERYMENT: bramka HTTP + executor Fiber */
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.rejects         = fpm_coop_rejects,
+		.validate        = fpm_pool_type_http_fiber_validate,
+		.init_main       = fpm_pool_type_http_fiber_init,
+		.child_main      = fpm_pool_fiber_child_main,
 	},
 };
 

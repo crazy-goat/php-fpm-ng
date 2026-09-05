@@ -112,6 +112,7 @@ struct {								\
 #include <event2/http.h>
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
+#include <event2/bufferevent.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/util.h>
 
@@ -129,6 +130,9 @@ struct {								\
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
 #include "fpm_http_acl.h"
+#include "fpm_http_forwarded.h"
+#include "fpm_http_auth.h"
+#include "fpm_http_access_log.h"
 #include "fpm_children_extra.h"
 #include "zlog.h"
 
@@ -181,6 +185,10 @@ struct fpm_http_gateway_s {
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
+	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
+	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = nikomu nie ufamy, see fpm_http_forwarded.h */
+	char *access_log_path;				/* http.access_log; NULL = wylaczony */
+	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL w masterze */
 
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
@@ -212,6 +220,14 @@ struct _fpm_http_conn {
 
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
+
+	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
+	ev_uint16_t peer_port;
+	struct fpm_http_forwarded_result_s fwd;		/* resolved once in fpm_http_request() */
+	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* effective REMOTE_ADDR: fwd.remote_addr or peer_addr */
+	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
+	int status;						/* HTTP status finally sent, -1 until known; for the access log */
+	size_t bytes_out;					/* body bytes sent to the client, for the access log */
 };
 
 /* One persistent FastCGI connection to the pool, serving one request at a time.
@@ -279,6 +295,65 @@ static inline int fpm_http_would_block(int err)
 }
 static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport);
 
+/* Local (server-side) address and port of one HTTP connection, for SERVER_ADDR/SERVER_PORT.
+ * Unlike the pool's listen address (which may be a wildcard "*"), this is the real address
+ * the client actually connected to -- correct even under SO_REUSEPORT or 0.0.0.0 binds.
+ * Both out buffers are left empty ("") when nothing sensible can be reported (e.g. the
+ * gateway's own HTTP listener is a unix socket, or the fd is not available). */
+static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
+		char *port_buf, size_t port_size)
+{
+	struct bufferevent *bev;
+	evutil_socket_t fd = -1;
+	struct sockaddr_storage ss;
+	socklen_t sslen = sizeof(ss);
+
+	addr_buf[0] = '\0';
+	port_buf[0] = '\0';
+	if (!evcon) {
+		return;
+	}
+	bev = evhttp_connection_get_bufferevent(evcon);
+	if (bev) {
+		fd = bufferevent_getfd(bev);
+	}
+	if (fd < 0) {
+		return;
+	}
+	if (getsockname(fd, (struct sockaddr*)&ss, &sslen) != 0) {
+		return;
+	}
+	if (ss.ss_family == AF_INET) {
+		struct sockaddr_in *sin = (struct sockaddr_in*)&ss;
+
+		evutil_inet_ntop(AF_INET, &sin->sin_addr, addr_buf, addr_size);
+		snprintf(port_buf, port_size, "%u", (unsigned) ntohs(sin->sin_port));
+	} else if (ss.ss_family == AF_INET6) {
+		struct sockaddr_in6 *sin6 = (struct sockaddr_in6*)&ss;
+
+		evutil_inet_ntop(AF_INET6, &sin6->sin6_addr, addr_buf, addr_size);
+		snprintf(port_buf, port_size, "%u", (unsigned) ntohs(sin6->sin6_port));
+	}
+	/* AF_UNIX: no numeric SERVER_ADDR/SERVER_PORT to report, buffers stay empty */
+}
+
+static const char *fpm_http_method_name(enum evhttp_cmd_type type);
+
+/* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
+ * straight from the evhttp_request, callers only supply what they already know
+ * (effective remote_addr, remote_user if any, final status, body bytes sent). */
+static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *remote_addr, const char *remote_user, int status, size_t bytes)
+{
+	if (!gw->access_log) {
+		return;
+	}
+	fpm_http_access_log_write(gw->access_log, remote_addr, remote_user,
+		fpm_http_method_name(evhttp_request_get_command(req)), evhttp_request_get_uri(req),
+		req->major, req->minor, status, bytes,
+		evhttp_find_header(evhttp_request_get_input_headers(req), "Referer"),
+		evhttp_find_header(evhttp_request_get_input_headers(req), "User-Agent"));
+}
 
 /* ---------------------------------------------------------------- FastCGI encoding */
 
@@ -348,8 +423,7 @@ static int fpm_http_build_request(fpm_http_conn *c)
 	const char *host = evhttp_request_get_host(req);
 	struct evkeyval *header;
 	struct evbuffer *body = evhttp_request_get_input_buffer(req);
-	char *decoded, *peer_addr = NULL, buf[64];
-	ev_uint16_t peer_port = 0;
+	char *decoded, buf[64];
 	smart_str filename = {0};
 	const char *path_info;
 	size_t decoded_len, body_len = evbuffer_get_length(body);
@@ -408,12 +482,59 @@ static int fpm_http_build_request(fpm_http_conn *c)
 		fpm_http_param(c, "SERVER_NAME", server_name);
 		free(server_name);
 	}
-	evhttp_connection_get_peer(c->evcon, &peer_addr, &peer_port);
-	if (peer_addr) {
-		fpm_http_param(c, "REMOTE_ADDR", peer_addr);
-		snprintf(buf, sizeof(buf), "%u", (unsigned)peer_port);
+	/* c->peer_addr/peer_port and c->fwd were resolved once by the caller
+	 * (fpm_http_request()), which also decided -- via http.trusted_proxies --
+	 * whether X-Forwarded-For/-Proto/-Port apply. See fpm_http_forwarded.h. */
+	if (c->peer_addr[0]) {
+		strlcpy(c->remote_addr, c->fwd.remote_addr[0] ? c->fwd.remote_addr : c->peer_addr, sizeof(c->remote_addr));
+		fpm_http_param(c, "REMOTE_ADDR", c->remote_addr);
+		snprintf(buf, sizeof(buf), "%u", (unsigned) c->peer_port);
 		fpm_http_param(c, "REMOTE_PORT", buf);
 	}
+
+	/* SERVER_ADDR/SERVER_PORT: real local endpoint of this connection (not the
+	 * pool's possibly-wildcard listen address), X-Forwarded-Port wins for the
+	 * port when the connection is from a trusted proxy (see fpm_http_forwarded.h).
+	 * SERVER_PORT is the one CGI var frameworks lean on hardest to build
+	 * absolute URLs (Symfony, Laravel), hence no silent fallback to "nothing". */
+	{
+		char local_addr[FPM_HTTP_FORWARDED_ADDR_LEN] = "", local_port[FPM_HTTP_FORWARDED_PORT_LEN] = "";
+		const char *server_port;
+
+		fpm_http_local_addr(c->evcon, local_addr, sizeof(local_addr), local_port, sizeof(local_port));
+		server_port = c->fwd.server_port[0] ? c->fwd.server_port : local_port;
+		if (local_addr[0]) {
+			fpm_http_param(c, "SERVER_ADDR", local_addr);
+		}
+		if (server_port[0]) {
+			fpm_http_param(c, "SERVER_PORT", server_port);
+		}
+	}
+
+	/* HTTPS/REQUEST_SCHEME: the gateway itself never terminates TLS (docs/NOTES.md,
+	 * section 5), so these are "http"/unset unless a trusted proxy in front says
+	 * otherwise via X-Forwarded-Proto. */
+	fpm_http_param(c, "REQUEST_SCHEME", c->fwd.scheme);
+	if (c->fwd.https) {
+		fpm_http_param(c, "HTTPS", "on");
+	}
+
+	/* AUTH_TYPE/REMOTE_USER: the gateway does not authenticate anything itself,
+	 * it only relays what arrived in Authorization -- see fpm_http_auth.h. The
+	 * raw header also comes through below as HTTP_AUTHORIZATION, same as nginx. */
+	{
+		const char *authorization = evhttp_find_header(evhttp_request_get_input_headers(req), "Authorization");
+		char auth_type[FPM_HTTP_AUTH_TYPE_LEN];
+
+		fpm_http_auth_parse(authorization, auth_type, c->remote_user);
+		if (auth_type[0]) {
+			fpm_http_param(c, "AUTH_TYPE", auth_type);
+		}
+		if (c->remote_user[0]) {
+			fpm_http_param(c, "REMOTE_USER", c->remote_user);
+		}
+	}
+
 	/* the body is complete (and de-chunked) at this point, so the length is ours to state */
 	snprintf(buf, sizeof(buf), "%zu", body_len);
 	fpm_http_param(c, "CONTENT_LENGTH", buf);
@@ -514,13 +635,16 @@ static void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_
 	evhttp_send_reply_start(c->req, code, reason && *reason ? reason : NULL);
 	free(reason);
 	c->headers_sent = 1;
+	c->status = code; /* for the access log, see fpm_http_finish() */
 
 	if (c->cgi_headers.s && body_off < ZSTR_LEN(c->cgi_headers.s)) {
 		struct evbuffer *chunk = evbuffer_new();
+		size_t chunk_len = ZSTR_LEN(c->cgi_headers.s) - body_off;
 
-		evbuffer_add(chunk, ZSTR_VAL(c->cgi_headers.s) + body_off, ZSTR_LEN(c->cgi_headers.s) - body_off);
+		evbuffer_add(chunk, ZSTR_VAL(c->cgi_headers.s) + body_off, chunk_len);
 		evhttp_send_reply_chunk(c->req, chunk);
 		evbuffer_free(chunk);
+		c->bytes_out += chunk_len;
 	}
 	smart_str_free(&c->cgi_headers);
 }
@@ -536,6 +660,7 @@ static void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 		evbuffer_add(chunk, data, len);
 		evhttp_send_reply_chunk(c->req, chunk);
 		evbuffer_free(chunk);
+		c->bytes_out += len;
 		return;
 	}
 
@@ -571,8 +696,11 @@ static void fpm_http_finish(fpm_http_conn *c, int upstream_ok)
 		if (!upstream_ok) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);
 		}
+		c->status = FPM_HTTP_BAD_GATEWAY;
 		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	}
+	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+		c->remote_user, c->status, c->bytes_out);
 	fpm_http_conn_free(c);
 }
 
@@ -948,7 +1076,7 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
 }
 
 static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
-		const char *path, size_t path_len)
+		const char *path, size_t path_len, const char *remote_addr)
 {
 	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], etag[64];
 	const char *root, *inm;
@@ -970,6 +1098,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 		return 0;
 	}
 	if (fpm_http_path_has_dotfile(path)) {
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
 		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
 		return 1;
 	}
@@ -981,6 +1110,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	root_len = strlen(root);
 
 	if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", root, path) >= sizeof(candidate)) {
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
 		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
 		return 1;
 	}
@@ -993,6 +1123,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	}
 	if (strncmp(resolved, root, root_len) || (resolved[root_len] && resolved[root_len] != '/')) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", gw->pool, path);
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
 		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
 		return 1;
 	}
@@ -1014,6 +1145,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	if (inm && !strcmp(inm, etag)) {
 		close(fd);
 		evhttp_add_header(out, "ETag", etag);
+		fpm_http_log_response(gw, req, remote_addr, NULL, 304, 0);
 		evhttp_send_reply(req, 304, "Not Modified", NULL);
 		return 1;
 	}
@@ -1027,6 +1159,8 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 		close(fd);
 		snprintf(len, sizeof(len), "%llu", (unsigned long long)st.st_size);
 		evhttp_add_header(out, "Content-Length", len);
+		/* HEAD sends no body, log 0 bytes like nginx' $body_bytes_sent would */
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, 0);
 		evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 		return 1;
 	}
@@ -1042,9 +1176,11 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 			} else {
 				close(fd);
 			}
+			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
 			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) st.st_size);
 		evhttp_send_reply(req, HTTP_OK, "OK", body);
 		evbuffer_free(body);
 	}
@@ -1054,7 +1190,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. */
-static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
 	const char *uri = evhttp_request_get_uri(req);
 	const struct evhttp_uri *decoded_uri;
@@ -1085,7 +1221,7 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 
 	/* Kolejnosc bedzie miala znaczenie, gdy dojda ACME i /status: najpierw
 	 * rzeczy o ustalonej sciezce, dopiero na koncu pliki z dysku. */
-	answered = fpm_http_serve_static(gw, req, path, path_len);
+	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr);
 
 	free(path);
 
@@ -1095,35 +1231,54 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 static void fpm_http_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	char *peer_addr = NULL;
+	ev_uint16_t peer_port = 0;
+	struct fpm_http_forwarded_result_s fwd;
+	const char *effective_addr;
 	fpm_http_conn *c;
 	int error;
 
-	if (gw->acl) {
-		struct evhttp_connection *evcon = evhttp_request_get_connection(req);
-		char *peer_addr = NULL;
-		ev_uint16_t peer_port;
-
-		if (evcon) {
-			evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
-		}
-		if (!fpm_http_acl_check(gw->acl, peer_addr)) {
-			evhttp_send_error(req, 403, "Forbidden");
-			return;
-		}
+	if (evcon) {
+		evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
 	}
+
+	if (gw->acl && !fpm_http_acl_check(gw->acl, peer_addr)) {
+		/* ACL is about the direct network peer, so it (and its log entry) is
+		 * deliberately NOT run through X-Forwarded-For -- an address rejected
+		 * here is exactly the one that made the TCP connection. */
+		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0);
+		evhttp_send_error(req, 403, "Forbidden");
+		return;
+	}
+
+	/* Resolved once per request: whether the direct peer is a trusted proxy
+	 * (http.trusted_proxies) and, if so, what X-Forwarded-For/-Proto/-Port say.
+	 * See fpm_http_forwarded.h. Everything downstream -- CGI vars and the
+	 * access log -- uses this single decision. */
+	fpm_http_forwarded_resolve(gw->trusted_proxies_acl, peer_addr,
+		evhttp_request_get_input_headers(req), &fwd);
+	effective_addr = fwd.remote_addr[0] ? fwd.remote_addr : peer_addr;
 
 	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
 	 * zajmowac slotu workera dla pliku, ktory oddamy sami. */
-	if (fpm_http_try_local(gw, req)) {
+	if (fpm_http_try_local(gw, req, effective_addr)) {
 		return;
 	}
 
 	c = calloc(1, sizeof(*c));
 	c->gw = gw;
 	c->req = req;
-	c->evcon = evhttp_request_get_connection(req);
+	c->evcon = evcon;
+	c->status = -1;
+	c->fwd = fwd;
+	c->peer_port = peer_port;
+	if (peer_addr) {
+		strlcpy(c->peer_addr, peer_addr, sizeof(c->peer_addr));
+	}
 
 	if ((error = fpm_http_build_request(c))) {
+		fpm_http_log_response(gw, req, effective_addr, NULL, error, 0);
 		evhttp_send_error(req, error, NULL);
 		c->evcon = NULL;
 		fpm_http_conn_free(c);
@@ -1206,6 +1361,10 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	snprintf(title, sizeof(title), "http gateway %s [%u]", gw->pool, index);
 	fpm_env_setproctitle(title);
+
+	/* one fd per gateway process, all appending to the same http.access_log
+	 * path -- see fpm_http_access_log.h for why that does not interleave */
+	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
 
 	if (gw->reuseport) {
 		/* own listening socket in the SO_REUSEPORT group, the kernel spreads connections by hash */
@@ -1401,6 +1560,9 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->pids);
 		fpm_http_acl_free(gw->acl);
 		free(gw->allowed_clients);
+		fpm_http_acl_free(gw->trusted_proxies_acl);
+		free(gw->trusted_proxies);
+		free(gw->access_log_path);
 		free(gw->http_listen_override);
 		free(gw->pool);
 		free(gw->listen_address);
@@ -1466,6 +1628,14 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
 		gw->allowed_clients = strdup(wp->config->http_allowed_clients);
 	}
+
+	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
+		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
+	}
+
+	if (wp->config->http_access_log && *wp->config->http_access_log) {
+		gw->access_log_path = strdup(wp->config->http_access_log);
+	}
 }
 /* }}} */
 
@@ -1504,6 +1674,9 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		 * address — fpm_http_validate_pool() already refused to start without
 		 * one; this is just a defensive fallback, unreachable in practice */
 		if (wp->listen_address_domain != FPM_AF_INET && !gw->http_listen_override) {
+			free(gw->allowed_clients);
+			free(gw->trusted_proxies);
+			free(gw->access_log_path);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1511,8 +1684,23 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return 0;
 		}
 
-		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, gw->allowed_clients, &gw->acl) != 0) {
+		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, "http.allowed_clients", gw->allowed_clients, &gw->acl) != 0) {
 			free(gw->allowed_clients);
+			free(gw->trusted_proxies);
+			free(gw->access_log_path);
+			free(gw->http_listen_override);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw);
+			return -1;
+		}
+
+		if (gw->trusted_proxies && fpm_http_acl_parse(gw->pool, "http.trusted_proxies", gw->trusted_proxies, &gw->trusted_proxies_acl) != 0) {
+			fpm_http_acl_free(gw->acl);
+			free(gw->allowed_clients);
+			free(gw->trusted_proxies);
+			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
 			free(gw->listen_address);
@@ -1525,6 +1713,9 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		if (gw->listen_fd < 0) {
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
+			fpm_http_acl_free(gw->trusted_proxies_acl);
+			free(gw->trusted_proxies);
+			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
 			free(gw->listen_address);
@@ -1604,7 +1795,15 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
 		struct fpm_http_acl_s *tmp = NULL;
 
-		if (fpm_http_acl_parse(wp->config->name, wp->config->http_allowed_clients, &tmp) != 0) {
+		if (fpm_http_acl_parse(wp->config->name, "http.allowed_clients", wp->config->http_allowed_clients, &tmp) != 0) {
+			return -1; /* fpm_http_acl_parse() already logged which address is bad */
+		}
+		fpm_http_acl_free(tmp);
+	}
+	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
+		struct fpm_http_acl_s *tmp = NULL;
+
+		if (fpm_http_acl_parse(wp->config->name, "http.trusted_proxies", wp->config->http_trusted_proxies, &tmp) != 0) {
 			return -1; /* fpm_http_acl_parse() already logged which address is bad */
 		}
 		fpm_http_acl_free(tmp);

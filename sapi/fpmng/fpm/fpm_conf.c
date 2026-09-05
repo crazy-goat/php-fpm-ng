@@ -176,6 +176,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
+	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
+	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -754,6 +756,8 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_parsed_schedule);
 	free(wpc->http_listen);
 	free(wpc->http_allowed_clients);
+	free(wpc->http_trusted_proxies);
+	free(wpc->http_access_log);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

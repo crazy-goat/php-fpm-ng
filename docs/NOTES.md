@@ -1274,6 +1274,103 @@ Po tej poprawce scenariusz 1 (USR2) pokazuje zero sierot już przy `t+3s`
 (wcześniej: dwie sieroty widoczne jeszcze przy `t+3s`, znikające dopiero przy
 `t+12s`).
 
+## 3q. Async: pomiary epoll vs io_uring i pułapki (agent, 2026-09-05)
+
+ZASTRZEŻENIE: agent mierzył **własnym prototypem w C** symulującym serwer
+FastCGI z pętlą zdarzeń. Nie sprawdzał tego z faktyczną implementacją True
+Async — konsekwencje semantyczne wywnioskował z lektury `fpm_scoreboard.c`,
+`fpm_request.c`, `ZendAccelerator.c`, `zend_signal.c`, `main.c`. Liczby
+o epoll/io_uring są zmierzone; wnioski o tym, co zniknie pod asynchronem, są
+wnioskami z kodu FPM/Zend, a nie z asynchrona. Osobny agent bada True Async
+u źródła — patrz sekcja, która powstanie z jego raportu.
+
+### io_uring odpada TAKŻE pod async, ale z innego powodu
+
+W modelu blokującym nie było czego batchować. W modelu z pętlą zdarzeń
+batchowanie działa — syscalle spadają z ~2,0/req do 0,08–0,2/req (10–25×) —
+ale **CPU spada tylko o 0,3 µs/req** (UDS, nasycone), 0,2 µs (TCP) i 0,7–1,15 µs
+przy rzadkich zdarzeniach. io_uring nie usuwa pracy jądra, tylko przejścia,
+a własny narzut (task-work, CQE, buffer ring) zjada większość oszczędności.
+
+Próg: przy 2 ms CPU/request potrzeba **17–67 operacji I/O na request**, żeby
+wyjść na 1%. Dla PHP nie istnieje N (równoległość), przy którym to wychodzi
+z szumu. io_uring wraca do gry dopiero, gdy `fcgi-async` przestaje być PHP,
+a staje się proxy z dziesiątkami operacji I/O na mikroskopijny request.
+
+**Gwóźdź praktyczny: Docker domyślnie blokuje `io_uring_*` w seccomp.**
+Do tego wymaga liburing i kernela ≥ 6.0 dla multishot recv, bywa wyłączany
+przez `io_uring_disabled`. Nasze docelowe środowisko to kontener.
+
+### Prawdziwa wygrana to PĘTLA ZDARZEŃ, nie API wejścia-wyjścia
+
+Blokujący worker po optymalizacjach: 22–23 µs/req (UDS). Prototyp async na
+epoll: **3,4 µs/req** (6,3 TCP). Różnica ~10 µs to koszt modelu "proces śpi
+w `read` i budzi się per request" — przełączenie kontekstu plus zimne cache.
+Znika w pętli zdarzeń **niezależnie od io_uring**. Czyli libevent, którą już
+mamy, wystarczy.
+
+### TRZY WCZEŚNIEJSZE REKOMENDACJE STAJĄ SIĘ BŁĘDAMI POD ASYNC
+
+Nie tylko bezużyteczne — **błędne**. Oznaczyć, zanim ktoś je zaimplementuje
+z listy w sekcji 3m:
+
+1. **Cache `chdir` w SAPI** — cwd jest per proces. Dwa przeplatane requesty
+   z różnych docrootów: jeden wykonuje się z cwd drugiego (relatywne `include`,
+   `fopen`). Pod async **każde `chdir` per request jest błędem**; potrzebne
+   wirtualne cwd per kontekst, czego NTS nie ma. To praca w Zend/TSRM.
+2. **`times()` opt-in** — mierzy CPU **procesu**, więc "CPU requestu" byłoby
+   sumą cudzych. Per-korutynowe CPU wymaga `CLOCK_THREAD_CPUTIME_ID` przy
+   każdym przełączeniu — **1,1 µs/syscall** (zmierzone, nie vDSO), przy
+   10 przełączeniach = 11 µs, więcej niż całość dzisiejszych oszczędności.
+3. **`SO_RCVTIMEO` zamiast `poll`** — nie działa na gniazdach nieblokujących
+   (`recv` wraca EAGAIN natychmiast). Timeouty muszą być timerami pętli.
+
+### Trzy pułapki, których nie było na żadnej liście
+
+- **Scoreboard**: slot `proc` jest per proces, a `request_uri`, `request_stage`,
+  `accepted` opisują JEDEN request. Pod async status i slowlog kłamią, a
+  `request_terminate_timeout` (master patrzy na `proc->tv` i `request_stage`)
+  **ubija proces z N requestami z powodu jednego**.
+- **Blokada opcache**: `accel_activate_add` bierze F_RDLCK per request;
+  `accel_deactivate_sub` pierwszego kończącego requestu **zwolniłby blokadę,
+  gdy inne jeszcze działają**. Trzymać raz per proces z licznikiem.
+- **Pojęcie "wolnego workera"** przestaje istnieć. `fpm_request_end`,
+  `fpm_stdio_flush_child` i `fpm_log_write` zakładają "request się skończył =
+  proces wolny", a na tym stoi `pm = dynamic/ondemand`. Trzeba zdefiniować
+  na nowo (requesty w toku < limit).
+
+### `max_execution_time` i `zend_signal_activate`
+
+`setitimer(ITIMER_PROF)` per request jest pod async **niewykonalne z definicji**
+— jeden timer na proces. Znika sam, ale zamiennik trzeba zaprojektować:
+- **zły**: `CLOCK_THREAD_CPUTIME_ID` przy przełączeniu korutyny (1,1 µs syscall,
+  10–50 przełączeń = 11–55 µs — drożej niż całe dzisiejsze 26 syscalli)
+- **dobry**: deadline wall-clock sprawdzany z `CLOCK_MONOTONIC_COARSE`
+  (7 ns, vDSO) plus jeden timer pętli na najbliższy deadline
+
+`zend_signal_activate` per request (7× `rt_sigaction`): handlery są per proces,
+więc rejestracja raz na proces staje się **konieczna, nie optymalizacyjna**.
+Głębszy problem: odraczanie sygnałów Zend (`SIGG(depth)`,
+`HANDLE_BLOCK_INTERRUPTIONS`) zakłada jeden wątek wykonania — przełączenie
+korutyny w sekcji krytycznej zostawia licznik w powietrzu. To Zend, nie SAPI.
+
+**Netto: 12 z 26 dzisiejszych syscalli znika pod async z przyczyn
+strukturalnych**, nie optymalizacyjnych.
+
+### Ile z podłogi zostaje
+
+Z ~21–23 µs (UDS): ~12 µs jest specyficzne dla modelu "jeden request na proces"
+i spada do ~3–4 µs w pętli zdarzeń (zmierzone prototypem); ~9 µs to user-space
+PHP i FPM, które zostaje. Docelowa podłoga transport+lifecycle pod async:
+**~12–14 µs/req**, czyli 0,6% przy 2 ms CPU requestu.
+
+**Wniosek: rzeczą, która realnie zmieni CPU/request pod async, jest koszt
+per-korutynowego kontekstu PHP (startup/shutdown, sterta, superglobale) —
+a to leży w Zend, nie w SAPI.** Cała warstwa transportu jest poniżej 1%.
+
+Artefakty: `~/ng-research/async/` na poligonie.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

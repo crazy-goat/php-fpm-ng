@@ -11,6 +11,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_pool_supervisor.h"
+#include "fpm_pool_async.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
@@ -43,6 +44,15 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.validate        = fpm_pool_supervisor_validate,
 		.init_main       = fpm_pool_supervisor_init_main,
 		.child_main      = fpm_pool_supervisor_child_main,
+	},
+	{
+		.name            = "async",	/* EKSPERYMENT: wymaga silnika True Async, patrz fpm_pool_async.h */
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.rejects         = fpm_pool_async_rejects,
+		.validate        = fpm_pool_async_validate,
+		.child_main      = fpm_pool_async_child_main,
 	},
 };
 

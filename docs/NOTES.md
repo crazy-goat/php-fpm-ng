@@ -1574,3 +1574,214 @@ wcześnie, że upstream coś zmienił.
   używania. `php-fpm-ng` jako nazwa produktu prosi się o list z prośbą
   o zmianę. Roboczo może zostać, przed publikacją dać coś własnego.
 
+
+## 3t. `pool.type = async` — POC URUCHOMIONY na forku True Async (agent, 2026-09-05)
+
+Kontynuacja 3s (tam: "nie budujemy tego"). Tu badanie wykonalnosci na kodzie,
+nie na opisach. Wszystko ponizej jest z lektury zrodel (plik:linia) albo
+zmierzone lokalnie na macu (arm64, NTS, `--enable-debug`). Kod:
+`sapi/fpmng/fpm/fpm_pool_async.c` (+ `.h`, jedna linia w `fpm_pool_types[]`).
+Nic nie poszlo do zadnego upstreamu. Zrodla forka i buildy:
+`~/work/true-async/{php-src,php-async,build,php-upstream,build-upstream}`.
+
+### Co fork faktycznie udostepnia (z kodu)
+
+Fork `true-async/php-src` ma wiele galezi; ta, na ktorej buduje ext, to
+`true-async-stable` (2026-08-26, ABI "TrueAsync ABI v0.26.0",
+`Zend/zend_async_API.h`, 3060 linii; `README` ext podaje `true-async-api`,
+ktora stoi na 2025-09 — nieaktualne). Vs upstream master: 228 plikow,
++21k linii. Osobno galaz `async-core-master` (2026-07-03): "AsyncCore ABI
+v0.1.0", 573-liniowy naglowek ze SLOTAMI schedulera (new_coroutine, enqueue,
+suspend, resume, cancel, launch, intercept_fiber, defer) i NICZYM wiecej —
+bez reaktora, eventow, poll. To jest to, co ma isc do 8.7. Dla SAPI oznacza:
+sam ABI nie da czekania na deskryptorze; to robi dostawca (ext).
+
+Scheduler i reaktor to ext `true-async/php-async` (libuv, 33k linii C;
+`scheduler.c`, `coroutine.c`, `libuv_reactor.c`). Rdzen dostarcza sloty
+funkcji (`zend_async_scheduler_register`, `zend_async_API.c:402`) i
+`zend_async_is_enabled()` = scheduler I reaktor zarejestrowane (`:305`).
+Scheduler startuje LENIWIE przy pierwszym `spawn`/`suspend`
+(`scheduler.c:1153 async_scheduler_launch`), zamieniajac biezacy przebieg w
+"korutyne glowna"; wymaga `EG(active_fiber) == NULL` i RINIT ext.
+
+Uruchomienie kodu z C: `ZEND_ASYNC_SPAWN()` (`zend_async_API.h:2726`) daje
+`zend_coroutine_t*`; ustawiasz `internal_entry` (void(*)(void)) i
+`extended_data`; startuje przy nastepnym oddaniu sterowania. Czekanie na fd:
+`ZEND_ASYNC_NEW_SOCKET_EVENT(fd, ASYNC_READABLE)` + `ZEND_ASYNC_WAKER_NEW` +
+`zend_async_resume_when(...)` + `ZEND_ASYNC_SUSPEND()` — wzor
+`main/network_async.c:241 network_async_await_stream_socket`. Dziala z C,
+sprawdzone (akceptor ponizej).
+
+Gdzie silnik zawiesza sie na I/O (fork, `git diff master..true-async-stable`):
+`main/streams/xp_socket.c` (+346, kazdy read/write/connect/accept przez
+`network_async_await_stream_socket`), `main/network.c` (`php_poll2` ->
+`php_poll2_async` gdy `ZEND_ASYNC_IS_ACTIVE`), `main/streams/plain_wrapper.c`
+(+743, pliki/pipe przez `ZEND_ASYNC_IO_CREATE`), `ext/standard/basic_functions.c`
+(`sleep_async` dla sleep/usleep/time_nanosleep), `ext/curl/curl_async.c`
+(+2278), `ext/pdo_pgsql`/`ext/pgsql` (libpq przez polling gniazda), `ext/sockets`,
+`ext/standard/dns.c`. Czyli mysqlnd (streamy) i libpq sa obslugiwane W SILNIKU
+— to wiecej niz nasz `php_stream_xport_register` z 3s.
+
+### Co jest per-korutyna DZIS (wyliczone z kodu, nie z opisu)
+
+- Fiber switch (`Zend/zend_fibers.c:121-160 zend_fiber_vm_state`):
+  `vm_stack*`, `current_execute_data`, `error_handling`, `exception_class`,
+  `jit_trace_num`, `active_fiber`, `bailout`. Tyle z EG.
+- `main/output.c`: stos `ob_*` przez klucz "internal context" korutyny
+  (`php_output_get_async_context`, handler startu korutyny glownej `:209`, `:1663`).
+- `main/network_async.c:1586`: cache `hostent`.
+- `EG(shutdown_context)` (destruktory na shutdown w korutynie).
+- SG: ZERO zmian (`main/SAPI.c`, `main/php_variables.c` — diff pusty).
+- `EG(symbol_table)`, `function_table`/`class_table`, `included_files`, ini,
+  `error_reporting`, `user_error_handler`, `memory_limit`, timeout: WSPOLNE.
+
+Zaczatek mechanizmu ISTNIEJE i jest publiczny: **switch-handlery** —
+`zend_coroutine_switch_handler_fn(coroutine, is_enter, is_finishing)`
+(`zend_async_API.h:269`), `ZEND_COROUTINE_ADD_SWITCH_HANDLER` (`:3043`),
+wolane w `ext/async/scheduler.c:1697` (LEAVE przed przelaczeniem) i `:1719`
+(ENTER po wznowieniu), FINISH w `coroutine.c` przy finalizacji. Tego uzywa
+sam fork dla `ob_*`. Tego uzywa nasz POC dla SG i tablicy symboli — i to
+WYSTARCZA bez zmian w VM (patrz nizej).
+
+Galaz `global-isolation` (af6c53037, 2025-11-30) zrobila per-korutyna
+`EG(symbol_table)` (`coroutine->symbol_table`, `zend_execute.c`,
+`zend_vm_def.h` +116) i per-scope superglobale (`scope->superglobals`) —
+**nigdy nie weszla do `true-async-stable`** (`git branch --contains` = tylko
+ona). Statyki klas per-korutyna zrobiono i cofnieto (858ece3db). Czyli autor
+forka probowal warunku 1 z 3s i porzucil; w stable stan requestu jest
+per-proces.
+
+### POC: co dziala i jak (ZMIERZONE)
+
+`child_main` (jeden proces, `pm = static`, `pm.max_children = 1`):
+1. JEDEN `php_request_startup()` — "request-kontener" (executor, RINIT ext,
+   arena). `zend_unset_timeout()`, bo `max_execution_time` dotyczylby procesu.
+2. `ZEND_ASYNC_SPAWN()` akceptora: czeka na `listening_socket` przez poll-event,
+   `fcgi_init_request` + `fcgi_accept_request` (accept od razu; `poll` na nowym
+   fd jest w forku asynchroniczny przez `php_poll2`; `read` naglowkow blokujacy,
+   ale dane juz sa), potem `ZEND_ASYNC_SPAWN()` korutyny requestu.
+3. Korutyna requestu: swieza kopia SG (odpowiednik `sapi_activate` +
+   `init_request_info`), swieze `EG(symbol_table)` i `EG(included_files)`
+   (`zend_hash_init` jak `init_executor`), ponowne uzbrojenie auto-globali,
+   switch-handler podmieniajacy przez `memcpy` cale `sapi_globals` i naglowki
+   obu HashTable (adres `&EG(symbol_table)` sie nie zmienia, zmienia sie
+   zawartosc — ramka skryptu trzyma wskaznik, wpisy IS_INDIRECT wskazuja w
+   stos VM tej korutyny). `zend_execute_scripts` (NIE `php_execute_script`,
+   patrz pulapki), `sapi_send_headers`/`sapi_flush`, `fcgi_finish_request`
+   bez keep-alive, `zend_hash_graceful_reverse_destroy` tablicy symboli.
+4. Korutyna glowna budzi sie co 1 s i sprawdza `fcgi_in_shutdown()`.
+
+Wyniki (klient FastCGI w PHP, N rownoleglych polaczen, jeden proces workera):
+
+    4 x slow.php (usleep 500 ms)      async: 503 ms lacznie   fcgi: 2008 ms
+    4 x net.php (fsockopen -> serwer
+      odpowiadajacy po 500 ms)         async: 537 ms           fcgi: 2140 ms
+    50 x slow.php (100 ms)             async: 105 ms
+    200 x slow.php (0 ms)              async: 22 ms (~110 us/req, debug build)
+    RSS dziecka po 2000 requestach     8624 KB -> 8624 KB (arena sie odzyskuje)
+
+Poprawnosc: kazdy request dostal SWOJ naglowek `X-Req`, SWOJE `$_GET`,
+`$_SERVER['REQUEST_URI']`, `$GLOBALS`, `get_included_files()`; ostrzezenia
+i "Uncaught RuntimeException" trafiaja do wlasciwego klienta; SIGQUIT do
+mastera -> wszystkie procesy znikaja < 2,5 s.
+
+### Co NIE dziala i przez jaki kod (zmierzone, nie wywnioskowane)
+
+- **Tablice funkcji i klas sa per proces.** `classdef.php` (definiuje klase
+  i funkcje) dziala RAZ; kazdy nastepny request w tym procesie: "Fatal error:
+  Cannot redeclare function helper()" — na zawsze, bo `EG(function_table)`
+  to `CG(function_table)` napelniana przy kompilacji i czyszczona dopiero w
+  `shutdown_executor()`. Podmiana tablicy per korutyna wymagalaby kopii
+  wszystkich wpisow wewnetrznych (tysiace) per request albo zmiany w silniku.
+  TO jest dzis prawdziwa sciana dla frameworkow (kazdy request laduje te same
+  klasy). Z opcache ten sam problem ma inna postac: `zend_accel_load_script`
+  binduje klasy do `EG(class_table)` per request.
+- **opcache zaklada jeden request na proces.** Z wlaczonym opcache requesty
+  2..N tracily `$_GET`/`$_SERVER`: `ext/opcache/ZendAccelerator.c:1958,2481`
+  odpala auto-globale tylko dla `ping_auto_globals_mask & ~ZCG(auto_globals_mask)`,
+  a maska zeruje sie w `accel_activate` (`:2873`), czyli raz na
+  request-kontener. POC dziala z `opcache.enable = off` — czyli bez opcache.
+  Analogiczne cache per request: `ZCG(cwd)`, `ZCG(include_path)`.
+- **Bez keep-alive po stronie poola**: `fcgi_accept_request` na otwartym fd
+  czyta blokujaco (`main/fastcgi.c:1445`, bez poll). Nasza bramka HTTP trzyma
+  polaczenia trwale — dopiac przez asynchroniczny poll na fd przed odczytem.
+- **POST**: `sapi_cgi_read_post` uzywa statycznego `request_body_fd`
+  (`fpm_main.c`) — wspolny dla wszystkich requestow w locie. POC testowany GET.
+- Brak `X-Powered-By`, brak `php_request_startup/shutdown` per request, wiec
+  RINIT/RSHUTDOWN rozszerzen nie biegna per request (sesje, mysqlnd stats,
+  `set_time_limit`, `memory_limit` per request — nie ma).
+- Fatal w dowolnej korutynie: nasz `zend_try` lapie bailout w korutynie, ale
+  `CG(unclean_shutdown)` i stan silnika po E_ERROR sa wspolne.
+- Logi dziecka nie trafiaja do `error_log` (FPM zamyka zlog w dziecku bez
+  `catch_workers_output`) — nasze NOTICE/DEBUG z `child_main` gina.
+
+### Pulapki, na ktore sie nadzialem (kazda to konkretny kod)
+
+1. `php_execute_script()` w forku wola `ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN`
+   (`main/main.c php_execute_script_ex`), a to = `suspend(from_main=true)`
+   -> `async_scheduler_main_coroutine_suspend` (`scheduler.c:1315`), ktore
+   FINALIZUJE biezaca korutyne jak glowna. Z wnetrza korutyny requestu trzeba
+   wolac `zend_execute_scripts()` bezposrednio.
+2. Fiber korutyny ma na dnie sztuczna ramke funkcji wewnetrznej
+   (`scheduler.c:1786-1811 fiber_entry`, `root_function`). `zend_execute()` przy
+   niepustym `EG(current_execute_data)` szuka tablicy symboli w gore stosu
+   (`zend_rebuild_symbol_table`) i dostaje NULL -> SIGSEGV w
+   `zend_attach_symbol_table` (`zend_execute_API.c:2029`). Na czas wykonania
+   skryptu trzeba ustawic `EG(current_execute_data) = NULL`.
+3. Wspolna `EG(symbol_table)` to nie tylko wyciek `$GLOBALS`: drugi skrypt
+   glowny w `zend_attach_symbol_table` przejmuje BITOWO (bez addref) wartosci
+   CV pierwszego o tych samych nazwach i zwalnia je pod nim. Zmierzone:
+   SIGABRT w `gc_possible_root` (`zend_gc.c:800`) na `net.php`, gdy `$fp`
+   z zasobem gniazda. Skalarne skrypty "dzialaly" przypadkiem. Rozwiazanie
+   w POC: wlasna tablica per korutyna podmieniana w switch-handlerze.
+4. `fiber_entry` ustawia `EG(error_reporting)` z ini zamiast dziedziczyc
+   (`scheduler.c:1766-1813`); bez php.ini daje 0 — ostrzezenia i "Uncaught"
+   znikaja bez sladu. Dziedziczymy wartosc kontenera recznie.
+5. `fpm_main.c:1800-1801` podmienia `php_import_environment_variables` na
+   wariant czytajacy srodowisko FastCGI DOPIERO po powrocie z `fpm_run()`.
+   `child_main` nie wraca, wiec `$_SERVER` mial tylko environ procesu.
+6. Build forka na macOS: `ext/async/thread.c:3222` deklaruje slaby symbol
+   `OPENSSL_thread_stop` — linker Apple wymaga `-Wl,-U,_OPENSSL_thread_stop`.
+   Poza tym fork + ext + nasze `sapi/fpmng` buduja sie razem bez zadnej latki
+   (`prepare.sh` dziala na forku jak na upstreamie; `main/fastcgi.c` forka
+   jest identyczny z upstreamem).
+
+### Wykrywanie silnika (punkt 4) — zweryfikowane na obu binarkach
+
+Kompilacja: `__has_include("zend_async_API.h")` (tylko fork ma ten naglowek;
+`-IZend` jest zawsze). Runtime w `validate()`: `zend_async_is_enabled()` —
+mozliwe, bo `fpm_init()` biegnie PO `php_module_startup()` (`fpm_main.c:1749`
+vs `:1765`), wiec MINIT ext/async juz zarejestrowal scheduler. Dodatkowo
+`ZEND_ASYNC_API` daje wersje ABI do komunikatu. Na binarce z upstreamu
+(`~/work/true-async/build-upstream`, PHP 8.6.0-dev bez API):
+
+    ALERT: [pool async] pool.type = async requires a PHP engine with the True
+    Async API (Zend/zend_async_API.h); this binary is PHP 8.6.0-dev without it
+
+`-t` na forku: `pm = dynamic` i `request_terminate_timeout` odrzucane
+czytelnie, poprawny plik przechodzi.
+
+### Punkt 6: `php_stream_xport_register()` — potwierdzone w upstreamie
+
+`PHPAPI` (`main/streams/php_stream_transport.h:32`), rejestr to
+`zend_hash_update_ptr` (`transports.c:30`) — ostatni wygrywa;
+`_php_stream_xport_create` szuka po nazwie protokolu (`transports.c:109`).
+Domyslne `tcp/udp/unix/udg` rejestruje `streams.c:1765-1769`; ext/openssl
+NADPISUJE `tcp` w MINIT (`openssl.c:832`) i przywraca w MSHUTDOWN (`:906`) —
+wiec nasze ext musi ladowac sie PO openssl. mysqlnd: `mysqlnd_vio.c:210`
+`php_stream_xport_create(scheme...)` ze schematem `tcp://`/`unix://`
+(`:278-305`) — lapie sie. phpredis: `library.c:3345` to samo. Do zawieszania
+fibera z C upstream ma `ZEND_API zend_fiber_suspend/resume`
+(`zend_fibers.h:135-136`). Teza z 3s stoi: warunek 2 w naszym zasiegu na
+upstreamie; warunek 1 (stan requestu) nadal nie.
+
+### Nastepny krok, gdyby isc dalej
+
+Nie "wiecej I/O" — I/O fork ma. Brakuje trzech rzeczy i wszystkie sa w
+silniku, nie w SAPI: (a) tablice funkcji/klas per request albo mechanizm
+"skrypt juz zaladowany w tym procesie" (to jest to, co robi tryb worker
+FrankenPHP/Octane: aplikacja ladowana RAZ, request = wywolanie funkcji —
+i to jest realistyczny model dla `async`, nie "kazdy request od zera");
+(b) per-korutyna `RINIT/RSHUTDOWN` albo lista rozszerzen bezpiecznych;
+(c) opcache swiadomy wielu requestow w procesie. Nasza strona (keep-alive,
+POST, scoreboard, logi dziecka) to robota na dzien i nie o nia sie rozbija.

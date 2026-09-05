@@ -1,0 +1,6 @@
+FROM scratch
+COPY php-fpm /php-fpm
+COPY fpm.conf /fpm.conf
+COPY www /www
+EXPOSE 9001
+ENTRYPOINT ["/php-fpm", "-y", "/fpm.conf", "-F"]

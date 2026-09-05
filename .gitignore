@@ -1,0 +1,4 @@
+build-dir/
+*.log
+php-fpm
+php-fpm-*

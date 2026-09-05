@@ -23,6 +23,7 @@
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fastcgi.h"
+#include "zend_signal.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -156,6 +157,7 @@ run_child: /* only workers reach this point */
 		}
 		if (type && (!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http"))) {
 			fcgi_set_optimized_transport(true);
+			zend_signal_use_persistent_handlers(true);
 		}
 
 		if (type && type->child_main) {

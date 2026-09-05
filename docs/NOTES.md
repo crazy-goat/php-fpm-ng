@@ -2453,11 +2453,127 @@ Przy jednej instancji na VPS-ie **nie ma klastra, który wyłapie awarię**.
 Backoff, próg błędów i widoczne logowanie to funkcja, nie higiena. Kod wyjścia
 różny od zera musi być widoczny, nie tylko na poziomie debug.
 
-### Wdzięczne zatrzymanie
+### Wdzięczne zatrzymanie — ZWERYFIKOWANE NA ŻYWO (2026-09-06), z jednym znalezionym i naprawionym błędem
 
-Ważniejsze od hot-reloadu: zerwane zadanie zostawia śmieci w bazie, a sekunda
-przerwy w HTTP nie zostawia nic. Consumer musi dostać SIGTERM i dokończyć
-bieżące zadanie. Cron w trakcie przebiegu — albo dopalić, albo pominąć.
+Ten wpis był nieaktualny: mechanizm (`supervisor.stop_timeout`, `cron.timeout`,
+wspólny watchdog w `fpm_pool_watchdog.c`) był już zaimplementowany od dawna
+(patrz 3o, 3r), tylko ten akapit w sekcji 6 nie został po tym zaktualizowany.
+Zweryfikowano ponownie od zera na żywej binarce (PHP 8.5.11-dev, macOS,
+`sapi/fpmng/php-fpm-ng`) i znaleziono **prawdziwy, poważny regres**, opisany
+niżej — teraz naprawiony.
+
+#### Tabela semantyki stopu per typ poola
+
+| typ poola | SIGTERM wysłane do DZIECKA bezpośrednio | SIGQUIT/SIGTERM wysłane do MASTERA (`docker stop`) | twardy limit |
+|---|---|---|---|
+| `fastcgi`/`fastcgi-ng`/`http` (i warianty `fiber`/`async`) | request w trakcie się dokańcza, `request_terminate_timeout` to twardy limit | tak samo, przez eskalację mastera (`process_control_timeout`) — standardowe zachowanie FPM, nietknięte | `request_terminate_timeout` (istniejąca dyrektywa FPM) |
+| `supervisor` | bieżąca iteracja skryptu ma do `supervisor.stop_timeout` sekund na dokończenie się SAMA (proces nie jest budzony niczym specjalnym — po prostu dostaje czas); po przekroczeniu limitu — `SIGKILL` z osobnego procesu-watchdoga, z logiem `[pool NAZWA] ... exited on signal 9` | **tylko jeśli `process_control_timeout` (global) >= `supervisor.stop_timeout`** — inaczej master ubija dziecko swoją własną eskalacją PIERWSZY, zanim nasz watchdog zdąży zadziałać (patrz niżej) | `supervisor.stop_timeout`, domyślnie 10s |
+| `cron` | jeśli w trakcie SNU (przed startem skryptu) — kończy się natychmiast i czysto, BEZ uruchamiania skryptu w tym przebiegu; jeśli skrypt już trwa — SIGTERM nie jest w ogóle łapane w tej fazie, jedyny limit to `cron.timeout` uzbrojony przed startem skryptu | jak wyżej: wymaga `process_control_timeout` (global) >= `cron.timeout` | `cron.timeout`, domyślnie 0 = brak limitu |
+| `status` | brak własnego handlera SIGTERM/SIGQUIT — nie ma tu nic do "dokończenia" (nie odpala PHP, tylko czyta scoreboardy), więc brak wdzięcznego zatrzymania jest nieszkodliwy z zasady | j.w. | brak (niepotrzebny) |
+
+Cron: reguła jest więc "dopal w ramach `cron.timeout`, ale TYLKO jeśli przebieg
+już wystartował; jeśli jeszcze śpi, po prostu pomiń ten przebieg" — dokładnie
+zgodnie z argumentem z tej sekcji sprzed naprawy. Osierocone procesy: przy
+`pm.max_children = 1` nie ma jak zostawić uruchomionego skryptu bez procesu,
+który go pilnuje (albo skrypt kończy proces sam, albo watchdog go zabija) —
+zweryfikowane `ps` po pełnym zatrzymaniu, zero sierot w obu przypadkach (a)/(b)/(c).
+
+#### BŁĄD ZNALEZIONY: `stop_timeout`/`cron.timeout` działały tylko dla PIERWSZEJ iteracji procesu
+
+`php_request_startup()` i `php_request_shutdown()` (rdzeń PHP, nie nasz kod)
+podmieniają dyspozycję sygnału `SIGTERM` na własny handler Zenda — `zend_sigs[]`
+w `Zend/zend_signal.c` obejmuje `SIGTERM`, nie tylko `SIGALRM`/`SIGPROF` używane
+przez `max_execution_time` (komentarz w `fpm_pool_supervisor.c` o tym drugim
+przypadku już istniał, ale problem okazał się szerszy). Dzieje się to przy
+KAŻDYM wywołaniu, nie tylko raz na proces.
+
+`pool.type = supervisor` instaluje własny handler SIGTERM raz, w
+`fpm_pool_supervisor_child_main()`, przed wejściem w pętlę `for(;;)`. Przy
+`supervisor.restart = always` proces żyje wiele iteracji (`fpm_pool_script_run()`
+w kółko) — i już PIERWSZA zakończona iteracja podmieniała dyspozycję SIGTERM
+z powrotem, po cichu. Efekt: SIGTERM wysłane do dziecka po co najmniej jednej
+ukończonej iteracji zabijało proces NATYCHMIAST, domyślną akcją — żadnego
+"dokończ bieżące zadanie", żadnego uzbrojenia watchdoga `stop_timeout`. Zmierzone
+bezpośrednio (dopisany tymczasowy debug w `sigaction(SIGTERM, NULL, &check)`):
+zaraz po instalacji handlera w `child_main()` dyspozycja była poprawna, ale zaraz
+po pierwszym powrocie z `fpm_pool_script_run()` — już nie (inny wskaźnik funkcji,
+nie nasz, nie `SIG_DFL`).
+
+Dla `cron` szkoda jest mniejsza (proces wykonuje TYLKO JEDEN skrypt w całym
+swoim życiu), ale ten sam mechanizm dotyczyłby drugiego uruchomienia, gdyby
+kiedyś ktoś zmienił model na "więcej niż jeden przebieg na proces".
+
+**Naprawa** (`fpm_pool_script.c`, plik dzielony między `supervisor` i `cron`,
+zero wiedzy o konkretnym typie — zgodnie z kontraktem z 3h): `fpm_pool_script_run()`
+zapamiętuje dyspozycję SIGTERM SPRZED `php_request_startup()` (czyli tę, którą
+faktycznie chciał mieć wołający — może to być też `SIG_DFL`, jeśli wołający nic
+nie zainstalował, przywrócenie jest wtedy no-opem) i przywraca ją natychmiast:
+po `php_request_startup()`, i drugi raz po `php_request_shutdown()` (na wypadek,
+gdyby ono też podmieniało — zmierzone, że tak). Naprawia to `supervisor` i `cron`
+jednocześnie, bez żadnego `if (type == ...)`.
+
+Zweryfikowane po naprawie na żywo, wielokrotnie, PO co najmniej kilku ukończonych
+iteracjach (nie tylko pierwszej):
+```
+[pool consumer] child 39020 exited with code 0 after 11.77s   # (a) SIGTERM w trakcie krótkiego zadania -> kończy się samo, exit 0
+[pool consumer] child 39136 exited on signal 9 (SIGKILL) after 26.75s  # (b) zadanie dłuższe niż stop_timeout=3s -> twardy kill po ~3s
+[pool job] child 39510 exited on signal 9 (SIGKILL) after 49.01s  # cron.timeout=3s liczone od startu SKRYPTU (start o :07:00, kill o :07:03), nie od startu procesu
+```
+
+#### DRUGI ZNALEZIONY PROBLEM (nie naprawiony w kodzie, bo nie da się — udokumentowany i ostrzeżenie dodane)
+
+`docker stop`/systemd wysyłają SIGTERM (albo skonfigurowany `STOPSIGNAL`) do
+PID 1, czyli do MASTERA, nie bezpośrednio do dziecka. Master w stanie
+`TERMINATING` (`fpm_process_ctl.c`, referencyjne, nietknięte) wysyła SIGTERM do
+dzieci i eskaluje SAM do SIGKILL po `process_control_timeout` sekund (domyślnie
+**0** — czyli praktycznie natychmiast). Nasz `supervisor.stop_timeout`/
+`cron.timeout` nigdy nie dostają szansy zadziałać, jeśli `process_control_timeout`
+jest mniejszy — dziecko ginie od SIGKILLa MASTERA, nie od naszego watchdoga.
+
+Zmierzone: z domyślnym `process_control_timeout = 0`, SIGTERM do mastera zabija
+zadanie natychmiast (bez dokończenia bieżącej iteracji); z
+`process_control_timeout = 5` (>= `supervisor.stop_timeout = 3`) — zadanie
+dostaje swoje 3 sekundy, watchdog je ubija, master czeka, zero sierot.
+
+**Nie da się tego naprawić wewnątrz typu poola** — `process_control_timeout` jest
+globalny (współdzielony przez wszystkie pule) i `fpm_process_ctl.c` jest
+referencyjny (nietknięty, zgodnie z kontraktem). Zamiast tego: `supervisor` i
+`cron` (`fpm_pool_supervisor_init_main()`, `fpm_pool_cron_init_main()`) ostrzegają
+GŁOŚNO przy starcie, jeśli `process_control_timeout < stop_timeout/cron.timeout`
+dla danej puli, z nazwą puli i konkretną sugerowaną wartością. **Do zapisania
+w przyszłej dokumentacji użytkownika jako wymaganie konfiguracyjne, nie tylko
+tutaj**: kto chce, żeby SIGTERM/`docker stop` faktycznie dawał czas na
+dokończenie zadania, musi ustawić `process_control_timeout` w `[global]` na co
+najmniej tyle, co największy `stop_timeout`/`cron.timeout` w konfiguracji.
+
+#### PHP dostaje szansę na cleanup
+
+`fpm_pool_script_run()` (`fpm_pool_script.c`) woła `php_request_startup()` /
+`php_execute_script()` / `php_request_shutdown()` dla KAŻDEJ iteracji/przebiegu —
+destruktory, `register_shutdown_function()`, zamykanie strumieni/połączeń,
+flush output bufferów, to wszystko idzie normalną ścieżką PHP, niezależnie od
+tego, czy iteracja skończyła się sama, czy zakończenie zostało poproszone przez
+SIGTERM (bo my nie przerywamy request'u niczym specjalnym — dajemy mu czas, nie
+zabijamy go z zewnątrz, dopóki `stop_timeout` nie minie). Jedyny wyjątek: gdy
+watchdog faktycznie ubija proces (`SIGKILL`, bo zadanie przekroczyło limit) —
+`SIGKILL` z definicji nie daje ŻADNEMU kodowi szansy zareagować, więc
+`php_request_shutdown()` w ogóle się nie wykonuje dla TEGO przebiegu. To jest
+zamierzone: to jest właśnie granica między "wdzięcznie" a "bo już nie ma
+wyjścia" — twardy limit ma być twardy.
+
+Osobno: `child_main()` (dla `supervisor`/`cron`) nigdy nie woła
+`php_module_shutdown()` przy normalnym zakończeniu procesu (`exit()`) — w
+przeciwieństwie do klasycznego workera FastCGI, który po powrocie z `fpm_run()`
+robi to w `fpm_main.c` (plik referencyjny). Sprawdzone, co to realnie kosztuje:
+`php_module_shutdown()` to zamknięcie na poziomie ROZSZERZEŃ (MSHUTDOWN), nie
+requestu — większość sensownego sprzątania (destruktory, output buffery,
+zamknięcie połączeń) już poszła przez `php_request_shutdown()` wyżej, wykonywane
+PO KAŻDYM przebiegu. Pominięcie `php_module_shutdown()` przy końcu procesu ma
+znaczenie tylko dla rozszerzeń robiących coś przy zamknięciu całego procesu
+(np. zapis statystyk opcache) — dla naszego przypadku (proces i tak zaraz ginie,
+system i tak odzyska zasoby) uznane za akceptowalne, ale **nie zweryfikowane
+z konkretnym rozszerzeniem, które by na tym ucierpiało** — zapisane jako
+świadomie pominięte, nie przeoczone.
 
 ### Czego NIE robimy
 

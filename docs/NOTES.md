@@ -1716,6 +1716,30 @@ tego typu nie jest "wiele niezaleznych requestow", tylko MODEL WORKERA —
 aplikacja ladowana RAZ, request jako wywolanie w nia. Wtedy tablice funkcji
 i klas nie sa problemem, bo nikt nie deklaruje ich drugi raz.
 
+### DECYZJA (2026-09-05): DWA typy poola, nie jeden z przelacznikiem
+
+`pool.type = fiber` (wlasny scheduler, czysty upstream) oraz
+`pool.type = true-async` (fork). Powod jest wylacznie taki, zeby WYCOFANIE
+bylo tanie: nasz kontrakt sprawia, ze typ to jeden plik + jedna linia
+w rejestrze, wiec porzucenie jednej drogi to skasowanie pliku i linii.
+
+Odrzucone: jeden typ `async` z dyrektywa `async.engine = fiber|true-async`.
+Wtedy obie sciezki splataja sie w jednym pliku i usuniecie jednej znaczy
+operowanie na zywym kodzie drugiej — czyli dokladnie to, czego ten uklad
+ma unikac.
+
+Kod wspolny (akceptor, obsluga requestu FastCGI, podmiana stanu) idzie do
+TRZECIEGO, dzielonego pliku — ten sam wzorzec co `fpm_pool_watchdog.c`
+i `fpm_pool_script.c` wydzielone przy cronie. Skasowanie jednego typu nie
+rusza wtedy rdzenia, bo drugi z niego korzysta.
+
+Do protokolu: wariant `fiber` NIE ISTNIEJE i nie jest zweryfikowany (patrz
+nizej) — POC mamy wylacznie na forku. Zgoda na dwa typy jest wiec zgoda na
+zbudowanie czegos niesprawdzonego, i to jest argument ZA tym ukladem,
+nie przeciw. Oba warianty uderzaja w te sama sciane (tablice funkcji/klas,
+opcache), wiec oba i tak wyjda na model workera.
+
+
 ### WARIANT "async bez forka" — opcja, NIE zweryfikowana
 
 To jest rozumowanie, nie wynik pomiaru — nikt tego nie probowal. Zapisane,

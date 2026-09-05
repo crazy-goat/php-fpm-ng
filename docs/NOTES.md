@@ -2974,6 +2974,23 @@ Dla odpowiedzi 262 144 B przez keep-alive, pięć naprzemiennych serii `wrk -t1 
 
 Mała odpowiedź nie wykazała poprawy (mediany 12833,55 i 12668,64 req/s), zgodnie z oczekiwaniem: mieści się w jednym zapisie i nie uruchamia opóźnienia małego końcowego fragmentu. Regresja przeszła dla małej i dużej odpowiedzi, binarnego POST 65 792 B, keep-alive, `Connection: close` i zerwanego odbiorcy.
 
+### Profil syscalli PHP 8.5 po poprawce
+
+`strace -f -c` służył wyłącznie do liczenia wywołań, nie do porównania req/s. Profil objął trzy frontendy, TCP/UDS do workera oraz keep-alive/close:
+
+| frontend | upstream | klient | syscalle/request |
+|---|---|---|---:|
+| `fastcgi` | TCP | keep-alive / close | 32,289 / 32,296 |
+| `fastcgi` | UDS | keep-alive / close | 31,289 / 31,283 |
+| `fastcgi-ng` | TCP | keep-alive / close | 25,228 / 25,237 |
+| `fastcgi-ng` | UDS | keep-alive / close | 24,232 / 24,227 |
+| `http` | TCP | keep-alive / close | 32,233 / 41,254 |
+| `http` | UDS | keep-alive / close | 32,256 / 41,271 |
+
+`fastcgi-ng` względem klasycznego `fastcgi` usuwa około 5 `read()` i 2 `fcntl()` na request. UDS oszczędza około jeden syscall/request, głównie `setsockopt(TCP_NODELAY)`.
+
+Wspólna ścieżka workera nadal wykonuje około 8 `rt_sigaction`, 2 `times`, 2 `setitimer`, 2 `chdir`, 1 `getcwd` i 2 `fcntl` na request. Dla HTTP keep-alive gateway dodaje głównie 4 `epoll_ctl`, 3 `epoll_wait`, po jednym `readv`, `writev` i `ioctl`. `Connection: close` zwiększa koszt HTTP o około 9 syscalli/request: `epoll_ctl` rośnie z 4 do 8, dochodzą około 2 `accept4`, dodatkowy `epoll_wait` i `shutdown`.
+
 Na masterze wcześniejszy benchmark dał około **-9,3% CPU/request** i **+4,8% req/s**. Pomiar pamięci nie wykazał kosztu: mediana RSS 7812 -> 7792 KB, PSS 3921 -> 3911 KB.
 
 Końcowa regresja PHP 8.5 przeszła dla `fastcgi`, `fastcgi-ng` i `http`: mała odpowiedź, odpowiedź 262 144 B, binarny POST 65 792 B z SHA-256, keep-alive/close oraz zerwany odbiorca. Wcześniejsze porównanie bajt w bajt objęło odpowiedzi 1, 8000, 8184, 8192, 65527, 65528, 65529, 131056, 262144 i 1048576 B.

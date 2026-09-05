@@ -3,6 +3,7 @@
 #include "fpm_config.h"
 
 #include <stdlib.h> /* for exit */
+#include <string.h>
 
 #include "fpm.h"
 #include "fpm_children.h"
@@ -21,6 +22,7 @@
 #include "fpm_stdio.h"
 #include "fpm_log.h"
 #include "fpm_request.h"
+#include "fastcgi.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -151,6 +153,9 @@ run_child: /* only workers reach this point */
 		 * odczytac tutaj. */
 		if (child_wp) {
 			fpm_request_set_cpu_tracking(child_wp->config->request_cpu_tracking);
+		}
+		if (type && (!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http"))) {
+			fcgi_set_optimized_transport(true);
 		}
 
 		if (type && type->child_main) {

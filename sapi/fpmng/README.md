@@ -11,6 +11,11 @@ Nasze pliki. Reszta SAPI jest kopiowana z `sapi/fpm/` upstreamu przez
 | `fpm/fpm_http.h` | |
 | `fpm/fpm_pool_async.c` | EKSPERYMENT: `pool.type = async` — korutyna True Async per request, jeden proces; mimo obslugi cache hit nadal zalecane `opcache.enable=0` (NOTES 3t) |
 | `fpm/fpm_pool_async.h` | |
+| `fpm/fpm_pool_coop.c` | wspolny stan requestu dla eksperymentalnych poolow wielorequestowych |
+| `fpm/fpm_pool_coop.h` | |
+| `fpm/fpm_pool_fiber.c` | EKSPERYMENT: `pool.type = fiber` na upstreamowym PHP, scheduler libevent (NOTES 3u) |
+| `fpm/fpm_pool_fiber.h` | |
+| `fpm/fpm_pool_fiber_xport.c` | zawieszanie Fiberow na transportach `tcp` i `unix` |
 
 Docelowo dojda `fpm/fpm_conf.c`, `fpm/fpm_status.c` i `fpm/fpm_main.c` —
 to jedyne pliki FPM z realnym churnem upstreamu (patrz `docs/NOTES.md`).

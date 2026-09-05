@@ -22,6 +22,9 @@ Zweryfikowane 2026-09-05:
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
 - uruchomienie w gołym `FROM scratch`, FPM jako PID 1, HTTP 200, cały obraz
   20 MB w wersji minimalnej
+- eksperymentalny `pool.type = fiber` na upstreamowym PHP: jeden proces obsluguje
+  wspolbieznie wiele requestow czekajacych na socket I/O; wymaga wylaczonego
+  OPcache i ma ograniczenia opisane w `docs/NOTES.md`, sekcja 3u
 
 ## Plan
 

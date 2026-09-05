@@ -1,0 +1,179 @@
+FastCGI transport: buffered reads and accept4(SOCK_CLOEXEC) in main/fastcgi.c
+
+Pure syscall reduction on the worker's request path, nothing changes on the wire:
+
+ * safe_read() now reads whatever the peer has already sent (up to 16 KB) into a
+   per-request buffer and serves record headers/bodies from it. A typical request
+   head (BEGIN_REQUEST + PARAMS + empty PARAMS + empty STDIN) is one read() instead
+   of six. Body chunks >= 16 KB with an empty buffer are read straight into the
+   caller's buffer (no extra copy). Buffered data belongs to the connection and is
+   kept across keep-alive requests; it is dropped when the fd is closed.
+ * accept4(..., SOCK_CLOEXEC) replaces accept() + fcntl(F_GETFD) + fcntl(F_SETFD)
+   when available. HAVE_ACCEPT4 comes from AC_CHECK_FUNCS([accept4]); today only
+   ext/sockets/config.m4 checks it, so fpm-ng adds the check in sapi/fpmng/config.m4.
+   An upstream submission should move the check into configure.ac. Without
+   HAVE_ACCEPT4 the old accept()+fcntl path is compiled.
+
+Measured on the fpm-ng test box (Linux, PTI+IBRS): -5 syscalls per keep-alive
+request, -7 per fresh connection; numbers in docs/NOTES.md.
+
+Czeka na: nie zgloszone jeszcze do upstreamu — kandydat na PR do php/php-src,
+niezalezny od 0001 i 0002. Znika, gdy upstream przyjmie rownowaznik.
+Wariant dla PHP-8.3: tam safe_read() ma jeszcze sygnature "const void *buf"
+(zmienione w 8.4 przez #20887); poza tym identyczna z ogolna latka.
+
+--- a/main/fastcgi.c
++++ b/main/fastcgi.c
+@@ -219,6 +219,15 @@
+ 	int            in_len;
+ 	int            in_pad;
+ 
++	/* Read-side buffer: safe_read() pulls as much as the peer has already sent
++	 * in one read() and hands it out piecemeal, so a request head
++	 * (BEGIN_REQUEST + PARAMS + empty PARAMS + empty STDIN) costs one syscall
++	 * instead of one per record header and one per record body. Data left in
++	 * the buffer belongs to the same connection and survives until it closes. */
++	unsigned char *in_pos;
++	unsigned char *in_end;
++	unsigned char  in_buf[1024*16];
++
+ 	fcgi_header   *out_hdr;
+ 
+ 	unsigned char *out_pos;
+@@ -901,6 +910,7 @@
+ 
+ 	*/
+ 	req->out_pos = req->out_buf;
++	req->in_pos = req->in_end = req->in_buf;
+ 	req->hook.on_accept = on_accept ? on_accept : fcgi_hook_dummy_bool;
+ 	req->hook.on_read = on_read ? on_read : fcgi_hook_dummy_bool;
+ 	req->hook.on_close = on_close ? on_close : fcgi_hook_dummy;
+@@ -919,7 +929,7 @@
+ 	free(req);
+ }
+ 
+-static inline ssize_t safe_write(fcgi_request *req, const void *buf, size_t count)
++static inline ssize_t safe_write(fcgi_request *req, void *buf, size_t count)
+ {
+ 	int    ret;
+ 	size_t n = 0;
+@@ -956,42 +966,69 @@
+ 	return n;
+ }
+ 
+-static inline ssize_t safe_read(fcgi_request *req, const void *buf, size_t count)
++/* One read(2) on the connection, EINTR retried. Returns >0 bytes, 0 on EOF, <0 on error. */
++static inline ssize_t fcgi_read_raw(fcgi_request *req, void *buf, size_t count)
+ {
+-	int    ret;
+-	size_t n = 0;
++	int ret;
+ 
+ 	do {
+-#ifdef _WIN32
+-		size_t tmp;
+-#endif
+ 		errno = 0;
+ #ifdef _WIN32
+-		tmp = count - n;
+-
+ 		if (!req->tcp) {
+-			unsigned int in_len = tmp > INT_MAX ? INT_MAX : (unsigned int)tmp;
++			unsigned int in_len = count > INT_MAX ? INT_MAX : (unsigned int)count;
+ 
+-			ret = _read(req->fd, ((char*)buf)+n, in_len);
++			ret = _read(req->fd, buf, in_len);
+ 		} else {
+-			int in_len = tmp > INT_MAX ? INT_MAX : (int)tmp;
++			int in_len = count > INT_MAX ? INT_MAX : (int)count;
+ 
+-			ret = recv(req->fd, ((char*)buf)+n, in_len, 0);
++			ret = recv(req->fd, buf, in_len, 0);
+ 			if (ret <= 0) {
+ 				errno = WSAGetLastError();
+ 			}
+ 		}
+ #else
+-		ret = read(req->fd, ((char*)buf)+n, count-n);
++		ret = read(req->fd, buf, count);
+ #endif
+-		if (ret > 0) {
+-			n += ret;
+-		} else if (ret == 0 && errno == 0) {
+-			return n;
+-		} else if (ret <= 0 && errno != 0 && errno != EINTR) {
+-			return ret;
+-		}
+-	} while (n != count);
++	} while (ret < 0 && errno == EINTR);
++	return ret;
++}
++
++static inline ssize_t safe_read(fcgi_request *req, void *buf, size_t count)
++{
++	size_t n = 0;
++
++	while (n < count) {
++		size_t avail = (size_t)(req->in_end - req->in_pos);
++
++		if (avail == 0) {
++			ssize_t ret;
++			size_t want = count - n;
++
++			if (want >= sizeof(req->in_buf)) {
++				/* Large body chunk and nothing buffered: read straight into
++				 * the caller's buffer, no extra copy. */
++				ret = fcgi_read_raw(req, ((char*)buf) + n, want);
++				if (ret <= 0) {
++					return ret < 0 ? ret : (ssize_t)n;
++				}
++				n += ret;
++				continue;
++			}
++			ret = fcgi_read_raw(req, req->in_buf, sizeof(req->in_buf));
++			if (ret <= 0) {
++				return ret < 0 ? ret : (ssize_t)n;
++			}
++			req->in_pos = req->in_buf;
++			req->in_end = req->in_buf + ret;
++			avail = (size_t)ret;
++		}
++		if (avail > count - n) {
++			avail = count - n;
++		}
++		memcpy(((char*)buf) + n, req->in_pos, avail);
++		req->in_pos += avail;
++		n += avail;
++	}
+ 	return n;
+ }
+ 
+@@ -1317,6 +1354,7 @@
+ 		req->nodelay = 0;
+ #endif
+ 		req->fd = -1;
++		req->in_pos = req->in_end = req->in_buf;
+ 
+ 		req->hook.on_close();
+ 	}
+@@ -1412,7 +1450,11 @@
+ 					socklen_t len = sizeof(sa);
+ 
+ 					FCGI_LOCK(req->listen_socket);
++#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
++					req->fd = accept4(listen_socket, (struct sockaddr *)&sa, &len, SOCK_CLOEXEC);
++#else
+ 					req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
++#endif
+ 					FCGI_UNLOCK(req->listen_socket);
+ 
+ #ifndef _WIN32
+@@ -1439,7 +1481,7 @@
+ 					return -1;
+ 				}
+ 
+-#if defined(F_SETFD) && defined(FD_CLOEXEC)
++#if defined(F_SETFD) && defined(FD_CLOEXEC) && !(defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC))
+ 				int fd_attrs = fcntl(req->fd, F_GETFD);
+ 				if (0 > fd_attrs) {
+ 					fcgi_log(FCGI_WARNING, "failed to get attributes of the connection socket");

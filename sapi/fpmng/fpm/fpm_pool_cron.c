@@ -13,12 +13,12 @@
  * proces liczy kolejny termin od "teraz" i znowu spi. Dzieki temu NIE
  * dotykamy fpm_children.c ani fpm_events.c, dokladnie jak supervisor.
  *
- * Konsekwencja tej decyzji, nieoczywista, wiec zapisana wprost: cron, w
- * odroznieniu od supervisora, NIE MA ZADNEGO stanu w pamieci dzielonej.
- * Supervisorowi shared memory jest potrzebne, bo ma polityke restart/backoff,
- * ktora musi przezyc smierc procesu. Cron nie ma zadnej polityki do
- * przetrwania: kazdy nowy proces liczy termin WYLACZNIE z biezacego zegara
- * i harmonogramu, nigdy z tego, co robil poprzednik. To jest tez powod, dla
+ * Konsekwencja tej decyzji, nieoczywista, wiec zapisana wprost: cron nie ma
+ * ZADNEGO stanu sterujacego w pamieci dzielonej. Minimalny stan historyczny
+ * (ostatni start/wynik) istnieje wylacznie dla pool.type = status i nigdy nie
+ * wplywa na zachowanie crona. Kazdy nowy proces liczy termin WYLACZNIE z
+ * biezacego zegara i harmonogramu, nigdy z tego, co robil poprzednik.
+ * To jest tez powod, dla
  * ktorego "nakladanie sie przebiegow" nie jest polityka, ktora trzeba
  * napisac: przy pm.max_children = 1 drugi proces tego poola fizycznie nie
  * istnieje, dopoki pierwszy nie skonczy dzialania (exit()) — fpm_children.c
@@ -102,6 +102,7 @@ struct fpm_cron_shared_s {
 	unsigned char running;		/* 1 = skrypt aktualnie sie wykonuje */
 	time_t last_run;		/* epoch startu ostatniego przebiegu, 0 = jeszcze zaden */
 	int last_exit_code;		/* kod wyjscia ostatniego ZAKONCZONEGO przebiegu */
+	unsigned char has_last_exit_code;
 	unsigned consecutive_failures;	/* kolejne exit_code != 0 z rzedu; na nic nie wplywa,
 					 * to tylko sygnal dla czlowieka/monitoringu */
 };
@@ -296,6 +297,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (shared) {
 		shared->running = 0;
 		shared->last_exit_code = exit_code;
+		shared->has_last_exit_code = 1;
 		shared->consecutive_failures = (exit_code != 0) ? shared->consecutive_failures + 1 : 0;
 	}
 
@@ -330,6 +332,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	 * dzielonej — patrz docs/NOTES.md 3u i 3r. */
 	if (wp->config->cron_parsed_schedule) {
 		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL));
+		out->has_next_run = 1;
 		out->next_run = (n == (time_t) -1) ? 0 : n;
 	}
 
@@ -341,6 +344,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	out->state = shared->running ? FPM_POOL_STATE_RUNNING : FPM_POOL_STATE_IDLE;
 	out->last_start = shared->last_run;
 	out->last_exit_code = shared->last_exit_code;
+	out->has_last_exit_code = shared->has_last_exit_code;
 	out->consecutive_failures = shared->consecutive_failures;
 }
 /* }}} */

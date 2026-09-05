@@ -80,6 +80,7 @@ struct fpm_supervisor_shared_s {
 	unsigned char running;			/* 1 = skrypt aktualnie sie wykonuje */
 	time_t last_start;			/* epoch startu ostatniej iteracji, 0 = jeszcze zadnej */
 	int last_exit_code;			/* kod wyjscia ostatniej ZAKONCZONEJ iteracji */
+	unsigned char has_last_exit_code;
 };
 
 struct fpm_supervisor_registry_s {
@@ -388,6 +389,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		exit_code = fpm_pool_script_run(c->name, c->supervisor_script);
 		shared->running = 0;
 		shared->last_exit_code = exit_code;
+		shared->has_last_exit_code = 1;
 		duration = time(NULL) - started;
 
 		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration);
@@ -430,9 +432,11 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 
 	out->last_start = shared->last_start;
 	out->last_exit_code = shared->last_exit_code;
+	out->has_last_exit_code = shared->has_last_exit_code;
 	out->consecutive_failures = shared->failures;
-	/* out->next_run zostaje 0 — pojecie "nastepnego terminu" nie ma sensu
-	 * dla supervisora (restart natychmiast albo po backoffie, nie wedlug
-	 * harmonogramu), tylko dla crona. */
+	out->has_backoff_until = 1;
+	out->backoff_until = shared->next_allowed_start;
+	/* next_run nie jest oznaczone jako dostepne — pojecie terminu z
+	 * harmonogramu ma sens tylko dla crona. */
 }
 /* }}} */

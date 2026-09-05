@@ -32,9 +32,13 @@ enum fpm_pool_state_e {
 struct fpm_pool_status_s {
 	enum fpm_pool_state_e state;
 	time_t last_start;		/* epoch, 0 = jeszcze nigdy nie startowal */
-	int last_exit_code;		/* wazne tylko gdy last_start != 0 */
+	int last_exit_code;
 	unsigned consecutive_failures;	/* kolejne exit_code != 0 z rzedu */
-	time_t next_run;		/* tylko cron: najblizszy termin z harmonogramu; 0 = nie dotyczy */
+	time_t next_run;		/* tylko cron: najblizszy termin z harmonogramu */
+	time_t backoff_until;		/* tylko supervisor: koniec biezacego backoffu */
+	unsigned has_last_exit_code:1;
+	unsigned has_next_run:1;
+	unsigned has_backoff_until:1;
 };
 
 struct fpm_pool_type_s {

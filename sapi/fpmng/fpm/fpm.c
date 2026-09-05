@@ -20,6 +20,7 @@
 #include "fpm_scoreboard.h"
 #include "fpm_stdio.h"
 #include "fpm_log.h"
+#include "fpm_request.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -144,6 +145,13 @@ run_child: /* only workers reach this point */
 	{
 		struct fpm_worker_pool_s *child_wp = fpm_pool_type_current_pool();
 		const struct fpm_pool_type_s *type = child_wp ? fpm_pool_type_of(child_wp) : NULL;
+
+		/* Zwykly worker FastCGI po fpm_cleanups_run() nie ma juz wp->config,
+		 * wiec to, co z konfiguracji poola ma dzialac per request, trzeba
+		 * odczytac tutaj. */
+		if (child_wp) {
+			fpm_request_set_cpu_tracking(child_wp->config->request_cpu_tracking);
+		}
 
 		if (type && type->child_main) {
 			/* Ten typ przejmuje caly proces na dobre — nie wraca, wiec

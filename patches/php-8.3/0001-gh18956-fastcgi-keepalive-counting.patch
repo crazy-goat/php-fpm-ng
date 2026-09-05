@@ -16,8 +16,8 @@ rozszerzenia (request_cpu_tracking), dlatego zostaja plikami na wlasnosc.
 
 Czeka na: merge https://github.com/bukka/php-src/pull/2 — wtedy latka znika
 W CALOSCI (obie czesci naraz).
-Sprawdzone na: PHP-8.3 (wariant patches/php-8.3/ dla czesci sapi/fpm), PHP-8.4,
-PHP-8.5, master.
+Wariant dla PHP-8.3: fpm_scoreboard_update_commit() ma tam 7 argumentow int
+(8.4 dodalo memory_peak), czesc main/ identyczna z ogolna latka.
 
 diff --git a/main/fastcgi.c b/main/fastcgi.c
 index abd55892803..6cdf023334a 100644
@@ -130,8 +130,8 @@ diff --git a/sapi/fpm/fpm/fpm_request.c b/sapi/fpm/fpm/fpm_request.c
  	fpm_scoreboard_proc_release(proc);
  
  	/* idle++, active-- */
--	fpm_scoreboard_update_commit(1, -1, 0, 0, 0, 0, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
-+	fpm_scoreboard_update_commit((first || fromActive) ? 1 : 0, fromActive ? -1 : 0, 0, 0, 0, 0, 0, 0,
+-	fpm_scoreboard_update_commit(1, -1, 0, 0, 0, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
++	fpm_scoreboard_update_commit((first || fromActive) ? 1 : 0, fromActive ? -1 : 0, 0, 0, 0, 0, 0,
 +			FPM_SCOREBOARD_ACTION_INC, NULL);
  }
  
@@ -144,8 +144,8 @@ diff --git a/sapi/fpm/fpm/fpm_request.c b/sapi/fpm/fpm/fpm_request.c
  	fpm_scoreboard_proc_release(proc);
  
  	/* idle--, active++, request++ */
--	fpm_scoreboard_update_commit(-1, 1, 0, 0, 1, 0, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
-+	fpm_scoreboard_update_commit(keptAlive ? 0 : -1, keptAlive ? 0 : 1, 0, 0, 1, 0, 0, 0,
+-	fpm_scoreboard_update_commit(-1, 1, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
++	fpm_scoreboard_update_commit(keptAlive ? 0 : -1, keptAlive ? 0 : 1, 0, 0, 1, 0, 0,
 +			FPM_SCOREBOARD_ACTION_INC, NULL);
  }
  

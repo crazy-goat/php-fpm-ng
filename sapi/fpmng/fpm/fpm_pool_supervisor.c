@@ -90,17 +90,34 @@ static void fpm_pool_supervisor_sigterm(int signo)
 	(void) signo;
 	if (!supervisor_term_requested) {
 		supervisor_term_requested = 1;
+
 		/* Siatka bezpieczenstwa: jesli biezaca iteracja (skrypt, ktory nie
 		 * sprawdza niczego miedzy wlasnymi krokami) nie skonczy sie sama w
-		 * ciagu stop_timeout, ubijamy sie sami sygnalem KILL. */
-		alarm((unsigned) supervisor_stop_timeout);
-	}
-}
+		 * ciagu stop_timeout, ubijamy sie sami sygnalem KILL.
+		 *
+		 * CELOWO nie uzywamy tu alarm()/SIGALRM: PHP samo uzywa SIGALRM (albo
+		 * SIGPROF, w zaleznosci od budowania) do wlasnego max_execution_time
+		 * (zend_set_timeout_ex(), Zend/zend_execute_API.c) i pod
+		 * ZEND_SIGNALS re-instaluje ten handler przy KAZDYM wykonaniu
+		 * skryptu — nasz raw sigaction(SIGALRM,...) zostalby po cichu
+		 * podmieniony i strzelilby w rece Zenda zamiast w nasze (zmierzone:
+		 * budowa tego projektu ma -DZEND_SIGNALS). Zamiast tego forkujemy
+		 * malutki proces-watchdog, calkowicie niezalezny od stanu sygnalow
+		 * PHP: spi stop_timeout sekund, i jesli my (proces supervisora)
+		 * nadal zyjemy, ubija nas SIGKILL-em. fork() jest async-signal-safe,
+		 * wiec robimy to bezpiecznie tu, w handlerze, zeby zlapac takze
+		 * skrypt, ktory nigdy nie odda sterowania z powrotem do naszej petli. */
+		pid_t me = getpid();
+		pid_t watchdog = fork();
 
-static void fpm_pool_supervisor_sigalrm(int signo)
-{
-	(void) signo;
-	kill(getpid(), SIGKILL);
+		if (watchdog == 0) {
+			sleep((unsigned) supervisor_stop_timeout);
+			if (kill(me, 0) == 0) {
+				kill(me, SIGKILL);
+			}
+			_exit(0);
+		}
+	}
 }
 
 /* }}} sygnaly */
@@ -399,17 +416,25 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		return;
 	}
 
-	/* "Zyl dostatecznie dlugo" resetuje licznik porazek — inaczej jeden
-	 * pechowy restart po tygodniach pracy liczylby sie do tego samego
-	 * restart_max co prawdziwy szybki crash-loop. Prog: restart_delay_max,
-	 * czyli ta sama liczba, do ktorej i tak eskaluje backoff — jesli proces
-	 * zyl dluzej niz najdluzszy mozliwy odstep miedzy probami, to nie byl
-	 * "szybka smiercia". */
+	if (exit_code == 0) {
+		/* Sukces: pod restart=always to normalny, oczekiwany koniec jednej
+		 * "jednostki pracy" (skrypt sam decyduje o tempie, np. wlasnym sleep()),
+		 * NIE porazka — zerujemy licznik i startujemy nastepna iteracje od
+		 * razu, bez sztucznego throttlingu z naszej strony. */
+		shared->failures = 0;
+		shared->next_allowed_start = 0;
+		return;
+	}
+
+	/* Od tego miejsca: prawdziwa porazka (exit != 0). "Zyl dostatecznie dlugo"
+	 * przed porazka zeruje licznik — inaczej jeden pechowy restart po
+	 * tygodniach pracy liczylby sie do tego samego restart_max co prawdziwy
+	 * szybki crash-loop. Prog: restart_delay_max, czyli ta sama liczba, do
+	 * ktorej i tak eskaluje backoff. */
 	if (duration >= (time_t) c->supervisor_restart_delay_max) {
 		shared->failures = 0;
-	} else {
-		shared->failures++;
 	}
+	shared->failures++;
 
 	if (c->supervisor_restart_max > 0 && shared->failures >= (unsigned) c->supervisor_restart_max) {
 		shared->terminal = 1;
@@ -444,8 +469,6 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	struct fpm_supervisor_shared_s *shared = fpm_pool_supervisor_shared_for(wp);
 	struct sigaction sa;
 
-	zlog(ZLOG_WARNING, "[pool %s] supervisor: DEBUG child_main entered, shared=%p", c->name, (void *) shared);
-
 	if (!shared) {
 		/* Nie powinno sie zdarzyc — init_main alokuje to dla kazdego poola
 		 * supervisora zanim cokolwiek sforkuje. Bez tego stanu nie ma jak
@@ -460,11 +483,6 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	sa.sa_handler = fpm_pool_supervisor_sigterm;
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGTERM, &sa, NULL);
-
-	memset(&sa, 0, sizeof(sa));
-	sa.sa_handler = fpm_pool_supervisor_sigalrm;
-	sigemptyset(&sa.sa_mask);
-	sigaction(SIGALRM, &sa, NULL);
 
 	fpm_pool_supervisor_install_sapi_overrides();
 

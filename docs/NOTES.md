@@ -2890,6 +2890,15 @@ modelu: cztery blokujace workery przy 50 ms daja teoretycznie 80 req/s, a 32
 polaczenia wspolbiezne daja 640 req/s. Fiber uzyskal odpowiednio ok. 95% i 89%
 tych granic. Nie bylo bledow ani timeoutow w poprawionej serii.
 
+Przy 128 klientach (`wrk -t4 -c128`, timeout 5 s, piec przeplotowych serii po
+10 s, `FPM_HTTP_MAX_UPSTREAMS=256`) klasyczny FPM pozostal przy medianie
+**76,5 req/s**, p50 **1,66 s**, p99 **1,66 s**. `http-fiber` osiagnal mediane
+**1924 req/s**, p50 **64,5 ms**, p99 **87,1 ms** — ok. **25x throughput**.
+Teoretyczna granica wynikajaca z 128 / 50 ms to 2560 req/s, wiec mediana Fiber
+to ok. 75% tej wartosci. Rozrzut miedzy przebiegami byl istotny
+(1442–2022 req/s), dlatego nie nalezy przedstawiać najlepszego wyniku jako
+stalej wydajnosci. Oba poole pozostaly bez restartow i bledow w logach.
+
 ### Wniosek
 
 Eksperyment potwierdza, ze wariant oparty na Fiberach jest wykonalny na PHP

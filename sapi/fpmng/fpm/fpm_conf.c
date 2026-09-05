@@ -165,6 +165,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.restart_max",    &fpm_conf_set_integer,     WPO(supervisor_restart_max) },
 	{ "supervisor.stop_timeout",   &fpm_conf_set_time,        WPO(supervisor_stop_timeout) },
 	{ "supervisor.fatal",          &fpm_conf_set_boolean,     WPO(supervisor_fatal) },
+	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
+	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
+	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -733,6 +736,9 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->security_limit_extensions);
 	free(wpc->supervisor_script);
 	free(wpc->supervisor_restart);
+	free(wpc->cron_schedule);
+	free(wpc->cron_script);
+	free(wpc->cron_parsed_schedule);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

@@ -38,7 +38,33 @@ awk -v list="$LIST" '{ gsub(/@FPMNG_SOURCES@/, "\n" list "\n  "); print }' \
   "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"
 
+# Latki na pliki poza sapi/ — odstepstwo od "upstream nietkniety", wiec glosno.
+# Zasady i terminy waznosci: patches/README.md
+PHPVER=$(awk -F'"' '/PHP_VERSION /{print $2}' "$PHPSRC/main/php_version.h" 2>/dev/null)
+PHPMINOR=$(echo "$PHPVER" | cut -d. -f1,2)
+PATCHED=0
+for p in "$REPO"/patches/*.patch; do
+  [ -f "$p" ] || continue
+  name=$(basename "$p")
+  # wariant wersyjny nadpisuje ogolny
+  [ -f "$REPO/patches/php-$PHPMINOR/$name" ] && p="$REPO/patches/php-$PHPMINOR/$name"
+  if patch -d "$PHPSRC" -p1 --forward --silent < "$p"; then
+    echo "  ! latka nalozona na upstream: $name"
+    PATCHED=$((PATCHED + 1))
+  else
+    echo "BLAD: latka nie naklada sie na PHP $PHPVER: $name" >&2
+    echo "      patrz patches/README.md — albo upstream ja zmergowal (usun ja)," >&2
+    echo "      albo potrzebny jest wariant patches/php-$PHPMINOR/$name" >&2
+    exit 1
+  fi
+done
+
 echo "sapi/fpmng gotowe."
+if [ "$PATCHED" -gt 0 ]; then
+  echo "  UWAGA: upstream zostal zmodyfikowany przez $PATCHED latke/i (patrz wyzej)"
+else
+  echo "  upstream nietkniety — powstal wylacznie sapi/fpmng/"
+fi
 echo "  zrodel z upstreamu + naszych: $(echo "$SOURCES" | wc -l | tr -d ' ')"
 echo "  nasze pliki:"
 (cd "$REPO/sapi/fpmng" && find . -type f | sed 's|^\./|    |' | sort)

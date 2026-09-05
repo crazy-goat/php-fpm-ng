@@ -325,6 +325,40 @@ Katalog budowania powstaje w kontenerze i należy do roota — czyszczenie z hos
 wymaga `sudo rm -rf`.
 
 
+## 3f. Granica modelu: pliki poza `sapi/` — mechanizm łatek (2026-09-05)
+
+Poprawka liczenia statystyk GH-18956 dotyka `main/fastcgi.c` i `main/fastcgi.h`,
+czyli **rdzenia php-src poza `sapi/`**. Osobne SAPI ich nie dosięgnie. To jest
+pierwsze realne ograniczenie modelu.
+
+**I to nie jest problem teoretyczny, tylko nasz własny.** Bramka trzyma trwałe
+połączenia do poola (`FCGI_KEEP_CONN`), więc fpm-ng jest dokładnie tym
+przypadkiem, który ten błąd psuje: licznik idle kontra active kłamie, a
+`pm = dynamic` i `ondemand` źle skalują pulę. Bez łatki wiarygodny jest tylko
+`pm = static`.
+
+Decyzja: **niesiemy łatkę**, ale tak, żeby odstępstwo było widoczne i policzalne.
+`patches/` + `prepare.sh` nakłada i głośno raportuje; bez łatek mówi wprost
+"upstream nietknięty". Po nałożeniu `git status` w drzewie upstreamu pokazuje
+dokładnie `M main/fastcgi.c`, `M main/fastcgi.h`, `?? sapi/fpmng/` — pełny
+promień rażenia na jednym ekranie.
+
+Zasady w `patches/README.md`: każda łatka podaje PR upstreamu i znika, gdy tamten
+się zmerguje; jedna łatka na problem, nie na wersję; więcej niż dwa warianty
+wersyjne to sygnał, że musi iść do upstreamu albo do `sapi/fpmng/`; CI buduje
+każdą wspieraną wersję, więc nienakładająca się łatka pada przy budowaniu.
+
+**Ile łatek na wersję?** Zmierzone: `0001` nakłada się czysto na PHP-8.3, 8.4,
+8.5 i master. `main/fastcgi.c` ma 2–9 commitów rocznie i nie w naszym rejonie.
+Czyli na razie zero wariantów wersyjnych.
+
+Towarzyszące zmiany w `fpm_request.c` i `fpm_request.h` niesiemy jako własne
+pliki, bo są w `sapi/`.
+
+Drobiazg: binarka dynamiczna z Alpine wymaga w kontenerze `libgcc` obok
+`libevent` — inaczej `Error loading shared library libgcc_s.so.1`.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

@@ -442,6 +442,47 @@ niego daje `ALERT: no listen address have been defined!`) — o wymagalności
 decyduje `validate_config()` typu.
 
 
+## 3i. `pool.type` — zaimplementowane i zweryfikowane (2026-09-05)
+
+Rejestr w `fpm_pool_type.c`. Typ deklaruje wymagania konfiguracyjne **danymi**
+(`requires_listen`, `requires_pm`, `serves_requests`), a nie kodem — dzięki temu
+`fpm_conf.c` nie zna żadnego konkretnego typu i dodanie kolejnego nie wymaga tam
+zmian. Kontrakt z 3h spełniony: **nowy typ = nowy plik + jedna linia
+w `fpm_pool_types[]`**.
+
+Zweryfikowane na zbudowanej binarce:
+```
+brak pool.type   -> fcgi, zero bramek, port glucny        (pelne BC)
+pool.type = http -> bramka wstaje, odpowiada
+pool.type = xxx  -> ALERT: unknown pool.type 'xxx'; known types: fcgi, http
+```
+
+**Uboczny efekt: zniknął jeden z blokerów.** Bramka nie startuje już domyślnie
+na każdym poolu TCP — trzeba o nią poprosić przez `pool.type = http`.
+
+### Dwie rzeczy warte zapamiętania z implementacji
+
+**Dziecko odnajduje swój pool przez scoreboard.** Naiwne rozwiązanie (użyć
+zmiennej pętli `wp` przy etykiecie `run_child:`) jest BŁĘDNE: dzieci wskrzeszane
+w pętli zdarzeń wychodzą z `fpm_event_loop()` przez `if (fpm_globals.is_child)
+break` i docierają do `run_child:` z `wp == NULL`, bo pętla po poolach dawno się
+skończyła. Scoreboard jest per pool i dziecko dostaje swój w
+`fpm_scoreboard_init_child()`, więc wystarczy dopasowanie —
+i `fpm_children.c` pozostaje nietknięty, zgodnie z kontraktem.
+
+**Naprawiony błąd z reloadem** (znaleziony w 6, wcześniej niezweryfikowany):
+sprzątanie bramek rejestruje się teraz także na `FPM_CLEANUP_PARENT_EXEC`.
+Reload robi `execvp()`, więc bez tego bramki zostawały osierocone i trzymały
+port, na którym nowy master chciał się zbindować.
+
+### Pułapka w `prepare.sh`, którą sam wpuściłem i naprawiłem
+
+Test "czy łatka już nałożona" przez `patch -R --dry-run` **jako pierwszy** jest
+błędny: na nietkniętym drzewie też potrafi zwrócić sukces (BSD patch na macOS).
+Efekt byłby cichy i paskudny — binarka bez łatki i komunikat, że łatka jest.
+Kolejność musi być: najpierw próba w przód, dopiero potem test odwrotny.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

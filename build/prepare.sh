@@ -48,12 +48,15 @@ for p in "$REPO"/patches/*.patch; do
   name=$(basename "$p")
   # wariant wersyjny nadpisuje ogolny
   [ -f "$REPO/patches/php-$PHPMINOR/$name" ] && p="$REPO/patches/php-$PHPMINOR/$name"
-  if patch -d "$PHPSRC" -p1 -R --dry-run --silent < "$p" >/dev/null 2>&1; then
-    # odwrotne nalozenie przechodzi => latka juz siedzi w drzewie
-    echo "  ! latka juz nalozona na upstream: $name"
-    PATCHED=$((PATCHED + 1))
-  elif patch -d "$PHPSRC" -p1 --forward --silent < "$p"; then
+  # Kolejnosc ma znaczenie: NAJPIERW proba w przod. Odwrotne nalozenie na
+  # nietknietym drzewie tez potrafi zwrocic sukces (BSD patch), wiec test
+  # "-R" jako pierwszy dawalby cicho binarke bez latki z komunikatem, ze jest.
+  if patch -d "$PHPSRC" -p1 --dry-run --forward --silent < "$p" >/dev/null 2>&1; then
+    patch -d "$PHPSRC" -p1 --forward --silent < "$p" >/dev/null
     echo "  ! latka nalozona na upstream: $name"
+    PATCHED=$((PATCHED + 1))
+  elif patch -d "$PHPSRC" -p1 -R --dry-run --forward --silent < "$p" >/dev/null 2>&1; then
+    echo "  ! latka juz byla nalozona: $name"
     PATCHED=$((PATCHED + 1))
   else
     echo "BLAD: latka nie naklada sie na PHP $PHPVER: $name" >&2

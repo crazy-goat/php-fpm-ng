@@ -2403,31 +2403,25 @@ Nie na start. Patrz sekcja 7.
 
 ## 6. Znane problemy i braki
 
-### BŁĄD w obecnym POC bramki
+### Blokery — ZAMKNIĘTE (2026-09-06, branch `http-config`)
 
-`fpm_http.c:1065` rejestruje `fpm_cleanup_add(FPM_CLEANUP_PARENT, ...)`, ale
-przy reloadzie master idzie ścieżką `FPM_CLEANUP_PARENT_EXEC`
-(`fpm_pctl_exec` robi `execvp(saved_argv[0], saved_argv)`). Czyli przy `reload`
-bramki prawdopodobnie nie dostaną SIGTERM, zostaną osierocone i będą trzymać
-port, a nowy master nie zdoła się zbindować. **Nie zweryfikowane
-uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
-
-### Blokery (bez tego nie da się tego nikomu włączyć)
-
-- Konfiguracja w zmiennych środowiskowych (`FPM_HTTP_LISTEN`, `FPM_HTTP_GATEWAYS`,
-  `FPM_HTTP_REUSEPORT`, `FPM_HTTP_IDLE_MS`) — muszą być dyrektywy z walidacją
-- Domyślnie włączone — teraz każdy pool TCP dostaje bramkę na porcie +1, czyli
-  otwiera port, o który nikt nie prosił
-- Brak kontroli dostępu — FastCGI ma `listen.allowed_clients`, bramka nie ma nic
-- Brak respawnu bramek — forkowane raz w `fpm_run()`, master trzyma tylko pidy
-  żeby je ubić. Padnięta bramka nie wraca, a przy `reuseport` połowa ruchu
-  trafia w martwą kolejkę
+- Konfiguracja: są dyrektywy `http.listen`, `http.gateways` (2), `http.reuseport`
+  (0), `http.static` (1), `http.idle_timeout` (500 ms), `http.allowed_clients`.
+  Walidacja w hooku `.validate` typu poola. Envy `FPM_HTTP_*` zostały jako
+  fallback, dyrektywa ma pierwszeństwo. `rejects[]` na typach fastcgi sprawia,
+  że `http.*` poza `pool.type = http` to błąd konfiguracji, nie ciche zignorowanie
+- "Domyślnie włączone" było **nieaktualne** — bramka od czasu wprowadzenia
+  `pool.type` startuje wyłącznie pod `pool.type = http`. Ten punkt wisiał tu
+  po wersji sprzed typów poola
+- Kontrola dostępu: `fpm_http_acl.c/.h`, ta sama logika co `listen.allowed_clients`
+  (literalne IPv4/IPv6, **bez CIDR** — jak upstream). Odrzucony klient dostaje 403
+- Respawn: `fpm_children_extra.c/.h` — generyczny rejestr procesów, które typ
+  poola forkuje sam, poza liczonymi przez `pm.*` `fpm_child_s`. W `fpm_children.c`
+  jeden hook w gałęzi "unknown child", bez wiedzy o konkretnym typie. Limit
+  5 respawnów na 10 s, potem bramka się poddaje do najbliższego reloadu
 
 ### Funkcjonalne (bez tego nie zastąpi nginxa)
 
-- **Pliki statyczne** — wszystko idzie do PHP. Przy koncepcji scratch to jest
-  bloker, nie opcja: bez nginxa aplikacja nie ma skąd wziąć CSS-a. Spora robota:
-  stat, sendfile/mmap, ETag, Range, cache headers, typy MIME
 - Brak TLS (patrz sekcja 5)
 - Brakujące zmienne CGI: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`, `REQUEST_SCHEME`,
   `AUTH_TYPE`, `REMOTE_USER`. `SERVER_PORT` boli najbardziej — frameworki budują
@@ -2438,10 +2432,6 @@ uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
 
 ### Twardość
 
-- Sprawdzanie ścieżki jest tekstowe (NUL, `/../`, końcowe `/..`). Brak `realpath`
-  i sprawdzenia, że wynik jest pod docrootem → symlink wyprowadza na zewnątrz.
-  Ratuje dziś tylko `security.limit_extensions` po stronie FPM. Naprawić **bez**
-  dokładania `stat` na request
 - Limity zaszyte: 32 MB body, 64 KB nagłówków CGI
 - Brak timeoutów po stronie klienta (slow loris)
 - Przy pełnym poolu oddajemy 502, powinno być 503 z `Retry-After`

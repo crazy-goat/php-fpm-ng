@@ -35,6 +35,15 @@ const char *fpm_request_get_stage_name(int stage) {
 	return requests_stages[stage];
 }
 
+/* fpm-ng: request_cpu_tracking. Wylaczone = brak times() na start i koniec requestu;
+ * "last request cpu" w statusie i %C w access.format pokazuja wtedy 0. */
+static bool fpm_request_cpu_tracking = true;
+
+void fpm_request_set_cpu_tracking(bool on)
+{
+	fpm_request_cpu_tracking = on;
+}
+
 void fpm_request_accepting(bool fromActive)
 {
 	struct fpm_scoreboard_proc_s *proc;
@@ -74,7 +83,11 @@ void fpm_request_reading_headers(bool keptAlive)
 	fpm_clock_get(&now);
 	now_epoch = time(NULL);
 #ifdef HAVE_TIMES
-	times(&cpu);
+	if (fpm_request_cpu_tracking) {
+		times(&cpu);
+	} else {
+		memset(&cpu, 0, sizeof(cpu));
+	}
 #endif
 
 	fpm_scoreboard_update_begin(NULL);
@@ -184,7 +197,11 @@ void fpm_request_end(void)
 
 	fpm_clock_get(&now);
 #ifdef HAVE_TIMES
-	times(&cpu);
+	if (fpm_request_cpu_tracking) {
+		times(&cpu);
+	} else {
+		memset(&cpu, 0, sizeof(cpu));
+	}
 #endif
 
 	proc = fpm_scoreboard_proc_acquire(NULL, -1, 0);

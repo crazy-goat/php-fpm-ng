@@ -90,6 +90,7 @@ struct fpm_worker_pool_config_s {
 	int request_slowlog_trace_depth;
 	int request_terminate_timeout;
 	int request_terminate_timeout_track_finished;
+	int request_cpu_tracking;		/* fpm-ng: times() na start i koniec requestu; zasila "last request cpu" w statusie i %C w access.format */
 	int rlimit_files;
 	int rlimit_core;
 	char *chroot;

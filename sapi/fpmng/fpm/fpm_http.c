@@ -98,6 +98,7 @@ struct {								\
 	*(elm)->field.tqe_prev = (elm)->field.tqe_next;			\
 } while (0)
 #endif
+#include <time.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -126,10 +127,18 @@ struct {								\
 #include "fpm_env.h"
 #include "fpm_shm.h"
 #include "fpm_atomic.h"
+#include "fpm_process_ctl.h"
+#include "fpm_http_acl.h"
+#include "fpm_children_extra.h"
 #include "zlog.h"
 
-#define FPM_HTTP_GATEWAYS_DEFAULT 2			/* overridable with FPM_HTTP_GATEWAYS until there is a directive */
-#define FPM_HTTP_IDLE_MS         500		/* release a pinned worker after this much idle time */
+#define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
+#define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
+/* A crash loop (bad bind, OOM, ...) must not turn into an unbounded fork()
+ * storm: after this many respawns within RESPAWN_WINDOW seconds, a gateway
+ * slot gives up and stays dead until the next reload. */
+#define FPM_HTTP_RESPAWN_MAX_BURST 5
+#define FPM_HTTP_RESPAWN_WINDOW_SEC 10
 #define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)
 #define FPM_HTTP_MAX_CGI_HEADERS (64 * 1024)
 #define FCGI_MAX_RECORD_LEN      0xffff
@@ -137,6 +146,22 @@ struct {								\
 
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
+
+struct fpm_http_gateway_s;
+
+/* one gateway slot: which gw it belongs to, its index, and its crash-loop
+ * bookkeeping (see fpm_http_gateway_on_exit()). Passed as the `arg` to
+ * fpm_children_extra_watch() because fpm_children_extra.h only knows a bare
+ * void* — this is where "which gateway, which slot" gets recovered. */
+struct fpm_http_gw_slot_s {
+	struct fpm_http_gateway_s *gw;
+	unsigned index;
+	struct {
+		time_t window_start;
+		unsigned count;
+		int gave_up;
+	} respawn;
+};
 
 /* one gateway family per pool */
 struct fpm_http_gateway_s {
@@ -146,9 +171,16 @@ struct fpm_http_gateway_s {
 	char *docroot;
 	int listen_fd;
 	int backlog;
-	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (FPM_HTTP_REUSEPORT=1) */
+	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (http.reuseport) */
 	unsigned nproc;
 	pid_t *pids;
+	struct fpm_http_gw_slot_s **slots;		/* one per pids[i], see fpm_http_gw_slot_s */
+	int static_files;				/* http.static, per pool: fork() copies it into every gateway process */
+	int idle_ms;					/* http.idle_timeout, milliseconds; 0 = never drop an idle pinned connection */
+	struct timeval idle_timeout;			/* idle_ms split into {sec, usec} for event_add() */
+	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
+	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
+	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
 
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
@@ -245,11 +277,8 @@ static inline int fpm_http_would_block(int err)
 #endif
 	return 0;
 }
-static int fpm_http_listen(const char *pool, const char *listen_address, int backlog, int reuseport);
+static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport);
 
-static struct timeval idle_timeout = {FPM_HTTP_IDLE_MS / 1000, (FPM_HTTP_IDLE_MS % 1000) * 1000};
-static int static_files = 1;		/* FPM_HTTP_STATIC=0 wylacza; docelowo dyrektywa */
-static int idle_ms = FPM_HTTP_IDLE_MS;		/* FPM_HTTP_IDLE_MS env overrides it; 0 = never close */
 
 /* ---------------------------------------------------------------- FastCGI encoding */
 
@@ -594,8 +623,8 @@ static void fpm_http_request_done(fpm_http_upstream *up)
 	up->busy = 0;
 	memset(up->rec_hdr, 0, sizeof(up->rec_hdr));
 	up->rec_hdr_len = up->rec_type = up->rec_len = up->rec_pad = 0;
-	if (idle_ms > 0) {
-		event_add(up->ev_read, &idle_timeout);
+	if (up->gw->idle_ms > 0) {
+		event_add(up->ev_read, &up->gw->idle_timeout);
 	}
 	fpm_http_pump(up->gw);
 }
@@ -792,7 +821,7 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		c->upstream = idle;
 		idle->busy = 1;
 		idle->current = c;
-		if (idle_ms > 0 && !idle->connecting) {
+		if (gw->idle_ms > 0 && !idle->connecting) {
 			event_add(idle->ev_read, NULL);		/* drop the idle deadline for the duration of the request */
 		}
 		fpm_http_upstream_write(idle, ZSTR_VAL(c->out.s), ZSTR_LEN(c->out.s));
@@ -1034,7 +1063,7 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	size_t path_len;
 	int answered = 0;
 
-	if (!static_files || !uri) {
+	if (!gw->static_files || !uri) {
 		return 0;
 	}
 
@@ -1068,6 +1097,20 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	struct fpm_http_gateway_s *gw = arg;
 	fpm_http_conn *c;
 	int error;
+
+	if (gw->acl) {
+		struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+		char *peer_addr = NULL;
+		ev_uint16_t peer_port;
+
+		if (evcon) {
+			evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
+		}
+		if (!fpm_http_acl_check(gw->acl, peer_addr)) {
+			evhttp_send_error(req, 403, "Forbidden");
+			return;
+		}
+	}
 
 	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
 	 * zajmowac slotu workera dla pliku, ktory oddamy sami. */
@@ -1167,7 +1210,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	if (gw->reuseport) {
 		/* own listening socket in the SO_REUSEPORT group, the kernel spreads connections by hash */
 		close(gw->listen_fd);
-		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->backlog, 1);
+		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, 1);
 		if (gw->listen_fd < 0) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
@@ -1199,9 +1242,8 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 /* Listens on http_address when given, otherwise on the FastCGI address with the port bumped by
  * one. Returns -1 when that is not possible. */
-static int fpm_http_listen(const char *pool, const char *listen_address, int backlog, int reuseport) /* {{{ */
+static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport) /* {{{ */
 {
-	const char *http_address = getenv("FPM_HTTP_LISTEN");
 	char *dup_address = strdup(http_address ? http_address : listen_address), *host = NULL, *port_str = strrchr(dup_address, ':');
 	char port[sizeof("65535")];
 	struct addrinfo hints, *res, *p;
@@ -1259,6 +1301,71 @@ static int fpm_http_listen(const char *pool, const char *listen_address, int bac
 }
 /* }}} */
 
+static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status);
+
+static void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
+{
+	gw->pids[index] = fork();
+	if (gw->pids[index] < 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] http: fork() failed", gw->pool);
+	} else if (gw->pids[index] == 0) {
+		fpm_http_gateway_run(gw, index);
+		/* not reached */
+	} else {
+		fpm_children_extra_watch(gw->pids[index], fpm_http_gateway_on_exit, gw->slots[index]);
+	}
+}
+/* }}} */
+
+/* Called by fpm_children_bury() (via fpm_children_extra_handle_exit()) when a
+ * gateway process dies, however it dies — crash, OOM kill, whatever. Never
+ * called for a deliberate shutdown: fpm_http_cleanup() forgets the pid first.
+ * "Master respawns it like any other child" (docs/NOTES.md) without teaching
+ * fpm_children.c anything about gateways — see fpm_children_extra.h. */
+static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{{ */
+{
+	struct fpm_http_gw_slot_s *slot = arg;
+	struct fpm_http_gateway_s *gw = slot->gw;
+	time_t now = time(NULL);
+
+	if (slot->respawn.gave_up) {
+		return; /* already logged once below, do not spam on every further death */
+	}
+
+	if (now - slot->respawn.window_start > FPM_HTTP_RESPAWN_WINDOW_SEC) {
+		slot->respawn.window_start = now;
+		slot->respawn.count = 0;
+	}
+	slot->respawn.count++;
+
+	if (WIFSIGNALED(status)) {
+		zlog(ZLOG_WARNING, "[pool %s] http gateway %u (pid %d) killed by signal %d, respawning",
+			gw->pool, slot->index, (int) old_pid, WTERMSIG(status));
+	} else {
+		zlog(ZLOG_WARNING, "[pool %s] http gateway %u (pid %d) exited with code %d, respawning",
+			gw->pool, slot->index, (int) old_pid, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+	}
+
+	if (!fpm_pctl_can_spawn_children()) {
+		/* master is stopping/reloading: fpm_http_cleanup() is about to run
+		 * (or already did) and will forget the survivors; nothing to spawn */
+		gw->pids[slot->index] = 0;
+		return;
+	}
+
+	if (slot->respawn.count > FPM_HTTP_RESPAWN_MAX_BURST) {
+		slot->respawn.gave_up = 1;
+		gw->pids[slot->index] = 0;
+		zlog(ZLOG_ALERT, "[pool %s] http gateway %u crashed %u times within %d seconds, giving up on it "
+			"(reload to try again); the pool now has one fewer gateway",
+			gw->pool, slot->index, slot->respawn.count, FPM_HTTP_RESPAWN_WINDOW_SEC);
+		return;
+	}
+
+	fpm_http_gateway_spawn(gw, slot->index);
+}
+/* }}} */
+
 static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 {
 	struct fpm_http_gateway_s *gw, *next;
@@ -1268,6 +1375,10 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		next = gw->next;
 		for (i = 0; i < gw->nproc; i++) {
 			if (gw->pids[i] > 0) {
+				/* forget it BEFORE signalling it: this is a deliberate kill,
+				 * not a crash, so fpm_children_extra_handle_exit() must not
+				 * respawn it when the master's SIGCHLD handler reaps it */
+				fpm_children_extra_forget(gw->pids[i]);
 				kill(gw->pids[i], SIGTERM);
 			}
 		}
@@ -1282,7 +1393,14 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		if (gw->upstreams_used) {
 			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
 		}
+		for (i = 0; i < gw->nproc; i++) {
+			free(gw->slots[i]);
+		}
+		free(gw->slots);
 		free(gw->pids);
+		fpm_http_acl_free(gw->acl);
+		free(gw->allowed_clients);
+		free(gw->http_listen_override);
 		free(gw->pool);
 		free(gw->listen_address);
 		free(gw->docroot);
@@ -1292,39 +1410,63 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 }
 /* }}} */
 
-static unsigned nproc_wanted = FPM_HTTP_GATEWAYS_DEFAULT;
-static int reuseport = 0;
 static int cleanup_registered = 0;
 
-/* Ustawienia z env, dopoki nie ma dyrektyw. Czytane raz. */
-static void fpm_http_settings_init(void)
+/* Dyrektywa ma pierwszenstwo, gdy faktycznie ustawiona (fpm_conf_directive_was_set —
+ * z samej wartosci nie da sie odroznic "nieustawione" od "ustawione na domyslna");
+ * env zostaje jako fallback dla wdrozen, ktore go juz uzywaja. http.allowed_clients
+ * jest nowa dyrektywa i celowo bez fallbacku envowego. */
+static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned *nproc_wanted, int *reuseport_out) /* {{{ */
 {
-	static int done = 0;
 	const char *env;
+	int idle_ms;
 
-	if (done) {
-		return;
-	}
-	done = 1;
-
-	env = getenv("FPM_HTTP_GATEWAYS");
-	if (env && atoi(env) > 0) {
-		nproc_wanted = (unsigned)atoi(env);
-	}
-	reuseport = getenv("FPM_HTTP_REUSEPORT") && atoi(getenv("FPM_HTTP_REUSEPORT")) > 0;
-
-	env = getenv("FPM_HTTP_STATIC");
-	if (env) {
-		static_files = atoi(env) > 0;
+	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways > 0) {
+		*nproc_wanted = (unsigned) wp->config->http_gateways;
+	} else if ((env = getenv("FPM_HTTP_GATEWAYS")) && atoi(env) > 0) {
+		*nproc_wanted = (unsigned) atoi(env);
+	} else {
+		*nproc_wanted = wp->config->http_gateways > 0 ? (unsigned) wp->config->http_gateways : FPM_HTTP_GATEWAYS_DEFAULT;
 	}
 
-	env = getenv("FPM_HTTP_IDLE_MS");
-	if (env) {
+	if (fpm_conf_directive_was_set(wp->config, "http.reuseport")) {
+		*reuseport_out = wp->config->http_reuseport;
+	} else {
+		env = getenv("FPM_HTTP_REUSEPORT");
+		*reuseport_out = env && atoi(env) > 0;
+	}
+	gw->reuseport = *reuseport_out;
+
+	if (fpm_conf_directive_was_set(wp->config, "http.static")) {
+		gw->static_files = wp->config->http_static;
+	} else if ((env = getenv("FPM_HTTP_STATIC"))) {
+		gw->static_files = atoi(env) > 0;
+	} else {
+		gw->static_files = wp->config->http_static;
+	}
+
+	if (fpm_conf_directive_was_set(wp->config, "http.idle_timeout")) {
+		idle_ms = wp->config->http_idle_timeout;
+	} else if ((env = getenv("FPM_HTTP_IDLE_MS"))) {
 		idle_ms = atoi(env);
-		idle_timeout.tv_sec = idle_ms / 1000;
-		idle_timeout.tv_usec = (idle_ms % 1000) * 1000;
+	} else {
+		idle_ms = wp->config->http_idle_timeout;
+	}
+	gw->idle_ms = idle_ms;
+	gw->idle_timeout.tv_sec = idle_ms / 1000;
+	gw->idle_timeout.tv_usec = (idle_ms % 1000) * 1000;
+
+	if (fpm_conf_directive_was_set(wp->config, "http.listen") && wp->config->http_listen && *wp->config->http_listen) {
+		gw->http_listen_override = strdup(wp->config->http_listen);
+	} else if ((env = getenv("FPM_HTTP_LISTEN")) && *env) {
+		gw->http_listen_override = strdup(env);
+	}
+
+	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
+		gw->allowed_clients = strdup(wp->config->http_allowed_clients);
 	}
 }
+/* }}} */
 
 /* Wolane raz na pool typu http, ze strony mastera, przed forkiem workerow.
  * capacity_override jest potrzebne executorom wielorequestowym: klasyczny
@@ -1332,8 +1474,6 @@ static void fpm_http_settings_init(void)
 static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity_override) /* {{{ */
 {
 	char cwd[MAXPATHLEN];
-
-	fpm_http_settings_init();
 
 	if (!getcwd(cwd, sizeof(cwd))) {
 		strcpy(cwd, "/");
@@ -1344,15 +1484,12 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		unsigned workers = wp->config->pm_max_children > 0 ? (unsigned)wp->config->pm_max_children : 1;
 		unsigned capacity = capacity_override ? capacity_override : workers;
 		const char *capacity_env = capacity_override ? getenv("FPM_HTTP_MAX_UPSTREAMS") : NULL;
+		unsigned nproc_wanted;
+		int reuseport;
 		unsigned i;
 
 		if (capacity_env && atoi(capacity_env) > 0) {
 			capacity = (unsigned) atoi(capacity_env);
-		}
-
-		/* a UNIX socket pool has no port to bump, so it needs an explicit HTTP address */
-		if (wp->listen_address_domain != FPM_AF_INET && !getenv("FPM_HTTP_LISTEN")) {
-			return 0;
 		}
 
 		gw = calloc(1, sizeof(*gw));
@@ -1360,9 +1497,34 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->listen_address = strdup(wp->config->listen_address);
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
 		gw->backlog = wp->config->listen_backlog;
-		gw->reuseport = reuseport;
-		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->backlog, reuseport);
+		fpm_http_gateway_settings(wp, gw, &nproc_wanted, &reuseport);
+
+		/* a UNIX socket pool has no port to bump, so it needs an explicit HTTP
+		 * address — fpm_http_validate_pool() already refused to start without
+		 * one; this is just a defensive fallback, unreachable in practice */
+		if (wp->listen_address_domain != FPM_AF_INET && !gw->http_listen_override) {
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw);
+			return 0;
+		}
+
+		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, gw->allowed_clients, &gw->acl) != 0) {
+			free(gw->allowed_clients);
+			free(gw->http_listen_override);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw);
+			return -1;
+		}
+
+		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport);
 		if (gw->listen_fd < 0) {
+			fpm_http_acl_free(gw->acl);
+			free(gw->allowed_clients);
+			free(gw->http_listen_override);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1380,19 +1542,19 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 		*gw->upstreams_used = 0;
 		gw->pids = calloc(gw->nproc, sizeof(pid_t));
+		gw->slots = calloc(gw->nproc, sizeof(*gw->slots));
 		gw->next = gateways;
 		gateways = gw;
-		zlog(ZLOG_NOTICE, "[pool %s] HTTP listener on FastCGI port + 1: %u gateway(s)%s, %u persistent connection(s) to the pool",
-			wp->config->name, gw->nproc, reuseport ? " with SO_REUSEPORT" : "", capacity);
+		zlog(ZLOG_NOTICE, "[pool %s] HTTP listener: %u gateway(s)%s%s, %u persistent connection(s) to the pool",
+			wp->config->name, gw->nproc, reuseport ? " with SO_REUSEPORT" : "",
+			gw->acl ? ", access-restricted" : "", capacity);
 
 		for (i = 0; i < gw->nproc; i++) {
-			gw->pids[i] = fork();
-			if (gw->pids[i] < 0) {
-				zlog(ZLOG_SYSERROR, "[pool %s] http: fork() failed", wp->config->name);
-			} else if (gw->pids[i] == 0) {
-				fpm_http_gateway_run(gw, i);
-				/* not reached */
-			}
+			gw->slots[i] = calloc(1, sizeof(*gw->slots[i]));
+			gw->slots[i]->gw = gw;
+			gw->slots[i]->index = i;
+			gw->slots[i]->respawn.window_start = time(NULL);
+			fpm_http_gateway_spawn(gw, i);
 		}
 		if (reuseport) {
 			/* the master's socket would otherwise take its share of connections and never accept them */
@@ -1410,6 +1572,41 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return -1;
 		}
 		cleanup_registered = 1;
+	}
+	return 0;
+}
+/* }}} */
+
+/* Sprawdzenia specyficzne dla pool.type = http, wolane przez fpm_pool_type.c
+ * podczas walidacji configu, przed forkiem czegokolwiek. */
+int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways < 1) {
+		zlog(ZLOG_ERROR, "[pool %s] http.gateways must be at least 1", wp->config->name);
+		return -1;
+	}
+	if (fpm_conf_directive_was_set(wp->config, "http.idle_timeout") && wp->config->http_idle_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.idle_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->listen_address_domain != FPM_AF_INET) {
+		int has_directive = fpm_conf_directive_was_set(wp->config, "http.listen")
+			&& wp->config->http_listen && *wp->config->http_listen;
+		const char *env = getenv("FPM_HTTP_LISTEN");
+
+		if (!has_directive && !(env && *env)) {
+			zlog(ZLOG_ERROR, "[pool %s] pool.type = http requires http.listen when listen is a unix socket "
+				"(there is no FastCGI port to bump by one)", wp->config->name);
+			return -1;
+		}
+	}
+	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
+		struct fpm_http_acl_s *tmp = NULL;
+
+		if (fpm_http_acl_parse(wp->config->name, wp->config->http_allowed_clients, &tmp) != 0) {
+			return -1; /* fpm_http_acl_parse() already logged which address is bad */
+		}
+		fpm_http_acl_free(tmp);
 	}
 	return 0;
 }
@@ -1439,6 +1636,12 @@ int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capa
 {
 	(void)wp;
 	(void)capacity;
+	return 0;
+}
+
+int fpm_http_validate_pool(struct fpm_worker_pool_s *wp)
+{
+	(void)wp;
 	return 0;
 }
 

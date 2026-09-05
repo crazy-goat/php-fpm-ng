@@ -19,6 +19,13 @@
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
+/* http.* dostraja bramke, ktora startuje wylacznie pod pool.type = http —
+ * na kazdym innym typie te dyrektywy nie maja czego dostrajac. */
+static const char *const fpm_pool_fastcgi_rejects[] = {
+	"http.",
+	NULL
+};
+
 static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 {
 	return fpm_http_init_pool(wp);
@@ -44,18 +51,21 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
 		.name            = "fastcgi-ng",
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
 		.name            = "http",
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		.validate        = fpm_http_validate_pool,
 		.init_main       = fpm_pool_type_http_init,
 	},
 	{

@@ -2403,31 +2403,25 @@ Nie na start. Patrz sekcja 7.
 
 ## 6. Znane problemy i braki
 
-### BŁĄD w obecnym POC bramki
+### Blokery — ZAMKNIĘTE (2026-09-06, branch `http-config`)
 
-`fpm_http.c:1065` rejestruje `fpm_cleanup_add(FPM_CLEANUP_PARENT, ...)`, ale
-przy reloadzie master idzie ścieżką `FPM_CLEANUP_PARENT_EXEC`
-(`fpm_pctl_exec` robi `execvp(saved_argv[0], saved_argv)`). Czyli przy `reload`
-bramki prawdopodobnie nie dostaną SIGTERM, zostaną osierocone i będą trzymać
-port, a nowy master nie zdoła się zbindować. **Nie zweryfikowane
-uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
-
-### Blokery (bez tego nie da się tego nikomu włączyć)
-
-- Konfiguracja w zmiennych środowiskowych (`FPM_HTTP_LISTEN`, `FPM_HTTP_GATEWAYS`,
-  `FPM_HTTP_REUSEPORT`, `FPM_HTTP_IDLE_MS`) — muszą być dyrektywy z walidacją
-- Domyślnie włączone — teraz każdy pool TCP dostaje bramkę na porcie +1, czyli
-  otwiera port, o który nikt nie prosił
-- Brak kontroli dostępu — FastCGI ma `listen.allowed_clients`, bramka nie ma nic
-- Brak respawnu bramek — forkowane raz w `fpm_run()`, master trzyma tylko pidy
-  żeby je ubić. Padnięta bramka nie wraca, a przy `reuseport` połowa ruchu
-  trafia w martwą kolejkę
+- Konfiguracja: są dyrektywy `http.listen`, `http.gateways` (2), `http.reuseport`
+  (0), `http.static` (1), `http.idle_timeout` (500 ms), `http.allowed_clients`.
+  Walidacja w hooku `.validate` typu poola. Envy `FPM_HTTP_*` zostały jako
+  fallback, dyrektywa ma pierwszeństwo. `rejects[]` na typach fastcgi sprawia,
+  że `http.*` poza `pool.type = http` to błąd konfiguracji, nie ciche zignorowanie
+- "Domyślnie włączone" było **nieaktualne** — bramka od czasu wprowadzenia
+  `pool.type` startuje wyłącznie pod `pool.type = http`. Ten punkt wisiał tu
+  po wersji sprzed typów poola
+- Kontrola dostępu: `fpm_http_acl.c/.h`, ta sama logika co `listen.allowed_clients`
+  (literalne IPv4/IPv6, **bez CIDR** — jak upstream). Odrzucony klient dostaje 403
+- Respawn: `fpm_children_extra.c/.h` — generyczny rejestr procesów, które typ
+  poola forkuje sam, poza liczonymi przez `pm.*` `fpm_child_s`. W `fpm_children.c`
+  jeden hook w gałęzi "unknown child", bez wiedzy o konkretnym typie. Limit
+  5 respawnów na 10 s, potem bramka się poddaje do najbliższego reloadu
 
 ### Funkcjonalne (bez tego nie zastąpi nginxa)
 
-- **Pliki statyczne** — wszystko idzie do PHP. Przy koncepcji scratch to jest
-  bloker, nie opcja: bez nginxa aplikacja nie ma skąd wziąć CSS-a. Spora robota:
-  stat, sendfile/mmap, ETag, Range, cache headers, typy MIME
 - Brak TLS (patrz sekcja 5)
 - Brakujące zmienne CGI: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`, `REQUEST_SCHEME`,
   `AUTH_TYPE`, `REMOTE_USER`. `SERVER_PORT` boli najbardziej — frameworki budują
@@ -2438,10 +2432,6 @@ uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
 
 ### Twardość
 
-- Sprawdzanie ścieżki jest tekstowe (NUL, `/../`, końcowe `/..`). Brak `realpath`
-  i sprawdzenia, że wynik jest pod docrootem → symlink wyprowadza na zewnątrz.
-  Ratuje dziś tylko `security.limit_extensions` po stronie FPM. Naprawić **bez**
-  dokładania `stat` na request
 - Limity zaszyte: 32 MB body, 64 KB nagłówków CGI
 - Brak timeoutów po stronie klienta (slow loris)
 - Przy pełnym poolu oddajemy 502, powinno być 503 z `Retry-After`
@@ -3046,3 +3036,43 @@ Dotychczasowe kombinowane typy przechodza na:
 - `fiber` -> `pool.type = fastcgi-ng`, `pool.executor = fiber`;
 - `async` -> `pool.type = fastcgi-ng`, `pool.executor = async`;
 - `http-fiber` -> `pool.type = http`, `pool.executor = fiber`.
+
+## 3w. Rozdzielenie transportu i `writev()` dużych odpowiedzi (2026-09-05)
+
+Procesowy przełącznik `fcgi_set_optimized_transport()` jest domyślnie wyłączony i ustawiany po forku workera. `fastcgi` zachowuje upstreamową ścieżkę `accept()` i odczytów, natomiast `fastcgi-ng` oraz wewnętrzny transport frontendu `http` włączają buforowane odczyty, `accept4(SOCK_CLOEXEC)` i zoptymalizowany zapis dużych rekordów. Test dwóch pooli w jednej binarce potwierdził, że ustawienie nie przecieka między procesami.
+
+Dla lekkiego requestu, cztery workery i pięć naprzemiennych serii `wrk -t1 -c2 -d10s`, rozdzielenie dało:
+
+- `fastcgi`: 8718,57 req/s i 114,244 us CPU workera/request;
+- `fastcgi-ng`: 8866,06 req/s i 104,377 us CPU workera/request;
+- wynik: **-8,64% CPU/request** dla `fastcgi-ng`.
+
+Profil syscalli potwierdził `accept()` wyłącznie dla `fastcgi`, `accept4()` wyłącznie dla `fastcgi-ng` oraz spadek liczby odczytów z około 9,1 do 4,1 na request.
+
+### Duże odpowiedzi
+
+`patches/0005-fastcgi-writev-large-response.patch` łączy nagłówek rekordu i duże body przez `writev()` tylko dla zoptymalizowanego transportu na Unixie. `safe_writev()` obsługuje `EINTR` i częściowe zapisy przez oba wektory. Klasyczny `fastcgi` i Windows zachowują istniejącą ścieżkę.
+
+Dla odpowiedzi 262 144 B liczba operacji transportowych spadła z 11 do 6. Końcowy `strace` na PHP 8.5 pokazał:
+
+- `fastcgi`: 11 zapisów FastCGI, 0 `writev()`;
+- `fastcgi-ng`: 5 `writev()` z nagłówkiem i payloadem oraz osobny końcowy rekord.
+
+Benchmark PHP 8.5, pięć naprzemiennych serii:
+
+| frontend | CPU/request baseline | CPU/request `writev` | zmiana CPU | req/s baseline | req/s `writev` | zmiana req/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `fastcgi-ng` | 195,433 us | 178,824 us | **-8,5%** | 2018,63 | 2037,15 | **+0,9%** |
+| `http`, `Connection: close` | 525,209 us | 490,612 us | **-6,6%** | 2682,67 | 2705,14 | **+0,8%** |
+
+W obu testach `writev()` miało niższy CPU/request we wszystkich pięciu parach. Pierwsza seria HTTP z keep-alive osiągała około 50 req/s przez znany efekt Nagle/delayed ACK, dlatego jej przepustowości nie użyto jako wyniku optymalizacji.
+
+Na masterze wcześniejszy benchmark dał około **-9,3% CPU/request** i **+4,8% req/s**. Pomiar pamięci nie wykazał kosztu: mediana RSS 7812 -> 7792 KB, PSS 3921 -> 3911 KB.
+
+Końcowa regresja PHP 8.5 przeszła dla `fastcgi`, `fastcgi-ng` i `http`: mała odpowiedź, odpowiedź 262 144 B, binarny POST 65 792 B z SHA-256, keep-alive/close oraz zerwany odbiorca. Wcześniejsze porównanie bajt w bajt objęło odpowiedzi 1, 8000, 8184, 8192, 65527, 65528, 65529, 131056, 262144 i 1048576 B.
+
+### Odrzucone warianty
+
+- Bufory wejściowe 8/16/32 KB dały odpowiednio 86,591 / 87,321 / 86,564 us na request. Różnice poniżej 1% nie uzasadniają zmiany; pozostaje 16 KB.
+- Batching małej odpowiedzi nie oszczędza zapisu FastCGI: odpowiedź już trafia do jednego `write()`, a drugi obserwowany zapis dotyczy innego deskryptora.
+- Cache dwóch `getpid()` na request odrzucono, ponieważ wywołania należą do timeoutów Zend i wykrywania `fork()`.

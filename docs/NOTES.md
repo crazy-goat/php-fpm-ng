@@ -359,6 +359,89 @@ Drobiazg: binarka dynamiczna z Alpine wymaga w kontenerze `libgcc` obok
 `libevent` — inaczej `Error loading shared library libgcc_s.so.1`.
 
 
+## 3g. Swoboda na ścieżce HTTP i kontrakt rozszerzalności (2026-09-05)
+
+Skoro to nie wejdzie łatwo do php-src, na ścieżce HTTP nie wiąże nas zgodność
+z niczym. Ale rozróżnienie zostaje: **szaleć wolno w naszych plikach**;
+w czterech współdzielonych (`fpm_main.c`, `fpm_conf.c`, `fpm_status.c`, `fpm.c`)
+każda ekstrawagancja to koszt przy każdym wydaniu PHP.
+
+Żadnej z poniższych rzeczy nie robimy dla wydajności — tam nie ma czego zbierać
+(sekcja 4). Robimy je, bo usuwają ruchome części albo dokładają brakującą funkcję.
+
+| pomysł | ocena |
+|---|---|
+| **Pliki statyczne w bramce** (`sendfile`, bez zawracania głowy workerowi) | ROBIMY, pierwsze. Jedyna rzecz przesądzająca, czy nginx jest jeszcze potrzebny. Możliwa TYLKO z bramką — wariant in-process ją traci. |
+| **Pool HTTP nie otwiera gniazdka FastCGI** (gniazdko uniksowe w katalogu runtime) | ROBIMY przy okazji `pool.type` — ta sama robota. Mniej powierzchni ataku, o dyrektywę mniej. |
+| **Zdjąć ramkowanie FastCGI z odpowiedzi, `splice()`** | Kiedyś. Bramka zostaje w ścieżce, więc 502 i timeouty nadal działają. Czysty zysk bez utraty kontroli. |
+| **Przekazanie deskryptora przez `SCM_RIGHTS`** | ODRZUCONE. Największy zysk przy dużych odpowiedziach, ale gdy worker padnie w połowie, klient dostaje ucięty strumień, a bramka nie może wysłać 502 ani pilnować timeoutu na gniazdku, którego nie posiada. Przy jednej instancji bez klastra to zła wymiana. |
+| **`$_SERVER` bez objazdu przez CGI** | ODRZUCONE na razie. Aplikacje polegają na dokładnym zestawie kluczy CGI, więc oszczędność jest tylko w środku. |
+
+### `fcgi-ng` — eksperymentalny, stary `fcgi` bez zmian
+
+Decyzja Piotra. Zastrzeżenie do zapamiętania: **BC dotyczy konfiguracji
+i protokołu, nie wewnętrznego zachowania.** Istniejący `fpm.conf` ma działać
+i nginx ma się dogadać — ale poprawki błędów i usprawnienia wewnętrzne mieszczą
+się w `fcgi`. GH-18956 to naprawa, nie zmiana kontraktu.
+
+`fcgi-ng` ma sens jako miejsce na zmiany łamiące obserwowalne zachowanie i na
+eksperymenty (io_uring, `SO_REUSEPORT` per worker, batchowanie syscalli).
+Uwaga strukturalna do zweryfikowania: ścieżka FastCGI ma inną budowę niż bramka.
+Bramka to nasz proces z pętlą libevent; worker FastCGI to blokująca pętla
+w `fpm_main.c`, a pętla zdarzeń FPM żyje w MASTERZE. Więc to, co zadziałało
+w bramce, tu niekoniecznie się przekłada. **Bada to osobny agent — wynik
+wkleić tutaj.**
+
+### `http-direct` (in-process) — nie teraz, ale nie zamykamy drogi
+
+Korekta wcześniejszego argumentu: mówiłem, że bez bramki keep-alive przypina
+workera i osiem workerów to osiem połączeń. To prawda tylko wtedy, gdy worker
+po odpowiedzi wraca do `accept`. Worker z własną pętlą zdarzeń trzyma wiele
+połączeń i przetwarza po jednym — wtedy zastrzeżenie znika, a kolejkowanie robi
+backlog jądra per gniazdko `SO_REUSEPORT`. Architektura się broni.
+
+Prawdziwy koszt jest inny i poważniejszy: dziś worker jest GŁUPI (czyta FastCGI,
+wykonuje skrypt, pisze wynik), a bramka bierze na siebie parsowanie HTTP,
+keep-alive, timeouty, limity ciała i wolnych klientów. In-process wpycha to
+wszystko do procesu wykonującego kod PHP — każdy błąd w parserze HTTP staje się
+błędem w procesie trzymającym pamięć aplikacji, bez niczego z przodu.
+To jest tryb worker FrankenPHP. Działa, ale to inny produkt.
+
+Sekwencja, nie zakaz: przepisanie rdzenia serwowania jest dobre, gdy masz
+użytkowników, złe jako drugi krok przy zerowej bazie.
+
+## 3h. KONTRAKT: typ poola musi być rozszerzalny
+
+Wymaganie zapisane PRZED kodem, na wyraźną prośbę.
+
+Dodanie nowego typu poola ma kosztować **nowy plik plus jedną linię w rejestrze**.
+Nic poza tym. W szczególności NIE wolno przy tym ruszać:
+
+- logiki walidacji w `fpm_conf.c` (tablica dyrektyw tak, `if`-y walidacji nie)
+- `fpm_children.c` — jeśli nowy typ wymaga tam zmiany, znaczy że polityka
+  spawnowania nie została wydzielona czysto
+- `fpm_status.c` poza dodaniem etykiety
+
+Struktura z operacjami, po jednym pliku na typ:
+
+```
+validate_config()   co jest wymagane, co zabronione dla tego typu
+init_main()         przygotowanie po stronie mastera (gniazdka, bramki, timery)
+spawn_policy()      ile dzieci i kiedy (static N / na gniazdku / na tickу)
+child_main()        co robi dziecko przy run_child: — pętla accept albo skrypt
+status()            jak się pokazuje w statusie
+```
+
+Znane typy do zmieszczenia w tym interfejsie: `fcgi` (domyślny, brak
+`pool.type` = `fcgi`, zero BC), `http`, `fcgi-ng`, `supervisor`, `cron`,
+a w przyszłości `http-direct`. Jeśli któryś z nich nie wchodzi gładko —
+interfejs jest zły i lepiej się o tym dowiedzieć teraz.
+
+`listen` przestaje być bezwarunkowo obowiązkowe (zweryfikowane: dziś pool bez
+niego daje `ALERT: no listen address have been defined!`) — o wymagalności
+decyduje `validate_config()` typu.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

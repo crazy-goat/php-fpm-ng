@@ -286,6 +286,45 @@ Konsekwencje, wszystkie na plus:
 - Statyka zostaje **opcjonalnym wariantem** dla tych, którzy nic nie potrzebują,
   a nie fundamentem. Zweryfikowana, że działa (patrz 3c), więc opcja istnieje.
 
+## 3e. Szkielet SAPI — zweryfikowany (2026-09-05)
+
+`sapi/fpmng/` zbudowane przeciw **nietkniętemu** php-src. `git status` w drzewie
+upstreamu pokazuje wyłącznie `?? sapi/fpmng/` — żaden istniejący plik nie
+ruszony. Binarka `php-fpm-ng` startuje, bramka HTTP odpowiada, `php_sapi_name()`
+zwraca `fpm-fcgi`.
+
+Nasze pliki (reszta kopiowana z `sapi/fpm/` przez `build/prepare.sh`):
+`config.m4`, `Makefile.frag`, `fpm/fpm.c`, `fpm/fpm_http.c`, `fpm/fpm_http.h`.
+
+### Co trzeba było przemianować, żeby oba SAPI współistniały
+
+- makra `AC_DEFUN`: `PHP_FPM_*` → `PHP_FPMNG_*` (inaczej "already defined")
+- zmienne: `SAPI_FPM_PATH`, `BUILD_FPM`, `FPM_EXTRA_LIBS`, `PHP_FPM_OBJS`
+- **opcje configure też**: `--with-fpm-systemd` → `--with-fpmng-systemd` itd.
+  Sama zmiana nazwy zmiennej nie wystarcza — `PHP_ARG_WITH` generuje zmienną
+  z nazwy opcji, więc przemianowanie tylko zmiennej sprawia, że test czyta
+  niezdefiniowaną wartość i odpala się mimo wyłączenia (systemd wywalił build).
+- `Makefile.frag` — cel `fpm:` musi być `fpmng:`, inaczej
+  `No rule to make target 'fpmng'`
+
+### PLIKI ŹRÓDŁOWE GENEROWANE, NIE ZASZYTE
+
+Pierwsza próba miała listę plików zaszytą w naszym `config.m4` i od razu pękła:
+nasza kopia pochodziła z nowszego php-src, który nie ma `events/devpoll.c`,
+a budowaliśmy przeciw starszemu, który go ma → `undefined reference to
+fpm_event_devpoll_module`.
+
+Dlatego `config.m4` ma placeholder `@FPMNG_SOURCES@`, a `build/prepare.sh`
+wyciąga listę z `sapi/fpm/config.m4` **tego konkretnego php-src** i dopisuje
+nasze pliki. Ta klasa dryfu jest przez to załatwiona na stałe — i to jest wzorzec
+do powtórzenia wszędzie, gdzie kusi zaszycie czegoś z upstreamu.
+
+### Drobiazg operacyjny
+
+Katalog budowania powstaje w kontenerze i należy do roota — czyszczenie z hosta
+wymaga `sudo rm -rf`.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

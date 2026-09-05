@@ -1282,6 +1282,7 @@ static int fpm_http_listen(const char *pool, const char *listen_address, const c
 			continue;
 		}
 		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 #ifdef SO_REUSEPORT
 		if (reuseport) {
 			setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));

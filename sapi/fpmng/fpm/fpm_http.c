@@ -248,6 +248,7 @@ static inline int fpm_http_would_block(int err)
 static int fpm_http_listen(const char *pool, const char *listen_address, int backlog, int reuseport);
 
 static struct timeval idle_timeout = {FPM_HTTP_IDLE_MS / 1000, (FPM_HTTP_IDLE_MS % 1000) * 1000};
+static int static_files = 1;		/* FPM_HTTP_STATIC=0 wylacza; docelowo dyrektywa */
 static int idle_ms = FPM_HTTP_IDLE_MS;		/* FPM_HTTP_IDLE_MS env overrides it; 0 = never close */
 
 /* ---------------------------------------------------------------- FastCGI encoding */
@@ -824,12 +825,257 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	fpm_http_conn_free(c);
 }
 
+/* ------------------------------------------------------------------------ *
+ * Odpowiedzi, ktore bramka daje SAMA, bez zajmowania workera.
+ *
+ * To jest jeden punkt na wszystkie takie przypadki. Dzis pliki statyczne;
+ * pozniej doloza sie tu wyzwanie ACME (/.well-known/acme-challenge/) i
+ * /status. Nie robic z tego doraznych if-ow w fpm_http_request — kazdy z tych
+ * przypadkow potrzebuje dokladnie tego samego: rozwiazac sciezke, sprawdzic
+ * zawieranie w katalogu, odpowiedziec bez FastCGI.
+ * ------------------------------------------------------------------------ */
+
+static const struct {
+	const char *ext;
+	const char *type;
+} fpm_http_mime[] = {
+	{ "html", "text/html; charset=UTF-8" },
+	{ "htm",  "text/html; charset=UTF-8" },
+	{ "css",  "text/css; charset=UTF-8" },
+	{ "js",   "text/javascript; charset=UTF-8" },
+	{ "mjs",  "text/javascript; charset=UTF-8" },
+	{ "json", "application/json" },
+	{ "map",  "application/json" },
+	{ "xml",  "application/xml" },
+	{ "txt",  "text/plain; charset=UTF-8" },
+	{ "svg",  "image/svg+xml" },
+	{ "png",  "image/png" },
+	{ "jpg",  "image/jpeg" },
+	{ "jpeg", "image/jpeg" },
+	{ "gif",  "image/gif" },
+	{ "webp", "image/webp" },
+	{ "avif", "image/avif" },
+	{ "ico",  "image/x-icon" },
+	{ "woff", "font/woff" },
+	{ "woff2","font/woff2" },
+	{ "ttf",  "font/ttf" },
+	{ "otf",  "font/otf" },
+	{ "pdf",  "application/pdf" },
+	{ "wasm", "application/wasm" },
+	{ "mp4",  "video/mp4" },
+	{ "webm", "video/webm" },
+	{ NULL, NULL }
+};
+
+static const char *fpm_http_content_type(const char *path)
+{
+	const char *dot = strrchr(path, '.');
+	unsigned i;
+
+	if (!dot || strchr(dot, '/')) {
+		return "application/octet-stream";
+	}
+	dot++;
+	for (i = 0; fpm_http_mime[i].ext; i++) {
+		if (!strcasecmp(dot, fpm_http_mime[i].ext)) {
+			return fpm_http_mime[i].type;
+		}
+	}
+
+	return "application/octet-stream";
+}
+
+/* Any path segment starting with a dot is refused: .env, .git, .htaccess and
+ * friends must never be served just because they sit under the document root.
+ * nginx needs an explicit rule for this; we make it the default. */
+static int fpm_http_path_has_dotfile(const char *path)
+{
+	const char *p = path;
+
+	while ((p = strchr(p, '/')) != NULL) {
+		if (p[1] == '.') {
+			return 1;
+		}
+		p++;
+	}
+
+	return 0;
+}
+
+/* Resolved document root, once per gateway process. */
+static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
+{
+	static char resolved[MAXPATHLEN];
+	static int done = 0;
+
+	if (!done) {
+		done = 1;
+		if (!realpath(gw->docroot, resolved)) {
+			resolved[0] = '\0';
+		}
+	}
+
+	return resolved[0] ? resolved : NULL;
+}
+
+static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *path, size_t path_len)
+{
+	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], etag[64];
+	const char *root, *inm;
+	struct evkeyvalq *out;
+	struct stat st;
+	size_t root_len;
+	int fd, cmd;
+
+	cmd = evhttp_request_get_command(req);
+	if (cmd != EVHTTP_REQ_GET && cmd != EVHTTP_REQ_HEAD) {
+		return 0;
+	}
+	/* Anything that is a PHP script, or has PATH_INFO behind one, is the
+	 * worker's business. A directory falls through to index.php too. */
+	if (!path_len || path[path_len - 1] == '/' || strstr(path, ".php/")) {
+		return 0;
+	}
+	if (path_len >= 4 && !strcasecmp(path + path_len - 4, ".php")) {
+		return 0;
+	}
+	if (fpm_http_path_has_dotfile(path)) {
+		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
+		return 1;
+	}
+
+	root = fpm_http_docroot_real(gw);
+	if (!root) {
+		return 0;
+	}
+	root_len = strlen(root);
+
+	if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", root, path) >= sizeof(candidate)) {
+		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
+		return 1;
+	}
+	/* realpath() is the only honest containment check: the textual /../ filter
+	 * in fpm_http_build_request does not catch a symlink pointing outside the
+	 * document root. One extra syscall, but a static hit costs no worker at
+	 * all, so the trade is easy. */
+	if (!realpath(candidate, resolved)) {
+		return 0;			/* no such file: let the worker produce the 404 */
+	}
+	if (strncmp(resolved, root, root_len) || (resolved[root_len] && resolved[root_len] != '/')) {
+		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", gw->pool, path);
+		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
+		return 1;
+	}
+
+	fd = open(resolved, O_RDONLY | O_CLOEXEC);
+	if (fd < 0) {
+		return 0;
+	}
+	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+		close(fd);
+		return 0;			/* directories and specials go to the worker */
+	}
+
+	snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
+		(unsigned long long)st.st_mtime, (unsigned long long)st.st_size);
+
+	out = evhttp_request_get_output_headers(req);
+	inm = evhttp_find_header(evhttp_request_get_input_headers(req), "If-None-Match");
+	if (inm && !strcmp(inm, etag)) {
+		close(fd);
+		evhttp_add_header(out, "ETag", etag);
+		evhttp_send_reply(req, 304, "Not Modified", NULL);
+		return 1;
+	}
+
+	evhttp_add_header(out, "Content-Type", fpm_http_content_type(resolved));
+	evhttp_add_header(out, "ETag", etag);
+
+	if (cmd == EVHTTP_REQ_HEAD) {
+		char len[32];
+
+		close(fd);
+		snprintf(len, sizeof(len), "%llu", (unsigned long long)st.st_size);
+		evhttp_add_header(out, "Content-Length", len);
+		evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+		return 1;
+	}
+
+	/* evbuffer_add_file takes ownership of fd and uses sendfile/mmap where it
+	 * can, so the bytes never pass through our address space. */
+	{
+		struct evbuffer *body = evbuffer_new();
+
+		if (!body || evbuffer_add_file(body, fd, 0, st.st_size) < 0) {
+			if (body) {
+				evbuffer_free(body);
+			} else {
+				close(fd);
+			}
+			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+			return 1;
+		}
+		evhttp_send_reply(req, HTTP_OK, "OK", body);
+		evbuffer_free(body);
+	}
+
+	return 1;
+}
+
+/* Returns 1 when the gateway answered on its own; 0 to hand the request to a
+ * worker. */
+static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+{
+	const char *uri = evhttp_request_get_uri(req);
+	const struct evhttp_uri *decoded_uri;
+	const char *raw_path;
+	char *path;
+	size_t path_len;
+	int answered = 0;
+
+	if (!static_files || !uri) {
+		return 0;
+	}
+
+	decoded_uri = evhttp_request_get_evhttp_uri(req);
+	raw_path = decoded_uri ? evhttp_uri_get_path(decoded_uri) : NULL;
+	if (!raw_path || !*raw_path) {
+		return 0;
+	}
+
+	path = evhttp_uridecode(raw_path, 0, &path_len);
+	if (!path) {
+		return 0;
+	}
+	if (path_len != strlen(path) || path[0] != '/' || strstr(path, "/../") ||
+	    (path_len >= 3 && !memcmp(path + path_len - 3, "/..", 3))) {
+		free(path);
+		return 0;			/* let fpm_http_build_request produce the 400 */
+	}
+
+	/* Kolejnosc bedzie miala znaczenie, gdy dojda ACME i /status: najpierw
+	 * rzeczy o ustalonej sciezce, dopiero na koncu pliki z dysku. */
+	answered = fpm_http_serve_static(gw, req, path, path_len);
+
+	free(path);
+
+	return answered;
+}
+
 static void fpm_http_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
-	fpm_http_conn *c = calloc(1, sizeof(*c));
+	fpm_http_conn *c;
 	int error;
 
+	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
+	 * zajmowac slotu workera dla pliku, ktory oddamy sami. */
+	if (fpm_http_try_local(gw, req)) {
+		return;
+	}
+
+	c = calloc(1, sizeof(*c));
 	c->gw = gw;
 	c->req = req;
 	c->evcon = evhttp_request_get_connection(req);
@@ -1066,6 +1312,11 @@ static void fpm_http_settings_init(void)
 		nproc_wanted = (unsigned)atoi(env);
 	}
 	reuseport = getenv("FPM_HTTP_REUSEPORT") && atoi(getenv("FPM_HTTP_REUSEPORT")) > 0;
+
+	env = getenv("FPM_HTTP_STATIC");
+	if (env) {
+		static_files = atoi(env) > 0;
+	}
 
 	env = getenv("FPM_HTTP_IDLE_MS");
 	if (env) {

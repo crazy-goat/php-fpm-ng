@@ -2959,7 +2959,20 @@ Benchmark PHP 8.5, pięć naprzemiennych serii:
 | `fastcgi-ng` | 195,433 us | 178,824 us | **-8,5%** | 2018,63 | 2037,15 | **+0,9%** |
 | `http`, `Connection: close` | 525,209 us | 490,612 us | **-6,6%** | 2682,67 | 2705,14 | **+0,8%** |
 
-W obu testach `writev()` miało niższy CPU/request we wszystkich pięciu parach. Pierwsza seria HTTP z keep-alive osiągała około 50 req/s przez znany efekt Nagle/delayed ACK, dlatego jej przepustowości nie użyto jako wyniku optymalizacji.
+W obu testach `writev()` miało niższy CPU/request we wszystkich pięciu parach. Pierwsza seria HTTP z keep-alive osiągała około 50 req/s przez efekt Nagle/delayed ACK, dlatego jej przepustowości nie użyto jako wyniku optymalizacji.
+
+### `TCP_NODELAY` na listenerze HTTP
+
+Gateway ustawiał `TCP_NODELAY` na połączeniu do workera, ale nie na połączeniu klienta. Ustawienie opcji raz na gnieździe nasłuchującym jest dziedziczone przez zaakceptowane sockety i nie dodaje syscalla do ścieżki requestu.
+
+Dla odpowiedzi 262 144 B przez keep-alive, pięć naprzemiennych serii `wrk -t1 -c2 -d10s`:
+
+- mediana przepustowości: 49,74 -> 2686,13 req/s (**+5300%**);
+- łączny CPU gatewaya i workera/request: 643,939 -> 494,200 us (**-23,25%**);
+- wszystkie przebiegi baseline mieściły się w 49–53 req/s;
+- wszystkie przebiegi z `TCP_NODELAY` mieściły się w 2648–2696 req/s.
+
+Mała odpowiedź nie wykazała poprawy (mediany 12833,55 i 12668,64 req/s), zgodnie z oczekiwaniem: mieści się w jednym zapisie i nie uruchamia opóźnienia małego końcowego fragmentu. Regresja przeszła dla małej i dużej odpowiedzi, binarnego POST 65 792 B, keep-alive, `Connection: close` i zerwanego odbiorcy.
 
 Na masterze wcześniejszy benchmark dał około **-9,3% CPU/request** i **+4,8% req/s**. Pomiar pamięci nie wykazał kosztu: mediana RSS 7812 -> 7792 KB, PSS 3921 -> 3911 KB.
 

@@ -213,7 +213,7 @@ Pięć naprzemiennych serii na PHP 8.5, `wrk -t1 -c2 -d10s`:
 | `http`, `Connection: close` | łączny CPU gatewaya i workera/request | 525,209 us | 490,612 us | **-6,6%** |
 | `http`, `Connection: close` | req/s | 2682,67 | 2705,14 | **+0,8%** |
 
-Spadek CPU wystąpił we wszystkich pięciu parach obu benchmarków. Pierwszego pomiaru HTTP z keep-alive, około 50 req/s, nie użyto do oceny przepustowości z powodu znanego efektu Nagle/delayed ACK; przebieg z `Connection: close` usunął to zakłócenie.
+Spadek CPU wystąpił we wszystkich pięciu parach obu benchmarków. Pierwszego pomiaru HTTP z keep-alive, około 50 req/s, nie użyto do oceny `writev()`, ponieważ brak `TCP_NODELAY` na listenerze HTTP uruchamiał Nagle/delayed ACK. Ustawienie tej opcji raz na listenerze (dziedziczonej przez zaakceptowane sockety) podniosło medianę dużej odpowiedzi keep-alive z 49,74 do 2686,13 req/s i obniżyło łączny CPU gatewaya i workera/request z 643,939 do 494,200 us.
 
 Regresja PHP 8.5 przeszła dla małej i dużej odpowiedzi, binarnego POST 65 792 B z kontrolą SHA-256, keep-alive/close oraz zerwanego odbiorcy. Odpowiedzi od 1 B do 1 MiB, w tym granice rekordów FastCGI, zostały wcześniej porównane bajt w bajt na masterze.
 

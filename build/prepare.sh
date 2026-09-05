@@ -11,6 +11,18 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 [ -d "$PHPSRC/sapi/fpm" ] || { echo "to nie wyglada na php-src: $PHPSRC" >&2; exit 1; }
 
+# MUSI byc PRZED odtworzeniem katalogu: nizej sapi/fpmng jest kasowane i robione
+# na nowo z upstreamowego sapi/fpm, w ktorym nie ma bloku PHP_FPMNG_FILES.
+# Sluzy do wykrycia, czy doszedl albo znikl plik .c — patrz ostrzezenie na koncu.
+OLD_SOURCES=""
+if [ -f "$PHPSRC/sapi/fpmng/config.m4" ]; then
+  # Tylko blok PHP_FPMNG_FILES — w config.m4 sa tez inne wzmianki o plikach
+  # (fpm_systemd.c, fpm_trace.c, www.c pod warunkami), ktore nie naleza do listy.
+  OLD_SOURCES=$(sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
+      "$PHPSRC/sapi/fpmng/config.m4" \
+    | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u)
+fi
+
 rm -rf "$PHPSRC/sapi/fpmng"
 cp -r "$PHPSRC/sapi/fpm" "$PHPSRC/sapi/fpmng"
 
@@ -37,6 +49,24 @@ LIST=$(echo "$SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 awk -v list="$LIST" '{ gsub(/@FPMNG_SOURCES@/, "\n" list "\n  "); print }' \
   "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"
+
+# Czy lista zrodel sie zmienila wzgledem poprzedniego przebiegu? Jesli tak, to
+# istniejacy katalog budowania ma ZAMROZONA liste obiektow w Makefile i nie
+# zobaczy nowego pliku. Objawia sie to bledem linkowania PO przekompilowaniu
+# wszystkiego — albo, gdy nowy plik nie eksportuje uzywanych symboli, wcale:
+# build przechodzi i wychodzi binarka po cichu pozbawiona nowego typu poola.
+# Dlatego ostrzegamy glosno i na koncu, zeby nie zjechalo z ekranu.
+# Uwaga: ten skrypt to /bin/sh, wiec zadnych <(...) — porownanie idzie przez
+# pliki tymczasowe.
+SOURCES_CHANGED=""
+NEW_SORTED=$(echo "$SOURCES" | sort -u)
+if [ -n "$OLD_SOURCES" ] && [ "$OLD_SOURCES" != "$NEW_SORTED" ]; then
+  _old=$(mktemp) && _new=$(mktemp)
+  printf '%s\n' "$OLD_SOURCES" > "$_old"
+  printf '%s\n' "$NEW_SORTED" > "$_new"
+  SOURCES_CHANGED=$(diff "$_old" "$_new" | grep '^[<>]' || true)
+  rm -f "$_old" "$_new"
+fi
 
 # Latki na pliki poza sapi/ — odstepstwo od "upstream nietkniety", wiec glosno.
 # Zasady i terminy waznosci: patches/README.md
@@ -113,3 +143,20 @@ fi
 echo "  zrodel z upstreamu + naszych: $(echo "$SOURCES" | wc -l | tr -d ' ')"
 echo "  nasze pliki:"
 (cd "$REPO/sapi/fpmng" && find . -type f | sed 's|^\./|    |' | sort)
+
+if [ -n "$SOURCES_CHANGED" ]; then
+  echo
+  echo "================================================================"
+  echo "UWAGA: zmienila sie lista plikow zrodlowych sapi/fpmng:"
+  echo "$SOURCES_CHANGED" | sed 's/^/    /'
+  echo
+  echo "Istniejacy katalog budowania ma zamrozona liste obiektow i tego"
+  echo "NIE zobaczy. Zanim zbudujesz, wykonaj:"
+  echo
+  echo "    cd $PHPSRC && ./buildconf --force"
+  echo "    cd <katalog-budowania> && ./config.nice && make"
+  echo
+  echo "Pominiecie tego konczy sie bledem linkowania — albo, co gorsza,"
+  echo "binarka bez nowego kodu, ktora buduje sie bez slowa skargi."
+  echo "================================================================"
+fi

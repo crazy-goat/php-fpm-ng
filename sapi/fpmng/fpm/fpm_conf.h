@@ -98,6 +98,15 @@ struct fpm_worker_pool_config_s {
 	int decorate_workers_output;
 	int clear_env;
 	char *security_limit_extensions;
+	/* fpm-ng: pool.type = supervisor, patrz fpm_pool_supervisor.c */
+	char *supervisor_script;
+	int supervisor_processes;
+	char *supervisor_restart;		/* "always" (domyslne) | "on-failure" | "never" */
+	int supervisor_restart_delay;
+	int supervisor_restart_delay_max;
+	int supervisor_restart_max;		/* 0 = bez limitu, nigdy nie poddawaj sie */
+	int supervisor_stop_timeout;
+	int supervisor_fatal;			/* wyczerpanie restart_max ubija cala mastera */
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

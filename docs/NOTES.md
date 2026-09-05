@@ -563,6 +563,144 @@ Po supervisorze i cronie, razem z metrykami — bo dopiero wtedy wiadomo, co
 naprawdę jest do pokazania. Robienie tego wcześniej to zgadywanie kształtu danych.
 
 
+## 3k. Metryki z PHP — API i decyzje projektowe (2026-09-05)
+
+### Gdzie mieszka kod: ROZSZERZENIE, nie funkcje SAPI
+
+`configure.ac:1097` woła `esyscmd(./build/config-stubs ext)` — czyli `ext/` jest
+wykrywane tym samym globem co `sapi/`. Więc repo może zawierać
+`ext/fpmng_metrics/`, a `prepare.sh` wrzuci je obok `sapi/fpmng/`, nadal bez
+łatek na upstream.
+
+To rozstrzyga rozwidlenie z sekcji o metrykach: funkcje rejestrowane
+w `fpm_main.c` istniałyby tylko pod fpm-ng, a tryb CLI z ręcznie włączonymi
+metrykami jest jednym z celów produktu. Pod fpm-ng rozszerzenie używa pamięci
+dzielonej; pod CLI ma magazyn w procesie i funkcję zwracającą gotowy tekst,
+żeby skrypt mógł go sam wystawić. Ten sam kod PHP działa w obu miejscach.
+
+### API
+
+```php
+fpm_metric_register(string $name, string $type, string $help, array $buckets = []): bool
+fpm_metric_inc(string $name, float $by = 1.0, array $labels = []): bool
+fpm_metric_set(string $name, float $value, array $labels = []): bool
+fpm_metric_observe(string $name, float $value, array $labels = []): bool
+```
+
+Typ wynika z użytej funkcji, `register` jest opcjonalny (HELP, kubełki).
+Wszystkie zwracają `bool` — to jest sposób na wykrycie wyczerpania puli, nie
+ozdoba.
+
+### Współbieżność: SLOTY PER WORKER, nie atomiki na wspólnym liczniku
+
+Kilkunastu workerów walących atomowo w ten sam licznik to kontencja o linię
+cache przy każdym `inc`. Zamiast tego każdy worker pisze do własnego fragmentu
+bez synchronizacji, a **sumowanie robi się przy odczycie**. Zero blokad.
+
+Slot kluczowany **indeksem procesu ze scoreboardu, nie pidem** — inaczej przy
+recyklingu po `pm.max_requests` licznik startowałby od zera.
+
+Gauge się nie sumuje: domyślnie suma, ale przy rejestracji musi dać się wybrać
+agregację (dla "użycie pamięci" sensowne jest maksimum). Prometheus ma ten sam
+problem w trybie wieloprocesowym i rozwiązuje tak samo.
+
+### Kardynalność — twarda reguła
+
+Stały limit serii z dyrektywy. Po wyczerpaniu **odrzucamy i zwracamy `false`**,
+nigdy nie rośniemy. Ostrzeżenie w logu **raz**, nie przy każdym requeście,
+i koniecznie z nazwą metryki, która wyczerpała pulę — bez tego operator nie
+znajdzie winowajcy.
+
+### Histogramy WCHODZĄ do pierwszej wersji
+
+KOREKTA wcześniejszej oceny (mojej, błędnej). Dla consumera kolejki rozkład
+czasu przetwarzania to jest ta jedna metryka, która ma sens — średnia zakłamuje
+ogon, a to właśnie ogon zapycha kolejkę. Koszt też przeszacowałem: histogram
+z ustalonymi kubełkami to N liczników plus suma plus licznik, przy inkrementacji
+szukanie kubełka wśród kilkunastu wartości. Pracochłonne są exemplary,
+histogramy natywne i estymacja kwantyli — a tego nie robimy.
+
+Ostrzejsza reguła: **histogramy nie są drogie same z siebie, są drogie
+w połączeniu z etykietami o nieograniczonej liczbie wartości.** Histogram czasu
+requestu z etykietą `route` przy 100 trasach i 12 kubełkach to 1200 serii razy
+liczba workerów. Ten sam histogram u consumera z etykietą `queue` przy 5
+kolejkach to 60 serii.
+
+**To przesądza `fpm_metric_observe`:** przy supervisorze NIE MAMY jak wywnioskować,
+gdzie kończy się jedno zadanie — skrypt to długo żyjąca pętla, granicę zna
+wyłącznie aplikacja. Więc to nie jest wygodny dodatek, tylko jedyna droga do
+sensownych metryk consumera.
+
+Domyślne kubełki muszą sięgać dalej niż typowe dla HTTP (zadania trwają dłużej
+niż requesty): 0.005 do 60 s.
+
+### Jak konsument rozróżnia, czego dotyczy metryka
+
+Nazwa poola jest bezpiecznym kluczem — zweryfikowane, `fpm_conf.c:1439` przy
+powtórzonej sekcji `[nazwa]` wraca do istniejącego poola zamiast tworzyć drugi.
+
+Dwa mechanizmy na dwa różne pytania:
+
+1. **Jakiego typu jest pool** — metryka informacyjna, zawsze obecna:
+   `fpmng_pool_info{pool="queue",type="supervisor"} 1`
+2. **Których pól się spodziewać** — po NAZWIE metryki, nie po etykiecie.
+   `fpmng_fcgi_idle_processes` dla poola supervisora **po prostu nie istnieje**.
+   Nazwa metryki ma mieć jedno znaczenie i jednostkę; "idle" supervisora to nie
+   to samo pojęcie co "idle" poola FastCGI.
+
+**PUŁAPKA:** nigdy nie emitować fałszywego zera tam, gdzie pojęcie nie ma sensu.
+`fpmng_fcgi_idle_processes{pool="queue"} 0` skończy się alertem "idle == 0"
+i budzikiem z powodu poola, który nie ma takiego pojęcia. **Brak serii to
+informacja, fałszywe zero to kłamstwo.**
+
+Stan jako enum z etykietą (`state="running"|"backoff"|"gave_up"`, każdy 0/1),
+nie jedna liczba kodująca stan. JSON: pola nieadekwatne nieobecne. Strona dla
+człowieka: osobna tabela na typ.
+
+
+## 3l. TLS i ACME — DECYZJA: robimy, ale na końcu (2026-09-05)
+
+Piotr: "TLS i acme na koniec - ale robimy". Przestaje być otwartym pytaniem.
+
+### Konsekwencja 1: domyka sprawę `http-direct`
+
+Przy TLS worker nie ma jak pisać prosto do klienta — strumień jest szyfrowany,
+a stan sesji siedzi w bramce. Wariant in-process musiałby dać każdemu workerowi
+własny stan TLS i obsługę certyfikatów. To praktycznie **zamyka** tamtą drogę,
+nie tylko odkłada. Nie wracać do tematu bez nowego argumentu.
+
+### Konsekwencja 2: ACME piszemy w PHP, nie w C
+
+Klient ACME to podpisy JOSE, JSON, rozmowa HTTP z Let's Encrypt i zarządzanie
+zamówieniem. W C to kilka tysięcy linii i stała powierzchnia na błędy
+bezpieczeństwa. W PHP kilkaset, a biblioteki istnieją.
+
+A my budujemy maszynerię, która to uruchomi:
+- **odnawianie certyfikatu = pool typu `cron`**
+- **wyzwanie HTTP-01 = podanie pliku spod `/.well-known/acme-challenge/`**,
+  czyli ten sam mechanizm co pliki statyczne w bramce
+
+W C zostaje: TLS w bramce przez `bufferevent_openssl` (libevent to ma, OpenSSL
+już linkujemy statycznie — sprawdzone w sekcji 3c) plus przeładowanie
+certyfikatu bez zrywania połączeń, we wszystkich procesach bramki.
+
+### DWIE RZECZY DO ZAPROJEKTOWANIA TERAZ, NIE NA KOŃCU
+
+1. **Ścieżka requestu w bramce potrzebuje JEDNEGO punktu, w którym odpowiadamy
+   bez workera.** Pliki statyczne, wyzwanie ACME, `/status` — to ten sam haczyk.
+   Jeśli pliki statyczne zrobimy doraźnym `if`-em, przy ACME będziemy przepisywać.
+2. **Certyfikaty i konto ACME to STAN, nie kod.** Muszą leżeć na wolumenie
+   zapisywalnym, nie w binarce — wchodzą do tego samego podziału "kod niezmienny
+   kontra stan na wolumenie", który i tak trzeba zdefiniować przy self-runnerze
+   (sekcja 3a, punkt 1). Rozstrzygnąć raz.
+
+### Konsekwencja konfiguracyjna
+
+HTTP-01 wymaga portu 80. Setup z ACME potrzebuje i 80, i 443 — jeden na wyzwanie
+i przekierowanie, drugi na ruch. Model konfiguracji musi to obsłużyć; sprawdzić,
+czy "jeden pool, jeden port" wystarcza.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude
@@ -599,7 +737,9 @@ węźle. Przy `-t4 -c64` pomiar mierzy walkę o hyperthready, nie koszt hopa
 
 ## 5. Otwarte pytania
 
-### TLS — najważniejsze, do rozstrzygnięcia przed pierwszym commitem
+### TLS — ROZSTRZYGNIĘTE 2026-09-05: robimy, na końcu. Patrz sekcja 3l.
+
+Poniższe zostaje jako zapis rozważań; wybrana została droga własnego HTTPS z ACME.
 
 Przy małym projekcie na VPS-ie nie ma load balancera. Trzy opcje:
 1. Przed fpm-ng stoi Caddy/Traefik — ale wtedy "nic więcej nie potrzebujesz"

@@ -136,8 +136,22 @@ run_child: /* only workers reach this point */
 	{
 		struct fpm_worker_pool_s *child_wp = fpm_pool_type_current_pool();
 
+		{
+			char dbgbuf[256];
+			int n = snprintf(dbgbuf, sizeof(dbgbuf), "DEBUG run_child: pid=%d child_wp=%p name=%s\n",
+				(int) getpid(), (void *) child_wp, child_wp ? child_wp->config->name : "(null)");
+			write(2, dbgbuf, n);
+		}
+
 		if (child_wp) {
 			const struct fpm_pool_type_s *type = fpm_pool_type_of(child_wp);
+
+			{
+				char dbgbuf[256];
+				int n = snprintf(dbgbuf, sizeof(dbgbuf), "DEBUG run_child: type=%s child_main=%p\n",
+					type->name, (void *) type->child_main);
+				write(2, dbgbuf, n);
+			}
 
 			if (type->child_main) {
 				type->child_main(child_wp);

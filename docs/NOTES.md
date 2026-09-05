@@ -1696,12 +1696,16 @@ mastera -> wszystkie procesy znikaja < 2,5 s.
   TO jest dzis prawdziwa sciana dla frameworkow (kazdy request laduje te same
   klasy). Z opcache ten sam problem ma inna postac: `zend_accel_load_script`
   binduje klasy do `EG(class_table)` per request.
-- **opcache zaklada jeden request na proces.** Z wlaczonym opcache requesty
-  2..N tracily `$_GET`/`$_SERVER`: `ext/opcache/ZendAccelerator.c:1958,2481`
-  odpala auto-globale tylko dla `ping_auto_globals_mask & ~ZCG(auto_globals_mask)`,
-  a maska zeruje sie w `accel_activate` (`:2873`), czyli raz na
-  request-kontener. POC dziala z `opcache.enable = off` — czyli bez opcache.
-  Analogiczne cache per request: `ZCG(cwd)`, `ZCG(include_path)`.
+- **opcache zaklada jeden request na proces.** Pierwotnie z wlaczonym opcache
+  requesty 2..N tracily `$_GET`/`$_SERVER`: cache hit omijal kompilacje, na
+  ktorej POC polegal przy uruchamianiu callbackow auto-globali. POC jawnie
+  wywoluje teraz `zend_is_auto_global_str()` dla kazdego requestu; test 3 x 4
+  rownoleglych requestow z aktywnym opcache zachowal osobne `$_GET`, `$_SERVER`,
+  `$_COOKIE`, `$GLOBALS` i `get_included_files()` (4 x 500 ms w 506-508 ms).
+  Nadal **zalecane jest `opcache.enable = off`**: opcache oraz jego stan
+  `ZCG(cwd)`, `ZCG(include_path)` nie byly projektowane dla wielu requestow
+  przeplatanych w jednym procesie, a test nie dowodzi izolacji wszystkich
+  sciezek rozszerzenia.
 - **Bez keep-alive po stronie poola**: `fcgi_accept_request` na otwartym fd
   czyta blokujaco (`main/fastcgi.c:1445`, bez poll). Nasza bramka HTTP trzyma
   polaczenia trwale — dopiac przez asynchroniczny poll na fd przed odczytem.

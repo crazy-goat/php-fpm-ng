@@ -1,4 +1,4 @@
-/* fpm-ng: pool.type = async — EKSPERYMENT (patrz fpm_pool_async.h, NOTES 3t).
+/* fpm-ng: pool.executor = async — EKSPERYMENT (patrz fpm_pool_async.h, NOTES 3t).
  *
  * Model: dziecko robi JEDEN php_request_startup() ("request-kontener"), a potem
  * kazdy request FastCGI dostaje wlasna korutyne True Async. Stan SAPI (SG)
@@ -66,10 +66,10 @@ int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 #ifndef FPMNG_ASYNC_ENGINE
 # ifdef FPMNG_ASYNC_NO_ZTS
-	zlog(ZLOG_ALERT, "[pool %s] pool.type = async is not supported in a ZTS build (PHP %s)",
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async is not supported in a ZTS build (PHP %s)",
 		wp->config->name, PHP_VERSION);
 # else
-	zlog(ZLOG_ALERT, "[pool %s] pool.type = async requires a PHP engine with the True Async API "
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async requires a PHP engine with the True Async API "
 		"(Zend/zend_async_API.h); this binary is PHP %s without it",
 		wp->config->name, PHP_VERSION);
 # endif
@@ -79,13 +79,13 @@ int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * fpm_init()), wiec MINIT ext/async juz zarejestrowal scheduler i reaktor
 	 * — mozna to sprawdzic tutaj, a nie dopiero w dziecku. */
 	if (!zend_async_is_enabled()) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.type = async: the engine has the True Async API (%s) "
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: the engine has the True Async API (%s) "
 			"but no scheduler/reactor is registered — ext/async is not loaded",
 			wp->config->name, ZEND_ASYNC_API);
 		return -1;
 	}
 	if (wp->config->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.type = async supports only pm = static "
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async supports only pm = static "
 			"(dynamic/ondemand scale on scoreboard idle/active counters this type does not maintain)",
 			wp->config->name);
 		return -1;
@@ -99,7 +99,7 @@ int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 
 void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	zlog(ZLOG_ALERT, "[pool %s] pool.type = async: engine without True Async API, this should have been rejected by validate()",
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: engine without True Async API, this should have been rejected by validate()",
 		wp->config->name);
 	exit(FPM_EXIT_SOFTWARE);
 }

@@ -54,7 +54,8 @@ extern struct fpm_global_config_s fpm_global_config;
  */
 struct fpm_worker_pool_config_s {
 	char *name;
-	char *type;			/* fpm-ng: pool.type, pusty = fcgi (patrz fpm_pool_type.h) */
+	char *type;			/* fpm-ng: pool.type, pusty = fastcgi (patrz fpm_pool_type.h) */
+	char *executor;			/* fpm-ng: pool.executor, pusty = classic */
 	char *set_directives;		/* fpm-ng: ";nazwa;nazwa;" faktycznie ustawionych dyrektyw,
 					 * zeby typ poola mogl odrzucic te, ktore go nie dotycza —
 					 * z samej wartosci nie da sie odroznic "nieustawione"

@@ -1,4 +1,4 @@
-/* fpm-ng: pool.type = fiber — przechwycenie gniazd w warstwie strumieni.
+/* fpm-ng: pool.executor = fiber — przechwycenie gniazd w warstwie strumieni.
  *
  * php_stream_xport_register() (main/streams/php_stream_transport.h, PHPAPI)
  * pozwala podmienic fabryke transportu "tcp"/"unix". Nasza fabryka wola

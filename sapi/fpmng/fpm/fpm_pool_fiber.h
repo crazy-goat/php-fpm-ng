@@ -1,4 +1,4 @@
-/* fpm-ng: pool.type = fiber — EKSPERYMENT.
+/* fpm-ng: pool.executor = fiber — EKSPERYMENT.
  *
  * Jeden proces, wiele requestow FastCGI w locie, kazdy w osobnym fiberze
  * silnika (Zend/zend_fibers.h: zend_fiber_start/resume/suspend sa ZEND_API)

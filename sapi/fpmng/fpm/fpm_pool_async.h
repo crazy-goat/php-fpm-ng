@@ -1,4 +1,4 @@
-/* fpm-ng: pool.type = async — EKSPERYMENT.
+/* fpm-ng: pool.executor = async — EKSPERYMENT.
  *
  * Jeden proces, wiele requestow FastCGI w locie, kazdy w osobnej korutynie
  * True Async (fork php-src true-async/php-src + ext/async). Na silniku bez
@@ -11,7 +11,7 @@
 
 struct fpm_worker_pool_s;
 
-/* Dyrektywy odrzucane dla pool.type = async (patrz fpm_pool_type_check_directives). */
+/* Dyrektywy odrzucane dla pool.executor = async (patrz fpm_pool_type_check_directives). */
 extern const char *const fpm_pool_async_rejects[];
 
 /* fpm_pool_type_s.validate — odrzuca pool, gdy silnik nie ma True Async API

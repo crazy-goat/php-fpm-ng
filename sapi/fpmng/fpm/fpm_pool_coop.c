@@ -116,14 +116,14 @@ static const char fpm_coop_opcache_msg[] =
 int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{{ */
 {
 #ifdef ZTS
-	zlog(ZLOG_ALERT, "[pool %s] pool.type = %s is not supported in a ZTS build (PHP %s): "
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s is not supported in a ZTS build (PHP %s): "
 		"it swaps sapi_globals/executor_globals by value, which only works in NTS",
 		wp->config->name, type_name, PHP_VERSION);
 	return -1;
 #else
 	if (wp->config->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pm = static "
-			"(dynamic/ondemand scale on scoreboard idle/active counters this type does not maintain)",
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s supports only pm = static "
+			"(dynamic/ondemand scale on scoreboard idle/active counters this executor does not maintain)",
 			wp->config->name, type_name);
 		return -1;
 	}
@@ -132,7 +132,7 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 	if (zend_get_extension("Zend OPcache")
 		&& zend_ini_long("opcache.enable", sizeof("opcache.enable") - 1, 0)
 		&& !fpm_coop_pool_disables_opcache(wp)) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.type = %s: %s", wp->config->name, type_name, fpm_coop_opcache_msg);
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: %s", wp->config->name, type_name, fpm_coop_opcache_msg);
 		return -1;
 	}
 	return 0;

@@ -20,6 +20,12 @@ struct fpm_pool_type_s {
 	unsigned requires_pm:1;			/* pool musi miec sensowne pm/pm.max_children */
 	unsigned serves_requests:1;		/* liczy sie w scoreboardzie requestow */
 
+	/* Dyrektywy, ktorych ten typ nie obsluguje. Zakonczona NULL-em, moze byc NULL.
+	 * Lista ODRZUCEN, nie dopuszczen — dzieki temu nowa dyrektywa jest domyslnie
+	 * dozwolona wszedzie i nie psuje zgodnosci wstecznej przez przeoczenie.
+	 * Nazwa konczaca sie kropka dziala jak prefiks: "pm." lapie cale pm.*. */
+	const char *const *rejects;
+
 	/* Sprawdzenia specyficzne dla typu; NULL = brak. Zwraca 0 albo -1. */
 	int (*validate)(struct fpm_worker_pool_s *wp);
 
@@ -43,5 +49,8 @@ const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp);
 
 /* Pool biezacego dziecka, albo NULL poza dzieckiem. */
 struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
+
+/* Odrzuca dyrektywy nieobslugiwane przez ten typ. 0 albo -1. */
+int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
 #endif

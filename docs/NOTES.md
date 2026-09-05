@@ -460,6 +460,30 @@ pool.type = xxx  -> ALERT: unknown pool.type 'xxx'; known types: fcgi, http
 **Uboczny efekt: zniknął jeden z blokerów.** Bramka nie startuje już domyślnie
 na każdym poolu TCP — trzeba o nią poprosić przez `pool.type = http`.
 
+### Ograniczanie dyrektyw per typ
+
+Wymaganie: blok ma być jednego typu i mieć **ograniczony** zestaw dyrektyw —
+te bez sensu dla typu mają być odrzucane, nie po cichu ignorowane.
+
+Problem do rozwiązania: z samej wartości w konfiguracji **nie da się odróżnić
+"nieustawione" od "ustawione na wartość domyślną"** (`pm_max_children = 0` może
+znaczyć jedno albo drugie). Dlatego `fpm_conf.c` zapamiętuje przy parsowaniu
+listę faktycznie ustawionych dyrektyw w `config->set_directives` jako
+`";nazwa;nazwa;"` — delimitery po obu stronach, żeby wyszukiwanie nie dawało
+fałszywego trafienia na prefiksie (`pm` kontra `pm.max_children`).
+
+Typ deklaruje `rejects` — tablicę nazw zakończoną NULL-em. **Lista ODRZUCEŃ,
+nie dopuszczeń**: nowa dyrektywa jest domyślnie dozwolona wszędzie, więc
+przeoczenie nie psuje zgodności wstecznej. Nazwa kończąca się kropką działa jak
+prefiks (`pm.` łapie całe `pm.*`).
+
+STAN: mechanizm zaimplementowany i skompilowany, ale **nie ma jeszcze
+konsumenta** — ani `fcgi`, ani `http` niczego nie odrzucają, bo dziś oba
+używają tych samych dyrektyw. Pierwszym prawdziwym testem będzie `supervisor`
+(odrzuci `listen`, `pm.start_servers`, `pm.min_spare_servers`,
+`pm.max_spare_servers`, `request_terminate_timeout`, `slowlog`, `ping.path`,
+`security.limit_extensions`). Do tego czasu traktować jako niezweryfikowany.
+
 ### Dwie rzeczy warte zapamiętania z implementacji
 
 **Dziecko odnajduje swój pool przez scoreboard.** Naiwne rozwiązanie (użyć

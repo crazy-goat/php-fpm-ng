@@ -663,7 +663,10 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * cudzy fiber — patrz docs/fiber_errors.md. Uwaga: php_admin_value
 	 * blokuje ini_set, wiec z php_admin_value[max_execution_time] = 0
 	 * set_time_limit() zwraca false i nigdy tu nie ma czego przywracac. */
-	{
+	if (EG(modified_ini_directives)) {
+		/* Straznik jak w zend_ini_deactivate(): bez ini_set/set_time_limit
+		 * w skrypcie ta tablica jest NULL, wiec typowy request nie placi tu
+		 * ani alokacji zend_string, ani przeszukania tablicy ini. */
 		zend_string *key = ZSTR_INIT_LITERAL("max_execution_time", false);
 
 		zend_restore_ini_entry(key, ZEND_INI_STAGE_DEACTIVATE);

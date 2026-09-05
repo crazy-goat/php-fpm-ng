@@ -81,7 +81,7 @@ Brak `pool.type` → `fcgi`. Zero BC.
 |---|---|---|
 | `fcgi` | jak dziś | gotowe, tylko dispatch |
 | `http` | bramka HTTP na libevent przed poolem | POC działa, patrz sekcja 6 |
-| `supervisor` | N długo żyjących procesów, wskrzeszanych | gotowe, patrz sekcja 3j |
+| `supervisor` | N długo żyjących procesów, wskrzeszanych | gotowe, patrz sekcja 3o |
 | `cron` | skrypt odpalany z harmonogramu | do zrobienia, małe |
 
 Metryki to rzecz przekrojowa, nie typ poola.
@@ -852,210 +852,7 @@ Nazwa produktu `php-fpm-ng` na razie bez zmian; osobna sprawa, patrz sekcja 9
 (znak towarowy).
 
 
-## 4. Zmierzone: wydajność NIE jest argumentem
-
-Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude
-(`reference_k3d_bench_poligon.md`).
-
-CPU na request, pomiar czysty (`wrk -t1 -c2`, węzeł nienasycony):
-
-| skrypt | nginx+fpm | bramka | oszczędność |
-|---|---|---|---|
-| hello.php (~0) | 227 µs | 128 µs | 44% |
-| work.php (~1 ms) | ~1590 µs | ~1400 µs | 12% |
-| w5.php (7.7 ms) | 7917 µs | 7116 µs | 10% |
-| w20.php (74 ms) | 74132 µs | 73548 µs | 0.8% |
-
-Realna aplikacja (20-100 ms CPU) leży między dwoma ostatnimi wierszami —
-**kilka procent**. Przepustowość analogicznie: 2.21x na pustym skrypcie,
-1.06x przy 1 ms, 1.01x przy 5 ms.
-
-Sama bramka kosztuje **najwyżej ~25 µs/request** (C razem 128 µs vs sam
-php-fpm w B 104 µs). To cały budżet dla dalszych optymalizacji.
-
-**Wnioski, do których nie wracamy:**
-- io_uring — odpada, atakuje część z tych 25 µs, a wymaga drugiego backendu
-  pętli zdarzeń tylko pod Linuksem
-- wariant in-process (HTTP w workerze) — odpada, rząd 50-60 µs zysku za
-  wejście HTTP w cykl życia workera (`max_requests`, `request_terminate_timeout`,
-  brak miejsca na kolejkowanie)
-- **żadnych dalszych optymalizacji wydajności**, cała energia w funkcje
-
-Metodologia: poligon ma 4 rdzenie fizyczne / 8 wątków i wrk siedzi na tym samym
-węźle. Przy `-t4 -c64` pomiar mierzy walkę o hyperthready, nie koszt hopa
-(ta sama para dała 1670 µs vs 234 µs różnicy). Miarodajne jest dopiero
-`wrk -t1 -c2`.
-
-## 5. Otwarte pytania
-
-### TLS — ROZSTRZYGNIĘTE 2026-09-05: robimy, na końcu. Patrz sekcja 3l.
-
-Poniższe zostaje jako zapis rozważań; wybrana została droga własnego HTTPS z ACME.
-
-Przy małym projekcie na VPS-ie nie ma load balancera. Trzy opcje:
-1. Przed fpm-ng stoi Caddy/Traefik — ale wtedy "nic więcej nie potrzebujesz"
-   przestaje być prawdą
-2. fpm-ng umie HTTPS łącznie z ACME — spory kawałek roboty
-3. Terminacja TLS poza zakresem, w dokumentacji wprost (Cloudflare / reverse proxy)
-
-Kontekst konkurencyjny: FrankenPHP celuje w tę samą grupę i ma jedną binarkę,
-HTTP, pliki statyczne, automatyczne HTTPS przez Caddy, tryb worker. **Nie ma**
-deklaratywnych consumerów i cronów. Czyli bramka HTTP jest u nas częścią
-najmniej wyróżniającą, a supervisor i cron tym, czego nie ma nikt inny.
-Jeśli trzeba będzie gdzieś przyciąć ambicje — raczej w HTTP.
-
-### Statyczna binarka — do sprawdzenia PIERWSZE
-
-Cała koncepcja obrazu bez systemu stoi na tym, że da się zlinkować statycznie
-PHP + FPM + libevent + pcre + zlib. Z musl idzie gładko, z glibc walka z NSS.
-**Jeśli to okaże się piekłem, koncepcja bierze w łeb** — lepiej wiedzieć przed
-napisaniem czterech typów poola.
-
-Dobra wiadomość: `fpm_unix.c:51` ma `fpm_unix_is_id` — jeśli w `user`/`group`
-wpisać liczbę, FPM nie woła `getpwnam`. Czyli `user = 65534` działa bez
-`/etc/passwd`. To zwykle wywala scratch.
-
-### Zakres hot-reloadu
-
-Prawdziwy hot-reload (diff konfiguracji, dotknięcie tylko zmienionego poola)
-jest realny, ale walczy z architekturą opartą na `exec` — kilka tygodni.
-Nie na start. Patrz sekcja 7.
-
-## 6. Znane problemy i braki
-
-### BŁĄD w obecnym POC bramki
-
-`fpm_http.c:1065` rejestruje `fpm_cleanup_add(FPM_CLEANUP_PARENT, ...)`, ale
-przy reloadzie master idzie ścieżką `FPM_CLEANUP_PARENT_EXEC`
-(`fpm_pctl_exec` robi `execvp(saved_argv[0], saved_argv)`). Czyli przy `reload`
-bramki prawdopodobnie nie dostaną SIGTERM, zostaną osierocone i będą trzymać
-port, a nowy master nie zdoła się zbindować. **Nie zweryfikowane
-uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
-
-### Blokery (bez tego nie da się tego nikomu włączyć)
-
-- Konfiguracja w zmiennych środowiskowych (`FPM_HTTP_LISTEN`, `FPM_HTTP_GATEWAYS`,
-  `FPM_HTTP_REUSEPORT`, `FPM_HTTP_IDLE_MS`) — muszą być dyrektywy z walidacją
-- Domyślnie włączone — teraz każdy pool TCP dostaje bramkę na porcie +1, czyli
-  otwiera port, o który nikt nie prosił
-- Brak kontroli dostępu — FastCGI ma `listen.allowed_clients`, bramka nie ma nic
-- Brak respawnu bramek — forkowane raz w `fpm_run()`, master trzyma tylko pidy
-  żeby je ubić. Padnięta bramka nie wraca, a przy `reuseport` połowa ruchu
-  trafia w martwą kolejkę
-
-### Funkcjonalne (bez tego nie zastąpi nginxa)
-
-- **Pliki statyczne** — wszystko idzie do PHP. Przy koncepcji scratch to jest
-  bloker, nie opcja: bez nginxa aplikacja nie ma skąd wziąć CSS-a. Spora robota:
-  stat, sendfile/mmap, ETag, Range, cache headers, typy MIME
-- Brak TLS (patrz sekcja 5)
-- Brakujące zmienne CGI: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`, `REQUEST_SCHEME`,
-  `AUTH_TYPE`, `REMOTE_USER`. `SERVER_PORT` boli najbardziej — frameworki budują
-  z niego absolutne URL-e
-- Brak obsługi `X-Forwarded-For` — za proxy `REMOTE_ADDR` to proxy
-- Brak access logu
-- `index.php` zaszyty na sztywno, brak odpowiednika `try_files`
-
-### Twardość
-
-- Sprawdzanie ścieżki jest tekstowe (NUL, `/../`, końcowe `/..`). Brak `realpath`
-  i sprawdzenia, że wynik jest pod docrootem → symlink wyprowadza na zewnątrz.
-  Ratuje dziś tylko `security.limit_extensions` po stronie FPM. Naprawić **bez**
-  dokładania `stat` na request
-- Limity zaszyte: 32 MB body, 64 KB nagłówków CGI
-- Brak timeoutów po stronie klienta (slow loris)
-- Przy pełnym poolu oddajemy 502, powinno być 503 z `Retry-After`
-- Brak backpressure przy wysyłaniu body — duży upload ląduje w pamięci bramki
-
-### Niezawodność supervisora i crona
-
-Przy jednej instancji na VPS-ie **nie ma klastra, który wyłapie awarię**.
-Backoff, próg błędów i widoczne logowanie to funkcja, nie higiena. Kod wyjścia
-różny od zera musi być widoczny, nie tylko na poziomie debug.
-
-### Wdzięczne zatrzymanie
-
-Ważniejsze od hot-reloadu: zerwane zadanie zostawia śmieci w bazie, a sekunda
-przerwy w HTTP nie zostawia nic. Consumer musi dostać SIGTERM i dokończyć
-bieżące zadanie. Cron w trakcie przebiegu — albo dopalić, albo pominąć.
-
-### Czego NIE robimy
-
-HTTP/2, kompresja, cache. To są rzeczy, dla których istnieje nginx.
-
-### Scratch: pliki, których zabraknie aplikacji (nie nam)
-
-- brak `/etc/resolv.conf` → brak DNS, połączenie do bazy po nazwie hosta pada
-- brak paczki certyfikatów → każdy `https://` do zewnętrznego API pada
-- brak `tzdata` → `date()` w UTC niezależnie od `date.timezone`
-
-Żadnego nie da się rozwiązać w kodzie — to dane, nie funkcje. Realnie jest to
-`FROM scratch` + binarka + kod + trzy pliki danych. Mówić to uczciwie od początku.
-
-### Konfiguracja
-
-`include=` **już działa**, z globem (`fpm_conf.c:1383`, używa `php_glob`).
-Czyli `include=/etc/fpmng/conf.d/*.conf` jest gotowe, nic nie trzeba pisać.
-
-Wymaganie projektowe: plik dla "aplikacja + dwa consumery + trzy crony" musi
-mieścić się w jakichś czterdziestu linijkach. Jeśli będzie dwieście,
-przegrywamy z docker-compose i supervisord mimo lepszej techniki.
-
-Brak shella w scratch = brak entrypointa. Konfiguracja musi być w pełni
-deklaratywna plus podstawianie zmiennych środowiskowych w pliku. **Do
-sprawdzenia**, na ile FPM to dziś potrafi — bez tego jeden obraz nie obsłuży
-dev i prod.
-
-## 7. Kolejność prac
-
-0. **Statyczna binarka na musl w scratch, serwująca `hello.php`.** Dzień roboty,
-   rozstrzyga czy koncepcja stoi. Reszta planu jest sensowna niezależnie, ale to
-   jedyne założenie, które może zabrać ze sobą wszystko.
-0b. Rozstrzygnąć TLS (sekcja 5).
-1. `pool.type` jako szew: tablica operacji, domyślnie `fcgi`, `fcgi` i `http`
-   tylko przenoszą istniejący kod. Zero nowej funkcjonalności — chodzi o to,
-   żeby zobaczyć, czy abstrakcja jest dobra. Jeśli `http` nie wchodzi gładko,
-   jest zła.
-2. `supervisor`. Sprawdza abstrakcję na przypadku naprawdę innym od `fcgi`.
-3. `cron`. Druga polityka odpalania na tej samej maszynerii. Dobry test szwu:
-   jeśli trzeba pod niego ruszać `fpm_children.c`, polityka spawnowania nie
-   została wydzielona czysto.
-4. Metryki. Tu decyzja SAPI kontra rozszerzenie.
-5. Pliki statyczne.
-6. Self-runner (sekcja 3a) — niezależny od reszty, ale ograniczenie
-   projektowe z 3a musi być spełnione już w punkcie 1.
-7. Reload zrobiony porządnie: gniazdka przeżywają, requesty się dopalają,
-   consumer dostaje SIGTERM i kończy zadanie. Opcjonalnie obserwowanie plików
-   konfiguracyjnych. **Nie** prawdziwy hot-reload — zostawić na później,
-   kiedy będzie wiadomo, czy ktoś na to narzeka.
-
-## 8. Utrzymanie: nowa wersja PHP = przebudowa
-
-SAPI kompiluje się **w** binarkę PHP i nie ma stabilnego ABI. Każde wydanie
-(8.5.11 → 8.5.12) wymaga zbudowania binarki na nowo przeciw temu tagowi.
-
-To nie jest wada tej architektury — dystrybucje robią dokładnie to samo ze
-swoimi paczkami `php-fpm`. A skoro i tak wypuszczamy obraz kontenera, to
-"przebudowa" znaczy "CI odpala się na nowym tagu i pushuje obraz".
-
-Skala pracy:
-- **patch** (8.5.11 → 8.5.12): mechaniczne, wewnętrzne API się nie zmienia,
-  CI po prostu przechodzi
-- **minor** (8.5 → 8.6): może wymagać poprawek, głównie w `fpm_main.c`
-- **major** (9.0): na pewno wymaga
-
-Dlatego: php-src pinowany **tagiem, nie gałęzią**, i podbijany świadomie.
-CI z macierzą dwóch-trzech wersji PHP to jedyny sposób, żeby dowiedzieć się
-wcześnie, że upstream coś zmienił.
-
-## 9. Sprawy formalne
-
-- **Licencja**: kod pochodzi z FPM → PHP License 3.01. Nie ma wyboru.
-- **Nazwa**: "PHP" jest znakiem towarowym PHP Group i mają politykę jego
-  używania. `php-fpm-ng` jako nazwa produktu prosi się o list z prośbą
-  o zmianę. Roboczo może zostać, przed publikacją dać coś własnego.
-
-## 3j. `pool.type = supervisor` — zaimplementowane i zweryfikowane (2026-09-05)
+## 3o. `pool.type = supervisor` — zaimplementowane i zweryfikowane (2026-09-05)
 
 Nowy plik `sapi/fpmng/fpm/fpm_pool_supervisor.c` + `.h`, jedna linia w
 `fpm_pool_types[]` (`fpm_pool_type.c`), dyrektywy w `fpm_conf.c`/`fpm_conf.h`.
@@ -1315,3 +1112,207 @@ FPM przez istniejące przechwytywanie pipe'em (stąd wymóg
   testu poza samym faktem odrzucenia w konfiguracji — nie sprawdzono np. czy
   odrzucenie nie psuje czegoś w `fpm_unix.c` (nie powinno, bo to tylko string
   w configu, ale nie zweryfikowane explicite).
+
+## 4. Zmierzone: wydajność NIE jest argumentem
+
+Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude
+(`reference_k3d_bench_poligon.md`).
+
+CPU na request, pomiar czysty (`wrk -t1 -c2`, węzeł nienasycony):
+
+| skrypt | nginx+fpm | bramka | oszczędność |
+|---|---|---|---|
+| hello.php (~0) | 227 µs | 128 µs | 44% |
+| work.php (~1 ms) | ~1590 µs | ~1400 µs | 12% |
+| w5.php (7.7 ms) | 7917 µs | 7116 µs | 10% |
+| w20.php (74 ms) | 74132 µs | 73548 µs | 0.8% |
+
+Realna aplikacja (20-100 ms CPU) leży między dwoma ostatnimi wierszami —
+**kilka procent**. Przepustowość analogicznie: 2.21x na pustym skrypcie,
+1.06x przy 1 ms, 1.01x przy 5 ms.
+
+Sama bramka kosztuje **najwyżej ~25 µs/request** (C razem 128 µs vs sam
+php-fpm w B 104 µs). To cały budżet dla dalszych optymalizacji.
+
+**Wnioski, do których nie wracamy:**
+- io_uring — odpada, atakuje część z tych 25 µs, a wymaga drugiego backendu
+  pętli zdarzeń tylko pod Linuksem
+- wariant in-process (HTTP w workerze) — odpada, rząd 50-60 µs zysku za
+  wejście HTTP w cykl życia workera (`max_requests`, `request_terminate_timeout`,
+  brak miejsca na kolejkowanie)
+- **żadnych dalszych optymalizacji wydajności**, cała energia w funkcje
+
+Metodologia: poligon ma 4 rdzenie fizyczne / 8 wątków i wrk siedzi na tym samym
+węźle. Przy `-t4 -c64` pomiar mierzy walkę o hyperthready, nie koszt hopa
+(ta sama para dała 1670 µs vs 234 µs różnicy). Miarodajne jest dopiero
+`wrk -t1 -c2`.
+
+## 5. Otwarte pytania
+
+### TLS — ROZSTRZYGNIĘTE 2026-09-05: robimy, na końcu. Patrz sekcja 3l.
+
+Poniższe zostaje jako zapis rozważań; wybrana została droga własnego HTTPS z ACME.
+
+Przy małym projekcie na VPS-ie nie ma load balancera. Trzy opcje:
+1. Przed fpm-ng stoi Caddy/Traefik — ale wtedy "nic więcej nie potrzebujesz"
+   przestaje być prawdą
+2. fpm-ng umie HTTPS łącznie z ACME — spory kawałek roboty
+3. Terminacja TLS poza zakresem, w dokumentacji wprost (Cloudflare / reverse proxy)
+
+Kontekst konkurencyjny: FrankenPHP celuje w tę samą grupę i ma jedną binarkę,
+HTTP, pliki statyczne, automatyczne HTTPS przez Caddy, tryb worker. **Nie ma**
+deklaratywnych consumerów i cronów. Czyli bramka HTTP jest u nas częścią
+najmniej wyróżniającą, a supervisor i cron tym, czego nie ma nikt inny.
+Jeśli trzeba będzie gdzieś przyciąć ambicje — raczej w HTTP.
+
+### Statyczna binarka — do sprawdzenia PIERWSZE
+
+Cała koncepcja obrazu bez systemu stoi na tym, że da się zlinkować statycznie
+PHP + FPM + libevent + pcre + zlib. Z musl idzie gładko, z glibc walka z NSS.
+**Jeśli to okaże się piekłem, koncepcja bierze w łeb** — lepiej wiedzieć przed
+napisaniem czterech typów poola.
+
+Dobra wiadomość: `fpm_unix.c:51` ma `fpm_unix_is_id` — jeśli w `user`/`group`
+wpisać liczbę, FPM nie woła `getpwnam`. Czyli `user = 65534` działa bez
+`/etc/passwd`. To zwykle wywala scratch.
+
+### Zakres hot-reloadu
+
+Prawdziwy hot-reload (diff konfiguracji, dotknięcie tylko zmienionego poola)
+jest realny, ale walczy z architekturą opartą na `exec` — kilka tygodni.
+Nie na start. Patrz sekcja 7.
+
+## 6. Znane problemy i braki
+
+### BŁĄD w obecnym POC bramki
+
+`fpm_http.c:1065` rejestruje `fpm_cleanup_add(FPM_CLEANUP_PARENT, ...)`, ale
+przy reloadzie master idzie ścieżką `FPM_CLEANUP_PARENT_EXEC`
+(`fpm_pctl_exec` robi `execvp(saved_argv[0], saved_argv)`). Czyli przy `reload`
+bramki prawdopodobnie nie dostaną SIGTERM, zostaną osierocone i będą trzymać
+port, a nowy master nie zdoła się zbindować. **Nie zweryfikowane
+uruchomieniowo** — do sprawdzenia jednym testem. Poprawka to jedna linijka.
+
+### Blokery (bez tego nie da się tego nikomu włączyć)
+
+- Konfiguracja w zmiennych środowiskowych (`FPM_HTTP_LISTEN`, `FPM_HTTP_GATEWAYS`,
+  `FPM_HTTP_REUSEPORT`, `FPM_HTTP_IDLE_MS`) — muszą być dyrektywy z walidacją
+- Domyślnie włączone — teraz każdy pool TCP dostaje bramkę na porcie +1, czyli
+  otwiera port, o który nikt nie prosił
+- Brak kontroli dostępu — FastCGI ma `listen.allowed_clients`, bramka nie ma nic
+- Brak respawnu bramek — forkowane raz w `fpm_run()`, master trzyma tylko pidy
+  żeby je ubić. Padnięta bramka nie wraca, a przy `reuseport` połowa ruchu
+  trafia w martwą kolejkę
+
+### Funkcjonalne (bez tego nie zastąpi nginxa)
+
+- **Pliki statyczne** — wszystko idzie do PHP. Przy koncepcji scratch to jest
+  bloker, nie opcja: bez nginxa aplikacja nie ma skąd wziąć CSS-a. Spora robota:
+  stat, sendfile/mmap, ETag, Range, cache headers, typy MIME
+- Brak TLS (patrz sekcja 5)
+- Brakujące zmienne CGI: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`, `REQUEST_SCHEME`,
+  `AUTH_TYPE`, `REMOTE_USER`. `SERVER_PORT` boli najbardziej — frameworki budują
+  z niego absolutne URL-e
+- Brak obsługi `X-Forwarded-For` — za proxy `REMOTE_ADDR` to proxy
+- Brak access logu
+- `index.php` zaszyty na sztywno, brak odpowiednika `try_files`
+
+### Twardość
+
+- Sprawdzanie ścieżki jest tekstowe (NUL, `/../`, końcowe `/..`). Brak `realpath`
+  i sprawdzenia, że wynik jest pod docrootem → symlink wyprowadza na zewnątrz.
+  Ratuje dziś tylko `security.limit_extensions` po stronie FPM. Naprawić **bez**
+  dokładania `stat` na request
+- Limity zaszyte: 32 MB body, 64 KB nagłówków CGI
+- Brak timeoutów po stronie klienta (slow loris)
+- Przy pełnym poolu oddajemy 502, powinno być 503 z `Retry-After`
+- Brak backpressure przy wysyłaniu body — duży upload ląduje w pamięci bramki
+
+### Niezawodność supervisora i crona
+
+Przy jednej instancji na VPS-ie **nie ma klastra, który wyłapie awarię**.
+Backoff, próg błędów i widoczne logowanie to funkcja, nie higiena. Kod wyjścia
+różny od zera musi być widoczny, nie tylko na poziomie debug.
+
+### Wdzięczne zatrzymanie
+
+Ważniejsze od hot-reloadu: zerwane zadanie zostawia śmieci w bazie, a sekunda
+przerwy w HTTP nie zostawia nic. Consumer musi dostać SIGTERM i dokończyć
+bieżące zadanie. Cron w trakcie przebiegu — albo dopalić, albo pominąć.
+
+### Czego NIE robimy
+
+HTTP/2, kompresja, cache. To są rzeczy, dla których istnieje nginx.
+
+### Scratch: pliki, których zabraknie aplikacji (nie nam)
+
+- brak `/etc/resolv.conf` → brak DNS, połączenie do bazy po nazwie hosta pada
+- brak paczki certyfikatów → każdy `https://` do zewnętrznego API pada
+- brak `tzdata` → `date()` w UTC niezależnie od `date.timezone`
+
+Żadnego nie da się rozwiązać w kodzie — to dane, nie funkcje. Realnie jest to
+`FROM scratch` + binarka + kod + trzy pliki danych. Mówić to uczciwie od początku.
+
+### Konfiguracja
+
+`include=` **już działa**, z globem (`fpm_conf.c:1383`, używa `php_glob`).
+Czyli `include=/etc/fpmng/conf.d/*.conf` jest gotowe, nic nie trzeba pisać.
+
+Wymaganie projektowe: plik dla "aplikacja + dwa consumery + trzy crony" musi
+mieścić się w jakichś czterdziestu linijkach. Jeśli będzie dwieście,
+przegrywamy z docker-compose i supervisord mimo lepszej techniki.
+
+Brak shella w scratch = brak entrypointa. Konfiguracja musi być w pełni
+deklaratywna plus podstawianie zmiennych środowiskowych w pliku. **Do
+sprawdzenia**, na ile FPM to dziś potrafi — bez tego jeden obraz nie obsłuży
+dev i prod.
+
+## 7. Kolejność prac
+
+0. **Statyczna binarka na musl w scratch, serwująca `hello.php`.** Dzień roboty,
+   rozstrzyga czy koncepcja stoi. Reszta planu jest sensowna niezależnie, ale to
+   jedyne założenie, które może zabrać ze sobą wszystko.
+0b. Rozstrzygnąć TLS (sekcja 5).
+1. `pool.type` jako szew: tablica operacji, domyślnie `fcgi`, `fcgi` i `http`
+   tylko przenoszą istniejący kod. Zero nowej funkcjonalności — chodzi o to,
+   żeby zobaczyć, czy abstrakcja jest dobra. Jeśli `http` nie wchodzi gładko,
+   jest zła.
+2. `supervisor`. Sprawdza abstrakcję na przypadku naprawdę innym od `fcgi`.
+3. `cron`. Druga polityka odpalania na tej samej maszynerii. Dobry test szwu:
+   jeśli trzeba pod niego ruszać `fpm_children.c`, polityka spawnowania nie
+   została wydzielona czysto.
+4. Metryki. Tu decyzja SAPI kontra rozszerzenie.
+5. Pliki statyczne.
+6. Self-runner (sekcja 3a) — niezależny od reszty, ale ograniczenie
+   projektowe z 3a musi być spełnione już w punkcie 1.
+7. Reload zrobiony porządnie: gniazdka przeżywają, requesty się dopalają,
+   consumer dostaje SIGTERM i kończy zadanie. Opcjonalnie obserwowanie plików
+   konfiguracyjnych. **Nie** prawdziwy hot-reload — zostawić na później,
+   kiedy będzie wiadomo, czy ktoś na to narzeka.
+
+## 8. Utrzymanie: nowa wersja PHP = przebudowa
+
+SAPI kompiluje się **w** binarkę PHP i nie ma stabilnego ABI. Każde wydanie
+(8.5.11 → 8.5.12) wymaga zbudowania binarki na nowo przeciw temu tagowi.
+
+To nie jest wada tej architektury — dystrybucje robią dokładnie to samo ze
+swoimi paczkami `php-fpm`. A skoro i tak wypuszczamy obraz kontenera, to
+"przebudowa" znaczy "CI odpala się na nowym tagu i pushuje obraz".
+
+Skala pracy:
+- **patch** (8.5.11 → 8.5.12): mechaniczne, wewnętrzne API się nie zmienia,
+  CI po prostu przechodzi
+- **minor** (8.5 → 8.6): może wymagać poprawek, głównie w `fpm_main.c`
+- **major** (9.0): na pewno wymaga
+
+Dlatego: php-src pinowany **tagiem, nie gałęzią**, i podbijany świadomie.
+CI z macierzą dwóch-trzech wersji PHP to jedyny sposób, żeby dowiedzieć się
+wcześnie, że upstream coś zmienił.
+
+## 9. Sprawy formalne
+
+- **Licencja**: kod pochodzi z FPM → PHP License 3.01. Nie ma wyboru.
+- **Nazwa**: "PHP" jest znakiem towarowym PHP Group i mają politykę jego
+  używania. `php-fpm-ng` jako nazwa produktu prosi się o list z prośbą
+  o zmianę. Roboczo może zostać, przed publikacją dać coś własnego.
+

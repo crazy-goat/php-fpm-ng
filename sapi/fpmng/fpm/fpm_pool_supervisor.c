@@ -13,10 +13,23 @@
 #include "fpm_config.h"
 
 #include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#if defined(__linux__)
+#include <sys/syscall.h>
+/* Numery syscalli, nie zawsze wystawione przez naglowki libc (musl/starsze
+ * glibc) — stale od lat te same na x86_64/aarch64. */
+#ifndef SYS_pidfd_open
+#define SYS_pidfd_open 434
+#endif
+#ifndef SYS_pidfd_send_signal
+#define SYS_pidfd_send_signal 424
+#endif
+#endif
 
 #include "php.h"
 #include "php_main.h"
@@ -85,10 +98,42 @@ static int supervisor_cleanup_registered = 0;
 static volatile sig_atomic_t supervisor_term_requested = 0;
 static volatile sig_atomic_t supervisor_stop_timeout = 10;
 
+/* pidfd: uchwyt na KONKRETNA instancje procesu, odporny na ponowne uzycie
+ * PID-u (w przeciwienstwie do trzymania samego numeru PID-u). Dostepne tylko
+ * na Linuksie (jadro >= 5.3 dla pidfd_open, >= 5.1 dla pidfd_send_signal) —
+ * czyli dokladnie na docelowej platformie tego projektu (kontenery
+ * Alpine/glibc), a nie na tym Macu, na ktorym tylko sie buduje i testuje
+ * lokalnie. Numery syscalli podane na sztywno, bo nie kazda libc (musl,
+ * starsze glibc) je jeszcze opakowuje. */
+static int fpm_pool_supervisor_pidfd_open(pid_t pid)
+{
+#if defined(__linux__) && defined(SYS_pidfd_open)
+	return (int) syscall(SYS_pidfd_open, pid, 0);
+#else
+	(void) pid;
+	return -1;
+#endif
+}
+
+static int fpm_pool_supervisor_pidfd_send_signal(int pidfd, int sig)
+{
+#if defined(__linux__) && defined(SYS_pidfd_send_signal)
+	return (int) syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
+#else
+	(void) pidfd;
+	(void) sig;
+	return -1;
+#endif
+}
+
 static void fpm_pool_supervisor_sigterm(int signo)
 {
 	(void) signo;
 	if (!supervisor_term_requested) {
+		int pidfd;
+		pid_t me;
+		pid_t watchdog;
+
 		supervisor_term_requested = 1;
 
 		/* Siatka bezpieczenstwa: jesli biezaca iteracja (skrypt, ktory nie
@@ -103,19 +148,55 @@ static void fpm_pool_supervisor_sigterm(int signo)
 		 * podmieniony i strzelilby w rece Zenda zamiast w nasze (zmierzone:
 		 * budowa tego projektu ma -DZEND_SIGNALS). Zamiast tego forkujemy
 		 * malutki proces-watchdog, calkowicie niezalezny od stanu sygnalow
-		 * PHP: spi stop_timeout sekund, i jesli my (proces supervisora)
-		 * nadal zyjemy, ubija nas SIGKILL-em. fork() jest async-signal-safe,
-		 * wiec robimy to bezpiecznie tu, w handlerze, zeby zlapac takze
-		 * skrypt, ktory nigdy nie odda sterowania z powrotem do naszej petli. */
-		pid_t me = getpid();
-		pid_t watchdog = fork();
+		 * PHP: czeka do stop_timeout, i jesli my (proces supervisora) nadal
+		 * zyjemy, ubija nas.
+		 *
+		 * Otwieramy pidfd na SIEBIE ZANIM sforkujemy watchdoga — w tym
+		 * miejscu "siebie" jest jeszcze jednoznaczne (jestesmy wciaz tym
+		 * samym, zywym procesem, ktory dopiero co dostal SIGTERM), wiec to
+		 * otwarcie nie ma zadnego okna wyscigu. Ten sam deskryptor dziedziczy
+		 * sforkowany watchdog (fork() dziedziczy otwarte fd). Watchdog czeka
+		 * na ten pidfd przez poll() zamiast spac() na slepo i strzelac
+		 * SIGKILL po SAMYM PID-zie po przebudzeniu — gdyby w tym czasie nasz
+		 * PID zdazyl umrzec i zostac przydzielony innemu procesowi, kill()
+		 * po golym PID-zie trafilby w niewlasciwy proces. pidfd nie ma tego
+		 * problemu: odnosi sie do KONKRETNEJ instancji procesu az do jej
+		 * zakonczenia, niezaleznie od tego, co pozniej stanie sie z tym
+		 * numerem PID. fork() i syscall() sa async-signal-safe, wiec to
+		 * bezpieczne tu, w handlerze.
+		 *
+		 * Fallback (nie-Linux, albo jadro bez pidfd_open — ENOSYS): stare
+		 * zachowanie sleep()+kill() po PID-zie, z udokumentowanym, waskim
+		 * oknem wyscigu PID-owym. Dotyczy tylko lokalnego budowania/testow
+		 * na tym Macu — docelowa platforma (Alpine w kontenerze) ma pidfd. */
+		me = getpid();
+		pidfd = fpm_pool_supervisor_pidfd_open(me);
+		watchdog = fork();
 
 		if (watchdog == 0) {
-			sleep((unsigned) supervisor_stop_timeout);
-			if (kill(me, 0) == 0) {
-				kill(me, SIGKILL);
+			if (pidfd >= 0) {
+				struct pollfd pfd;
+
+				pfd.fd = pidfd;
+				pfd.events = POLLIN;
+				pfd.revents = 0;
+
+				if (poll(&pfd, 1, (int) supervisor_stop_timeout * 1000) == 0) {
+					/* timeout, nie POLLIN: proces wciaz zyje (ten sam,
+					 * ktoremu otworzylismy pidfd przed forkiem) */
+					fpm_pool_supervisor_pidfd_send_signal(pidfd, SIGKILL);
+				}
+			} else {
+				sleep((unsigned) supervisor_stop_timeout);
+				if (kill(me, 0) == 0) {
+					kill(me, SIGKILL);
+				}
 			}
 			_exit(0);
+		}
+
+		if (pidfd >= 0) {
+			close(pidfd);
 		}
 	}
 }

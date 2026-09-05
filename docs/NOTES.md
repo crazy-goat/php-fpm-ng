@@ -2207,6 +2207,25 @@ dev i prod.
    consumer dostaje SIGTERM i kończy zadanie. Opcjonalnie obserwowanie plików
    konfiguracyjnych. **Nie** prawdziwy hot-reload — zostawić na później,
    kiedy będzie wiadomo, czy ktoś na to narzeka.
+8. TLS + ACME (sekcja 3l).
+9. `pool.type = proxy` — DECYZJA (2026-09-05): robimy, ale **na samym koncu**,
+   po TLS. Bramka trzyma :443, terminuje TLS, obsluguje ACME i pliki statyczne
+   sama, a reszte przekazuje po zwyklym HTTP/1.1 na localhost do dlugo zyjacego
+   procesu aplikacji (amphp, ReactPHP, Octane, cokolwiek). Powod kolejnosci:
+   bez TLS i ACME ten typ nie ma czego wnosic — sam przekaz HTTP na localhost
+   zalatwia dowolne narzedzie. Wartosc powstaje dopiero z polaczenia
+   "jedna binarka trzyma certyfikat i statyki" z "aplikacja jest osobnym
+   procesem". Kontekst i skad sie to wzielo: sekcja 3s.
+
+### Stan na 2026-09-05
+
+Zrobione: 1 (pool.type z kontraktem rozszerzalnosci), 2 (supervisor),
+3 (cron), 5 (pliki statyczne), 0 (statyczna binarka musl) — plus optymalizacje
+syscalli blokujacego workera (3t), ktorych w pierwotnym planie nie bylo.
+W robocie: `pool.type = status` (czesc punktu 4) i eksperymentalny
+`pool.type = async` (3s).
+Zostalo: 4 (metryki z PHP, `fpm_metric_*`), 6 (self-runner), 7 (reload),
+8 (TLS+ACME), 9 (proxy), oraz dlugi ogon braków bramki z sekcji 6.
 
 ## 8. Utrzymanie: nowa wersja PHP = przebudowa
 

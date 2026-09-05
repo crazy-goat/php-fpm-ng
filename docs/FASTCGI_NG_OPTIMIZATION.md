@@ -186,17 +186,38 @@ Jeżeli profil potwierdzi istotny koszt, rozważyć jawną opcję tylko dla `fas
 
 Nie stosować cache CWD jako niewidocznej optymalizacji, ponieważ może zmienić zachowanie aplikacji.
 
-### 7. Sprawdzić rozmiar bufora wejściowego
+### 7. Sprawdzić rozmiar bufora wejściowego — wykonane dla 8/16/32 KB
 
-Porównać co najmniej 4, 8, 16 i 32 KB dla:
+Pomiar CPU/request nie wykazał istotnej przewagi żadnego wariantu:
 
-- typowego GET z parametrami nginx;
-- dużej liczby parametrów i nagłówków;
-- POST poniżej i powyżej rozmiaru bufora;
-- keep-alive i nowych połączeń;
-- TCP i UDS.
+| bufor | CPU/request |
+|---|---:|
+| 8 KB | 86,591 us |
+| 16 KB | 87,321 us |
+| 32 KB | 86,564 us |
 
-Mierzyć CPU, liczbę `read()`, kopiowanie danych i wpływ na cache procesora. Obecne 16 KB pozostaje wartością domyślną, dopóki pomiar nie wykaże lepszego kompromisu.
+Różnice pozostały poniżej 1%, dlatego bufor wejściowy pozostaje bez zmian: 16 KB.
+
+## Zaakceptowana optymalizacja dużych odpowiedzi
+
+Dla dużego rekordu FastCGI zoptymalizowany transport na Unixie wysyła nagłówek i body jednym `writev()`. Klasyczny `fastcgi` oraz Windows zachowują dotychczasową ścieżkę `write()`.
+
+Dla odpowiedzi 262 144 B liczba operacji transportowych spadła z 11 do 6. Test `strace` na PHP 8.5 potwierdził 11 zapisów i brak `writev()` dla `fastcgi` oraz 5 `writev()` i końcowy zapis rekordu dla `fastcgi-ng`.
+
+Pięć naprzemiennych serii na PHP 8.5, `wrk -t1 -c2 -d10s`:
+
+| frontend | metryka | baseline | `writev` | zmiana |
+|---|---|---:|---:|---:|
+| `fastcgi-ng` | CPU workera/request | 195,433 us | 178,824 us | **-8,5%** |
+| `fastcgi-ng` | req/s | 2018,63 | 2037,15 | **+0,9%** |
+| `http`, `Connection: close` | łączny CPU gatewaya i workera/request | 525,209 us | 490,612 us | **-6,6%** |
+| `http`, `Connection: close` | req/s | 2682,67 | 2705,14 | **+0,8%** |
+
+Spadek CPU wystąpił we wszystkich pięciu parach obu benchmarków. Pierwszego pomiaru HTTP z keep-alive, około 50 req/s, nie użyto do oceny przepustowości z powodu znanego efektu Nagle/delayed ACK; przebieg z `Connection: close` usunął to zakłócenie.
+
+Regresja PHP 8.5 przeszła dla małej i dużej odpowiedzi, binarnego POST 65 792 B z kontrolą SHA-256, keep-alive/close oraz zerwanego odbiorcy. Odpowiedzi od 1 B do 1 MiB, w tym granice rekordów FastCGI, zostały wcześniej porównane bajt w bajt na masterze.
+
+Batching małej odpowiedzi odrzucono: kompletna mała odpowiedź FastCGI już trafia do jednego `write()`, a obserwowany drugi zapis dotyczy innego deskryptora. Nie daje to bezpiecznej oszczędności transportowej.
 
 ## Metodologia benchmarków
 

@@ -187,7 +187,20 @@ static void fpm_pool_supervisor_sigterm(int signo)
 					fpm_pool_supervisor_pidfd_send_signal(pidfd, SIGKILL);
 				}
 			} else {
-				sleep((unsigned) supervisor_stop_timeout);
+				/* Bez pidfd sprawdzamy co sekunde zamiast spac na slepo caly
+				 * stop_timeout — inaczej watchdog zostaje (nieszkodliwym, ale
+				 * widocznym w ps jako osierocony po execvp() przy reloadzie)
+				 * "ogonem" przez caly stop_timeout, nawet gdy proces skonczyl
+				 * sie sam po ulamku sekundy. */
+				int remaining = (int) supervisor_stop_timeout;
+
+				while (remaining > 0) {
+					if (kill(me, 0) != 0) {
+						break;
+					}
+					sleep(1);
+					remaining--;
+				}
 				if (kill(me, 0) == 0) {
 					kill(me, SIGKILL);
 				}

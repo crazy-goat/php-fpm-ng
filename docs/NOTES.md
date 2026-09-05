@@ -1128,14 +1128,151 @@ FPM przez istniejące przechwytywanie pipe'em (stąd wymóg
   gdyby ktoś tego chciał.
 - Status supervisora w `fpm_status.c` (oznaczenie typu w statusie, wspomniane
   w sekcji 3) — nie ruszone, poza zakresem tego zadania.
-- Test współistnienia wielu poola `supervisor` w jednej konfiguracji obok
-  zwykłego `fcgi`/`http` w jednym procesie mastera — sprawdzone tylko
-  pośrednio (test 9 ma dodatkowy zwykły pool `other` obok `sup`), nie
-  przetestowane osobno pod kątem interakcji przy reload/SIGHUP.
+- Współistnienie wielu pooli `supervisor` obok `fcgi`/`http` w jednym procesie
+  mastera przy reload/SIGHUP — **przetestowane, patrz sekcja 3p** (dopisek
+  koordynatora, 2026-09-05).
 - `security.limit_extensions` i inne dyrektywy security nie mają dedykowanego
   testu poza samym faktem odrzucenia w konfiguracji — nie sprawdzono np. czy
   odrzucenie nie psuje czegoś w `fpm_unix.c` (nie powinno, bo to tylko string
   w configu, ale nie zweryfikowane explicite).
+
+## 3p. `supervisor` przy reload i mieszanych poolach — zweryfikowane (2026-09-05)
+
+Dopisek koordynatora po odebraniu 3o: historycznie bramki HTTP rejestrowały
+sprzątanie tylko na `FPM_CLEANUP_PARENT`, a reload idzie przez
+`FPM_CLEANUP_PARENT_EXEC` (`fpm_pctl_exec()` robi `execvp()`) — więc zostawały
+osierocone, trzymając port (naprawione dla `http`, patrz 3i). Ten sam rodzaj
+pytania dla `supervisor` nie był wcześniej sprawdzony — sprawdzone teraz.
+
+**Konfiguracja testowa**: jeden pool `http`, jeden zwykły `fcgi`, jeden
+`supervisor` z `restart = always` (skrypt: 6 ticków po 0.4s, ok. 2.4s na
+iterację, z logiem do pliku), jeden `supervisor` z `restart = never` (skrypt
+`exit(0)` od razu, więc pool jest już zaparkowany, zanim dojdzie do testu
+sygnałów — nie trzeba nic specjalnie odczekiwać, to naturalny efekt
+`restart = never`).
+
+### Scenariusz 1: `SIGUSR2` (reload, `execvp()`)
+
+```
+PRZED: pgrep -P 90726
+90728 90729 90730 90732   # web, plainfcgi, sup_always, sup_parked
+
+kill -USR2 90726
+[...] NOTICE: Reloading in progress ...
+[...] NOTICE: reloading: execvp("php-fpm-ng", {"-y", "reload_test.conf", "-F", "-O"})
+[...] NOTICE: using inherited socket fd=8, ".../reload_web.sock"
+[...] NOTICE: using inherited socket fd=9, ".../reload_fcgi.sock"
+[...] NOTICE: fpm is running, pid 90726          # <- TEN SAM PID (execvp nie zmienia PID)
+[...] NOTICE: ready to handle connections
+
+PO (t+3s): master pid=90726 (ten sam)
+dzieci nowego mastera: 90739 90740 90741 90743
+wszystkie procesy pool sup*:
+90741 90726 php-fpm: pool sup_always
+90743 90726 php-fpm: pool sup_parked
+```
+
+**Brak sierot** — obie stare instancje supervisora zniknęły, obie nowe mają
+poprawny `PPID` (nowy/ten sam master). Log `reload_always.log` pokazuje, że
+stary proces (pid 90730) dokończył SWOJĄ bieżącą iterację do końca
+("tick 0".."tick 5", "iter end") **przed** faktycznym `execvp()` o 17:44:33 —
+sygnał dotarł, `child_main` zareagował, nowa iteracja (pid 90741) wystartowała
+dopiero po restarcie:
+
+```
+2026-09-05T15:44:31+00:00 reload_always iter start pid=90730
+2026-09-05T15:44:31+00:00 reload_always tick 0
+...
+2026-09-05T15:44:33+00:00 reload_always tick 5
+2026-09-05T15:44:33+00:00 reload_always iter end
+2026-09-05T15:44:33+00:00 reload_always iter start pid=90741   # nowa generacja, po reloadzie
+```
+
+**Pamięć dzielona (backoff) po `execvp()`**: `fpm_shm_alloc()` używa
+`mmap(MAP_ANONYMOUS | MAP_SHARED)` — taka mapa **nie przeżywa `execve()`**
+(POSIX: cała przestrzeń adresowa poza otwartymi deskryptorami znika przy
+exec). To nie jest coś, co dziedziczymy poprawnie czy niepoprawnie — to
+fizycznie niemożliwe do odziedziczenia, więc pytanie "czy licznik porażek ma
+sens po reloadzie" ma proste rozwiązanie: **nowa instancja mastera i tak
+alokuje nowy segment `fpm_shm_alloc()` od zera** (w swoim własnym
+`fpm_init()`/`fpm_pool_type_of()->init_main()`), więc liczniki backoffu
+zerują się naturalnie przy reloadzie. Zachowanie spójne z resztą FPM: reload
+to nowa instancja procesu, nie "kontynuacja" starej.
+
+### Scenariusz 2: `SIGQUIT` (graceful stop, bez exec)
+
+```
+kill -QUIT 90858
+[...] NOTICE: Finishing ...
+[...] NOTICE: exiting, bye-bye!
+master zszedl po 0s (pomiar co 0.3s — bardzo szybko)
+
+reload_always.log (koniec):
+...tick 4
+...tick 5
+...iter end        # <- dokonczyl biezaca iteracje przed zejsciem
+```
+
+Zaraz po zejściu mastera `ps` chwilowo pokazywał dwa procesy z `PPID=1`
+(`pool sup_parked`, `pool sup_always`) — to były nasze własne procesy-
+-strażniki `stop_timeout` (patrz 3o), które na tym Macu (brak `pidfd`) czekają
+w pętli sprawdzającej `kill(pid,0)` co sekundę zamiast reagować na sygnał —
+zniknęły same w ciągu ~1-2s. Nie prawdziwa sierota w sensie "zostanie na
+zawsze", tylko przejściowy artefakt własnego mechanizmu strażnika, opisany
+i zaakceptowany w 3o.
+
+### Scenariusz 3: `SIGTERM` (szybkie zamknięcie)
+
+```
+kill -TERM 91009
+[...] NOTICE: Terminating ...
+[...] NOTICE: exiting, bye-bye!
+master zszedl po ~2s
+
+reload_always.log (koniec):
+...iter start pid=91013
+...tick 0
+...tick 1
+...tick 2
+...tick 3
+...tick 4          # <- BRAK "tick 5"/"iter end" — proces nie zdazyl dokonczyc
+```
+
+**Różnica względem `SIGQUIT`/`SIGUSR2` i warta zapisania**: pod stanem
+`TERMINATING` `fpm_pctl_action_next()` (`fpm_process_ctl.c`, referencja) wysyła
+`SIGTERM` jako **pierwszy** sygnał (nie `SIGQUIT`), a przy domyślnym
+`process_control_timeout = 0` eskaluje do `SIGKILL` już po ok. 1 sekundzie,
+jeśli dziecko jeszcze żyje — to jest zachowanie **całego mastera FPM, nie coś
+wprowadzonego przez `supervisor`**, i dotyczy każdego typu poola (zwykły
+worker FastCGI w trakcie długiego requestu ginie tak samo). Nasz własny
+`supervisor.stop_timeout` (domyślnie 10s) nie ma tu znaczenia, bo to
+**master**, nie nasz watchdog, dobija proces szybciej. Skrypt (2.4s na
+iterację) nie zdążył zakończyć iteracji przy domyślnym
+`process_control_timeout`. Żadnej sieroty nie zostało (`ps` czysty od razu po
+zejściu mastera) — proces został poprawnie zebrany, tylko brakuje w logu
+pojedynczej linii "child exited" dla tego PID-u (najpewniej dlatego, że
+pętla zdarzeń mastera skończyła się, zanim zdążyła zalogować reap tego
+konkretnego SIGCHLD — kosmetyczna kolejność logowania, zweryfikowane przez
+`ps`, że proces faktycznie zniknął, nie osierocił się).
+
+**Wniosek dla użytkowników**: kto chce, żeby `supervisor` (albo jakikolwiek
+inny typ poola) miał czas dokończyć pracę przy `SIGTERM`/`docker stop`, musi
+ustawić `process_control_timeout` na sensowną wartość globalnie — to
+istniejąca dyrektywa FPM, nie coś do dodania. Warte dopisania do przyszłej
+dokumentacji użytkownika, nie tylko tu.
+
+### Poprawka przy okazji: watchdog `stop_timeout` bez `pidfd` skracał okno sieroty
+
+Pierwsza wersja testu (przed poprawką w tym samym dniu) pokazywała sieroty
+utrzymujące się przez pełne `stop_timeout` (domyślnie 10s) po reloadzie —
+bo fallbackowy watchdog (bez `pidfd`, czyli na tym Macu) robił jeden długi
+`sleep(stop_timeout)` zamiast sprawdzać co sekundę, czy nadzorowany proces już
+się skończył. Naprawione (patrz też commit `2a4da50`/kolejny): watchdog na
+ścieżce fallback pyta `kill(pid, 0)` co sekundę i kończy się od razu, gdy
+nadzorowany proces już nie żyje, zamiast czekać cały `stop_timeout` na ślepo.
+Po tej poprawce scenariusz 1 (USR2) pokazuje zero sierot już przy `t+3s`
+(wcześniej: dwie sieroty widoczne jeszcze przy `t+3s`, znikające dopiero przy
+`t+12s`).
 
 ## 4. Zmierzone: wydajność NIE jest argumentem
 

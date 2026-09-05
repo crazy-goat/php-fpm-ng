@@ -7,6 +7,7 @@
 #include "fpm_config.h"
 
 #include <errno.h>
+#include <signal.h>
 #include <unistd.h>
 
 #include "php.h"
@@ -91,6 +92,25 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 {
 	zend_file_handle file_handle;
 	int exit_code;
+	struct sigaction term_before;
+
+	/* ZMIERZONE (docs/NOTES.md, "wdzieczne zatrzymanie"): php_request_startup()
+	 * i php_request_shutdown() PODMIENIAJA dyspozycje SIGTERM procesu na wlasny
+	 * handler Zenda (ZEND_SIGNALS obejmuje SIGTERM w zend_sigs[], nie tylko
+	 * SIGALRM uzywany do max_execution_time) — i robia to przy KAZDYM
+	 * wywolaniu, nie tylko raz. Wolajacy (pool.type = supervisor/cron) instaluje
+	 * WLASNY handler SIGTERM przed pierwsza iteracja PRZED wejsciem do petli —
+	 * bez przywrocenia go tutaj dziala on tylko dopoki nie skonczy sie
+	 * PIERWSZA iteracja: kazda kolejna (restart = always/on-failure, wiele
+	 * przebiegow w tym samym procesie) dostaje z powrotem domyslna dyspozycje
+	 * i SIGTERM zabija proces natychmiast, bez szansy na wdzieczne zakonczenie
+	 * i bez uzbrojenia watchdoga stop_timeout/cron.timeout. Zapamietujemy
+	 * dyspozycje SPRZED php_request_startup() (a wiec TA, ktora wolajacy
+	 * faktycznie chcial miec) i przywracamy ja natychmiast po kazdym miejscu,
+	 * w ktorym PHP moze ja podmienic — nie znajac przy tym NIC o wolajacym
+	 * (moze to byc SIG_DFL, jesli caller nie zainstalowal niczego wlasnego —
+	 * przywrocenie SIG_DFL jest wtedy no-opem, wiec bezpieczne zawsze). */
+	sigaction(SIGTERM, NULL, &term_before);
 
 	SG(server_context) = NULL;
 	SG(request_info).path_translated = estrdup(script_path);
@@ -109,8 +129,11 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 		zlog(ZLOG_ERROR, "[pool %s] cannot start request for script '%s'", pool_name, script_path);
 		efree(SG(request_info).path_translated);
 		SG(request_info).path_translated = NULL;
+		sigaction(SIGTERM, &term_before, NULL);
 		return 255;
 	}
+	/* Patrz komentarz przy term_before na gorze funkcji. */
+	sigaction(SIGTERM, &term_before, NULL);
 	/* Jak przy '-v'/phpinfo w fpm_main.c: ustawic PO startupie, bo RINIT
 	 * resetuje no_headers. Nie ma dokad wysylac naglowkow, wiec sciezka
 	 * send_headers zostaje calkowicie pominieta (patrz sapi_send_headers()). */
@@ -139,6 +162,11 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 	SG(request_info).path_translated = NULL;
 
 	php_request_shutdown((void *) 0);
+	/* php_request_shutdown() moze podmienic dyspozycje SIGTERM tak samo jak
+	 * php_request_startup() (patrz komentarz przy term_before) — przywracamy
+	 * jeszcze raz, zeby okno MIEDZY iteracjami (backoff, park(), oczekiwanie
+	 * na kolejny termin crona) tez mialo dzialajacy handler wolajacego. */
+	sigaction(SIGTERM, &term_before, NULL);
 	fpm_stdio_flush_child();
 
 	return exit_code;

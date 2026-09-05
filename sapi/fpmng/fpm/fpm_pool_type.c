@@ -11,6 +11,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_scoreboard.h"
+#include "zlog.h"
 
 static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 {
@@ -33,6 +34,44 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.init_main       = fpm_pool_type_http_init,
 	},
 };
+
+int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+	const char *const *reject;
+	int bad = 0;
+
+	if (!type->rejects || !wp->config->set_directives) {
+		return 0;
+	}
+
+	for (reject = type->rejects; *reject; reject++) {
+		size_t len = strlen(*reject);
+
+		if (len && (*reject)[len - 1] == '.') {
+			/* prefiks: "pm." lapie kazda pm.* faktycznie ustawiona */
+			const char *p = wp->config->set_directives;
+			char needle[128];
+
+			if ((size_t)snprintf(needle, sizeof(needle), ";%s", *reject) >= sizeof(needle)) {
+				continue;
+			}
+			while ((p = strstr(p, needle)) != NULL) {
+				const char *end = strchr(p + 1, ';');
+
+				zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by pool.type = %s",
+					wp->config->name, end ? (int)(end - p - 1) : 0, p + 1, type->name);
+				bad = 1;
+				p = end ? end : p + strlen(p);
+			}
+		} else if (fpm_conf_directive_was_set(wp->config, *reject)) {
+			zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s",
+				wp->config->name, *reject, type->name);
+			bad = 1;
+		}
+	}
+
+	return bad ? -1 : 0;
+}
 
 #define FPM_POOL_TYPE_COUNT (sizeof(fpm_pool_types) / sizeof(fpm_pool_types[0]))
 #define FPM_POOL_TYPE_DEFAULT (&fpm_pool_types[0])

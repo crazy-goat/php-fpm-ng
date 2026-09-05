@@ -54,6 +54,10 @@ extern struct fpm_global_config_s fpm_global_config;
 struct fpm_worker_pool_config_s {
 	char *name;
 	char *type;			/* fpm-ng: pool.type, pusty = fcgi (patrz fpm_pool_type.h) */
+	char *set_directives;		/* fpm-ng: ";nazwa;nazwa;" faktycznie ustawionych dyrektyw,
+					 * zeby typ poola mogl odrzucic te, ktore go nie dotycza —
+					 * z samej wartosci nie da sie odroznic "nieustawione"
+					 * od "ustawione na domyslna" */
 	char *prefix;
 	char *user;
 	char *group;
@@ -124,6 +128,10 @@ enum {
 
 int fpm_conf_init_main(int test_conf, int force_daemon);
 int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc);
+
+/* fpm-ng: sledzenie faktycznie ustawionych dyrektyw poola (patrz set_directives) */
+int fpm_conf_note_directive(struct fpm_worker_pool_config_s *wpc, const char *name);
+bool fpm_conf_directive_was_set(struct fpm_worker_pool_config_s *wpc, const char *name);
 int fpm_conf_write_pid(void);
 int fpm_conf_unlink_pid(void);
 

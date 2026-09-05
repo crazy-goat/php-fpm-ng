@@ -658,11 +658,50 @@ static void *fpm_worker_pool_config_alloc(void)
 	return wp->config;
 }
 
+/* fpm-ng: dopisuje nazwe dyrektywy do listy ";a;b;". Delimitery po obu stronach
+ * sprawiaja, ze wyszukiwanie nie da falszywego trafienia na prefiksie
+ * ("pm" kontra "pm.max_children"). */
+int fpm_conf_note_directive(struct fpm_worker_pool_config_s *wpc, const char *name)
+{
+	size_t have = wpc->set_directives ? strlen(wpc->set_directives) : 0;
+	size_t need = have + strlen(name) + 2 + 1;
+	char *buf = realloc(wpc->set_directives, need);
+
+	if (!buf) {
+		return -1;
+	}
+	if (!have) {
+		buf[0] = ';';
+		buf[1] = '\0';
+	}
+	strcat(buf, name);
+	strcat(buf, ";");
+	wpc->set_directives = buf;
+
+	return 0;
+}
+
+bool fpm_conf_directive_was_set(struct fpm_worker_pool_config_s *wpc, const char *name)
+{
+	char needle[128];
+
+	if (!wpc->set_directives) {
+		return false;
+	}
+	if ((size_t)snprintf(needle, sizeof(needle), ";%s;", name) >= sizeof(needle)) {
+		return false;
+	}
+
+	return strstr(wpc->set_directives, needle) != NULL;
+}
+
 int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 {
 	struct key_value_s *kv, *kv_next;
 
 	free(wpc->name);
+	free(wpc->type);
+	free(wpc->set_directives);
 	free(wpc->prefix);
 	free(wpc->user);
 	free(wpc->group);
@@ -868,6 +907,11 @@ static int fpm_conf_process_all_pools(void)
 				zlog(ZLOG_ERROR, "[pool %s] the prefix '%s' does not exist or is not a directory", wp->config->name, wp->config->prefix);
 				return -1;
 			}
+		}
+
+		/* dyrektywy, ktorych ten typ nie obsluguje — odrzucamy, nie ignorujemy */
+		if (0 > fpm_pool_type_check_directives(wp, type)) {
+			return -1;
 		}
 
 		/* sprawdzenia specyficzne dla typu */
@@ -1479,6 +1523,7 @@ static void fpm_conf_ini_parser_section(zval *section, void *arg) /* {{{ */
 
 static void fpm_conf_ini_parser_entry(zval *name, zval *value, void *arg) /* {{{ */
 {
+	int in_pool = 0;
 	const struct ini_value_parser_s *parser;
 	void *config = NULL;
 
@@ -1505,6 +1550,7 @@ static void fpm_conf_ini_parser_entry(zval *name, zval *value, void *arg) /* {{{
 	} else {
 		parser = ini_fpm_pool_options;
 		config = current_wp->config;
+		in_pool = 1;
 	}
 
 	for (; parser->name; parser++) {
@@ -1521,6 +1567,12 @@ static void fpm_conf_ini_parser_entry(zval *name, zval *value, void *arg) /* {{{
 				zlog(ZLOG_ERROR, "[%s:%d] unable to parse value for entry '%s': %s", ini_filename, ini_lineno, parser->name, ret);
 				*error = 1;
 				return;
+			}
+
+			/* fpm-ng: zapamietaj, ze ta dyrektywa zostala faktycznie ustawiona */
+			if (in_pool && 0 > fpm_conf_note_directive(current_wp->config, parser->name)) {
+				zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry '%s'", ini_filename, ini_lineno, parser->name);
+				*error = 1;
 			}
 
 			/* all is good ! */

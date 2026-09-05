@@ -157,6 +157,14 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "decorate_workers_output",   &fpm_conf_set_boolean,     WPO(decorate_workers_output) },
 	{ "clear_env",                 &fpm_conf_set_boolean,     WPO(clear_env) },
 	{ "security.limit_extensions", &fpm_conf_set_string,      WPO(security_limit_extensions) },
+	{ "supervisor.script",         &fpm_conf_set_string,      WPO(supervisor_script) },
+	{ "supervisor.processes",      &fpm_conf_set_integer,     WPO(supervisor_processes) },
+	{ "supervisor.restart",        &fpm_conf_set_string,      WPO(supervisor_restart) },
+	{ "supervisor.restart_delay",  &fpm_conf_set_time,        WPO(supervisor_restart_delay) },
+	{ "supervisor.restart_delay_max", &fpm_conf_set_time,     WPO(supervisor_restart_delay_max) },
+	{ "supervisor.restart_max",    &fpm_conf_set_integer,     WPO(supervisor_restart_max) },
+	{ "supervisor.stop_timeout",   &fpm_conf_set_time,        WPO(supervisor_stop_timeout) },
+	{ "supervisor.fatal",          &fpm_conf_set_boolean,     WPO(supervisor_fatal) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -637,6 +645,10 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->process_dumpable = 0;
 	wp->config->clear_env = 1;
 	wp->config->decorate_workers_output = 1;
+	wp->config->supervisor_processes = 1;
+	wp->config->supervisor_restart_delay = 1;
+	wp->config->supervisor_restart_delay_max = 60;
+	wp->config->supervisor_stop_timeout = 10;
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif
@@ -719,6 +731,8 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->chroot);
 	free(wpc->chdir);
 	free(wpc->security_limit_extensions);
+	free(wpc->supervisor_script);
+	free(wpc->supervisor_restart);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

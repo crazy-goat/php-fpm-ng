@@ -262,8 +262,61 @@ AS_VAR_IF([php_cv_have_SO_LISTENQLEN], [yes],
     [Define to 1 if you have 'SO_LISTENQ*'.])])
 ])
 
+AC_DEFUN([PHP_FPMNG_KQUEUE],
+[AC_CACHE_CHECK([for kqueue],
+  [php_cv_have_kqueue],
+  [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([dnl
+    #include <sys/types.h>
+    #include <sys/event.h>
+    #include <sys/time.h>
+  ], [dnl
+    int kfd;
+    struct kevent k;
+    kfd = kqueue();
+    EV_SET(&k, 0, EVFILT_READ, EV_ADD | EV_CLEAR, 0, 0, NULL);
+    (void)kfd;
+  ])],
+  [php_cv_have_kqueue=yes],
+  [php_cv_have_kqueue=no])])
+AS_VAR_IF([php_cv_have_kqueue], [yes],
+  [AC_DEFINE([HAVE_KQUEUE], [1],
+    [Define to 1 if system has a working 'kqueue' function.])])
+])
+
+AC_DEFUN([PHP_FPMNG_EPOLL],
+[AC_CACHE_CHECK([for epoll],
+  [php_cv_have_epoll],
+  [AC_COMPILE_IFELSE([AC_LANG_PROGRAM([#include <sys/epoll.h>], [dnl
+    int epollfd;
+    struct epoll_event e;
+
+    epollfd = epoll_create(1);
+    if (epollfd < 0) {
+      return 1;
+    }
+
+    e.events = EPOLLIN | EPOLLET;
+    e.data.fd = 0;
+
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, 0, &e) == -1) {
+      return 1;
+    }
+
+    e.events = 0;
+    if (epoll_wait(epollfd, &e, 1, 1) < 0) {
+      return 1;
+    }
+  ])],
+  [php_cv_have_epoll=yes],
+  [php_cv_have_epoll=no])])
+AS_VAR_IF([php_cv_have_epoll], [yes],
+  [AC_DEFINE([HAVE_EPOLL], [1], [Define to 1 if system has a working epoll.])])
+])
+
 if test "$PHP_FPMNG" != "no"; then
   PHP_FPMNG_CLOCK
+  PHP_FPMNG_KQUEUE
+  PHP_FPMNG_EPOLL
   PHP_FPMNG_TRACE
   PHP_FPMNG_BUILTIN_ATOMIC
   PHP_FPMNG_LQ

@@ -89,6 +89,7 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 {
 	char line[4096];
 	char uri_esc[1024], referer_esc[512], ua_esc[512];
+	char addr_esc[128], user_esc[256];
 	char status_buf[8];
 	char timebuf[64];
 	time_t now;
@@ -105,6 +106,11 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	localtime_r(&now, &tmv);
 	strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S %z", &tmv);
 
+	/* remote_user pochodzi z base64 w naglowku Authorization, wiec moze
+	 * zawierac DOWOLNE bajty, z nowa linia wlacznie -- bez ucieczki klient
+	 * wstrzykiwalby wlasne linie do access logu. remote_addr dla porzadku. */
+	fpm_http_access_log_escape(remote_addr, addr_esc, sizeof(addr_esc));
+	fpm_http_access_log_escape(remote_user, user_esc, sizeof(user_esc));
 	fpm_http_access_log_escape(uri, uri_esc, sizeof(uri_esc));
 	fpm_http_access_log_escape(referer, referer_esc, sizeof(referer_esc));
 	fpm_http_access_log_escape(user_agent, ua_esc, sizeof(ua_esc));
@@ -117,8 +123,8 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 
 	len = snprintf(line, sizeof(line),
 		"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\"\n",
-		remote_addr && *remote_addr ? remote_addr : "-",
-		remote_user && *remote_user ? remote_user : "-",
+		addr_esc[0] ? addr_esc : "-",
+		user_esc[0] ? user_esc : "-",
 		timebuf,
 		method ? method : "-",
 		uri_esc[0] ? uri_esc : "-",

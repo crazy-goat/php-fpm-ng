@@ -1,0 +1,53 @@
+diff --git a/Zend/zend_signal.c b/Zend/zend_signal.c
+index 83f8aa0..faf9be9 100644
+--- a/Zend/zend_signal.c
++++ b/Zend/zend_signal.c
+@@ -78,6 +78,7 @@ static const int zend_sigs[] = { TIMEOUT_SIG, SIGHUP, SIGINT, SIGQUIT, SIGTERM,
+ /* True globals, written only at process startup */
+ static zend_signal_entry_t global_orig_handlers[NSIG];
+ static sigset_t            global_sigmask;
++static bool                persistent_handlers;
+ 
+ /* {{{ zend_signal_handler_defer
+  *  Blocks signals if in critical section */
+@@ -326,12 +327,20 @@ void zend_signal_activate(void)
+ 		for (x = 0; x < sizeof(zend_sigs) / sizeof(*zend_sigs); x++) {
+ 			zend_signal_register(zend_sigs[x], zend_signal_handler_defer);
+ 		}
++		if (persistent_handlers) {
++			SIGG(reset) = false;
++		}
+ 	}
+ 
+ 	SIGG(active) = 1;
+ 	SIGG(depth)  = 0;
+ } /* }}} */
+ 
++ZEND_API void zend_signal_use_persistent_handlers(bool enable)
++{
++	persistent_handlers = enable;
++}
++
+ /* {{{ zend_signal_deactivate */
+ void zend_signal_deactivate(void)
+ {
+diff --git a/Zend/zend_signal.h b/Zend/zend_signal.h
+index e88892d..84ace5c 100644
+--- a/Zend/zend_signal.h
++++ b/Zend/zend_signal.h
+@@ -88,6 +88,7 @@ END_EXTERN_C()
+ ZEND_API void zend_signal_handler_unblock(void);
+ void zend_signal_activate(void);
+ void zend_signal_deactivate(void);
++ZEND_API void zend_signal_use_persistent_handlers(bool enable);
+ BEGIN_EXTERN_C()
+ ZEND_API void zend_signal_startup(void);
+ END_EXTERN_C()
+@@ -103,6 +104,7 @@ ZEND_API void zend_sigaction(int signo, const struct sigaction *act, struct siga
+ 
+ # define zend_signal_activate()
+ # define zend_signal_deactivate()
++# define zend_signal_use_persistent_handlers(enable)
+ # define zend_signal_startup()
+ # define zend_signal_init()
+ 

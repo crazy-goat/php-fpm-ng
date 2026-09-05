@@ -163,6 +163,7 @@ static const char *fpm_pool_status_state_name(enum fpm_pool_state_e state) /* {{
  * nie ma czego pokazac, i nie ma potrzeby specjalnego wykrywania po nazwie. */
 struct fpm_pool_status_row_s {
 	const char *name;
+	const char *type_name;
 	int serves_requests;
 
 	/* serves_requests = 1 */
@@ -186,6 +187,7 @@ static void fpm_pool_status_collect_and_render(struct fpm_status_buf_s *b, fpm_p
 
 		memset(&row, 0, sizeof(row));
 		row.name = wp->config->name;
+		row.type_name = type->name;
 		row.serves_requests = type->serves_requests;
 
 		if (type->serves_requests) {
@@ -214,20 +216,40 @@ static void fpm_pool_status_collect_and_render(struct fpm_status_buf_s *b, fpm_p
 
 static void fpm_pool_status_row_prometheus(struct fpm_status_buf_s *b, const struct fpm_pool_status_row_s *row, int first) /* {{{ */
 {
+	static const char *const states[] = { "running", "backoff", "gave_up", "finished", "idle" };
+	time_t now = time(NULL);
+	size_t i;
+
 	(void) first;
+
+	fpm_status_buf_appendf(b, "fpmng_pool_info{pool=\"%s\",type=\"%s\"} 1\n", row->name, row->type_name);
 
 	if (row->serves_requests) {
 		fpm_status_buf_appendf(b, "fpmng_pool_workers_idle{pool=\"%s\"} %d\n", row->name, row->idle);
 		fpm_status_buf_appendf(b, "fpmng_pool_workers_active{pool=\"%s\"} %d\n", row->name, row->active);
 		fpm_status_buf_appendf(b, "fpmng_pool_requests_total{pool=\"%s\"} %lu\n", row->name, row->requests);
-	} else {
-		fpm_status_buf_appendf(b, "fpmng_pool_state{pool=\"%s\"} %d\n", row->name, (int) row->st.state);
-		fpm_status_buf_appendf(b, "fpmng_pool_last_start_seconds{pool=\"%s\"} %ld\n", row->name, (long) row->st.last_start);
+		return;
+	}
+
+	for (i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+		fpm_status_buf_appendf(b, "fpmng_pool_state{pool=\"%s\",state=\"%s\"} %d\n",
+			row->name, states[i], row->st.state == (enum fpm_pool_state_e) i);
+	}
+	fpm_status_buf_appendf(b, "fpmng_pool_last_start_seconds{pool=\"%s\"} %ld\n", row->name, (long) row->st.last_start);
+	if (row->st.state == FPM_POOL_STATE_RUNNING && row->st.last_start > 0) {
+		fpm_status_buf_appendf(b, "fpmng_pool_uptime_seconds{pool=\"%s\"} %ld\n",
+			row->name, (long) (now > row->st.last_start ? now - row->st.last_start : 0));
+	}
+	if (row->st.has_last_exit_code) {
 		fpm_status_buf_appendf(b, "fpmng_pool_last_exit_code{pool=\"%s\"} %d\n", row->name, row->st.last_exit_code);
-		fpm_status_buf_appendf(b, "fpmng_pool_consecutive_failures{pool=\"%s\"} %u\n", row->name, row->st.consecutive_failures);
-		if (row->st.next_run) {
-			fpm_status_buf_appendf(b, "fpmng_pool_next_run_seconds{pool=\"%s\"} %ld\n", row->name, (long) row->st.next_run);
-		}
+	}
+	fpm_status_buf_appendf(b, "fpmng_pool_consecutive_failures{pool=\"%s\"} %u\n", row->name, row->st.consecutive_failures);
+	if (row->st.has_next_run) {
+		fpm_status_buf_appendf(b, "fpmng_pool_next_run_seconds{pool=\"%s\"} %ld\n", row->name, (long) row->st.next_run);
+	}
+	if (row->st.has_backoff_until) {
+		fpm_status_buf_appendf(b, "fpmng_pool_backoff_seconds{pool=\"%s\"} %ld\n", row->name,
+			(long) (row->st.backoff_until > now ? row->st.backoff_until - now : 0));
 	}
 }
 /* }}} */
@@ -235,46 +257,68 @@ static void fpm_pool_status_row_prometheus(struct fpm_status_buf_s *b, const str
 static void fpm_pool_status_render_prometheus(struct fpm_status_buf_s *b) /* {{{ */
 {
 	fpm_status_buf_appendf(b,
+		"# HELP fpmng_pool_info Pool identity and type.\n"
+		"# TYPE fpmng_pool_info gauge\n"
 		"# HELP fpmng_pool_workers_idle Idle worker processes (pools that serve requests).\n"
 		"# TYPE fpmng_pool_workers_idle gauge\n"
 		"# HELP fpmng_pool_workers_active Active worker processes (pools that serve requests).\n"
 		"# TYPE fpmng_pool_workers_active gauge\n"
 		"# HELP fpmng_pool_requests_total Requests served since start (pools that serve requests).\n"
 		"# TYPE fpmng_pool_requests_total counter\n"
-		"# HELP fpmng_pool_state Pool state: 0=running 1=backoff 2=gave_up 3=finished 4=idle (pools that do not serve requests).\n"
+		"# HELP fpmng_pool_state Current pool state; exactly one state label is 1.\n"
 		"# TYPE fpmng_pool_state gauge\n"
-		"# HELP fpmng_pool_last_start_seconds Unix time of the last start, 0 = never (pools that do not serve requests).\n"
+		"# HELP fpmng_pool_last_start_seconds Unix time of the last start, 0 = never.\n"
 		"# TYPE fpmng_pool_last_start_seconds gauge\n"
-		"# HELP fpmng_pool_last_exit_code Exit code of the last finished run (pools that do not serve requests).\n"
+		"# HELP fpmng_pool_uptime_seconds Elapsed time of the currently running script.\n"
+		"# TYPE fpmng_pool_uptime_seconds gauge\n"
+		"# HELP fpmng_pool_last_exit_code Exit code of the last finished run.\n"
 		"# TYPE fpmng_pool_last_exit_code gauge\n"
-		"# HELP fpmng_pool_consecutive_failures Consecutive failed runs (pools that do not serve requests).\n"
+		"# HELP fpmng_pool_consecutive_failures Consecutive failed runs.\n"
 		"# TYPE fpmng_pool_consecutive_failures gauge\n"
-		"# HELP fpmng_pool_next_run_seconds Unix time of the next scheduled run, cron only (0 = not applicable).\n"
-		"# TYPE fpmng_pool_next_run_seconds gauge\n");
+		"# HELP fpmng_pool_next_run_seconds Unix time of the next scheduled run, cron only.\n"
+		"# TYPE fpmng_pool_next_run_seconds gauge\n"
+		"# HELP fpmng_pool_backoff_seconds Seconds remaining in supervisor backoff.\n"
+		"# TYPE fpmng_pool_backoff_seconds gauge\n");
 	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_prometheus);
 }
 /* }}} */
 
 static void fpm_pool_status_row_json(struct fpm_status_buf_s *b, const struct fpm_pool_status_row_s *row, int first) /* {{{ */
 {
+	time_t now = time(NULL);
+
 	if (!first) {
 		fpm_status_buf_appendf(b, ",");
 	}
 
 	if (row->serves_requests) {
 		fpm_status_buf_appendf(b,
-			"{\"name\":\"%s\",\"serves_requests\":true,"
+			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":true,"
 			"\"idle\":%d,\"active\":%d,\"requests\":%lu}",
-			row->name, row->idle, row->active, row->requests);
-	} else {
-		fpm_status_buf_appendf(b,
-			"{\"name\":\"%s\",\"serves_requests\":false,"
-			"\"state\":\"%s\",\"last_start\":%ld,\"last_exit_code\":%d,"
-			"\"consecutive_failures\":%u,\"next_run\":%ld}",
-			row->name, fpm_pool_status_state_name(row->st.state),
-			(long) row->st.last_start, row->st.last_exit_code,
-			row->st.consecutive_failures, (long) row->st.next_run);
+			row->name, row->type_name, row->idle, row->active, row->requests);
+		return;
 	}
+
+	fpm_status_buf_appendf(b,
+		"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false,"
+		"\"state\":\"%s\",\"last_start\":%ld,\"consecutive_failures\":%u",
+		row->name, row->type_name, fpm_pool_status_state_name(row->st.state),
+		(long) row->st.last_start, row->st.consecutive_failures);
+	if (row->st.state == FPM_POOL_STATE_RUNNING && row->st.last_start > 0) {
+		fpm_status_buf_appendf(b, ",\"uptime\":%ld",
+			(long) (now > row->st.last_start ? now - row->st.last_start : 0));
+	}
+	if (row->st.has_last_exit_code) {
+		fpm_status_buf_appendf(b, ",\"last_exit_code\":%d", row->st.last_exit_code);
+	}
+	if (row->st.has_next_run) {
+		fpm_status_buf_appendf(b, ",\"next_run\":%ld", (long) row->st.next_run);
+	}
+	if (row->st.has_backoff_until) {
+		fpm_status_buf_appendf(b, ",\"backoff_seconds\":%ld",
+			(long) (row->st.backoff_until > now ? row->st.backoff_until - now : 0));
+	}
+	fpm_status_buf_appendf(b, "}");
 }
 /* }}} */
 

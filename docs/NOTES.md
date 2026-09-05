@@ -507,6 +507,62 @@ Efekt byłby cichy i paskudny — binarka bez łatki i komunikat, że łatka jes
 Kolejność musi być: najpierw próba w przód, dopiero potem test odwrotny.
 
 
+## 3j. Statystyki dla `supervisor` i `cron` — projekt (2026-09-05)
+
+Wymaganie: statystyki poolów, które nie obsługują requestów, mają być dostępne
+po HTTP na osobnym porcie. W Dockerze/k8s restartem zarządza orkiestrator
+(patrz `supervisor.fatal`), więc rolą fpm-ng jest tam **tylko raportowanie stanu**.
+
+### Dlaczego to nie jest oczywiste
+
+Pool typu supervisor i cron **nie obsługuje requestów**, więc nie ma jak wystawić
+własnych statystyk — mechanizm `pm.status_path` działa wewnątrz requestu
+(`fpm_main.c:1832`). Statystyki takiego poola musi wystawić ktoś inny.
+Scoreboard jest per pool w pamięci dzielonej, więc technicznie każdy proces może
+je odczytać — ale to nowy wzorzec dostępu, dziś nikt tak nie robi.
+
+### Kształt danych jest INNY niż dla FastCGI
+
+To jest sedno problemu, nie szczegół. Scoreboard FastCGI mierzy idle/active,
+liczbę requestów, długość kolejki. Dla supervisora i crona sensowne są zupełnie
+inne rzeczy:
+
+- stan: działa / śpi w backoffie / poddał się / zakończony planowo
+- czas ostatniego startu i czas życia bieżącego procesu
+- kod wyjścia ostatniego zakończenia
+- liczba kolejnych porażek i bieżące opóźnienie backoffu
+- dla crona dodatkowo: czas ostatniego przebiegu, czas następnego, ile przebiegów
+  pominięto z powodu nakładania
+
+Dlatego `fpm_status.c` musi stać się świadomy typów. Pole `serves_requests`
+w deskryptorze typu **już istnieje i jest dziś nieużywane** — to jest miejsce,
+w które ma się wpiąć rozgałęzienie.
+
+### Skąd to podawać — do rozstrzygnięcia
+
+1. **Osobny pool `pool.type = status`** — mały listener HTTP, który nie odpala
+   PHP w ogóle, tylko czyta scoreboardy wszystkich poolów i serializuje.
+   Zaleta: osobny port, więc metryk nie wystawiamy na porcie publicznym; przy
+   okazji jest to świetny test kontraktu rozszerzalności (typ bez workerów,
+   bez `pm`, bez skryptu). Wada: kolejny typ poola.
+2. **Bramka HTTP odpowiada na `/status` i `/metrics` sama**, bez zawracania głowy
+   workerowi — ten sam mechanizm co planowane pliki statyczne. Zaleta: nic
+   nowego. Wada: te same porty co ruch publiczny, więc trzeba kontroli dostępu.
+
+**Skłaniam się do (1)**, bo oddzielenie portu metryk od publicznego jest
+w produkcji warte więcej niż oszczędność jednego typu, a Piotr wprost mówił
+"na jakiś port".
+
+Format: tekstowy Prometheus plus JSON pod inną ścieżką. Uwaga na kardynalność
+(sekcja o metrykach) — tu akurat jest ograniczona, bo etykietą jest nazwa poola,
+a tych jest skończenie wiele.
+
+### Kolejność
+
+Po supervisorze i cronie, razem z metrykami — bo dopiero wtedy wiadomo, co
+naprawdę jest do pokazania. Robienie tego wcześniej to zgadywanie kształtu danych.
+
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude

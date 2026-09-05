@@ -199,6 +199,20 @@ int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
+	/* Patrz identyczny komentarz w fpm_pool_supervisor_init_main() —
+	 * cron.timeout ma dokladnie ten sam problem z SIGTERM do MASTERA:
+	 * process_control_timeout globalnego mastera eskaluje do SIGKILL zanim
+	 * cron.timeout zdazy cokolwiek zrobic. */
+	if (fpm_global_config.process_control_timeout < wp->config->cron_timeout) {
+		zlog(ZLOG_WARNING,
+			"[pool %s] cron.timeout = %ds, ale global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije biezacy przebieg przez "
+			"eskalacje mastera, zanim cron.timeout zdazy zadzialac — ustaw process_control_timeout "
+			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie przebiegu",
+			wp->config->name, wp->config->cron_timeout, fpm_global_config.process_control_timeout,
+			wp->config->cron_timeout);
+	}
+
 	entry = calloc(1, sizeof(*entry));
 	if (!entry) {
 		return -1;

@@ -206,6 +206,30 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
+	/* ZMIERZONE (docs/NOTES.md, "wdziecznie zatrzymanie", scenariusz 3): kiedy
+	 * SIGTERM idzie do MASTERA (dokladnie to, co wysyla `docker stop`/systemd,
+	 * bez zadnej dodatkowej konfiguracji STOPSIGNAL), master jest w stanie
+	 * TERMINATING i eskaluje SAM, przez fpm_process_ctl.c (referencja,
+	 * nietkniete) — to zachowanie calego mastera FPM, nie cos wprowadzonego
+	 * przez ten typ poola. Domyslne process_control_timeout = 0 eskaluje do
+	 * SIGKILL niemal natychmiast, wiec supervisor.stop_timeout NIGDY nie
+	 * dostaje szansy zadzialac: proces ginie od SIGKILL-a mastera, zanim nasz
+	 * wlasny watchdog w ogole zdazy odliczyc. Nie da sie tego naprawic w tym
+	 * pliku (process_control_timeout jest globalny, wspoldzielony przez
+	 * wszystkie pule, i fpm_process_ctl.c jest referencyjny) — ale MOZNA
+	 * ostrzec operatora glosno, raz, przy starcie, zamiast zostawiac go z
+	 * cichym "dziala na moim teście" (gdzie SIGTERM leci PROSTO do dziecka,
+	 * nie do mastera) i niedzialajacym w produkcji `docker stop`. */
+	if (fpm_global_config.process_control_timeout < wp->config->supervisor_stop_timeout) {
+		zlog(ZLOG_WARNING,
+			"[pool %s] supervisor.stop_timeout = %ds, ale global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije to dziecko przez eskalacje "
+			"mastera, zanim supervisor.stop_timeout zdazy zadzialac — ustaw process_control_timeout "
+			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie zadania",
+			wp->config->name, wp->config->supervisor_stop_timeout, fpm_global_config.process_control_timeout,
+			wp->config->supervisor_stop_timeout);
+	}
+
 	entry = calloc(1, sizeof(*entry));
 	if (!entry) {
 		return -1;

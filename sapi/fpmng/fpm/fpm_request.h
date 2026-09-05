@@ -15,6 +15,9 @@ void fpm_request_executing(void);
 void fpm_request_end(void);
 /* request processed: cleaning current request */
 void fpm_request_finished(void);
+/* fpm-ng: request_cpu_tracking — czy mierzyc CPU requestu przez times() (2 syscalle/request).
+ * Wolane w dziecku przed petla accept; domyslnie wlaczone. */
+void fpm_request_set_cpu_tracking(bool on);
 
 struct fpm_child_s;
 struct timeval;

@@ -30,4 +30,11 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp);
  * wracac do petli accept FastCGI. Nie wraca. */
 void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp);
 
+struct fpm_pool_status_s;
+
+/* fpm_pool_type_s.status — stan tego poola dla pool.type = status. Czyta
+ * WYLACZNIE pamiec dzielona alokowana w init_main (ten proces to nie ten
+ * sam proces co supervisor, wiec zaden stan lokalny nie jest widoczny). */
+void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
+
 #endif

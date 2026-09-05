@@ -273,43 +273,43 @@ if test "$PHP_FPMNG" != "no"; then
   AC_CHECK_HEADER([priv.h], [AC_CHECK_FUNCS([setpflags])])
   AC_CHECK_HEADER([sys/times.h], [AC_CHECK_FUNCS([times])])
 
-  PHP_ARG_WITH([fpm-user],,
-    [AS_HELP_STRING([[--with-fpm-user[=USER]]],
+  PHP_ARG_WITH([fpmng-user],,
+    [AS_HELP_STRING([[--with-fpmng-user[=USER]]],
       [Set the user for php-fpm to run as. (default: nobody)])],
     [nobody],
     [no])
 
-  PHP_ARG_WITH([fpm-group],,
-    [AS_HELP_STRING([[--with-fpm-group[=GRP]]],
+  PHP_ARG_WITH([fpmng-group],,
+    [AS_HELP_STRING([[--with-fpmng-group[=GRP]]],
       [Set the group for php-fpm to run as. For a system user, this should
       usually be set to match the fpm username (default: nobody)])],
     [nobody],
     [no])
 
-  PHP_ARG_WITH([fpm-systemd],
+  PHP_ARG_WITH([fpmng-systemd],
     [whether to enable systemd integration in PHP-FPM],
-    [AS_HELP_STRING([--with-fpm-systemd],
+    [AS_HELP_STRING([--with-fpmng-systemd],
       [Activate systemd integration])],
     [no],
     [no])
 
-  PHP_ARG_WITH([fpm-acl],
+  PHP_ARG_WITH([fpmng-acl],
     [whether to use Access Control Lists (ACL) in PHP-FPM],
-    [AS_HELP_STRING([--with-fpm-acl],
+    [AS_HELP_STRING([--with-fpmng-acl],
       [Use POSIX Access Control Lists])],
     [no],
     [no])
 
-  PHP_ARG_WITH([fpm-apparmor],
+  PHP_ARG_WITH([fpmng-apparmor],
     [whether to enable AppArmor confinement in PHP-FPM],
-    [AS_HELP_STRING([--with-fpm-apparmor],
+    [AS_HELP_STRING([--with-fpmng-apparmor],
       [Support AppArmor confinement through libapparmor])],
     [no],
     [no])
 
-  PHP_ARG_WITH([fpm-selinux],
+  PHP_ARG_WITH([fpmng-selinux],
     [whether to enable SELinux support in PHP-FPM],
-    [AS_HELP_STRING([--with-fpm-selinux],
+    [AS_HELP_STRING([--with-fpmng-selinux],
       [Support SELinux policy library])],
     [no],
     [no])
@@ -408,16 +408,16 @@ if test "$PHP_FPMNG" != "no"; then
     CFLAGS=$CFLAGS_save
   ])
 
-  if test -z "$PHP_FPM_USER" || test "$PHP_FPM_USER" = "yes" || test "$PHP_FPM_USER" = "no"; then
+  if test -z "$PHP_FPMNG_USER" || test "$PHP_FPMNG_USER" = "yes" || test "$PHP_FPMNG_USER" = "no"; then
     php_fpm_user=nobody
   else
-    php_fpm_user=$PHP_FPM_USER
+    php_fpm_user=$PHP_FPMNG_USER
   fi
 
-  if test -z "$PHP_FPM_GROUP" || test "$PHP_FPM_GROUP" = "yes" || test "$PHP_FPM_GROUP" = "no"; then
+  if test -z "$PHP_FPMNG_GROUP" || test "$PHP_FPMNG_GROUP" = "yes" || test "$PHP_FPMNG_GROUP" = "no"; then
     php_fpm_group=nobody
   else
-    php_fpm_group=$PHP_FPM_GROUP
+    php_fpm_group=$PHP_FPMNG_GROUP
   fi
 
   AC_SUBST([php_fpm_user])
@@ -434,11 +434,7 @@ if test "$PHP_FPMNG" != "no"; then
     sapi/fpmng/fpm/events
   ])
   AC_CONFIG_FILES([
-    sapi/fpmng/init.d.php-fpm
-    sapi/fpmng/php-fpm.8
     sapi/fpmng/php-fpm.conf
-    sapi/fpmng/php-fpm.service
-    sapi/fpmng/status.html
     sapi/fpmng/www.conf
   ])
   PHP_ADD_MAKEFILE_FRAGMENT([$abs_srcdir/sapi/fpmng/Makefile.frag])
@@ -449,35 +445,10 @@ if test "$PHP_FPMNG" != "no"; then
     [AS_IF([test -f "$abs_srcdir/sapi/fpmng/fpm/fpm_trace_$fpmng_trace_type.c"],
       [PHP_FPMNG_TRACE_FILES="fpm/fpm_trace.c fpm/fpm_trace_$fpmng_trace_type.c"])])
 
-  PHP_FPMNG_FILES="fpm/fpm.c \
-    fpm/fpm_children.c \
-    fpm/fpm_cleanup.c \
-    fpm/fpm_clock.c \
-    fpm/fpm_conf.c \
-    fpm/fpm_env.c \
-    fpm/fpm_events.c \
-    fpm/fpm_http.c \
-    fpm/fpm_log.c \
-    fpm/fpm_main.c \
-    fpm/fpm_php.c \
-    fpm/fpm_php_trace.c \
-    fpm/fpm_process_ctl.c \
-    fpm/fpm_request.c \
-    fpm/fpm_shm.c \
-    fpm/fpm_scoreboard.c \
-    fpm/fpm_signals.c \
-    fpm/fpm_sockets.c \
-    fpm/fpm_status.c \
-    fpm/fpm_stdio.c \
-    fpm/fpm_unix.c \
-    fpm/fpm_worker_pool.c \
-    fpm/zlog.c \
-    fpm/events/select.c \
-    fpm/events/poll.c \
-    fpm/events/epoll.c \
-    fpm/events/kqueue.c \
-    fpm/events/port.c \
-  "
+  dnl Lista zrodel jest wstrzykiwana przez build/prepare.sh na podstawie
+  dnl sapi/fpm/config.m4 z tego konkretnego php-src — dzieki temu nie dryfuje,
+  dnl gdy upstream doda albo usunie plik (np. events/devpoll.c).
+  PHP_FPMNG_FILES="@FPMNG_SOURCES@"
 
   PHP_SELECT_SAPI([fpmng],
     [program],

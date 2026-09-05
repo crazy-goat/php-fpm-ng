@@ -81,7 +81,7 @@ Brak `pool.type` → `fcgi`. Zero BC.
 |---|---|---|
 | `fcgi` | jak dziś | gotowe, tylko dispatch |
 | `http` | bramka HTTP na libevent przed poolem | POC działa, patrz sekcja 6 |
-| `supervisor` | N długo żyjących procesów, wskrzeszanych | do zrobienia, małe |
+| `supervisor` | N długo żyjących procesów, wskrzeszanych | gotowe, patrz sekcja 3j |
 | `cron` | skrypt odpalany z harmonogramu | do zrobienia, małe |
 
 Metryki to rzecz przekrojowa, nie typ poola.
@@ -377,14 +377,14 @@ każda ekstrawagancja to koszt przy każdym wydaniu PHP.
 | **Przekazanie deskryptora przez `SCM_RIGHTS`** | ODRZUCONE. Największy zysk przy dużych odpowiedziach, ale gdy worker padnie w połowie, klient dostaje ucięty strumień, a bramka nie może wysłać 502 ani pilnować timeoutu na gniazdku, którego nie posiada. Przy jednej instancji bez klastra to zła wymiana. |
 | **`$_SERVER` bez objazdu przez CGI** | ODRZUCONE na razie. Aplikacje polegają na dokładnym zestawie kluczy CGI, więc oszczędność jest tylko w środku. |
 
-### `fcgi-ng` — eksperymentalny, stary `fcgi` bez zmian
+### `fcgi-async` — eksperymentalny, stary `fcgi` bez zmian
 
 Decyzja Piotra. Zastrzeżenie do zapamiętania: **BC dotyczy konfiguracji
 i protokołu, nie wewnętrznego zachowania.** Istniejący `fpm.conf` ma działać
 i nginx ma się dogadać — ale poprawki błędów i usprawnienia wewnętrzne mieszczą
 się w `fcgi`. GH-18956 to naprawa, nie zmiana kontraktu.
 
-`fcgi-ng` ma sens jako miejsce na zmiany łamiące obserwowalne zachowanie i na
+`fcgi-async` ma sens jako miejsce na zmiany łamiące obserwowalne zachowanie i na
 eksperymenty (io_uring, `SO_REUSEPORT` per worker, batchowanie syscalli).
 Uwaga strukturalna do zweryfikowania: ścieżka FastCGI ma inną budowę niż bramka.
 Bramka to nasz proces z pętlą libevent; worker FastCGI to blokująca pętla
@@ -392,7 +392,7 @@ w `fpm_main.c`, a pętla zdarzeń FPM żyje w MASTERZE. Więc to, co zadziałał
 w bramce, tu niekoniecznie się przekłada. **Bada to osobny agent — wynik
 wkleić tutaj.**
 
-### `http-direct` (in-process) — nie teraz, ale nie zamykamy drogi
+### `http-async` (in-process) — nie teraz, ale nie zamykamy drogi
 
 Korekta wcześniejszego argumentu: mówiłem, że bez bramki keep-alive przypina
 workera i osiem workerów to osiem połączeń. To prawda tylko wtedy, gdy worker
@@ -433,8 +433,8 @@ status()            jak się pokazuje w statusie
 ```
 
 Znane typy do zmieszczenia w tym interfejsie: `fcgi` (domyślny, brak
-`pool.type` = `fcgi`, zero BC), `http`, `fcgi-ng`, `supervisor`, `cron`,
-a w przyszłości `http-direct`. Jeśli któryś z nich nie wchodzi gładko —
+`pool.type` = `fcgi`, zero BC), `http`, `fcgi-async`, `supervisor`, `cron`,
+a w przyszłości `http-async`. Jeśli któryś z nich nie wchodzi gładko —
 interfejs jest zły i lepiej się o tym dowiedzieć teraz.
 
 `listen` przestaje być bezwarunkowo obowiązkowe (zweryfikowane: dziś pool bez
@@ -662,7 +662,7 @@ człowieka: osobna tabela na typ.
 
 Piotr: "TLS i acme na koniec - ale robimy". Przestaje być otwartym pytaniem.
 
-### Konsekwencja 1: domyka sprawę `http-direct`
+### Konsekwencja 1: domyka sprawę `http-async`
 
 Przy TLS worker nie ma jak pisać prosto do klienta — strumień jest szyfrowany,
 a stan sesji siedzi w bramce. Wariant in-process musiałby dać każdemu workerowi
@@ -730,11 +730,11 @@ i przekierowanie, drugi na ruch. Model konfiguracji musi to obsłużyć; sprawdz
 czy "jeden pool, jeden port" wystarcza.
 
 
-## 3m. `fcgi-ng` — wyniki badania i PRAWDZIWY CEL: eksperymentalny build pod async
+## 3m. `fcgi-async` — wyniki badania i PRAWDZIWY CEL: eksperymentalny build pod async
 
 ### Cel, w którego świetle trzeba czytać wszystkie liczby
 
-`fcgi-ng` nie jest głównie o wyciśnięciu mikrosekund z dzisiejszego FPM. Ma być
+`fcgi-async` nie jest głównie o wyciśnięciu mikrosekund z dzisiejszego FPM. Ma być
 **eksperymentalnym buildem pod prawdziwy asynchron w PHP**. To zmienia wagę
 wszystkich pomiarów poniżej.
 
@@ -807,16 +807,16 @@ wiele deskryptorów, wiele operacji zgłaszanych jednym `io_uring_enter`,
 multishot accept/recv, brak `epoll_ctl` na każdą zmianę zainteresowania.
 **Przy async trzeba to przeliczyć od nowa. Nie cytować samej konkluzji.**
 
-### KOREKTA: async ponownie otwiera `http-direct`
+### KOREKTA: async ponownie otwiera `http-async`
 
 W sekcji 3l napisałem, że TLS praktycznie zamyka wariant in-process, bo worker
 musiałby mieć własny stan TLS i pętlę zdarzeń. Pod asynchronem worker **i tak ma
 pętlę zdarzeń** — to jest sedno asynchrona. HTTP i TLS w workerze przestają
 wtedy być wpychaniem parsera do procesu, który nie ma gdzie go trzymać.
 
-Argument był za mocny. `http-direct` wraca do stanu **otwarte**, nie zamknięte.
+Argument był za mocny. `http-async` wraca do stanu **otwarte**, nie zamknięte.
 
-### Rekomendacja agenta — kolejność dla `fcgi-ng`
+### Rekomendacja agenta — kolejność dla `fcgi-async`
 
 1. Naprawa `TCP_NODELAY` (jedna linia, błąd, zgłosić upstream)
 2. Bufor wejściowy + `accept4` (~7 µs keep, ~12 µs nowe poł., zero zmian na drucie)
@@ -828,9 +828,28 @@ Argument był za mocny. `http-direct` wraca do stanu **otwarte**, nie zamknięte
    `request_terminate_timeout`)
 7. W dokumentacji: `max_execution_time=0` + UDS dla mikro-endpointów
 
-Poza `fcgi-ng`, do upstreamu: 7× `rt_sigaction` w `zend_signal_activate`
+Poza `fcgi-async`, do upstreamu: 7× `rt_sigaction` w `zend_signal_activate`
 (~6,5 µs) i 2× `fcntl` opcache (~1,7 µs) — 40% pozostałych syscalli, ale nie po
 stronie SAPI.
+
+
+## 3n. Nazwy trybów: `fcgi-async` i `http-async`, nie `-ng` (2026-09-05)
+
+Decyzja Piotra. `-ng` mówi tylko, że coś jest nowsze; `-async` mówi, czym to
+jest i czym się różni. Poprzednie nazwy w tym pliku zostały przemianowane:
+
+- `fcgi-ng` -> **`fcgi-async`** — eksperymentalny typ poola FastCGI pod prawdziwy
+  asynchron w PHP. Stary `fcgi` bez zmian.
+- `http-direct` -> **`http-async`** — wariant, w którym HTTP żyje w workerze
+  z pętlą zdarzeń, bez bramki i bez hopa FastCGI.
+
+Nazwa `http-async` jest przy tym trafniejsza merytorycznie niż `http-direct`,
+bo to nie "bezpośredniość" jest istotą tego wariantu, tylko to, że worker ma
+pętlę zdarzeń. Bez asynchrona ten wariant nie ma sensu (traci kolejkowanie
+i przypina połączenia keep-alive do workerów) — z asynchronem ma.
+
+Nazwa produktu `php-fpm-ng` na razie bez zmian; osobna sprawa, patrz sekcja 9
+(znak towarowy).
 
 
 ## 4. Zmierzone: wydajność NIE jest argumentem

@@ -3097,6 +3097,14 @@ Mała odpowiedź nie wykazała poprawy (mediany 12833,55 i 12668,64 req/s), zgod
 
 Wspólna ścieżka workera nadal wykonuje około 8 `rt_sigaction`, 2 `times`, 2 `setitimer`, 2 `chdir`, 1 `getcwd` i 2 `fcntl` na request. Dla HTTP keep-alive gateway dodaje głównie 4 `epoll_ctl`, 3 `epoll_wait`, po jednym `readv`, `writev` i `ioctl`. `Connection: close` zwiększa koszt HTTP o około 9 syscalli/request: `epoll_ctl` rośnie z 4 do 8, dochodzą około 2 `accept4`, dodatkowy `epoll_wait` i `shutdown`.
 
+### Trwałe handlery sygnałów w zoptymalizowanych frontendach
+
+`fastcgi-ng` i `http` instalują zestaw handlerów Zend podczas pierwszego requestu, a następnie pozostawiają go na czas życia workera. Reset logicznej tablicy handlerów nadal odbywa się per request, podobnie jak instalacja `SIGPROF` obsługującego `max_execution_time`. Klasyczny `fastcgi` zachowuje zachowanie upstreamu.
+
+Dla `fastcgi-ng` liczba syscalli spadła z 25,228 do 18,173/request; `rt_sigaction` z około 8 do około 1/request. Pięć naprzemiennych serii małej odpowiedzi dało CPU/request 86,615 -> 80,569 us (**-6,98%**). Dla HTTP: 111,041 -> 103,964 us (**-6,37%**) i 12850,98 -> 13853,09 req/s (**+7,80%**). Końcowe porównanie na jednej binarce `fastcgi` -> `fastcgi-ng` dało 94,964 -> 80,499 us CPU/request (**-15,23%**); różnica req/s -0,58% nie jest traktowana jako zysk.
+
+Regresja objęła timeout 1 s i kolejny request na tym samym workerze, reset handlera `pcntl_signal()` między requestami, graceful shutdown, małą i dużą odpowiedź, binarny POST oraz zerwanego odbiorcę dla `fastcgi`, `fastcgi-ng` i `http`. Świadomie zmienia się przypadek rozszerzenia podmieniającego handler bezpośrednim libc `sigaction()` zamiast API Zend: przy domyślnym `zend.signal_check=0` handler nie zostanie automatycznie naprawiony w następnym requeście. `zend.signal_check=1` nadal wykonuje kontrolę przy końcu requestu.
+
 ### Zero-copy / DMA — kierunek odłożony
 
 DMA nie jest bezpośrednim API dla odpowiedzi generowanych przez PHP. `sendfile()` ma sens tylko dla plików statycznych i należy najpierw sprawdzić, czy libevent już go używa. `MSG_ZEROCOPY` może być kandydatem dla dużych odpowiedzi TCP, ale wymaga obsługi completion queue i pomiaru przez fizyczny interfejs; loopback nie jest miarodajny. `splice()` jest mało atrakcyjne, ponieważ gateway musi parsować rekordy FastCGI i budować HTTP. Dla dynamicznych odpowiedzi pozostaje obecnie prostsze i potwierdzone benchmarkiem `writev()`.

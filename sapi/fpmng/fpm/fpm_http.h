@@ -11,4 +11,8 @@ int fpm_http_init_pool(struct fpm_worker_pool_s *wp);
  * capacity = liczba rownoleglych polaczen FastCGI do calego poola. */
 int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity);
 
+/* Walidacja dyrektyw http.* dla pool.type = http, wolana z fpm_pool_type.c
+ * (.validate) w fazie sprawdzania configu, przed forkiem czegokolwiek. */
+int fpm_http_validate_pool(struct fpm_worker_pool_s *wp);
+
 #endif

@@ -115,6 +115,15 @@ struct fpm_worker_pool_config_s {
 	char *cron_script;
 	int cron_timeout;			/* sekundy, 0 = bez limitu (domyslne) */
 	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* wypelnia validate() */
+	/* fpm-ng: pool.type = http, patrz fpm_http.c. Bramka startuje TYLKO gdy
+	 * pool.type = http (patrz fpm_pool_type.c) — te dyrektywy ja jedynie
+	 * dostrajaja, nigdy nie wlaczaja same z siebie na innym typie poola. */
+	char *http_listen;			/* pusty = FastCGI port + 1 (albo wymagane, gdy pool sluchał na UDS) */
+	int http_gateways;			/* liczba procesow bramki, domyslnie 2 */
+	int http_reuseport;			/* kazda bramka wlasny SO_REUSEPORT socket */
+	int http_static;			/* serwowanie plikow statycznych bez PHP, domyslnie wlaczone */
+	int http_idle_timeout;			/* ms, zwalnia przypiete polaczenie po tylu ms bezczynnosci; 0 = nigdy */
+	char *http_allowed_clients;		/* jak listen.allowed_clients, ale dla bramki HTTP; puste = brak ograniczenia */
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

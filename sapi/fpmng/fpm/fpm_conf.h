@@ -124,6 +124,8 @@ struct fpm_worker_pool_config_s {
 	int http_static;			/* serwowanie plikow statycznych bez PHP, domyslnie wlaczone */
 	int http_idle_timeout;			/* ms, zwalnia przypiete polaczenie po tylu ms bezczynnosci; 0 = nigdy */
 	char *http_allowed_clients;		/* jak listen.allowed_clients, ale dla bramki HTTP; puste = brak ograniczenia */
+	char *http_trusted_proxies;		/* adresy, z ktorych ufamy naglowkom X-Forwarded-*; puste = nikomu (bezpieczny domyslny), patrz fpm_http_forwarded.c */
+	char *http_access_log;			/* sciezka do logu dostepu bramki HTTP; puste = wylaczony, patrz fpm_http_access_log.c */
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

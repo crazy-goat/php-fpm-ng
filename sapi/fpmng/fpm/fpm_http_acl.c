@@ -28,7 +28,7 @@ struct fpm_http_acl_s {
 	struct fpm_http_acl_entry_s entries[1];	/* flexible-ish, count entries follow */
 };
 
-int fpm_http_acl_parse(const char *pool, const char *csv, struct fpm_http_acl_s **out) /* {{{ */
+int fpm_http_acl_parse(const char *pool, const char *directive, const char *csv, struct fpm_http_acl_s **out) /* {{{ */
 {
 	char *dup, *save = NULL, *tok;
 	unsigned n = 0, i;
@@ -74,7 +74,7 @@ int fpm_http_acl_parse(const char *pool, const char *csv, struct fpm_http_acl_s 
 			acl->entries[i].family = FPM_HTTP_ACL_INET6;
 			i++;
 		} else {
-			zlog(ZLOG_ERROR, "[pool %s] http.allowed_clients: '%s' is not a valid IP address", pool, tok);
+			zlog(ZLOG_ERROR, "[pool %s] %s: '%s' is not a valid IP address", pool, directive, tok);
 			free(dup);
 			free(acl);
 			return -1;

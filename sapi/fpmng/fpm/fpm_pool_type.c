@@ -12,6 +12,8 @@
 #include "fpm_http.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_async.h"
+#include "fpm_pool_coop.h"
+#include "fpm_pool_fiber.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
@@ -53,6 +55,15 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects         = fpm_pool_async_rejects,
 		.validate        = fpm_pool_async_validate,
 		.child_main      = fpm_pool_async_child_main,
+	},
+	{
+		.name            = "fiber",	/* EKSPERYMENT: czysty upstream, wlasny scheduler, patrz fpm_pool_fiber.h */
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.rejects         = fpm_coop_rejects,
+		.validate        = fpm_pool_fiber_validate,
+		.child_main      = fpm_pool_fiber_child_main,
 	},
 };
 

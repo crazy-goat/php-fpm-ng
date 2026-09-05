@@ -26,6 +26,7 @@
 #include "fpm_scoreboard.h"
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
+#include "fpm_children_extra.h"
 #include "fpm_log.h"
 
 #include "zlog.h"
@@ -340,6 +341,9 @@ void fpm_children_bury(void)
 					break;
 				}
 			}
+		} else if (fpm_children_extra_handle_exit(pid, status)) {
+			/* a process a pool type forked on its own (not a pm.*-counted
+			 * fpm_child_s), e.g. an http gateway — see fpm_children_extra.h */
 		} else if (fpm_globals.parent_pid == 1) {
 			zlog(ZLOG_DEBUG, "unknown child (%d) exited %s - most likely an orphan process (master process is the init process)", pid, buf);
 		} else {

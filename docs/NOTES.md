@@ -3210,7 +3210,15 @@ Wspólna ścieżka workera nadal wykonuje około 8 `rt_sigaction`, 2 `times`, 2 
 
 Dla `fastcgi-ng` liczba syscalli spadła z 25,228 do 18,173/request; `rt_sigaction` z około 8 do około 1/request. Pięć naprzemiennych serii małej odpowiedzi dało CPU/request 86,615 -> 80,569 us (**-6,98%**). Dla HTTP: 111,041 -> 103,964 us (**-6,37%**) i 12850,98 -> 13853,09 req/s (**+7,80%**). Końcowe porównanie na jednej binarce `fastcgi` -> `fastcgi-ng` dało 94,964 -> 80,499 us CPU/request (**-15,23%**); różnica req/s -0,58% nie jest traktowana jako zysk.
 
-Regresja objęła timeout 1 s i kolejny request na tym samym workerze, reset handlera `pcntl_signal()` między requestami, graceful shutdown, małą i dużą odpowiedź, binarny POST oraz zerwanego odbiorcę dla `fastcgi`, `fastcgi-ng` i `http`. Świadomie zmienia się przypadek rozszerzenia podmieniającego handler bezpośrednim libc `sigaction()` zamiast API Zend: przy domyślnym `zend.signal_check=0` handler nie zostanie automatycznie naprawiony w następnym requeście. `zend.signal_check=1` nadal wykonuje kontrolę przy końcu requestu.
+Regresja executora `classic` objęła timeout 1 s i kolejny request na tym samym workerze, reset handlera `pcntl_signal()` między requestami, graceful shutdown, małą i dużą odpowiedź, binarny POST oraz zerwanego odbiorcę dla `fastcgi`, `fastcgi-ng` i `http`. Świadomie zmienia się przypadek rozszerzenia podmieniającego handler bezpośrednim libc `sigaction()` zamiast API Zend: przy domyślnym `zend.signal_check=0` handler nie zostanie automatycznie naprawiony w następnym requeście. `zend.signal_check=1` nadal wykonuje kontrolę przy końcu requestu. Fiber nie ma pełnego request startup/shutdown, dlatego nie zapewnia timeoutu ani izolacji `pcntl`; szczegóły w `docs/fiber_errors.md`.
+
+### Walidacja release PHP 8.5 po optymalizacji sygnałów
+
+Czysty build `--enable-fpmng` ujawnił, że `sapi/fpmng/config.m4` nie wykonywał testów `epoll`/`kqueue`, które upstream uruchamia tylko w bloku `--enable-fpm`. Samodzielna binarka FPM-NG odrzucała przez to `pm = ondemand` na Linuksie. Dodano niezależne makra `PHP_FPMNG_EPOLL` i `PHP_FPMNG_KQUEUE`; po poprawce `HAVE_EPOLL=1`, a `ondemand` startuje bez budowania klasycznego SAPI FPM.
+
+Release build PHP 8.5.11-dev z upstreamowego commita `67d1476d4d`, `-O2 -DNDEBUG`, przeszedł dla `fastcgi` (`static`, `dynamic`, `ondemand`), `fastcgi-ng` (`classic`, `fiber`) i `http` (`classic`, `fiber`). Sprawdzono małą i dużą odpowiedź, binarny POST, keep-alive/close, zerwanego odbiorcę, recovery, reload i stop. Classic przeszedł również timeout, reset `pcntl` i kontrolowany fork. Async został poprawnie odrzucony, ponieważ czysty upstream PHP 8.5 nie zawiera True Async API.
+
+Końcowe pięć naprzemiennych par release `fastcgi` -> `fastcgi-ng` (`wrk -t1 -c2`) dało medianę CPU/request 93,601 -> 79,615 us (**-14,94%**). Mediana przepustowości 9155,85 -> 9028,11 req/s (**-1,40%**) nie stanowi poprawy. Dodatkowa regresja aktualnego HTTP gateway potwierdziła zmienne CGI, zaufane `X-Forwarded-*`, Basic Auth, dwa gatewaye, 40 nieprzeplecionych wpisów access logu i brak możliwości wstrzyknięcia nowej linii przez `REMOTE_USER`.
 
 ### Zero-copy / DMA — kierunek odłożony
 

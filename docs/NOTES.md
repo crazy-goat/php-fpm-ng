@@ -82,7 +82,7 @@ Brak `pool.type` → `fcgi`. Zero BC.
 | `fcgi` | jak dziś | gotowe, tylko dispatch |
 | `http` | bramka HTTP na libevent przed poolem | POC działa, patrz sekcja 6 |
 | `supervisor` | N długo żyjących procesów, wskrzeszanych | gotowe, patrz sekcja 3o |
-| `cron` | skrypt odpalany z harmonogramu | do zrobienia, małe |
+| `cron` | skrypt odpalany z harmonogramu | gotowe, patrz sekcja 3r |
 
 Metryki to rzecz przekrojowa, nie typ poola.
 
@@ -1371,6 +1371,967 @@ a to leży w Zend, nie w SAPI.** Cała warstwa transportu jest poniżej 1%.
 Artefakty: `~/ng-research/async/` na poligonie.
 
 
+## 3r. `pool.type = cron` — zaimplementowane i zweryfikowane (2026-09-05)
+
+Nowe pliki: `fpm_pool_cron.c`/`.h` (sam typ), `fpm_cron_schedule.c`/`.h`
+(parser crontaba, bez zależności poza libc), plus dwa pliki wydzielone ze
+wspólnego kodu z supervisorem: `fpm_pool_watchdog.c`/`.h` (pidfd watchdog)
+i `fpm_pool_script.c`/`.h` (wykonanie jednego skryptu PHP poza requestem
+FastCGI, nadpisania `sapi_module`). Jedna linia w `fpm_pool_types[]`
+(`fpm_pool_type.c`), trzy dyrektywy w `fpm_conf.c`/`fpm_conf.h`
+(`cron.schedule`, `cron.script`, `cron.timeout`). `fpm_pool_supervisor.c`
+zostało przepisane na te dwa wspólne pliki zamiast trzymać własne kopie —
+zero zmiany zachowania, tylko usunięcie duplikacji (patrz niżej).
+
+### Kluczowa decyzja upraszczająca: żadnych timerów po stronie mastera
+
+Zgodnie z ustaleniem sprzed kodu (sekcja 3): dziecko poola `cron`, po starcie,
+liczy najbliższy termin, śpi do niego przerywalnie, wykonuje skrypt RAZ,
+kończy proces. FPM wskrzesza je istniejącą maszynerią (`fpm_children.c`,
+NIETKNIĘTE), nowy proces liczy kolejny termin od bieżącego zegara. `fpm_events.c`
+też nietknięty — cron nie używa `fpm_event_set_timer()`, wbrew wcześniejszemu
+szkicowi w sekcji 3 ("timer + fork"). To jest inny, prostszy mechanizm niż
+w tamtym szkicu, i prostszy niż supervisor.
+
+### Różnica wobec supervisora: ZERO stanu w pamięci dzielonej
+
+To jest największa różnica projektowa względem supervisora, warta zapisania
+wprost, bo nieoczywista. Supervisor potrzebuje `fpm_shm_alloc()`, bo ma
+politykę restart/backoff/`restart_max`, która musi przeżyć śmierć procesu.
+Cron **nie ma żadnej polityki do przetrwania**: każdy nowy proces liczy
+termin WYŁĄCZNIE z bieżącego zegara i harmonogramu, nigdy z tego, co robił
+poprzednik. Nie ma więc `init_main` dla `cron` w `fpm_pool_types[]` (pole
+zostaje `NULL` — "nic do zrobienia po stronie mastera", zgodnie z kontraktem
+w `fpm_pool_type.h`).
+
+Konsekwencja tej samej decyzji: **"nakładanie się przebiegów" nie jest
+polityką, którą trzeba było napisać.** `cron.processes`-podobnej dyrektywy
+świadomie nie ma — dla crona jest zawsze `pm.max_children = 1`,
+ustawiane programowo w `validate()`, tak samo jak supervisor mapuje
+`supervisor.processes` na `pm.max_children`. Przy `pm.max_children = 1` drugi
+proces tego poola fizycznie nie istnieje, dopóki pierwszy nie zakończy
+działania (`exit()`) — `fpm_children.c` odpala następny dopiero PO śmierci
+poprzedniego. Nie ma więc przebiegu, z którym mógłby się nałożyć kolejny.
+Polityka "pomijaj nakładające się" (przewidziana w sekcji 3 jako coś do
+napisania) wychodzi więc za darmo z samej konstrukcji pm=static+1 i **nie
+została napisana wcale** — dokładnie jak zapowiadało zadanie.
+
+### Dlaczego "brak nadrabiania" i "brak podwójnego odpalenia" to jedna i ta sama linijka kodu
+
+`fpm_cron_schedule_next(sched, after)` zawsze liczy najmniejszy czas ściśle
+WIĘKSZY niż `after`, licząc od `((after / 60) + 1) * 60` (start następnej
+pełnej minuty). Nigdy nie pyta "co przegapiłem od ostatniego uruchomienia" —
+zawsze "co jest najbliżej w przyszłości od teraz". Efekt uboczny, za darmo:
+- master wyłączony na godzinę → nowy proces liczy termin od aktualnego
+  zegara, dostaje najbliższy przyszły termin, nie dwanaście zaległych,
+- proces odrodzony chwilę po tym, jak poprzedni skończył przebieg w tej
+  samej minucie (skrypt trwał ułamek sekundy), nigdy nie znajdzie ponownie
+  minuty, która właśnie minęła — bo szuka ściśle w przyszłości.
+
+Ktoś kiedyś będzie chciał dodać nadrabianie zaległych przebiegów — to ma być
+świadoma zmiana projektowa (zmiana `after` na "czas ostatniego udanego
+przebiegu", trzymany w stanie, którego dziś celowo nie ma), nie poprawka.
+
+### Czas: wyłącznie UTC
+
+`fpm_cron_schedule_next()` używa `gmtime_r()`, nigdy `localtime_r()`. Czas
+lokalny + zmiana czasu (DST) dawałby przebieg podwójny (cofnięcie zegara)
+albo zaden (przesunięcie zegara) przy każdym przejściu. Nie warto tego
+ryzykować dla wygody zapisu harmonogramu w czasie lokalnym — harmonogramy
+przenoszone z systemowego crona (który zwykle i tak zaleca UTC dla serwerów)
+działają identycznie.
+
+### Parser crontaba (`fpm_cron_schedule.c`) — zakres i pułapki
+
+Pięć pól (minuta, godzina, dzień miesiąca, miesiąc, dzień tygodnia), bez
+zależności poza libc. Obsługuje `*`, `N`, `N-M`, `*/S`, `N-M/S`, listy
+przez przecinek, oraz nieoczywisty, ale prawdziwy crontab(5): `N/S` BEZ
+zakresu (np. `10/15`) znaczy "od N do końca dziedziny pola ze skokiem S", nie
+pojedynczą wartość — inaczej harmonogramy przenoszone z systemowego crona
+zmieniłyby znaczenie. Dzień tygodnia 0-7, gdzie zarówno 0 jak i 7 znaczą
+niedzielę (parsowane w tymczasowym bitmapie 0..7, potem 7 składane w 0).
+Skróty: `@hourly`, `@daily`, `@weekly`, `@monthly`, `@yearly` (tylko te pięć,
+zgodnie z zadaniem — `@midnight`/`@annually` świadomie pominięte, tania
+rzecz do dodania później, gdyby ktoś potrzebował).
+
+**Reguła OR dla dnia miesiąca i dnia tygodnia** (klasyczny, zaskakujący
+cron): kiedy OBA pola są ograniczone (żadne nie jest literalnym `*`),
+dopasowanie to SUMA, nie iloczyn. Literalność sprawdzana na całym polu
+PRZED podziałem po przecinkach (`*/1` NIE liczy się jako `*`, zgodnie
+z zachowaniem vixie-cron) — zaimplementowane i zweryfikowane osobnym
+programem (patrz testy niżej): `0 0 13 * 5` pasuje do każdego piątku ORAZ
+do 13. dnia miesiąca niezależnie od dnia tygodnia.
+
+**Błąd składni odrzuca konfigurację przy starcie**, z czytelnym komunikatem
+wskazującym które pole i dlaczego (`fpm_cron_schedule_parse()` wypełnia
+bufor błędu przekazany przez `validate()`, `validate()` loguje
+`ZLOG_ALERT` i zwraca -1 — ten sam mechanizm co reszta walidacji `fpm_conf.c`,
+zero specjalnego traktowania). Zweryfikowane: `* * * *` (za mało pól),
+`99 * * * *` (wartość poza zakresem), `*/0 * * * *` (krok zero) — wszystkie
+trzy odrzucone ze startu, exit 78, bez próby "mniej więcej" interpretacji.
+
+`fpm_cron_schedule_next()` ma limit poszukiwań (~4 lata w minutach) jako
+ostatnia siatka bezpieczeństwa przed harmonogramem, który strukturalnie
+nigdy nie może zajść (np. `0 0 30 2 1` — 30 lutego, dzień tygodnia
+ograniczony, więc reguła OR też nie ratuje) — walidacja przy starcie
+sprawdza tylko składnię, nie "czy harmonogram może kiedykolwiek zajść".
+Nie zaimplementowano osobnej walidacji "czy to jest strukturalnie możliwe"
+— uznane za niewartą złożoność dla przypadku, który i tak jest ewidentnym
+błędem operatora i zostanie zauważony (proces odmawia startu z ALERT-em
+"schedule never matches").
+
+### `cron.timeout` — dokładnie ten sam watchdog co `supervisor.stop_timeout`
+
+Wydzielone do `fpm_pool_watchdog.c`: `fpm_pool_watchdog_arm(target_pid,
+timeout_seconds)` forkuje proces-watchdoga, który przez `pidfd` (Linux) albo
+`kill(pid,0)` w pętli co sekundę (fallback, tylko lokalne budowanie/testy)
+czeka aż `target_pid` się zakończy LUB minie `timeout_seconds` — jeśli
+minie, a proces wciąż żyje, SIGKILL. Dla supervisora uzbrajany w handlerze
+SIGTERM (siatka bezpieczeństwa na `stop_timeout`); dla crona uzbrajany PRZED
+uruchomieniem skryptu (`cron.timeout`, domyślnie 0 = bez limitu, wtedy
+w ogóle nie uzbrajany). Mechanizm sam się "anuluje": jeśli skrypt skończy
+się w czasie, proces w końcu i tak wywoła `exit()`, `poll()` na pidfd dostaje
+POLLIN (proces się zakończył) i watchdog kończy się cicho, bez sygnału — nie
+trzeba osobnego wywołania "anuluj timeout".
+
+### Wykonanie skryptu — dokładnie ten sam kod co supervisor, teraz wspólny
+
+Wydzielone do `fpm_pool_script.c`: `fpm_pool_script_install_sapi_overrides()`
+(nadpisania `ub_write`/`getenv`/`read_post`/`read_cookies`/
+`register_server_variables`, bezpieczne z tego samego powodu co
+w supervisorze — proces nigdy nie wraca do pętli accept) i
+`fpm_pool_script_run(pool_name, script_path)` (`php_request_startup` /
+`php_fopen_primary_script` / `php_execute_script` / `php_request_shutdown`,
+bez `SG(request_info)` z FastCGI). `fpm_pool_supervisor.c` przepisane na te
+dwie funkcje zamiast trzymać własne kopie — czysty refaktor, zero zmiany
+zachowania (te same 10 scenariuszy z sekcji 3o dalej przechodzą, patrz
+"zweryfikowane po refaktorze" niżej).
+
+### SIGTERM: prostsze niż supervisor, bo nie ma "bieżącej iteracji do pilnowania podczas snu"
+
+W odróżnieniu od supervisora, handler SIGTERM crona TYLKO ustawia flagę
+(`cron_term_requested`), nie uzbraja żadnego watchdoga. Podczas SNU nic się
+nie wykonuje — flaga budzi `sleep()` (przerywane każdym dostarczonym
+sygnałem, dla którego mamy handler) i proces kończy się natychmiast, zanim
+cokolwiek zostanie sforkowane. Podczas WYKONYWANIA skryptu granicę czasu
+ustawia `cron.timeout` (osobny mechanizm, patrz wyżej), nie SIGTERM — skrypt
+kończy bieżący przebieg naturalnie, tak jak supervisor (test 8 niżej). Zwykła
+eskalacja mastera (`process_control_timeout`, patrz sekcja 3p) dotyczy tego
+typu tak samo jak każdego innego, bez cron-specyficznego kodu.
+
+### `requires_pm = 0` (różni się od supervisora, gdzie jest 1)
+
+Zgodnie z opisem zadania. W praktyce nie ma to znaczenia funkcjonalnego —
+`validate()` ustawia `pm`/`pm_max_children` programowo PRZED sprawdzeniami
+`requires_pm` w `fpm_conf.c` (patrz sekcja 3i, `fpm_conf.c:960-969`), więc te
+sprawdzenia i tak przechodzą trywialnie niezależnie od wartości `requires_pm`.
+Zostawione jak w zadaniu, bo semantycznie bardziej precyzyjne: cron nie
+"wymaga" `pm` w sensie "użytkownik musi coś skonfigurować", bo user w ogóle
+nie ma tu nic do ustawienia (odrzucone przez `rejects`).
+
+### `rejects`
+
+`listen`, `listen.`, `pm`, `pm.`, `request_terminate_timeout(_track_finished)`,
+`request_slowlog_timeout`, `request_slowlog_trace_depth`, `slowlog`, `ping.`,
+`access.`, `security.limit_extensions`, `supervisor.` — nadzbiór listy
+z zadania, z tym samym uzasadnieniem co supervisor (sekcja 3o): `pm`/`pm.`
+w całości (generowane programowo, zawsze 1, dwa źródła prawdy inaczej),
+`listen`/`listen.`/`ping.`/`access.` w całości (brak requestów FastCGI),
+plus `supervisor.` (dyrektywy DRUGIEGO typu poola).
+
+### Testy (9 scenariuszy z zadania, wszystkie zielone, surowe wyjścia w raporcie)
+
+1. Config bez `pool.type` (`pm = static`, zwykły `listen`) — `-t` zielone,
+   proces startuje i kończy się bez śladu (BC nietknięte).
+2. `cron.schedule = * * * * *`, skrypt zapisujący `gmdate()` + PID do pliku —
+   dwa kolejne przebiegi o `16:07:00` i `16:08:00` UTC (dokładnie na początku
+   minuty), różne PID-y (proces kończy się i jest wskrzeszany między
+   przebiegami, zgodnie z modelem "jeden proces = jeden przebieg").
+3. Tymczasowy program testowy (skompilowany osobno, NIE w produkcie, usunięty
+   po teście) dla `*/15 * * * *`, `0 3 * * *`, `30 4 1,15 * *`, `0 0 * * 0`,
+   `@daily` liczony od `2026-09-05 16:10:00 UTC` (piątek) — wszystkie terminy
+   sprawdzone ręcznie jako poprawne (najbliższy kwadrans, najbliższa 3:00,
+   najbliższy 1. albo 15. dzień miesiąca o 4:30, najbliższa niedziela
+   o północy, to samo dla `@daily`).
+4. Reguła OR: `0 0 13 * 5` — kolejnych 10 dopasowań od 2026-09-01 pokazuje
+   naprzemiennie piątki (dowolna data) i 13. dzień miesiąca (dowolny dzień
+   tygodnia, w tym niedziela i wtorek w kolejnych miesiącach) — potwierdzone
+   `fpm_cron_schedule_next()` bezpośrednio, nie tylko bitmapami.
+5. Złe harmonogramy `* * * *` / `99 * * * *` / `*/0 * * * *` — każdy odrzucony
+   ze startu (`ALERT` + `FPM initialization failed`, exit 78) z czytelnym
+   komunikatem wskazującym które pole i dlaczego.
+6. `rejects` — pool `cron` z `listen` albo `pm.max_children` w konfiguracji
+   dają czytelny `ALERT` i `FPM initialization failed` (exit 78).
+7. `cron.timeout = 3`, skrypt z `sleep(20)` — proces zabity, w logu skryptu
+   widać TYLKO wpis "starting sleep(20)", nigdy "finished normally"; następny
+   przebieg (nowy PID) wystartował normalnie w kolejnej minucie.
+8. SIGTERM w trakcie snu (wysłane bezpośrednio do dziecka, zanim nadszedł
+   termin) — proces kończy się natychmiast, skrypt NIGDY nie uruchomiony
+   (log pusty), nowe dziecko odrodzone przez `fpm_children.c` czeka na
+   kolejny termin. SIGTERM w trakcie przebiegu (wysłane w połowie pętli
+   10 "ticków") — skrypt dokończył WSZYSTKIE 10 ticków i "run end" przed
+   zakończeniem procesu (zachowanie identyczne z supervisorem, test 7 w 3o).
+   Oba scenariusze: zero sierot po `ps`.
+9. Współistnienie: jeden pool `http` (`pm = static`, 2 workery) + jeden pool
+   `cron` w tym samym mastrze — oba wstają, cron wykonuje przebieg normalnie
+   podczas gdy pool http stoi gotowy. `SIGUSR2` (reload, `execvp()`) — ten
+   sam PID mastera, świeże dzieci obu typów (`web` x2 + `cronjob`), zero
+   procesów z PPID=1 po reloadzie.
+
+**Zweryfikowane po refaktorze supervisora na wspólne pliki**: powyższe testy
+uruchamiane były na tej samej binarce, w której `fpm_pool_supervisor.c` już
+korzysta z `fpm_pool_watchdog.c`/`fpm_pool_script.c` zamiast własnych kopii —
+build czysty (zero ostrzeżeń o niezdefiniowanych symbolach), a testy 7-9
+(SIGTERM, timeout, coexistence) pośrednio ćwiczą te same funkcje współdzielone
+z supervisorem. Osobny, pełny przebieg 10 scenariuszy z sekcji 3o NIE został
+powtórzony w tym zadaniu (poza zakresem) — ryzyko regresji ocenione jako
+niskie, bo refaktor jest czysto mechaniczny (przeniesienie identycznego ciała
+funkcji, zmiana tylko nazw i miejsca pliku), ale warto to dopisać jako
+"czego nie zrobiono" wprost.
+
+### Czego NIE zrobiono / wątpliwe
+
+- Pełny powtórzony przebieg 10 testów supervisora z sekcji 3o po refaktorze
+  na wspólne pliki (patrz wyżej) — niskie ryzyko, ale nie zweryfikowane
+  bezpośrednio, tylko pośrednio przez testy crona korzystające z tego samego
+  kodu.
+- Status crona w `fpm_status.c` (oznaczenie typu w statusie, jak w sekcji 3o
+  dla supervisora) — nie ruszone, poza zakresem tego zadania (patrz sekcja 3j,
+  metryki dla typów bez requestów to osobne zadanie).
+- Walidacja "czy harmonogram może kiedykolwiek strukturalnie zajść"
+  (np. 30 lutego) — tylko limit poszukiwań jako siatka bezpieczeństwa
+  w runtime, nie odrzucenie przy starcie. Patrz wyżej.
+- `@midnight`/`@annually` jako dodatkowe aliasy skrótów — świadomie pominięte,
+  zadanie wymieniało tylko pięć skrótów.
+- Nadrabianie zaległych przebiegów — świadomie NIE zrobione, zgodnie
+  z zadaniem (patrz sekcja o "brak nadrabiania" wyżej). Ktoś kiedyś będzie
+  chciał to dodać — to ma być świadoma zmiana projektowa.
+
+
+## 3s. Async w PHP — ZAMKNIĘTE, oraz opcja `ext` z danymi requestu z C (2026-09-05)
+
+Rozmowa o tym, czy da się mieć w PHP model: worker oddaje sterowanie na I/O,
+bramka wpycha mu w tym czasie kolejne żądanie. Wniosek: **nie budujemy tego**,
+ale powody warto mieć spisane, bo za pół roku ktoś (my) zapyta znowu.
+
+### Dlaczego nie — trzy warunki, wszystkie muszą zajść naraz
+
+1. **Stan requestu per-korutyna w silniku.** PHP ma JEDEN komplet stanu
+   requestu na proces, nie na request. `php_request_startup()` /
+   `php_request_shutdown()` ustawiają i sprzątają globale: `$_SERVER`,
+   nagłówki, bufory wyjścia, handler błędów, bieżące ini, sesja. Nie ma
+   "obiektu requestu", od którego to wisi. Wpuszczenie drugiego żądania
+   w trakcie pierwszego nadpisuje stan pierwszego — zawsze, nie "czasem".
+   True Async po całej dotychczasowej pracy ma per-korutyna `ob_*` i cache
+   hostent. To pokazuje skalę roboty. STATUS: nie ma.
+
+2. **Przechwytywanie I/O w sterownikach.** KOREKTA wcześniejszej notatki
+   ("połowa rozszerzeń nie zadziała") — dla typowego stosu to nieprawda:
+   - `mysqlnd` idzie przez `php_stream` → MySQL przez PDO/mysqli
+     w domyślnej kompilacji JEST w warstwie przechwytywalnej.
+   - `phpredis` też siedzi na streamach. Predis (userland) tym bardziej.
+   - Po złej stronie: `libpq` (`pdo_pgsql`), `libmysqlclient`, `curl` —
+     własne gniazda, o schedulerze nie wiedzą.
+   Czyli to jest krótka, konkretna lista, a nie "ekosystem".
+   STATUS: technicznie w zasięgu, nie zrobione.
+   POPRAWKA (2026-09-05, po pytaniu o własny scheduler): to jest w zasięgu
+   NAS SAMYCH, bez łatania silnika. PHP ma publiczne API
+   `php_stream_xport_register()` — rozszerzenie może podmienić transport
+   `tcp` na własny (tak działa ext/openssl). Skoro mysqlnd i phpredis idą
+   przez streamy, nasze `ext` mogłoby przechwycić ich gniazda i zawiesić
+   fiber zamiast blokować. Bez patcha, bez forka php-src.
+   Wykonalne przez nas — i BEZWARTOŚCIOWE samo w sobie, dopóki stoi
+   warunek 1.
+
+3. **Frameworki napisane tak, żeby z tego skorzystać.** I to jest warunek,
+   który zabija temat, bo nie zależy od nikogo, na kogo mamy wpływ.
+   Fiber sam z siebie nic nie daje — zawiesza wykonanie tylko wtedy, gdy
+   wywołanie NA DOLE odda sterowanie. `PDO::query()` wchodzi w `read()`
+   i blokuje proces niezależnie od tego, czy jesteś w fiberze.
+   amphp działa, ale z KLIENTAMI amphp (`amphp/mysql`, `amphp/redis`),
+   a Doctrine i Eloquent ich nie użyją, bo ich API jest z definicji
+   synchroniczne (`$user->posts` musi zwrócić kolekcję, nie obietnicę).
+   To nie kwestia adaptera, tylko kształtu ORM-a.
+   Jedyny prawdziwy wyjątek: `Symfony\HttpClient` (równoległe żądania
+   przez `curl_multi`) — ale to HTTP, nie baza, i to wyspa, nie model.
+   Laravel Octane to NIE async, tylko worker mode (proces żyje między
+   żądaniami, jedno naraz). Symfony Runtime to samo.
+   STATUS: nie są i się nie zapowiadają.
+
+   POPRAWKA (2026-09-05, po pytaniu "czy tego nie ogarnia True Async"):
+   powyższe jest prawdą dla modelu amphp (JAWNEGO: inne klienty, inne API,
+   więc Eloquent/Doctrine odpadają), ale NIE dla modelu True Async, który
+   jest PRZEZROCZYSTY — `PDO::query()` sam oddaje sterowanie, a kod
+   wywołujący o niczym nie wie. Gdyby warunki 1 i 2 zostały dowiezione,
+   Laravel i Symfony działałyby BEZ ZMIAN. Warunek 3 nie znika calkiem,
+   tylko slabnie do: "framework nie może przeciekać stanem między
+   requestami" (singleton pamiętający zalogowanego użytkownika — statyki
+   klas żyją w procesie, nie w korutynie). To jest DOKŁADNIE ta sama
+   dyscyplina, ktorej wymaga Octane, a Laravel ma Octane i Symfony ma
+   Runtime — wiec ekosystem jest w te strone czesciowo przygotowany.
+   To czyni True Async WAZNIEJSZYM, niz wynikalo z pierwszej wersji tej
+   sekcji, gdzie warunek 3 byl postawiony za ostro.
+
+   Co True Async ma dzis: warunek 2 w duzej czesci (przechwytywanie w
+   silniku, wiec szersze niz nasz `php_stream_xport_register`); warunek 1
+   tylko `ob_*` i cache hostent per-korutyna, reszta EG/SG nierozdzielona;
+   `max_execution_time` bez zmian. Nie znikna nigdy: fatal ubija wszystkie
+   korutyny w procesie, `memory_limit` jest na proces.
+
+   Praktycznie dla nas: to fork php-src, RFC dla uzytkownika ANULOWANE,
+   do 8.7 proponowany sam ABI schedulera bez I/O. Budowanie na tym dzis =
+   pilnowanie cudzego forka i porzucenie zasady "przypiety tag upstreamu,
+   zero latek", na ktorej stoi ten projekt. Nasza rola: OBSERWOWAC jeden
+   sygnal — czy stan requestu staje sie per-korutyna.
+
+### WYNIK POC (2026-09-05): dziala, ale wylacznie na forku — galaz `async-poc`
+
+`pool.type = async` zostal zbudowany i URUCHOMIONY na forku
+`true-async-stable` razem z naszym `sapi/fpmng`. Jeden proces,
+`pm.max_children = 1`, wlasny klient FastCGI:
+
+    4 x slow.php (usleep 500 ms)    503 ms   (fcgi: 2008 ms)
+    4 x net.php  (fsockopen 500 ms) 537 ms   (fcgi: 2140 ms)
+    RSS po 2000 requestach          bez wzrostu
+
+Kazdy request dostal swoj naglowek, `$_GET`, `$_SERVER`, `$GLOBALS`
+i `get_included_files()`. Pelny opis w NOTES sekcja 3t NA GALEZI `async-poc`.
+
+**KOREKTA do tej sekcji:** teza "fiber przelacza stos, nie globale, wiec zaden
+scheduler tego nie naprawi" byla ZA MOCNA. Fork ma publiczne switch-handlery
+(`zend_async_API.h:269`) i przez nie da sie podmieniac SG, `EG(symbol_table)`
+i `EG(included_files)` BEZ zmian w VM. Fork uzywa ich do `ob_*`; POC uzyl do
+reszty i to wystarczylo.
+
+**Sciana jest gdzie indziej i stoi:** tablice funkcji i klas sa PER PROCES
+(`EG(function_table)` = `CG(function_table)`, czyszczone dopiero w
+`shutdown_executor()`), wiec drugi request deklarujacy funkcje dostaje
+"Cannot redeclare" i tak zostaje. Opcache zaklada jeden request na proces
+(`ZendAccelerator.c:1958,2481`), wiec POC dziala z `opcache.enable = off`.
+Galaz `global-isolation` forka zrobila `symbol_table` per korutyna, ale NIGDY
+nie weszla do stable; statyki klas per korutyna zrobiono i cofnieto.
+
+Stad wniosek, do ktorego doszlismy tez niezaleznie od kodu: realnym ksztaltem
+tego typu nie jest "wiele niezaleznych requestow", tylko MODEL WORKERA —
+aplikacja ladowana RAZ, request jako wywolanie w nia. Wtedy tablice funkcji
+i klas nie sa problemem, bo nikt nie deklaruje ich drugi raz.
+
+### DECYZJA (2026-09-05): DWA typy poola, nie jeden z przelacznikiem
+
+`pool.type = fiber` (wlasny scheduler, czysty upstream) oraz
+`pool.type = true-async` (fork). Powod jest wylacznie taki, zeby WYCOFANIE
+bylo tanie: nasz kontrakt sprawia, ze typ to jeden plik + jedna linia
+w rejestrze, wiec porzucenie jednej drogi to skasowanie pliku i linii.
+
+Odrzucone: jeden typ `async` z dyrektywa `async.engine = fiber|true-async`.
+Wtedy obie sciezki splataja sie w jednym pliku i usuniecie jednej znaczy
+operowanie na zywym kodzie drugiej — czyli dokladnie to, czego ten uklad
+ma unikac.
+
+Kod wspolny (akceptor, obsluga requestu FastCGI, podmiana stanu) idzie do
+TRZECIEGO, dzielonego pliku — ten sam wzorzec co `fpm_pool_watchdog.c`
+i `fpm_pool_script.c` wydzielone przy cronie. Skasowanie jednego typu nie
+rusza wtedy rdzenia, bo drugi z niego korzysta.
+
+Do protokolu: wariant `fiber` NIE ISTNIEJE i nie jest zweryfikowany (patrz
+nizej) — POC mamy wylacznie na forku. Zgoda na dwa typy jest wiec zgoda na
+zbudowanie czegos niesprawdzonego, i to jest argument ZA tym ukladem,
+nie przeciw. Oba warianty uderzaja w te sama sciane (tablice funkcji/klas,
+opcache), wiec oba i tak wyjda na model workera.
+
+
+### WARIANT "async bez forka" — opcja, NIE zweryfikowana
+
+To jest rozumowanie, nie wynik pomiaru — nikt tego nie probowal. Zapisane,
+bo zmienia rachunek kosztow eksperymentu: gdyby True Async nigdy nie wszedl
+do PHP, ta droga nadal istnieje.
+
+Co dzis pochodzi z forka i musialoby powstac u nas: (a) scheduler i reaktor
+(`ext/async`, 33k linii na libuv) — moglby powstac na libevent, ktorego i tak
+uzywamy w bramce; (b) przechwytywanie I/O w silniku (`xp_socket.c`,
+`network.c`, `plain_wrapper.c`, `curl_async.c`, uspienia w
+`basic_functions.c`) — czesciowo zastapialne przez
+`php_stream_xport_register()`; (c) switch-handlery — NIEPOTRZEBNE, bo w tym
+wariancie to MY jestesmy tym, kto przelacza, wiec podmieniamy stan sami tuz
+przed wznowieniem fibera. `zend_fiber_suspend`/`zend_fiber_resume` sa
+`ZEND_API` w upstreamie (`zend_fibers.h:135-136`).
+
+Zasieg takiej wersji: gniazda i tylko gniazda — mysqlnd, phpredis,
+`fsockopen`. NIE zlapie `sleep()`/`usleep()`, curl, libpq ani zwyklych plikow,
+bo to nie idzie przez warstwe streamow.
+
+Koszt: piszemy od zera to, co fork juz napisal, i bierzemy na siebie
+utrzymanie. Sciana z tablicami funkcji/klas i opcache stoi TAK SAMO —
+zadna z dwoch drog jej nie omija.
+
+
+### Własny scheduler dla amphp — sprawdzone, nie ma czego budować
+
+Pytanie: skoro amphp stoi na fiberach, czy nie podstawić mu naszej pętli
+i "łapać" przerwania. Odpowiedź: ten kawałek JUŻ ISTNIEJE. Revolt ma
+abstrakcję sterownika i sam wykrywa `ext-event` (to dosłownie libevent),
+`ext-uv` i `ext-ev`; bez nich spada na `stream_select`. Nasz sterownik byłby
+czwartą kopią `ext-event` — tego samego libeventa, którego używa bramka.
+Jedyna przewaga własnego: JEDNA wspólna pętla dla gniazd bramki w C i dla
+I/O PHP-a — co ma sens wyłącznie w wersji ambitnej (nasz C przyjmuje
+połączenia i woła PHP). Przy zwykłej aplikacji amphp, która sama trzyma
+port, zysk zerowy, a koszt to sterownik chodzący za zmianami Revolt.
+
+I rzecz najważniejsza, gdyby ktoś chciał tędy iść:
+**Fiber przełącza STOS, nie przełącza GLOBALI.** Żaden scheduler tego nie
+naprawi, bo to nie jest problem harmonogramowania. Żeby przełączać requesty,
+trzeba przy każdym przełączeniu fibera podmieniać `EG` i `SG` — czyli
+warunek 1. Scheduler i przechwytywanie I/O są w naszym zasięgu; brakującym
+elementem nie jest ani jedno, ani drugie.
+
+**Czego pilnować, gdyby wracać do tematu:** nie "czy True Async dodał
+sterowniki", tylko **czy stan requestu jest per-korutyna**. To jedno pytanie
+rozstrzyga warunek 1. Warunek 3 i tak zostaje.
+
+### Rachunek, który mimo wszystko jest na korzyść async
+
+Warto zapisać, bo pokazuje, że to nie jest głupi pomysł, tylko niewykonalny.
+Typowy request frameworkowy z bazą i redisem: ~30 zapytań × ~1 ms czekania
+przy ~5 ms CPU. Worker jest bezczynny ~85% czasu requestu. Żeby wysycić
+4 rdzenie trzeba nie 4 procesów, tylko ~28 — przy 60 MB/worker to ~1,7 GB
+RAM-u wydanego na czekanie. Na małym VPS to realne ograniczenie.
+**Async oszczędza procesy, które CZEKAJĄ, nie te, które LICZĄ** —
+współbieżność to nie równoległość, na 4 rdzenie nadal trzeba 4 procesów.
+
+DO ZMIERZENIA na realnej aplikacji: stosunek czasu requestu do CPU requestu
+(FPM loguje oba). To jest współczynnik upakowania i rozstrzyga wartość async
+faktami zamiast przewidywaniami. 1:7 → async oszczędza 6 procesów na 7.
+1:2 → temat zamknięty definitywnie.
+
+### Co z tego wynika DLA NAS — aplikacja amphp/ReactPHP
+
+Ważne odkrycie z tej rozmowy: **aplikacja w amphp nie potrzebuje
+php-fpm-ng jako serwera HTTP.** Ma własny serwer, sama trzyma port, jest
+długo żyjącym procesem. Nasza bramka, pula workerów i cały FastCGI nie mają
+się do czego podpiąć. Nie konkurujemy — mijamy się.
+
+Ale to dobry wynik, bo taka aplikacja pasuje do nas jako **`pool.type =
+supervisor`** — nadzór nad procesem, restart policy, backoff, statystyki,
+crony obok w tym samym pliku konfiguracyjnym. To już mamy i to działa.
+
+Uwaga do protokołu — ograniczenia amphp, żeby nie sprzedawać tego jako
+darmowego obiadu: (a) JEDNO blokujące wywołanie gdziekolwiek w drzewie
+zależności zatrzymuje pętlę dla WSZYSTKICH żądań w locie (w FPM spowolniłoby
+jedno); (b) ekosystem composera jest blokujący (SDK płatności, AWS →
+Guzzle/curl); (c) nie ma granicy między requestami — arena się nie resetuje,
+`memory_limit`/`max_execution_time`/`set_time_limit()` nie działają per
+request, fatal ubija wszystkie żądania w locie, singleton pamięta dane
+poprzedniego użytkownika (znany footgun Octane/Swoole).
+
+### OPCJA (nie decyzja): `pool.type = proxy`
+
+Jedyny brakujący element między nami a aplikacjami asynchronicznymi.
+Bramka trzyma :443, terminuje TLS, obsługuje ACME, oddaje pliki statyczne
+sama, a resztę przekazuje po zwykłym HTTP/1.1 na localhost do procesu
+aplikacji (amphp/ReactPHP/cokolwiek). Aplikacja nie wie o niczym, my nie
+dotykamy Revolt. Domyka historię "jedna binarka, bez nginxa".
+Koszt: `evhttp` jako KLIENT, kilkadziesiąt linii, nic co już działa nie jest
+ruszane. Ładnie się składa z TLS+ACME z sekcji 3l, które i tak są na końcu.
+
+### OPCJA (nie decyzja): `ext` wystawiające dane requestu sparsowane w C
+
+Obserwacja Piotra: amphp parsuje HTTP w PHP, a my mamy to już w C — może da
+się to wykorzystać. Dwie bardzo różne wersje:
+
+**Wersja skromna — nasz C parsuje, PHP dostaje gotowe.** Rozszerzenie
+wystawiające metodę, URI, nagłówki i ciało już sparsowane przez `evhttp`
+(roboczo: `fpmng_request_*`). amphp używa go zamiast własnego parsera.
+Wykonalne, małe, ale **zysk prawdopodobnie znikomy**: zmierzyliśmy naszą
+bramkę na ~25 µs/żądanie — to CAŁY tor HTTP w C (accept, parsowanie,
+odpowiedź). Nawet gdyby amphp potrzebował na to 10× tyle, przy requeście
+palącym 5 ms CPU to kilka procent. Parsowanie 200 bajtów nagłówków nie jest
+tam, gdzie idzie czas.
+
+**Wersja ambitna — nasz C prowadzi pętlę, PHP jest z niej wywoływane.**
+Prawdziwa przeszkoda: **DWIE PĘTLE ZDARZEŃ** — nasza (libevent) i Revolt.
+Obie nie mogą prowadzić. Gdy PHP zawiesza się na zapytaniu do bazy, ktoś
+musi obsłużyć to gniazdo; jeśli to Revolt, on musi być na wierzchu, a nasza
+pętla stoi. Da się rozwiązać, bo Revolt ma abstrakcję sterownika — można
+napisać sterownik w C na naszym libevent i mieć JEDNĄ pętlę, naszą.
+To realny projekt, nie weekend, plus utrzymywanie go razem ze zmianami
+w Revolt.
+
+**Gdzie C naprawdę wygrywa — i to NIE jest parsowanie:** TLS, HTTP/2
+(amphp robi w PHP całą maszynę stanów, ramkowanie i HPACK) oraz pliki
+statyczne. Tam różnica jest duża, a nie kilkuprocentowa. I do tego nie
+trzeba ŻADNEJ z powyższych wersji — wystarczy `pool.type = proxy` powyżej.
+
+### POMIAR WYKONANY (2026-09-05) — wersja skromna jest bez sensu
+
+Poligon 192.168.8.103, amphp/http-server 3.4.6, PHP 8.6.0-dev z tego samego
+drzewa zrodel co nasze binarki (`--disable-all --enable-filter`, zeby
+league/uri mialo `filter_var()`), `zend.assertions=-1`, kompresja wylaczona.
+Odpowiedz "Hello World", `wrk -t1 -c2 -d12s`, CPU liczone z
+`/proc/<pid>/stat` (utime+stime) samego procesu serwera, 3 powtorzenia:
+
+    amphp (TCP_NODELAY wl.)   ~6 900 req/s    ~147 us/req CPU
+    nasza bramka, hello.php  ~13 600 req/s    (k3d: 139 us/req)
+
+Czyli **caly per-request koszt amphp w PHP jest mniej wiecej rowny naszemu
+calemu torowi w C razem z `php_request_startup/shutdown` i wykonaniem
+`hello.php`** — a przepustowosc mamy 2x wyzsza na tej samej maszynie.
+Skoro parsowanie HTTP jest tylko ulamkiem tych 147 us, to wystawienie
+naszego parsera jako `ext` nie ma czego uratowac. WERSJA SKROMNA: ODRZUCONA
+na liczbach. Wersja ambitna (sterownik Revolt w C) niezmieniona — nadal
+realny projekt, nie weekend.
+
+Zastrzezenie do protokolu: nasze 139 us/req pochodzi z pomiaru w k3d,
+a 13 600 req/s z golej maszyny; liczba req/s jest porownywalna
+(ta sama maszyna, ta sama metodyka), liczba us/req nie w pelni. Gdyby ktos
+chcial to domknac, trzeba przemierzyc bramke bare-metal ta sama metoda.
+
+### ZNALEZISKO PRZY OKAZJI: amphp domyslnie NIE ustawia TCP_NODELAY
+
+`Amp\Socket\BindContext::$tcpNoDelay` ma wartosc domyslna `false`, a
+`SocketHttpServer::expose()` bez jawnego kontekstu tej wartosci nie zmienia.
+Skutek zmierzony: na polaczeniu keep-alive pierwsze zadanie 0,5 ms, **drugie
+41 ms**; `wrk -t1 -c2` daje wtedy 49 req/s zamiast 6 900, a latencja stoi
+rowno na 40,8 ms. Klasyczny Nagle + delayed ACK, bo odpowiedz idzie
+`transfer-encoding: chunked` w kilku zapisach. Z `Connection: close`
+problem znika (2 686 req/s), co potwierdza mechanizm.
+Lekarstwo: `$server->expose($addr, (new BindContext())->withTcpNoDelay())`.
+
+To jest DOKLADNIE ta sama klasa bledu co nasza latka 0002 na `main/fastcgi.c`
+(tam `req->tcp` ustawiane tylko pod `#ifdef _WIN32`). Warto zglosic do amphp.
+
+Pulapka diagnostyczna, warta zapamietania: przy `NullLogger` amphp POLYKA
+wyjatki z obslugi klienta. Objaw byl taki, ze `wrk` pokazywal 80 tysiecy
+"read errors" i zero odpowiedzi, a w logu nie bylo NIC. Dopiero wlasny
+logger na stderr pokazal `Call to undefined function filter_var()`.
+
+
+## 3u. `pool.type = status` — zaimplementowane i zweryfikowane (2026-09-05)
+
+Nowy plik `sapi/fpmng/fpm/fpm_pool_status.c`/`.h`, jedna linia w
+`fpm_pool_types[]` (`fpm_pool_type.c`). Zero nowych dyrektyw konfiguracyjnych —
+`validate()` programowo wymusza `pm = static` + `pm.max_children = 1` (jeden
+proces w zupelnosci wystarcza na scrapy monitoringu), tak jak `supervisor`
+mapuje `supervisor.processes` na `pm.*`. `requires_listen = 1`, ale w
+odroznieniu od bramki http port to BEZPOSREDNIO `listen` z configu (nie
+fcgi+1) — ten typ nie ma zadnego fcgi za soba, wiec nie ma czego przesuwac.
+
+### Ksztalt danych — rozgalezienie po `serves_requests`, dokladnie jak w 3j
+
+`fpm_pool_status.c` idzie po `fpm_worker_all_pools`, dla kazdego poola bierze
+`fpm_pool_type_of(wp)` i:
+- `serves_requests = 1` (fcgi, http): czyta `wp->scoreboard` (ten sam
+  scoreboard co dzisiejszy `fpm_status.c`, `fpm_scoreboard_copy(wp->scoreboard, 0)`
+  — kopia pod lockiem, bo to CUDZY pool, czytany z INNEGO procesu) — idle,
+  active, requests.
+- `serves_requests = 0` (supervisor, cron): NOWY piaty operator w
+  `fpm_pool_type_s` — `status(wp, out)`, zwraca `struct fpm_pool_status_s`
+  (`state`, `last_start`, opcjonalny `last_exit_code`, `consecutive_failures`,
+  opcjonalne `next_run` albo `backoff_until`).
+  Kazdy taki typ implementuje to we WLASNYM pliku, czytajac WLASNA pamiec
+  dzielona — `fpm_pool_status.c` nie zna wewnetrznej struktury
+  `fpm_supervisor_shared_s` ani `fpm_cron_shared_s`, dokladnie jak wymaga
+  kontrakt z 3h ("nowy typ = nowy plik + jedna linia w rejestrze").
+- Typ bez `.status` i `serves_requests = 0` (dzis: `status` samo siebie) —
+  pomijany w wyjsciu, bez wykrywania po nazwie.
+
+`enum fpm_pool_state_e` (running/backoff/gave_up/finished/idle) i
+`struct fpm_pool_status_s` zyja w `fpm_pool_type.h` — to jedyne miejsce
+wspolne dla typow, ktore go wypelniaja, i dla `fpm_pool_status.c`, ktore go
+czyta. Prometheus dostaje `fpmng_pool_info{pool,type} 1`, a stan jest zestawem
+serii `fpmng_pool_state{pool,state} 0|1`, nie liczba wymagajaca znajomosci enum.
+Pola specyficzne dla typu (`next_run` dla crona, `backoff_seconds` dla
+supervisora) sa emitowane tylko tam, gdzie maja znaczenie; ta sama regula
+obowiazuje w JSON. Zero etykiet o nieograniczonej kardynalnosci: etykiety
+pochodza wylacznie z konfiguracji pooli i zamknietego zbioru stanow.
+
+### Dolozony minimalny stan w shm — dokladnie tyle, ile pokazane, ani pola wiecej
+
+**Supervisor** (`fpm_supervisor_shared_s`, w `fpm_pool_supervisor.c`) mial juz
+`failures`/`terminal`/`gave_up` (polityka backoffu, 3o) — dolozone TRZY nowe
+pola wylacznie na potrzeby statusu: `running` (bool, ustawiane tuz przed
+`fpm_pool_script_run()` i zerowane zaraz po), `last_start` (epoch), oraz
+`last_exit_code`. Zadne z nich nie wplywa na polityke restart/backoff — to
+czysto obserwacyjny dodatek.
+
+**Cron** (3r) mial ZERO stanu w shm — swiadoma decyzja, bo "kazdy nowy proces
+liczy termin wylacznie z biezacego zegara". Ta decyzja **zostaje w mocy**:
+`next_run` dla statusu jest liczony NA BIEZACO w `fpm_pool_cron_status()`
+przez `fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL))`
+— dokladnie ta sama funkcja, ktorej uzywa sam cron do policzenia wlasnego
+kolejnego terminu, wywolana na configu odczytanym z pamieci procesu statusu
+(wspolny fork z mastera, ten sam config dla wszystkich poolow — patrz nizej).
+Zero shm dla `next_run`.
+
+To, czego cron NIE MOZE policzyc z samego zegara, to fakty historyczne:
+`last_run` i `last_exit_code`. Dla tych dwoch (plus `running` i
+`consecutive_failures`, ktore i tak sa "za darmo" przy tej samej alokacji)
+dodano `fpm_cron_shared_s` — NOWY, minimalny `init_main` dla typu `cron`
+(wczesniej `NULL`, "nic do zrobienia po stronie mastera" — teraz jest: jedna
+alokacja `fpm_shm_alloc()`, ten sam wzorzec co supervisor). **To jest jedyny
+kompromis wobec "cron jest bezstanowy" z 3r** — i jest swiadomy: bez tego
+"last_start"/"last_exit_code" fizycznie nie da sie pokazac (nikt inny tego
+nie pamieta), a "next_run" i tak zostal bezstanowy. `consecutive_failures`
+dla crona jest policzalne za darmo (ten sam `last_exit_code`), ale na NIC nie
+wplywa — cron nie ma polityki, ktora by to konsumowala (w odroznieniu od
+supervisora); to czysty sygnal dla czlowieka/monitoringu ("ten cron pada z
+rzedu N razy"), zaakceptowany bo tania konsekwencja tego samego stanu, nie
+osobna decyzja projektowa. "Ile przebiegow pominieto z powodu nakladania"
+(wymienione w 3j jako mozliwy dodatek dla crona) **NIE zostalo zaimplementowane**
+— przy `pm.max_children = 1` nakladanie jest fizycznie niemozliwe (3r), a
+liczenie "ile terminow zostalo pominietych miedzy last_run a teraz" byloby
+tylko kosmetyka bez zadnej polityki za nim; uznane za zbedna zlozonosc.
+
+### PUŁAPKA — prawdziwe znalezisko: `fpm_children.c` domyslnie ZWALNIA scoreboardy CUDZYCH poolow w kazdym dziecku
+
+To jest **jedyne miejsce, w ktorym dotknieto `fpm_children.c`**, i zrobiono to
+z pelnym uzasadnieniem, dokladnie jak zadanie przewidywalo. Objaw: pool
+`status` odczytujacy scoreboard poola `fcgi`/`http` (czyli WLASNIE to, po co
+istnieje wariant 1 z 3j) segfaultowal **w mniej niz 1ms od forka**, zanim
+jakikolwiek kod nasz zdazyl cokolwiek zrobic — na samym pierwszym dotknieciu
+`wp->scoreboard->idle` dla CUDZEGO poola.
+
+Diagnoza (godziny zmarnowane na falszywe tropy — zapisane, zeby nikt nie
+musial ich powtarzac): to NIE byl problem Zend MM, NIE opcache, NIE
+kolejnosc alokacji vs forka (sprawdzone: oba scoreboardy alokowane w
+masterze PRZED jakimkolwiek forkiem), NIE roznica anonymous-vs-named shm
+(przetestowane osobno: `shm_open()` zamiast `mmap(MAP_ANON)` w
+`fpm_shm_alloc()` — crash identyczny), NIE sasiedztwo regionow w pamieci
+(przetestowany spacer miedzy alokacjami — crash identyczny), NIE ograniczenie
+srodowiska/sandboxa tego repo (goly program w C robiacy `mmap(MAP_SHARED)` +
+dwa kolejne forki dziala bez zarzutu, w tym samym sandboxie bash).
+
+Prawdziwa przyczyna, znaleziona przez czytanie kodu, nie zgadywanie:
+`fpm_children.c:fpm_child_resources_use()` (wolane w KAZDYM dziecku, zaraz po
+`fork()`, przed czymkolwiek innym) ma petle:
+
+```c
+for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+    if (wp == child->wp || wp == child->wp->shared) {
+        continue;
+    }
+    fpm_scoreboard_free(wp);   /* munmap() scoreboardu KAZDEGO INNEGO poola */
+}
+```
+
+To ISTNIEJACA, celowa higiena pamieci w upstreamie: kazdy worker po forku
+zwalnia (munmapuje) scoreboardy WSZYSTKICH poolow poza swoim wlasnym, zeby nie
+trzymac w swoim adresie niepotrzebnych mapowan. Bezpieczne od zawsze, bo
+KAZDY dotychczasowy konsument scoreboardu (sam `fpm_status.c`) czyta
+WYLACZNIE scoreboard WLASNEGO poola — nikt nigdy nie probowal czytac
+scoreboardu CUDZEGO poola z INNEGO procesu. `pool.type = status` jest
+**pierwszym** takim konsumentem, i ta "higiena" jest wobec niego destrukcyjna:
+proces `status`, chcac pokazac dane fcgi/http, ma pod soba scoreboardy tamtych
+poolow odmapowane, zanim zdazy je przeczytac.
+
+To jest DOKLADNIE ograniczenie kontraktu z 3h przewidziane przez zadanie:
+_"Nie ruszaj fpm_children.c bez bardzo dobrego powodu — jesli uznasz ze
+musisz, uzasadnij dlaczego"_. Uzasadnienie: bez zmiany tutaj `pool.type = status`
+nie moze dzialac DLA FCGI/HTTP W OGOLE (dla supervisor/cron dziala od razu,
+bo ich wlasny stan nie przechodzi przez `fpm_scoreboard_free()` — to osobna
+alokacja, `fpm_pool_supervisor.c`/`fpm_pool_cron.c` wlasny rejestr).
+
+Naprawa (minimalna, danych-nie-kodu, zgodna z duchem 3h): nowe pole w
+`fpm_pool_type_s` — `reads_foreign_scoreboards:1` (dzis ustawione tylko dla
+`status`). W `fpm_child_resources_use()` petla zwalniajaca cudze scoreboardy
+jest owinieta w `if (!fpm_pool_type_of(child->wp)->reads_foreign_scoreboards)`
+— decyzja jest per DZIECKO, nie per caly master: **wylacznie** dziecko poola
+`status` nie zwalnia cudzych scoreboardow; KAZDY inny pool w tym samym
+configu (w tym zwykly fcgi/http obok `status`) nadal zwalnia je dokladnie
+jak dzis, niezaleznie od tego, czy gdziekolwiek w configu istnieje pool
+`status`. `fpm_children.c` pyta o typ TEGO KONKRETNEGO dziecka przez
+`fpm_pool_type_of()` (juz istniejaca, generyczna funkcja) — nie zna zadnego
+konkretnego typu, tylko czyta dane. Pierwsza wersja tej naprawy wylaczala
+higiene dla calego mastera przez osobna funkcje skanujaca caly config
+(`fpm_pool_type_any_reads_foreign_scoreboards()`) — **poprawione po review**:
+to bylo za szerokie (workery fcgi/http tracily zabezpieczenie przed
+przypadkowym dostepem do cudzej pamieci, mimo ze ich to nie dotyczylo).
+Funkcja skanujaca caly config zostala usunieta jako niepotrzebna.
+
+Bez `pool.type = status` w configu zachowanie jest 1:1 identyczne
+z upstreamem — zweryfikowane wprost (nie tylko teoretycznie): dwa zwykle
+poole `fcgi` (`web`, `web2`, bez zadnego `status` w configu) — `vmmap` na
+kazdym z dzieci pokazuje dokladnie JEDEN 16K region `VM_ALLOCATE...SM=S/A`
+(wlasny scoreboard), NIE dwa — czyli worker `web` nadal fizycznie nie ma
+zmapowanego scoreboardu `web2` i odwrotnie, dokladnie jak przed jakakolwiek
+zmiana w tym zadaniu. Dla kontrastu, master (przed forkiem) ma jeden,
+POLACZONY region 32K (oba scoreboardy razem, sasiadujace w pamieci) — to
+pokazuje dokladnie, CO konkretne dziecko odziedziczylo, a co samo zwolnilo.
+
+Cena naprawy (po zawezeniu): TYLKO proces `status` trzyma w swoim adresie
+mapowania scoreboardow WSZYSTKICH innych poolow (kilkanascie KB na pool,
+zaniedbywalne) — zaden inny proces w systemie nie ponosi tego kosztu.
+
+### Testy (zweryfikowane na zbudowanej binarce, macOS/arm64)
+
+1. Config bez `pool.type` (`fcgi`) — `-t` zielone, dziala jak dzis (BC).
+2. `pool.type = status` z odpowiadajacymi za "cokolwiek zwiazane z php/pm"
+   dyrektywami (`pm.max_children`, `supervisor.script`) w tym samym bloku —
+   `-t` daje czytelny ALERT dla obu i `FPM initialization failed` (exit 78).
+3. Realny serwer: jeden pool `fcgi` (`web`), jeden `supervisor` (`sup`), jeden
+   `cron` (`cronjob`, `* * * * *`), jeden `status` (`metrics`) — wszystkie
+   wstaja. `curl /metrics` (Prometheus) i `curl /status` (JSON) na porcie
+   statusu pokazuja jednoczesnie idle/active/requests dla `web` ORAZ
+   `pool_info`, state/last_start/exit_code/failures dla `sup` i `cronjob`
+   (plus `backoff_seconds` tylko dla `sup` i `next_run` tylko dla `cronjob`) —
+   pola nieadekwatne dla typu sa nieobecne.
+4. `SIGUSR2` (reload) — ten sam PID mastera, nowe dzieci wszystkich typow,
+   `/status` po reloadzie pokazuje swiezy `last_start` dla `sup` (liczniki
+   backoffu zerowane, zgodnie z 3p — nowy segment shm od zera po `execvp()`).
+5. `kill -9` na procesie `sup` — `fpm_children.c` (nietkniete) wskrzesza go
+   natychmiast; `/status` pokazuje nowy, pozniejszy `last_start` po
+   wskrzeszeniu — status poprawnie odzwierciedla nowa generacje procesu.
+6. Skrypt supervisora konczacy sie zawsze `exit(1)`, `restart = on-failure`,
+   `restart_max = 2` — po dwoch porazkach `/status` pokazuje
+   `"state":"gave_up"`, `"last_exit_code":1`, `"consecutive_failures":2` —
+   dokladnie stan, w ktorym supervisor faktycznie sie znajduje (potwierdzone
+   rownolegle logiem ALERT "giving up").
+7. Po zawezeniu naprawy z `fpm_children.c` (patrz wyzej) do pojedynczego
+   dziecka: powtorzony test 3 (status nadal czyta wszystkie scoreboardy bez
+   segfaulta) — zielony. Osobno, config BEZ zadnego poola `status` (dwa zwykle
+   `fcgi`) — `vmmap` na kazdym dziecku pokazuje TYLKO wlasny scoreboard (16K),
+   nie oba — bit w bit jak przed calym zadaniem.
+8. Klient laczacy sie z portem statusu i nie wysylajacy nic (`socket.recv()`
+   bez wczesniejszego `send()`) — polaczenie zamkniete przez serwer po
+   dokladnie ~5s (`SO_RCVTIMEO`), zmierzone bezposrednio (nie tylko
+   zalozone) — proces NIE wisi w nieskonczonosc, i nadal odpowiada
+   normalnie na kolejny, prawdziwy request zaraz potem.
+9. Dwa poole `pool.type = status` w jednym configu (rozne porty) — oba
+   wstaja niezaleznie, oba poprawnie odpowiadaja na `/status` dla tego
+   samego poola `fcgi` obok nich, zero konfliktu.
+
+### Czego NIE zrobiono / wątpliwe
+
+- API metryk aplikacyjnych z PHP (`fpm_metric_register/inc/set/observe`) opisane
+  w 3k jest osobnym zadaniem; ten typ wystawia tylko wbudowany stan poolow.
+- Wiele procesow `status` (np. `status.processes`) — celowo brak, jeden
+  proces wystarcza na scrape monitoringu; gdyby ktos potrzebowal wiecej, to
+  swiadoma decyzja projektowa (nowa dyrektywa), nie domysl.
+- Keep-alive/chunked/pelny parser HTTP — celowo brak (patrz komentarz w
+  `fpm_pool_status.c`): to endpoint monitoringu, nie serwer WWW, jeden
+  request na polaczenie w zupelnosci wystarcza.
+- Obsluga `SIGQUIT` (graceful) dla poola `status` — brak wlasnego handlera,
+  taki sam skutek uboczny jak dla supervisor/cron bez uchwytu na `SIGQUIT`
+  (opoznienie do eskalacji `SIGTERM` przez mastera, patrz 3p scenariusz 2) —
+  zaakceptowane, bo `status` nie ma zadnej pracy w toku do dokonczenia.
+- "Ile przebiegow crona pominieto z powodu nakladania" — patrz wyzej,
+  swiadomie pominiete jako zbedna zlozonosc przy `pm.max_children = 1`.
+- `SO_RCVTIMEO`/`SO_SNDTIMEO` (5s, `FPM_POOL_STATUS_IO_TIMEOUT_SEC`) na
+  polaczeniu klienckim — dopisane i zmierzone bezposrednio (test 8 wyzej):
+  klient trzymajacy polaczenie otwarte bez wysylania danych zostaje
+  odlaczony po dokladnie ~5s, proces obsluguje kolejne requesty normalnie.
+  NIE zabezpiecza to przed powolnym, ALE nie-cichym klientem (np. wysylajacym
+  1 bajt co 4s, resetujac timeout za kazdym razem) — teoretyczna luka DoS
+  na pojedynczy proces (pm.max_children zawsze 1), zaakceptowana jako
+  wystarczajaca dla endpointu monitoringu bez ruchu publicznego.
+
+## 3t. Syscalle blokującego workera FastCGI — zaimplementowane i zweryfikowane (2026-09-05)
+
+Zmiana założenia względem 3m/3q: **nie ma typu `fcgi-async`**. True Async
+sprawdzone u źródła — RFC użytkowe anulowane, blokujące I/O w C-SAPI nie jest
+przechwytywane, `main/fastcgi.c` i `sapi/fpm` nietknięte. Optymalizacje trafiły
+więc do zwykłego, blokującego workera, podzielone według tego, czy zmieniają
+obserwowalne zachowanie: nie zmieniają → domyślnie; zmieniają → opt-in.
+
+### Co weszło
+
+| co | gdzie | domyślnie | zmiana zachowania |
+|---|---|---|---|
+| naprawa `TCP_NODELAY` (błąd upstreamu) | `patches/0002` (`main/fastcgi.c`) | tak | tylko naprawa — Nagle znika z keep-alive po TCP |
+| bufor wejściowy 16 KB w `safe_read()` | `patches/0003` | tak | nie (jeden `read()` zamiast sześciu na nagłówek requestu) |
+| `accept4(SOCK_CLOEXEC)` | `patches/0003` + `AC_CHECK_FUNCS([accept4])` w naszym `config.m4` | tak, gdy `HAVE_ACCEPT4` | nie (zejście na `accept`+2×`fcntl`) |
+| `write(2, "\0fscf")` tylko przy `catch_workers_output = yes` | `fpm_stdio.c` (wzięty na własność, 4 commity/rok) | tak | nie — przy `no` fd 2 to `/dev/null`, zapis szedł w próżnię |
+| `request_cpu_tracking = yes|no` (2× `times()`) | `fpm_conf.c/h`, `fpm_request.c/h`, hook w `fpm.c` | **yes** = jak upstream | `no` zeruje „last request cpu" w statusie i `%C` w `access.format` |
+
+`fpm_stdio.c` to piąty plik na własność (po `fpm_main.c`… — patrz sekcja 2);
+zmiana to statyczna flaga ustawiana w `fpm_stdio_child_use_pipes()` i wczesny
+`return` w `fpm_stdio_flush_child()`.
+
+`request_cpu_tracking` czyta się w dziecku w `fpm.c` **przed**
+`fpm_cleanups_run(FPM_CLEANUP_CHILD)`, bo potem `wp->config` już nie istnieje
+(ta sama pułapka co w 3o). Dyrektywa per pool.
+
+### Co odrzucone i dlaczego
+
+- **`poll` po `accept` → `SO_RCVTIMEO` na gnieździe nasłuchującym.** Zmierzone
+  programem w C na poligonie (Linux 7.0), nie z dokumentacji:
+  - TCP: opcja dziedziczy się przez `accept()` i przerywa `read()` — ale
+    **`accept()` bez klienta też dostaje EAGAIN po timeoucie**, a
+    `fcgi_accept_request` traktuje każdy błąd poza EINTR/ECONNABORTED jako
+    fatalny → worker wychodzi co 5 s bezczynności;
+  - **UDS: nie dziedziczy się w ogóle** (`SO_RCVTIMEO` na połączeniu = 0),
+    czyli zerowa ochrona na transporcie, który sami zalecamy;
+  - timeout przenosiłby się na `read()` połączeń keep-alive (nginx trzyma je
+    bezczynnie długo), więc trzeba by go zdejmować kolejnym `setsockopt` — zysk
+    jednego syscalla na NOWE połączenie znika.
+  `poll` zostaje. Jeden syscall nie jest wart zawieszonego albo znikającego workera.
+- **Cache `chdir`** — poza zakresem (`main/`, semantyka cwd), zgodnie z decyzją.
+- **`zend_signal_activate` (7× `rt_sigaction`) i blokada opcache (2× `fcntl`)**
+  — Zend i ext/opcache, nie SAPI. Materiał na osobne zgłoszenie upstream:
+  rejestracja handlerów raz na proces zamiast per request; blokada
+  `accel_activate_add`/`deactivate_sub` per request.
+- **`SO_REUSEPORT`** — nie ruszane (3m: thundering herd nie istnieje).
+
+### Pułapki znalezione po drodze
+
+1. **`0001` psuło `--enable-fpm` w tym samym drzewie — NAPRAWIONE (droga 1).**
+   Zmieniało sygnaturę hooków w `main/fastcgi.h` (`void(*)(bool)`), a upstreamowe
+   `fpm_main.c` przekazywało `void(*)(void)`; GCC 14+ traktuje niezgodne wskaźniki
+   jako błąd. Przyczyna: `0001` było wycinkiem PR bukka#2 ograniczonym do `main/`,
+   a jego część z `sapi/fpm/fpm/fpm_request.c/.h` nieśliśmy tylko jako własne pliki
+   w `sapi/fpmng/`. Decyzja koordynatora: `0001` niesie teraz pełny PR (bez
+   testów .phpt). Zweryfikowane: `--enable-fpm --enable-fpmng` w jednym drzewie
+   buduje się (mac), a `sapi/fpm/tests` na tak zbudowanym upstreamowym
+   `php-fpm` z pełnym stosem 0001+0002+0003: 141 testów, 0 failed. Skutek
+   uboczny: `prepare.sh` mógłby przestać usuwać `sapi/fpmng/tests`. Koszt:
+   PHP-8.3 potrzebuje wariantu `0001` (`fpm_scoreboard_update_commit` ma tam
+   7 argumentów; 8.4 dodało `memory_peak`) — razem z wariantem `0003` to dwa
+   warianty dla 8.3, czyli próg alarmowy z `patches/README.md`.
+   Testy upstreamu można też puszczać przeciw `php-fpm-ng` przez
+   `TEST_PHP_FPM_EXECUTABLE` (szuka `<dir>/fpm/php-fpm` dwa poziomy wyżej —
+   potrzebny symlink).
+2. **Stos łatek jest kolejnościowy.** 0002 i 0003 kontekstowo zakładają 0001
+   (hunk init w `fcgi_init_request` i okolice `accept()`), choć merytorycznie
+   są niezależne. Wersje do upstreamu trzeba by przebazować na czyste drzewo.
+3. **`prepare.sh` kłamał przy stosie.** „Już nałożone" sprawdzał odwrotnym
+   dry-runem per łatka — pada dla 0002, gdy leży na niej 0003. Teraz decyzja
+   zapada raz dla całego stosu: w przód na nietknięte drzewo albo cały stos
+   odwrotnie z kopii dotkniętych plików. Sprawdzone na BSD patch (mac) i GNU.
+4. **`safe_read()` na PHP-8.3 ma `const void *buf`** (zmienione w 8.4 przez
+   #20887) — 0003 potrzebuje wariantu `patches/php-8.3/`. Pierwszy wariant
+   wersyjny w repo; dwa to próg alarmowy z `patches/README.md`.
+5. Kopiowanie repo z maca `tar`-em bez `COPYFILE_DISABLE=1` wrzuca pliki
+   `._*.c`, które `prepare.sh` bierze za źródła i build pada na
+   `No rule to make target '._fpm_request.c'`.
+
+### Poprawność
+
+Pełny zestaw `sapi/fpm/tests` (141 testów), 0 failed, w pięciu wariantach —
+piąty to upstreamowy `php-fpm` zbudowany razem z `php-fpm-ng` w jednym drzewie
+z pełnym stosem 0001+0002+0003 (mac, 115 pass / 25 skip). Pozostałe cztery:
+upstream czysty i upstream+0002/0003 na Linuksie (121 pass / 19 skip, identycznie
+przed i po; `HAVE_ACCEPT4` włączone ręcznie, bo upstream go nie sprawdza),
+upstream+0002/0003 na macu (ścieżka bez `accept4`) i `php-fpm-ng` na macu
+(115 / 25, skipy środowiskowe). Jedyny „warn" to upstreamowy XFAIL, który
+przechodzi — tak samo bez łatek.
+
+Prawdziwy nginx 1.28 na poligonie (`ngtest/nginx-check.sh`), binarka bazowa
+(0001 + nasze sapi) vs nowa, w konfiguracjach `catch_workers_output = yes`, `no`
+i `no` + `request_cpu_tracking = no`. **Cztery przebiegi, zero porażek**,
+identyczny wynik dla bazowej i nowej:
+
+- `hello.php` ×50 na każdej ścieżce: keep-alive TCP, nowe połączenie TCP,
+  keep-alive UDS, nowe połączenie UDS, `fastcgi_buffering off` +
+  `fastcgi_request_buffering off`;
+- POST surowy 1 KB, 17 KB (tuż nad buforem), 100 KB, 1 MB, 5 MB — długość i md5
+  ciała zgadzają się na każdej ścieżce; multipart 300 KB z plikiem — `$_POST`
+  i md5 pliku zgadzają się;
+- odpowiedzi 20 KB, 200 KB, 5 MB (md5 całego ciała) na każdej ścieżce;
+- chunked: nginx odpowiada `Transfer-Encoding: chunked`, surowe ciało dłuższe
+  od zdekodowanego, zdekodowane md5 poprawne;
+- zerwane połączenie w połowie odpowiedzi (`curl -m 0.3` w pauzie skryptu
+  100 KB + `usleep` + 100 KB, dwa razy, na keep-alive i na streamie): worker
+  przeżywa, kolejne 20 requestów OK, liczba workerów bez zmian;
+- `catch_workers_output = yes`: `php://stderr` z workera ląduje w `error_log`
+  mastera; przy `no` nie ląduje (zgodnie z semantyką) — czyli pominięcie
+  `write(2, "\0fscf")` nic nie psuje, gdy jest odbiorca;
+- `request_cpu_tracking` domyślne: „last request cpu" w statusie i `%C` w
+  access logu niezerowe po skrypcie z ~30 ms CPU; `= no`: oba równe 0.
+
+Pułapka testowa (nie kodu): w SAPI FPM nie ma stałej `STDERR` — skrypt z
+`fwrite(STDERR, …)` pada fatalem; trzeba `fopen('php://stderr')`. Pierwsza wersja
+testu „brak STDERR w logu" była fałszywym alarmem, także na upstreamie.
+
+### Wydajność — zmierzone (poligon i7-6700T, Linux 7.0, PTI+IBRS, k3d wyłączone, maszyna pusta)
+
+Binarka bazowa = 0001 + nasze `sapi/fpmng` sprzed tej pracy; nowa = to samo +
+0002 + 0003 + `fpm_stdio.c` + `request_cpu_tracking` (domyślnie `yes`, więc
+`times()` w obu). Konfiguracje pomiarowe bez `catch_workers_output`, czyli
+nowa binarka pomija `write(2, "\0fscf")`. `hello.php` (`echo "hello\n"`), opcache.
+
+**Syscalle na request** (`strace -c` na jednym workerze, fcgibench, TCP):
+
+| | keep-alive | nowe połączenie |
+|---|---|---|
+| bazowa | **26** (read 6, write 2, rt_sigaction 8, chdir 2, fcntl 2, times 2, setitimer 2, getcwd, rt_sigprocmask) | **33** (+ accept, fcntl 2, poll, shutdown, recvfrom 2, close; read 5) |
+| nowa | **20** (read 1, write 1, reszta bez zmian) | **25** (accept4 1, fcntl 2 = tylko opcache, read 1, recvfrom 1, poll, shutdown, close) |
+
+Z pozostałych 20: 8× `rt_sigaction` + 1× `rt_sigprocmask` (Zend signals), 2×
+`setitimer` (`max_execution_time`), 2× `chdir` + `getcwd`, 2× `fcntl` (opcache),
+2× `times` (wyłączalne dyrektywą) — tylko `read` + `write` to FastCGI.
+
+**CPU workera na request** (suma utime+stime dzieci z `/proc`, fcgibench,
+2 połączenia, 5 s, trzy powtórzenia; wartości min–max):
+
+| ścieżka | bazowa µs/req | nowa µs/req | różnica |
+|---|---|---|---|
+| TCP keep-alive | 60,2–62,5 | 48,7–50,8 | **−12 (−19%)** |
+| TCP nowe połączenie | 89,0–95,4 | 81,7–84,5 | −8 (−9%) |
+| UDS keep-alive | 52,6–53,7 | 41,7–44,8 | **−9 (−18%)** |
+| UDS nowe połączenie | 72,0–73,0 | 52,3–54,3 | **−19 (−27%)** |
+
+Zysk większy niż w 3m (7/12 µs), bo tam nie było jeszcze pominięcia
+`write(2, …)` — `write` na tej maszynie kosztuje 4–7 µs/wywołanie wg `strace`,
+najdroższy pojedynczy syscall na ścieżce.
+
+**`wrk -t1 -c2 -d10s` przez nginx 1.28** (nginx + wrk + 2 workery na tej samej
+maszynie, trzy powtórzenia):
+
+| ścieżka | req/s bazowa | req/s nowa | CPU workera µs/req bazowa → nowa |
+|---|---|---|---|
+| TCP keep-alive (`fastcgi_keep_conn on`) | 8441–8830 | 8543–8576 | 108–113 → 106–108 (−3…−5) |
+| TCP nowe połączenie | 7622–7948 | 7737–7935 | 106–109 → 97–98 (**−11**) |
+| UDS keep-alive | 14657–15012 | 15962–16191 (**+7%**) | 69–72 → 59–60 (**−10**) |
+
+Przepustowość przez nginx prawie nie drga, bo mierzy głównie nginx+wrk (jak
+w 3m: przy większym obciążeniu widać walkę o hyperthready, nie kod); CPU
+workera na request jest miarą właściwą. Zaskoczenie: przez nginx TCP keep-alive
+zyskuje najmniej (−3…−5 µs), choć bezpośrednio fcgibenchem −12 — nie zbadane,
+zapisane jako otwarte. Request przez nginx kosztuje ~45 µs więcej CPU niż ten
+sam skrypt fcgibenchem — to ~20 zmiennych `fastcgi_params` i większe `$_SERVER`,
+nie transport.
+
+**Nagle (`TCP_NODELAY`, łatka 0002)** — własny klient FastCGI w Pythonie
+(`patches/0002-fcgi-nodelay-repro.py`), jedno połączenie TCP z `FCGI_KEEP_CONN`,
+50 requestów z rzędu, `mid.php` = 20 KB odpowiedzi (> bufor 8 KB), trzy serie:
+
+| | mediana | min | max |
+|---|---|---|---|
+| bazowa | **41,0 ms** | 0,27 ms | 41,8 ms |
+| nowa | **0,08 ms** | 0,07 ms | 0,71 ms |
+| bazowa, `hello.php` (< 8 KB) | 0,09 ms | 0,07 ms | 0,34 ms |
+
+Dwie osobne rzeczy, których nie wolno mieszać:
+
+1. **Wada w kodzie — udowodniona z samego kodu**: `req->tcp` przypisywane
+   tylko pod `_WIN32`, czytane bezwarunkowo; gałąź `TCP_NODELAY` poza Windows
+   jest martwa. To wystarcza do zgłoszenia niezależnie od pomiarów.
+2. **Skutek praktyczny — wykazany tylko częściowo.** Własnym klientem: 41 ms
+   → 0,08 ms, czyli timer delayed ACK Linuksa (40 ms) na każdym requeście z
+   odpowiedzią większą niż jeden `write()`. **Z nginx 1.28 na loopbacku NIE
+   odtworzone** — odpowiedzi > 8 KB są w mikrosekundach z łatką i bez. Nie
+   znaleźliśmy konfiguracji z prawdziwym nginxem, która to łapie, więc nie
+   twierdzimy, że typowe wdrożenie nginx + FPM to widzi. Hipoteza (nie
+   ustalenie): nginx czyta odpowiedź natychmiast, jego jądro ACK-uje po dwóch
+   pełnych segmentach, więc delayed ACK nie ma kiedy zadziałać; klient czytający
+   wolniej albo po prawdziwej sieci dostaje opóźnienie — nasz klient Pythonowy
+   jest takim klientem.
+
+Tekst zgłoszenia trzyma ten podział: `patches/0002-upstream-report.md`.
+
+**Zastrzeżenie sprzętowe** bez zmian z 3m: PTI+IBRS, syscall ~0,9 µs; na nowszym
+CPU zysk bezwzględny skurczy się 3–5×.
+
+### Zalecana konfiguracja dla lekkich endpointów (zero linijek kodu)
+
+- `php_admin_value[max_execution_time] = 0` — znika `setitimer` ×2 +
+  `rt_sigprocmask` (−3 µs/req na poligonie). FPM i tak ma
+  `request_terminate_timeout` jako strażnika czasu ściennego.
+- `listen = /run/php/pool.sock` zamiast `127.0.0.1:9000` — −7…−11 µs/req.
+  Bramka HTTP i worker są w tym samym kontenerze, TCP na loopbacku nic nie daje.
+- `catch_workers_output = no`, jeśli logi idą przez `error_log()`/stderr do
+  własnego stosu — oszczędza `write()` per request (od teraz automatycznie).
+- `request_cpu_tracking = no`, jeśli nikt nie czyta „last request cpu" ani `%C`.
+
 ## 4. Zmierzone: wydajność NIE jest argumentem
 
 Poligon 192.168.8.103, k3d, i7-6700T. Pełne dane w pamięci projektu Claude
@@ -1547,6 +2508,25 @@ dev i prod.
    consumer dostaje SIGTERM i kończy zadanie. Opcjonalnie obserwowanie plików
    konfiguracyjnych. **Nie** prawdziwy hot-reload — zostawić na później,
    kiedy będzie wiadomo, czy ktoś na to narzeka.
+8. TLS + ACME (sekcja 3l).
+9. `pool.type = proxy` — DECYZJA (2026-09-05): robimy, ale **na samym koncu**,
+   po TLS. Bramka trzyma :443, terminuje TLS, obsluguje ACME i pliki statyczne
+   sama, a reszte przekazuje po zwyklym HTTP/1.1 na localhost do dlugo zyjacego
+   procesu aplikacji (amphp, ReactPHP, Octane, cokolwiek). Powod kolejnosci:
+   bez TLS i ACME ten typ nie ma czego wnosic — sam przekaz HTTP na localhost
+   zalatwia dowolne narzedzie. Wartosc powstaje dopiero z polaczenia
+   "jedna binarka trzyma certyfikat i statyki" z "aplikacja jest osobnym
+   procesem". Kontekst i skad sie to wzielo: sekcja 3s.
+
+### Stan na 2026-09-05
+
+Zrobione: 1 (pool.type z kontraktem rozszerzalnosci), 2 (supervisor),
+3 (cron), 5 (pliki statyczne), 0 (statyczna binarka musl) — plus optymalizacje
+syscalli blokujacego workera (3t), ktorych w pierwotnym planie nie bylo.
+W robocie: `pool.type = status` (czesc punktu 4) i eksperymentalny
+`pool.type = async` (3s).
+Zostalo: 4 (metryki z PHP, `fpm_metric_*`), 6 (self-runner), 7 (reload),
+8 (TLS+ACME), 9 (proxy), oraz dlugi ogon braków bramki z sekcji 6.
 
 ## 8. Utrzymanie: nowa wersja PHP = przebudowa
 
@@ -1696,12 +2676,16 @@ mastera -> wszystkie procesy znikaja < 2,5 s.
   TO jest dzis prawdziwa sciana dla frameworkow (kazdy request laduje te same
   klasy). Z opcache ten sam problem ma inna postac: `zend_accel_load_script`
   binduje klasy do `EG(class_table)` per request.
-- **opcache zaklada jeden request na proces.** Z wlaczonym opcache requesty
-  2..N tracily `$_GET`/`$_SERVER`: `ext/opcache/ZendAccelerator.c:1958,2481`
-  odpala auto-globale tylko dla `ping_auto_globals_mask & ~ZCG(auto_globals_mask)`,
-  a maska zeruje sie w `accel_activate` (`:2873`), czyli raz na
-  request-kontener. POC dziala z `opcache.enable = off` — czyli bez opcache.
-  Analogiczne cache per request: `ZCG(cwd)`, `ZCG(include_path)`.
+- **opcache zaklada jeden request na proces.** Pierwotnie z wlaczonym opcache
+  requesty 2..N tracily `$_GET`/`$_SERVER`: cache hit omijal kompilacje, na
+  ktorej POC polegal przy uruchamianiu callbackow auto-globali. POC jawnie
+  wywoluje teraz `zend_is_auto_global_str()` dla kazdego requestu; test 3 x 4
+  rownoleglych requestow z aktywnym opcache zachowal osobne `$_GET`, `$_SERVER`,
+  `$_COOKIE`, `$GLOBALS` i `get_included_files()` (4 x 500 ms w 506-508 ms).
+  Nadal **zalecane jest `opcache.enable = off`**: opcache oraz jego stan
+  `ZCG(cwd)`, `ZCG(include_path)` nie byly projektowane dla wielu requestow
+  przeplatanych w jednym procesie, a test nie dowodzi izolacji wszystkich
+  sciezek rozszerzenia.
 - **Bez keep-alive po stronie poola**: `fcgi_accept_request` na otwartym fd
   czyta blokujaco (`main/fastcgi.c:1445`, bez poll). Nasza bramka HTTP trzyma
   polaczenia trwale — dopiac przez asynchroniczny poll na fd przed odczytem.

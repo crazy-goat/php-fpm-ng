@@ -149,6 +149,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "request_slowlog_trace_depth", &fpm_conf_set_integer,     WPO(request_slowlog_trace_depth) },
 	{ "request_terminate_timeout", &fpm_conf_set_time,        WPO(request_terminate_timeout) },
 	{ "request_terminate_timeout_track_finished", &fpm_conf_set_boolean, WPO(request_terminate_timeout_track_finished) },
+	{ "request_cpu_tracking",      &fpm_conf_set_boolean,     WPO(request_cpu_tracking) },
 	{ "rlimit_files",              &fpm_conf_set_integer,     WPO(rlimit_files) },
 	{ "rlimit_core",               &fpm_conf_set_rlimit_core, WPO(rlimit_core) },
 	{ "chroot",                    &fpm_conf_set_string,      WPO(chroot) },
@@ -165,6 +166,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.restart_max",    &fpm_conf_set_integer,     WPO(supervisor_restart_max) },
 	{ "supervisor.stop_timeout",   &fpm_conf_set_time,        WPO(supervisor_stop_timeout) },
 	{ "supervisor.fatal",          &fpm_conf_set_boolean,     WPO(supervisor_fatal) },
+	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
+	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
+	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -645,6 +649,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->process_dumpable = 0;
 	wp->config->clear_env = 1;
 	wp->config->decorate_workers_output = 1;
+	wp->config->request_cpu_tracking = 1;	/* fpm-ng: domyslnie jak upstream */
 	wp->config->supervisor_processes = 1;
 	wp->config->supervisor_restart_delay = 1;
 	wp->config->supervisor_restart_delay_max = 60;
@@ -733,6 +738,9 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->security_limit_extensions);
 	free(wpc->supervisor_script);
 	free(wpc->supervisor_restart);
+	free(wpc->cron_schedule);
+	free(wpc->cron_script);
+	free(wpc->cron_parsed_schedule);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif
@@ -1876,6 +1884,7 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\trequest_slowlog_trace_depth = %d", wp->config->request_slowlog_trace_depth);
 		zlog(ZLOG_NOTICE, "\trequest_terminate_timeout = %ds", wp->config->request_terminate_timeout);
 		zlog(ZLOG_NOTICE, "\trequest_terminate_timeout_track_finished = %s", BOOL2STR(wp->config->request_terminate_timeout_track_finished));
+		zlog(ZLOG_NOTICE, "\trequest_cpu_tracking = %s",       BOOL2STR(wp->config->request_cpu_tracking));
 		zlog(ZLOG_NOTICE, "\trlimit_files = %d",               wp->config->rlimit_files);
 		zlog(ZLOG_NOTICE, "\trlimit_core = %d",                wp->config->rlimit_core);
 		zlog(ZLOG_NOTICE, "\tchroot = %s",                     STR2STR(wp->config->chroot));

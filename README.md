@@ -30,6 +30,20 @@ wykrywa katalogi w `sapi/` globem, więc nie trzeba tknąć żadnego istniejące
 pliku. Szczegóły, decyzje, zmierzone liczby i lista znanych problemów:
 [`docs/NOTES.md`](docs/NOTES.md).
 
+## Zalecana konfiguracja poola dla lekkich endpointów
+
+Zysk bez linijki kodu, zmierzony na poligonie (szczegóły: `docs/NOTES.md`, 3m i 3t):
+
+```ini
+listen = /run/php/pool.sock          ; UDS zamiast loopbacku TCP: -7..-11 us/req
+php_admin_value[max_execution_time] = 0   ; bez setitimer per request: -3 us/req
+catch_workers_output = no            ; logi przez error_log()/stderr do wlasnego stosu
+request_cpu_tracking = no            ; jesli nikt nie czyta "last request cpu" ani %C
+```
+
+`request_terminate_timeout` nadal pilnuje czasu ściennego, więc
+`max_execution_time = 0` nie zostawia requestu bez strażnika.
+
 ## Budowanie
 
 Skrypty w `build/` uruchamiane w kontenerze Alpine, budowanie out-of-tree:

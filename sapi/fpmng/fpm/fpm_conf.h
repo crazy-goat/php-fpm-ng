@@ -11,6 +11,7 @@
 #define FPM_CONF_MAX_PONG_LENGTH 64
 
 struct key_value_s;
+struct fpm_cron_schedule_s;	/* fpm-ng: definicja w fpm_cron_schedule.h, tu tylko wskaznik */
 
 struct key_value_s {
 	struct key_value_s *next;
@@ -90,6 +91,7 @@ struct fpm_worker_pool_config_s {
 	int request_slowlog_trace_depth;
 	int request_terminate_timeout;
 	int request_terminate_timeout_track_finished;
+	int request_cpu_tracking;		/* fpm-ng: times() na start i koniec requestu; zasila "last request cpu" w statusie i %C w access.format */
 	int rlimit_files;
 	int rlimit_core;
 	char *chroot;
@@ -107,6 +109,11 @@ struct fpm_worker_pool_config_s {
 	int supervisor_restart_max;		/* 0 = bez limitu, nigdy nie poddawaj sie */
 	int supervisor_stop_timeout;
 	int supervisor_fatal;			/* wyczerpanie restart_max ubija cala mastera */
+	/* fpm-ng: pool.type = cron, patrz fpm_pool_cron.c */
+	char *cron_schedule;
+	char *cron_script;
+	int cron_timeout;			/* sekundy, 0 = bez limitu (domyslne) */
+	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* wypelnia validate() */
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

@@ -2423,12 +2423,110 @@ Nie na start. Patrz sekcja 7.
 ### Funkcjonalne (bez tego nie zastąpi nginxa)
 
 - Brak TLS (patrz sekcja 5)
-- Brakujące zmienne CGI: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`, `REQUEST_SCHEME`,
-  `AUTH_TYPE`, `REMOTE_USER`. `SERVER_PORT` boli najbardziej — frameworki budują
-  z niego absolutne URL-e
-- Brak obsługi `X-Forwarded-For` — za proxy `REMOTE_ADDR` to proxy
-- Brak access logu
 - `index.php` zaszyty na sztywno, brak odpowiednika `try_files`
+
+### Zmienne CGI, X-Forwarded-*, access log — ZAMKNIĘTE (2026-09-06, branch `http-cgi-vars`)
+
+Trzy punkty zamknięte razem, bo się przenikają (REMOTE_ADDR/SERVER_PORT
+liczą się inaczej za zaufanym proxy, a access log chce znać ten sam,
+ostateczny adres).
+
+- **Brakujące zmienne CGI**: `SERVER_PORT`, `SERVER_ADDR`, `HTTPS`,
+  `REQUEST_SCHEME`, `AUTH_TYPE`, `REMOTE_USER` — dopisane w
+  `fpm_http_build_request()` (`fpm_http.c`). `SERVER_ADDR`/`SERVER_PORT` biorą
+  się z `getsockname()` na deskryptorze KONKRETNEGO połączenia
+  (`evhttp_connection_get_bufferevent()` + `bufferevent_getfd()`), nie z
+  adresu nasłuchu poola — poprawne nawet pod `SO_REUSEPORT` albo bindem na
+  `0.0.0.0`/`::`. Bramka sama nigdy nie mówi TLS, więc `HTTPS`/`REQUEST_SCHEME`
+  domyślnie to "brak"/`http`; nadpisuje je TYLKO zaufany proxy (niżej).
+  `AUTH_TYPE`/`REMOTE_USER` wyprowadzone z nagłówka `Authorization` w nowym
+  pliku `fpm_http_auth.c/.h` — własny dekoder base64 (Zend MM nie jest
+  zainicjowany w procesie bramki, więc `php_base64_decode_ex()` z
+  `ext/standard` nie jest tu bezpieczne do wywołania). `Basic` dekoduje
+  `user:pass`, każdy inny schemat dostaje samo `AUTH_TYPE`.
+- **`X-Forwarded-For`/`-Proto`/`-Port`**: nowy plik `fpm_http_forwarded.c/.h`
+  plus dyrektywa `http.trusted_proxies` (jak `http.allowed_clients`: lista
+  literalnych IPv4/IPv6, reużywa `fpm_http_acl_parse()`/`_check()` — stąd ten
+  moduł zmienił nazwę pierwszego parametru na `directive`, żeby błąd
+  parsowania wskazywał właściwą dyrektywę, nie zawsze "http.allowed_clients").
+  Nagłówki liczą się TYLKO gdy bezpośredni adres TCP jest na liście — pusta
+  dyrektywa = nikomu nie ufamy = bezpieczny domyślny. Z `X-Forwarded-For`
+  bierzemy tylko PIERWSZY adres (oryginalny klient) — świadome uproszczenie
+  dla jednego zaufanego proxy przed bramką, typowego dla tego projektu;
+  łańcuch kilku proxy nie jest rozpoznawany ponad to. `X-Forwarded-Proto` ->
+  `HTTPS`/`REQUEST_SCHEME`, `X-Forwarded-Port` -> `SERVER_PORT` (NIE
+  `REMOTE_PORT` — to zawsze prawdziwy port TCP połączenia). Rozwiązanie
+  wywoływane RAZ na request w `fpm_http_request()`, wynik dzielony między CGI
+  vars i access log.
+- **Access log**: nowy plik `fpm_http_access_log.c/.h`, dyrektywa
+  `http.access_log` (ścieżka, puste = wyłączony). Format Combined Log Format,
+  NIEKONFIGUROWALNY — świadomie, żeby nie komplikować kodu configowalnym
+  formatterem. Każdy z `http.gateways` procesów bramki otwiera WŁASNY
+  deskryptor do TEGO SAMEGO pliku, `O_APPEND`; jeden `write()` na linię
+  (celowo bez retry po krótkim zapisie — dogrywanie reszty drugim `write()`
+  zepsułoby wlaśnie gwarancję braku przeplotu) wykorzystuje gwarancję POSIX,
+  że `write()` z `O_APPEND` na zwykłym pliku jest atomowy względem innych
+  piszących — **zmierzone na żywo**: 40 równoległych żądań przez 2 procesy
+  bramki, 40 czystych linii, zero przeplecionych. Zapis jest synchroniczny
+  (jak w nginx/Apache) — lokalny dysk/page cache czyni to tanim.
+  Zalogowane punkty: odpowiedź od workera (sukces i 502), 403 z ACL
+  (`http.allowed_clients`, na SUROWYM adresie łączącym się klienta — to
+  decyzja o bezpośrednim peerze, nie przechodzi przez X-Forwarded-For), 400
+  ze złego żądania, i wszystkie odpowiedzi plików statycznych (304/200/404/502).
+
+**Zweryfikowane NA ŻYWO** (macOS/arm64, PHP 8.5.11-dev, build lokalny z brew
+libevent — nie Docker/Alpine, patrz "jak zbudowane" niżej): baseline `$_SERVER`
+przez HTTP; spoofing `X-Forwarded-*` z adresu SPOZA `http.trusted_proxies` —
+odrzucony (REMOTE_ADDR/SERVER_PORT/HTTPS zostają nienaruszone); te same
+nagłówki z adresu W `http.trusted_proxies` — zaakceptowane, REMOTE_ADDR/
+SERVER_PORT/HTTPS/REQUEST_SCHEME nadpisane poprawnie, REMOTE_PORT bez zmian;
+`Authorization: Basic` -> `AUTH_TYPE=Basic` + `REMOTE_USER` poprawnie
+zdekodowany; `Authorization: Bearer ...` -> samo `AUTH_TYPE=Bearer`, bez
+`REMOTE_USER`; base64 bez dwukropka po dekodowaniu -> `AUTH_TYPE` zostaje,
+`REMOTE_USER` nie; `http.trusted_proxies`/`http.access_log` odrzucone na
+`pool.type = fcgi` (`rejects[]` działa); zła wartość `http.trusted_proxies`
+odrzucona przy starcie z poprawnym komunikatem (patrz błąd niżej); access log
+z `http.gateways = 2` pod 40 równoległymi żądaniami — 40 czystych linii;
+403 z ACL trafia do logu; plik statyczny (`http.static = 1`) trafia do logu
+z prawdziwym rozmiarem.
+
+**Nie zmierzone / świadomie pominięte**: porównanie z nginx+fpm na żywo — nie
+było pod ręką lokalnie zainstalowanego nginxa, porównanie oparte o wiedzę o
+standardowym `fastcgi_params` nginksa, nie o uruchomiony test. `slow loris`/
+timeouty klienta na access logu (osobny, znany brak, patrz "Twardość" niżej).
+Logowanie dla ścieżki `SCM_RIGHTS`/`fcgi-async` nie dotyczy — bramka HTTP to
+jedyny typ z access logiem.
+
+**Znaleziony przy okazji, NAPRAWIONY jako część tej samej pracy**: `fpm_http_acl_parse()`
+miało na sztywno wpisany komunikat błędu `"http.allowed_clients: ..."` —
+niewidoczne, dopóki funkcja miała jednego wywołującego. Reużycie dla
+`http.trusted_proxies` ujawniło to natychmiast (błędny config zgłaszał złą
+dyrektywę). Naprawione dodaniem parametru `directive` do `fpm_http_acl_parse()`
+(sygnatura się zmieniła, wszystkie 4 miejsca wołające zaktualizowane).
+
+**Znaleziony przy okazji, NIE naprawiony (poza zakresem tej pracy)**: kolejność
+sprawdzeń w `fpm_conf.c` (`sekcja "dyrektywy specyficzne dla typu"` przed
+blokiem `/* listen */`) sprawia, że `type->validate()` (czyli
+`fpm_http_validate_pool()`) widzi `wp->listen_address_domain` jeszcze
+NIEUSTAWIONE (zero, czyli ani `FPM_AF_UNIX` ani `FPM_AF_INET`). Efekt:
+`fpm_http_validate_pool()`'s check "`listen_address_domain != FPM_AF_INET`
+wymaga `http.listen`" jest zawsze prawdziwy, NIEZALEŻNIE od tego, czy `listen`
+to `host:port` czy gniazdko uniksowe — czyli `http.listen` jest dziś de facto
+WYMAGANE zawsze, nie tylko dla UDS, jak mówi komunikat błędu i dokumentacja.
+Nieszkodliwe (wymaganie jest tylko ZBYT SZEROKIE, nie odwrotnie), ale komunikat
+błędu wprowadza w błąd. Do testów w tej pracy trzeba było zawsze dopisywać
+`http.listen` — nawet dla `listen = 127.0.0.1:9001`. Osobny drobny fix, nie
+ruszony tutaj, żeby nie mieszać z zadaniem.
+
+**Jak zbudowane i przetestowane**: osobny klon php-src (PHP-8.5, `/private/tmp`,
+NIE `~/work/php-src` użytkownika) + `build/prepare.sh` + `buildconf --force`
++ `./configure --disable-all --enable-fpmng` (libevent z brew wykryty przez
+`pkg-config`, `PATH` z brew `bison` przed systemowym) + `make`. Serwer
+uruchamiany na żywo (`php-fpm-ng -y fpm.conf -F`), żądania przez `curl`
+(w tym `curl --interface 127.0.0.2` do symulacji nie-loopbackowego peera —
+nie zadziałało bez `sudo ifconfig lo0 alias`, więc test "zaufany"/"niezaufany"
+zrobiony przez przełączanie `http.trusted_proxies` między adresem klienta a
+adresem, który nim nie jest, zamiast przez dwa różne adresy klienta).
 
 ### Twardość
 

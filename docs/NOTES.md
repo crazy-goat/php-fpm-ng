@@ -2451,9 +2451,13 @@ ostateczny adres).
   parsowania wskazywał właściwą dyrektywę, nie zawsze "http.allowed_clients").
   Nagłówki liczą się TYLKO gdy bezpośredni adres TCP jest na liście — pusta
   dyrektywa = nikomu nie ufamy = bezpieczny domyślny. Z `X-Forwarded-For`
-  bierzemy tylko PIERWSZY adres (oryginalny klient) — świadome uproszczenie
-  dla jednego zaufanego proxy przed bramką, typowego dla tego projektu;
-  łańcuch kilku proxy nie jest rozpoznawany ponad to. `X-Forwarded-Proto` ->
+  bierzemy pierwszy OD PRAWEJ adres, który sam nie jest na liście zaufanych.
+  **Nie pierwszy z lewej** — pierwsza wersja tak robiła i to była dziura:
+  nginx z domyślnym `$proxy_add_x_forwarded_for` DOPISUJE adres klienta do
+  nagłówka, który klient przysłał, więc lewa strona listy jest wprost pod
+  kontrolą klienta i `REMOTE_ADDR` dawało się podszyć MIMO zaufanego proxy
+  (zmierzone: `"9.9.9.9, 8.8.8.8"` dawało 9.9.9.9, teraz 8.8.8.8). Skan od
+  prawej działa tak samo dla jednego proxy i dla łańcucha. `X-Forwarded-Proto` ->
   `HTTPS`/`REQUEST_SCHEME`, `X-Forwarded-Port` -> `SERVER_PORT` (NIE
   `REMOTE_PORT` — to zawsze prawdziwy port TCP połączenia). Rozwiązanie
   wywoływane RAZ na request w `fpm_http_request()`, wynik dzielony między CGI
@@ -2467,7 +2471,12 @@ ostateczny adres).
   zepsułoby wlaśnie gwarancję braku przeplotu) wykorzystuje gwarancję POSIX,
   że `write()` z `O_APPEND` na zwykłym pliku jest atomowy względem innych
   piszących — **zmierzone na żywo**: 40 równoległych żądań przez 2 procesy
-  bramki, 40 czystych linii, zero przeplecionych. Zapis jest synchroniczny
+  bramki, 40 czystych linii, zero przeplecionych. `remote_user` i
+  `remote_addr` przechodzą przez ten sam escape co URI i User-Agent —
+  `remote_user` pochodzi z base64 w `Authorization`, więc może zawierać
+  dowolne bajty; pierwsza wersja go nie uciekała, co dawało wstrzykiwanie
+  własnych linii do access logu (zmierzone: `Basic base64("ad\nmin:x")`).
+  Zapis jest synchroniczny
   (jak w nginx/Apache) — lokalny dysk/page cache czyni to tanim.
   Zalogowane punkty: odpowiedź od workera (sukces i 502), 403 z ACL
   (`http.allowed_clients`, na SUROWYM adresie łączącym się klienta — to

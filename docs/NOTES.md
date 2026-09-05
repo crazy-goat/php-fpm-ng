@@ -1019,20 +1019,44 @@ of 30 seconds exceeded"), nie na nasz `stop_timeout`.
 
 Naprawione: `stop_timeout` **nie** używa żadnego sygnału/timera PHP. Handler
 `SIGTERM` forkuje malutki proces-watchdog (`fork()` jest async-signal-safe),
-który śpi `stop_timeout` sekund w **osobnym procesie**, całkowicie niezależnym
-od stanu sygnałów Zenda, i jeśli proces supervisora nadal żyje —
-`kill(pid, SIGKILL)`. Zweryfikowane na żywo (test 7c, busy-loop bez żadnego
-punktu bezpiecznego): zabite dokładnie po `stop_timeout`, sygnałem, nie przez
-naturalne zakończenie skryptu.
+który czeka do `stop_timeout` w **osobnym procesie**, całkowicie niezależnym
+od stanu sygnałów Zenda, i jeśli proces supervisora nadal żyje — ubija go.
+Zweryfikowane na żywo (test 7c, busy-loop bez żadnego punktu bezpiecznego):
+zabite dokładnie po `stop_timeout`, sygnałem, nie przez naturalne zakończenie
+skryptu.
 
-**Znana, zaakceptowana niedoskonałość tego watchdoga**: identyfikuje proces po
-PID-zie zapamiętanym w momencie `fork()`. Teoretyczny (rzadki) wyścig: jeśli
-proces supervisora zdąży umrzeć i jego PID zostanie ponownie użyty przez inny
-proces zanim watchdog się obudzi, watchdog wyśle `SIGKILL` nie tam, gdzie
-trzeba. Nie naprawione — niska szkodliwość (proces i tak kończy się w oknie
-`stop_timeout`), rozwiązanie porządne wymagałoby np. `pidfd_send_signal` (tylko
-Linux) albo śledzenia przez `waitpid` z osobnego wątku, poza budżetem tego
-zadania.
+**Wyścig PID-owy — zamknięty na Linuksie (2026-09-05, dopisek koordynatora)**.
+Pierwsza wersja identyfikowała proces po samym PID-zie zapamiętanym w momencie
+`fork()`: watchdog spał `stop_timeout` sekund, potem `kill(pid, SIGKILL)`.
+Teoretyczny wyścig: gdyby proces supervisora zdążył umrzeć i jego PID został
+ponownie użyty przez inny proces zanim watchdog się obudzi, watchdog zabiłby
+nie tam, gdzie trzeba — nie do zaakceptowania w produkcie, który ma pilnować
+cudzych procesów (Docker/k8s).
+
+Naprawione przez `pidfd_open()`/`pidfd_send_signal()` (Linux, jądro ≥5.3/5.1
+— czyli dokładnie platforma docelowa: kontenery Alpine). Klucz: pidfd
+otwierany na siebie samego **tuż przed `fork()`-iem watchdoga**, w momencie,
+gdy "ja" jest jeszcze jednoznaczne (proces właśnie dostał SIGTERM, na pewno
+wciąż żyje) — więc samo otwarcie nie ma żadnego okna wyścigu. Watchdog
+dziedziczy ten deskryptor przez `fork()` i czeka na niego przez `poll()`
+zamiast spać na ślepo: pidfd odnosi się do **konkretnej instancji procesu**,
+niezależnie od tego, co później stanie się z tym numerem PID — więc timeout
+w `poll()` jest jednoznacznym dowodem "to wciąż ten sam proces, wciąż żywy",
+i dopiero wtedy leci `SIGKILL` (przez `pidfd_send_signal`, więc nawet ten
+ostatni strzał nie przechodzi przez goły PID).
+
+Numery syscalli (`SYS_pidfd_open` = 434, `SYS_pidfd_send_signal` = 424) na
+sztywno w kodzie — nie każda libc (musl, starsze glibc) jeszcze je opakowuje,
+a `syscall()` bezpośrednio jest wystarczająco stabilne (te numery nie
+zmieniają się między architekturami x86_64/aarch64).
+
+Na nie-Linuksie (ten Mac — tylko lokalne budowanie i testy, nigdy platforma
+docelowa) `pidfd_open` nie istnieje: zostaje stary fallback `sleep()`+
+`kill(pid, ...)`, z tym samym, udokumentowanym wyżej wąskim oknem wyścigu.
+Zweryfikowane tylko w tej gałęzi fallbacku (na macOS nie da się przetestować
+ścieżki `pidfd` — nie ma jej w jądrze). Test 7c powtórzony po zmianie:
+zachowanie identyczne jak przed poprawką (busy-loop zabity `SIGKILL`-em
+dokładnie po `stop_timeout`).
 
 ### Kolejny drobiazg: `catch_workers_output`
 

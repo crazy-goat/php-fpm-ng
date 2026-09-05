@@ -1054,3 +1054,264 @@ wcześnie, że upstream coś zmienił.
 - **Nazwa**: "PHP" jest znakiem towarowym PHP Group i mają politykę jego
   używania. `php-fpm-ng` jako nazwa produktu prosi się o list z prośbą
   o zmianę. Roboczo może zostać, przed publikacją dać coś własnego.
+
+## 3j. `pool.type = supervisor` — zaimplementowane i zweryfikowane (2026-09-05)
+
+Nowy plik `sapi/fpmng/fpm/fpm_pool_supervisor.c` + `.h`, jedna linia w
+`fpm_pool_types[]` (`fpm_pool_type.c`), dyrektywy w `fpm_conf.c`/`fpm_conf.h`.
+Pięć dyrektyw z zadania (`supervisor.script`, `.processes`, `.restart`,
+backoff/`.restart_max`, `.stop_timeout`) plus szósta dopisana w trakcie przez
+koordynatora: `supervisor.fatal`. Wszystkie zweryfikowane na zbudowanej
+binarce (10 scenariuszy, patrz niżej).
+
+### Decyzja: `supervisor.processes` → `pm = static` + `pm.max_children`
+
+Rozstrzygnięte na tak. `fpm_pool_type_s.validate()` dla tego typu ustawia
+`wp->config->pm = PM_STYLE_STATIC` i `pm_max_children = supervisor.processes`
+**programowo**, zanim `fpm_conf_process_all_pools()` dojdzie do sprawdzeń
+`requires_pm` — więc te sprawdzenia przechodzą trywialnie, a użytkownik nigdy
+sam nie ustawia `pm`/`pm.*` (odrzucone przez `rejects`, patrz niżej). Efekt:
+spawnowanie N procesów i wskrzeszanie po `exit()`/crash jest **za darmo**
+z istniejącego `fpm_children.c` — zero własnej puli procesów.
+
+Konsekwencja tej decyzji: `requires_pm = 1`, nie `0` jak sugerował szkic
+zadania — bo "wymaga sensownego pm" jest prawdą, tylko ten pool sam sobie tę
+wartość generuje zamiast czytać ją z configu.
+
+### `rejects`: `pm`/`pm.` i `listen`/`listen.` w całości
+
+Skoro `pm`/`pm.max_children` są generowane z `supervisor.processes`, pozwolenie
+użytkownikowi ustawić je równolegle dawałoby dwa źródła prawdy dla tej samej
+liczby — więc odrzucone **w całości** (`"pm"` i prefiks `"pm."`), nie tylko
+pojedyncze pola wymienione w zadaniu. Podobnie `listen`/`listen.` w całości
+(ten typ nie nasłuchuje), `ping.`/`access.` w całości (bez `listen` nie ma
+czego pingować ani logować jako "dostęp"), plus pojedyncze pozycje z zadania
+(`request_terminate_timeout(_track_finished)`, `request_slowlog_timeout`,
+`request_slowlog_trace_depth`, `slowlog`, `security.limit_extensions`).
+
+**Mechanizm `rejects` zweryfikowany — działał od razu, bez poprawek.**
+`fpm_pool_type_check_directives()` (w `fpm_pool_type.c`) był poprawny; jedyne,
+czego brakowało, to prawdziwy konsument (dotąd testowany zerem dyrektyw,
+patrz 3i). Testy 8/8b niżej pokazują czytelny ALERT przy starcie z odrzuconą
+dyrektywą, dokładnie jak zaprojektowano.
+
+### PROBLEM PROJEKTOWY (a) kontra (b): rozstrzygnięte na (a), zgodnie z preferencją
+
+Zaimplementowane (a): pamięć dzielona per pool (`fpm_shm_alloc`, ten sam wzorzec
+co `fpm_http.c`), struktura `fpm_supervisor_shared_s` (`failures`,
+`next_allowed_start`, `terminal`, `gave_up`, `fatal_signaled`). `fpm_children.c`
+**nietknięty**. Dziecko po starcie sprawdza stan: jeśli `terminal` już
+ustawiony (poprzedni proces tego poola już raz zdecydował "koniec") — parkuje
+się (`pause()` w pętli aż do sygnału) zamiast robić cokolwiek. Zweryfikowane:
+test 4 (`restart = never`) pokazuje dokładnie ten mechanizm.
+
+**Ważna korekta względem opisu w zadaniu**: proces wskrzeszony przez
+`fpm_children.c` po `exit()` **nie znika** — zostaje jako harmless parkujący
+się proces (dokładnie tak, jak zapowiadała wada (a) w opisie zadania:
+"procesy istnieją i śpią zamiast zniknąć"). Test 4 pokazuje to wprost w `ps`:
+po tym jak skrypt uruchomiony z `restart = never` skończy działanie, zostaje
+jeden proces `pool sup`, ale jest to **nowy, zaparkowany** proces (inny PID),
+nie oryginalny. Skrypt sam **nie jest uruchamiany ponownie** (log skryptu ma
+dokładnie jeden wpis) — to jest właściwa gwarancja, jaką (a) może dać bez
+zmiany `fpm_children.c`.
+
+### Nie "jedna instancja PHP na jedno wykonanie skryptu" — pętla WEWNĄTRZ procesu
+
+Doprecyzowanie względem szkicu w sekcji 3 ("dziecko wykonuje skrypt" w liczbie
+pojedynczej): supervisor **nie** kończy procesu po każdym uruchomieniu skryptu.
+`child_main()` woła `php_request_startup()` / `php_fopen_primary_script()` /
+`php_execute_script()` / `php_request_shutdown()` **w pętli C, w tym samym
+procesie**, tak długo jak polityka `restart` każe próbować dalej. Proces kończy
+się (świadomie, przez `exit()`) tylko gdy: polityka mówi "koniec na dobre"
+(`never` po jednym biegu, `on-failure` po sukcesie, `restart_max` wyczerpany),
+albo przyszedł SIGTERM i bieżące wykonanie skryptu się zakończyło. To jest
+zgodne z literą zadania ("dać wewnętrzną logikę pętli nad wykonaniami
+skryptu"), tylko nie od razu oczywiste z opisu w sekcji 3 wyżej — tamten opis
+("dziecko wykonuje skrypt", liczba pojedyncza) sugerował model
+"jeden proces = jedno wykonanie", co okazało się niezgodne z literą zadania.
+Bonus z sekcji 3 (fork mastera z gotowym PHP) działa więc **raz na cały czas
+życia procesu**, nie przy każdej iteracji — iteracje w tym samym procesie są
+jeszcze tańsze, bo nawet nie ma kosztu `fork()`.
+
+### Backoff: co liczy się jako "porażka"
+
+Zdecydowane: **tylko `exit_code != 0` liczy się jako porażka** dla backoffu
+i `restart_max`. Pierwsza wersja liczyła też udane zakończenia (bo mierzyła
+tylko "czy proces żył krótko"), co pod `restart = always` z krótko trwającym,
+ale w pełni zdrowym skryptem (typowy consumer: odbierz-jedno-zadanie-i-wróć)
+winowałoby normalny cykl pracy jako "flapping" i po `restart_max` cyklach
+zabijałoby zdrowy pool. Naprawione: `exit_code == 0` zawsze zeruje licznik
+i startuje następną iterację **od razu** (zero sztucznego throttlingu — tempo
+kontroluje sam skrypt, np. własnym `sleep()`). Dopiero `exit_code != 0`
+wchodzi w logikę backoffu (`restart_delay`, rosnąco ×2 aż do
+`restart_delay_max`) i liczy się do `restart_max`. Próg resetu licznika przy
+długo żyjącym niepowodzeniu: `restart_delay_max` (jeśli proces żył dłużej niż
+najdłuższy możliwy odstęp między próbami, to nie był "szybką śmiercią" — jeden
+pechowy fail po tygodniach pracy nie powinien liczyć się do tego samego limitu
+co prawdziwy crash-loop). `supervisor.restart_max` domyślnie `0` = bez limitu
+(nigdy się nie poddawaj) — w zadaniu nie było jawnego domyślnego.
+
+### `supervisor.fatal` (dopisane przez koordynatora w trakcie pracy)
+
+`supervisor.fatal = no` (domyślne) | `yes`. Gdy pool poddaje się z powodu
+**prawdziwej porażki** (`restart_max` wyczerpany, `shared->gave_up = 1`) i
+`fatal = yes`: ALERT, `kill(fpm_globals.parent_pid, SIGTERM)` do mastera —
+czyli to samo, co zwykłe zamknięcie mastera sygnałem, więc pozostałe poole
+dopalają requesty i sprzątają się przez ISTNIEJĄCĄ maszynerię (`fpm_signals.c`,
+`fpm_process_ctl.c`, nietknięte). Kod wyjścia mastera musi być != 0 (inaczej
+Docker/k8s nie zrestartują kontenera) — do tego jeden dodatkowy hook:
+`fpm_cleanup_add(FPM_CLEANUP_PARENT_EXIT_MAIN, ...)` (ten sam mechanizm, na
+którym stoi już sprzątanie bramek HTTP), wołany tuż przed
+`exit(FPM_EXIT_OK)` w `fpm_pctl_exit()` (`fpm_process_ctl.c`, nietknięte) —
+callback sprawdza `shared->gave_up && supervisor.fatal` dla wszystkich poola
+supervisora i jeśli prawda, robi `_exit(FPM_EXIT_SOFTWARE)` (70) **zanim**
+`fpm_pctl_exit()` zdąży wywołać swój `exit(FPM_EXIT_OK)`. Rozróżnienie
+"planowe zakończenie" (`restart = never` / sukces pod `on-failure`,
+`gave_up = 0`) od "prawdziwej porażki" (`gave_up = 1`) pilnowane explicite w
+kodzie (`shared->gave_up`, nie samo `shared->terminal`) — test 10 pokazuje że
+`restart = never` + `fatal = yes` ze skryptem kończącym się zerem **nie**
+ubija mastera.
+
+### Pułapka #1 (poważna): `child_main` nigdy nie był wcześniej wywołany — `fpm_worker_all_pools` ginie przed `run_child:`
+
+To był największy problem w tym zadaniu, w kodzie **cudzym** (już istniejącym
+w `fpm.c`/`fpm_pool_type.c` przed tym zadaniem). Mechanizm
+`fpm_pool_type_current_pool()` (dopasowanie przez scoreboard) był opisany
+w 3i jako "zaimplementowany i skompilowany", ale **`http` go nie używa**
+(bramka forkuje własne procesy bezpośrednio w `init_main()`, nie przez
+`child_main`) — więc `supervisor` jest pierwszym prawdziwym konsumentem
+`child_main`, i mechanizm okazał się zepsuty.
+
+Przyczyna: `fpm_worker_pool_init_main()` (`fpm_worker_pool.c`, referencja)
+rejestruje `fpm_worker_pool_cleanup()` na `FPM_CLEANUP_ALL` — czyli i na
+`FPM_CLEANUP_CHILD`. Ta funkcja **zwalnia całą listę `fpm_worker_all_pools`**,
+włącznie z `wp->config` (`free()`), i na końcu `fpm_worker_all_pools = NULL`.
+`fpm.c` woła `fpm_cleanups_run(FPM_CLEANUP_CHILD)` **na samym początku**
+etykiety `run_child:`, **przed** próbą znalezienia typu poola przez
+`fpm_pool_type_current_pool()` — więc do czasu gdy nasz kod próbuje odczytać
+`wp->config->supervisor_script`, `wp` już nie istnieje (use-after-free).
+Dla zwykłego workera FastCGI to niewidoczne, bo po tym punkcie kod już nigdy
+nie zagląda do `wp`/`config` (działa wyłącznie na `fpm_globals`).
+
+Naprawione w `fpm.c` (już nasz plik, więc dozwolone): rozwiązanie typu
+(`fpm_pool_type_current_pool()` + `fpm_pool_type_of()`) przeniesione **przed**
+`fpm_cleanups_run(FPM_CLEANUP_CHILD)`, i dla typu z ustawionym `child_main`
+**cały `fpm_cleanups_run(FPM_CLEANUP_CHILD)` jest pomijany** — bo `child_main`
+i tak nie wraca, a `wp`/`config` są potrzebne przez cały czas życia procesu.
+To jest zmiana w `fpm.c` wykraczająca poza "fpm_conf.c/.h + nowy plik" —
+zgłoszona tu wprost, bo tak każe instrukcja zadania. Bez niej supervisor (i
+każdy przyszły typ z `child_main`, np. `cron`) w ogóle by nie ruszył: proces
+kończył się natychmiast (0.001s), bez wykonania skryptu, w gorącej pętli
+fork-exit-fork (widoczne w logu jako dziesiątki "child exited with code 0"
+na sekundę) — bo trafiał z powrotem do zwykłej pętli accept FastCGI na
+gnieździe 0 (dup od stdin, bo `requires_listen = 0`), która natychmiast
+kończyła się błędem.
+
+### Pułapka #2: PHP samo używa `SIGALRM`/`ITIMER_REAL` do `max_execution_time`
+
+Pierwsza wersja `stop_timeout` używała `alarm()` + własny handler `SIGALRM`
+jako siatki bezpieczeństwa (twardy `SIGKILL`, gdyby skrypt nie skończył się
+sam w czasie `stop_timeout`). Zmierzone na żywo, że to koliduje z
+`zend_set_timeout_ex()` (`Zend/zend_execute_API.c`), które **też** używa
+`SIGALRM`/`setitimer(ITIMER_REAL,...)` do `max_execution_time`, i pod
+`ZEND_SIGNALS` (ten build ma `-DZEND_SIGNALS`) re-instaluje swój handler przy
+każdym wykonaniu skryptu — nasz `sigaction(SIGALRM,...)` (wołany raz, na
+starcie procesu) bywał po cichu podmieniany. Efekt w teście: proces czekał na
+zakończenie PHP-owego `max_execution_time` (komunikat "Maximum execution time
+of 30 seconds exceeded"), nie na nasz `stop_timeout`.
+
+Naprawione: `stop_timeout` **nie** używa żadnego sygnału/timera PHP. Handler
+`SIGTERM` forkuje malutki proces-watchdog (`fork()` jest async-signal-safe),
+który śpi `stop_timeout` sekund w **osobnym procesie**, całkowicie niezależnym
+od stanu sygnałów Zenda, i jeśli proces supervisora nadal żyje —
+`kill(pid, SIGKILL)`. Zweryfikowane na żywo (test 7c, busy-loop bez żadnego
+punktu bezpiecznego): zabite dokładnie po `stop_timeout`, sygnałem, nie przez
+naturalne zakończenie skryptu.
+
+**Znana, zaakceptowana niedoskonałość tego watchdoga**: identyfikuje proces po
+PID-zie zapamiętanym w momencie `fork()`. Teoretyczny (rzadki) wyścig: jeśli
+proces supervisora zdąży umrzeć i jego PID zostanie ponownie użyty przez inny
+proces zanim watchdog się obudzi, watchdog wyśle `SIGKILL` nie tam, gdzie
+trzeba. Nie naprawione — niska szkodliwość (proces i tak kończy się w oknie
+`stop_timeout`), rozwiązanie porządne wymagałoby np. `pidfd_send_signal` (tylko
+Linux) albo śledzenia przez `waitpid` z osobnego wątku, poza budżetem tego
+zadania.
+
+### Kolejny drobiazg: `catch_workers_output`
+
+Bez `catch_workers_output = yes` supervisor **działa poprawnie, ale bez
+żadnych logów** — `echo`/`error_log`/nasze własne `zlog()` z procesu dziecka
+lecą do `/dev/null` (domyślne zachowanie FPM dla stdout/stderr dziecka, gdy ta
+dyrektywa jest wyłączona, co jest domyślne). To nie jest specyficzne dla
+supervisora, ale dla tego typu jest krytyczne (to jedyny sposób, żeby zobaczyć
+cokolwiek ze skryptu) — warto rekomendować `catch_workers_output = yes` jako
+praktyczne "wymagane" dla `pool.type = supervisor` w dokumentacji użytkownika
+(nie wymuszone w kodzie, żeby nie dodawać kolejnej reguły walidacji bez
+wyraźnej potrzeby).
+
+### Monkey-patching `sapi_module` na czas życia procesu — bezpieczne, bo proces nie wraca
+
+`child_main` nadpisuje kilka pól globalnego `sapi_module` (`ub_write`,
+`getenv`, `read_post`, `read_cookies`, `register_server_variables`,
+`pre_request_init = NULL`) — oryginalne wersje z `fpm_main.c` bezwarunkowo
+rzutują `SG(server_context)` na `fcgi_request*`, a supervisor nigdy nie ma
+prawdziwego requestu FastCGI (`SG(server_context)` zostaje `NULL` przez cały
+czas życia procesu), więc bez nadpisania pierwszy `echo` w skrypcie zrobiłby
+segfault. Bezpieczne wyłącznie dlatego, że ten proces **nigdy nie wraca** do
+pętli accept FastCGI — gdyby wracał, te nadpisania zepsułyby normalną obsługę
+requestów. `ub_write` pisze bezpośrednio na `STDOUT_FILENO`, co trafia do logu
+FPM przez istniejące przechwytywanie pipe'em (stąd wymóg
+`catch_workers_output` wyżej).
+
+### Testy (10 scenariuszy, wszystkie zielone)
+
+1. Brak `pool.type` → zwykły pool `fcgi`, pełne BC (zweryfikowane też
+   prawdziwym requestem FastCGI po UDS, ręcznym klientem w Pythonie —
+   `X-Powered-By`, treść skryptu).
+2. `pool.type = supervisor` + `supervisor.script` — skrypt wykonuje się
+   faktycznie (plik logu z timestampem i PID), w pętli, w tym samym procesie.
+3. `supervisor.processes = 3` → trzy faktyczne procesy `php-fpm: pool sup`
+   w `ps`.
+4. `restart = never` — skrypt uruchomiony dokładnie raz (log ma jeden wpis),
+   proces kończy się; **nowy, zaparkowany** proces zajmuje jego miejsce
+   (patrz sekcja o (a) wyżej), ale skrypt się nie powtarza.
+5. `restart = on-failure` — `exit(0)` nie restartuje (log: "not restarting"),
+   `exit(1)` restartuje z backoffem, w tym samym procesie (ten sam PID).
+6. Szybkie `exit(1)` w pętli — backoff rośnie geometrycznie (1s, 2s, 4s,
+   ucięte na `restart_delay_max`), po `restart_max` ALERT i koniec prób na
+   dobre (jeden zaparkowany proces zamiast crash-loopa).
+7. SIGTERM w trakcie wykonywania skryptu (pętla z `usleep`) — skrypt kończy
+   bieżące wykonanie (wszystkie 10 "ticków"), proces kończy się czysto
+   (`exited with code 0`), NIE jest wskrzeszany do tego samego skryptu w tym
+   samym sensie (nowy proces startuje, bo to normalne zejście, nie polityka
+   "koniec na dobre"). Osobno (7c): busy-loop bez punktu bezpiecznego +
+   `stop_timeout = 2` → zabity `SIGKILL`-em dokładnie po ok. 2s (nie kończy
+   się sam po 15s).
+8. `rejects` — `listen` i `pm.*` (`pm`, `pm.start_servers`,
+   `pm.min_spare_servers`, `pm.max_spare_servers`) w konfiguracji poola
+   `supervisor` dają czytelny ALERT i `FPM initialization failed` (exit 78),
+   mechanizm działał bez poprawek.
+9. `supervisor.fatal = yes` + szybki crash-loop → po wyczerpaniu
+   `restart_max`: ALERT, master schodzi normalną ścieżką ("Terminating ...",
+   "exiting, bye-bye!"), **`echo $? == 70`**.
+10. `restart = never` + `fatal = yes` ze skryptem kończącym się zerem —
+    master **nie** pada (proces "sup" się parkuje, master żyje dalej).
+
+### Czego NIE zrobiono / wątpliwe
+
+- Watchdog `stop_timeout` ma teoretyczny wyścig PID-owy (opisane wyżej).
+- `pm.max_requests` (semantyka z sekcji 3: "skrypt kończy się sam po N
+  zadaniach") **nie zaimplementowana** — nie było w pięciu wymaganych
+  funkcjach, a `pm.*` jest teraz odrzucane w całości dla tego typu, więc
+  potrzebowałoby własnej dyrektywy `supervisor.max_iterations` czy podobnej,
+  gdyby ktoś tego chciał.
+- Status supervisora w `fpm_status.c` (oznaczenie typu w statusie, wspomniane
+  w sekcji 3) — nie ruszone, poza zakresem tego zadania.
+- Test współistnienia wielu poola `supervisor` w jednej konfiguracji obok
+  zwykłego `fcgi`/`http` w jednym procesie mastera — sprawdzone tylko
+  pośrednio (test 9 ma dodatkowy zwykły pool `other` obok `sup`), nie
+  przetestowane osobno pod kątem interakcji przy reload/SIGHUP.
+- `security.limit_extensions` i inne dyrektywy security nie mają dedykowanego
+  testu poza samym faktem odrzucenia w konfiguracji — nie sprawdzono np. czy
+  odrzucenie nie psuje czegoś w `fpm_unix.c` (nie powinno, bo to tylko string
+  w configu, ale nie zweryfikowane explicite).

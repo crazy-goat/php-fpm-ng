@@ -8,43 +8,29 @@
  * bezwarunkowo) — dlatego polityka restart/backoff/restart_max/fatal zyje
  * w pamieci dzielonej per pool i jest sprawdzana PRZEZ DZIECKO przy starcie
  * i miedzy kolejnymi wykonaniami skryptu, a nie przez zmiane fpm_children.c.
+ *
+ * pidfd watchdog (stop_timeout) i wykonanie skryptu poza requestem FastCGI
+ * sa wspoldzielone z pool.type = cron — patrz fpm_pool_watchdog.[ch] i
+ * fpm_pool_script.[ch].
  */
 
 #include "fpm_config.h"
 
-#include <errno.h>
-#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
-#if defined(__linux__)
-#include <sys/syscall.h>
-/* Numery syscalli, nie zawsze wystawione przez naglowki libc (musl/starsze
- * glibc) — stale od lat te same na x86_64/aarch64. */
-#ifndef SYS_pidfd_open
-#define SYS_pidfd_open 434
-#endif
-#ifndef SYS_pidfd_send_signal
-#define SYS_pidfd_send_signal 424
-#endif
-#endif
-
 #include "php.h"
-#include "php_main.h"
-#include "php_variables.h"
-#include "SAPI.h"
-#include "zend_globals.h"
-#include "fopen_wrappers.h"
 
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_supervisor.h"
+#include "fpm_pool_watchdog.h"
+#include "fpm_pool_script.h"
 #include "fpm_cleanup.h"
 #include "fpm_shm.h"
-#include "fpm_stdio.h"
 #include "zlog.h"
 
 /* Lista ODRZUCEN, nie dopuszczen — patrz fpm_pool_type_check_directives().
@@ -98,42 +84,10 @@ static int supervisor_cleanup_registered = 0;
 static volatile sig_atomic_t supervisor_term_requested = 0;
 static volatile sig_atomic_t supervisor_stop_timeout = 10;
 
-/* pidfd: uchwyt na KONKRETNA instancje procesu, odporny na ponowne uzycie
- * PID-u (w przeciwienstwie do trzymania samego numeru PID-u). Dostepne tylko
- * na Linuksie (jadro >= 5.3 dla pidfd_open, >= 5.1 dla pidfd_send_signal) —
- * czyli dokladnie na docelowej platformie tego projektu (kontenery
- * Alpine/glibc), a nie na tym Macu, na ktorym tylko sie buduje i testuje
- * lokalnie. Numery syscalli podane na sztywno, bo nie kazda libc (musl,
- * starsze glibc) je jeszcze opakowuje. */
-static int fpm_pool_supervisor_pidfd_open(pid_t pid)
-{
-#if defined(__linux__) && defined(SYS_pidfd_open)
-	return (int) syscall(SYS_pidfd_open, pid, 0);
-#else
-	(void) pid;
-	return -1;
-#endif
-}
-
-static int fpm_pool_supervisor_pidfd_send_signal(int pidfd, int sig)
-{
-#if defined(__linux__) && defined(SYS_pidfd_send_signal)
-	return (int) syscall(SYS_pidfd_send_signal, pidfd, sig, NULL, 0);
-#else
-	(void) pidfd;
-	(void) sig;
-	return -1;
-#endif
-}
-
 static void fpm_pool_supervisor_sigterm(int signo)
 {
 	(void) signo;
 	if (!supervisor_term_requested) {
-		int pidfd;
-		pid_t me;
-		pid_t watchdog;
-
 		supervisor_term_requested = 1;
 
 		/* Siatka bezpieczenstwa: jesli biezaca iteracja (skrypt, ktory nie
@@ -147,70 +101,12 @@ static void fpm_pool_supervisor_sigterm(int signo)
 		 * skryptu — nasz raw sigaction(SIGALRM,...) zostalby po cichu
 		 * podmieniony i strzelilby w rece Zenda zamiast w nasze (zmierzone:
 		 * budowa tego projektu ma -DZEND_SIGNALS). Zamiast tego forkujemy
-		 * malutki proces-watchdog, calkowicie niezalezny od stanu sygnalow
-		 * PHP: czeka do stop_timeout, i jesli my (proces supervisora) nadal
-		 * zyjemy, ubija nas.
-		 *
-		 * Otwieramy pidfd na SIEBIE ZANIM sforkujemy watchdoga — w tym
-		 * miejscu "siebie" jest jeszcze jednoznaczne (jestesmy wciaz tym
-		 * samym, zywym procesem, ktory dopiero co dostal SIGTERM), wiec to
-		 * otwarcie nie ma zadnego okna wyscigu. Ten sam deskryptor dziedziczy
-		 * sforkowany watchdog (fork() dziedziczy otwarte fd). Watchdog czeka
-		 * na ten pidfd przez poll() zamiast spac() na slepo i strzelac
-		 * SIGKILL po SAMYM PID-zie po przebudzeniu — gdyby w tym czasie nasz
-		 * PID zdazyl umrzec i zostac przydzielony innemu procesowi, kill()
-		 * po golym PID-zie trafilby w niewlasciwy proces. pidfd nie ma tego
-		 * problemu: odnosi sie do KONKRETNEJ instancji procesu az do jej
-		 * zakonczenia, niezaleznie od tego, co pozniej stanie sie z tym
-		 * numerem PID. fork() i syscall() sa async-signal-safe, wiec to
-		 * bezpieczne tu, w handlerze.
-		 *
-		 * Fallback (nie-Linux, albo jadro bez pidfd_open — ENOSYS): stare
-		 * zachowanie sleep()+kill() po PID-zie, z udokumentowanym, waskim
-		 * oknem wyscigu PID-owym. Dotyczy tylko lokalnego budowania/testow
-		 * na tym Macu — docelowa platforma (Alpine w kontenerze) ma pidfd. */
-		me = getpid();
-		pidfd = fpm_pool_supervisor_pidfd_open(me);
-		watchdog = fork();
-
-		if (watchdog == 0) {
-			if (pidfd >= 0) {
-				struct pollfd pfd;
-
-				pfd.fd = pidfd;
-				pfd.events = POLLIN;
-				pfd.revents = 0;
-
-				if (poll(&pfd, 1, (int) supervisor_stop_timeout * 1000) == 0) {
-					/* timeout, nie POLLIN: proces wciaz zyje (ten sam,
-					 * ktoremu otworzylismy pidfd przed forkiem) */
-					fpm_pool_supervisor_pidfd_send_signal(pidfd, SIGKILL);
-				}
-			} else {
-				/* Bez pidfd sprawdzamy co sekunde zamiast spac na slepo caly
-				 * stop_timeout — inaczej watchdog zostaje (nieszkodliwym, ale
-				 * widocznym w ps jako osierocony po execvp() przy reloadzie)
-				 * "ogonem" przez caly stop_timeout, nawet gdy proces skonczyl
-				 * sie sam po ulamku sekundy. */
-				int remaining = (int) supervisor_stop_timeout;
-
-				while (remaining > 0) {
-					if (kill(me, 0) != 0) {
-						break;
-					}
-					sleep(1);
-					remaining--;
-				}
-				if (kill(me, 0) == 0) {
-					kill(me, SIGKILL);
-				}
-			}
-			_exit(0);
-		}
-
-		if (pidfd >= 0) {
-			close(pidfd);
-		}
+		 * malutki proces-watchdog (fpm_pool_watchdog_arm(), wspoldzielony
+		 * z pool.type = cron — patrz fpm_pool_watchdog.h), calkowicie
+		 * niezalezny od stanu sygnalow PHP: czeka do stop_timeout, i jesli
+		 * my (proces supervisora) nadal zyjemy, ubija nas. Bezpieczne tu, w
+		 * handlerze — patrz komentarz w fpm_pool_watchdog.h. */
+		fpm_pool_watchdog_arm(getpid(), (unsigned) supervisor_stop_timeout);
 	}
 }
 
@@ -352,138 +248,6 @@ static void fpm_pool_supervisor_park(void) /* {{{ */
 }
 /* }}} */
 
-/* Nadpisania sapi_module na czas zycia tego procesu. Bezpieczne WYLACZNIE
- * dlatego, ze ten proces nigdy nie wraca do petli accept FastCGI (child_main
- * "nie wraca") — nie ma innego kodu w tym procesie, ktory polegalby na
- * oryginalnych wskaznikach cgi_sapi_module. SG(server_context) zostaje NULL
- * przez caly czas, wiec oryginalne wersje tych callbackow (ktore go
- * bezwarunkowo rzutuja na fcgi_request*) by segfaultowaly. */
-static size_t fpm_pool_supervisor_ub_write(const char *str, size_t str_length) /* {{{ */
-{
-	size_t left = str_length;
-
-	while (left > 0) {
-		ssize_t n = write(STDOUT_FILENO, str + (str_length - left), left);
-		if (n < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			break;
-		}
-		if (n == 0) {
-			break;
-		}
-		left -= (size_t) n;
-	}
-	return str_length - left;
-}
-/* }}} */
-
-static char *fpm_pool_supervisor_getenv(const char *name, size_t name_len) /* {{{ */
-{
-	(void) name_len;
-	return getenv(name);
-}
-/* }}} */
-
-static size_t fpm_pool_supervisor_read_post(char *buffer, size_t count_bytes) /* {{{ */
-{
-	(void) buffer;
-	(void) count_bytes;
-	return 0;
-}
-/* }}} */
-
-static char *fpm_pool_supervisor_read_cookies(void) /* {{{ */
-{
-	return NULL;
-}
-/* }}} */
-
-static void fpm_pool_supervisor_register_server_variables(zval *track_vars_array) /* {{{ */
-{
-	/* Brak requestu HTTP, wiec brak PHP_SELF i innych CGI-owych zmiennych —
-	 * tylko srodowisko, jak w CLI. */
-	php_import_environment_variables(track_vars_array);
-}
-/* }}} */
-
-static void fpm_pool_supervisor_install_sapi_overrides(void) /* {{{ */
-{
-	sapi_module.pre_request_init = NULL;
-	sapi_module.ub_write = fpm_pool_supervisor_ub_write;
-	sapi_module.getenv = fpm_pool_supervisor_getenv;
-	sapi_module.read_post = fpm_pool_supervisor_read_post;
-	sapi_module.read_cookies = fpm_pool_supervisor_read_cookies;
-	sapi_module.register_server_variables = fpm_pool_supervisor_register_server_variables;
-}
-/* }}} */
-
-/* Jedno wykonanie skryptu: dokladnie wzorzec fpm_main.c (php_request_startup /
- * php_fopen_primary_script / php_execute_script / php_request_shutdown), tylko
- * bez SG(request_info) wypelnianego z FastCGI. Zwraca EG(exit_status) skryptu
- * (0 = sukces, jak exit()/normalne zakonczenie skryptu PHP; != 0 tak jak
- * exit($n) albo blad fatalny) — TO jest "kod wyjscia" dla supervisor.restart,
- * nie kod wyjscia procesu (proces nie konczy sie po kazdej iteracji). */
-static int fpm_pool_supervisor_run_script(struct fpm_worker_pool_config_s *c) /* {{{ */
-{
-	zend_file_handle file_handle;
-	int exit_code;
-
-	SG(server_context) = NULL;
-	SG(request_info).path_translated = estrdup(c->supervisor_script);
-	SG(request_info).request_method = NULL;
-	SG(request_info).query_string = NULL;
-	SG(request_info).request_uri = NULL;
-	SG(request_info).content_type = NULL;
-	SG(request_info).content_length = 0;
-	SG(request_info).auth_user = NULL;
-	SG(request_info).auth_password = NULL;
-	SG(request_info).auth_digest = NULL;
-	SG(request_info).proto_num = 1000;
-	SG(sapi_headers).http_response_code = 200;
-
-	if (php_request_startup() == FAILURE) {
-		zlog(ZLOG_ERROR, "[pool %s] supervisor: php_request_startup() failed", c->name);
-		efree(SG(request_info).path_translated);
-		SG(request_info).path_translated = NULL;
-		return 255;
-	}
-	/* Jak przy '-v'/phpinfo w fpm_main.c: ustawic PO startupie, bo RINIT
-	 * resetuje no_headers. Nie ma dokad wysylac naglowkow, wiec sciezka
-	 * send_headers zostaje calkowicie pominieta (patrz sapi_send_headers()). */
-	SG(headers_sent) = true;
-	SG(request_info).no_headers = 1;
-
-	EG(exit_status) = 0;
-
-	zend_first_try {
-		if (php_fopen_primary_script(&file_handle) == FAILURE) {
-			zlog(ZLOG_ERROR, "[pool %s] supervisor: cannot open script '%s'",
-				c->name, c->supervisor_script);
-			EG(exit_status) = 255;
-		} else {
-			php_execute_script(&file_handle);
-			if (!file_handle.in_list) {
-				zend_destroy_file_handle(&file_handle);
-			}
-		}
-	} zend_catch {
-		EG(exit_status) = 255;
-	} zend_end_try();
-
-	exit_code = EG(exit_status);
-
-	efree(SG(request_info).path_translated);
-	SG(request_info).path_translated = NULL;
-
-	php_request_shutdown((void *) 0);
-	fpm_stdio_flush_child();
-
-	return exit_code;
-}
-/* }}} */
-
 /* Backoff i decyzja "czy probowac dalej", stosowana miedzy kolejnymi
  * wykonaniami skryptu w TYM SAMYM procesie, i tez przez kazdy swiezy respawn
  * po crashu (bo shared przezywa smierc procesu). */
@@ -578,7 +342,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	sigemptyset(&sa.sa_mask);
 	sigaction(SIGTERM, &sa, NULL);
 
-	fpm_pool_supervisor_install_sapi_overrides();
+	fpm_pool_script_install_sapi_overrides();
 
 	if (shared->terminal) {
 		/* Respawn fpm_children.c po tym, jak poprzedni proces tego poola juz
@@ -609,7 +373,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 
 		started = time(NULL);
-		exit_code = fpm_pool_supervisor_run_script(c);
+		exit_code = fpm_pool_script_run(c->name, c->supervisor_script);
 		duration = time(NULL) - started;
 
 		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration);

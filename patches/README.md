@@ -33,6 +33,7 @@ patches/php-8.4/*.patch      tylko dla tej wersji, nadpisuje łatkę o tej nazwi
 | `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | kandydat na PR do php/php-src, nie zgłoszone | 8.4, 8.5, master; **8.3 przez wariant** `php-8.3/` (inna sygnatura `safe_read`) |
 | `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | przeniesienie przełącznika za API należące do `sapi/fpmng` | 8.5, master; starsze wersje do weryfikacji |
 | `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | kandydat na PR do php/php-src, nie zgłoszone | 8.5, master; starsze wersje do weryfikacji |
+| `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | przeniesienie przełącznika za API należące do `sapi/fpmng` albo propozycja upstream | 8.5; starsze wersje i master do weryfikacji |
 
 Stos jest kolejnościowy: 0002 i 0003 zakładają nałożone 0001 (kontekst przy
 `accept()`), choć merytorycznie są od niego niezależne. `prepare.sh` nakłada
@@ -69,6 +70,12 @@ zero zmian na drucie. Liczby przed/po: `docs/NOTES.md`, sekcja 3t. Wykrywanie
 `accept4` robi nasz `sapi/fpmng/config.m4` (`AC_CHECK_FUNCS([accept4])`),
 bo upstream sprawdza to tylko w `ext/sockets`; bez `HAVE_ACCEPT4` kompiluje się
 stara ścieżka. Wersja dla upstreamu musiałaby dodać ten check do `configure.ac`.
+
+### Dlaczego 0006 (trwałe handlery sygnałów)
+
+Zend domyślnie sprawdza i ponownie rejestruje siedem handlerów przy aktywacji każdego requestu. `fastcgi-ng` i `http` włączają procesowy przełącznik, po którym pełna rejestracja odbywa się tylko dla pierwszego requestu workera; później nadal ustawiany jest `SIGPROF` dla timeoutu. Klasyczny `fastcgi` nie włącza tej ścieżki. Zmiana redukuje `fastcgi-ng` z około 25,2 do 18,2 syscalla/request i dała powtarzalnie około 7% mniej CPU/request.
+
+Logiczne handlery Zend nadal są resetowane per request, co potwierdzono z `pcntl_signal()`. Kompromisem jest brak automatycznej naprawy handlera podmienionego bezpośrednim libc `sigaction()` przez rozszerzenie przy domyślnym `zend.signal_check=0`; jawne `zend.signal_check=1` nadal wykrywa taką podmianę podczas shutdownu requestu.
 
 ### ROZWIĄZANE (droga 1): 0001 łamało `--enable-fpm --enable-fpmng` w jednym drzewie
 

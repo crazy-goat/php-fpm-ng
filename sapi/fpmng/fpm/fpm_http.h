@@ -7,4 +7,8 @@ struct fpm_worker_pool_s;
  * "http" z fpm_pool_type.c, ze strony mastera, przed forkiem workerow. */
 int fpm_http_init_pool(struct fpm_worker_pool_s *wp);
 
+/* Jak wyzej, ale dla executora obslugujacego wiele requestow na worker.
+ * capacity = liczba rownoleglych polaczen FastCGI do calego poola. */
+int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity);
+
 #endif

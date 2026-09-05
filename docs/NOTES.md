@@ -1823,6 +1823,213 @@ wyjatki z obslugi klienta. Objaw byl taki, ze `wrk` pokazywal 80 tysiecy
 "read errors" i zero odpowiedzi, a w logu nie bylo NIC. Dopiero wlasny
 logger na stderr pokazal `Call to undefined function filter_var()`.
 
+## 3t. Syscalle blokującego workera FastCGI — zaimplementowane i zweryfikowane (2026-09-05)
+
+Zmiana założenia względem 3m/3q: **nie ma typu `fcgi-async`**. True Async
+sprawdzone u źródła — RFC użytkowe anulowane, blokujące I/O w C-SAPI nie jest
+przechwytywane, `main/fastcgi.c` i `sapi/fpm` nietknięte. Optymalizacje trafiły
+więc do zwykłego, blokującego workera, podzielone według tego, czy zmieniają
+obserwowalne zachowanie: nie zmieniają → domyślnie; zmieniają → opt-in.
+
+### Co weszło
+
+| co | gdzie | domyślnie | zmiana zachowania |
+|---|---|---|---|
+| naprawa `TCP_NODELAY` (błąd upstreamu) | `patches/0002` (`main/fastcgi.c`) | tak | tylko naprawa — Nagle znika z keep-alive po TCP |
+| bufor wejściowy 16 KB w `safe_read()` | `patches/0003` | tak | nie (jeden `read()` zamiast sześciu na nagłówek requestu) |
+| `accept4(SOCK_CLOEXEC)` | `patches/0003` + `AC_CHECK_FUNCS([accept4])` w naszym `config.m4` | tak, gdy `HAVE_ACCEPT4` | nie (zejście na `accept`+2×`fcntl`) |
+| `write(2, "\0fscf")` tylko przy `catch_workers_output = yes` | `fpm_stdio.c` (wzięty na własność, 4 commity/rok) | tak | nie — przy `no` fd 2 to `/dev/null`, zapis szedł w próżnię |
+| `request_cpu_tracking = yes|no` (2× `times()`) | `fpm_conf.c/h`, `fpm_request.c/h`, hook w `fpm.c` | **yes** = jak upstream | `no` zeruje „last request cpu" w statusie i `%C` w `access.format` |
+
+`fpm_stdio.c` to piąty plik na własność (po `fpm_main.c`… — patrz sekcja 2);
+zmiana to statyczna flaga ustawiana w `fpm_stdio_child_use_pipes()` i wczesny
+`return` w `fpm_stdio_flush_child()`.
+
+`request_cpu_tracking` czyta się w dziecku w `fpm.c` **przed**
+`fpm_cleanups_run(FPM_CLEANUP_CHILD)`, bo potem `wp->config` już nie istnieje
+(ta sama pułapka co w 3o). Dyrektywa per pool.
+
+### Co odrzucone i dlaczego
+
+- **`poll` po `accept` → `SO_RCVTIMEO` na gnieździe nasłuchującym.** Zmierzone
+  programem w C na poligonie (Linux 7.0), nie z dokumentacji:
+  - TCP: opcja dziedziczy się przez `accept()` i przerywa `read()` — ale
+    **`accept()` bez klienta też dostaje EAGAIN po timeoucie**, a
+    `fcgi_accept_request` traktuje każdy błąd poza EINTR/ECONNABORTED jako
+    fatalny → worker wychodzi co 5 s bezczynności;
+  - **UDS: nie dziedziczy się w ogóle** (`SO_RCVTIMEO` na połączeniu = 0),
+    czyli zerowa ochrona na transporcie, który sami zalecamy;
+  - timeout przenosiłby się na `read()` połączeń keep-alive (nginx trzyma je
+    bezczynnie długo), więc trzeba by go zdejmować kolejnym `setsockopt` — zysk
+    jednego syscalla na NOWE połączenie znika.
+  `poll` zostaje. Jeden syscall nie jest wart zawieszonego albo znikającego workera.
+- **Cache `chdir`** — poza zakresem (`main/`, semantyka cwd), zgodnie z decyzją.
+- **`zend_signal_activate` (7× `rt_sigaction`) i blokada opcache (2× `fcntl`)**
+  — Zend i ext/opcache, nie SAPI. Materiał na osobne zgłoszenie upstream:
+  rejestracja handlerów raz na proces zamiast per request; blokada
+  `accel_activate_add`/`deactivate_sub` per request.
+- **`SO_REUSEPORT`** — nie ruszane (3m: thundering herd nie istnieje).
+
+### Pułapki znalezione po drodze
+
+1. **`0001` psuło `--enable-fpm` w tym samym drzewie — NAPRAWIONE (droga 1).**
+   Zmieniało sygnaturę hooków w `main/fastcgi.h` (`void(*)(bool)`), a upstreamowe
+   `fpm_main.c` przekazywało `void(*)(void)`; GCC 14+ traktuje niezgodne wskaźniki
+   jako błąd. Przyczyna: `0001` było wycinkiem PR bukka#2 ograniczonym do `main/`,
+   a jego część z `sapi/fpm/fpm/fpm_request.c/.h` nieśliśmy tylko jako własne pliki
+   w `sapi/fpmng/`. Decyzja koordynatora: `0001` niesie teraz pełny PR (bez
+   testów .phpt). Zweryfikowane: `--enable-fpm --enable-fpmng` w jednym drzewie
+   buduje się (mac), a `sapi/fpm/tests` na tak zbudowanym upstreamowym
+   `php-fpm` z pełnym stosem 0001+0002+0003: 141 testów, 0 failed. Skutek
+   uboczny: `prepare.sh` mógłby przestać usuwać `sapi/fpmng/tests`. Koszt:
+   PHP-8.3 potrzebuje wariantu `0001` (`fpm_scoreboard_update_commit` ma tam
+   7 argumentów; 8.4 dodało `memory_peak`) — razem z wariantem `0003` to dwa
+   warianty dla 8.3, czyli próg alarmowy z `patches/README.md`.
+   Testy upstreamu można też puszczać przeciw `php-fpm-ng` przez
+   `TEST_PHP_FPM_EXECUTABLE` (szuka `<dir>/fpm/php-fpm` dwa poziomy wyżej —
+   potrzebny symlink).
+2. **Stos łatek jest kolejnościowy.** 0002 i 0003 kontekstowo zakładają 0001
+   (hunk init w `fcgi_init_request` i okolice `accept()`), choć merytorycznie
+   są niezależne. Wersje do upstreamu trzeba by przebazować na czyste drzewo.
+3. **`prepare.sh` kłamał przy stosie.** „Już nałożone" sprawdzał odwrotnym
+   dry-runem per łatka — pada dla 0002, gdy leży na niej 0003. Teraz decyzja
+   zapada raz dla całego stosu: w przód na nietknięte drzewo albo cały stos
+   odwrotnie z kopii dotkniętych plików. Sprawdzone na BSD patch (mac) i GNU.
+4. **`safe_read()` na PHP-8.3 ma `const void *buf`** (zmienione w 8.4 przez
+   #20887) — 0003 potrzebuje wariantu `patches/php-8.3/`. Pierwszy wariant
+   wersyjny w repo; dwa to próg alarmowy z `patches/README.md`.
+5. Kopiowanie repo z maca `tar`-em bez `COPYFILE_DISABLE=1` wrzuca pliki
+   `._*.c`, które `prepare.sh` bierze za źródła i build pada na
+   `No rule to make target '._fpm_request.c'`.
+
+### Poprawność
+
+Pełny zestaw `sapi/fpm/tests` (141 testów), 0 failed, w pięciu wariantach —
+piąty to upstreamowy `php-fpm` zbudowany razem z `php-fpm-ng` w jednym drzewie
+z pełnym stosem 0001+0002+0003 (mac, 115 pass / 25 skip). Pozostałe cztery:
+upstream czysty i upstream+0002/0003 na Linuksie (121 pass / 19 skip, identycznie
+przed i po; `HAVE_ACCEPT4` włączone ręcznie, bo upstream go nie sprawdza),
+upstream+0002/0003 na macu (ścieżka bez `accept4`) i `php-fpm-ng` na macu
+(115 / 25, skipy środowiskowe). Jedyny „warn" to upstreamowy XFAIL, który
+przechodzi — tak samo bez łatek.
+
+Prawdziwy nginx 1.28 na poligonie (`ngtest/nginx-check.sh`), binarka bazowa
+(0001 + nasze sapi) vs nowa, w konfiguracjach `catch_workers_output = yes`, `no`
+i `no` + `request_cpu_tracking = no`. **Cztery przebiegi, zero porażek**,
+identyczny wynik dla bazowej i nowej:
+
+- `hello.php` ×50 na każdej ścieżce: keep-alive TCP, nowe połączenie TCP,
+  keep-alive UDS, nowe połączenie UDS, `fastcgi_buffering off` +
+  `fastcgi_request_buffering off`;
+- POST surowy 1 KB, 17 KB (tuż nad buforem), 100 KB, 1 MB, 5 MB — długość i md5
+  ciała zgadzają się na każdej ścieżce; multipart 300 KB z plikiem — `$_POST`
+  i md5 pliku zgadzają się;
+- odpowiedzi 20 KB, 200 KB, 5 MB (md5 całego ciała) na każdej ścieżce;
+- chunked: nginx odpowiada `Transfer-Encoding: chunked`, surowe ciało dłuższe
+  od zdekodowanego, zdekodowane md5 poprawne;
+- zerwane połączenie w połowie odpowiedzi (`curl -m 0.3` w pauzie skryptu
+  100 KB + `usleep` + 100 KB, dwa razy, na keep-alive i na streamie): worker
+  przeżywa, kolejne 20 requestów OK, liczba workerów bez zmian;
+- `catch_workers_output = yes`: `php://stderr` z workera ląduje w `error_log`
+  mastera; przy `no` nie ląduje (zgodnie z semantyką) — czyli pominięcie
+  `write(2, "\0fscf")` nic nie psuje, gdy jest odbiorca;
+- `request_cpu_tracking` domyślne: „last request cpu" w statusie i `%C` w
+  access logu niezerowe po skrypcie z ~30 ms CPU; `= no`: oba równe 0.
+
+Pułapka testowa (nie kodu): w SAPI FPM nie ma stałej `STDERR` — skrypt z
+`fwrite(STDERR, …)` pada fatalem; trzeba `fopen('php://stderr')`. Pierwsza wersja
+testu „brak STDERR w logu" była fałszywym alarmem, także na upstreamie.
+
+### Wydajność — zmierzone (poligon i7-6700T, Linux 7.0, PTI+IBRS, k3d wyłączone, maszyna pusta)
+
+Binarka bazowa = 0001 + nasze `sapi/fpmng` sprzed tej pracy; nowa = to samo +
+0002 + 0003 + `fpm_stdio.c` + `request_cpu_tracking` (domyślnie `yes`, więc
+`times()` w obu). Konfiguracje pomiarowe bez `catch_workers_output`, czyli
+nowa binarka pomija `write(2, "\0fscf")`. `hello.php` (`echo "hello\n"`), opcache.
+
+**Syscalle na request** (`strace -c` na jednym workerze, fcgibench, TCP):
+
+| | keep-alive | nowe połączenie |
+|---|---|---|
+| bazowa | **26** (read 6, write 2, rt_sigaction 8, chdir 2, fcntl 2, times 2, setitimer 2, getcwd, rt_sigprocmask) | **33** (+ accept, fcntl 2, poll, shutdown, recvfrom 2, close; read 5) |
+| nowa | **20** (read 1, write 1, reszta bez zmian) | **25** (accept4 1, fcntl 2 = tylko opcache, read 1, recvfrom 1, poll, shutdown, close) |
+
+Z pozostałych 20: 8× `rt_sigaction` + 1× `rt_sigprocmask` (Zend signals), 2×
+`setitimer` (`max_execution_time`), 2× `chdir` + `getcwd`, 2× `fcntl` (opcache),
+2× `times` (wyłączalne dyrektywą) — tylko `read` + `write` to FastCGI.
+
+**CPU workera na request** (suma utime+stime dzieci z `/proc`, fcgibench,
+2 połączenia, 5 s, trzy powtórzenia; wartości min–max):
+
+| ścieżka | bazowa µs/req | nowa µs/req | różnica |
+|---|---|---|---|
+| TCP keep-alive | 60,2–62,5 | 48,7–50,8 | **−12 (−19%)** |
+| TCP nowe połączenie | 89,0–95,4 | 81,7–84,5 | −8 (−9%) |
+| UDS keep-alive | 52,6–53,7 | 41,7–44,8 | **−9 (−18%)** |
+| UDS nowe połączenie | 72,0–73,0 | 52,3–54,3 | **−19 (−27%)** |
+
+Zysk większy niż w 3m (7/12 µs), bo tam nie było jeszcze pominięcia
+`write(2, …)` — `write` na tej maszynie kosztuje 4–7 µs/wywołanie wg `strace`,
+najdroższy pojedynczy syscall na ścieżce.
+
+**`wrk -t1 -c2 -d10s` przez nginx 1.28** (nginx + wrk + 2 workery na tej samej
+maszynie, trzy powtórzenia):
+
+| ścieżka | req/s bazowa | req/s nowa | CPU workera µs/req bazowa → nowa |
+|---|---|---|---|
+| TCP keep-alive (`fastcgi_keep_conn on`) | 8441–8830 | 8543–8576 | 108–113 → 106–108 (−3…−5) |
+| TCP nowe połączenie | 7622–7948 | 7737–7935 | 106–109 → 97–98 (**−11**) |
+| UDS keep-alive | 14657–15012 | 15962–16191 (**+7%**) | 69–72 → 59–60 (**−10**) |
+
+Przepustowość przez nginx prawie nie drga, bo mierzy głównie nginx+wrk (jak
+w 3m: przy większym obciążeniu widać walkę o hyperthready, nie kod); CPU
+workera na request jest miarą właściwą. Zaskoczenie: przez nginx TCP keep-alive
+zyskuje najmniej (−3…−5 µs), choć bezpośrednio fcgibenchem −12 — nie zbadane,
+zapisane jako otwarte. Request przez nginx kosztuje ~45 µs więcej CPU niż ten
+sam skrypt fcgibenchem — to ~20 zmiennych `fastcgi_params` i większe `$_SERVER`,
+nie transport.
+
+**Nagle (`TCP_NODELAY`, łatka 0002)** — własny klient FastCGI w Pythonie
+(`patches/0002-fcgi-nodelay-repro.py`), jedno połączenie TCP z `FCGI_KEEP_CONN`,
+50 requestów z rzędu, `mid.php` = 20 KB odpowiedzi (> bufor 8 KB), trzy serie:
+
+| | mediana | min | max |
+|---|---|---|---|
+| bazowa | **41,0 ms** | 0,27 ms | 41,8 ms |
+| nowa | **0,08 ms** | 0,07 ms | 0,71 ms |
+| bazowa, `hello.php` (< 8 KB) | 0,09 ms | 0,07 ms | 0,34 ms |
+
+Dwie osobne rzeczy, których nie wolno mieszać:
+
+1. **Wada w kodzie — udowodniona z samego kodu**: `req->tcp` przypisywane
+   tylko pod `_WIN32`, czytane bezwarunkowo; gałąź `TCP_NODELAY` poza Windows
+   jest martwa. To wystarcza do zgłoszenia niezależnie od pomiarów.
+2. **Skutek praktyczny — wykazany tylko częściowo.** Własnym klientem: 41 ms
+   → 0,08 ms, czyli timer delayed ACK Linuksa (40 ms) na każdym requeście z
+   odpowiedzią większą niż jeden `write()`. **Z nginx 1.28 na loopbacku NIE
+   odtworzone** — odpowiedzi > 8 KB są w mikrosekundach z łatką i bez. Nie
+   znaleźliśmy konfiguracji z prawdziwym nginxem, która to łapie, więc nie
+   twierdzimy, że typowe wdrożenie nginx + FPM to widzi. Hipoteza (nie
+   ustalenie): nginx czyta odpowiedź natychmiast, jego jądro ACK-uje po dwóch
+   pełnych segmentach, więc delayed ACK nie ma kiedy zadziałać; klient czytający
+   wolniej albo po prawdziwej sieci dostaje opóźnienie — nasz klient Pythonowy
+   jest takim klientem.
+
+Tekst zgłoszenia trzyma ten podział: `patches/0002-upstream-report.md`.
+
+**Zastrzeżenie sprzętowe** bez zmian z 3m: PTI+IBRS, syscall ~0,9 µs; na nowszym
+CPU zysk bezwzględny skurczy się 3–5×.
+
+### Zalecana konfiguracja dla lekkich endpointów (zero linijek kodu)
+
+- `php_admin_value[max_execution_time] = 0` — znika `setitimer` ×2 +
+  `rt_sigprocmask` (−3 µs/req na poligonie). FPM i tak ma
+  `request_terminate_timeout` jako strażnika czasu ściennego.
+- `listen = /run/php/pool.sock` zamiast `127.0.0.1:9000` — −7…−11 µs/req.
+  Bramka HTTP i worker są w tym samym kontenerze, TCP na loopbacku nic nie daje.
+- `catch_workers_output = no`, jeśli logi idą przez `error_log()`/stderr do
+  własnego stosu — oszczędza `write()` per request (od teraz automatycznie).
+- `request_cpu_tracking = no`, jeśli nikt nie czyta „last request cpu" ani `%C`.
 
 ## 4. Zmierzone: wydajność NIE jest argumentem
 

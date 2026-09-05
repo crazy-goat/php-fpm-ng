@@ -2930,3 +2930,43 @@ Dotychczasowe kombinowane typy przechodza na:
 - `fiber` -> `pool.type = fastcgi-ng`, `pool.executor = fiber`;
 - `async` -> `pool.type = fastcgi-ng`, `pool.executor = async`;
 - `http-fiber` -> `pool.type = http`, `pool.executor = fiber`.
+
+## 3w. Rozdzielenie transportu i `writev()` dużych odpowiedzi (2026-09-05)
+
+Procesowy przełącznik `fcgi_set_optimized_transport()` jest domyślnie wyłączony i ustawiany po forku workera. `fastcgi` zachowuje upstreamową ścieżkę `accept()` i odczytów, natomiast `fastcgi-ng` oraz wewnętrzny transport frontendu `http` włączają buforowane odczyty, `accept4(SOCK_CLOEXEC)` i zoptymalizowany zapis dużych rekordów. Test dwóch pooli w jednej binarce potwierdził, że ustawienie nie przecieka między procesami.
+
+Dla lekkiego requestu, cztery workery i pięć naprzemiennych serii `wrk -t1 -c2 -d10s`, rozdzielenie dało:
+
+- `fastcgi`: 8718,57 req/s i 114,244 us CPU workera/request;
+- `fastcgi-ng`: 8866,06 req/s i 104,377 us CPU workera/request;
+- wynik: **-8,64% CPU/request** dla `fastcgi-ng`.
+
+Profil syscalli potwierdził `accept()` wyłącznie dla `fastcgi`, `accept4()` wyłącznie dla `fastcgi-ng` oraz spadek liczby odczytów z około 9,1 do 4,1 na request.
+
+### Duże odpowiedzi
+
+`patches/0005-fastcgi-writev-large-response.patch` łączy nagłówek rekordu i duże body przez `writev()` tylko dla zoptymalizowanego transportu na Unixie. `safe_writev()` obsługuje `EINTR` i częściowe zapisy przez oba wektory. Klasyczny `fastcgi` i Windows zachowują istniejącą ścieżkę.
+
+Dla odpowiedzi 262 144 B liczba operacji transportowych spadła z 11 do 6. Końcowy `strace` na PHP 8.5 pokazał:
+
+- `fastcgi`: 11 zapisów FastCGI, 0 `writev()`;
+- `fastcgi-ng`: 5 `writev()` z nagłówkiem i payloadem oraz osobny końcowy rekord.
+
+Benchmark PHP 8.5, pięć naprzemiennych serii:
+
+| frontend | CPU/request baseline | CPU/request `writev` | zmiana CPU | req/s baseline | req/s `writev` | zmiana req/s |
+|---|---:|---:|---:|---:|---:|---:|
+| `fastcgi-ng` | 195,433 us | 178,824 us | **-8,5%** | 2018,63 | 2037,15 | **+0,9%** |
+| `http`, `Connection: close` | 525,209 us | 490,612 us | **-6,6%** | 2682,67 | 2705,14 | **+0,8%** |
+
+W obu testach `writev()` miało niższy CPU/request we wszystkich pięciu parach. Pierwsza seria HTTP z keep-alive osiągała około 50 req/s przez znany efekt Nagle/delayed ACK, dlatego jej przepustowości nie użyto jako wyniku optymalizacji.
+
+Na masterze wcześniejszy benchmark dał około **-9,3% CPU/request** i **+4,8% req/s**. Pomiar pamięci nie wykazał kosztu: mediana RSS 7812 -> 7792 KB, PSS 3921 -> 3911 KB.
+
+Końcowa regresja PHP 8.5 przeszła dla `fastcgi`, `fastcgi-ng` i `http`: mała odpowiedź, odpowiedź 262 144 B, binarny POST 65 792 B z SHA-256, keep-alive/close oraz zerwany odbiorca. Wcześniejsze porównanie bajt w bajt objęło odpowiedzi 1, 8000, 8184, 8192, 65527, 65528, 65529, 131056, 262144 i 1048576 B.
+
+### Odrzucone warianty
+
+- Bufory wejściowe 8/16/32 KB dały odpowiednio 86,591 / 87,321 / 86,564 us na request. Różnice poniżej 1% nie uzasadniają zmiany; pozostaje 16 KB.
+- Batching małej odpowiedzi nie oszczędza zapisu FastCGI: odpowiedź już trafia do jednego `write()`, a drugi obserwowany zapis dotyczy innego deskryptora.
+- Cache dwóch `getpid()` na request odrzucono, ponieważ wywołania należą do timeoutów Zend i wykrywania `fork()`.

@@ -11,6 +11,8 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_pool_supervisor.h"
+#include "fpm_pool_cron.h"
+#include "fpm_pool_status.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
@@ -43,6 +45,28 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.validate        = fpm_pool_supervisor_validate,
 		.init_main       = fpm_pool_supervisor_init_main,
 		.child_main      = fpm_pool_supervisor_child_main,
+		.status          = fpm_pool_supervisor_status,
+	},
+	{
+		.name            = "cron",
+		.requires_listen = 0,
+		.requires_pm     = 0,	/* validate() ustawia pm=static+max_children=1 programowo, zawsze */
+		.serves_requests = 0,
+		.rejects         = fpm_pool_cron_rejects,
+		.validate        = fpm_pool_cron_validate,
+		.init_main       = fpm_pool_cron_init_main,
+		.child_main      = fpm_pool_cron_child_main,
+		.status          = fpm_pool_cron_status,
+	},
+	{
+		.name                     = "status",
+		.requires_listen          = 1,	/* wlasny port HTTP, bezposrednio (nie fcgi+1 jak bramka http) */
+		.requires_pm              = 0,	/* validate() ustawia pm=static+max_children=1 programowo, zawsze */
+		.serves_requests          = 0,
+		.reads_foreign_scoreboards = 1,	/* patrz komentarz przy tym polu w fpm_pool_type.h */
+		.rejects                  = fpm_pool_status_rejects,
+		.validate                 = fpm_pool_status_validate,
+		.child_main               = fpm_pool_status_child_main,
 	},
 };
 
@@ -129,6 +153,7 @@ const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp)
 
 	return type ? type : FPM_POOL_TYPE_DEFAULT;
 }
+
 
 /* Dziecko musi znac swoj pool, a przy wskrzeszaniu w petli zdarzen wskaznik na
  * niego przepada w fpm_children.c. Scoreboard jest per pool i dziecko dostaje

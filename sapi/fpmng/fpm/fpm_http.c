@@ -189,6 +189,7 @@ struct fpm_http_gateway_s {
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = nikomu nie ufamy, see fpm_http_forwarded.h */
 	char *access_log_path;				/* http.access_log; NULL = wylaczony */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL w masterze */
+	char *front_controller;			/* http.front_controller; puste = fallback wylaczony (dzisiejsze zachowanie) */
 
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
@@ -411,8 +412,11 @@ static const char *fpm_http_method_name(enum evhttp_cmd_type type)
 	return NULL;
 }
 
-/* Builds BEGIN_REQUEST, PARAMS and STDIN in c->out. Returns an HTTP error code or 0. */
-static int fpm_http_build_request(fpm_http_conn *c)
+/* Builds BEGIN_REQUEST, PARAMS and STDIN in c->out. Returns an HTTP error code or 0.
+ * script_missing_hint is fpm_http_try_local()'s realpath() verdict on the exact
+ * path this function would otherwise stat() itself (0 = exists, 1 = confirmed
+ * missing, -1 = not checked there) -- see the comment on fpm_http_serve_static(). */
+static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 {
 	static const char begin_request[8] = {0, FCGI_RESPONDER, FCGI_KEEP_CONN, 0, 0, 0, 0, 0};
 	struct evhttp_request *req = c->req;
@@ -426,6 +430,7 @@ static int fpm_http_build_request(fpm_http_conn *c)
 	char *decoded, buf[64];
 	smart_str filename = {0};
 	const char *path_info;
+	int trailing_slash;
 	size_t decoded_len, body_len = evbuffer_get_length(body);
 
 	if (!method || !path || !*path) {
@@ -450,12 +455,47 @@ static int fpm_http_build_request(fpm_http_conn *c)
 	if (path_info) {
 		path_info += sizeof(".php") - 1;
 	}
+	trailing_slash = (decoded[decoded_len - 1] == '/');
 	smart_str_appends(&filename, c->gw->docroot);
 	smart_str_appendl(&filename, decoded, path_info ? (size_t)(path_info - decoded) : decoded_len);
-	if (decoded[decoded_len - 1] == '/') {
+	if (trailing_slash) {
 		smart_str_appendl(&filename, "index.php", sizeof("index.php") - 1);
 	}
 	smart_str_0(&filename);
+
+	/* try_files $uri http.front_controller$is_args$args, roughly: when the script
+	 * this request maps to does not exist, hand it to the front controller instead
+	 * and let PATH_INFO carry the original path -- same idea as php -S's own
+	 * fallback to index.php (php_cli_server_request_translate_vpath()), minus its
+	 * walk-left-and-stat() loop, which is fine for a dev server but too many
+	 * syscalls per request for here.
+	 *
+	 * Cost: when path_info is NULL and there was no trailing slash (the plain
+	 * "/mix" case, no .php split or appended index.php), fpm_http_try_local()
+	 * already ran this exact realpath() for GET/HEAD with http.static on, so
+	 * script_missing_hint answers it for free. Everywhere else -- POST/PUT/...,
+	 * http.static = 0, a request for a bare .php file (fpm_http_serve_static()
+	 * steps aside for those on purpose), or a trailing-slash/.php-split path --
+	 * this is the one extra stat() the fallback adds, and only when
+	 * http.front_controller is non-empty in the first place. */
+	if (fpm_http_front_controller_ok(c->gw)) {
+		int missing;
+
+		if (!path_info && !trailing_slash && script_missing_hint >= 0) {
+			missing = script_missing_hint;
+		} else {
+			struct stat st;
+
+			missing = (stat(ZSTR_VAL(filename.s), &st) != 0);
+		}
+		if (missing) {
+			smart_str_free(&filename);
+			smart_str_appends(&filename, c->gw->docroot);
+			smart_str_appends(&filename, c->gw->front_controller);
+			smart_str_0(&filename);
+			path_info = decoded;	/* whole original path, whatever split/index.php rule ran above */
+		}
+	}
 
 	snprintf(buf, sizeof(buf), "HTTP/%d.%d", req->major, req->minor);
 	fpm_http_param(c, "REQUEST_METHOD", method);
@@ -1075,8 +1115,58 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
 	return resolved[0] ? resolved : NULL;
 }
 
+/* Validates http.front_controller once per gateway process (empty option ->
+ * fallback disabled, same as today). The value is admin config, not request
+ * input, but it still goes through the same realpath()-under-docroot check as
+ * a static file (see fpm_http_serve_static): a symlink can put a perfectly
+ * innocent-looking path outside the document root, and there is no reason to
+ * trust config more than we trust the filesystem. When the front controller
+ * is not deployed yet, realpath() has nothing to resolve -- the fallback is
+ * still enabled in that case, so a request that reaches it gets the worker's
+ * usual "File not found" instead of silently behaving as if the option were
+ * unset. */
+static int fpm_http_front_controller_ok(struct fpm_http_gateway_s *gw)
+{
+	static int state = 0; /* 0 = not checked yet, 1 = usable, -1 = disabled/invalid */
+
+	if (!state) {
+		const char *fc = gw->front_controller;
+
+		state = -1;
+		if (fc && *fc) {
+			const char *root = fpm_http_docroot_real(gw);
+			char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
+
+			if (!root) {
+				zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller fallback disabled, document root does not resolve", gw->pool);
+			} else if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", gw->docroot, fc) >= sizeof(candidate)) {
+				zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' is too long, fallback disabled", gw->pool, fc);
+			} else if (!realpath(candidate, resolved)) {
+				state = 1;	/* not deployed yet: still enable, see the comment above */
+			} else {
+				size_t root_len = strlen(root);
+
+				if (!strncmp(resolved, root, root_len) && (!resolved[root_len] || resolved[root_len] == '/')) {
+					state = 1;
+				} else {
+					zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' resolves outside the document root, fallback disabled", gw->pool, fc);
+				}
+			}
+		}
+	}
+
+	return state == 1;
+}
+
+/* cmd == EVHTTP_REQ_GET or EVHTTP_REQ_HEAD, and http.static is on: fills in
+ * *script_missing with what realpath() below finds out about the same path
+ * fpm_http_build_request() would use as SCRIPT_FILENAME (0 = exists, 1 =
+ * confirmed missing), so that build_request can skip its own stat() for the
+ * one case this function already paid for. -1 (unchanged from the caller's
+ * initial value) means this function never reached that check -- the caller
+ * still doesn't know. */
 static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
-		const char *path, size_t path_len, const char *remote_addr)
+		const char *path, size_t path_len, const char *remote_addr, int *script_missing)
 {
 	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], etag[64];
 	const char *root, *inm;
@@ -1119,7 +1209,13 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	 * document root. One extra syscall, but a static hit costs no worker at
 	 * all, so the trade is easy. */
 	if (!realpath(candidate, resolved)) {
+		if (script_missing) {
+			*script_missing = 1;	/* http.front_controller reuses this instead of stat()-ing again */
+		}
 		return 0;			/* no such file: let the worker produce the 404 */
+	}
+	if (script_missing) {
+		*script_missing = 0;	/* file is there, whatever open()/fstat() below turn out to say about it */
 	}
 	if (strncmp(resolved, root, root_len) || (resolved[root_len] && resolved[root_len] != '/')) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", gw->pool, path);
@@ -1189,8 +1285,9 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 }
 
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
- * worker. */
-static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
+ * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
+ * out (see the comment there) so fpm_http_build_request() can reuse it. */
+static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr, int *script_missing)
 {
 	const char *uri = evhttp_request_get_uri(req);
 	const struct evhttp_uri *decoded_uri;
@@ -1221,7 +1318,7 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 
 	/* Kolejnosc bedzie miala znaczenie, gdy dojda ACME i /status: najpierw
 	 * rzeczy o ustalonej sciezce, dopiero na koncu pliki z dysku. */
-	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr);
+	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr, script_missing);
 
 	free(path);
 
@@ -1261,23 +1358,31 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	effective_addr = fwd.remote_addr[0] ? fwd.remote_addr : peer_addr;
 
 	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
-	 * zajmowac slotu workera dla pliku, ktory oddamy sami. */
-	if (fpm_http_try_local(gw, req, effective_addr)) {
-		return;
+	 * zajmowac slotu workera dla pliku, ktory oddamy sami. -1 = "nie sprawdzano"
+	 * (nie GET/HEAD, albo http.static = 0): fpm_http_build_request() wtedy sam
+	 * zdecyduje, czy potrzebuje wlasnego stat() dla http.front_controller. */
+	{
+		int script_missing = -1;
+
+		if (fpm_http_try_local(gw, req, effective_addr, &script_missing)) {
+			return;
+		}
+
+		c = calloc(1, sizeof(*c));
+		c->gw = gw;
+		c->req = req;
+		c->evcon = evcon;
+		c->status = -1;
+		c->fwd = fwd;
+		c->peer_port = peer_port;
+		if (peer_addr) {
+			strlcpy(c->peer_addr, peer_addr, sizeof(c->peer_addr));
+		}
+
+		error = fpm_http_build_request(c, script_missing);
 	}
 
-	c = calloc(1, sizeof(*c));
-	c->gw = gw;
-	c->req = req;
-	c->evcon = evcon;
-	c->status = -1;
-	c->fwd = fwd;
-	c->peer_port = peer_port;
-	if (peer_addr) {
-		strlcpy(c->peer_addr, peer_addr, sizeof(c->peer_addr));
-	}
-
-	if ((error = fpm_http_build_request(c))) {
+	if (error) {
 		fpm_http_log_response(gw, req, effective_addr, NULL, error, 0);
 		evhttp_send_error(req, error, NULL);
 		c->evcon = NULL;
@@ -1562,6 +1667,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->allowed_clients);
 		fpm_http_acl_free(gw->trusted_proxies_acl);
 		free(gw->trusted_proxies);
+		free(gw->front_controller);
 		free(gw->access_log_path);
 		free(gw->http_listen_override);
 		free(gw->pool);
@@ -1636,6 +1742,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_access_log && *wp->config->http_access_log) {
 		gw->access_log_path = strdup(wp->config->http_access_log);
 	}
+
+	/* Default is "/index.php" (see the struct field's init in fpm_conf.c), so an
+	 * unset directive already arrives here non-empty; strdup("") when the pool
+	 * explicitly blanked it out to disable the fallback. */
+	gw->front_controller = strdup(wp->config->http_front_controller ? wp->config->http_front_controller : "");
 }
 /* }}} */
 
@@ -1676,6 +1787,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		if (wp->listen_address_domain != FPM_AF_INET && !gw->http_listen_override) {
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+		free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->pool);
 			free(gw->listen_address);
@@ -1687,6 +1799,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, "http.allowed_clients", gw->allowed_clients, &gw->acl) != 0) {
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+		free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
@@ -1700,6 +1813,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+		free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
@@ -1715,6 +1829,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+		free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
@@ -1807,6 +1922,15 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1; /* fpm_http_acl_parse() already logged which address is bad */
 		}
 		fpm_http_acl_free(tmp);
+	}
+	if (wp->config->http_front_controller && *wp->config->http_front_controller) {
+		const char *fc = wp->config->http_front_controller;
+		size_t len = strlen(fc);
+
+		if (fc[0] != '/' || strstr(fc, "/../") || (len >= 3 && !strcmp(fc + len - 3, "/.."))) {
+			zlog(ZLOG_ERROR, "[pool %s] http.front_controller must be an absolute path under the document root, without '..'", wp->config->name);
+			return -1;
+		}
 	}
 	return 0;
 }

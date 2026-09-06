@@ -28,6 +28,7 @@
 #include "zend_exceptions.h"
 #include "zend_extensions.h"
 #include "zend_ini.h"
+#include "zend_compile.h"		/* zend_is_auto_global(), ZEND_STR_AUTOGLOBAL_* */
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -657,6 +658,32 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * dokladnie to, co php_hash_environment() w php_request_startup(). */
 	zend_activate_auto_globals();
 
+	/* $_SERVER/$_ENV/$_REQUEST maja jit == PG(auto_globals_jit) ZAMROZONE
+	 * w chwili php_startup_auto_globals() (main/php_variables.c) — to jest
+	 * jeden raz na proces, w php_module_startup(), PRZED tym jak FPM w ogole
+	 * stosuje php_admin_value poola po forku. php_admin_value[auto_globals_jit]
+	 * w konfiguracji poola NIC tu nie zmienia: flaga jest juz przeczytana.
+	 * Z jit == 1 (domyslne) zend_activate_auto_globals() tylko UZBRAJA wpis
+	 * (armed = 1) — realny callback odpala dopiero przy KOMPILACJI pliku,
+	 * ktory uzywa tej zmiennej (zend_is_auto_global, wolane z zend_compile.c
+	 * przy kazdym uzyciu $_SERVER itp.). Przy FPMNG_SHARED_INCLUDES=1 vendor
+	 * nie jest rekompilowany od 2. requestu, wiec jesli skrypt wejsciowy sam
+	 * nie dotyka autoglobali (Laravel: dotyka ich dopiero phpdotenv w
+	 * vendorze), callback nigdy sie nie wola i te zmienne globalne po prostu
+	 * nie istnieja — "Undefined global variable $_SERVER" i dalej TypeError
+	 * na null zamiast array. Wymuszamy wiec utworzenie tu, niezaleznie od
+	 * tego, czy TEN skrypt je kompiluje. zend_is_auto_global() sam pilnuje,
+	 * zeby nie zrobic podwojnej roboty: czyta i zeruje flage "armed" (patrz
+	 * zend_auto_global_check w zend_compile.c), wiec gdy skrypt i tak
+	 * skompiluje uzycie $_SERVER, callback juz nie wystartuje drugi raz.
+	 * Kolejnosc bez znaczenia: php_auto_globals_create_request czyta
+	 * $_GET/$_POST/$_COOKIE (utworzone wyzej, jit=0, wiec juz gotowe), nie
+	 * $_SERVER/$_ENV. Koszt per request: trzy male tablice + jeden getenv-owy
+	 * przebieg po environ dla $_ENV — tanie wobec ceny calego requestu. */
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV));
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST));
+
 	/* Fiber startuje z EG(error_reporting) z ini (zend_fibers.c:
 	 * zend_fiber_execute), nie z wartosci biezacej; bez php.ini to moze byc
 	 * cos innego niz w kontenerze. Dziedziczymy wartosc kontenera. */
@@ -686,25 +713,27 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 		} zend_end_try();
 	}
 
-	/* set_time_limit(N) / ini_set() w skrypcie idzie przez OnUpdateTimeout
-	 * (main.c) do zend_set_timeout() i uzbraja timer PROCESU — walidacja
-	 * odrzuca tylko konfiguracje, nie runtime. Przywracamy wpis ini tak, jak
-	 * zend_ini_deactivate() robi to w php_request_shutdown() (stage DEACTIVATE:
-	 * OnUpdateTimeout rozbraja timer i NIE uzbraja go na nowo), zeby timer ani
-	 * wartosc ini nie przezyly requestu, ktory je zmienil. Nic nie robi, gdy
-	 * request ini nie ruszal. W trakcie requestu SIGPROF nadal moze trafic w
-	 * cudzy fiber — patrz docs/fiber_errors.md. Uwaga: php_admin_value
-	 * blokuje ini_set, wiec z php_admin_value[max_execution_time] = 0
-	 * set_time_limit() zwraca false i nigdy tu nie ma czego przywracac. */
-	if (EG(modified_ini_directives)) {
-		/* Straznik jak w zend_ini_deactivate(): bez ini_set/set_time_limit
-		 * w skrypcie ta tablica jest NULL, wiec typowy request nie placi tu
-		 * ani alokacji zend_string, ani przeszukania tablicy ini. */
-		zend_string *key = ZSTR_INIT_LITERAL("max_execution_time", false);
-
-		zend_restore_ini_entry(key, ZEND_INI_STAGE_DEACTIVATE);
-		zend_string_release_ex(key, false);
-	}
+	/* ini_set()/set_time_limit() w skrypcie zapisuje kazdy zmieniony wpis do
+	 * EG(modified_ini_directives) (zend_alter_ini_entry_ex, Zend/zend_ini.c) i
+	 * ten wpis zostaje procesowy, bo my nie robimy php_request_shutdown() per
+	 * request. Zmierzony skutek: Laravel w HandleExceptions robi
+	 * ini_set('display_errors', 'Off') i error_reporting(-1) w pierwszym
+	 * requescie na fiberze, i to zostaje dla CALEGO PROCESU — kolejne fatale
+	 * daja puste 500 zamiast tresci bledu. define() zostaje procesowe (nie ma
+	 * odpowiednika "restore" dla stalych) i to sie nie zmieni — patrz
+	 * docs/frameworks.md.
+	 *
+	 * zend_ini_deactivate() (Zend/zend_ini.c) to dokladnie ta operacja, ktora
+	 * php_request_shutdown() wykonuje dla WSZYSTKICH zmodyfikowanych wpisow —
+	 * per wpis, stage DEACTIVATE (OnUpdateTimeout rozbraja timer max_execution_time
+	 * i NIE uzbraja go na nowo, dokladnie to zachowanie, ktore mial dotychczasowy
+	 * kod ograniczony do jednego klucza), i sama niszczy/zeruje
+	 * EG(modified_ini_directives). Straznik "czy w ogole cos bylo zmienione"
+	 * jest WEWNATRZ niej (if (EG(modified_ini_directives))), wiec request bez
+	 * ini_set/set_time_limit w skrypcie nadal nie placi tu nic — ani alokacji,
+	 * ani przeszukania tablicy ini. W trakcie requestu SIGPROF nadal moze
+	 * trafic w cudzy fiber — patrz docs/fiber_errors.md. */
+	zend_ini_deactivate();
 	if (EG(timeout_seconds)) {
 		/* cokolwiek innego uzbroilo timer (rozszerzenie wolajace zend_set_timeout) */
 		zend_unset_timeout();

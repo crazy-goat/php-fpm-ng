@@ -28,6 +28,7 @@
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_reval.h"
 #include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_flock.h"
 #include "fpm_pool_fiber_sleep.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
@@ -153,6 +154,13 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 			 * obudzi — traktujemy jak koniec requestu z bledem. */
 			zlog(ZLOG_WARNING, "[pool %s] fiber: request #%u suspended outside the scheduler (Fiber::suspend() in the request's main fiber?); dropping it",
 				fpm_coop_pool_name(), fr->ctx->id);
+			/* SPIKE: ten request nigdy sie juz nie doczeka release_owner()
+			 * z fpm_coop_req_run() (nie wroci tam) — gdyby trzymal jakis
+			 * flock() z rejestru, zostalby tam NA ZAWSZE i zablokowal
+			 * kazdego przyszlego konkurenta w tym procesie. To jest
+			 * DOKLADNIE dziura, ktora fpm_pool_fiber_flock_release_owner()
+			 * ma zamykac — patrz jej naglowek. */
+			fpm_pool_fiber_flock_release_owner(fr);
 			fcgi_finish_request(fr->ctx->req, 1);
 			fr->ctx->req = NULL;
 			/* Obiekt fibera zwolnimy przy wyjsciu procesu — jego zniszczenie
@@ -163,6 +171,10 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 	}
 
 	fd = fr->ctx->fd;
+	/* SPIKE: normalny koniec requestu (rowniez fatal blad z wnetrza
+	 * zend_catch w fpm_coop_req_run — to caly czas ten sam powrot tutaj).
+	 * Belt-and-suspenders, idempotentne: no-op, jesli fr nic nie trzyma. */
+	fpm_pool_fiber_flock_release_owner(fr);
 	req = fpm_coop_req_free(fr->ctx);
 	event_free(fr->ev);
 	OBJ_RELEASE(&fr->fiber->std);
@@ -538,6 +550,15 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	/* Transporty: jestesmy po MINIT (fpm_main.c: startup() przed fpm_run()),
 	 * czyli po ext/openssl, ktore nadpisuje "tcp" w swoim MINIT. */
 	fpm_pool_fiber_xport_install();
+
+	/* SPIKE (docs/flock-streams-spike-report.md): przechwycenie
+	 * PHP_STREAM_OPTION_LOCKING dla zwyklych plikow, zeby flock()/
+	 * file_put_contents(..., LOCK_EX) na plik trzymany przez INNY fiber w
+	 * tym procesie zawieszalo sie na kolejce w pamieci zamiast blokowac cala
+	 * petle zdarzen w kernelu (patrz docs/flock-fiber-deadlock-report.md,
+	 * spike/flock-fiber). Instalacja tu, nie w MINIT: ta sama zasada co
+	 * xport_install wyzej. */
+	fpm_pool_fiber_flock_install();
 
 	/* Sleep-family (sleep/usleep/time_nanosleep): patrz fpm_pool_fiber_sleep.h.
 	 * Kolejnosc wzgledem xport_install nie ma tu znaczenia (rozne funkcje w

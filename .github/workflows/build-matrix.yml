@@ -130,6 +130,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: install runtime dependencies
+        # This runner never ran the build job's dependency install step, but
+        # php-fpm-ng and php are dynamically linked against libevent/openssl —
+        # without this, php-fpm-ng -v fails silently (missing shared library),
+        # which run-fpm-phpt.sh reports as "NOT MEASURED: ... failed to
+        # report its version".
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v4
         with:
           name: fpmng-canonical-build

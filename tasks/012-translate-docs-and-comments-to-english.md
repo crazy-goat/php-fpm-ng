@@ -1,7 +1,9 @@
 # 012 — Translate documentation and our own comments to English
 
-**Priority:** low-medium. Do it after 011, never before.
-**Status:** open. Blocked on 011 (the rule must exist first).
+**Priority:** medium. Unblocked — the rule now exists.
+**Status:** open. The language decision was taken on 2026-09-06 (English,
+everywhere) and is recorded in `CLAUDE.md`. This task is the translation work
+itself; task 011 is the check that stops the tree drifting back.
 
 ## Context
 
@@ -9,8 +11,25 @@ Effectively all of `docs/` is Polish: `NOTES.md`, `fiber_errors.md`,
 `frameworks.md`, `async_errors.md`, `fiber_async_io.md`, `spike-tsrm-context.md`.
 So are most comments in `sapi/fpmng/fpm/fpm_pool_*.c` (see 011 for the split).
 
-That is fine for a private single-author project and a hard stop for anything
-else — a public repository, an outside contributor, an upstream discussion.
+That was acceptable for a private single-author project and is a hard stop for
+anything else — a public repository, an outside contributor, an upstream
+discussion. The decision has been made to move everything to English.
+
+Sizes, largest first, so the work can be planned:
+
+    docs/NOTES.md                     3429 lines
+    docs/fiber_errors.md               422
+    docs/FASTCGI_NG_OPTIMIZATION.md    299
+    docs/spike-tsrm-context.md         272
+    docs/frameworks.md                 262
+    docs/node_server_gaps.md           207
+    docs/fiber_async_io.md              87
+    docs/async_errors.md                87
+    README.md                           82   (already partly English)
+    sapi/fpmng/README.md                23
+
+plus the Polish comments in `sapi/fpmng/fpm/`, concentrated in the `fpm_pool_*`
+files (see the table in task 011).
 
 ## Problem
 

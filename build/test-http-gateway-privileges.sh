@@ -116,7 +116,11 @@ run_scenario() {
     cat > "$dir/docroot/index.php" <<'EOF'
 <?php echo "ok"; ?>
 EOF
-    chmod 755 "$dir" "$dir/docroot"
+    # $dir itself needs to be writable by the gateway's dropped-to identity
+    # (nobody), or http.access_log can never be created there; 755 alone
+    # covers the read/traverse the worker needs for docroot but not this.
+    chmod 777 "$dir"
+    chmod 755 "$dir/docroot"
     chmod 644 "$dir/docroot/index.php"
 
     fcgi_port=$((19100 + $4))

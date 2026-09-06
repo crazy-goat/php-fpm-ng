@@ -339,6 +339,7 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 }
 
 static const char *fpm_http_method_name(enum evhttp_cmd_type type);
+static int fpm_http_front_controller_ok(struct fpm_http_gateway_s *gw);
 
 /* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
  * straight from the evhttp_request, callers only supply what they already know

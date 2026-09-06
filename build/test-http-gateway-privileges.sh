@@ -53,6 +53,11 @@ NOBODY_GID=$(id -g nobody)
 NOBODY_GROUP=$(id -gn nobody)
 
 RUN_ROOT=$(mktemp -d)
+# mktemp -d defaults to 0700: the dropped-to worker (running as $NOBODY_UID,
+# unrelated to this task -- that drop already existed) needs to traverse this
+# directory to reach docroot/index.php, or every request 404s no matter how
+# correctly the gateway itself dropped privileges.
+chmod 755 "$RUN_ROOT"
 trap 'cleanup_all' EXIT INT TERM
 MASTER_PIDS=""
 
@@ -179,7 +184,10 @@ EOF
     # accept the connection, serve the request, write the access log --
     # not just exist with the right uid. front_controller runs index.php.
     body=$(curl --silent --show-error --connect-timeout 2 --max-time 5 "http://127.0.0.1:$http_port/")
-    [ "$body" = "ok" ] || fail "[$name] expected body 'ok', got: $body"
+    if [ "$body" != "ok" ]; then
+        cat "$dir/error.log" "$dir/stdout.log" 2>/dev/null >&2
+        fail "[$name] expected body 'ok', got: $body"
+    fi
 
     [ -f "$dir/access.log" ] || fail "[$name] http.access_log was never created"
     if [ "$pool_has_user" = "yes" ]; then

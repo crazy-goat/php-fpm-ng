@@ -1,51 +1,51 @@
-# Znane problemy executora Fiber
+# Known problems in the Fiber executor
 
-Stan na 2026-09-06, po hardeningu z brancha `fiber-hardening`. `pool.executor = fiber` jest eksperymentalny i nie jest przeznaczony do użycia produkcyjnego.
+State as of 2026-09-06, after hardening from the `fiber-hardening` branch. `pool.executor = fiber` is experimental and is not meant for production use.
 
-## Zakres
+## Scope
 
-Problemy dotyczą konfiguracji:
+The problems concern the configuration:
 
 ```ini
 pool.type = fastcgi-ng | http
 pool.executor = fiber
 ```
 
-Nie dotyczą produkcyjnych ścieżek `fastcgi`, `fastcgi-ng/classic` ani `http/classic`. Cały kod opisany niżej żyje w `sapi/fpmng/fpm/fpm_pool_coop.c` (wspólny rdzeń „wiele requestów w jednym procesie”), w callbacku `validate` typu i w starcie kontenera — `fpm_conf.c`, `fpm_children.c` i `fpm_pool_type.h` nie zostały tknięte, zgodnie z kontraktem rozszerzalności.
+They do not concern the production paths `fastcgi`, `fastcgi-ng/classic` or `http/classic`. All the code described below lives in `sapi/fpmng/fpm/fpm_pool_coop.c` (the shared "many requests in one process" core), in the pool type's `validate` callback, and in container startup — `fpm_conf.c`, `fpm_children.c` and `fpm_pool_type.h` were not touched, per the extensibility contract.
 
-Fiber wymaga wyłączonego OPcache i zerowego `max_execution_time`:
+Fiber requires OPcache disabled and `max_execution_time` set to zero:
 
 ```ini
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
 ```
 
-## Podsumowanie: co jest domknięte i czym
+## Summary: what is closed and by what
 
-Żaden z trzech problemów nie został **naprawiony** — fiber nadal nie ma per-requestowego timeoutu ani izolacji sygnałów. Zamiast po cichu nie działać, konfiguracja **odmawia**, a API **jest zablokowane**:
+None of the three problems has been **fixed** — fiber still has no per-request timeout and no signal isolation. Instead of silently not working, the configuration **refuses to start**, and the API **is blocked**:
 
-| Problem | Mechanizm | Co to jest | Co zostaje otwarte |
+| Problem | Mechanism | What it is | What remains open |
 |---|---|---|---|
-| `max_execution_time` ≠ 0 nie przerywa requestu | `fpm_coop_validate()`: efektywna wartość (pool → php.ini) ≠ 0 ⇒ `ALERT` + odmowa startu | odmowa | timeout per fiber nie istnieje |
-| `set_time_limit(N)` uzbraja procesowy timer | `fpm_coop_req_run()`: `zend_restore_ini_entry("max_execution_time", DEACTIVATE)` po skrypcie; `php_admin_value` dodatkowo blokuje `ini_set` | mitygacja | w trakcie requestu SIGPROF może trafić w cudzy fiber |
-| `pcntl_signal()` przecieka między requestami | `fpm_coop_container_start()`: `zend_disable_functions()` na procesowym API pcntl | blokada | handlery sygnałów są procesowe; brak izolacji |
-| `pcntl_fork()` duplikuje wielorequestowy proces | ta sama blokada (`pcntl_fork`, `pcntl_rfork`, `pcntl_forkx`, `pcntl_exec`) | blokada | — |
+| `max_execution_time` != 0 does not interrupt the request | `fpm_coop_validate()`: effective value (pool -> php.ini) != 0 => `ALERT` + startup refusal | refusal | there is no per-fiber timeout |
+| `set_time_limit(N)` arms the process-wide timer | `fpm_coop_req_run()`: `zend_restore_ini_entry("max_execution_time", DEACTIVATE)` after the script; `php_admin_value` additionally blocks `ini_set` | mitigation | during the request, SIGPROF can hit someone else's fiber |
+| `pcntl_signal()` leaks between requests | `fpm_coop_container_start()`: `zend_disable_functions()` on the process-wide pcntl API | block | signal handlers are process-wide; no isolation |
+| `pcntl_fork()` duplicates the multi-request process | the same block (`pcntl_fork`, `pcntl_rfork`, `pcntl_forkx`, `pcntl_exec`) | block | — |
 
-## `max_execution_time` nie przerywa requestu
+## `max_execution_time` does not interrupt the request
 
-Request wykonujący nieskończoną pętlę nie jest przerywany po przekroczeniu skonfigurowanego limitu:
+A request running an infinite loop is not interrupted once the configured limit is exceeded:
 
 ```php
 <?php while (true) {}
 ```
 
-### Przyczyna
+### Cause
 
-Executor Fiber nie wykonuje pełnego `php_request_startup()` i `php_request_shutdown()` osobno dla każdego requestu — robi jeden `php_request_startup()` na życie procesu („request-kontener”, `fpm_coop_container_start`). Timeout Zend jest procesowy: jeden `setitimer()` (`ITIMER_PROF`/`SIGPROF`; na aarch64 macOS `ITIMER_REAL`/`SIGALRM`) w `zend_set_timeout_ex()`. Jeden timer nie reprezentuje niezależnych deadline'ów wielu requestów. Kontener od zawsze robił `zend_unset_timeout()`, więc niezerowa wartość była przyjmowana i po cichu nieegzekwowana.
+The Fiber executor does not run a full `php_request_startup()` and `php_request_shutdown()` separately for every request — it does one `php_request_startup()` for the life of the process (a "request container", `fpm_coop_container_start`). The Zend timeout is process-wide: one `setitimer()` (`ITIMER_PROF`/`SIGPROF`; on aarch64 macOS `ITIMER_REAL`/`SIGALRM`) in `zend_set_timeout_ex()`. One timer does not represent the independent deadlines of many requests. The container had always done `zend_unset_timeout()`, so a non-zero value was accepted and silently not enforced.
 
-### Stan po zmianie: odmowa w walidacji
+### State after the change: refused at validation
 
-`fpm_coop_validate()` liczy efektywną wartość poola — `php_admin_value`/`php_value[max_execution_time]` z poola (admin przed value, jak `fpm_php_apply_defines` w `fpm_php.c`), a gdy pool jej nie ustawia, wartość z php.ini przez `zend_ini_long()` (domyślnie `30`, `main/main.c`). Wartość ≠ 0 kończy się odmową startu, tak samo jak włączony OPcache:
+`fpm_coop_validate()` computes the pool's effective value — `php_admin_value`/`php_value[max_execution_time]` from the pool (admin before value, same as `fpm_php_apply_defines` in `fpm_php.c`), and when the pool does not set it, the value from php.ini via `zend_ini_long()` (default `30`, `main/main.c`). A value != 0 ends in a refusal to start, the same as with OPcache enabled:
 
 ```text
 ALERT: [pool fiber] pool.executor = fiber: max_execution_time = 30 is not enforced (the Zend timeout is one setitimer()/SIGPROF timer per process, and this process runs many requests at once; see docs/fiber_errors.md); set php_admin_value[max_execution_time] = 0 in this pool or max_execution_time = 0 in php.ini
@@ -53,34 +53,34 @@ ERROR: failed to post process the configuration
 ERROR: FPM initialization failed
 ```
 
-Konsekwencja: **każdy** pool fiber bez jawnego `php_admin_value[max_execution_time] = 0` przestaje startować, bo domyślne ini to 30. To zamierzone — tak samo działa wymóg wyłączonego OPcache. Zmierzone: `php_admin_value = 1` → odmowa; brak dyrektywy (default 30) → odmowa; `php_value = 5` + `php_admin_value = 0` → start (admin wygrywa); `= 0` → start i obsługa requestów.
+Consequence: **every** fiber pool without an explicit `php_admin_value[max_execution_time] = 0` stops starting, because the default ini value is 30. That is intentional — the same way the OPcache-disabled requirement works. Measured: `php_admin_value = 1` -> refusal; no directive (default 30) -> refusal; `php_value = 5` + `php_admin_value = 0` -> starts (admin wins); `= 0` -> starts and serves requests.
 
-### `set_time_limit()` — dziura, która zostawała, i jej mitygacja
+### `set_time_limit()` — the hole that remained, and its mitigation
 
-Walidacja odrzuca tylko konfigurację. `set_time_limit(N)` (`main/main.c`, `PHP_FUNCTION(set_time_limit)`) idzie przez `zend_alter_ini_entry_ex(..., PHP_INI_STAGE_RUNTIME)` do `OnUpdateTimeout`, a ten woła `zend_set_timeout()` — timer procesu zostaje uzbrojony. Gdy odpali, `zend_timeout_handler` ustawia `EG(timed_out)` i request, który następny wykona opcode — niekoniecznie ten, który wołał `set_time_limit` — dostaje „Maximum execution time exceeded”. Nie jest to crash: bailout łapie `zend_try` w `fpm_coop_execute`.
+Validation only rejects the configuration. `set_time_limit(N)` (`main/main.c`, `PHP_FUNCTION(set_time_limit)`) goes through `zend_alter_ini_entry_ex(..., PHP_INI_STAGE_RUNTIME)` to `OnUpdateTimeout`, which calls `zend_set_timeout()` — the process timer gets armed. When it fires, `zend_timeout_handler` sets `EG(timed_out)` and the request that executes the next opcode — not necessarily the one that called `set_time_limit` — gets "Maximum execution time exceeded". This is not a crash: `zend_try` in `fpm_coop_execute` catches the bailout.
 
-Mitygacja w `fpm_coop_req_run()`, po skrypcie i po wysłaniu nagłówków: `zend_restore_ini_entry("max_execution_time", ZEND_INI_STAGE_DEACTIVATE)` — dokładnie to, co `zend_ini_deactivate()` robi dla wszystkich wpisów w klasycznym `php_request_shutdown()`. `OnUpdateTimeout` w stage DEACTIVATE rozbraja timer i **nie** uzbraja go na nowo, a wartość ini wraca do wyjściowej. Timer ani `ini_get('max_execution_time')` nie przeżywają requestu, który je zmienił.
+Mitigation in `fpm_coop_req_run()`, after the script and after sending the headers: `zend_restore_ini_entry("max_execution_time", ZEND_INI_STAGE_DEACTIVATE)` — exactly what `zend_ini_deactivate()` does for all entries in classic `php_request_shutdown()`. `OnUpdateTimeout` in stage DEACTIVATE disarms the timer and does **not** re-arm it, and the ini value goes back to its initial one. Neither the timer nor `ini_get('max_execution_time')` survive the request that changed them.
 
-Dwie obserwacje z pomiarów:
+Two observations from measurements:
 
-- Z `php_admin_value[max_execution_time] = 0` (zalecana konfiguracja) `set_time_limit(1)` zwraca `false` — `php_admin_value` blokuje `ini_set` (`fpm_php_zend_ini_alter_master` z `ZEND_INI_SYSTEM`). Timer nigdy się nie uzbraja; mitygacja nie ma czego robić.
-- Z `php_value[max_execution_time] = 0` `set_time_limit(1)` zwraca `true`; request wołający je kończy się, następny request z 2 s pętli CPU przeżywa, a `ini_get` w kolejnym pokazuje znów `0`.
+- With `php_admin_value[max_execution_time] = 0` (the recommended configuration), `set_time_limit(1)` returns `false` — `php_admin_value` blocks `ini_set` (`fpm_php_zend_ini_alter_master` with `ZEND_INI_SYSTEM`). The timer never arms; the mitigation has nothing to do.
+- With `php_value[max_execution_time] = 0`, `set_time_limit(1)` returns `true`; the request that calls it ends, the next request with a 2 s CPU loop survives, and `ini_get` in the following one shows `0` again.
 
-**Otwarte:** w trakcie samego requestu, który wołał `set_time_limit(N)`, timer jest uzbrojony i może trafić w fiber innego requestu. Zamknięcie tego to per-fiber timeout (poniżej), nie tania łatka. Nie blokujemy `set_time_limit` — frameworki wołają `set_time_limit(0)` rutynowo, a zero jest nieszkodliwe.
+**Open:** during the request itself that called `set_time_limit(N)`, the timer is armed and can hit another request's fiber. Closing this requires a per-fiber timeout (below), not a cheap patch. We do not block `set_time_limit` — frameworks call `set_time_limit(0)` routinely, and zero is harmless.
 
-### Pełna naprawa (osobny projekt)
+### Full fix (separate project)
 
-1. deadline przechowywany osobno dla każdego fibera;
-2. kolejka timerów zintegrowana z schedulerem;
-3. przełączanie aktywnego timera przy suspend/resume;
-4. przypisanie `SIGPROF` do aktualnie wykonywanego fibera;
-5. bezpieczne przerwanie tylko jednego requestu;
-6. obsługa kodu CPU-bound, który nie wraca do event loop;
-7. potwierdzenie, że bailout nie uszkadza współdzielonego stanu procesu.
+1. deadline stored separately for each fiber;
+2. timer queue integrated with the scheduler;
+3. switching the active timer on suspend/resume;
+4. assigning `SIGPROF` to the fiber currently executing;
+5. safely interrupting only one request;
+6. handling CPU-bound code that never returns to the event loop;
+7. confirming that the bailout does not corrupt shared process state.
 
-## Handlery `pcntl_signal()` przeciekają między requestami
+## `pcntl_signal()` handlers leak between requests
 
-Handler ustawiony w jednym requeście pozostawał widoczny w następnym requeście obsługiwanym przez ten sam proces:
+A handler set in one request remained visible in the next request handled by the same process:
 
 ```php
 // Request 1
@@ -90,18 +90,18 @@ pcntl_signal(SIGUSR1, static function (): void {});
 var_dump(pcntl_signal_get_handler(SIGUSR1) === SIG_DFL); // false
 ```
 
-### Przyczyna
+### Cause
 
-Przeciekają dwa stany, nie jeden:
+Two states leak, not one:
 
-- logiczna tablica pcntl `PCNTL_G(php_signal_table)` (`ext/pcntl/php_pcntl.h`) — to ją czyta `pcntl_signal_get_handler()`;
-- dyspozycja jądra i tablica Zend: `php_signal4()` (`ext/pcntl/php_signal.c`) → `zend_sigaction()`, która zapisuje `SIGG(handlers)[signo-1]` **i** instaluje `zend_signal_handler_defer` w jądrze (`Zend/zend_signal.c`).
+- the logical pcntl table `PCNTL_G(php_signal_table)` (`ext/pcntl/php_pcntl.h`) — this is what `pcntl_signal_get_handler()` reads;
+- the kernel disposition and the Zend table: `php_signal4()` (`ext/pcntl/php_signal.c`) -> `zend_sigaction()`, which writes `SIGG(handlers)[signo-1]` **and** installs `zend_signal_handler_defer` in the kernel (`Zend/zend_signal.c`).
 
-Classic resetuje oba w `PHP_RSHUTDOWN(pcntl)` (`ext/pcntl/pcntl.c`: `php_signal(signo, SIG_DFL)` dla każdego wpisu, `zend_hash_destroy` tablicy), potem `zend_signal_deactivate()` w `php_request_shutdown()`, a przy następnym requeście `zend_signal_activate()` robi `memcpy(&SIGG(handlers), &global_orig_handlers, ...)`. Fiber wykonuje RINIT raz na proces, więc tablica żyje do końca procesu. Sam `zend_signal_activate()` między requestami nic nie da: nie dotyka `PCNTL_G(php_signal_table)`.
+Classic resets both in `PHP_RSHUTDOWN(pcntl)` (`ext/pcntl/pcntl.c`: `php_signal(signo, SIG_DFL)` for every entry, `zend_hash_destroy` of the table), then `zend_signal_deactivate()` in `php_request_shutdown()`, and on the next request `zend_signal_activate()` does `memcpy(&SIGG(handlers), &global_orig_handlers, ...)`. Fiber does RINIT once per process, so the table lives until the process ends. `zend_signal_activate()` alone between requests achieves nothing: it does not touch `PCNTL_G(php_signal_table)`.
 
-### Stan po zmianie: blokada procesowego API pcntl
+### State after the change: process-wide pcntl API blocked
 
-Na początku `fpm_coop_container_start()`, jeśli `zend_get_module_started("pcntl") == SUCCESS`, wołane jest `zend_disable_functions()` na liście `fpm_coop_disabled_functions` (obok `fpm_coop_rejects`):
+At the start of `fpm_coop_container_start()`, if `zend_get_module_started("pcntl") == SUCCESS`, `zend_disable_functions()` is called on the `fpm_coop_disabled_functions` list (next to `fpm_coop_rejects`):
 
 ```text
 pcntl_signal, pcntl_signal_get_handler, pcntl_signal_dispatch, pcntl_async_signals,
@@ -109,11 +109,11 @@ pcntl_sigprocmask, pcntl_sigwaitinfo, pcntl_sigtimedwait, pcntl_alarm,
 pcntl_fork, pcntl_rfork, pcntl_forkx, pcntl_exec
 ```
 
-To ten sam mechanizm, którym `fpm_php.c` (`fpm_php_apply_defines_ex`) stosuje `php_admin_value[disable_functions]` w dziecku — usunięcie wpisu z `CG(function_table)` przed pierwszym requestem, po `fpm_php_init_child` (MINIT i `php_admin_value[extension]` już za nami). Funkcja znika: wywołanie daje `Error: Call to undefined function pcntl_signal()`, a `function_exists()` zwraca `false`, więc biblioteki z fallbackiem działają dalej. `extension_loaded('pcntl')` nadal zwraca `true`. `pcntl_alarm` jest na liście, bo `SIGALRM` jest procesowy (a na aarch64 macOS to sygnał timeoutu Zend). `pcntl_wait*`, `pcntl_wifexited` itd. zostają — bez forka są nieszkodliwe, a przydają się przy `proc_open`. `proc_open`/`popen`/`exec` zostają: robią fork+exec, dziecko nie wraca do schedulera.
+This is the same mechanism `fpm_php.c` (`fpm_php_apply_defines_ex`) uses to apply `php_admin_value[disable_functions]` in the child — removing the entry from `CG(function_table)` before the first request, after `fpm_php_init_child` (MINIT and `php_admin_value[extension]` already behind us). The function disappears: calling it gives `Error: Call to undefined function pcntl_signal()`, and `function_exists()` returns `false`, so libraries with a fallback keep working. `extension_loaded('pcntl')` still returns `true`. `pcntl_alarm` is on the list because `SIGALRM` is process-wide (and on aarch64 macOS it is the Zend timeout signal). `pcntl_wait*`, `pcntl_wifexited` etc. stay — without fork they are harmless, and they're useful with `proc_open`. `proc_open`/`popen`/`exec` stay: they do fork+exec, and the child does not return to the scheduler.
 
-Kontener loguje jeden `NOTICE` z listą wyłączonych funkcji. Uwaga: to log **workera**; przy `error_log = /dev/stderr` bez `catch_workers_output = yes` nie widać go, tak jak każdego innego logu dziecka.
+The container logs one `NOTICE` with the list of disabled functions. Note: this is a **worker** log; with `error_log = /dev/stderr` and without `catch_workers_output = yes` you won't see it, same as any other child log.
 
-Zmierzone przez `http/fiber`:
+Measured via `http/fiber`:
 
 ```text
 pcntl_loaded=true
@@ -124,299 +124,307 @@ pcntl_signal=Error: Call to undefined function pcntl_signal()
 pcntl_fork=Error: Call to undefined function pcntl_fork()
 ```
 
-Ten sam skrypt przez `http/classic` i `fastcgi` (bez zmian w konfiguracji, `max_execution_time` domyślne 30): `function_exists(pcntl_signal)=true`, `pcntl_signal=OK handler=SET`, `pcntl_fork=OK`, worker obsługuje kolejne requesty, brak alertów w logu.
+The same script via `http/classic` and `fastcgi` (no config changes, `max_execution_time` default 30): `function_exists(pcntl_signal)=true`, `pcntl_signal=OK handler=SET`, `pcntl_fork=OK`, the worker keeps serving requests, no alerts in the log.
 
-### Odrzucone: reset handlerów przez RSHUTDOWN/RINIT pcntl między requestami
+### Rejected: resetting handlers via pcntl RSHUTDOWN/RINIT between requests
 
-Rozważany „tani reset”: po każdym requeście w `fpm_coop_req_run()` wołać `request_shutdown_func` + `request_startup_func` modułu `pcntl` z `module_registry` (`zend_hash_str_find_ptr(&module_registry, "pcntl", 5)`, pola `zend_module_entry` w `Zend/zend_modules.h`). Technicznie ~15 linii. **Odrzucony** z trzech powodów, każdy samodzielnie dyskwalifikujący:
+Considered "cheap reset": after every request, in `fpm_coop_req_run()`, call the `pcntl` module's `request_shutdown_func` + `request_startup_func` from `module_registry` (`zend_hash_str_find_ptr(&module_registry, "pcntl", 5)`, fields of `zend_module_entry` in `Zend/zend_modules.h`). Technically ~15 lines. **Rejected** for three reasons, each disqualifying on its own:
 
-1. **Tick functions rosną per request.** `PHP_RINIT(pcntl)` woła `php_add_tick_function(pcntl_signal_dispatch_tick_function, NULL)` przy każdym wywołaniu (`ext/pcntl/pcntl.c`). `PG(tick_functions)` rośnie o jeden wpis na request, a `php_run_ticks()` iteruje całą listę (`main/php_ticks.c`) — koszt ticka O(liczba requestów), bez końca. Selektywne usunięcie nie jest możliwe: funkcja ticka jest `static` w `pcntl.c`, a `php_deactivate_ticks()` czyści całą listę, łącznie z tickiem `run_user_tick_functions` z `ext/standard/basic_functions.c`. Ominięcie RINIT i wyzerowanie samej tablicy wymagałoby `PCNTL_G()`, czyli symbolu `pcntl_globals` — linkowalnego przy pcntl statycznym, nieosiągalnego przenośnie, gdy pcntl jest ładowany jako `.so`.
-2. **Brak izolacji w trakcie requestu.** Handlery są procesowe *podczas* requestu: request B wołający `pcntl_signal(SIGUSR1, ...)` nadpisuje handler A, a sygnał jest dostarczany do tego fibera, który akurat wykonuje tick albo obsługę `vm_interrupt`. Reset po zakończeniu requestu naprawia wyłącznie test „SET → LEAK”, nie izolację.
-3. **`SIG_DFL` psuje równoległy fiber.** `PHP_RSHUTDOWN(pcntl)` po requeście A robi `php_signal(signo, SIG_DFL)` także dla sygnałów, na których jeszcze polega równolegle biegnący request B. Kolejny taki sygnał zabija cały wielorequestowy proces (domyślna dyspozycja `SIGUSR1`/`SIGTERM`).
+1. **Tick functions grow per request.** `PHP_RINIT(pcntl)` calls `php_add_tick_function(pcntl_signal_dispatch_tick_function, NULL)` on every invocation (`ext/pcntl/pcntl.c`). `PG(tick_functions)` grows by one entry per request, and `php_run_ticks()` iterates the whole list (`main/php_ticks.c`) — tick cost is O(number of requests), without end. Selective removal is not possible: the tick function is `static` in `pcntl.c`, and `php_deactivate_ticks()` clears the entire list, including the `run_user_tick_functions` tick from `ext/standard/basic_functions.c`. Bypassing RINIT and zeroing the table directly would require `PCNTL_G()`, i.e. the `pcntl_globals` symbol, which is linkable when pcntl is static but is not portably reachable when pcntl is loaded as `.so`.
+2. **No isolation during the request itself.** Handlers are process-wide *during* the request: request B calling `pcntl_signal(SIGUSR1, ...)` overwrites A's handler, and the signal gets delivered to whichever fiber happens to be executing a tick or handling `vm_interrupt`. A reset after the request ends only fixes the "SET -> LEAK" test, not isolation.
+3. **`SIG_DFL` breaks a parallel fiber.** `PHP_RSHUTDOWN(pcntl)` after request A does `php_signal(signo, SIG_DFL)` also for signals that a still-running parallel request B depends on. The next such signal kills the entire multi-request process (default disposition of `SIGUSR1`/`SIGTERM`).
 
-Wniosek: reset byłby kosmetyką z pułapką — usuwa objaw z testu, zostawia i pogarsza realne zachowanie. Blokada jest uczciwa: mówi wprost, że w tym executorze tego API nie ma.
+Conclusion: the reset would be cosmetic and a trap — it removes the symptom from the test, and leaves and worsens the real behavior. The block is honest: it says outright that this API does not exist in this executor.
 
-### Pełna naprawa (osobny branch)
+### Full fix (separate branch)
 
-Stan handlerów trzeba dołączyć do kontekstu requestu Fiber:
+Handler state has to be attached to the Fiber request context:
 
-1. zapisywać go przy zawieszeniu fibera;
-2. przywracać przed wznowieniem;
-3. resetować po zakończeniu requestu;
-4. zachować wewnętrzne handlery wymagane przez Zend i FPM;
-5. przetestować kilka współbieżnych requestów ustawiających różne handlery.
+1. save it on fiber suspend;
+2. restore it before resume;
+3. reset it after the request ends;
+4. preserve internal handlers required by Zend and FPM;
+5. test several concurrent requests setting different handlers.
 
-Dopóki to nie istnieje, blokada zostaje.
+Until this exists, the block stays.
 
-## `pcntl_fork()` wewnątrz requestu
+## `pcntl_fork()` inside a request
 
-`pcntl_fork()` duplikuje cały wielorequestowy proces wraz ze schedulerem libevent, deskryptorami wszystkich połączeń i requestami w locie. Samo `exit()` w potomku nie kończy procesu FPM — kończy skrypt, po czym potomek przechodzi dalszą część `fpm_coop_req_run()` (wysyła **duplikat odpowiedzi** na współdzielony deskryptor) i wraca do pętli workera jako klon. Rodzic czekający przez `pcntl_waitpid()` może blokować się bez końca. `pcntl_exec()` ma ten sam problem od drugiej strony: podmienia obraz całego procesu.
+`pcntl_fork()` duplicates the entire multi-request process along with the libevent scheduler, the descriptors of all connections, and requests in flight. `exit()` alone in the child does not end the FPM process — it ends the script, after which the child goes through the rest of `fpm_coop_req_run()` (sending a **duplicate response** on the shared descriptor) and returns to the worker loop as a clone. A parent waiting via `pcntl_waitpid()` can block forever. `pcntl_exec()` has the same problem from the other side: it replaces the entire process image.
 
-### Stan po zmianie: blokada
+### State after the change: blocked
 
-`pcntl_fork`, `pcntl_rfork`, `pcntl_forkx` i `pcntl_exec` są na liście `fpm_coop_disabled_functions` (patrz wyżej). Zmierzone: `pcntl_fork=Error: Call to undefined function pcntl_fork()`, `function_exists('pcntl_fork') === false`.
+`pcntl_fork`, `pcntl_rfork`, `pcntl_forkx` and `pcntl_exec` are on the `fpm_coop_disabled_functions` list (see above). Measured: `pcntl_fork=Error: Call to undefined function pcntl_fork()`, `function_exists('pcntl_fork') === false`.
 
-### Odrzucone alternatywy
+### Rejected alternatives
 
-- `pthread_atfork()` z `_exit()` w potomku — psuje `proc_open`/`popen`, które forkują wewnętrznie. Odpada.
-- Strażnik PID w schedulerze (`getpid()` porównywany w `fpm_fiber_after_switch()` z PID-em zapamiętanym przy starcie, `_exit()` przy różnicy) — domyka zawieszenie rodzica, ale nie poprawność: potomek dociera do strażnika dopiero po wysłaniu duplikatu odpowiedzi. Zbędny, gdy `pcntl_fork` jest zablokowany.
+- `pthread_atfork()` with `_exit()` in the child — breaks `proc_open`/`popen`, which fork internally. Ruled out.
+- A PID guard in the scheduler (`getpid()` compared in `fpm_fiber_after_switch()` against the PID remembered at startup, `_exit()` on mismatch) — closes the parent's hang, but not correctness: the child reaches the guard only after sending the duplicate response. Redundant once `pcntl_fork` is blocked.
 
-## Potwierdzone działające elementy
+## Confirmed working elements
 
-Dla `fastcgi-ng/fiber` i `http/fiber` na czystym release buildzie PHP 8.5 potwierdzono wcześniej:
+For `fastcgi-ng/fiber` and `http/fiber` on a clean release build of PHP 8.5, previously confirmed:
 
-- małą i dużą odpowiedź;
-- binarny POST;
-- FastCGI/HTTP keep-alive i `Connection: close`;
-- przeżycie zerwania połączenia przez klienta;
-- kolejny request po błędzie klienta;
-- reload przez `SIGUSR2`;
-- zatrzymanie przez `SIGTERM`;
-- wymóg wyłączonego OPcache.
+- small and large responses;
+- binary POST;
+- FastCGI/HTTP keep-alive and `Connection: close`;
+- surviving a client disconnect;
+- another request after a client error;
+- reload via `SIGUSR2`;
+- shutdown via `SIGTERM`;
+- the OPcache-disabled requirement.
 
-Hardening z tego dokumentu zmierzono 2026-09-06 na debug buildzie `PHP 8.6.0-dev` (master `4e55e35ead7` + 6 łatek z `patches/`, `--disable-all --enable-fpmng --enable-pcntl`), macOS aarch64:
+The hardening from this document was measured on 2026-09-06 on a debug build of `PHP 8.6.0-dev` (master `4e55e35ead7` + 6 patches from `patches/`, `--disable-all --enable-fpmng --enable-pcntl`), macOS aarch64:
 
-- `http/fiber`: odmowa startu dla `max_execution_time` = 1 i dla domyślnego 30; start dla `= 0`; `php_admin_value` wygrywa nad `php_value`; requesty obsługiwane; pcntl zablokowane; `set_time_limit(1)` (przy `php_value`) nie przeżywa requestu.
-- `http/classic` i `fastcgi` w tym samym binarium: `max_execution_time = 30` nie blokuje startu, `pcntl_signal()` i `pcntl_fork()` działają, brak alertów — ścieżki produkcyjne nietknięte.
+- `http/fiber`: refusal to start for `max_execution_time` = 1 and for the default 30; starts for `= 0`; `php_admin_value` wins over `php_value`; requests served; pcntl blocked; `set_time_limit(1)` (with `php_value`) does not survive the request.
+- `http/classic` and `fastcgi` in the same binary: `max_execution_time = 30` does not block startup, `pcntl_signal()` and `pcntl_fork()` work, no alerts — production paths untouched.
 
-Ta sama seria powtórzona na poligonie (Ubuntu 26.04, x86_64, gcc 15, ten sam commit i te same łatki) dała identyczne wyniki. To istotne dla `set_time_limit`: na Linuksie timer to `ITIMER_PROF` (czas CPU), więc `set_time_limit(1)` w jednym requeście, a potem 2 s pętli CPU w następnym, bez rozbrojenia skończyłoby się „Maximum execution time of 1 second exceeded” — w logu 0 takich wpisów, request przeżył.
+The same series repeated on the test box (Ubuntu 26.04, x86_64, gcc 15, same commit and same patches) gave identical results. This matters for `set_time_limit`: on Linux the timer is `ITIMER_PROF` (CPU time), so `set_time_limit(1)` in one request, followed by 2 s of CPU loop in the next, would end in "Maximum execution time of 1 second exceeded" without disarming — the log shows 0 such entries, the request survived.
 
-## Rekomendacja
+## Recommendation
 
-Nie rozszerzać bieżącej poprawki o przebudowę lifecycle Fiber. Kolejność dalszych prac:
+Do not extend the current fix into a rebuild of the Fiber lifecycle. Order of further work:
 
-1. ~~jawnie odrzucić niezerowe `max_execution_time` dla Fiber~~ — zrobione (odmowa w walidacji);
-2. ~~udokumentować lub zablokować procesowe API `pcntl`~~ — zrobione (blokada w kontenerze);
-3. na osobnym branchu zaimplementować izolację handlerów sygnałów — dopiero wtedy zdejmować blokadę;
-4. per-fiber timeout potraktować jako osobny projekt wymagający testów współbieżności, bailoutów i kodu CPU-bound — dopiero wtedy zdejmować odmowę i mitygację `set_time_limit`;
-5. utrzymać oznaczenie Fiber jako eksperymentalnego do czasu rozwiązania tych problemów.
+1. ~~explicitly reject non-zero `max_execution_time` for Fiber~~ — done (refused at validation);
+2. ~~document or block the process-wide `pcntl` API~~ — done (blocked in the container);
+3. on a separate branch implement signal handler isolation — only then lift the block;
+4. treat per-fiber timeout as a separate project requiring concurrency, bailout and CPU-bound-code tests — only then lift the refusal and the `set_time_limit` mitigation;
+5. keep Fiber marked experimental until these problems are resolved.
 
-## EKSPERYMENT: `included_files` wspolne dla procesu
+## EXPERIMENT: `included_files` shared for the process
 
-`FPMNG_SHARED_INCLUDES=1` (przez `env[]` w poolu — `clear_env = 1` jest
-domyslne, wiec bez tego zmienna nie dociera do dziecka). Domyslnie wylaczone.
+`FPMNG_SHARED_INCLUDES=1` (via `env[]` in the pool — `clear_env = 1` is the
+default, so without this the variable does not reach the child). Disabled by
+default.
 
-**Po co.** Bez tego zadna aplikacja z Composerem nie przezywa drugiego
-requestu. Lista wczytanych plikow jest per request, tablice funkcji i klas
-per proces — wiec drugi request uznaje, ze `vendor/autoload.php` nie byl
-wczytany, wczytuje go ponownie i redeklaruje klase, ktora nadal zyje
-w procesie. Wspolna lista czyni bootstrap jednorazowym BEZ worker-mode
-i bez zmian w aplikacji.
+**What for.** Without this, no application using Composer survives a second
+request. The list of included files is per request, the function and class
+tables are per process — so the second request thinks `vendor/autoload.php`
+was not loaded, loads it again, and redeclares a class that is still alive in
+the process. A shared list makes bootstrap a one-time thing WITHOUT
+worker-mode and without changes to the application.
 
-**Zmierzone** (wzorzec bootstrapu: `require vendor/autoload.php`,
-`require_once` helpers z funkcja i klasa, `$app = require_once bootstrap/app.php`):
+**Measured** (bootstrap pattern: `require vendor/autoload.php`,
+`require_once` helpers with a function and a class, `$app = require_once
+bootstrap/app.php`):
 
-    PRZED:  req1 ok, req2 i req3 Fatal: Cannot redeclare class ComposerAutoloaderInit...
-    PO:     req1 ok, req2 ok, req3 ok — 30/30 requestow, zero bledow w logu
+    BEFORE:  req1 ok, req2 and req3 Fatal: Cannot redeclare class ComposerAutoloaderInit...
+    AFTER:   req1 ok, req2 ok, req3 ok — 30/30 requests, zero errors in the log
 
-Wspolbieznosc I/O nietknieta: 4 rownolegle `fsockopen` po 500 ms nadal
-0,525 s lacznie.
+I/O concurrency untouched: 4 parallel `fsockopen` at 500 ms each still take
+0,525 s total.
 
-### Dwa skutki uboczne — jeden do naprawy, jeden nie
+### Two side effects — one to fix, one not
 
-**Glosny, do naprawy:** `require_once` przy drugim wywolaniu zwraca `true`,
-a nie wartosc zwrocona przez plik. Wzorzec
-`$app = require_once 'bootstrap/app.php'` daje `app=true` od requestu 2
-(zmierzone). Do zrobienia: cache'owac wartosc zwracana przez plik
-i oddawac ja przy kolejnych wywolaniach zamiast `true`.
+**Loud, to fix:** `require_once` on a second call returns `true`, not the
+value the file returned. The pattern
+`$app = require_once 'bootstrap/app.php'` gives `app=true` from request 2
+onward (measured). To do: cache the value returned by the file and give it
+back on subsequent calls instead of `true`.
 
-**Cichy, NIE do naprawy:** kod wykonywany na gorze pliku wciaganego przez
-`require_once` przestaje sie wykonywac od drugiego requestu. Bez bledu, bez
-ostrzezenia:
+**Silent, NOT to fix:** code executed at the top of a file pulled in via
+`require_once` stops executing from the second request onward. No error, no
+warning:
 
-    PRZED:  req1 init_runs=1   req2 init_runs=1     req3 init_runs=1
-    PO:     req1 init_runs=1   req2 init_runs=BRAK  req3 init_runs=BRAK
+    BEFORE:  req1 init_runs=1   req2 init_runs=1     req3 init_runs=1
+    AFTER:   req1 init_runs=1   req2 init_runs=NONE  req3 init_runs=NONE
 
-To nie jest blad do usuniecia — to dokladnie ta semantyka, o ktora chodzi
-("wykonaj raz"). To jest WYMAGANIE wobec aplikacji: nic istotnego nie moze
-dziac sie jako efekt uboczny wczytania pliku. Frameworki sa tu w dobrej
-formie (bootstrap buduje obiekty i je zwraca), ale to trzeba potwierdzic na
-prawdziwym kodzie, nie na wzorcu.
+This is not a bug to remove — it is exactly the semantics intended
+("execute once"). This is a REQUIREMENT on the application: nothing
+significant may happen as a side effect of loading a file. Frameworks are in
+good shape here (bootstrap builds objects and returns them), but this has to
+be confirmed on real code, not on a pattern.
 
-### Co sie NIE zmienia
+### What does NOT change
 
-- **Opcache dalej odrzucany** przez walidacje — sprawdzone. Przy okazji
-  wspolne `included_files` w duzej mierze usuwaja powod, dla ktorego chcialoby
-  sie opcache: bootstrap kompiluje sie raz na proces, per request rekompiluje
-  sie tylko `index.php`.
-- **Statyki klas dalej przeciekaja** miedzy requestami (`Foo::$hits` roslo
-  2 -> 3 -> 4). To samo ryzyko co w Octane i Swoole.
-- `EG(symbol_table)` zostaje per request — jego rozdzielenie jest wymuszone
-  przez `zend_attach_symbol_table` (SIGABRT zmierzony w NOTES 3t).
+- **OPcache is still rejected** by validation — checked. Incidentally, shared
+  `included_files` largely removes the reason you'd want OPcache in the first
+  place: bootstrap compiles once per process, per request only `index.php`
+  gets recompiled.
+- **Class statics still leak** between requests (`Foo::$hits` grew
+  2 -> 3 -> 4). The same risk as in Octane and Swoole.
+- `EG(symbol_table)` stays per request — separating it is forced by
+  `zend_attach_symbol_table` (SIGABRT measured in NOTES 3t).
 
-### Czego ten eksperyment NIE sprawdzil
+### What this experiment did NOT check
 
-Prawdziwego Symfony ani Laravela — tylko wzorzec bootstrapu. Nie wiadomo, ile
-w realnych frameworkach jest miejsc polegajacych na wartosci zwracanej przez
-`require_once` ani na efektach ubocznych wczytania pliku. To jest nastepny
-krok i jest wykonalny od reki: binarka istnieje.
+Real Symfony or Laravel — only the bootstrap pattern. It's not known how much
+of real frameworks relies on the `require_once` return value or on side
+effects of loading a file. That's the next step and it's doable right away:
+the binary exists.
 
-### Podmiana plikow na dysku: deploy WYMAGA reloadu
+### Swapping files on disk: deploy REQUIRES a reload
 
-Zmierzone przy `FPMNG_SHARED_INCLUDES=1`, podmiana obu plikow miedzy requestami:
+Measured with `FPMNG_SHARED_INCLUDES=1`, swapping both files between requests:
 
-    req1                     entry=ENTRY-1  lib=WERSJA-1
-    req2 (po podmianie)      entry=ENTRY-2  lib=WERSJA-1   <- stan MIESZANY
-    req3                     entry=ENTRY-2  lib=WERSJA-1
-    req4 (po SIGUSR2)        entry=ENTRY-2  lib=WERSJA-2
+    req1                     entry=ENTRY-1  lib=VERSION-1
+    req2 (after the swap)    entry=ENTRY-2  lib=VERSION-1   <- MIXED state
+    req3                     entry=ENTRY-2  lib=VERSION-1
+    req4 (after SIGUSR2)     entry=ENTRY-2  lib=VERSION-2
 
-Skrypt wejsciowy jest czytany z dysku przy KAZDYM requescie, bo wykonujemy go
-bezposrednio, a nie przez `require_once`. Wszystko, co on wciaga, zostaje
-zamrozone w procesie. Po `git pull` bez reloadu dziala wiec nowy `index.php`
-na starym bootstrapie — bledy bez sensu i bez tropu.
+The entry script is read from disk on EVERY request, because we execute it
+directly, not via `require_once`. Everything it pulls in stays frozen in the
+process. So after `git pull` without a reload, the new `index.php` runs on
+the old bootstrap — nonsensical errors with no trail.
 
-To jest ZMIANA ZACHOWANIA, nie tylko nowe ograniczenie: wczesniej podmiana
-pliku z funkcja dawala glosny fatal "Cannot redeclare" przy drugim requescie,
-teraz dostaje sie cichy stary kod. Dla klas ladowanych autoloaderem
-nieswiezosc istniala juz wczesniej (klasa siedzi w tablicy procesu, autoloader
-nie jest wolany) — ta zmiana rozciaga ja na caly bootstrap.
+This is a BEHAVIOR CHANGE, not just a new limitation: previously, swapping a
+file with a function gave a loud "Cannot redeclare" fatal on the second
+request; now you get silent stale code. For classes loaded via the
+autoloader, staleness already existed before (the class sits in the process
+table, the autoloader is not called) — this change extends it to the whole
+bootstrap.
 
-Zasada do dokumentacji uzytkownika: **deploy konczy sie `SIGUSR2`**, tak samo
-jak w Octane, Swoole i RoadRunnerze. Reload jest graceful i dziala (req4).
-Alternatywa dla dev: `fiber.revalidate_freq` ponizej.
+Rule for the user documentation: **deploy ends with `SIGUSR2`**, the same as
+in Octane, Swoole and RoadRunner. Reload is graceful and works (req4). Dev
+alternative: `fiber.revalidate_freq` below.
 
-### `fiber.revalidate_freq` — worker wymienia sie sam po zmianie pliku
+### `fiber.revalidate_freq` — worker replaces itself after a file change
 
-Dyrektywa poola, sekundy, **domyslnie `0` = wylaczone**. Przy `N > 0` worker
-zapamietuje mtime/rozmiar/inode kazdego pliku w chwili, gdy silnik go
-kompiluje (hook `zend_compile_file` w `fpm_pool_coop_reval.c` — ten sam
-moment, w ktorym `opened_path` trafia do `EG(included_files)`; skrypt
-wejsciowy jest pomijany, bo i tak jest czytany z dysku per request), a co N
-sekund z petli zdarzen robi jeden przebieg `stat()` po tej tablicy. Zadnego
-`stat()` per request — koszt to (liczba plikow / N) na sekunde, niezaleznie
-od ruchu. Zmiana ktoregokolwiek pliku (mtime, rozmiar, inode po `rename`,
-albo `stat()` bledny — plik usuniety w trakcie deployu) daje NOTICE z nazwa
-pliku i **drain**: worker przestaje przyjmowac polaczenia, zamyka bezczynne
-keep-alive, konczy requesty w locie i wychodzi z kodem 0; master go wymienia
-ta sama sciezka, ktora recykluje klasyczny worker po `pm.max_requests`
-(`fpm_children_bury`, `restart_child = 1`). To NIE jest sciezka SIGQUIT
-(`fcgi_in_shutdown`), ktora porzuca requesty w locie.
+A pool directive, seconds, **default `0` = disabled**. With `N > 0` the
+worker remembers the mtime/size/inode of every file at the moment the engine
+compiles it (hook `zend_compile_file` in `fpm_pool_coop_reval.c` — the same
+moment `opened_path` lands in `EG(included_files)`; the entry script is
+skipped, since it's read from disk per request anyway), and every N seconds
+runs one `stat()` pass over that table from the event loop. No `stat()` per
+request — the cost is (number of files / N) per second, regardless of
+traffic. A change to any file (mtime, size, inode after a `rename`, or a
+failed `stat()` — file removed during deploy) produces a NOTICE with the file
+name and **drains**: the worker stops accepting connections, closes idle
+keep-alive, finishes requests in flight and exits with code 0; the master
+replaces it the same way it recycles a classic worker after
+`pm.max_requests` (`fpm_children_bury`, `restart_child = 1`). This is NOT the
+SIGQUIT path (`fcgi_in_shutdown`), which drops requests in flight.
 
-Zmierzone (2026-09-06, `pm.max_children = 1`, z `FPMNG_SHARED_INCLUDES=1`
-i bez):
+Measured (2026-09-06, `pm.max_children = 1`, with `FPMNG_SHARED_INCLUDES=1`
+and without):
 
-    freq = 1:  req1 lib=WERSJA-1 pid=2137 | podmiana | req2 (od razu) lib=WERSJA-1 pid=2137
-               req3 (po 1.5 s) lib=WERSJA-2 pid=2166 — NOTICE "lib.php changed on disk (mtime ...)"
-    w locie:   slow.php (3 s na gniezdzie) w trakcie podmiany: "worker will exit after
+    freq = 1:  req1 lib=VERSION-1 pid=2137 | swap | req2 (right away) lib=VERSION-1 pid=2137
+               req3 (after 1.5 s) lib=VERSION-2 pid=2166 — NOTICE "lib.php changed on disk (mtime ...)"
+    in flight: slow.php (3 s sleeping) during the swap: "worker will exit after
                1 request(s) in flight finish", "draining, 1 request(s) still in flight",
-               request skonczyl sie po 3.09 s z poprawna odpowiedzia; "abandoned" w logu: 0
-    freq = 0:  podmiana -> lib=WERSJA-1 ten sam pid po 2.2 s (zachowanie jak dotad)
-    freq = 2:  sweepy co 2.000 s; podmiana tuz po sweepie: +0.3 s stare, +1.3 s stare, +2.5 s nowe;
-               200 requestow w oknie -> licznik stat() rosl o 1 na sweep, nie o 200
-    fastcgi / http classic: bez zmian; dyrektywa odrzucana:
+               the request finished after 3.09 s with a correct response; "abandoned" in the log: 0
+    freq = 0:  swap -> lib=VERSION-1 same pid after 2.2 s (behavior as before)
+    freq = 2:  sweeps every 2.000 s; swap right after a sweep: +0.3 s stale, +1.3 s stale, +2.5 s fresh;
+               200 requests in the window -> stat() counter grew by 1 per sweep, not by 200
+    fastcgi / http classic: unchanged; directive rejected:
                ALERT: [pool fc] 'fiber.revalidate_freq' is not supported by pool.type = fastcgi
-    4 x fsockopen 500 ms rownolegle: 504 ms lacznie (klasyczny worker: 2017 ms)
+    4 x fsockopen 500 ms parallel: 504 ms total (classic worker: 2017 ms)
 
-Dlaczego domyslnie `0`: (1) proces sam sie zabijajacy to nowe zachowanie i ma
-byc opt-in — istniejace configi dzialaja jak dotad; (2) w produkcji sa pliki
-wczytywane przez `require`, ktore aplikacja LEGALNIE nadpisuje w trakcie pracy
-(skompilowane szablony Twig/Blade, `bootstrap/cache/*.php`, kontener DI) —
-z automatem kazdy taki zapis wymienialby workera; (3) deploy przez `rsync`
-nie jest atomowy — worker moglby wystartowac na polowie skopiowanego drzewa
-i wymienic sie jeszcze raz w nastepnym oknie. W dev `fiber.revalidate_freq = 1`
-daje "skopiowales pliki, dziala nowy kod" bez pamietania o `SIGUSR2`.
+Why `0` by default: (1) the process killing itself is new behavior and has
+to be opt-in — existing configs keep working as before; (2) in production
+there are files loaded via `require` that the application LEGITIMATELY
+overwrites while running (compiled Twig/Blade templates,
+`bootstrap/cache/*.php`, the DI container) — with the automatic version, every
+such write would replace the worker; (3) deploy via `rsync` is not atomic —
+a worker could start on half a copied tree and replace itself again in the
+next window. In dev, `fiber.revalidate_freq = 1` gives "you copied the files,
+the new code runs" without having to remember `SIGUSR2`.
 
-Ograniczenia:
+Limitations:
 
-- **Symlink-deploy (`current -> release-N`) nie jest wykrywany.**
-  `EG(included_files)` trzyma realpathy, wiec pliki starego wydania sie nie
-  zmieniaja — przelaczenie dowiazania nie rusza ich mtime. Tam nadal
-  `SIGUSR2`.
-- W trakcie drain nowe polaczenia czekaja w backlogu gniazda az wystartuje
-  nastepca (przy `pm.max_children = 1` tyle, ile trwa najdluzszy request
-  w locie; przy wiekszej liczbie dzieci przejmuja je pozostale). Bezczynne
-  keep-alive bramki sa zamykane od razu — bramka traktuje to jak EOF po
-  `pm.max_requests` i laczy sie na nowo; request, ktory bramka wyslala
-  dokladnie w tym oknie, przepada tak samo jak dzis przy `pm.max_requests`.
-- Request zawieszony poza schedulerem (`Fiber::suspend()` w glownym fiberze,
-  juz dzis logowany jako "dropping it") nigdy nie zejdzie z licznika w locie,
-  wiec drain sie nie skonczy; tick loguje wtedy co sekunde "draining, N
-  request(s) still in flight".
-- Pierwszy stan pliku wygrywa: `stat()` po sciezce robimy tuz PO pierwszej
-  kompilacji; podmiana w tym mikrosekundowym oknie zapisze nowy stan przy
-  starym kodzie.
-- Sledzone sa tylko pliki przechodzace przez `zend_compile_file`: `eval()`,
-  dane czytane `file_get_contents` (konfiguracja YAML/JSON) i szablony
-  nie-PHP nie sa widziane.
+- **Symlink-deploy (`current -> release-N`) is not detected.**
+  `EG(included_files)` keeps realpaths, so the files of the old release don't
+  change — flipping the symlink doesn't touch their mtime. `SIGUSR2` is still
+  needed there.
+- During drain, new connections wait in the socket backlog until the
+  successor starts (with `pm.max_children = 1`, as long as the longest
+  request in flight takes; with more children, the rest pick up the slack).
+  Idle gateway keep-alive connections are closed immediately — the gateway
+  treats this like EOF after `pm.max_requests` and reconnects; a request the
+  gateway sent exactly in that window is lost the same way it is today with
+  `pm.max_requests`.
+- A request suspended outside the scheduler (`Fiber::suspend()` in the main
+  fiber, already logged today as "dropping it") never comes off the
+  in-flight counter, so drain never finishes; the tick then logs every
+  second "draining, N request(s) still in flight".
+- First file state wins: we `stat()` the path right AFTER the first
+  compilation; a swap within that microsecond window records the new state
+  against the old code.
+- Only files going through `zend_compile_file` are tracked: `eval()`, data
+  read via `file_get_contents` (YAML/JSON configuration) and non-PHP
+  templates are not seen.
 
-## Polaczenia trwale: ZABLOKOWANE (zmierzone na poligonie)
+## Persistent connections: BLOCKED (measured on the test box)
 
-`EG(persistent_list)` jest PROCESOWA, a rdzen coop jej nie podmienia przy
-przelaczaniu requestow — wiec dwa requesty w locie moga dostac ten sam socket.
-Protokoly bazodanowe sa naprzemienne (zapytanie-odpowiedz), wiec to nie jest
-spowolnienie, tylko rozjechany protokol.
+`EG(persistent_list)` is PROCESS-WIDE, and the coop core does not swap it when
+switching requests — so two requests in flight can get the same socket.
+Database protocols are request-response, so this is not a slowdown, it's a
+protocol gone out of sync.
 
-**Zmierzone** (Ubuntu 26.04, epoll, jeden worker, 4 rownolegle requesty, ten sam
+**Measured** (Ubuntu 26.04, epoll, one worker, 4 parallel requests, same
 DSN, MySQL 8):
 
-    PDO z ATTR_PERSISTENT, przebieg 1:  3 requesty WISZA do timeoutu klienta (60 s),
-                                        1 konczy sie poprawnie
-    PDO z ATTR_PERSISTENT, przebieg 2:  3 x HTTP 502, czwarty
-                                        "PDOException: Trying to access array offset on false",
-                                        worker padl i zostal wymieniony
-    PDO bez persistent, ten sam test:   1,019 s, czysto
+    PDO with ATTR_PERSISTENT, run 1:  3 requests HANG until the client timeout (60 s),
+                                       1 finishes correctly
+    PDO with ATTR_PERSISTENT, run 2:  3 x HTTP 502, the fourth
+                                       "PDOException: Trying to access array offset on false",
+                                       the worker died and was replaced
+    PDO without persistent, same test: 1,019 s, clean
 
-    mysqli z prefiksem "p:":            NIE psul sie — cztery ROZNE identyfikatory
-                                        sesji (215-218), tag_ok=true, 1,017 s
+    mysqli with "p:" prefix:          did NOT break — four DIFFERENT session
+                                       identifiers (215-218), tag_ok=true, 1,017 s
 
-Czyli bezpieczenstwo zalezy od tego, czy dany klient pilnuje zajetosci
-polaczenia: PDO nie pilnuje, mysqli pilnuje. Z warstwy transportu tego nie
-widac i nie kontrolujemy tego, wiec **blokujemy oba**. Lepiej odmowic glosno
-przy nawiazywaniu polaczenia niz rozjechac protokol w losowym requescie.
+So safety depends on whether a given client tracks connection ownership: PDO
+does not, mysqli does. You can't see this from the transport layer and we
+don't control it, so **we block both**. Better to refuse loudly when opening
+the connection than to desync the protocol in a random request.
 
-### Gdzie i dlaczego tam
+### Where, and why there
 
-W fabryce transportu (`fpm_pool_fiber_xport.c`), nie w `validate()` — persistent
-to atrybut polaczenia podawany w kodzie aplikacji, a nie dyrektywa konfiguracji,
-wiec w momencie walidacji poola nie ma czego sprawdzac. Odmowa dotyczy tylko
-executora fiber (`fpm_pool_fiber_can_wait()`); `fastcgi` i `http/classic` sa
-nietkniete — zmierzone, `classic` z persistent dalej dziala jak dotad.
+In the transport factory (`fpm_pool_fiber_xport.c`), not in `validate()` —
+persistent is a connection attribute given in application code, not a
+configuration directive, so there is nothing to check at pool-validation
+time. The refusal applies only to the fiber executor
+(`fpm_pool_fiber_can_wait()`); `fastcgi` and `http/classic` are untouched —
+measured, `classic` with persistent still works as before.
 
-### Komunikat: dwa odbiorcy
+### The message: two recipients
 
-Programista dostaje `E_WARNING` z wyjasnieniem. **Ale PDO lapie blad polaczenia
-i rzuca wlasny `PDOException: SQLSTATE[HY000] [2002] Unknown error while
-connecting`, wiec do autora kodu nasze ostrzezenie NIE dociera** — zmierzone.
-Dlatego operator dostaje osobny `ZLOG_NOTICE` w logu workera, raz na proces.
+The developer gets an `E_WARNING` with an explanation. **But PDO catches the
+connection error and throws its own `PDOException: SQLSTATE[HY000] [2002]
+Unknown error while connecting`, so our warning does NOT reach the code's
+author** — measured. That's why the operator gets a separate `ZLOG_NOTICE` in
+the worker log, once per process.
 
-**`persistent_id` NIE jest logowany**: PDO sklada ten klucz z DSN wraz
-z uzytkownikiem i haslem, wiec trafiloby to do error logu.
+**`persistent_id` is NOT logged**: PDO builds this key from the DSN together
+with the username and password, so it would end up in the error log.
 
-### Regresje sprawdzone
+### Regressions checked
 
-    pdo nietrwaly N=4       1,018 s
-    mysqli nietrwaly N=4    1,018 s
-    phpredis N=4 (BLPOP)    1,116 s
-    classic z persistent    2,019 s (bez zmian)
+    pdo non-persistent N=4    1,018 s
+    mysqli non-persistent N=4 1,018 s
+    phpredis N=4 (BLPOP)      1,116 s
+    classic with persistent   2,019 s (unchanged)
 
-## ODRZUCONE: executor fiber wylacznie w ZTS, kontekst TSRM per request
+## REJECTED: fiber executor only in ZTS, per-request TSRM context
 
-Pomysl: skoro w ZTS wszystkie globale (`EG`, `SG`, `PG` i globale KAZDEGO
-modulu, w tym `ps_globals`) sa przesunieciami w bloku zasobow watku, to gdyby
-kazdy request w locie mial wlasny blok, jednym ruchem znikaja sesje per
-request, wpisy ini, statyki klas frameworka (`Container::$instance`,
-`Facade::$app`) i cala sciana `Cannot redeclare` / `require_once` — bo kazdy
-request bylby swiezym interpreterem.
+Idea: since in ZTS all globals (`EG`, `SG`, `PG` and the globals of EVERY
+module, including `ps_globals`) are offsets in a thread's resource block, if
+every request in flight had its own block, sessions per request, ini
+entries, framework class statics (`Container::$instance`, `Facade::$app`) and
+the whole "Cannot redeclare" / `require_once` wall would disappear in one
+move — because every request would be a fresh interpreter.
 
-**Sprawdzone eksperymentalnie i odrzucone.** Pelny raport z surowymi wynikami:
-`docs/spike-tsrm-context.md`. Skrot:
+**Checked experimentally and rejected.** Full report with raw results:
+`docs/spike-tsrm-context.md`. Summary:
 
-- Przelaczanie przez reczne `TSRMLS_CACHE` DZIALA dla kodu wkompilowanego
-  statycznie (zmierzone na `EG(precision)`), ale nie ma settera dla sciezki
-  `tsrm_get_ls_cache()` — przelaczanie jest wiec jednokierunkowe i niepelne.
-- Rozszerzenie ladowane DYNAMICZNIE ma **fizycznie oddzielna kopie**
-  `_tsrm_ls_cache`, zamrozona przy starcie procesu. `readelf -sW` pokazuje ten
-  symbol jako `TLS LOCAL` osobno w `sapi/cli/php` i w
-  `ext/session/.libs/session.so`. Zadna podmiana w binarce glownej nie ma
-  prawa byc przez nie widziana — i to bez bledu kompilacji i bez ostrzezenia.
-- Blok utworzony przez `ts_resource_ex(0, &fake_tid)` powstaje, ale **nie jest
-  dzialajacym interpreterem**: wykonanie w nim nawet trywialnego pliku PHP
-  konczy sie segfaultem. API, ktore robilo to poprawnie
-  (`tsrm_set_interpreter_context()`), usunieto w PHP 8 (`bd73607b9e4`).
-- Niezaleznie od powyzszego build ZTS `sapi/fpmng` i tak dzis nie przechodzi:
-  `fpm_pool_coop.c` uzywa golych `sapi_globals`/`output_globals`, ktore w ZTS
-  sa makrami, nie symbolami (8 wystapien) — spojne z tym, ze
-  `fpm_coop_validate()` odrzuca ZTS juz w runtime.
+- Switching via manual `TSRMLS_CACHE` DOES WORK for code compiled statically
+  (measured on `EG(precision)`), but there is no setter for the
+  `tsrm_get_ls_cache()` path — so switching is one-directional and
+  incomplete.
+- A DYNAMICALLY loaded extension has a **physically separate copy** of
+  `_tsrm_ls_cache`, frozen at process start. `readelf -sW` shows this symbol
+  as `TLS LOCAL` separately in `sapi/cli/php` and in
+  `ext/session/.libs/session.so`. No swap in the main binary can possibly be
+  seen by it — with no compile error and no warning.
+- A block created by `ts_resource_ex(0, &fake_tid)` gets created, but it is
+  **not a working interpreter**: executing even a trivial PHP file in it ends
+  in a segfault. The API that did this correctly
+  (`tsrm_set_interpreter_context()`) was removed in PHP 8 (`bd73607b9e4`).
+- Regardless of the above, a ZTS build of `sapi/fpmng` does not even build
+  today: `fpm_pool_coop.c` uses bare `sapi_globals`/`output_globals`, which in
+  ZTS are macros, not symbols (8 occurrences) — consistent with
+  `fpm_coop_validate()` already rejecting ZTS at runtime.
 
-Koszt pamieci pustego bloku zmierzono na ~285-292 kB; koszt z zaladowanym
-frameworkiem NIE zostal zmierzony, bo do tego nigdy nie doszlo.
+The memory cost of an empty block was measured at ~285-292 kB; the cost with
+a loaded framework was NOT measured, because it never got that far.

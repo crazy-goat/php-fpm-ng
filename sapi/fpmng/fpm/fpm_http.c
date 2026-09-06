@@ -1788,7 +1788,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		if (wp->listen_address_domain != FPM_AF_INET && !gw->http_listen_override) {
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
-		free(gw->front_controller);
+			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->pool);
 			free(gw->listen_address);
@@ -1800,7 +1800,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, "http.allowed_clients", gw->allowed_clients, &gw->acl) != 0) {
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
-		free(gw->front_controller);
+			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
@@ -1814,7 +1814,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
-		free(gw->front_controller);
+			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);
@@ -1830,7 +1830,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
-		free(gw->front_controller);
+			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->pool);

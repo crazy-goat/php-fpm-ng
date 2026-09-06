@@ -3,15 +3,22 @@
 namespace App\Controller;
 
 use App\Entity\Item;
+use App\Message\ProbeMessage;
+use App\Probe\DeployMarker;
 use App\Probe\Gate;
+use App\Probe\ProbeFormType;
+use App\Probe\ProbeInput;
 use Doctrine\DBAL\Connection;
 use Doctrine\ORM\EntityManagerInterface;
 use Symfony\Bundle\FrameworkBundle\Controller\AbstractController;
 use Symfony\Component\Cache\Adapter\RedisAdapter;
+use Symfony\Component\Form\FormFactoryInterface;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpKernel\KernelInterface;
+use Symfony\Component\Messenger\MessageBusInterface;
+use Symfony\Component\Messenger\Stamp\HandledStamp;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Contracts\Cache\CacheInterface;
 
@@ -146,6 +153,96 @@ final class ProbeController extends AbstractController
         ] + $this->common($request, $stack, $kernel));
     }
 
+    #[Route('/twig', name: 'twig')]
+    public function twig(Request $request, RequestStack $stack, KernelInterface $kernel): JsonResponse
+    {
+        $marker = (string) $request->query->get('marker', 'twig');
+        $value = (string) $request->query->get('value', 'value');
+        $user = $this->getUser()?->getUserIdentifier() ?? 'anonymous';
+        $html = $this->renderView('probe.html.twig', [
+            'marker' => $marker,
+            'value' => $value,
+            'gate' => (string) $request->query->get('gate', ''),
+            'participant' => $user.'-'.bin2hex(random_bytes(3)),
+        ]);
+
+        return new JsonResponse([
+            'user' => $user,
+            'marker' => $marker,
+            'value' => $value,
+            'html' => $html,
+            'gate_released' => str_contains($html, 'data-gate="released"'),
+            'ok' => str_contains($html, 'data-user="'.$user.'"')
+                && str_contains($html, 'data-marker="'.$marker.'"')
+                && str_contains($html, 'data-value="'.$value.'"')
+                && str_contains($html, 'data-gate="released"'),
+        ] + $this->common($request, $stack, $kernel));
+    }
+
+    #[Route('/form', name: 'form')]
+    public function form(
+        Request $request,
+        FormFactoryInterface $formFactory,
+        Gate $gate,
+        RequestStack $stack,
+        KernelInterface $kernel,
+    ): JsonResponse {
+        $name = (string) $request->query->get('name', '');
+        $input = new ProbeInput();
+        $form = $formFactory->create(ProbeFormType::class, $input);
+        $form->submit(['name' => $name]);
+        $valid = $form->isSubmitted() && $form->isValid();
+        $errors = [];
+        foreach ($form->getErrors(true) as $error) {
+            $errors[] = $error->getMessage();
+        }
+        $gateReleased = $gate->wait(
+            (string) $request->query->get('gate', ''),
+            $name.'-'.bin2hex(random_bytes(3)),
+        );
+
+        return new JsonResponse([
+            'submitted_name' => $input->name,
+            'valid' => $valid,
+            'errors' => $errors,
+            'gate_released' => $gateReleased,
+            'ok' => $gateReleased && $valid === ($name !== ''),
+        ] + $this->common($request, $stack, $kernel));
+    }
+
+    #[Route('/messenger', name: 'messenger')]
+    public function messenger(
+        Request $request,
+        MessageBusInterface $bus,
+        RequestStack $stack,
+        KernelInterface $kernel,
+    ): JsonResponse {
+        $value = (string) $request->query->get('value', 'message');
+        $envelope = $bus->dispatch(new ProbeMessage(
+            $value,
+            (string) $request->query->get('gate', ''),
+            $value.'-'.bin2hex(random_bytes(3)),
+        ));
+        $handled = $envelope->last(HandledStamp::class);
+        $result = $handled instanceof HandledStamp ? $handled->getResult() : null;
+
+        return new JsonResponse([
+            'value' => $value,
+            'handled' => $result,
+            'ok' => $result === 'handled:'.$value.':released',
+        ] + $this->common($request, $stack, $kernel));
+    }
+
+    #[Route('/deploy', name: 'deploy')]
+    public function deploy(Request $request, RequestStack $stack, KernelInterface $kernel): JsonResponse
+    {
+        return new JsonResponse([
+            'version' => DeployMarker::VALUE,
+            'pid' => getmypid(),
+            'ok' => true,
+        ] + $this->common($request, $stack, $kernel));
+    }
+
     #[Route('/who', name: 'who')]
     public function who(
         Request $request,
@@ -161,6 +258,7 @@ final class ProbeController extends AbstractController
     private function common(Request $request, RequestStack $stack, KernelInterface $kernel): array
     {
         self::$hits++;
+        $rss = self::rssKb();
 
         return [
             'pid' => getmypid(),
@@ -171,9 +269,32 @@ final class ProbeController extends AbstractController
             'request_oid' => spl_object_id($request),
             'stack_depth' => $stack->getParentRequest() === null ? 1 : 2,
             'memory_bytes' => memory_get_usage(true),
+            'rss_kb' => $rss,
             'included_files' => count(get_included_files()),
             'output_buffer_level' => ob_get_level(),
             'environment' => $kernel->getEnvironment(),
         ];
+    }
+
+    private static function rssKb(): ?int
+    {
+        // Linux exposes VmRSS in /proc/self/status. macOS has no /proc; the
+        // getrusage() peak in ru_maxrss is reported in bytes there and in
+        // KiB on Linux, so normalize before the runner asserts on it.
+        // The /proc probe is gated on is_file(): a failed fopen must not
+        // surface as an error inside the pool (an error here is fatal for
+        // the whole response, suppressed or not).
+        if (is_file('/proc/self/status')) {
+            $status = file_get_contents('/proc/self/status');
+            if (is_string($status) && preg_match('/^VmRSS:\s+(\d+)\s+kB$/m', $status, $matches)) {
+                return (int) $matches[1];
+            }
+        }
+        $peak = getrusage()['ru_maxrss'] ?? 0;
+        if (!is_int($peak) || $peak <= 0) {
+            return null;
+        }
+
+        return str_starts_with(php_uname('s'), 'Darwin') ? intdiv($peak, 1024) : $peak;
     }
 }

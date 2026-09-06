@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Symfony fiber probe</title></head>
+<body>
+    <main
+        data-user="{{ app.user ? app.user.userIdentifier : 'anonymous' }}"
+        data-marker="{{ marker }}"
+        data-value="{{ value }}"
+        data-gate="{{ probe_gate(gate, participant) }}"
+    >{{ marker }}:{{ value }}</main>
+</body>
+</html>

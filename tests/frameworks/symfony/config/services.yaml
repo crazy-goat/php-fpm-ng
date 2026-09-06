@@ -17,3 +17,6 @@ services:
     App\Probe\Gate:
         arguments:
             $prefix: '%env(REDIS_PREFIX)%'
+
+    App\Twig\ProbeExtension:
+        tags: ['twig.extension']

@@ -23,7 +23,7 @@ final class Gate
         $release = $this->prefix.'gate:'.$name.':release';
 
         $redis->rpush($ready, $participant);
-        $result = $redis->blpop([$release], 30);
+        $result = $redis->blpop([$release], 90);
 
         if (method_exists($redis, 'close')) {
             $redis->close();

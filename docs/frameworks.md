@@ -378,8 +378,14 @@ worker. The probe configured no `fiber.isolate_statics` entries and did not need
 any: all tested request, application, route-collector, and default-container
 observations stayed isolated. No Slim-specific C support was added.
 
-This is not a claim that every Slim integration is supported. PHP-DI and route
-cache were not provisioned, and the broader unmeasured matrix is listed below.
+The two remaining scenario rows have since been measured with the same binary
+and settings. With `SLIM_CONTAINER=php-di` (`php-di/php-di` `7.1.1`), 8/8
+concurrent requests used distinct PHP-DI containers and distinct container
+services. With `SLIM_ROUTE_CACHE=1` (Slim's route collector cache file), the
+cached routes returned correct data under concurrency and the cache file's
+fingerprint (device, inode, size, mtime, content hash) was unchanged before and
+after the run. The final combined run reported **11 PASS, 0 ERROR, 0 NOT
+MEASURED**. Neither mode needed `fiber.isolate_statics` entries.
 
 ## Binary and command
 
@@ -428,17 +434,20 @@ Assertions were on response data, not only HTTP status.
 | PSR-7 request body | 8/8 own JSON marker/hash and complete 64 KiB body | **PASS** |
 | PSR-7 response body | 8/8 exact `start-N`/`end-N` stream output | **PASS** |
 | middleware stack | 8/8 own middleware id and one hit | **PASS** |
+| container: PHP-DI (`SLIM_CONTAINER=php-di`) | 8/8 distinct PHP-DI containers and distinct container services per request | **PASS** |
+| route cache (`SLIM_ROUTE_CACHE=1`) | cached routes returned correct data under concurrency; cache fingerprint unchanged during the run | **PASS** |
 | error middleware | 8/8 HTTP 500 responses contained only their own error tag | **PASS** |
 | PHP-DI container variant | no PHP-DI probe provisioned | **NOT MEASURED** |
 | route cache enabled | route-cache mode has not been enabled | **NOT MEASURED** |
 
-Final runner summary: **PASS=9, ERROR=0, NOT MEASURED=2**. An `ERROR` remains a
-failure in `bin/run.php` and makes the command exit non-zero; no failing scenario
-was deleted or weakened.
+Final runner summary: **PASS=11, ERROR=0, NOT MEASURED=0** (the PHP-DI and
+route-cache scenarios report NOT MEASURED when their mode is not selected; the
+final combined run selected both). An `ERROR` remains a failure in `bin/run.php`
+and makes the command exit non-zero; no failing scenario was deleted or
+weakened.
 
 ## What remains unmeasured
 
-- PHP-DI and Slim route-cache modes;
 - a classic/non-fiber baseline and a separate negative-control comparison;
 - other Slim 4 minors and other PSR-7 implementations;
 - `pm.max_children > 1` and `fiber.revalidate_freq`;

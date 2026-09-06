@@ -2,7 +2,10 @@
 
 declare(strict_types=1);
 
-$baseUrl = rtrim(getenv('SLIM_BASE_URL') ?: 'http://127.0.0.1:22626/index.php', '/');
+$baseUrl = rtrim(getenv('SLIM_BASE_URL') ?: 'http://127.0.0.1:22626', '/');
+$containerMode = getenv('SLIM_CONTAINER') ?: 'none';
+$routeCacheEnabled = getenv('SLIM_ROUTE_CACHE') === '1';
+$routeCacheFile = getenv('SLIM_ROUTE_CACHE_FILE') ?: '';
 $parallel = 8;
 $results = [];
 
@@ -106,12 +109,34 @@ function checkContainerIdentity(array $rows): void
     if ($mode === 'none') {
         foreach ($rows as $row) {
             checkCondition(($row['container_oid'] ?? null) === null, 'container_oid was set without a container');
+            checkCondition(($row['container_service_oid'] ?? null) === null, 'container service was set without a container');
         }
 
         return;
     }
 
     checkUnique($rows, 'container_oid');
+    checkUnique($rows, 'container_service_oid');
+}
+
+function cacheFingerprint(string $file): array
+{
+    clearstatcache(true, $file);
+    $stat = stat($file);
+    checkCondition(is_array($stat), "route cache is missing: $file");
+    $contents = file_get_contents($file);
+    checkCondition(is_string($contents) && str_starts_with($contents, '<?php return '), 'route cache is not a FastRoute PHP cache file');
+    $dispatchData = require $file;
+    checkCondition(is_array($dispatchData), 'route cache did not return dispatch data');
+
+    return [
+        'device' => $stat['dev'],
+        'inode' => $stat['ino'],
+        'size' => $stat['size'],
+        'mtime' => $stat['mtime'],
+        'ctime' => $stat['ctime'],
+        'hash' => hash('sha256', $contents),
+    ];
 }
 
 function recordResult(string $name, callable $test): void
@@ -371,13 +396,60 @@ recordResult('error-middleware', static function () use ($baseUrl, $parallel): s
     return '8/8 error responses kept their own exception';
 });
 
-$notMeasured = [
-    'container-php-di' => 'PHP-DI variant is not provisioned yet',
-    'route-cache' => 'Slim route cache has not been enabled yet',
-];
-foreach ($notMeasured as $name => $reason) {
-    $results[$name] = 'NOT MEASURED';
-    echo "[NOT MEASURED] $name — $reason\n";
+if ($containerMode === 'php-di') {
+    recordResult('container-php-di', static function () use ($parallelSpecs): string {
+        $responses = requestBatch($parallelSpecs(
+            static fn (int $id): string => "/identity?sleep=1&id=$id",
+        ));
+        $rows = array_map(static fn (array $response): array => getJson($response), $responses);
+        foreach ($rows as $row) {
+            checkCondition(($row['container_mode'] ?? null) === 'psr-container', 'PHP-DI container was not attached to Slim');
+            checkCondition(is_int($row['container_service_oid'] ?? null), 'PHP-DI service identity is missing');
+        }
+        checkContainerIdentity($rows);
+
+        return '8/8 concurrent requests used distinct PHP-DI containers and services';
+    });
+} else {
+    $results['container-php-di'] = 'NOT MEASURED';
+    echo "[NOT MEASURED] container-php-di — run with SLIM_CONTAINER=php-di to measure PHP-DI\n";
+}
+
+if ($routeCacheEnabled) {
+    recordResult('route-cache', static function () use ($baseUrl, $parallel, $parallelSpecs, $routeCacheFile): string {
+        checkCondition($routeCacheFile !== '', 'route cache file path is missing');
+        $before = cacheFingerprint($routeCacheFile);
+
+        $identityResponses = requestBatch($parallelSpecs(
+            static fn (int $id): string => "/identity?sleep=1&id=$id",
+        ));
+        $identityRows = [];
+        foreach ($identityResponses as $id => $response) {
+            $row = getJson($response);
+            checkCondition(($row['uri'] ?? null) === "/identity?sleep=1&id=$id", "identity route $id was not selected");
+            $identityRows[] = $row;
+        }
+        checkUnique($identityRows, 'request_oid');
+        checkUnique($identityRows, 'route_collector_oid');
+
+        $mixSpecs = [];
+        for ($id = 1; $id <= $parallel; $id++) {
+            $mixSpecs[$id] = ['url' => "$baseUrl/mix?id=$id&sleep=1"];
+        }
+        foreach (requestBatch($mixSpecs) as $id => $response) {
+            $row = getJson($response);
+            checkCondition(($row['ok'] ?? false) === true, "cached route $id returned incorrect data");
+            checkCondition((int) ($row['id'] ?? 0) === $id, "cached route $id returned the wrong id");
+        }
+
+        $after = cacheFingerprint($routeCacheFile);
+        checkCondition($before === $after, 'route cache changed during concurrent requests');
+
+        return 'route data stayed correct and the cache fingerprint was unchanged';
+    });
+} else {
+    $results['route-cache'] = 'NOT MEASURED';
+    echo "[NOT MEASURED] route-cache — run with SLIM_ROUTE_CACHE=1 to measure Slim route caching\n";
 }
 
 $counts = array_count_values($results);

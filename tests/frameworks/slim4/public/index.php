@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use DI\ContainerBuilder;
 use Predis\Client as RedisClient;
 use Psr\Container\ContainerInterface;
 use Psr\Http\Message\ResponseInterface;
@@ -12,13 +13,37 @@ use Slim\Psr7\Response;
 
 require __DIR__ . '/../vendor/autoload.php';
 
-$app = AppFactory::create();
+$containerMode = getenv('SLIM_CONTAINER') ?: 'none';
+$container = null;
+$containerService = null;
+if ($containerMode === 'php-di') {
+    $containerBuilder = new ContainerBuilder();
+    $containerBuilder->addDefinitions([
+        'slim4.probe.identity' => static fn (): object => new stdClass(),
+    ]);
+    $container = $containerBuilder->build();
+    $containerService = $container->get('slim4.probe.identity');
+    $app = AppFactory::createFromContainer($container);
+} elseif ($containerMode === 'none') {
+    $app = AppFactory::create();
+} else {
+    throw new RuntimeException("unsupported Slim container mode: $containerMode");
+}
+
+if (getenv('SLIM_ROUTE_CACHE') === '1') {
+    $routeCacheFile = getenv('SLIM_ROUTE_CACHE_FILE');
+    if ($routeCacheFile === false || $routeCacheFile === '') {
+        throw new RuntimeException('SLIM_ROUTE_CACHE_FILE is required when route cache is enabled');
+    }
+    $app->getRouteCollector()->setCacheFile($routeCacheFile);
+}
+
 $app->addRoutingMiddleware();
 $app->addErrorMiddleware(true, true, true);
 
 $middlewareId = bin2hex(random_bytes(4));
 
-$app->add(static function (
+$app->add(function (
     ServerRequestInterface $request,
     RequestHandlerInterface $handler
 ) use ($middlewareId): ResponseInterface {
@@ -29,7 +54,7 @@ $app->add(static function (
     return $handler->handle($request);
 });
 
-$app->add(static function (
+$app->add(function (
     ServerRequestInterface $request,
     RequestHandlerInterface $handler
 ): ResponseInterface {
@@ -114,7 +139,7 @@ $newPdo = static function (): PDO {
     );
 };
 
-$common = static function (ServerRequestInterface $request) use ($app): array {
+$common = static function (ServerRequestInterface $request) use ($app, $containerService): array {
     $container = $app->getContainer();
 
     return [
@@ -125,6 +150,7 @@ $common = static function (ServerRequestInterface $request) use ($app): array {
         'route_collector_oid' => spl_object_id($app->getRouteCollector()),
         'container_oid' => $container instanceof ContainerInterface ? spl_object_id($container) : null,
         'container_mode' => $container instanceof ContainerInterface ? 'psr-container' : 'none',
+        'container_service_oid' => is_object($containerService) ? spl_object_id($containerService) : null,
         'middleware_id' => $request->getAttribute('slim_probe_middleware_id'),
         'middleware_hits' => $request->getAttribute('slim_probe_middleware_hits'),
         'session_user' => $_SESSION['user'] ?? null,
@@ -134,7 +160,7 @@ $common = static function (ServerRequestInterface $request) use ($app): array {
     ];
 };
 
-$app->get('/health', static function (
+$app->get('/health', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common): ResponseInterface {
@@ -144,7 +170,7 @@ $app->get('/health', static function (
     ] + $common($request));
 });
 
-$app->get('/identity', static function (
+$app->get('/identity', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue, $suspend): ResponseInterface {
@@ -153,7 +179,7 @@ $app->get('/identity', static function (
     return $json($response, $common($request));
 });
 
-$app->get('/mix', static function (
+$app->get('/mix', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue, $newPdo, $newRedis): ResponseInterface {
@@ -193,7 +219,7 @@ $app->get('/mix', static function (
     ] + $common($request));
 });
 
-$app->get('/session', static function (
+$app->get('/session', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue, $suspend): ResponseInterface {
@@ -218,7 +244,7 @@ $app->get('/session', static function (
     ] + $common($request));
 });
 
-$app->get('/login', static function (
+$app->get('/login', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue): ResponseInterface {
@@ -231,7 +257,7 @@ $app->get('/login', static function (
     ] + $common($request));
 });
 
-$app->get('/me', static function (
+$app->get('/me', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue, $suspend): ResponseInterface {
@@ -242,7 +268,7 @@ $app->get('/me', static function (
     ] + $common($request));
 });
 
-$app->post('/body', static function (
+$app->post('/body', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $suspend, $queryValue): ResponseInterface {
@@ -262,7 +288,7 @@ $app->post('/body', static function (
     ] + $common($request));
 });
 
-$app->get('/response-stream', static function (
+$app->get('/response-stream', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($queryValue, $suspend): ResponseInterface {
@@ -275,7 +301,7 @@ $app->get('/response-stream', static function (
     return $response->withHeader('Content-Type', 'text/plain');
 });
 
-$app->get('/middleware', static function (
+$app->get('/middleware', function (
     ServerRequestInterface $request,
     ResponseInterface $response
 ) use ($json, $common, $queryValue, $suspend): ResponseInterface {
@@ -284,7 +310,7 @@ $app->get('/middleware', static function (
     return $json($response, $common($request));
 });
 
-$app->get('/error', static function (
+$app->get('/error', function (
     ServerRequestInterface $request
 ) use ($queryValue, $suspend): never {
     $tag = (string) $queryValue($request, 'tag', 'unknown');

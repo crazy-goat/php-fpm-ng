@@ -2,9 +2,10 @@
 
 **Priority:** medium. Slim 4 is the framework most likely to work with no special
 configuration at all; this task records the first repository-owned measurement.
-**Status:** in progress. The repository probe has measured the core and listed
-Slim-specific scenarios below on the current-main fiber build. The unmeasured
-rows remain explicitly open; the result is evidence, not an expectation.
+**Status:** in progress. The repository probe has measured the core and all
+listed Slim-specific scenarios below on the current-main fiber build. Broader
+controls and integrations remain explicitly open; the result is evidence, not an
+expectation.
 
 ## Why it is worth testing
 
@@ -118,11 +119,12 @@ is not reproducible.
 The repository probe under `tests/frameworks/slim4/` ran against the current-main
 fiber build with Slim `4.15.3`, `slim/psr7` `1.8.0`, and `predis/predis` `3.6.0`.
 With `pool.executor = fiber`, `FPMNG_SHARED_INCLUDES=1`, `pm.max_children = 1`,
-MySQL database `slim4`, and Redis database `2`, the final run reported **9 PASS,
-0 ERROR, and 2 NOT MEASURED**. The nine passing rows cover the shared-includes
-entry script, `/mix`, two session rounds, the authenticated route, object
-identity, request and response PSR-7 streams, middleware state, and error
-middleware.
+MySQL database `slim4`, and Redis database `2`, the final combined run
+(`SLIM_CONTAINER=php-di SLIM_ROUTE_CACHE=1`) reported **11 PASS, 0 ERROR, and
+0 NOT MEASURED**. The passing rows cover the shared-includes entry script,
+`/mix`, two session rounds, the authenticated route, object identity, request
+and response PSR-7 streams, middleware state, error middleware, the PHP-DI
+container variant, and Slim route-cache mode.
 
 This is a conditional **YES** for the measured Slim 4 probe: the stock
 `public/index.php` survives repeated shared-includes requests, and no
@@ -130,7 +132,12 @@ This is a conditional **YES** for the measured Slim 4 probe: the stock
 runner uses the HTTP gateway's bare front-controller routes; no Slim-specific C
 support was added.
 
-The PHP-DI container variant and route-cache mode remain **NOT MEASURED**. Also
+The PHP-DI container variant and route-cache mode are **PASS**: with
+`SLIM_CONTAINER=php-di` eight concurrent requests each used a distinct PHP-DI
+container and a distinct container service (`php-di/php-di` `7.1.1`), and with
+`SLIM_ROUTE_CACHE=1` cached routing stayed correct under concurrency while the
+`$app->getRouteCollector()->setCacheFile()` cache file's fingerprint (device,
+inode, size, mtime, content hash) was unchanged before and after the run. Also
 not measured are negative-control/classic comparisons, other Slim or PSR-7
 versions, `pm.max_children > 1`, `fiber.revalidate_freq`, and broader framework
 features outside this probe. Task 026 remains in progress until the unmeasured

@@ -7,6 +7,18 @@ PHP=${PHP:-php}
 FPMNG=${FPMNG:-php-fpm-ng}
 HTTP_PORT=${HTTP_PORT:-22626}
 FCGI_PORT=${FCGI_PORT:-22625}
+SLIM_CONTAINER=${SLIM_CONTAINER:-none}
+SLIM_ROUTE_CACHE=${SLIM_ROUTE_CACHE:-0}
+SLIM_ROUTE_CACHE_FILE=${SLIM_ROUTE_CACHE_FILE:-$RUN_DIR/route-cache.php}
+
+case "$SLIM_CONTAINER" in
+    none|php-di) ;;
+    *) echo "unsupported SLIM_CONTAINER: $SLIM_CONTAINER" >&2; exit 2 ;;
+esac
+case "$SLIM_ROUTE_CACHE" in
+    0|1) ;;
+    *) echo "SLIM_ROUTE_CACHE must be 0 or 1" >&2; exit 2 ;;
+esac
 
 if [ ! -f "$ROOT/vendor/autoload.php" ]; then
     echo "Slim 4 dependencies are missing; run composer install in $ROOT" >&2
@@ -14,6 +26,9 @@ if [ ! -f "$ROOT/vendor/autoload.php" ]; then
 fi
 
 mkdir -p "$RUN_DIR/sessions"
+if [ "$SLIM_ROUTE_CACHE" = 1 ]; then
+    rm -f "$SLIM_ROUTE_CACHE_FILE"
+fi
 
 cat > "$RUN_DIR/php.ini" <<INI
 display_errors=1
@@ -47,6 +62,9 @@ php_admin_flag[opcache.enable] = off
 php_admin_value[max_execution_time] = 0
 catch_workers_output = yes
 env[FPMNG_SHARED_INCLUDES] = 1
+env[SLIM_CONTAINER] = "$SLIM_CONTAINER"
+env[SLIM_ROUTE_CACHE] = "$SLIM_ROUTE_CACHE"
+env[SLIM_ROUTE_CACHE_FILE] = "$SLIM_ROUTE_CACHE_FILE"
 env[SLIM_DB_HOST] = ${SLIM_DB_HOST:-127.0.0.1}
 env[SLIM_DB_PORT] = ${SLIM_DB_PORT:-3306}
 env[SLIM_DB_NAME] = ${SLIM_DB_NAME:-slim4}
@@ -95,4 +113,7 @@ if ! grep -q '"ok":true' "$RUN_DIR/health.json"; then
 fi
 
 SLIM_BASE_URL="http://127.0.0.1:$HTTP_PORT" \
+SLIM_CONTAINER="$SLIM_CONTAINER" \
+SLIM_ROUTE_CACHE="$SLIM_ROUTE_CACHE" \
+SLIM_ROUTE_CACHE_FILE="$SLIM_ROUTE_CACHE_FILE" \
 "$PHP" "$ROOT/bin/run.php"

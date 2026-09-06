@@ -212,8 +212,8 @@ fpm_pool_coop.c:384:36: error: 'sapi_globals' undeclared (first use in this func
         memcpy(&fpm_coop_base_sg, &sapi_globals, sizeof(sapi_globals));
 fpm_pool_coop.c:385:36: error: 'output_globals' undeclared (first use in this function); did you mean 'output_globals_id'?
         memcpy(&fpm_coop_base_og, &output_globals, sizeof(output_globals));
-... (dokladnie ta sama para bledow w fpm_coop_accept_kept, fpm_coop_req_new,
-     fpm_coop_req_enter, fpm_coop_req_leave — 8 wystapien lacznie)
+... (the same pair of errors in fpm_coop_accept_kept, fpm_coop_req_new,
+     fpm_coop_req_enter, fpm_coop_req_leave — 8 occurrences in total)
 make: *** [Makefile:663: sapi/fpmng/fpm/fpm_pool_coop.lo] Error 1
 ```
 

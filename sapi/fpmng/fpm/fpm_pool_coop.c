@@ -410,11 +410,42 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 fcgi_request *fpm_coop_accept(int listen_fd, int *fd_out) /* {{{ */
 {
 	fcgi_request *req = fcgi_init_request(listen_fd, NULL, NULL, NULL);
-	int fd = fcgi_accept_request(req);
+	int fd, listen_flags = -1;
+
+	/* With pm.max_children > 1 several children share one listening socket:
+	 * for one pending connection kqueue wakes the accept callback in ALL of
+	 * them, and fcgi_accept_request() does a BLOCKING accept() — the child
+	 * that loses the race (the connection was already taken by a sibling)
+	 * blocks in the kernel and freezes its whole scheduler: every fiber in
+	 * flight stops being serviced, including its timers, until the NEXT
+	 * connection arrives. With a Redis gate in the scenario that freeze is
+	 * invisible in any log and lasts until the client times out. Measured
+	 * 2026-09-06 with the Symfony pm2 suite: the sample of a stalled child
+	 * shows ~1740 samples in accept() under fpm_fiber_accept_cb while its
+	 * fibers waited forever on Redis replies that were already in the
+	 * socket's receive queue. Make the listening socket non-blocking for the
+	 * duration of the accept, the same way fpm_coop_accept_kept() already
+	 * does: with nothing pending we get -1/EAGAIN, which fpm_coop_accept_cb
+	 * handles (returns, waits for the next event). A socket accepted on
+	 * BSD/macOS inherits O_NONBLOCK — clear the flag. */
+	listen_flags = fcntl(listen_fd, F_GETFL);
+	if (listen_flags >= 0) {
+		fcntl(listen_fd, F_SETFL, listen_flags | O_NONBLOCK);
+	}
+	fd = fcgi_accept_request(req);
+	if (listen_flags >= 0) {
+		fcntl(listen_fd, F_SETFL, listen_flags);
+	}
 
 	if (fd < 0) {
 		fcgi_destroy_request(req);
 		return NULL;
+	}
+	{
+		int fl = fcntl(fd, F_GETFL);
+		if (fl >= 0 && (fl & O_NONBLOCK)) {
+			fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
+		}
 	}
 	*fd_out = fd;
 	return req;

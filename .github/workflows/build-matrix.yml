@@ -100,14 +100,24 @@ jobs:
           strings sapi/fpmng/php-fpm-ng | grep -q 'X-Powered-By: PHP' || true
           sapi/fpmng/php-fpm-ng -v
 
+      - name: stage artifact
+        # A single top-level path, not a multi-entry `path:` list: with more
+        # than one path, upload-artifact strips only their *common* ancestor,
+        # which is sapi/ here (php-fpm-ng and tests live under sapi/fpmng,
+        # cli's php lives under sapi/cli) — not the php-src/sapi/... layout
+        # the phpt job expects. Staging a flat, single-root directory avoids
+        # depending on that ancestor computation at all.
+        run: |
+          mkdir -p stage/bin stage/prepared/sapi/fpmng
+          cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
+          cp php-src/sapi/cli/php stage/bin/
+          cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+
       - name: upload build (for the phpt job)
         uses: actions/upload-artifact@v4
         with:
           name: fpmng-canonical-build
-          path: |
-            php-src/sapi/fpmng/php-fpm-ng
-            php-src/sapi/cli/php
-            php-src/sapi/fpmng/tests
+          path: stage
           retention-days: 3
 
   # Task 001 landed the copied upstream FPM .phpt suite and its runner
@@ -123,11 +133,10 @@ jobs:
           path: build-out
       - name: run the upstream FPM .phpt suite against php-fpm-ng
         run: |
-          chmod +x build-out/php-src/sapi/fpmng/php-fpm-ng build-out/php-src/sapi/cli/php
-          mkdir -p build-out/php-src/sapi/fpmng
-          TEST_PHP_EXECUTABLE="$PWD/build-out/php-src/sapi/cli/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/php-src/sapi/fpmng/php-fpm-ng" \
-          ./build/run-fpm-phpt.sh "$PWD/build-out/php-src" "$PWD/phpt-results"
+          chmod +x build-out/bin/php-fpm-ng build-out/bin/php
+          TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          ./build/run-fpm-phpt.sh "$PWD/build-out/prepared" "$PWD/phpt-results"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -39,6 +39,7 @@ static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 	return fpm_http_init_pool(wp);
 }
 
+#ifdef HAVE_FPMNG_FIBER
 static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
 {
 	if (fpm_coop_validate(wp, "fiber") < 0) {
@@ -49,12 +50,15 @@ static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
 	 * checked here (no autoloader yet), only checked at runtime. */
 	return fpm_coop_statics_validate(wp);
 }
+#endif
 
+#if defined(HAVE_FPMNG_FIBER) || defined(HAVE_FPMNG_ASYNC)
 static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
 {
 	/* Executor wielorequestowy moze obslugiwac wiele polaczen na worker. */
 	return fpm_http_init_pool_with_capacity(wp, 128);
 }
+#endif
 
 /* Typy widoczne w konfiguracji. fastcgi-ng jest zoptymalizowanym torem
  * FastCGI; http uruchamia wbudowana bramke. Oba domyslnie uzywaja executora
@@ -118,7 +122,14 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 };
 
 /* Efektywne kombinacje typu i executora. Nie sa osobnymi wartosciami
- * pool.type i dlatego nie trafiaja do listy typow w komunikatach. */
+ * pool.type i dlatego nie trafiaja do listy typow w komunikatach.
+ *
+ * Obie ponizsze grupy istnieja tylko w binarce zbudowanej z odpowiednia
+ * flaga (--enable-fpmng-fiber / --enable-fpmng-async, obie domyslnie "no").
+ * Bez flagi zrodla w ogole nie sa kompilowane (patrz build/prepare.sh i
+ * sapi/fpmng/config.m4), wiec te struktury i ich uzycie nizej w
+ * fpm_pool_type_resolve() sa objete tym samym #ifdef. */
+#ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.name            = "fastcgi-ng",
 	.requires_listen = 1,
@@ -127,16 +138,6 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.rejects         = fpm_coop_rejects,
 	.validate        = fpm_pool_type_fiber_validate,
 	.child_main      = fpm_pool_fiber_child_main,
-};
-
-static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
-	.name            = "fastcgi-ng",
-	.requires_listen = 1,
-	.requires_pm     = 1,
-	.serves_requests = 1,
-	.rejects         = fpm_pool_async_rejects,
-	.validate        = fpm_pool_async_validate,
-	.child_main      = fpm_pool_async_child_main,
 };
 
 static const struct fpm_pool_type_s fpm_pool_http_fiber = {
@@ -149,6 +150,18 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.init_main       = fpm_pool_type_http_concurrent_init,
 	.child_main      = fpm_pool_fiber_child_main,
 };
+#endif /* HAVE_FPMNG_FIBER */
+
+#ifdef HAVE_FPMNG_ASYNC
+static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
+	.name            = "fastcgi-ng",
+	.requires_listen = 1,
+	.requires_pm     = 1,
+	.serves_requests = 1,
+	.rejects         = fpm_pool_async_rejects,
+	.validate        = fpm_pool_async_validate,
+	.child_main      = fpm_pool_async_child_main,
+};
 
 static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.name            = "http",
@@ -160,6 +173,7 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.init_main       = fpm_pool_type_http_concurrent_init,
 	.child_main      = fpm_pool_async_child_main,
 };
+#endif /* HAVE_FPMNG_ASYNC */
 
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
@@ -260,10 +274,21 @@ const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp
 		return type;
 	}
 	if (!strcmp(executor, "fiber")) {
+#ifdef HAVE_FPMNG_FIBER
 		return !strcmp(type->name, "http") ? &fpm_pool_http_fiber : &fpm_pool_fastcgi_ng_fiber;
+#else
+		/* Unreachable in practice: fpm_pool_type_validate_executor() already
+		 * refuses this build/executor combination before resolve() is ever
+		 * called (see fpm_conf.c). Kept for defensive symmetry. */
+		return NULL;
+#endif
 	}
 	if (!strcmp(executor, "async")) {
+#ifdef HAVE_FPMNG_ASYNC
 		return !strcmp(type->name, "http") ? &fpm_pool_http_async : &fpm_pool_fastcgi_ng_async;
+#else
+		return NULL;
+#endif
 	}
 
 	return NULL;
@@ -287,6 +312,22 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 			wp->config->name, executor);
 		return -1;
 	}
+#ifndef HAVE_FPMNG_FIBER
+	if (!strcmp(executor, "fiber")) {
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = fiber: this binary was built without "
+			"--enable-fpmng-fiber; rebuild with that flag to use this executor",
+			wp->config->name);
+		return -1;
+	}
+#endif
+#ifndef HAVE_FPMNG_ASYNC
+	if (!strcmp(executor, "async")) {
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: this binary was built without "
+			"--enable-fpmng-async; rebuild with that flag to use this executor",
+			wp->config->name);
+		return -1;
+	}
+#endif
 	return 0;
 }
 

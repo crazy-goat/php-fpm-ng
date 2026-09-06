@@ -135,9 +135,32 @@ Full-run result: **PASS=19 ERROR=2 NOT MEASURED=0** over 21 scenarios.
   fatal for the whole response on this build — suppressed or not), 90 s gate
   windows, per-pool logs (each pool start truncated the previous pool's log).
 
-The task remains open for: root-causing the `pm.max_children = 2` stall, the
-user-facing support statement in `README.md` (item 3), and the version-scope
-decision (item 4).
+The task remains open for: the user-facing support statement in `README.md`
+(item 3), and the version-scope decision (item 4).
+
+## UPDATE 2026-09-06 (third session): pm2 stall root-caused and fixed
+
+The `pm.max_children = 2` stall was a blocking `accept()` race in the fiber
+pool's acceptor, not a session problem: with a shared listening socket, kqueue
+wakes every child for one pending connection and the losing child blocks in
+`fcgi_accept_request()`'s blocking `accept()`, freezing its whole fiber
+scheduler (timers included) until the next connection arrives. Gated scenarios
+never see that next connection, so their fibers hang until the client gives
+up. Full evidence chain in `docs/frameworks.md`, section "Root cause of the
+pm2 stall". Fixed in `sapi/fpmng/fpm/fpm_pool_coop.c` (`fpm_coop_accept()`
+non-blocking accept, mirroring `fpm_coop_accept_kept()`); targeted repro
+30/30 rounds clean, and the full suite re-run is **PASS=21 ERROR=0
+NOT MEASURED=0** — `pm2-session`, `pm2-stateful-auth` and `pm2-object-identity`
+all pass their data assertions in the same run (fixed binary `PHP 8.6.0-dev`,
+SHA-256 `1d002fbff74530876245e2d055662de7c13acfc5ecd77569ee1c9c4c5ab1729d`,
+source commit `d617976`). The session
+hypothesis (PHP session lock / two workers contending on one session id) was
+checked and ruled out: the freeze reproduces in round 1 before any session
+round-trip matters, and the observed 401s in the cookie-replay round were a
+downstream effect (the frozen fiber never reached its session flush), not the
+cause. `pool.executor = async` has the same latent blocking accept in
+`fpm_pool_async.c` and stays rejected until fixed. This task remains open for
+the README support statement and the version-scope decision only.
 
 ## Detailed test matrix
 

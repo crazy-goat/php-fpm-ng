@@ -34,6 +34,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_coop.h"
+#include "fpm_pool_coop_session.h"
 #include "zlog.h"
 
 const char *const fpm_coop_rejects[] = {
@@ -391,6 +392,11 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	fpm_coop_base_error_reporting = EG(error_reporting);
 	fpm_coop_base_handlers_save();
 
+	/* Izolacja stanu ext/session per request — patrz fpm_pool_coop_session.[ch].
+	 * Wolane TU, bo dopiero teraz mamy zarejestrowane wpisy ini i modul
+	 * session (jesli w ogole zaladowany) po wlasnym RINIT kontenera. */
+	fpm_coop_session_container_start();
+
 	return 0;
 }
 /* }}} */
@@ -497,6 +503,7 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		EG(user_error_handlers_error_reporting) = ctx->user_error_handlers_error_reporting;
 		EG(user_error_handlers) = ctx->user_error_handlers;
 		EG(user_exception_handlers) = ctx->user_exception_handlers;
+		fpm_coop_session_req_enter(ctx);
 	}
 }
 /* }}} */
@@ -518,6 +525,7 @@ static void fpm_coop_base_tables_restore(void) /* {{{ */
 	EG(user_error_handlers_error_reporting) = fpm_coop_base_stacks[0];
 	EG(user_error_handlers) = fpm_coop_base_stacks[1];
 	EG(user_exception_handlers) = fpm_coop_base_stacks[2];
+	fpm_coop_session_base_restore();
 }
 /* }}} */
 
@@ -543,6 +551,7 @@ void fpm_coop_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		ctx->user_error_handlers_error_reporting = EG(user_error_handlers_error_reporting);
 		ctx->user_error_handlers = EG(user_error_handlers);
 		ctx->user_exception_handlers = EG(user_exception_handlers);
+		fpm_coop_session_req_save(ctx);
 		fpm_coop_base_tables_restore();
 	}
 }
@@ -653,6 +662,13 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	zend_stack_init(&EG(user_exception_handlers), sizeof(zval));
 	ctx->live = true;
 
+	/* ext/session: stan bazowy -> zywe globale, RINIT modulu NA TYM requescie
+	 * (patrz fpm_pool_coop_session.c — dlaczego to jest bezpieczne i dlaczego
+	 * to jest dokladnie ten sam RINIT, ktorego klasyczny model wola raz na
+	 * request; tu wolany per request mimo jednego php_request_startup() na
+	 * proces kontenera). No-op, gdy session nie jest zaladowane. */
+	fpm_coop_session_request_startup();
+
 	/* Buduje $_GET/$_POST/$_COOKIE/$_FILES z BIEZACEGO SG do BIEZACEJ tablicy
 	 * i uzbraja JIT-owe ($_SERVER, $_ENV, $_REQUEST) na czas kompilacji —
 	 * dokladnie to, co php_hash_environment() w php_request_startup(). */
@@ -695,6 +711,15 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	/* 4. Skrypt. */
 	fpm_coop_execute(ctx);
+
+	/* ext/session: RSHUTDOWN modulu NA TYM requescie, PRZED zniszczeniem
+	 * symbol_table — php_session_flush() (I/O, wewnatrz RSHUTDOWN) czyta
+	 * $_SESSION, ktora musi jeszcze zyc. Zawieszenie w trakcie flush (np. na
+	 * write() do Redisa) przelacza sie normalnym fpm_coop_req_leave/enter,
+	 * bo dzieje sie W KONTEKSCIE tego requestu (ctx->live wciaz true) —
+	 * dokladnie ten sam mechanizm co zawieszenie gdziekolwiek w skrypcie.
+	 * No-op, gdy session nie jest zaladowane. */
+	fpm_coop_session_request_shutdown();
 
 	/* 5. Koniec jak php_request_shutdown(): destruktory zmiennych globalnych
 	 * (jeszcze w kontekscie requestu), bufory wyjscia, naglowki, FastCGI. */

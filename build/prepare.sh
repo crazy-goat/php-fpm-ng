@@ -26,10 +26,10 @@ fi
 rm -rf "$PHPSRC/sapi/fpmng"
 cp -r "$PHPSRC/sapi/fpm" "$PHPSRC/sapi/fpmng"
 
-# Testy FPM odwoluja sie do binarki php-fpm, nie naszej. Wroca, gdy beda wlasne.
-rm -rf "$PHPSRC/sapi/fpmng/tests"
+# Keep the upstream tests in the copied SAPI. The runner supplies the binary path
+# through TEST_PHP_FPM_EXECUTABLE, so the tests do not need to be forked here.
 
-# Nasze pliki nadpisuja upstream.
+# Our files override upstream.
 cp -r "$REPO/sapi/fpmng/." "$PHPSRC/sapi/fpmng/"
 
 # Rozszerzenie fpmng_metrics (NOTES 3k): ext/ wykrywany tym samym globem

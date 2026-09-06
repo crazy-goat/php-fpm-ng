@@ -1,7 +1,20 @@
 # 041 — TLS: ALPN and SNI — decide the scope before ACME needs them
 
 **Priority:** medium. A decision task with a small implementation attached.
-**Status:** open.
+**Status:** decided (2026-09-06, project owner). Both ALPN and SNI: yes.
+Implementation open.
+
+## Decision
+
+- **ALPN: yes.** Advertise `http/1.1` explicitly; reject a client that offers
+  only an unsupported protocol at the TLS layer.
+- **SNI: yes.** One pool can serve more than one certificate. This keeps both
+  HTTP-01 and TLS-ALPN-01 available to 020, and supports multiple domain names
+  behind one gateway pool — the more plausible small-project shape. Cost
+  accepted: a certificate-selection callback in `fpm_http_tls_ctx_new()`
+  keyed by servername, built as per-process state, not a new field of
+  `struct fpm_http_tls_s`. A connection with no SNI (or an unrecognized name)
+  falls back to a documented default certificate — the first configured one.
 
 ## Context
 

@@ -729,6 +729,22 @@ HTTP-01 wymaga portu 80. Setup z ACME potrzebuje i 80, i 443 — jeden na wyzwan
 i przekierowanie, drugi na ruch. Model konfiguracji musi to obsłużyć; sprawdzić,
 czy "jeden pool, jeden port" wystarcza.
 
+### DECYZJE (2026-09-06, project owner) — patrz taski 039-042
+
+- **ALPN: tak.** Rozgłaszamy `http/1.1`, klient oferujący wyłącznie
+  nieobsługiwany protokół jest odrzucany na warstwie TLS.
+- **SNI: tak.** Jeden pool może serwować więcej niż jeden certyfikat —
+  callback wyboru certyfikatu po servername w `fpm_http_tls_ctx_new()`,
+  jako stan per-proces, nie nowe pole `struct fpm_http_tls_s`. Bez SNI/z
+  nierozpoznaną nazwą: domyślny (pierwszy skonfigurowany) certyfikat.
+  Konsekwencja: 020 ma otwarte oba wyzwania ACME (HTTP-01 i TLS-ALPN-01).
+- **"jeden pool, jeden port" NIE wystarcza** — rozwiązanie: redirect-only
+  companion (task 042). Port 80 w tym samym poolu co TLS, nigdy nie dociera
+  do workera, odpowiada tylko przekierowaniem 301/308 i (po 046) wyzwaniem
+  HTTP-01, przez istniejący local-answer hook (`fpm_http.c:1041-1048`).
+  Koszt: bramka zyskuje drugie, zwykłe gniazdo HTTP na proces, dla poola,
+  który się na to zdecyduje.
+
 
 ## 3m. `fcgi-async` — wyniki badania i PRAWDZIWY CEL: eksperymentalny build pod async
 

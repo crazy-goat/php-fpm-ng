@@ -15,6 +15,7 @@
 #include "fpm_pool_status.h"
 #include "fpm_pool_async.h"
 #include "fpm_pool_coop.h"
+#include "fpm_pool_coop_statics.h"
 #include "fpm_pool_fiber.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
@@ -40,7 +41,13 @@ static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 
 static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
 {
-	return fpm_coop_validate(wp, "fiber");
+	if (fpm_coop_validate(wp, "fiber") < 0) {
+		return -1;
+	}
+	/* fiber.isolate_statics syntax check -- master side, before any fork.
+	 * See fpm_pool_coop_statics.c: class/property existence cannot be
+	 * checked here (no autoloader yet), only checked at runtime. */
+	return fpm_coop_statics_validate(wp);
 }
 
 static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)

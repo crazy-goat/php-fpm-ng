@@ -46,6 +46,7 @@
 #include "fpm_pool_status.h"
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
+#include "php_fpmng_metrics.h"
 #include "zlog.h"
 
 /* Lista ODRZUCEN, nie dopuszczen — patrz fpm_pool_type_check_directives()
@@ -282,6 +283,21 @@ static void fpm_pool_status_render_prometheus(struct fpm_status_buf_s *b) /* {{{
 		"# HELP fpmng_pool_backoff_seconds Seconds remaining in supervisor backoff.\n"
 		"# TYPE fpmng_pool_backoff_seconds gauge\n");
 	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_prometheus);
+
+	/* Metryki aplikacyjne (NOTES 3k): agregacja tablic serii WSZYSTKICH
+	 * slotow workera w shm — czytamy cudza pamiec dzielona z tego
+	 * procesu, bez PHP i bez kontekstu requestu, dlatego render_text
+	 * nie dotyka ZEND_API. Brak serii (nikt nic nie zarejestrowal) =
+	 * brak dodatkowych linii, celowo bez komentarza-ocupera. */
+	{
+		char *text = NULL;
+		size_t len = 0;
+
+		if (!fpmng_metrics_render_text(&text, &len) && text && len) {
+			fpm_status_buf_appendf(b, "%s", text);
+		}
+		free(text);
+	}
 }
 /* }}} */
 

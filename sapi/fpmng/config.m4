@@ -314,6 +314,8 @@ AS_VAR_IF([php_cv_have_epoll], [yes],
 ])
 
 if test "$PHP_FPMNG" != "no"; then
+  PHP_ADD_INCLUDE([$abs_srcdir/ext/fpmng_metrics])
+
   PHP_FPMNG_CLOCK
   PHP_FPMNG_KQUEUE
   PHP_FPMNG_EPOLL

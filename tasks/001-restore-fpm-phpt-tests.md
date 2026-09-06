@@ -93,13 +93,15 @@ matching them to the relative inventory.
 
 The complete 150-test suite was run on the isolated polygon build. The final
 run reported **133 PASS / 1 FAIL/ERROR / 1 WARN / 15 SKIP / 0 NOT MEASURED**.
-The stable `http-basic.phpt` failure is an upstream test artifact for the old
-`--with-fpm-http` mode: fpmng starts its gateway only for `pool.type = http`.
-The `XFAIL` output-log test reported `WARNED` because it passed unexpectedly,
-and is recorded as `WARN`. `gh16432-status-high-nprocs.phpt` failed once in
-three complete runs but passed five isolated repetitions; that intermittent
-observation remains documented and needs a separate investigation if it
-recurs. Full evidence and triage are in `docs/fpm-phpt-results.md`.
+The stable `http-basic.phpt` result is an intended fpmng difference: the
+upstream test assumes the old global `--with-fpm-http` mode, while fpmng starts
+its gateway only for `pool.type = http`. The `XFAIL` output-log test reported
+`WARNED` because it passed unexpectedly, and is recorded as `WARN`.
+`gh16432-status-high-nprocs.phpt` failed once in three complete runs but passed
+five isolated repetitions; that intermittent observation remains explicitly
+unclassified and needs a full-suite/resource-pressure investigation before
+this task can close. Full evidence and triage are in
+`docs/fpm-phpt-results.md`.
 
 The task remains in progress until the observed non-PASS results are either
 resolved or explicitly accepted/documented as out of scope, and the result

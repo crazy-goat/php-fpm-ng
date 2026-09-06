@@ -176,3 +176,31 @@ void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 	ctx->ini_mods = NULL;
 }
 /* }}} */
+
+void fpm_coop_ini_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
+{
+	zend_string *value;
+
+	/* Normalna sciezka tu nie wchodzi: request konczy sie NA PROCESORZE, wiec
+	 * ostatni fpm_coop_ini_req_enter() juz oddal obie tablice, a
+	 * zend_ini_deactivate() na koncu requestu przywrocil wpisy z on_modify.
+	 * To jest zabezpieczenie na wypadek zniszczenia ctx requestu, ktory zszedl
+	 * z procesora i nigdy nie wrocil (np. fiber ubity przy zamykaniu workera).
+	 * Same wpisy ini sa juz wtedy w stanie bazowym — fpm_coop_ini_req_leave()
+	 * przywrocil je przed zejsciem — wiec zostaje tylko zwolnic osierocone
+	 * wartosci tego requestu. */
+	if (ctx->ini_values) {
+		ZEND_HASH_MAP_FOREACH_PTR(ctx->ini_values, value) {
+			zend_string_release(value);
+		} ZEND_HASH_FOREACH_END();
+		zend_hash_destroy(ctx->ini_values);
+		FREE_HASHTABLE(ctx->ini_values);
+		ctx->ini_values = NULL;
+	}
+	if (ctx->ini_mods) {
+		zend_hash_destroy(ctx->ini_mods);
+		FREE_HASHTABLE(ctx->ini_mods);
+		ctx->ini_mods = NULL;
+	}
+}
+/* }}} */

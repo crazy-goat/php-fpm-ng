@@ -16,6 +16,10 @@ struct fpm_coop_req_s;
  * jakiejkolwiek tablicy. */
 void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx);
 
+/* Zwalnia to, co zostalo po requescie zniszczonym, gdy byl zdjety z procesora
+ * (wpisy ini sa juz wtedy bazowe — przywrocil je fpm_coop_ini_req_leave). */
+void fpm_coop_ini_req_free(struct fpm_coop_req_s *ctx);
+
 /* Wolac w fpm_coop_req_leave(), w bloku "if (ctx->live)": zdejmuje z
  * EG(modified_ini_directives) wszystko, co TEN request zmienil od ostatniego
  * wejscia, chowa WLASNA wartosc requestu do ctx i przywraca kazdemu wpisowi

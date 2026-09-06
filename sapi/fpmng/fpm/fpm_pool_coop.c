@@ -401,6 +401,29 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 
 	fpm_coop_statics_container_start(pool_name);
 
+	/* O_NONBLOCK is a property of the OPEN FILE DESCRIPTION, not of this
+	 * child's file descriptor number: the listening socket is created in the
+	 * master before fork, so every child of this pool (and the master's own
+	 * copy of the fd) shares one open file description with it. Toggling the
+	 * flag on and off around each accept() (the previous fix) therefore races
+	 * across siblings — child A can restore it to blocking while child B is
+	 * mid-accept expecting non-blocking, reintroducing the exact freeze this
+	 * was meant to cure, just rarer.  Set it ONCE here, at container start,
+	 * and never touch it again for the lifetime of this child: a lost accept
+	 * race then always yields -1/EAGAIN (handled by the accept callback)
+	 * regardless of what any sibling child does concurrently. This function
+	 * only runs on the fiber pool's child_main path (fpm_pool_fiber.c), where
+	 * fpm_globals.listening_socket is already the pool's listening fd by the
+	 * time we get here; the async pool has its own separate acceptor
+	 * (fpm_pool_async.c) and does not call this function, so this has no
+	 * effect on it. */
+	{
+		int listen_flags = fcntl(fpm_globals.listening_socket, F_GETFL);
+		if (listen_flags >= 0 && !(listen_flags & O_NONBLOCK)) {
+			fcntl(fpm_globals.listening_socket, F_SETFL, listen_flags | O_NONBLOCK);
+		}
+	}
+
 	return 0;
 }
 /* }}} */
@@ -410,38 +433,25 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 fcgi_request *fpm_coop_accept(int listen_fd, int *fd_out) /* {{{ */
 {
 	fcgi_request *req = fcgi_init_request(listen_fd, NULL, NULL, NULL);
-	int fd, listen_flags = -1;
+	int fd;
 
-	/* With pm.max_children > 1 several children share one listening socket:
-	 * for one pending connection kqueue wakes the accept callback in ALL of
-	 * them, and fcgi_accept_request() does a BLOCKING accept() — the child
-	 * that loses the race (the connection was already taken by a sibling)
-	 * blocks in the kernel and freezes its whole scheduler: every fiber in
-	 * flight stops being serviced, including its timers, until the NEXT
-	 * connection arrives. With a Redis gate in the scenario that freeze is
-	 * invisible in any log and lasts until the client times out. Measured
-	 * 2026-09-06 with the Symfony pm2 suite: the sample of a stalled child
-	 * shows ~1740 samples in accept() under fpm_fiber_accept_cb while its
-	 * fibers waited forever on Redis replies that were already in the
-	 * socket's receive queue. Make the listening socket non-blocking for the
-	 * duration of the accept, the same way fpm_coop_accept_kept() already
-	 * does: with nothing pending we get -1/EAGAIN, which fpm_coop_accept_cb
-	 * handles (returns, waits for the next event). A socket accepted on
-	 * BSD/macOS inherits O_NONBLOCK — clear the flag. */
-	listen_flags = fcntl(listen_fd, F_GETFL);
-	if (listen_flags >= 0) {
-		fcntl(listen_fd, F_SETFL, listen_flags | O_NONBLOCK);
-	}
+	/* The listening socket was made non-blocking once, permanently, in
+	 * fpm_coop_container_start() — see the comment there for why we no
+	 * longer toggle O_NONBLOCK around this call. With nothing pending we get
+	 * -1/EAGAIN here, which the accept callback already handles (returns,
+	 * waits for the next event). */
 	fd = fcgi_accept_request(req);
-	if (listen_flags >= 0) {
-		fcntl(listen_fd, F_SETFL, listen_flags);
-	}
 
 	if (fd < 0) {
 		fcgi_destroy_request(req);
 		return NULL;
 	}
 	{
+		/* On BSD/macOS an accepted socket inherits O_NONBLOCK from the
+		 * listening socket it came from; Linux's accept() does not carry the
+		 * listening socket's flags over to the accepted one. Harmless
+		 * either way, so we always clear it, but the flag is only ever set
+		 * here because of the BSD/macOS behavior. */
 		int fl = fcntl(fd, F_GETFL);
 		if (fl >= 0 && (fl & O_NONBLOCK)) {
 			fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);
@@ -458,7 +468,6 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 	int kept_fd = *fd_out;
 	int fd;
 	ssize_t n;
-	int listen_flags = -1;
 
 	/* Klient zamknal? fcgi_accept_request nie ma jak tego zglosic bez
 	 * przejscia na blokujacy accept() na gniezdzie nasluchujacym. */
@@ -472,17 +481,11 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 	}
 
 	/* Gdy odczyt requestu z tego fd sie nie uda, fcgi_accept_request zamyka
-	 * go i przechodzi do accept() na gniezdzie nasluchujacym — blokujaco.
-	 * Na czas tego wywolania robimy gniazdo nasluchujace nieblokujacym,
-	 * zeby zamiast zawisnac dostac -1 (EAGAIN). */
-	listen_flags = fcntl(fpm_globals.listening_socket, F_GETFL);
-	if (listen_flags >= 0) {
-		fcntl(fpm_globals.listening_socket, F_SETFL, listen_flags | O_NONBLOCK);
-	}
+	 * go i przechodzi do accept() na gniezdzie nasluchujacym. Gniazdo
+	 * nasluchujace jest juz trwale nieblokujace (patrz
+	 * fpm_coop_container_start()), wiec zamiast zawisnac dostajemy tu -1
+	 * (EAGAIN) bez zadnego dodatkowego przelaczania flagi. */
 	fd = fcgi_accept_request(req);
-	if (listen_flags >= 0) {
-		fcntl(fpm_globals.listening_socket, F_SETFL, listen_flags);
-	}
 
 	if (fd < 0) {
 		fcgi_destroy_request(req);
@@ -491,7 +494,9 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 	if (fd != kept_fd) {
 		/* Rzadki wyscig: kept fd padl, a w tym samym oknie przyszlo nowe
 		 * polaczenie; przyjete z nieblokujacego gniazda (na BSD/macOS
-		 * dziedziczy O_NONBLOCK). Zdejmujemy flage, dalej zwyczajnie. */
+		 * dziedziczy O_NONBLOCK — Linux tego nie robi, accept() na Linuksie
+		 * nie kopiuje flag gniazda nasluchujacego). Zdejmujemy flage, dalej
+		 * zwyczajnie. */
 		int fl = fcntl(fd, F_GETFL);
 		if (fl >= 0 && (fl & O_NONBLOCK)) {
 			fcntl(fd, F_SETFL, fl & ~O_NONBLOCK);

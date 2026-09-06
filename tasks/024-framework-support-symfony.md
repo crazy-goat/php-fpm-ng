@@ -68,6 +68,32 @@ accident.
   into something the repository owns rather than something that exists only on
   one machine.
 
+## Automated probe
+
+`tests/frameworks/symfony/run.sh` now provisions a fresh copy of the pinned
+application, a private MySQL database and Redis namespace, and runs the
+concurrency assertions. It was measured on 2026-09-06 against the verified
+php-fpm-ng binary `PHP 8.5.11-dev` with SHA-256
+`f9eeb62304b4fe609f3180e44c493f941c12f7a675d433826b7b4f7861b356b6`. The
+application used Symfony 8.1.6, Doctrine ORM 3.6.8, DBAL 4.4.4, and phpredis
+loaded as the Redis client. The source checkout recorded by the runner was
+`65ec755`.
+
+The measured report was `PASS=6 ERROR=0 NOT MEASURED=4`:
+
+- `/mix`, sessions including the second cookie round, stateful `http_basic`
+  including the no-header round, and object identity all passed with eight
+  concurrent requests;
+- the missing `FPMNG_SHARED_INCLUDES` control reproduced the request-two
+  Composer redeclaration in the response body (HTTP status was 200), and the
+  unsupported `fiber.isolate_statics`/`async` configuration control was
+  rejected;
+- `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq`, and the
+  additional framework surface/long RSS run remain explicitly `NOT MEASURED`.
+
+The task remains open: this first automated probe does not yet cover every
+matrix item or provide the user-facing support statement requested above.
+
 ## Detailed test matrix
 
 Everything below is **unmeasured** unless this document says otherwise. The

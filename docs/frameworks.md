@@ -1,228 +1,238 @@
-# Symfony i Laravel na `pool.executor = fiber`
+# Symfony and Laravel on `pool.executor = fiber`
 
-Pomiar z 2026-09-06 na poligonie (Ubuntu 26.04, epoll, MySQL 8.4, Redis,
-phpredis 6.3.0RC1), binarka z commita `a5800e4`. **Symfony 8.1.6** (skeleton +
-orm-pack + security-bundle, Doctrine ORM 3.6, sesje i cache na Redisie),
+Measurement from 2026-09-06 on the test box (Ubuntu 26.04, epoll, MySQL 8.4, Redis,
+phpredis 6.3.0RC1), binary from commit `a5800e4`. **Symfony 8.1.6** (skeleton +
+orm-pack + security-bundle, Doctrine ORM 3.6, sessions and cache on Redis),
 **Laravel 13.30.1** (`SESSION_DRIVER=redis`, `CACHE_STORE=redis`,
-`REDIS_CLIENT=phpredis`, Eloquent na MySQL). Kazdy w trzech poolach: `classic`,
-`fiber` bez flagi, `fiber` z `env[FPMNG_SHARED_INCLUDES] = 1`. `pm = static`,
+`REDIS_CLIENT=phpredis`, Eloquent on MySQL). Each in three pools: `classic`,
+`fiber` without the flag, `fiber` with `env[FPMNG_SHARED_INCLUDES] = 1`. `pm = static`,
 `pm.max_children = 1`.
 
-## Werdykt
+## Verdict
 
-**Symfony: TAK, pod warunkiem** — `FPMNG_SHARED_INCLUDES=1`, wlasny
-`public/index.php` bez `symfony/runtime`, brak sesji PHP i stanowego firewalla
-przy wspolbieznosci (czyli: API bezstanowe albo jeden request w locie).
+**Symfony: YES, with conditions** — `FPMNG_SHARED_INCLUDES=1`, own
+`public/index.php` without `symfony/runtime`, no PHP sessions and no stateful
+firewall under concurrency (i.e.: a stateless API, or one request in flight at
+a time).
 
-**Laravel: NIE.** Sekwencyjnie dziala po trzech zmianach w `index.php`, ale przy
-wiecej niz jednym requescie w locie miesza sesje uzytkownikow i polaczenia do
-baz. Bez wspolbieznosci fiber nie ma sensu, wiec to jest "nie".
+**Laravel: NO.** Works sequentially after three changes to `index.php`, but with
+more than one request in flight it mixes up user sessions and database
+connections. Fiber makes no sense without concurrency, so this is a "no".
 
-## Gdzie dziala, dziala bardzo dobrze
+## Where it works, it works very well
 
-Symfony, endpoint czytajacy MySQL (DBAL + ORM) i Redis (store + cache pool):
+Symfony, an endpoint reading MySQL (DBAL + ORM) and Redis (store + cache pool):
 
-    N=8 /mix?sleep=0.3    fiber 0,351 s    classic 2,950 s    8/8 poprawnych danych
+    N=8 /mix?sleep=0.3    fiber 0,351 s    classic 2,950 s    8/8 correct data
     N=4 SELECT SLEEP(1)   fiber 1,028 s    classic 4,221 s
     N=8 SELECT SLEEP(1)   fiber 1,046 s    classic 8,436 s
-    600 requestow         fiber 172 req/s  classic 15,5 req/s
-                          RSS 40,2 -> 42,4 MB, ten sam worker, 0 bledow
+    600 requests          fiber 172 req/s  classic 15,5 req/s
+                          RSS 40,2 -> 42,4 MB, same worker, 0 errors
 
-"8/8 poprawnych danych" znaczy: kazdy z osmiu rownoleglych requestow dostal
-SWOJE id, item, tag, wartosc z Redisa i z cache. To jest teza, ktora
-sprawdzalismy, i ona sie broni.
+"8/8 correct data" means: each of the eight parallel requests got ITS OWN id,
+item, tag, value from Redis and from the cache. That is the claim we were
+testing, and it holds up.
 
-## Co dokladnie trzeba zmienic w aplikacji
+## What exactly has to change in the application
 
-**Symfony: jeden plik.** `public/index.php` przepisany na styl sprzed
-`symfony/runtime` (siedem linii: `require vendor/autoload.php`, `bootEnv()`,
-`new Kernel`, `handle()`, `send()`, `terminate()`). Mniejszym kosztem sie nie da
-— patrz nizej.
+**Symfony: one file.** `public/index.php` rewritten in the pre-`symfony/runtime`
+style (seven lines: `require vendor/autoload.php`, `bootEnv()`,
+`new Kernel`, `handle()`, `send()`, `terminate()`). It cannot be done any
+cheaper than that — see below.
 
-**Laravel: jeden plik, trzy zmiany** w `public/index.php`:
-1. `require_once` -> `require` dla `bootstrap/app.php` (naprawia
-   `Call to a member function handleRequest() on true`); `bootstrap/app.php` nic
-   nie deklaruje, wiec `require` jest tam poprawniejsze;
-2. `define('LARAVEL_START', ...)` -> `defined(...) || define(...)`, bo stale sa
-   procesowe i zachowuja wartosc z pierwszego requestu;
-3. `$_SERVER; $_ENV; $_REQUEST;` — **obejscie NASZEGO bledu**, patrz "Autoglobale".
+**Laravel: one file, three changes** in `public/index.php`:
+1. `require_once` -> `require` for `bootstrap/app.php` (fixes
+   `Call to a member function handleRequest() on true`); `bootstrap/app.php`
+   declares nothing, so `require` is more correct there anyway;
+2. `define('LARAVEL_START', ...)` -> `defined(...) || define(...)`, because
+   constants are process-wide and keep the value from the first request;
+3. `$_SERVER; $_ENV; $_REQUEST;` — **workaround for OUR bug**, see "Autoglobals".
 
-Dodatkowy wymog wobec aplikacji: **zadnych deklaracji klas i funkcji w plikach
-wciaganych `require` per request**. Laravel robi `require routes/web.php` przy
-kazdym boocie, wiec klasa zadeklarowana w tym pliku daje "Cannot redeclare".
+Additional requirement on the application: **no class or function declarations
+in files pulled in with `require` per request**. Laravel does `require
+routes/web.php` on every boot, so a class declared in that file gives
+"Cannot redeclare".
 
-## Punkt odniesienia: bez `FPMNG_SHARED_INCLUDES`
+## Baseline: without `FPMNG_SHARED_INCLUDES`
 
-Oba frameworki, req1 OK, req2 fatal:
+Both frameworks, req1 OK, req2 fatal:
 
     Symfony: Cannot redeclare class ComposerAutoloaderInite8d3a95... (autoload_real.php:5)
              stack: vendor/autoload.php(20) -> vendor/autoload_runtime.php(5) -> public/index.php(5)
     Laravel: Cannot redeclare class ComposerAutoloaderInitcda2add... (autoload_real.php:5)
              + Warning: Constant LARAVEL_START already defined
 
-## Dlaczego cache wartosci `require_once` NIE pomoze
+## Why caching the `require_once` return value will NOT help
 
-Byl na liscie TODO jako naprawa wzorca `$app = require_once bootstrap/app.php`.
-Dla Laravela faktycznie naprawia ten jeden blad. **Dla Symfony nie daje nic**:
-`public/index.php` robi `require_once vendor/autoload_runtime.php`, a caly
-runtime (`$runtime->getRunner($app)->run()`) jest **efektem ubocznym tego
-include**. Gdy include staje sie no-opem, dostajemy HTTP 200 z pustym cialem
-i zero wpisow w logu — aplikacja sie nie wykonuje. Problem nie jest w wartosci
-zwracanej, tylko w tym, ze kod ma sie wykonac.
+It was on the TODO list as a fix for the `$app = require_once bootstrap/app.php`
+pattern. For Laravel it does in fact fix that one error. **For Symfony it does
+nothing**: `public/index.php` does `require_once vendor/autoload_runtime.php`,
+and the entire runtime (`$runtime->getRunner($app)->run()`) is a **side effect
+of that include**. When the include becomes a no-op, we get HTTP 200 with an
+empty body and zero log entries — the application does not execute. The
+problem is not in the return value, it is in the fact that the code has to
+run.
 
-Zmierzone tez obejscie A (`require` zamiast `require_once` w index.php): nie
-pomaga, bo `autoload_runtime.php:3` ma
+Also measured: workaround A (`require` instead of `require_once` in
+index.php): does not help, because `autoload_runtime.php:3` has
 `if (true === (require_once __DIR__.'/autoload.php') || ...) return;`.
 
-Wniosek: cache wartosci `require_once` to naprawa jednego wzorca w jednym
-frameworku, nie rozwiazanie modelu include.
+Conclusion: caching the `require_once` return value fixes one pattern in one
+framework, not the include model.
 
-## Autoglobale — NASZ blad, tani i krytyczny
+## Autoglobals — OUR bug, cheap and critical
 
-`$_SERVER`, `$_ENV` i `$_REQUEST` powstaja przez `auto_globals_jit` **w chwili
-KOMPILACJI** pliku, ktory ich uzywa. Przy wspolnych `included_files` vendor nie
-jest rekompilowany, a `index.php` Laravela sam ich nie dotyka — wiec:
+`$_SERVER`, `$_ENV` and `$_REQUEST` are created by `auto_globals_jit` **at
+COMPILE time** of the file that uses them. With shared `included_files`,
+vendor is not recompiled, and Laravel's `index.php` itself never touches
+them — so:
 
     Warning: Undefined global variable $_SERVER in vendor/vlucas/phpdotenv/.../ServerConstAdapter.php:42
     Warning: Undefined global variable $_ENV   in .../EnvConstAdapter.php:42
     Fatal: Uncaught TypeError: Request::createRequestFromFactory(): Argument #6 ($server)
            must be of type array, null given (symfony/http-foundation/Request.php:2094)
 
-**`php_admin_flag[auto_globals_jit] = off` NIE pomaga** — zmierzone. Executor nie
-tworzy autoglobali per request na zadnej sciezce poza JIT-em kompilacji.
+**`php_admin_flag[auto_globals_jit] = off` does NOT help** — measured. The
+executor does not create autoglobals per request on any path other than
+compile-time JIT.
 
-Symfony przezylo tylko przypadkiem: reczny `index.php` odwoluje sie do
-`$_SERVER['APP_ENV']`, wiec JIT je tworzy.
+Symfony survived only by accident: the hand-written `index.php` refers to
+`$_SERVER['APP_ENV']`, so JIT creates them.
 
-**To pada w kazdej aplikacji, ktorej skrypt wejsciowy sam nie dotyka
-autoglobali.** Naprawa jest tania: wolac callbacki autoglobali w
+**This breaks in every application whose entry script does not touch
+autoglobals itself.** The fix is cheap: call the autoglobal callbacks in
 `fpm_coop_req_enter`.
 
-## Wspolbieznosc: gdzie sie lamie
+## Concurrency: where it breaks
 
-### Symfony — sesje PHP
+### Symfony — PHP sessions
 
-    20/20 rund: HTTP 500, "Failed to start the session."
-                "PHP Request Startup: Cannot call session save handler in a recursive manner"
+    20/20 rounds: HTTP 500, "Failed to start the session."
+                  "PHP Request Startup: Cannot call session save handler in a recursive manner"
 
-Sekwencyjnie (uzytkownik A, potem B) dziala: rozne sid, count rosnie. Pada
-dopiero przy wspolbieznosci, bo `ext/session` trzyma stan w PROCESIE
-(`PS(session_status)`, `in_save_handler`, `$_SESSION`): fiber A wisi w I/O
-Redisa wewnatrz `read()` handlera, fiber B wola `session_start()`.
+Sequentially (user A, then B) it works: different sid, count increases. It
+only breaks under concurrency, because `ext/session` keeps state in the
+PROCESS (`PS(session_status)`, `in_save_handler`, `$_SESSION`): fiber A hangs
+in Redis I/O inside the `read()` handler, fiber B calls `session_start()`.
 
-Stanowy firewall (`http_basic` + sesja) z tego samego powodu: 2/6 rownoleglych
-requestow OK, 4/6 blad.
+The stateful firewall (`http_basic` + session) fails for the same reason: 2/6
+parallel requests OK, 4/6 fail.
 
-Kontener DI, `Request` i `RequestStack` (depth 1) sa czyste per request —
-`/who` bez auth zwraca `user: null`. Przecieka tylko statyk klasy
-(`leaked_static_user: "alice"`), czyli procesowy stan, ktorego nie rozdzielamy.
+The DI container, `Request` and `RequestStack` (depth 1) are clean per
+request — `/who` without auth returns `user: null`. Only a class static leaks
+(`leaked_static_user: "alice"`), i.e. process-wide state that we do not
+separate.
 
-### Laravel — statyki frameworka, i to jest wyciek DANYCH
+### Laravel — framework statics, and this is a DATA leak
 
-    N=8 /mix?sleep=0.3:  1 x 200, 4 x 500, 3 requesty wisialy do timeoutu 60 s
+    N=8 /mix?sleep=0.3:  1 x 200, 4 x 500, 3 requests hung until the 60 s timeout
     N=4 SELECT SLEEP(1): 4/4 timeout
-    bramka: "upstream: Connection reset by peer" / "no answer from upstream"
+    gateway: "upstream: Connection reset by peer" / "no answer from upstream"
 
     laravel.log:
       QueryException 2014 Cannot execute queries while other unbuffered queries are active
       RedisException: read error on connection to 127.0.0.1:6379
       SQLSTATE[08S01] [1159] Got timeout reading communication packets
-      PDOException: Error at offset 0 of 3 bytes   (unserialize CUDZEJ odpowiedzi)
+      PDOException: Error at offset 0 of 3 bytes   (unserialize of SOMEONE ELSE'S response)
 
-    sesje: 19/20 rund zle, w tym  user=B  sess_user=A   <- dane sesji A w requescie B
-    auth:  po Auth::login alice i bob, 5/6 rownoleglych /me zwrocilo user: null
+    sessions: 19/20 rounds wrong, including  user=B  sess_user=A   <- session A's data in request B
+    auth:  after Auth::login alice and bob, 5/6 parallel /me returned user: null
 
-Przyczyna, spojna ze wszystkimi objawami: `Container::$instance` i
-`Facade::$app` to statyki procesu. Request B, bootstrapujac nowa `Application`,
-podmienia je; gdy fiber A wraca z I/O, `app()`, `DB::`, `Redis::` i `session()`
-rozwiazuja sie w kontenerze B. Dwa requesty dziela jedno polaczenie PDO i Redis
-oraz jeden Store sesji.
+Cause, consistent with all the symptoms: `Container::$instance` and
+`Facade::$app` are process statics. Request B, bootstrapping a new
+`Application`, replaces them; when fiber A returns from I/O, `app()`, `DB::`,
+`Redis::` and `session()` resolve in container B. Two requests share one PDO
+connection and one Redis connection, and one session Store.
 
-To jest ta sama pulapka, przed ktora chroni Octane — z ta roznica, ze Octane
-NIGDY nie ma dwoch requestow w locie w jednym workerze.
+This is the same trap that Octane guards against — with the difference that
+Octane NEVER has two requests in flight in the same worker.
 
-Dodatkowo: `HandleExceptions` w req1 ustawia `display_errors = Off`
-i `error_reporting = -1`, co zostaje dla procesu (ini nie jest przywracane per
-request), przez co fatale na fiberze daja 500 bez tresci.
+Additionally: `HandleExceptions` in req1 sets `display_errors = Off` and
+`error_reporting = -1`, which stays for the process (ini is not restored per
+request), so fatals on the fiber give a 500 with no body.
 
-## Lista napraw po naszej stronie
+## List of fixes on our side
 
-W kolejnosci: tanie i blokujace wszystko najpierw.
+In order: cheap and blocking everything first.
 
-1. **Autoglobale per request** niezaleznie od `auto_globals_jit` — wolac
-   callbacki w `fpm_coop_req_enter`. Bez tego pada kazda aplikacja, ktorej
-   skrypt wejsciowy sam ich nie dotyka. Jedyna tania pozycja z tej listy.
-2. **Stan `ext/session` per request** — swap `ps_globals` przy enter/leave, tak
-   jak robimy z SG i OG. Bez tego sesje i security Symfony nie dzialaja
-   wspolbieznie.
-3. **Przywracanie WSZYSTKICH wpisow ini per request** (odpowiednik
-   `zend_ini_deactivate`), nie tylko `max_execution_time`. `define()` zostaje
-   procesowe i to sie nie zmieni.
-4. **Model include** — cache wartosci `require_once` nie ratuje Symfony. Albo
-   per-requestowe `included_files` z pomijaniem redeklaracji juz istniejacych
-   klas i funkcji przy rekompilacji, albo udokumentowany wymog wlasnego
-   `index.php`.
-5. **Laravel: statyki klas per fiber** (`Container::$instance`, `Facade::$app`).
-   To kierunek, ktory w forku True Async zrobiono i **cofnieto**. Bez tego
-   Laravel na fiberze to co najwyzej jeden request w locie.
-6. **Bramka HTTP: fallback na front controller** — `/mix` daje dzis
-   "File not found", trzeba `/index.php/mix`. Osobny brak, opisany tez
-   w NOTES ("index.php hardcoded / brak try_files").
+1. **Autoglobals per request** regardless of `auto_globals_jit` — call the
+   callbacks in `fpm_coop_req_enter`. Without this, every application whose
+   entry script does not touch them itself breaks. The only cheap item on
+   this list.
+2. **`ext/session` state per request** — swap `ps_globals` on enter/leave, the
+   same as we do with SG and OG. Without this, Symfony sessions and security
+   don't work concurrently.
+3. **Restoring ALL ini entries per request** (the equivalent of
+   `zend_ini_deactivate`), not just `max_execution_time`. `define()` stays
+   process-wide and that will not change.
+4. **The include model** — caching the `require_once` return value does not
+   save Symfony. Either per-request `included_files` that skips redeclaring
+   classes and functions that already exist on recompilation, or a documented
+   requirement for your own `index.php`.
+5. **Laravel: class statics per fiber** (`Container::$instance`,
+   `Facade::$app`). This is the direction the True Async fork took and then
+   **reverted**. Without this, Laravel on a fiber is at best one request in
+   flight.
+6. **HTTP gateway: fallback to the front controller** — `/mix` currently gives
+   "File not found", you have to use `/index.php/mix`. A separate gap, also
+   documented in NOTES ("index.php hardcoded / no try_files").
 
-## Czego ten pomiar NIE objal
+## What this measurement did NOT cover
 
-- Laravel `classic` jako linia odniesienia dla testow rownoleglych i sesji
-  (pojedyncze requesty OK).
-- Laravel: stabilnosc 300 requestow (przerwane przez wiszace requesty). RSS po
-  ~55 requestach 73 MB wobec 40 MB u Symfony.
-- Symfony z `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq`.
+- Laravel `classic` as a baseline for the parallel and session tests (single
+  requests OK).
+- Laravel: stability over 300 requests (interrupted by hanging requests). RSS
+  after ~55 requests was 73 MB versus 40 MB for Symfony.
+- Symfony with `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq`.
 
-## Uwaga metodyczna
+## Methodological note
 
-Bramka HTTP nie ma fallbacku na front controller, wiec wszystkie zadania szly
-przez `/index.php/mix?...` (PATH_INFO). Stary build na poligonie byl
-`--disable-all` i trzeba go bylo odbudowac z mbstring, session, ctype,
-tokenizer, dom, iconv, fileinfo, phar i curl — bez nich composer i oba
-frameworki sie nie instaluja.
+The HTTP gateway has no fallback to the front controller, so all requests
+went through `/index.php/mix?...` (PATH_INFO). The old build on the test box
+was `--disable-all` and had to be rebuilt with mbstring, session, ctype,
+tokenizer, dom, iconv, fileinfo, phar and curl — without them composer and
+both frameworks won't install.
 
 ---
 
-# AKTUALIZACJA 2026-09-06: po naprawach 1, 2, 3 i izolacji wartosci ini
+# UPDATE 2026-09-06: after fixes 1, 2, 3 and ini value isolation
 
-Werdykty wyzej sa juz NIEAKTUALNE dla Symfony. Zmierzone ponownie na tym samym
-poligonie, `pool.executor = fiber`, `env[FPMNG_SHARED_INCLUDES] = 1`,
-`pm.max_children = 1`, sesje przez handler uzytkownika, N=8 rownoleglych.
+The verdicts above are now OUTDATED for Symfony. Re-measured on the same test
+box, `pool.executor = fiber`, `env[FPMNG_SHARED_INCLUDES] = 1`,
+`pm.max_children = 1`, sessions through a user handler, N=8 parallel.
 
-## Co doszlo
+## What was added
 
-1. **Autoglobale per request** — `$_SERVER`/`$_ENV`/`$_REQUEST` wymuszane w
-   `fpm_coop_req_run`, niezaleznie od `auto_globals_jit`. Obejscie
-   `$_SERVER; $_ENV; $_REQUEST;` w `index.php` Laravela nie jest juz potrzebne.
-2. **Przywracanie WSZYSTKICH wpisow ini** na koncu requestu
-   (`zend_ini_deactivate()` zamiast jednego `max_execution_time`).
-3. **Izolacja stanu `ext/session` per request** — swap globali modulu przy
-   enter/leave plus RINIT/RSHUTDOWN per request (`fpm_pool_coop_session.c`).
-   Adres `ps_globals` brany z `mh_arg2` wpisu ini `session.save_path`, bez
-   zaleznosci linkera: build z `--enable-session=shared` i z sesja wylaczona
-   linkuja sie i dzialaja.
-4. **Izolacja WARTOSCI wpisow ini miedzy requestami w locie**
-   (`fpm_pool_coop_ini.c`) — bez tego `ini_get()` widzial cudze `ini_set()`.
+1. **Autoglobals per request** — `$_SERVER`/`$_ENV`/`$_REQUEST` forced in
+   `fpm_coop_req_run`, regardless of `auto_globals_jit`. The
+   `$_SERVER; $_ENV; $_REQUEST;` workaround in Laravel's `index.php` is no
+   longer needed.
+2. **Restoring ALL ini entries** at the end of the request
+   (`zend_ini_deactivate()` instead of just one, `max_execution_time`).
+3. **`ext/session` state isolation per request** — swap the module's globals
+   on enter/leave plus RINIT/RSHUTDOWN per request (`fpm_pool_coop_session.c`).
+   The address of `ps_globals` is taken from `mh_arg2` of the `session.save_path`
+   ini entry, with no linker dependency: a build with `--enable-session=shared`
+   and one with session disabled both link and work.
+4. **Isolating the VALUES of ini entries between requests in flight**
+   (`fpm_pool_coop_ini.c`) — without this `ini_get()` saw someone else's
+   `ini_set()`.
 
-## Symfony: TAK, takze z sesjami
+## Symfony: YES, sessions included
 
     N=8, /session?user=X&sleep=0.3
-    8/8 http=200, rozlaczne sid, ok=true, handler=user we wszystkich osmiu
-    druga runda tymi samymi ciasteczkami: 8/8 count=2, te same sid
+    8/8 http=200, disjoint sid, ok=true, handler=user for all eight
+    second round with the same cookies: 8/8 count=2, same sid
 
-Poprzednio: **20/20 rund HTTP 500**, `Failed to start the session`,
-`Cannot call session save handler in a recursive manner`. Logi czyste — 421
-linii "WARNING" w logu poola to wylacznie debug Symfony w trybie dev
-przepuszczony przez `catch_workers_output`, zero prawdziwych bledow.
+Previously: **20/20 rounds HTTP 500**, `Failed to start the session`,
+`Cannot call session save handler in a recursive manner`. Logs clean — 421
+lines of "WARNING" in the pool log are purely Symfony dev-mode debug passed
+through `catch_workers_output`, zero real errors.
 
-Skrypt testowy uzywa handlera z PRAWDZIWYM blokujacym I/O wewnatrz `read()`
-(`blPop` na Redisie), czyli dokladnie tym, co wywolywalo pierwotna awarie.
+The test script uses a handler with REAL blocking I/O inside `read()`
+(`blPop` on Redis), i.e. exactly what triggered the original failure.
 
-## Laravel: nadal NIE — i tryb awarii zmienil sie z GLOSNEGO na CICHY
+## Laravel: still NO — and the failure mode changed from LOUD to SILENT
 
     user    sess_user  ok      count  app_oid  container_request_oid
     alice   alice      True    1      1261     1329
@@ -234,29 +244,30 @@ Skrypt testowy uzywa handlera z PRAWDZIWYM blokujacym I/O wewnatrz `read()`
     grace   bob        False   4      225      1842
     heidi   heidi      True    1      225      1842
 
-5/8 poprawnych, 3/8 dostalo CUDZA sesje. Piec requestow dzieli jeden obiekt
-`Application` (`app_oid = 225`) i jeden obiekt `Request` (1842) — to jest
-`Container::$instance` i `Facade::$app`, czyli pozycja 5 z listy napraw,
-ktorej nie ruszalismy.
+5/8 correct, 3/8 got SOMEONE ELSE'S session. Five requests share one
+`Application` object (`app_oid = 225`) and one `Request` object (1842) — that
+is `Container::$instance` and `Facade::$app`, i.e. item 5 on the fix list,
+which we did not touch.
 
-Poprzednio: 1 x 200, 4 x 500, trzy requesty wiszace do timeoutu 60 s, plus
-`Cannot execute queries while other unbuffered queries are active` i
-`unserialize` cudzej odpowiedzi Redisa. Teraz: **8 x 200, zero wyjatkow, zero
-fatali, pusty `laravel.log`**.
+Previously: 1 x 200, 4 x 500, three requests hanging until the 60 s timeout,
+plus `Cannot execute queries while other unbuffered queries are active` and
+`unserialize` of someone else's Redis response. Now: **8 x 200, zero
+exceptions, zero fatals, empty `laravel.log`**.
 
-To NIE jest poprawa z punktu widzenia wdrozenia. Wczesniej Laravel na fiberze
-sie wywracal i bylo to widac. Teraz zwraca 200 z cudzymi danymi i nic tego nie
-zglasza. Werdykt "Laravel: NIE" jest po tej zmianie MOCNIEJSZY, nie slabszy.
+This is NOT an improvement from a deployment point of view. Before, Laravel
+on a fiber crashed and it was visible. Now it returns 200 with someone else's
+data and reports nothing. The verdict "Laravel: NO" is STRONGER after this
+change, not weaker.
 
-Roznica miedzy frameworkami nie lezy w ich jakosci: Symfony trzyma stan w
-kontenerze przekazywanym jawnie, Laravel w statyku klasy — a statyki klas sa
-procesowe i my ich nie rozdzielamy.
+The difference between the frameworks is not in their quality: Symfony keeps
+state in a container passed explicitly, Laravel in a class static — and class
+statics are process-wide and we do not separate them.
 
-## Znane ograniczenie naprawy 4
+## Known limitation of fix 4
 
-Izolowane sa WARTOSCI wpisow ini (to, co widzi `ini_get`/`ini_set`), ale nie
-procesowe globale, ktore niektore wpisy ustawiaja przez `on_modify` — np.
-`precision` trafia do `core_globals` i jest realnie uzywane przez `var_dump`
-i `serialize`, wiec tam nadal jest wspolne miedzy requestami w locie. Pelna
-naprawa wymagalaby swapowania globali kazdego takiego modulu, tak jak
-`fpm_pool_coop_session.c` robi to dla sesji.
+The VALUES of ini entries are isolated (what `ini_get`/`ini_set` see), but not
+the process-wide globals that some entries set through `on_modify` — e.g.
+`precision` lands in `core_globals` and is actually used by `var_dump` and
+`serialize`, so it is still shared between requests in flight there. A full
+fix would require swapping the globals of every such module, the way
+`fpm_pool_coop_session.c` does for sessions.

@@ -183,6 +183,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
+	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -765,6 +766,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
+	free(wpc->fiber_isolate_statics);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

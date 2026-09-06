@@ -135,6 +135,11 @@ struct fpm_worker_pool_config_s {
 	char *http_tls_min_version;		/* "TLSv1.2" (domyslne) albo "TLSv1.3" */
 	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
+	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class
+	 * static properties; see fpm_pool_coop_statics.c. Comma-separated list of
+	 * Class\Name::property (declaring class, PHP property syntax without the
+	 * '$'); empty = mechanism off, see FPM_COOP_STATICS_MAX. */
+	char *fiber_isolate_statics;
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

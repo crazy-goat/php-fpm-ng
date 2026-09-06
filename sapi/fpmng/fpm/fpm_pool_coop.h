@@ -86,6 +86,12 @@ struct fpm_coop_req_s {
 	HashTable *ini_mods;			/* nazwa -> zend_ini_entry* (ta sama tablica co EG(modified_ini_directives)) */
 	HashTable *ini_values;			/* nazwa -> zend_string* : wlasna wartosc TEGO requestu */
 
+	/* Values stashed from fiber.isolate_statics (fpm_pool_coop_statics.c)
+	 * while this request is not live. Array of zval, one per configured
+	 * item, NULL until the first fpm_coop_statics_req_leave() with a
+	 * non-empty item list allocates it (empty list, the default: never). */
+	void *statics;
+
 	void *type_data;			/* prywatne typu poola (fiber: zend_fiber + event) */
 };
 

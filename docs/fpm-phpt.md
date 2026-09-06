@@ -85,7 +85,8 @@ The categories are intentionally stricter than PHP's result names:
 |---|---|
 | `PASS` | `PASSED` only |
 | `SKIP` | `SKIPPED` only |
-| `FAIL/ERROR` | `FAILED`, `BORKED`, `WARNED`, `LEAKED`, `XFAILED`, `XLEAKED` or any other emitted non-pass status |
+| `WARN` | `WARNED` (for example, an `XFAIL` test passed unexpectedly) |
+| `FAIL/ERROR` | `FAILED`, `BORKED`, `LEAKED`, `XFAILED`, `XLEAKED` or any other emitted non-pass status |
 | `NOT MEASURED` | no status was emitted, or a prerequisite prevented the run |
 
 A missing status is never converted to `PASS`. A non-zero runner exit status is

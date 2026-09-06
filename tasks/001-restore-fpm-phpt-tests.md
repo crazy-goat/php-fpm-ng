@@ -1,7 +1,7 @@
 # 001 — Run upstream FPM's `.phpt` suite against `php-fpm-ng`
 
 **Priority:** highest. Everything else in `tasks/` is easier to trust once this exists.
-**Status:** done.
+**Status:** in progress.
 
 ## Context
 
@@ -81,17 +81,26 @@ thing to silence.
   (`tester.inc:531`). Expect a non-trivial number of environment-dependent
   skips and report them as skips, not as passes.
 
-## Outcome
+## Outcome so far — 2026-09-06
 
 `build/prepare.sh` now retains the upstream `sapi/fpm/tests` directory when it
 creates `sapi/fpmng/`. `build/run-fpm-phpt.sh` runs that copied suite against
 explicit `TEST_PHP_EXECUTABLE` and `TEST_PHP_FPM_EXECUTABLE` paths, fingerprints
 the binaries before starting tests, and writes per-test TSV results plus a
-summary with `PASS`, `FAIL/ERROR`, `SKIP` and `NOT MEASURED` categories.
+summary with `PASS`, `FAIL/ERROR`, `WARN`, `SKIP` and `NOT MEASURED` categories.
+The runner also normalizes the absolute paths emitted by `run-tests.php` before
+matching them to the relative inventory.
 
-The runner and prerequisites are documented in `docs/fpm-phpt.md`. The full
-suite was **not measured** in this environment: no compatible prepared source
-checkout and no binary built from the retry branch were available. The
-150-row inventory and exact source/patch blocker are recorded in
-`docs/fpm-phpt-results.md`; no failure was observed, so no failure triage or
-separate defect task was created.
+The complete 150-test suite was run on the isolated polygon build. The final
+run reported **133 PASS / 1 FAIL/ERROR / 1 WARN / 15 SKIP / 0 NOT MEASURED**.
+The stable `http-basic.phpt` failure is an upstream test artifact for the old
+`--with-fpm-http` mode: fpmng starts its gateway only for `pool.type = http`.
+The `XFAIL` output-log test reported `WARNED` because it passed unexpectedly,
+and is recorded as `WARN`. `gh16432-status-high-nprocs.phpt` failed once in
+three complete runs but passed five isolated repetitions; that intermittent
+observation remains documented and needs a separate investigation if it
+recurs. Full evidence and triage are in `docs/fpm-phpt-results.md`.
+
+The task remains in progress until the observed non-PASS results are either
+resolved or explicitly accepted/documented as out of scope, and the result
+record has been reviewed on the main branch.

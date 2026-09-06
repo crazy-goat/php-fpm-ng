@@ -28,6 +28,7 @@
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_reval.h"
 #include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_sleep.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
@@ -537,6 +538,12 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	/* Transporty: jestesmy po MINIT (fpm_main.c: startup() przed fpm_run()),
 	 * czyli po ext/openssl, ktore nadpisuje "tcp" w swoim MINIT. */
 	fpm_pool_fiber_xport_install();
+
+	/* Sleep-family (sleep/usleep/time_nanosleep): patrz fpm_pool_fiber_sleep.h.
+	 * Kolejnosc wzgledem xport_install nie ma tu znaczenia (rozne funkcje w
+	 * tablicy funkcji), ale trzymamy sie tego samego miejsca w child_main,
+	 * bo to jedyny punkt instalacji specyficzny dla typu poola fiber. */
+	fpm_pool_fiber_sleep_install();
 
 	fpm_fiber_ev_accept = event_new(fpm_fiber_base, fpm_fiber_listen_fd, EV_READ | EV_PERSIST, fpm_fiber_accept_cb, NULL);
 	fpm_fiber_ev_tick = event_new(fpm_fiber_base, -1, EV_PERSIST, fpm_fiber_tick_cb, NULL);

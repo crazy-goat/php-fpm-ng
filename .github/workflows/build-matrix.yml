@@ -33,7 +33,7 @@ jobs:
   patches:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: clone pinned php-src
         run: |
           git init php-src
@@ -52,7 +52,7 @@ jobs:
     needs: patches
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: install build dependencies
         run: |
@@ -62,7 +62,7 @@ jobs:
             libevent-dev libssl-dev zlib1g-dev ccache
 
       - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@v1.2.24
         with:
           key: build-canonical
 
@@ -117,7 +117,7 @@ jobs:
           cp php-src/run-tests.php stage/prepared/
 
       - name: upload build (for the phpt job)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fpmng-canonical-build
           path: stage
@@ -129,7 +129,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: install runtime dependencies
         # This runner never ran the build job's dependency install step, but
         # php-fpm-ng and php are dynamically linked against libevent/openssl —
@@ -139,7 +139,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
           path: build-out
@@ -149,7 +149,7 @@ jobs:
           TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
           TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
           ./build/run-fpm-phpt.sh "$PWD/build-out/prepared" "$PWD/phpt-results"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: phpt-results

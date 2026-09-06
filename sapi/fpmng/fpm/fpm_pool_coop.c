@@ -861,6 +861,7 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 {
 	fcgi_request *req = ctx->req;
 
+	fpm_coop_ini_req_free(ctx);
 	efree(ctx);
 	return req;
 }

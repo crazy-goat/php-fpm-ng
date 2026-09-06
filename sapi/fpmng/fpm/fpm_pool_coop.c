@@ -71,6 +71,15 @@ static sapi_globals_struct fpm_coop_base_sg;
 static zend_output_globals fpm_coop_base_og;
 static HashTable fpm_coop_base_symbol_table;
 static HashTable fpm_coop_base_included_files;
+
+/* EKSPERYMENT (FPMNG_SHARED_INCLUDES=1): lista wczytanych plikow WSPOLNA dla
+ * procesu zamiast per request. Powod: tablice funkcji i klas sa procesowe,
+ * wiec gdy included_files jest per request, drugi request wykonuje
+ * require_once 'vendor/autoload.php' jeszcze raz i dostaje "Cannot redeclare
+ * class ComposerAutoloaderInit...". Wspolna lista czyni bootstrap
+ * jednorazowym BEZ worker-mode i bez zmian w aplikacji. Znany koszt:
+ * require_once przy drugim wywolaniu zwraca true zamiast wartosci pliku. */
+static bool fpm_coop_shared_includes = false;
 static zval fpm_coop_base_http_globals[NUM_TRACK_VARS];
 static int fpm_coop_base_error_reporting;
 static const char *fpm_coop_name = "?";
@@ -320,6 +329,16 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 			"anything caching compiled scripts per process will misbehave with many requests in flight", pool_name);
 	}
 
+	{
+		const char *shared = getenv("FPMNG_SHARED_INCLUDES");
+
+		if (shared && *shared == '1') {
+			fpm_coop_shared_includes = true;
+			zlog(ZLOG_NOTICE, "[pool %s] coop: EKSPERYMENT — included_files wspolne dla procesu "
+				"(require_once wykonuje sie raz na proces, bootstrap nie redeklaruje klas)", pool_name);
+		}
+	}
+
 	/* Procesowe API pcntl — patrz fpm_coop_disabled_functions. Jestesmy po
 	 * fpm_php_init_child (MINIT i php_admin_value[extension] juz za nami) i
 	 * przed pierwszym requestem: dokladnie ta faza, w ktorej fpm_php.c stosuje
@@ -459,7 +478,9 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 	memcpy(&output_globals, &ctx->og, sizeof(output_globals));
 	if (ctx->live) {
 		memcpy(&EG(symbol_table), &ctx->symbol_table, sizeof(HashTable));
-		memcpy(&EG(included_files), &ctx->included_files, sizeof(HashTable));
+		if (!fpm_coop_shared_includes) {
+			memcpy(&EG(included_files), &ctx->included_files, sizeof(HashTable));
+		}
 		for (i = 0; i < NUM_TRACK_VARS; i++) {
 			ZVAL_COPY_VALUE(&PG(http_globals)[i], &ctx->http_globals[i]);
 		}
@@ -478,7 +499,9 @@ static void fpm_coop_base_tables_restore(void) /* {{{ */
 	int i;
 
 	memcpy(&EG(symbol_table), &fpm_coop_base_symbol_table, sizeof(HashTable));
-	memcpy(&EG(included_files), &fpm_coop_base_included_files, sizeof(HashTable));
+	if (!fpm_coop_shared_includes) {
+		memcpy(&EG(included_files), &fpm_coop_base_included_files, sizeof(HashTable));
+	}
 	for (i = 0; i < NUM_TRACK_VARS; i++) {
 		ZVAL_COPY_VALUE(&PG(http_globals)[i], &fpm_coop_base_http_globals[i]);
 	}
@@ -501,7 +524,9 @@ void fpm_coop_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 	memcpy(&output_globals, &fpm_coop_base_og, sizeof(output_globals));
 	if (ctx->live) {
 		memcpy(&ctx->symbol_table, &EG(symbol_table), sizeof(HashTable));
-		memcpy(&ctx->included_files, &EG(included_files), sizeof(HashTable));
+		if (!fpm_coop_shared_includes) {
+			memcpy(&ctx->included_files, &EG(included_files), sizeof(HashTable));
+		}
 		for (i = 0; i < NUM_TRACK_VARS; i++) {
 			ZVAL_COPY_VALUE(&ctx->http_globals[i], &PG(http_globals)[i]);
 		}
@@ -607,7 +632,9 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * bez addref i zwalnia je pod nim — zmierzone w 3t: SIGABRT w
 	 * gc_possible_root na skrypcie z zasobem gniazda w $fp. */
 	zend_hash_init(&EG(symbol_table), 64, NULL, ZVAL_PTR_DTOR, 0);
-	zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
+	if (!fpm_coop_shared_includes) {
+		zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
+	}
 	for (i = 0; i < NUM_TRACK_VARS; i++) {
 		ZVAL_UNDEF(&PG(http_globals)[i]);
 	}
@@ -728,7 +755,9 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	/* 7. Tablice requestu: jak shutdown_executor(). Symbol table juz
 	 * zniszczona (graceful destroy wyzej zwalnia tez arData). */
-	zend_hash_destroy(&EG(included_files));
+	if (!fpm_coop_shared_includes) {
+		zend_hash_destroy(&EG(included_files));
+	}
 	for (i = 0; i < NUM_TRACK_VARS; i++) {
 		zval_ptr_dtor(&PG(http_globals)[i]);
 	}

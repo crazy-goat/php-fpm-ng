@@ -1,209 +1,210 @@
-# SPIKE: czy executor `fiber` moze dzialac WYLACZNIE w ZTS, z osobnym blokiem TSRM na kazdy request?
+# SPIKE: can the `fiber` executor work EXCLUSIVELY in ZTS, with a separate TSRM block per request?
 
-Status: SPIKE, nie do zmergowania. Kod eksperymentu: `spike/ext-tsrm-spike/`
-(rozszerzenie `tsrm_spike`, `--enable-tsrm-spike`, statyczne, wolane z CLI:
+Status: SPIKE, not to be merged. Experiment code: `spike/ext-tsrm-spike/`
+(extension `tsrm_spike`, `--enable-tsrm-spike`, static, called from CLI:
 `tsrm_spike_run()`, `tsrm_spike_mem(n)`, `tsrm_spike_require_in_ctx(path, which)`).
-Nie implementuje executora na kontekstach TSRM — tylko sprawdza, czy fundament
-w ogole dziala.
+Does not implement an executor on TSRM contexts — it only checks whether the
+foundation works at all.
 
 Repo: php-fpm-ng @ `89c5151`, branch `spike/a5-tsrm-ctx`, worktree
-`/Users/piotr.halas/work/php-fpm-ng-spike-a5`. Poligon: `~/rd/a5` na
-192.168.8.103. Build: PHP 8.5.11-dev (ten sam php-src co `~/rd/phpsrc`, kopia
-w `~/rd/a5/phpsrc`), `./configure --disable-all --enable-fpmng --enable-zts
+`/Users/piotr.halas/work/php-fpm-ng-spike-a5`. Test box: `~/rd/a5` on
+192.168.8.103. Build: PHP 8.5.11-dev (the same php-src as `~/rd/phpsrc`, a copy
+in `~/rd/a5/phpsrc`), `./configure --disable-all --enable-fpmng --enable-zts
 --enable-tsrm-spike --enable-session=shared --enable-mbstring --enable-ctype
 --enable-tokenizer --enable-phar --with-openssl --with-zlib
 --prefix=/home/piotr/rd/a5/inst`.
 
-Weryfikacja, ze mierze SWOJA binarke: `strings sapi/cli/php | grep -c 'Q4a:
-przed utworzeniem'` -> `1` (nasz string jest w binarce), `php -v` -> `(ZTS)`,
-`php -m | grep tsrm_spike` -> `tsrm_spike` (modul zaladowany).
+Verification that I am measuring MY OWN binary: `strings sapi/cli/php | grep -c 'Q4a:
+przed utworzeniem'` -> `1` (our string is in the binary), `php -v` -> `(ZTS)`,
+`php -m | grep tsrm_spike` -> `tsrm_spike` (module loaded).
 
-## Ustalenia wstepne (research, nie pomiar — ale poparte configure.ac i readelf)
+## Preliminary findings (research, not measurement — but backed by configure.ac and readelf)
 
-- `tsrm_new_interpreter_context()` / `tsrm_set_interpreter_context()` faktycznie
-  nie istnieja w drzewie (`bd73607b9e4`, "TSRM cleanup for PHP8"). Zero
-  wystapien w `TSRM/`, `Zend/`, `main/`.
-- `TSRMG` (uzywane m.in. przez `PS()` w session, gdy nie ustawiona jest static
-  cache) i `TSRMG_STATIC` (uzywane przez `EG`/`PG`/`SG` i przez `PS()` GDY
-  ustawiona) to dwie rozne sciezki (`TSRM/TSRM.h:178-192`):
-  - `TSRMG_STATIC` czyta `TSRMLS_CACHE` (symbol `_tsrm_ls_cache`, `__thread`,
-    extern) z BIEZACEGO pliku kompilacji — to jest nieoficjalny, ale wciaz
-    dzialajacy "setter" (mozna do niego przypisac).
-  - `TSRMG` (bez `_STATIC`) woła `tsrm_get_ls_cache()` — funkcje TSRM, ktora
-    czyta prawdziwy, wewnetrzny `pthread_getspecific` (patrz `TSRM/TSRM.c:847`
-    i `tsrm_tls_get()`), NIE zmienna `_tsrm_ls_cache`.
-  - Ktora sciezke dostaje dany modul, decyduje `ZEND_ENABLE_STATIC_TSRMLS_CACHE`
-    (`Zend/zend.h:56-69`), flaga per-plik ustawiana w `config.m4`.
-    `ext/session/config.m4:20` ustawia ja TAKZE dla builda `shared` (a wiec
-    session UZYWA fast/static path, nie `tsrm_get_ls_cache()`).
-  - Dla `COMPILE_DL_SESSION`, `ext/session/session.c:3319-3323` robi
-    `ZEND_TSRMLS_CACHE_DEFINE()` (NOWA definicja symbolu `_tsrm_ls_cache` W TYM
-    PLIKU, tzn. w `session.so`) + `ZEND_GET_MODULE`, a `session.c:2884-2885`
-    robi `ZEND_TSRMLS_CACHE_UPDATE()` w MINIT — czyli RAZ, przy starcie
-    procesu / dlopen tego `.so`. To dokladnie hipoteza z zadania.
-  - **Zweryfikowane na poziomie binarki** (nie tylko przez czytanie kodu):
-    `readelf -sW` na `sapi/cli/php` i na `ext/session/.libs/session.so`
-    pokazuje `_tsrm_ls_cache` jako `TLS LOCAL` w OBU plikach — czyli to sa
-    FIZYCZNIE dwie oddzielne zmienne watkowo-lokalne, bez mozliwosci
-    interpozycji symboli ELF. Powod: kompilacja idzie z `-fvisibility=hidden`
-    (widac w linii kompilacji `make`), a `_tsrm_ls_cache` nie ma zadnego
-    atrybutu widocznosci w definicji (`TSRM_TLS void *_tsrm_ls_cache = NULL;`),
-    wiec dziedziczy `hidden` z flagi kompilacji per-plik. `session.so` fizycznie
-    NIE MOZE zobaczyc zmiany tej zmiennej w binarce glownej, i odwrotnie.
+- `tsrm_new_interpreter_context()` / `tsrm_set_interpreter_context()` really do
+  not exist in the tree (`bd73607b9e4`, "TSRM cleanup for PHP8"). Zero
+  occurrences in `TSRM/`, `Zend/`, `main/`.
+- `TSRMG` (used among others by `PS()` in session, when the static cache is
+  not set) and `TSRMG_STATIC` (used by `EG`/`PG`/`SG` and by `PS()` WHEN it IS
+  set) are two different paths (`TSRM/TSRM.h:178-192`):
+  - `TSRMG_STATIC` reads `TSRMLS_CACHE` (symbol `_tsrm_ls_cache`, `__thread`,
+    extern) from the CURRENT compilation unit — this is an unofficial, but
+    still working, "setter" (you can assign to it).
+  - `TSRMG` (without `_STATIC`) calls `tsrm_get_ls_cache()` — a TSRM function
+    that reads the real, internal `pthread_getspecific` (see `TSRM/TSRM.c:847`
+    and `tsrm_tls_get()`), NOT the `_tsrm_ls_cache` variable.
+  - Which path a given module gets is decided by
+    `ZEND_ENABLE_STATIC_TSRMLS_CACHE` (`Zend/zend.h:56-69`), a per-file flag set
+    in `config.m4`. `ext/session/config.m4:20` sets it ALSO for a `shared`
+    build (so session USES the fast/static path, not `tsrm_get_ls_cache()`).
+  - For `COMPILE_DL_SESSION`, `ext/session/session.c:3319-3323` does
+    `ZEND_TSRMLS_CACHE_DEFINE()` (a NEW definition of the symbol `_tsrm_ls_cache`
+    IN THIS FILE, i.e. in `session.so`) + `ZEND_GET_MODULE`, and
+    `session.c:2884-2885` does `ZEND_TSRMLS_CACHE_UPDATE()` in MINIT — i.e.
+    ONCE, at process start / dlopen of that `.so`. This is exactly the
+    hypothesis from the task.
+  - **Verified at the binary level** (not just by reading the code):
+    `readelf -sW` on `sapi/cli/php` and on `ext/session/.libs/session.so`
+    shows `_tsrm_ls_cache` as `TLS LOCAL` in BOTH files — i.e. these are
+    PHYSICALLY two separate thread-local variables, with no possibility of
+    ELF symbol interposition. Reason: compilation is done with
+    `-fvisibility=hidden` (visible in the `make` compile line), and
+    `_tsrm_ls_cache` has no visibility attribute in its definition
+    (`TSRM_TLS void *_tsrm_ls_cache = NULL;`), so it inherits `hidden` from the
+    per-file compilation flag. `session.so` physically CANNOT see a change to
+    this variable in the main binary, and vice versa.
 
-## Q1: czy da sie utworzyc drugi blok TSRM bez usunietego API?
+## Q1: is it possible to create a second TSRM block without the removed API?
 
-**TAK.** `ts_resource_ex(0, &fake_tid)` z podstawionym (nieprawdziwym) `th_id`
-tworzy nowy blok — `TSRM/TSRM.c:527-530` (`allocate_new_resource`), gdy
-`thread_id` nie jest jeszcze w hashtable. `id == 0` przekazane do
-`ts_resource_ex` zwraca `&thread_resources->storage` (patrz
-`TSRM_SAFE_RETURN_RSRC`, `offset==0` -> `return &array`), czyli dokladnie to,
-co normalnie zwraca `tsrm_get_ls_cache()` dla PRAWDZIWEGO watku.
-`allocate_new_resource` wywoluje ctor KAZDEGO zarejestrowanego modulu
-(`TSRM/TSRM.c:470-480`) — czyli nowy blok dostaje pelny, swiezy zestaw
-globali (jak nowy prawdziwy watek w SAPI watkowym).
+**YES.** `ts_resource_ex(0, &fake_tid)` with a substituted (fake) `th_id`
+creates a new block — `TSRM/TSRM.c:527-530` (`allocate_new_resource`), when
+`thread_id` is not yet in the hashtable. `id == 0` passed to
+`ts_resource_ex` returns `&thread_resources->storage` (see
+`TSRM_SAFE_RETURN_RSRC`, `offset==0` -> `return &array`), i.e. exactly what
+`tsrm_get_ls_cache()` normally returns for a REAL thread.
+`allocate_new_resource` calls the ctor of EVERY registered module
+(`TSRM/TSRM.c:470-480`) — i.e. the new block gets a full, fresh set of
+globals (like a new real thread in a threaded SAPI).
 
-Surowe wyjscie (`tsrm_spike_run()`):
+Raw output (`tsrm_spike_run()`):
 ```
 Q1: prawdziwy watek=130144153527872, tsrm_get_ls_cache() (ctxA)=0x617b00d055d0, TSRMLS_CACHE=0x617b00d055d0
 Q1: ts_resource_ex(0, fake_tid=130144153551077) -> ctxB=0x617b00f17b30 (utworzony=tak, rozny od A=tak)
 Q1: po utworzeniu B, tsrm_get_ls_cache()=0x617b00f17b30, TSRMLS_CACHE=0x617b00f17b30 (oczekiwane: oba == ctxB - efekt uboczny allocate_new_resource przelaczyl PRAWDZIWY watek)
 ```
 
-**Zastrzezenie odkryte PRZY OKAZJI (wazniejsze niz sama odpowiedz TAK):**
-`allocate_new_resource()` NIE tworzy tylko nowego bloku obok istniejacego —
-jego skutkiem ubocznym jest natychmiastowe PRZELACZENIE prawdziwego watku
-(realnego `pthread_setspecific` UZYWANEGO przez `tsrm_get_ls_cache()`, plus
-`TSRMLS_CACHE`) na nowo utworzony blok. Nie ma zadnej publicznej funkcji, ktora
-pozwala wrocic do poprzedniego bloku dla sciezki `tsrm_get_ls_cache()` —
-`ts_resource_ex()` dla JUZ ISTNIEJACEGO bloku (branch "znaleziono w
-hashtable") NIE wywoluje `set_thread_local_storage_resource_to()`, wiec nie
-przestawia real TLS z powrotem. Jedyny sposob powrotu, jaki znalazlem, to
-reczne przypisanie `TSRMLS_CACHE = adres_starego_bloku` — a to dziala TYLKO
-dla fast/static path (patrz Q2), NIE dla `tsrm_get_ls_cache()`.
+**Caveat discovered ALONG THE WAY (more important than the YES answer itself):**
+`allocate_new_resource()` does NOT just create a new block alongside the
+existing one — as a side effect it immediately SWITCHES the real thread
+(the real `pthread_setspecific` USED by `tsrm_get_ls_cache()`, plus
+`TSRMLS_CACHE`) to the newly created block. There is no public function that
+lets you go back to the previous block for the `tsrm_get_ls_cache()` path —
+`ts_resource_ex()` for an ALREADY EXISTING block (the "found in
+hashtable" branch) does NOT call `set_thread_local_storage_resource_to()`, so
+it does not switch the real TLS back. The only way back I found is manually
+assigning `TSRMLS_CACHE = address_of_old_block` — and that only works
+for the fast/static path (see Q2), NOT for `tsrm_get_ls_cache()`.
 
-## Q2: czy reczne `TSRMLS_CACHE = ...` przelacza EG/PG (kod statyczny)?
+## Q2: does manually setting `TSRMLS_CACHE = ...` switch EG/PG (statically compiled code)?
 
-**TAK**, dla kodu wkompilowanego statycznie (main binary, bez `COMPILE_DL_*`),
-bo to jest jedna, wspoldzielona zmienna (`TSRMLS_MAIN_CACHE_EXTERN()` w
-`zend.h:73-76` dla plikow bez `ZEND_COMPILE_DL_EXT`).
+**YES**, for code compiled statically (main binary, without `COMPILE_DL_*`),
+because that is one, shared variable (`TSRMLS_MAIN_CACHE_EXTERN()` in
+`zend.h:73-76` for files without `ZEND_COMPILE_DL_EXT`).
 
-Surowe wyjscie:
+Raw output:
 ```
 Q2: ustawilem EG(precision)=111 w A, =222 w B. W B odczytuje=222 (oczekiwane 222)
 Q2: po powrocie TSRMLS_CACHE=ctxA, EG(precision)=111 (oczekiwane 111, NIE 222)
 Q2: WNIOSEK: przelaczanie EG() (kod statyczny) przez reczne TSRMLS_CACHE dziala = TAK
 ```
-(Kolejnosc linii w terminalu byla przestawiona wzgledem kolejnosci
-wykonania kodu — patrz sekcja "Efekt uboczny na warstwie output" nizej;
-wartosci sa poprawne, tylko FLUSH bufora wyjscia jest nieprzewidywalny.)
+(The order of the lines in the terminal was shuffled relative to the order in
+which the code executed — see the "Side effect on the output layer" section
+below; the values are correct, only the output buffer FLUSH is unpredictable.)
 
-## Q3: czy session (`--enable-session=shared`) idzie za przelaczeniem?
+## Q3: does session (`--enable-session=shared`) follow the switch?
 
-**NIE — zgodnie z hipoteza, i to na dwa sposoby, jeden gorszy niz drugi.**
+**NO — as the hypothesis predicted, and in two ways, one worse than the other.**
 
-1. Build: `session.so` uzywa `ZEND_ENABLE_STATIC_TSRMLS_CACHE=1`
-   (`ext/session/config.m4:20`), wiec `PS(v)` idzie przez fast/static path —
-   ale WLASNA, sfrozenowana (raz, w MINIT tego `.so`) kopie `_tsrm_ls_cache`.
-   Reczne przelaczenie `TSRMLS_CACHE` w naszym pliku NIE dotyka tej kopii
-   (potwierdzone przez `readelf`, patrz wyzej: dwie fizycznie oddzielne
-   zmienne `TLS LOCAL`).
-2. Runtime, sciezka A<->A (test dziala): ustawiamy `session.save_path` w A,
-   odczytujemy w A — poprawnie, izolacja OK dopoki nie ruszamy sie z A:
+1. Build: `session.so` uses `ZEND_ENABLE_STATIC_TSRMLS_CACHE=1`
+   (`ext/session/config.m4:20`), so `PS(v)` goes through the fast/static
+   path — but its OWN copy of `_tsrm_ls_cache`, frozen once, in this `.so`'s
+   MINIT. Manually switching `TSRMLS_CACHE` in our file does NOT touch that
+   copy (confirmed by `readelf`, see above: two physically separate
+   `TLS LOCAL` variables).
+2. Runtime, A<->A path (test works): we set `session.save_path` in A,
+   read it in A — correctly, isolation is fine as long as we stay in A:
 ```
 Q3: w A ustawilem save_path=/spike/A, session_save_path() zwraca teraz: /spike/A
 Q3: po powrocie TSRMLS_CACHE=ctxA (statyczny EG/PG juz widzi A), session_save_path() (dynamicznie zaladowany session.so) zwraca: /spike/A
 ```
-3. Runtime, proba odczytu/zapisu W kontekscie B: **`call_user_function()` dla
-   `session_save_path` ZAWIODLO** (dwukrotnie — set i get):
+3. Runtime, attempt to read/write IN context B: **`call_user_function()` for
+   `session_save_path` FAILED** (twice — set and get):
 ```
 SPIKE: call_user_function(session_save_path, /spike/B) FAILED
 SPIKE: call_user_function(session_save_path) FAILED
 ```
-   Nie udalo mi sie ustalic dokladnej przyczyny w ramach tego spike'u (nie
-   drazylem glebiej, zgodnie z zasada "nie naprawiaj po drodze") — najbardziej
-   prawdopodobne wytlumaczenie: `CG(function_table)` w kontekscie B jest
-   swiezy z GINIT (bo `allocate_new_resource` woła ctor kazdego modulu, ale to
-   NIE jest to samo, co pelna rejestracja funkcji przez `php_module_startup()`
-   danego watku), wiec `session_save_path` moze tam po prostu nie istniec.
-   To jest WAZNIEJSZE od samego Q3: **kontekst B, nawet poprawnie utworzony
-   (Q1), NIE jest dzialajacym interpreterem** — patrz takze Q4b, gdzie proba
-   uruchomienia PRAWDZIWEGO kodu PHP w kontekscie B konczy sie SEGFAULTEM.
+   I did not manage to establish the exact cause within this spike (did not
+   dig deeper, per the "don't fix along the way" rule) — the most likely
+   explanation: `CG(function_table)` in context B is fresh from GINIT (because
+   `allocate_new_resource` calls the ctor of every module, but that is NOT the
+   same as the full function registration done by `php_module_startup()` for
+   a given thread), so `session_save_path` may simply not exist there.
+   This is MORE IMPORTANT than Q3 itself: **context B, even correctly created
+   (Q1), is NOT a working interpreter** — see also Q4b, where an attempt to
+   run REAL PHP code in context B ends in a SEGFAULT.
 
-**Wniosek dla Q3**: tej czesci pytania (czy session PO CICHU widzi stary
-kontekst zamiast nowego) NIE udalo sie jednoznacznie zmierzyc w runtime, bo
-probe blokuje glebszy problem — kontekst B nie jest w stanie wykonac zadnego
-wywolania funkcji PHP. To, co jest zmierzone i pewne: session.so ma WLASNA,
-fizycznie oddzielna kopie `_tsrm_ls_cache` (dowod `readelf`), wiec zaden
-zewnetrzny "switch" (nawet gdyby kontekst B dzialal) nie moze jej dotknac —
-session zawsze widzi kontekst, ktory mial w momencie wlasnego MINIT (zwykle
-start procesu), niezaleznie od czegokolwiek pozniej.
+**Conclusion for Q3**: this part of the question (whether session SILENTLY
+sees the old context instead of the new one) could NOT be conclusively
+measured at runtime, because the probe is blocked by a deeper problem —
+context B cannot execute any PHP function call. What IS measured and certain:
+session.so has ITS OWN, physically separate copy of `_tsrm_ls_cache` (proven
+by `readelf`), so no external "switch" (even if context B worked) can touch
+it — session always sees the context it had at the moment of its own MINIT
+(usually process start), regardless of anything that happens afterward.
 
-## Efekt uboczny odkryty przy okazji: warstwa output tez jest per-kontekst
+## Side effect discovered along the way: the output layer is also per-context
 
-Linie z `php_printf()` wydrukowane W TRAKCIE gdy `TSRMLS_CACHE` wskazywal na
-B pojawily sie w terminalu w INNEJ kolejnosci niz w kodzie (np. linia "Q2: po
-powrocie... 111" pojawila sie w logu PRZED linia "Q1: ts_resource_ex(...) ->
-ctxB", mimo ze w kodzie jest odwrotnie). `php_printf` idzie przez SAPI
-output buffering (`OG()`/`output_globals`), ktore rowniez jest per-kontekst
-TSRM (fast/static) — czyli przelaczenie `TSRMLS_CACHE` w trakcie requestu
-przelacza TEZ bufor wyjscia na nowy, "sierocy" bufor kontekstu B, ktory flushuje
-sie w innym momencie niz normalny strumien stdout kontekstu A. Nie zbadalem
-tego dogłębniej (poza zakresem spike'u), ale to kolejny, niezalezny dowod na
-to, ze "po prostu przelacz TSRMLS_CACHE" rusza znacznie wiecej stanu, niz
-tylko globalne zmienne, ktorych celowo dotykamy.
+Lines printed by `php_printf()` WHILE `TSRMLS_CACHE` pointed to B appeared in
+the terminal in a DIFFERENT order than in the code (e.g. the line "Q2: po
+powrocie... 111" appeared in the log BEFORE the line "Q1: ts_resource_ex(...) ->
+ctxB", even though the code has it the other way around). `php_printf` goes
+through SAPI output buffering (`OG()`/`output_globals`), which is also
+per-context TSRM (fast/static) — i.e. switching `TSRMLS_CACHE` mid-request
+also switches the output buffer to a new, "orphaned" buffer of context B,
+which flushes at a different moment than the normal stdout stream of context
+A. I did not investigate this further (out of scope for the spike), but it is
+another, independent piece of evidence that "just switch TSRMLS_CACHE" moves
+much more state than just the globals we deliberately touch.
 
-## Q4: koszt pamieci
+## Q4: memory cost
 
-### (a) sam blok zasobow TSRM, zmierzone
+### (a) the TSRM resource block itself, measured
 
-Metoda: `VmRSS` z `/proc/self/status` przed i po utworzeniu N blokow przez
-`ts_resource_ex(0, &fake_tid)` w petli (rozne `fake_tid` kazda iteracja), BEZ
-zadnego kodu PHP w srodku (zaden request, zaden `require`).
+Method: `VmRSS` from `/proc/self/status` before and after creating N blocks via
+`ts_resource_ex(0, &fake_tid)` in a loop (different `fake_tid` each iteration),
+WITHOUT any PHP code inside (no request, no `require`).
 
-Surowe wyjscie:
+Raw output:
 ```
 N=1: Q4a: przed utworzeniem 1 dodatkowych blokow: VmRSS=16564 kB
      Q4a: po utworzeniu 1 dodatkowych blokow: VmRSS=16856 kB (delta=292 kB, ~292.0 kB/blok)
 N=8: Q4a: przed utworzeniem 8 dodatkowych blokow: VmRSS=16664 kB
      Q4a: po utworzeniu 8 dodatkowych blokow: VmRSS=18944 kB (delta=2280 kB, ~285.0 kB/blok)
 ```
-~285-292 kB na dodatkowy, PUSTY blok TSRM (same struktury modulow po GINIT,
-zero kodu uzytkownika). To JEST mierzalny koszt bazowy, ale nie odpowiada na
-pytanie o realny koszt (patrz (b)).
+~285-292 kB per additional, EMPTY TSRM block (just the module structures after
+GINIT, zero user code). This IS a measurable baseline cost, but does not
+answer the question of the real-world cost (see (b)).
 
-### (b) z Symfony (`require vendor/autoload.php`) w kazdym kontekscie
+### (b) with Symfony (`require vendor/autoload.php`) in each context
 
-**NIE ZMIERZONE.** Proba (`tsrm_spike_require_in_ctx()`, uzywajac
-`zend_eval_string()` bo `require` to konstrukcja jezyka, nie funkcja) na
-prostym pliku `tiny.php` w BIEZACYM kontekscie zadziala poprawnie:
+**NOT MEASURED.** An attempt (`tsrm_spike_require_in_ctx()`, using
+`zend_eval_string()` because `require` is a language construct, not a
+function) on a simple `tiny.php` file in the CURRENT context works correctly:
 ```
 Q4b: zend_eval_string(require /home/piotr/rd/a5/tiny.php) w kontekscie biezacym -> rv=0 (SUCCESS), exception=nie
 Q4b: VmRSS przed=16632 kB po=16640 kB (delta=8 kB)
 PHP script survived to the end.
 ```
-ale ta sama operacja W KONTEKSCIE B (utworzonym przez `ts_resource_ex`, tak
-jak w Q1) **konczy sie SEGFAULTEM procesu, natychmiast, przed jakimkolwiek
-printem**:
+but the same operation IN CONTEXT B (created via `ts_resource_ex`, as in Q1)
+**ends in a process SEGFAULT, immediately, before any print**:
 ```
 $ php -n spike_require.php tiny.php 1
 Segmentation fault (core dumped)
 EXIT=139
 ```
-Nie draze dalej przyczyny (poza zakresem spike'u) — ale to zamyka sprawe (b):
-skoro nawet trywialny plik w kontekscie B segfaultuje, `require
-vendor/autoload.php` z Symfony w tym samym kontekscie nie ma szans zadzialac,
-a probowanie tego dalej byloby marnowaniem czasu na cos, co juz wiadomo ze nie
-dziala. Punkt odniesienia z `docs/frameworks.md` (8 rownoleglych requestow
-Symfony = 42 MB RSS w jednym procesie, obecny model) pozostaje jedynym
-zmierzonym punktem po tej stronie.
+Not digging further into the cause (out of scope for the spike) — but this
+closes the matter of (b): if even a trivial file segfaults in context B,
+`require vendor/autoload.php` with Symfony in the same context has no chance
+of working, and trying it further would be wasting time on something already
+known not to work. The reference point from `docs/frameworks.md` (8 parallel
+Symfony requests = 42 MB RSS in one process, the current model) remains the
+only measured data point on this side.
 
-## Q5: czy build ZTS przechodzi z `patches/` i `sapi/fpmng`?
+## Q5: does a ZTS build pass with `patches/` and `sapi/fpmng`?
 
-**NIE.** `./configure --enable-zts` + `build/prepare.sh` (patche + skladanie
-`sapi/fpmng`) przechodza bez ostrzezen, ale `make` pada na
-`sapi/fpmng/fpm/fpm_pool_coop.c` (mechanizm izolacji sesji request<->request
-na executorze coop/fiber — swap globali "przez wartosc"):
+**NO.** `./configure --enable-zts` + `build/prepare.sh` (patches + assembling
+`sapi/fpmng`) pass without warnings, but `make` fails on
+`sapi/fpmng/fpm/fpm_pool_coop.c` (the request<->request session isolation
+mechanism on the coop/fiber executor — "swap globals by value"):
 
 ```
 /home/piotr/rd/a5/phpsrc/sapi/fpmng/fpm/fpm_pool_coop.c: In function 'fpm_coop_container_start':
@@ -216,57 +217,56 @@ fpm_pool_coop.c:385:36: error: 'output_globals' undeclared (first use in this fu
 make: *** [Makefile:663: sapi/fpmng/fpm/fpm_pool_coop.lo] Error 1
 ```
 
-Przyczyna: `sapi_globals` i `output_globals` jako GOLE zmienne globalne
-istnieja TYLKO w buildzie NTS. W ZTS to makra (`SG(...)`, `OG(...)`) idace
-przez TSRM, nie symbole do wziecia adresu / `memcpy`. Kod
-`fpm_pool_coop.c` (mechanizm "swap globali przez wartosc" miedzy requestami w
-tym samym procesie, patrz `fpm_coop_req_enter`/`fpm_coop_req_leave`) zaklada
-NTS wprost — spojne z tym, ze `fpm_coop_validate()` juz dzis ODRZUCA ZTS w
-runtime (`fpm_pool_coop.c:172-176`). To znaczy: kod nigdy nie byl pisany pod
-ZTS i dzis nie przechodzi nawet kompilacji, nie tylko walidacji.
+Cause: `sapi_globals` and `output_globals` as bare global variables exist
+ONLY in an NTS build. In ZTS these are macros (`SG(...)`, `OG(...)`) going
+through TSRM, not symbols you can take the address of / `memcpy`. The code in
+`fpm_pool_coop.c` (the "swap globals by value" mechanism between requests in
+the same process, see `fpm_coop_req_enter`/`fpm_coop_req_leave`) assumes NTS
+outright — consistent with `fpm_coop_validate()` already REJECTING ZTS at
+runtime today (`fpm_pool_coop.c:172-176`). This means: the code was never
+written for ZTS and today does not even pass compilation, let alone
+validation.
 
-Reszta drzewa (CLI SAPI, Zend, nasze rozszerzenie `tsrm_spike`, `session`
-jako `shared`) kompiluje sie i linkuje czysto pod ZTS (`make sapi/cli/php`
-przeszlo bez bledow, `php -v` pokazuje `(ZTS)`).
+The rest of the tree (CLI SAPI, Zend, our `tsrm_spike` extension, `session`
+as `shared`) compiles and links cleanly under ZTS (`make sapi/cli/php`
+passed with no errors, `php -v` shows `(ZTS)`).
 
-## Podsumowanie
+## Summary
 
-| Pytanie | Odpowiedz | Pewnosc |
+| Question | Answer | Confidence |
 |---|---|---|
-| Q1: da sie stworzyc 2. blok TSRM | TAK, przez `ts_resource_ex(0,&fake_tid)` | wysoka — dziala, ale ma efekt uboczny (auto-przelaczenie) i tworzy kontekst, ktory NIE jest w pelni sprawnym interpreterem |
-| Q2: reczny `TSRMLS_CACHE` przelacza EG/PG | TAK | wysoka, zmierzone bezposrednio |
-| Q3: session idzie za przelaczeniem | NIE (wlasna, fizycznie oddzielna kopia `_tsrm_ls_cache`, potwierdzone `readelf`) | build-level: wysoka. Runtime "co dokladnie widzi w B": nie zmierzone, bo B nie wykonuje wywolan funkcji |
-| Q4a: koszt pustego bloku | ~285-292 kB/blok | zmierzone |
-| Q4b: koszt z Symfony | nie zmierzone (segfault juz na trywialnym pliku w kontekscie B) | — |
-| Q5: build ZTS przechodzi | NIE — `fpm_pool_coop.c` uzywa gołych `sapi_globals`/`output_globals`, ktore nie istnieja w ZTS | wysoka, konkretny blad kompilacji |
+| Q1: can a 2nd TSRM block be created | YES, via `ts_resource_ex(0,&fake_tid)` | high — it works, but has a side effect (auto-switch) and creates a context that is NOT a fully functional interpreter |
+| Q2: manual `TSRMLS_CACHE` switches EG/PG | YES | high, measured directly |
+| Q3: session follows the switch | NO (its own, physically separate copy of `_tsrm_ls_cache`, confirmed by `readelf`) | build-level: high. Runtime "what exactly does B see": not measured, because B does not execute function calls |
+| Q4a: cost of an empty block | ~285-292 kB/block | measured |
+| Q4b: cost with Symfony | not measured (segfault already on a trivial file in context B) | — |
+| Q5: does a ZTS build pass | NO — `fpm_pool_coop.c` uses bare `sapi_globals`/`output_globals`, which do not exist in ZTS | high, a concrete compilation error |
 
-**Ogolny wniosek tego spike'u**: pomysl "executor fiber wylacznie w ZTS,
-osobny kontekst TSRM per request" napotyka na PRZYNAJMNIEJ trzy niezalezne
-przeszkody, kazda z osobna wystarczajaca do odrzucenia pomyslu w obecnej
-formie:
-1. Nie ma publicznego, dwukierunkowego sposobu przelaczania kontekstu dla
-   WSZYSTKICH sciezek dostepu (fast-static dziala, `tsrm_get_ls_cache()` nie
-   ma odpowiednika settera).
-2. Rozszerzenia zaladowane dynamicznie (jak `session`) maja wlasna, fizycznie
-   oddzielna kopie cache'u, sfrozenowana raz przy starcie procesu — zaden
-   spike-owy hack tego nie zmieni bez ingerencji w kazde takie rozszerzenie.
-3. Blok utworzony przez `ts_resource_ex` z podstawionym `th_id` NIE jest
-   samodzielnym, dzialajacym interpreterem — proba wykonania w nim
-   PRAWDZIWEGO kodu PHP (nawet trywialnego) konczy sie segfaultem. Zeby to
-   naprawic, trzeba by odtworzyc znaczna czesc tego, co normalnie robi
-   `php_module_startup()`/`php_request_startup()` per-thread w watkowym SAPI —
-   co jest dokladnie tym, co usunieto z publicznego API w PHP8 (Q1's
-   wstepne ustalenie) i co ten spike mial celowo pominac.
+**Overall conclusion of this spike**: the idea "fiber executor exclusively in
+ZTS, separate TSRM context per request" runs into AT LEAST three independent
+obstacles, each on its own sufficient to reject the idea in its current form:
+1. There is no public, bidirectional way to switch context for ALL access
+   paths (fast-static works, `tsrm_get_ls_cache()` has no equivalent setter).
+2. Dynamically loaded extensions (like `session`) have their own, physically
+   separate copy of the cache, frozen once at process start — no spike-level
+   hack changes this without modifying every such extension.
+3. A block created by `ts_resource_ex` with a substituted `th_id` is NOT a
+   standalone, working interpreter — an attempt to execute REAL PHP code in
+   it (even trivial) ends in a segfault. Fixing this would require
+   reconstructing a significant part of what `php_module_startup()`/
+   `php_request_startup()` normally does per-thread in a threaded SAPI —
+   which is exactly what was removed from the public API in PHP8 (Q1's
+   preliminary finding) and what this spike was meant to deliberately skip.
 
-Do tego dochodzi (4) build ZTS obecnego `sapi/fpmng` i tak nie przechodzi
-(Q5) niezaleznie od powyzszego, bo `fpm_pool_coop.c` nigdy nie byl pisany pod
-ZTS.
+On top of this there is (4): a ZTS build of the current `sapi/fpmng` does not
+pass anyway (Q5) independently of the above, because `fpm_pool_coop.c` was
+never written for ZTS.
 
-## Czego NIE zrobiono
+## What was NOT done
 
-- Nie zaimplementowano executora fiber-na-kontekstach TSRM — poza zakresem.
-- Nie naprawiono `fpm_pool_coop.c` pod ZTS (Q5) — zanotowane, nie naprawiane.
-- Nie zdiagnozowano dokladnej przyczyny segfaulta w Q4b/niepowodzenia
-  `call_user_function` w Q3 (poza zakresem — "nie naprawiaj po drodze").
-- Q4(b) z prawdziwym Symfony — nie zmierzone, patrz wyzej dlaczego probowanie
-  dalej nie mialo sensu.
+- The fiber-on-TSRM-contexts executor was not implemented — out of scope.
+- `fpm_pool_coop.c` was not fixed for ZTS (Q5) — noted, not fixed.
+- The exact cause of the segfault in Q4b / the `call_user_function` failure
+  in Q3 was not diagnosed (out of scope — "don't fix along the way").
+- Q4(b) with real Symfony — not measured, see above why trying further did
+  not make sense.

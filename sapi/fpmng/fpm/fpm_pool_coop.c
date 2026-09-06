@@ -35,7 +35,6 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_session.h"
-#include "fpm_pool_coop_session_lock.h"
 #include "fpm_pool_coop_session_patch.h"
 #include "fpm_pool_coop_ini.h"
 #include "fpm_pool_coop_statics.h"
@@ -162,6 +161,60 @@ static zend_long fpm_coop_pool_max_execution_time(struct fpm_worker_pool_s *wp) 
 }
 /* }}} */
 
+/* Effective session.auto_start of the pool: pool value first, php.ini
+ * fallback otherwise -- same shape as fpm_coop_pool_max_execution_time()
+ * above. session.auto_start is an ordinary ini boolean (OnUpdateBool),
+ * parsed here the same way fpm_coop_pool_disables_opcache() parses
+ * opcache.enable. */
+static bool fpm_coop_pool_session_auto_start(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	const char *value = fpm_coop_pool_ini(wp, "session.auto_start");
+
+	if (value) {
+		return !fpm_coop_ini_value_is_off(value);
+	}
+	return zend_ini_long("session.auto_start", sizeof("session.auto_start") - 1, 0) != 0;
+}
+/* }}} */
+
+/* session.auto_start = 1 is refused under pool.executor = fiber for two
+ * independent reasons, neither fixed by the in-process session-lock patch
+ * (fpm_pool_coop_session_patch.c):
+ *
+ * 1. Correctness, pre-existing and unrelated to locking: ext/session's own
+ *    RINIT (php_rinit_session()) runs the auto-started session_start()
+ *    itself, synchronously, BEFORE fpm_coop_req_run() rebuilds $_COOKIE
+ *    for this request via zend_activate_auto_globals() (see
+ *    fpm_coop_session_request_startup() vs. the auto-globals block right
+ *    after it, both in this file) -- so the auto-started session can never
+ *    see the request's own PHPSESSID cookie. Confirmed both by reading
+ *    php_rinit_session() (session.c) and by a live measurement: two
+ *    sequential requests with the identical cookie get two different,
+ *    freshly-generated session ids (see the RED suite, test 10).
+ * 2. Locking: the same ordering means the in-process session-lock patch's
+ *    post-RINIT hook (fpm_coop_session_patch_req_apply()) has not run yet
+ *    either, so the FIRST session_start() of such a request is not
+ *    protected by it -- it runs through the real, unwrapped "files" module
+ *    and can still deadlock the whole worker on concurrent access to the
+ *    same session id (see docs/session-lock-arbiter-report.md, "The
+ *    auto_start gap").
+ *
+ * Both reasons are structural (RINIT ordering), not bugs in this feature,
+ * so this is a hard refusal, not a downgrade: nothing this project can hook
+ * runs early enough to fix either one. */
+static const char fpm_coop_session_auto_start_msg[] =
+	"session.auto_start = 1 is not supported: (1) the auto-started session "
+	"cannot see this request's own cookie (RINIT runs before $_COOKIE is "
+	"rebuilt for the request, so every auto_start=1 request gets a fresh, "
+	"unrelated session id -- see docs/session-lock-arbiter-report.md and "
+	"the RED suite's test 10) and (2) it also runs outside the in-process "
+	"session-lock patch's protection (the patch's hook does not exist yet "
+	"when RINIT's auto-started session_start() runs, so concurrent access "
+	"can still deadlock the worker -- see docs/session-lock-arbiter-report.md, "
+	"\"The auto_start gap\"); set php_admin_value[session.auto_start] = 0 in "
+	"this pool or session.auto_start = 0 in php.ini and call session_start() "
+	"explicitly instead";
+
 /* opcache zaklada jeden request na proces: maske auto-globali zeruje raz na
  * request-kontener (ZendAccelerator.c accel_activate), wiec skrypt zaladowany
  * z cache w 2. i kolejnym requescie nie dostaje $_SERVER/$_GET; znaczniki
@@ -210,6 +263,15 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 				wp->config->name, type_name, timeout);
 			return -1;
 		}
+	}
+	/* session.auto_start = 1 is refused: two independent reasons, neither
+	 * fixed by the in-process session-lock patch -- see
+	 * fpm_coop_pool_session_auto_start()/fpm_coop_session_auto_start_msg
+	 * above for the full reasoning. */
+	if (fpm_coop_pool_session_auto_start(wp)) {
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: %s", wp->config->name, type_name,
+			fpm_coop_session_auto_start_msg);
+		return -1;
 	}
 	/* fpm_conf_set_time parsuje przez atoi(), wiec "-1" przechodzi bez slowa. */
 	if (wp->config->fiber_revalidate_freq < 0) {
@@ -370,11 +432,11 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	fpm_coop_orig_import_env = php_import_environment_variables;
 	php_import_environment_variables = fpm_coop_import_environment_variables;
 
-	/* MUSI byc PRZED php_request_startup() nizej: ext/session resolwuje
-	 * session.save_handler na nowo przy KAZDYM RINIT (nie raz na proces) -
-	 * patrz fpm_pool_coop_session_lock.c - wiec modul "files_arb" musi juz
-	 * byc zarejestrowany, zanim ten proces wykona swoj PIERWSZY RINIT. */
-	fpm_coop_session_lock_container_start();
+	/* MUST run before php_request_startup() below: this captures the
+	 * built-in "files" save-handler module out of ps_globals.mod before
+	 * this process's first-ever RINIT can touch it (see
+	 * fpm_pool_coop_session_patch.c's header comment for why that timing
+	 * is itself the identification mechanism). */
 	fpm_coop_session_patch_container_start();
 
 	/* Request-kontener: jedyny php_request_startup() w zyciu procesu. Daje
@@ -517,7 +579,6 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		EG(user_error_handlers) = ctx->user_error_handlers;
 		EG(user_exception_handlers) = ctx->user_exception_handlers;
 		fpm_coop_session_req_enter(ctx);
-		fpm_coop_session_lock_req_enter(ctx);
 		fpm_coop_session_patch_req_enter(ctx);
 		fpm_coop_ini_req_enter(ctx);
 		fpm_coop_statics_req_enter(ctx);
@@ -880,7 +941,6 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	fpm_coop_ini_req_free(ctx);
 	fpm_coop_statics_req_free(ctx);
-	fpm_coop_session_lock_req_free(ctx);
 	fpm_coop_session_patch_req_free(ctx);
 	efree(ctx);
 	return req;

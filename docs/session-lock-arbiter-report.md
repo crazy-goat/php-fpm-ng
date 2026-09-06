@@ -1027,3 +1027,69 @@ in `fpm_pool_coop.c`) was found and flagged but is out of this task's scope
 to fix. Two claims in the original Variant 2 design section were corrected
 to match what was actually measured — see the inline corrections above and
 in "## Variant 2" itself.
+
+## Shipping decision (branch `feature/session-lock-field-patch`)
+
+Decided: ship **Variant 2 only** (`fpm_pool_coop_session_patch.[ch]`,
+"the field-patch"). Reason: `files_arb` (Variant 1) requires opting in via
+`session.save_handler = files_arb` in pool config — plain
+`session.save_handler = files`, PHP's own stock default, keeps deadlocking
+the worker for anyone who does not know to make that change. The
+field-patch protects every pool at `session.save_handler = files`
+automatically, with zero config change, which is the property that
+actually matters for a default that is silently fatal.
+
+`files_arb`'s code (`fpm_pool_coop_session_lock.[ch]`) is **kept in the
+tree, not deleted** — the mechanism is real, measured, and may become
+relevant again if the field-patch's one structural gap (`session.auto_start`,
+see below) ever needs a stronger fix than a startup refusal. It is
+**excluded from the build**, not by hand-editing `sapi/fpmng/config.m4`'s
+generated `@FPMNG_SOURCES@` list (forbidden — see this project's own
+`build/prepare.sh`/`CLAUDE.md`), but by renaming
+`fpm_pool_coop_session_lock.c` to `fpm_pool_coop_session_lock.c.notbuilt`:
+`find fpm -name '*.c'` no longer matches it, so it is invisible to the
+generated source list with no hand-edit anywhere. `fpm_pool_coop_session_lock.h`
+is left in place (harmless — nothing includes it once `fpm_pool_coop.c`'s
+hooks into the files_arb variant are removed). **NOT SHIPPED. Kept for
+reference only** — do not build this file back in without re-reading the
+link-dependency risk in "## Verdict" above.
+
+`fpm_pool_coop.c` on this branch hooks only the field-patch variant
+(`fpm_coop_session_patch_container_start()`/`_req_apply()`/`_req_enter()`/
+`_req_free()`), following the same req_enter/req_free pattern as this
+project's existing `ini`/`statics`/`session` features.
+
+### Closing the `auto_start` gap: hard startup refusal
+
+The field-patch's own documented gap (see "The `auto_start` gap" above and
+its measurement correction) is closed not by patching around it but by
+refusing to start any pool with `session.auto_start = 1` under
+`pool.executor = fiber` at all — `fpm_coop_validate()` in
+`fpm_pool_coop.c`, following the exact same effective-value-then-refuse
+shape as the existing `max_execution_time` check (pool
+`php_admin_value`/`php_value` first, `php.ini` fallback otherwise, computed
+by a new `fpm_coop_pool_session_auto_start()`, refused with `ZLOG_ALERT`
+naming what to change). This is a hard, loud failure, not a silent
+downgrade, and it is deliberately NOT limited to the field-patch's own
+gap: `session.auto_start = 1` is refused for two independent reasons,
+stated together in the refusal message:
+
+1. **Pre-existing, unrelated to locking**: `fpm_coop_req_run()` runs
+   `fpm_coop_session_request_startup()` (which triggers RINIT, and thus
+   the auto-started `session_start()`) before rebuilding `$_COOKIE` via
+   `zend_activate_auto_globals()` — so the auto-started session never sees
+   the request's own `PHPSESSID` cookie, ever, on this project's own
+   request lifecycle, regardless of any locking fix. This is exactly what
+   the RED suite's test 10 already demonstrates (two sequential requests
+   with the identical cookie get two different session ids).
+2. **Locking**: the same ordering means the field-patch's own post-RINIT
+   hook has not run yet either, so the auto-started `session_start()` call
+   is unprotected and can still deadlock the worker under concurrency.
+
+`fpm_coop_rejects[]` (the plain fpm.conf-directive rejection list a few
+lines above `fpm_coop_validate()` in the same file) does **not** catch
+this: `session.auto_start` is a PHP ini setting, reachable via
+`php_admin_value[session.auto_start]` in pool config OR via `php.ini`,
+neither of which that list's string-match mechanism inspects — hence the
+separate, explicit check, mirroring `max_execution_time`'s own handling
+for exactly the same reason.

@@ -184,3 +184,79 @@ przez `/index.php/mix?...` (PATH_INFO). Stary build na poligonie byl
 `--disable-all` i trzeba go bylo odbudowac z mbstring, session, ctype,
 tokenizer, dom, iconv, fileinfo, phar i curl — bez nich composer i oba
 frameworki sie nie instaluja.
+
+---
+
+# AKTUALIZACJA 2026-09-06: po naprawach 1, 2, 3 i izolacji wartosci ini
+
+Werdykty wyzej sa juz NIEAKTUALNE dla Symfony. Zmierzone ponownie na tym samym
+poligonie, `pool.executor = fiber`, `env[FPMNG_SHARED_INCLUDES] = 1`,
+`pm.max_children = 1`, sesje przez handler uzytkownika, N=8 rownoleglych.
+
+## Co doszlo
+
+1. **Autoglobale per request** — `$_SERVER`/`$_ENV`/`$_REQUEST` wymuszane w
+   `fpm_coop_req_run`, niezaleznie od `auto_globals_jit`. Obejscie
+   `$_SERVER; $_ENV; $_REQUEST;` w `index.php` Laravela nie jest juz potrzebne.
+2. **Przywracanie WSZYSTKICH wpisow ini** na koncu requestu
+   (`zend_ini_deactivate()` zamiast jednego `max_execution_time`).
+3. **Izolacja stanu `ext/session` per request** — swap globali modulu przy
+   enter/leave plus RINIT/RSHUTDOWN per request (`fpm_pool_coop_session.c`).
+   Adres `ps_globals` brany z `mh_arg2` wpisu ini `session.save_path`, bez
+   zaleznosci linkera: build z `--enable-session=shared` i z sesja wylaczona
+   linkuja sie i dzialaja.
+4. **Izolacja WARTOSCI wpisow ini miedzy requestami w locie**
+   (`fpm_pool_coop_ini.c`) — bez tego `ini_get()` widzial cudze `ini_set()`.
+
+## Symfony: TAK, takze z sesjami
+
+    N=8, /session?user=X&sleep=0.3
+    8/8 http=200, rozlaczne sid, ok=true, handler=user we wszystkich osmiu
+    druga runda tymi samymi ciasteczkami: 8/8 count=2, te same sid
+
+Poprzednio: **20/20 rund HTTP 500**, `Failed to start the session`,
+`Cannot call session save handler in a recursive manner`. Logi czyste — 421
+linii "WARNING" w logu poola to wylacznie debug Symfony w trybie dev
+przepuszczony przez `catch_workers_output`, zero prawdziwych bledow.
+
+Skrypt testowy uzywa handlera z PRAWDZIWYM blokujacym I/O wewnatrz `read()`
+(`blPop` na Redisie), czyli dokladnie tym, co wywolywalo pierwotna awarie.
+
+## Laravel: nadal NIE — i tryb awarii zmienil sie z GLOSNEGO na CICHY
+
+    user    sess_user  ok      count  app_oid  container_request_oid
+    alice   alice      True    1      1261     1329
+    bob     bob        True    1      225      1842
+    carol   carol      True    1      1540     1604
+    dave    bob        False   3      225      1842
+    eve     bob        False   2      225      1842
+    frank   frank      True    1      1011     1051
+    grace   bob        False   4      225      1842
+    heidi   heidi      True    1      225      1842
+
+5/8 poprawnych, 3/8 dostalo CUDZA sesje. Piec requestow dzieli jeden obiekt
+`Application` (`app_oid = 225`) i jeden obiekt `Request` (1842) — to jest
+`Container::$instance` i `Facade::$app`, czyli pozycja 5 z listy napraw,
+ktorej nie ruszalismy.
+
+Poprzednio: 1 x 200, 4 x 500, trzy requesty wiszace do timeoutu 60 s, plus
+`Cannot execute queries while other unbuffered queries are active` i
+`unserialize` cudzej odpowiedzi Redisa. Teraz: **8 x 200, zero wyjatkow, zero
+fatali, pusty `laravel.log`**.
+
+To NIE jest poprawa z punktu widzenia wdrozenia. Wczesniej Laravel na fiberze
+sie wywracal i bylo to widac. Teraz zwraca 200 z cudzymi danymi i nic tego nie
+zglasza. Werdykt "Laravel: NIE" jest po tej zmianie MOCNIEJSZY, nie slabszy.
+
+Roznica miedzy frameworkami nie lezy w ich jakosci: Symfony trzyma stan w
+kontenerze przekazywanym jawnie, Laravel w statyku klasy — a statyki klas sa
+procesowe i my ich nie rozdzielamy.
+
+## Znane ograniczenie naprawy 4
+
+Izolowane sa WARTOSCI wpisow ini (to, co widzi `ini_get`/`ini_set`), ale nie
+procesowe globale, ktore niektore wpisy ustawiaja przez `on_modify` — np.
+`precision` trafia do `core_globals` i jest realnie uzywane przez `var_dump`
+i `serialize`, wiec tam nadal jest wspolne miedzy requestami w locie. Pelna
+naprawa wymagalaby swapowania globali kazdego takiego modulu, tak jak
+`fpm_pool_coop_session.c` robi to dla sesji.

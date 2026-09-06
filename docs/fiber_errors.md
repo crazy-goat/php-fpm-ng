@@ -190,3 +190,63 @@ Nie rozszerzać bieżącej poprawki o przebudowę lifecycle Fiber. Kolejność d
 3. na osobnym branchu zaimplementować izolację handlerów sygnałów — dopiero wtedy zdejmować blokadę;
 4. per-fiber timeout potraktować jako osobny projekt wymagający testów współbieżności, bailoutów i kodu CPU-bound — dopiero wtedy zdejmować odmowę i mitygację `set_time_limit`;
 5. utrzymać oznaczenie Fiber jako eksperymentalnego do czasu rozwiązania tych problemów.
+
+## EKSPERYMENT: `included_files` wspolne dla procesu
+
+`FPMNG_SHARED_INCLUDES=1` (przez `env[]` w poolu — `clear_env = 1` jest
+domyslne, wiec bez tego zmienna nie dociera do dziecka). Domyslnie wylaczone.
+
+**Po co.** Bez tego zadna aplikacja z Composerem nie przezywa drugiego
+requestu. Lista wczytanych plikow jest per request, tablice funkcji i klas
+per proces — wiec drugi request uznaje, ze `vendor/autoload.php` nie byl
+wczytany, wczytuje go ponownie i redeklaruje klase, ktora nadal zyje
+w procesie. Wspolna lista czyni bootstrap jednorazowym BEZ worker-mode
+i bez zmian w aplikacji.
+
+**Zmierzone** (wzorzec bootstrapu: `require vendor/autoload.php`,
+`require_once` helpers z funkcja i klasa, `$app = require_once bootstrap/app.php`):
+
+    PRZED:  req1 ok, req2 i req3 Fatal: Cannot redeclare class ComposerAutoloaderInit...
+    PO:     req1 ok, req2 ok, req3 ok — 30/30 requestow, zero bledow w logu
+
+Wspolbieznosc I/O nietknieta: 4 rownolegle `fsockopen` po 500 ms nadal
+0,525 s lacznie.
+
+### Dwa skutki uboczne — jeden do naprawy, jeden nie
+
+**Glosny, do naprawy:** `require_once` przy drugim wywolaniu zwraca `true`,
+a nie wartosc zwrocona przez plik. Wzorzec
+`$app = require_once 'bootstrap/app.php'` daje `app=true` od requestu 2
+(zmierzone). Do zrobienia: cache'owac wartosc zwracana przez plik
+i oddawac ja przy kolejnych wywolaniach zamiast `true`.
+
+**Cichy, NIE do naprawy:** kod wykonywany na gorze pliku wciaganego przez
+`require_once` przestaje sie wykonywac od drugiego requestu. Bez bledu, bez
+ostrzezenia:
+
+    PRZED:  req1 init_runs=1   req2 init_runs=1     req3 init_runs=1
+    PO:     req1 init_runs=1   req2 init_runs=BRAK  req3 init_runs=BRAK
+
+To nie jest blad do usuniecia — to dokladnie ta semantyka, o ktora chodzi
+("wykonaj raz"). To jest WYMAGANIE wobec aplikacji: nic istotnego nie moze
+dziac sie jako efekt uboczny wczytania pliku. Frameworki sa tu w dobrej
+formie (bootstrap buduje obiekty i je zwraca), ale to trzeba potwierdzic na
+prawdziwym kodzie, nie na wzorcu.
+
+### Co sie NIE zmienia
+
+- **Opcache dalej odrzucany** przez walidacje — sprawdzone. Przy okazji
+  wspolne `included_files` w duzej mierze usuwaja powod, dla ktorego chcialoby
+  sie opcache: bootstrap kompiluje sie raz na proces, per request rekompiluje
+  sie tylko `index.php`.
+- **Statyki klas dalej przeciekaja** miedzy requestami (`Foo::$hits` roslo
+  2 -> 3 -> 4). To samo ryzyko co w Octane i Swoole.
+- `EG(symbol_table)` zostaje per request — jego rozdzielenie jest wymuszone
+  przez `zend_attach_symbol_table` (SIGABRT zmierzony w NOTES 3t).
+
+### Czego ten eksperyment NIE sprawdzil
+
+Prawdziwego Symfony ani Laravela — tylko wzorzec bootstrapu. Nie wiadomo, ile
+w realnych frameworkach jest miejsc polegajacych na wartosci zwracanej przez
+`require_once` ani na efektach ubocznych wczytania pliku. To jest nastepny
+krok i jest wykonalny od reki: binarka istnieje.

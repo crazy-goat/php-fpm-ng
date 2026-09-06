@@ -282,6 +282,11 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 		return -1;
 	}
 
+	/* event_add liczy deadline od czasu cache'owanego na poczatku tury petli.
+	 * Fiber mogl od tamtej pory blokowac (getaddrinfo, usleep, liczenie) —
+	 * bez odswiezenia 60 ms pracy zjada 50 ms timeoutu i czekanie konczy sie
+	 * natychmiast "Operation timed out". */
+	event_base_update_cache_time(fpm_fiber_base);
 	if (event_assign(fr->ev, fpm_fiber_base, fd, events, fpm_fiber_io_cb, fr) < 0
 		|| event_add(fr->ev, timeout) < 0) {
 		return -1;

@@ -134,6 +134,7 @@ struct {								\
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_children_extra.h"
+#include "fpm_http_tls.h"
 #include "zlog.h"
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
@@ -190,6 +191,18 @@ struct fpm_http_gateway_s {
 	char *access_log_path;				/* http.access_log; NULL = wylaczony */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL w masterze */
 	char *front_controller;			/* http.front_controller; puste = fallback wylaczony (dzisiejsze zachowanie) */
+
+#ifdef HAVE_FPM_HTTP_TLS
+	/* http.tls_cert/http.tls_key; NULL = zwykly HTTP, dokladnie jak dzis.
+	 * gw->tls jest wczytany DO PAMIECI w masterze, PRZED forkiem pierwszego
+	 * dziecka (fpm_http_tls_load()) -- fork() go kopiuje. gw->tls_ctx jest
+	 * per-proces: kazde dziecko buduje WLASNY SSL_CTX z tych samych bajtow
+	 * (fpm_http_tls_ctx_new(), wolane z fpm_http_gateway_run()), zeby
+	 * wspolny klucz ticketow w gw->tls dzialal dla wznowienia sesji miedzy
+	 * procesami, patrz fpm_http_tls.h. */
+	struct fpm_http_tls_s *tls;			/* NULL w dziecku po nieudanym starcie */
+	SSL_CTX *tls_ctx;				/* tylko w dziecku, NULL w masterze */
+#endif
 
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
@@ -1356,6 +1369,18 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	 * access log -- uses this single decision. */
 	fpm_http_forwarded_resolve(gw->trusted_proxies_acl, peer_addr,
 		evhttp_request_get_input_headers(req), &fwd);
+#ifdef HAVE_FPM_HTTP_TLS
+	/* This specific connection terminated TLS right here in the gateway
+	 * (gw->tls_ctx != NULL, see fpm_http_gateway_run()), which is a stronger
+	 * signal than any X-Forwarded-Proto a trusted proxy might have sent --
+	 * override to "https" regardless of what fpm_http_forwarded_resolve()
+	 * concluded. fpm_http_build_request() only ever reads fwd.scheme/https,
+	 * so this is the one place that needs to know about TLS at all. */
+	if (gw->tls_ctx) {
+		fwd.scheme = "https";
+		fwd.https = 1;
+	}
+#endif
 	effective_addr = fwd.remote_addr[0] ? fwd.remote_addr : peer_addr;
 
 	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
@@ -1490,6 +1515,18 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	gw->base = event_base_new();
 	gw->http = evhttp_new(gw->base);
+#ifdef HAVE_FPM_HTTP_TLS
+	if (gw->tls) {
+		/* Own SSL_CTX per gateway process, built from cert/key bytes the
+		 * master already read and validated (fpm_http_tls_load()), never
+		 * from an SSL_CTX inherited through fork() -- see fpm_http_tls.h. */
+		gw->tls_ctx = fpm_http_tls_ctx_new(gw->pool, gw->tls);
+		if (!gw->tls_ctx) {
+			exit(FPM_EXIT_SOFTWARE);
+		}
+		evhttp_set_bevcb(gw->http, fpm_http_tls_bevcb, gw->tls_ctx);
+	}
+#endif
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 		EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_max_body_size(gw->http, FPM_HTTP_MAX_BODY);
@@ -1748,6 +1785,16 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	 * unset directive already arrives here non-empty; strdup("") when the pool
 	 * explicitly blanked it out to disable the fallback. */
 	gw->front_controller = strdup(wp->config->http_front_controller ? wp->config->http_front_controller : "");
+
+#ifdef HAVE_FPM_HTTP_TLS
+	/* fpm_http_validate_pool() already refused a bad/mismatched cert+key at
+	 * config-validation time; this is the real load, in the master, BEFORE
+	 * fpm_http_gateway_spawn() forks the first child -- see fpm_http_tls.h. */
+	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
+		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
+			wp->config->http_tls_key, wp->config->http_tls_min_version);
+	}
+#endif
 }
 /* }}} */
 
@@ -1781,6 +1828,22 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
 		gw->backlog = wp->config->listen_backlog;
 		fpm_http_gateway_settings(wp, gw, &nproc_wanted, &reuseport);
+
+#ifdef HAVE_FPM_HTTP_TLS
+		/* fpm_http_tls_load() already logged what went wrong; http.tls_cert
+		 * was set, so falling back to plain HTTP would be a silent surprise. */
+		if (wp->config->http_tls_cert && *wp->config->http_tls_cert && !gw->tls) {
+			free(gw->allowed_clients);
+			free(gw->trusted_proxies);
+			free(gw->access_log_path);
+			free(gw->http_listen_override);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw);
+			return -1;
+		}
+#endif
 
 		/* a UNIX socket pool has no port to bump, so it needs an explicit HTTP
 		 * address — fpm_http_validate_pool() already refused to start without
@@ -1932,6 +1995,29 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			zlog(ZLOG_ERROR, "[pool %s] http.front_controller must be an absolute path under the document root, without '..'", wp->config->name);
 			return -1;
 		}
+	}
+	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
+#ifdef HAVE_FPM_HTTP_TLS
+		if (!wp->config->http_tls_key || !*wp->config->http_tls_key) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_cert requires http.tls_key", wp->config->name);
+			return -1;
+		}
+		/* Reads cert+key from disk into a throwaway SSL_CTX and checks they
+		 * parse and match -- a bad path or a mismatched key must fail here,
+		 * before fpm_http_init_pool_ex() forks a single gateway child, not
+		 * as a crash or a silent plain-HTTP fallback at request time. */
+		if (fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
+				wp->config->http_tls_min_version) != 0) {
+			return -1; /* fpm_http_tls_validate() already logged what is wrong */
+		}
+#else
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_cert requires the HTTP gateway to be built with TLS support "
+			"(libevent_openssl and/or OpenSSL were not found at build time)", wp->config->name);
+		return -1;
+#endif
+	} else if (wp->config->http_tls_key && *wp->config->http_tls_key) {
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_key without http.tls_cert has nothing to attach the key to", wp->config->name);
+		return -1;
 	}
 	return 0;
 }

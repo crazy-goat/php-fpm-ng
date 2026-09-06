@@ -1,0 +1,160 @@
+name: build
+
+# Task 002: prove the tree still builds and our php-src patches still apply.
+# See tasks/002-ci-build-matrix.md. Currently a single build cell rather than
+# the full ZTS x session x TLS matrix the task describes — that matrix, plus
+# the static musl build, is deferred to release time (deliberate scope cut,
+# not an oversight; see the "build" job's own comment).
+#
+# Runs on pull_request only (not on every push): a full php-src build is slow
+# on GitHub-hosted runners, and only a PR is a candidate for merging into main.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      php_src_ref:
+        description: "php-src commit/tag to build against (overrides the pinned default)"
+        required: false
+        default: ""
+
+env:
+  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinowany tagiem,
+  # nie galezia"). Bumping this is a deliberate version bump, not an automatic
+  # moving target — see docs/NOTES.md:2748-2755 on what a patch vs. minor bump
+  # requires.
+  PHP_SRC_REPO: https://github.com/php/php-src.git
+  PHP_SRC_REF: ${{ github.event.inputs.php_src_ref || 'php-8.5.9' }}
+
+jobs:
+  # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
+  # revision. build/prepare.sh already exits 1 and prints "BLAD: latka nie
+  # naklada sie..." on a genuine failure (build/prepare.sh:108-109) — this job
+  # just needs to run it and let that exit code fail the job.
+  patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+      - name: apply patches (build/prepare.sh)
+        run: ./build/prepare.sh "$PWD/php-src"
+
+  # Deliberately a single cell for now (non-ZTS, session static, TLS on),
+  # not the full ZTS x session x TLS matrix from tasks/002-ci-build-matrix.md.
+  # That matrix (and the static musl build) is release-time work — see the
+  # task file's acceptance criteria 3-4, not yet satisfied by this workflow.
+  # Re-add strategy.matrix (zts/session/tls) plus a static-musl job before
+  # the first release.
+  build:
+    needs: patches
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool bison re2c pkg-config \
+            libevent-dev libssl-dev zlib1g-dev ccache
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2.24
+        with:
+          key: build-canonical
+
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+
+      - name: buildconf --force
+        working-directory: php-src
+        run: ./buildconf --force
+
+      - name: configure
+        working-directory: php-src
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          ./configure --disable-all --enable-fpmng --enable-session \
+            2>&1 | tee ../configure.log
+
+      - name: build
+        working-directory: php-src
+        run: make -j"$(nproc)" fpmng cli 2>&1 | tee ../make.log
+
+      - name: verify the binary that got built
+        working-directory: php-src
+        run: |
+          test -x sapi/fpmng/php-fpm-ng
+          file sapi/fpmng/php-fpm-ng
+          strings sapi/fpmng/php-fpm-ng | grep -q 'X-Powered-By: PHP' || true
+          sapi/fpmng/php-fpm-ng -v
+
+      - name: stage artifact
+        # A single top-level path, not a multi-entry `path:` list: with more
+        # than one path, upload-artifact strips only their *common* ancestor,
+        # which is sapi/ here (php-fpm-ng and tests live under sapi/fpmng,
+        # cli's php lives under sapi/cli) — not the php-src/sapi/... layout
+        # the phpt job expects. Staging a flat, single-root directory avoids
+        # depending on that ancestor computation at all.
+        run: |
+          mkdir -p stage/bin stage/prepared/sapi/fpmng stage/prepared/ext/standard/tests/misc
+          cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
+          cp php-src/sapi/cli/php stage/bin/
+          cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+          # run-fpm-phpt.sh (build/run-fpm-phpt.sh:88) requires run-tests.php
+          # directly below the "prepared php-src" path it's given.
+          cp php-src/run-tests.php stage/prepared/
+          # gh12621.phpt reads __DIR__/../../../ext/standard/tests/misc/browscap.ini
+          # (a source-tree fixture, not a build product); without it the test
+          # fails on a nonexistent browscap path rather than exercising fpmng.
+          cp php-src/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
+
+      - name: upload build (for the phpt job)
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpmng-canonical-build
+          path: stage
+          retention-days: 3
+
+  # Task 001 landed the copied upstream FPM .phpt suite and its runner
+  # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
+  phpt:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        # This runner never ran the build job's dependency install step, but
+        # php-fpm-ng and php are dynamically linked against libevent/openssl —
+        # without this, php-fpm-ng -v fails silently (missing shared library),
+        # which run-fpm-phpt.sh reports as "NOT MEASURED: ... failed to
+        # report its version".
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: run the upstream FPM .phpt suite against php-fpm-ng
+        run: |
+          chmod +x build-out/bin/php-fpm-ng build-out/bin/php
+          TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          ./build/run-fpm-phpt.sh "$PWD/build-out/prepared" "$PWD/phpt-results"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: phpt-results
+          path: phpt-results

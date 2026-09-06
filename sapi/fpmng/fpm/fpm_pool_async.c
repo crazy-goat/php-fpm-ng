@@ -59,6 +59,7 @@ const char *const fpm_pool_async_rejects[] = {
 	"request_slowlog_trace_depth",
 	"slowlog",
 	"ping.",				/* ping obsluguje petla fpm_main.c, nie my */
+	"fiber.",				/* wymiana workera po zmianie plikow zyje w schedulerze fiber */
 	NULL
 };
 

@@ -205,6 +205,12 @@ int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name) /* {{
 			return -1;
 		}
 	}
+	/* fpm_conf_set_time parsuje przez atoi(), wiec "-1" przechodzi bez slowa. */
+	if (wp->config->fiber_revalidate_freq < 0) {
+		zlog(ZLOG_ALERT, "[pool %s] fiber.revalidate_freq = %d: must be 0 (off) or a positive number of seconds",
+			wp->config->name, wp->config->fiber_revalidate_freq);
+		return -1;
+	}
 	return 0;
 #endif
 }

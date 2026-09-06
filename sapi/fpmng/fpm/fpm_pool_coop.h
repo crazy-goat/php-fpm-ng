@@ -11,10 +11,15 @@
  *
  * Co jest WSPOLNE dla requestow w locie i czego ten rdzen NIE rozdziela
  * (swiadome ograniczenie, patrz docs/NOTES.md 3t i 3u): tablice funkcji
- * i klas, ini (ini_set), memory_limit, max_execution_time, statyki klas,
+ * i klas, memory_limit, max_execution_time, statyki klas,
  * register_shutdown_function, RINIT/RSHUTDOWN rozszerzen, opcache, handlery
  * sygnalow (pcntl_signal: PCNTL_G(php_signal_table) i SIGG(handlers) to
  * jedna tablica na proces), timer SIGALRM (pcntl_alarm), fork/exec.
+ * WARTOSC wpisow ini (ini_get/ini_set) JEST rozdzielona per request — patrz
+ * fpm_pool_coop_ini.[ch] — ale tylko na poziomie ini_entry->value; procesowe
+ * globale, ktore on_modify niektorych wpisow rowniez aktualizuje (np.
+ * core_globals.precision), rozdzielone NIE SA (wyjatek: ext/session, patrz
+ * fpm_pool_coop_session.c) — patrz uzasadnienie w fpm_pool_coop_ini.c.
  * Z tego ostatniego wynika, co validate() ODRZUCA (opcache wlaczone,
  * max_execution_time != 0) i co kontener BLOKUJE przez zend_disable_functions
  * (procesowe funkcje pcntl) — patrz fpm_pool_coop.c i docs/fiber_errors.md.
@@ -73,6 +78,13 @@ struct fpm_coop_req_s {
 	 * nawet gdy session nie jest zaladowane — koszt to kilkaset bajtow na
 	 * kontekst requestu, bez alokacji. */
 	unsigned char session_globals[sizeof(zend_ps_globals)];
+
+	/* Wpisy ini, ktore TEN request zmienil, gdy NIE jest live — patrz
+	 * fpm_pool_coop_ini.[ch]. Oba NULL, dopoki request nie zawiesi sie z
+	 * niepustym EG(modified_ini_directives) — czyli w OGROMNEJ wiekszosci
+	 * przelaczen fibera (bez ini_set/set_time_limit/...) zero kosztu. */
+	HashTable *ini_mods;			/* nazwa -> zend_ini_entry* (ta sama tablica co EG(modified_ini_directives)) */
+	HashTable *ini_values;			/* nazwa -> zend_string* : wlasna wartosc TEGO requestu */
 
 	void *type_data;			/* prywatne typu poola (fiber: zend_fiber + event) */
 };

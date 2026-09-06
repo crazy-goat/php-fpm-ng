@@ -7,6 +7,7 @@ small and does not add Slim-specific code to `sapi/fpmng/`.
 
 - Slim: `4.15.3`
 - PSR-7 implementation: `slim/psr7` `1.8.0`
+- PHP-DI: `7.1.1`
 - Redis client: `predis/predis` `3.6.0`
 
 The versions are pinned in `composer.json` and `composer.lock`.
@@ -35,10 +36,13 @@ The current measured scenarios are:
 - PSR-7 response streams;
 - middleware state;
 - error middleware;
-- repeated requests through the stock entry script with shared includes.
+- repeated requests through the stock entry script with shared includes;
+- PHP-DI container identity and service state;
+- Slim route-cache routing and cache-file stability.
 
-The PHP-DI container variant and Slim route-cache mode are present in the
-matrix as `NOT MEASURED`; they are not silently treated as passing.
+The PHP-DI and route-cache scenarios are mode-specific. If their mode is not
+selected, the runner reports them as `NOT MEASURED`; when selected, an assertion
+failure is reported as `ERROR`, never as a skip.
 
 ## Running
 
@@ -53,6 +57,22 @@ FPMNG=/path/to/php-fpm-ng \
 PHP=/path/to/php \
 ./bin/run.sh
 ```
+
+To measure the PHP-DI and route-cache rows, select their modes explicitly (they
+can be combined):
+
+```sh
+SLIM_CONTAINER=php-di \
+SLIM_ROUTE_CACHE=1 \
+FPMNG=/path/to/php-fpm-ng \
+PHP=/path/to/php \
+./bin/run.sh
+```
+
+PHP-DI builds a fresh `DI\ContainerBuilder` container per request and exposes a
+request-local identity service through Slim. Route-cache mode uses
+`$RUN_DIR/route-cache.php`; readiness warms it once, and the runner compares its
+cache fingerprint before and after concurrent routing/data requests.
 
 The default ports are `22625` (FastCGI) and `22626` (HTTP). The runner uses
 bare route paths and therefore requires the HTTP gateway's front-controller

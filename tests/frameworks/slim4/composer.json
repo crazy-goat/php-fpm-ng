@@ -5,6 +5,7 @@
     "license": "BSD-3-Clause",
     "require": {
         "php": ">=8.4",
+        "php-di/php-di": "7.1.1",
         "predis/predis": "3.6.0",
         "slim/psr7": "1.8.0",
         "slim/slim": "4.15.3"

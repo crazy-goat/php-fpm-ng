@@ -1,9 +1,10 @@
 # 026 — Slim 4 on the fiber executor: unknown, and the cheapest one to find out
 
-**Priority:** medium. Nothing is known yet, and it is the framework most likely
-to work with no special configuration at all.
-**Status:** open. **Nothing has been measured. Everything below is expectation,
-not evidence.**
+**Priority:** medium. Slim 4 is the framework most likely to work with no special
+configuration at all; this task records the first repository-owned measurement.
+**Status:** in progress. The repository probe has measured the core and listed
+Slim-specific scenarios below on the current-main fiber build. The unmeasured
+rows remain explicitly open; the result is evidence, not an expectation.
 
 ## Why it is worth testing
 
@@ -66,8 +67,9 @@ asserting on **data**, not HTTP status.
 
 ## Detailed test matrix
 
-Nothing here is measured. The point of the matrix is that Slim is the **control
-group**: if our diagnosis is right — that the trouble comes from process-wide
+The matrix below defines the coverage. The measured result is recorded in the
+Outcome section at the end of this task. Slim is the **control group**: if our
+diagnosis is right — that the trouble comes from process-wide
 state, and specifically from parking a container in a class static — then most
 of these should pass with no configuration beyond `FPMNG_SHARED_INCLUDES=1`.
 
@@ -110,3 +112,26 @@ Pin and record: the Slim 4 minor version, **and** the PSR-7 implementation
 handling, which is the part most likely to interact with
 `sapi/fpmng/fpm/fpm_pool_fiber_xport.c`. A result without both versions recorded
 is not reproducible.
+
+## Outcome so far — 2026-09-06
+
+The repository probe under `tests/frameworks/slim4/` ran against the current-main
+fiber build with Slim `4.15.3`, `slim/psr7` `1.8.0`, and `predis/predis` `3.6.0`.
+With `pool.executor = fiber`, `FPMNG_SHARED_INCLUDES=1`, `pm.max_children = 1`,
+MySQL database `slim4`, and Redis database `2`, the final run reported **9 PASS,
+0 ERROR, and 2 NOT MEASURED**. The nine passing rows cover the shared-includes
+entry script, `/mix`, two session rounds, the authenticated route, object
+identity, request and response PSR-7 streams, middleware state, and error
+middleware.
+
+This is a conditional **YES** for the measured Slim 4 probe: the stock
+`public/index.php` survives repeated shared-includes requests, and no
+`fiber.isolate_statics` entries are needed by the tested Slim application. The
+runner uses the HTTP gateway's bare front-controller routes; no Slim-specific C
+support was added.
+
+The PHP-DI container variant and route-cache mode remain **NOT MEASURED**. Also
+not measured are negative-control/classic comparisons, other Slim or PSR-7
+versions, `pm.max_children > 1`, `fiber.revalidate_freq`, and broader framework
+features outside this probe. Task 026 remains in progress until the unmeasured
+matrix rows are either run or intentionally closed.

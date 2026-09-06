@@ -38,7 +38,11 @@ struct fpm_http_tls_s {
 	char *key_pem;
 	size_t key_len;
 	int min_version;			/* np. TLS1_2_VERSION, patrz fpm_http_tls.c */
-	unsigned char ticket_key[48];
+	/* 80 = 16 (key name) + 32 (AES-256 key) + 32 (HMAC-SHA256 key), the
+	 * layout OpenSSL's classic SSL_CTX_set_tlsext_ticket_keys() expects
+	 * since it moved off AES-128/HMAC-SHA1 -- the old 48-byte layout from
+	 * early OpenSSL 1.x docs is refused with "invalid ticket keys length". */
+	unsigned char ticket_key[80];
 };
 
 /* Wolane z fpm_http_validate_pool(), w fazie walidacji configu, przed

@@ -273,9 +273,13 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 	EVP_PKEY_free(key);
 
 	SSL_CTX_set_min_proto_version(ctx, tls->min_version);
-	SSL_CTX_set_session_id_context((const unsigned char*)"fpm-ng", 6);
+	SSL_CTX_set_session_id_context(ctx, (const unsigned char*)"fpm-ng", 6);
 	SSL_CTX_set_options(ctx, SSL_OP_NO_COMPRESSION);
-	SSL_CTX_set_tlsext_ticket_keys(ctx, tls->ticket_key, sizeof(tls->ticket_key));
+	if (SSL_CTX_set_tlsext_ticket_keys(ctx, tls->ticket_key, sizeof(tls->ticket_key)) != 1) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot set the shared TLS session ticket key", pool);
+		SSL_CTX_free(ctx);
+		return NULL;
+	}
 
 	return ctx;
 }

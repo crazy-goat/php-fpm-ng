@@ -35,6 +35,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_session.h"
+#include "fpm_pool_coop_ini.h"
 #include "zlog.h"
 
 const char *const fpm_coop_rejects[] = {
@@ -504,6 +505,7 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		EG(user_error_handlers) = ctx->user_error_handlers;
 		EG(user_exception_handlers) = ctx->user_exception_handlers;
 		fpm_coop_session_req_enter(ctx);
+		fpm_coop_ini_req_enter(ctx);
 	}
 }
 /* }}} */
@@ -552,6 +554,7 @@ void fpm_coop_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		ctx->user_error_handlers = EG(user_error_handlers);
 		ctx->user_exception_handlers = EG(user_exception_handlers);
 		fpm_coop_session_req_save(ctx);
+		fpm_coop_ini_req_leave(ctx);
 		fpm_coop_base_tables_restore();
 	}
 }
@@ -739,25 +742,36 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	}
 
 	/* ini_set()/set_time_limit() w skrypcie zapisuje kazdy zmieniony wpis do
-	 * EG(modified_ini_directives) (zend_alter_ini_entry_ex, Zend/zend_ini.c) i
-	 * ten wpis zostaje procesowy, bo my nie robimy php_request_shutdown() per
-	 * request. Zmierzony skutek: Laravel w HandleExceptions robi
-	 * ini_set('display_errors', 'Off') i error_reporting(-1) w pierwszym
-	 * requescie na fiberze, i to zostaje dla CALEGO PROCESU — kolejne fatale
-	 * daja puste 500 zamiast tresci bledu. define() zostaje procesowe (nie ma
-	 * odpowiednika "restore" dla stalych) i to sie nie zmieni — patrz
-	 * docs/frameworks.md.
+	 * EG(modified_ini_directives) (zend_alter_ini_entry_ex, Zend/zend_ini.c).
+	 * DOPOKI request trwa (miedzy tym miejscem a jego pierwszym wejsciem na
+	 * procesor), fpm_pool_coop_ini.c przywraca te wpisy do wartosci bazowej
+	 * przy KAZDYM zejsciu z procesora (zawieszenie fibera) i naklada je z
+	 * powrotem przy kazdym wejsciu — patrz fpm_pool_coop_ini.c. Zmierzony
+	 * kiedys skutek "Laravel ini_set('display_errors','Off') zostaje dla
+	 * calego procesu" byl objawem WLASNIE braku tamtego mechanizmu; z nim
+	 * inne requesty w locie juz nie widza tej zmiany. define() nadal zostaje
+	 * procesowe (nie ma odpowiednika "restore" dla stalych) i to sie nie
+	 * zmieni — patrz docs/frameworks.md.
 	 *
-	 * zend_ini_deactivate() (Zend/zend_ini.c) to dokladnie ta operacja, ktora
-	 * php_request_shutdown() wykonuje dla WSZYSTKICH zmodyfikowanych wpisow —
-	 * per wpis, stage DEACTIVATE (OnUpdateTimeout rozbraja timer max_execution_time
-	 * i NIE uzbraja go na nowo, dokladnie to zachowanie, ktore mial dotychczasowy
-	 * kod ograniczony do jednego klucza), i sama niszczy/zeruje
-	 * EG(modified_ini_directives). Straznik "czy w ogole cos bylo zmienione"
-	 * jest WEWNATRZ niej (if (EG(modified_ini_directives))), wiec request bez
-	 * ini_set/set_time_limit w skrypcie nadal nie placi tu nic — ani alokacji,
-	 * ani przeszukania tablicy ini. W trakcie requestu SIGPROF nadal moze
-	 * trafic w cudzy fiber — patrz docs/fiber_errors.md. */
+	 * Ale TEN request, w chwili gdy tu dochodzimy, jest live (ctx->live
+	 * jeszcze true, entered) — a wiec ma zainstalowane WLASNE zmienione
+	 * wpisy w EG(modified_ini_directives), dokladnie tak, jakby nigdy nie
+	 * zszedl z procesora. To jest jedyny moment, w ktorym trzeba je ODWIKLAC
+	 * NAPRAWDE (wywolac on_modify z wartoscia bazowa — OnUpdateTimeout
+	 * rozbraja timer max_execution_time, OnUpdateSaveHandler przestawia
+	 * PS(mod) z powrotem na bazowy handler — patrz fpm_pool_coop_ini.c,
+	 * sekcja "Czego ta izolacja NIE naprawia" po to, dlaczego przy zwyklym
+	 * przelaczeniu fibera NIE wolamy on_modify, a tu TAK), bo ten request
+	 * juz nigdy nie wroci na procesor. zend_ini_deactivate() (Zend/zend_ini.c)
+	 * to dokladnie ta operacja: dla WSZYSTKICH wpisow w
+	 * EG(modified_ini_directives) (czyli, dzieki fpm_pool_coop_ini.c,
+	 * WYLACZNIE wlasnych wpisow TEGO requestu) woła on_modify per wpis, stage
+	 * DEACTIVATE, i sama niszczy/zeruje EG(modified_ini_directives). Straznik
+	 * "czy w ogole cos bylo zmienione" jest WEWNATRZ niej (if
+	 * (EG(modified_ini_directives))), wiec request bez ini_set/set_time_limit
+	 * w skrypcie nadal nie placi tu nic — ani alokacji, ani przeszukania
+	 * tablicy ini. W trakcie requestu SIGPROF nadal moze trafic w cudzy
+	 * fiber — patrz docs/fiber_errors.md. */
 	zend_ini_deactivate();
 	if (EG(timeout_seconds)) {
 		/* cokolwiek innego uzbroilo timer (rozszerzenie wolajace zend_set_timeout) */
@@ -847,6 +861,7 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 {
 	fcgi_request *req = ctx->req;
 
+	fpm_coop_ini_req_free(ctx);
 	efree(ctx);
 	return req;
 }

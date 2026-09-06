@@ -158,3 +158,26 @@ jobs:
         with:
           name: phpt-results
           path: phpt-results
+
+  # Task 010: the HTTP gateway must drop root before it ever accepts a
+  # connection, instead of holding the master's identity (and the TLS private
+  # key) for its whole life. Needs to run as root, which the phpt job's
+  # runner isn't by default -- kept as its own job for that reason, not
+  # folded into phpt.
+  gateway-privileges:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify the gateway drops privileges (tasks/010)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          sudo ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"

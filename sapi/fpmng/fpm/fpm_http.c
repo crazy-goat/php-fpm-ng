@@ -38,6 +38,7 @@
 #include <signal.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <sys/types.h>
 /* musl does not ship <sys/queue.h>, and libevent's headers may pull in a partial
  * one, so include it when it exists and fill in only what is missing. */
@@ -191,6 +192,16 @@ struct fpm_http_gateway_s {
 	char *access_log_path;				/* http.access_log; NULL = wylaczony */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL w masterze */
 	char *front_controller;			/* http.front_controller; puste = fallback wylaczony (dzisiejsze zachowanie) */
+
+	/* Pool's resolved 'user'/'group' (wp->set_uid/set_gid/set_user, copied
+	 * once in the master by fpm_http_gateway_settings() -- fpm_unix_conf_wp()
+	 * has already resolved them by then, see fpm_http.c:fpm_http_gateway_drop_privileges).
+	 * uid 0 means the pool declared none (only possible under FPM's explicit
+	 * run_as_root escape hatch): the gateway then keeps the master's identity,
+	 * same as fpm_unix_init_child() does for workers. */
+	uid_t drop_uid;
+	gid_t drop_gid;
+	char *drop_user;
 
 #ifdef HAVE_FPM_HTTP_TLS
 	/* http.tls_cert/http.tls_key; NULL = zwykly HTTP, dokladnie jak dzis.
@@ -1465,6 +1476,50 @@ static int fpm_http_resolve_upstream(struct fpm_http_gateway_s *gw)
 	}
 }
 
+/* Drops the gateway process from the master's identity (root, in the usual
+ * deployment where the master binds privileged ports) to the pool's own
+ * 'user'/'group' -- the same identity fpm_unix_init_child() (fpm_unix.c) puts
+ * the request workers under. Called once per gateway process, after the last
+ * operation that can need root (see the call site in fpm_http_gateway_run())
+ * and before the event loop ever accepts a connection.
+ *
+ * A pool with no 'user'/'group' at all is only possible under FPM's explicit
+ * run_as_root escape hatch (fpm_unix_conf_wp() refuses it otherwise) -- the
+ * operator asked for root there, so the gateway stays root too, same as a
+ * worker would. Anything else -- setgid/initgroups/setuid actually failing --
+ * is fatal: never continue serving TLS with the private key as root. */
+static void fpm_http_gateway_drop_privileges(struct fpm_http_gateway_s *gw) /* {{{ */
+{
+	if (geteuid() != 0) {
+		return; /* the master was not root either, nothing to drop */
+	}
+
+	if (!gw->drop_uid && !gw->drop_gid) {
+		zlog(ZLOG_WARNING, "[pool %s] http gateway: pool has no user/group, gateway keeps running as root", gw->pool);
+		return;
+	}
+
+	if (setgid(gw->drop_gid) != 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] http gateway: failed to setgid(%d)", gw->pool, (int) gw->drop_gid);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+	if (initgroups(gw->drop_user, gw->drop_gid) != 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] http gateway: failed to initgroups(%s, %d)", gw->pool, gw->drop_user, (int) gw->drop_gid);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+	if (setuid(gw->drop_uid) != 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] http gateway: failed to setuid(%d)", gw->pool, (int) gw->drop_uid);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+	if (geteuid() == 0) {
+		/* setuid(0) target, or a libc/capability quirk that made it a no-op:
+		 * either way, never serve a TLS private key as root */
+		zlog(ZLOG_ERROR, "[pool %s] http gateway: still root after dropping privileges", gw->pool);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+}
+/* }}} */
+
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -1494,18 +1549,27 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	snprintf(title, sizeof(title), "http gateway %s [%u]", gw->pool, index);
 	fpm_env_setproctitle(title);
 
-	/* one fd per gateway process, all appending to the same http.access_log
-	 * path -- see fpm_http_access_log.h for why that does not interleave */
-	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
-
 	if (gw->reuseport) {
-		/* own listening socket in the SO_REUSEPORT group, the kernel spreads connections by hash */
+		/* own listening socket in the SO_REUSEPORT group, the kernel spreads connections by hash;
+		 * the last thing that can need root, so the privilege drop below waits for it */
 		close(gw->listen_fd);
 		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, 1);
 		if (gw->listen_fd < 0) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
 	}
+
+	/* Everything above this line is the only reason the gateway ever needed
+	 * root: binding http.reuseport's own listener, and holding the TLS
+	 * private key the master read before the first fork (fpm_http_tls.h).
+	 * Nothing below -- the access log, static files, TLS handshakes, proxying
+	 * to the pool -- needs it. See tasks/010-http-gateway-drop-privileges.md. */
+	fpm_http_gateway_drop_privileges(gw);
+
+	/* one fd per gateway process, all appending to the same http.access_log
+	 * path -- see fpm_http_access_log.h for why that does not interleave.
+	 * Opened after the drop so the file is created by the dropped-to identity. */
+	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
 
 	if (fpm_http_resolve_upstream(gw) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot resolve '%s'", gw->pool, gw->listen_address);
@@ -1786,6 +1850,19 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	 * unset directive already arrives here non-empty; strdup("") when the pool
 	 * explicitly blanked it out to disable the fallback. */
 	gw->front_controller = strdup(wp->config->http_front_controller ? wp->config->http_front_controller : "");
+
+	/* The gateway drops to the same identity as the pool's own workers once
+	 * it no longer needs root, see fpm_http_gateway_drop_privileges(). */
+	gw->drop_uid = (uid_t) wp->set_uid;
+	gw->drop_gid = (gid_t) wp->set_gid;
+	/* wp->set_user is only populated when 'user' was a numeric id (see
+	 * fpm_unix_conf_wp() in fpm_unix.c); otherwise fall back to the name as
+	 * configured, exactly like fpm_unix_init_child() does for workers. */
+	if (wp->set_user) {
+		gw->drop_user = strdup(wp->set_user);
+	} else if (wp->config->user && *wp->config->user) {
+		gw->drop_user = strdup(wp->config->user);
+	}
 
 #ifdef HAVE_FPM_HTTP_TLS
 	/* fpm_http_validate_pool() already refused a bad/mismatched cert+key at

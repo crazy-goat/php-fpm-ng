@@ -1,9 +1,10 @@
-# 020 — ACME: obtain and renew TLS certificates in the gateway
+# 020 — ACME: obtain and renew TLS certificates (umbrella)
 
-**Priority:** low. Deliberately deferred; large, and partly replaceable by
-existing tooling.
-**Status:** open, not started by decision. Depends on TLS termination, which is
-done (`sapi/fpmng/fpm/fpm_http_tls.c`).
+**Priority:** the umbrella carries no priority of its own; see the individual
+tasks.
+**Status:** open. The "build it or not" question is **answered: we build it**
+(project owner, 2026-09-06). This file is now an index; the work is split
+across 039–047.
 
 ## Context
 
@@ -11,57 +12,52 @@ The project's premise is one binary plus application code in a container image:
 no nginx, no supervisord, no system cron, no shell. Certificates are the
 remaining piece that normally requires another process.
 
-TLS termination with a static certificate now exists — `http.tls_cert`,
-`http.tls_key`, a shared session-ticket key across gateway processes. ACME was
-scoped out at that point on purpose.
+TLS termination with a static certificate exists — `http.tls_cert`,
+`http.tls_key`, `http.tls_min_version`, a session-ticket key shared across
+gateway processes (`sapi/fpmng/fpm/fpm_http_tls.c`). ACME was scoped out at
+that point on purpose. `docs/NOTES.md` section 5 still says "TLS na końcu",
+which predates that work.
 
-## Why it was deferred
+## The split
 
-RFC 8555 is a protocol, not a call: account key, JWS signing, nonce handling,
-`order → authz → challenge → finalize → cert`, CSR generation. The gateway
-process today has no HTTP client and no JSON parser. On top of that, several
-decisions are the project owner's, not an implementer's:
+**TLS gaps that ACME would otherwise inherit** — all of them stand on their own,
+independent of whether ACME is ever finished:
 
-- **HTTP-01 needs port 80** for `/.well-known/acme-challenge/<token>`, while the
-  pool listens wherever it is told. TLS-ALPN-01 avoids port 80 but requires
-  certificate switching by ALPN.
-- **Which of N gateway processes renews?** `http.gateways` defaults to 2, with
-  `SO_REUSEPORT`. This needs single-writer election and a way to hand the new
-  certificate to the others.
-- **Where does the private key live, and who owns it?** See task 010 — the
-  gateway does not currently drop privileges.
-- **Let's Encrypt rate limits.** Testing must use the staging directory or risk
-  blocking the domain. This is a practical hazard, not a theoretical one.
+- **039** — only the leaf certificate is sent; a `fullchain.pem` intermediate is
+  silently dropped. Verified in the code. Do this first.
+- **040** — replace a certificate without restarting the gateway. Renewal is
+  worthless without it.
+- **041** — ALPN and SNI: decide the scope. Coupled to 042 through the choice of
+  challenge type.
+- **042** — a plain HTTP listener alongside the TLS one, for the redirect and
+  for HTTP-01. Answers `docs/NOTES.md` 3l's "is one pool, one port enough" —
+  it is not.
 
-There is also an honest question of value: for "one small VPS, one container", a
-certificate mounted as a volume or a secret, renewed by certbot alongside,
-covers a large share of cases. ACME in the binary is elegant but it is a week of
-work and permanent maintenance surface.
+**ACME proper:**
 
-## Problem
+- **043** — decide where the client lives: C in the gateway, or PHP in a `cron`
+  pool. Blocks the rest; the three checks to run are in `docs/NOTES.md` 3l.
+- **044** — define the state layout on a writable volume, and its ownership.
+  Shared with the self-runner; settle once.
+- **045** — exactly one process renews, and the others pick the result up.
+- **046** — serve the HTTP-01 challenge from the existing local-answer hook
+  (`fpm_http.c:1303`), which was designed for this.
+- **047** — issuance and renewal end to end, Let's Encrypt **staging** by
+  default.
 
-Decide whether to build it, and if so, settle the questions above first.
+## Suggested order
 
-## Acceptance criteria (if it proceeds)
+039 → 043 (decision) → 044 → 040 → 042 → 046 → 045 → 047, with 041 settled
+before 042 because it decides whether port 80 is required at all.
 
-1. The four decisions above are made and written down **before** implementation.
-2. Certificate acquisition and renewal work end to end against the Let's Encrypt
-   **staging** endpoint, with the staging endpoint as the default so that a
-   misconfigured test cannot burn production rate limits.
-3. Renewal happens without dropping connections and without an operator action.
-4. Exactly one process renews; the others pick up the new certificate. Verified
-   with `http.gateways` greater than 1.
-5. The private key is written with restrictive permissions and never appears in
-   any log. The project has already had one near-miss logging a credential-
-   bearing identifier.
-6. Failure to renew is loud and leaves the existing certificate in place rather
-   than breaking the listener.
+039 and 040 are worth doing regardless: a mounted certificate that renews
+outside the binary needs both.
 
-## Explicitly out of scope until the decision is made
+## The honest counter-argument, kept on the record
 
-- Any implementation work at all. This task is a decision first.
-
-## Notes
-
-- If the answer is "no", that is a complete outcome: record it, document
-  mounting a certificate as the supported path, and move this file to `done/`.
+For "one small VPS, one container", a certificate mounted as a volume or a
+secret and renewed by certbot alongside covers a large share of cases. ACME in
+the binary is elegant, but it is a week of work and permanent maintenance
+surface. If 043 concludes that neither option pays for itself, recording that
+and documenting the mounted-certificate path is a complete outcome — but 039
+and 040 still get fixed.

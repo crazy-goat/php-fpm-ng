@@ -25,6 +25,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_coop.h"
+#include "fpm_pool_coop_reval.h"
 #include "fpm_pool_fiber.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
@@ -59,17 +60,30 @@ struct fpm_fiber_req_s {
 	bool waiting;
 };
 
-/* Polaczenie keep-alive miedzy requestami: czekamy na kolejny request. */
+/* Polaczenie keep-alive miedzy requestami: czekamy na kolejny request.
+ * Lista, zeby przy drain (patrz nizej) zamknac je wszystkie naraz, zamiast
+ * czekac do 30 s na idle timeout. */
 struct fpm_fiber_kept_s {
 	fcgi_request *req;
 	int fd;
 	struct event *ev;
+	struct fpm_fiber_kept_s *prev, *next;
 };
 
 static struct event_base *fpm_fiber_base;
 static struct event *fpm_fiber_ev_accept;
 static struct event *fpm_fiber_ev_tick;
+static struct event *fpm_fiber_ev_reval;
 static int fpm_fiber_listen_fd = -1;
+static struct fpm_fiber_kept_s *fpm_fiber_kept_head;
+
+/* Drain: fiber.revalidate_freq wykrylo zmiane wczytanego pliku. Nie
+ * przyjmujemy nowych polaczen, requesty w locie koncza sie normalnie, a gdy
+ * nie ma zadnego — proces wychodzi z FPM_EXIT_OK i master go wymienia
+ * (fpm_children_bury: restart_child = 1 dla kazdego wyjscia poza idle_kill,
+ * ta sama sciezka, ktora wymienia klasycznego workera po pm.max_requests).
+ * W odroznieniu od fcgi_in_shutdown() (SIGQUIT) NIC nie jest porzucane. */
+static bool fpm_fiber_draining = false;
 
 /* Request, ktorego fiber jest wlasnie na procesorze (NULL w petli zdarzen). */
 static struct fpm_fiber_req_s *fpm_fiber_current;
@@ -148,6 +162,19 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 	OBJ_RELEASE(&fr->fiber->std);
 	efree(fr);
 
+	if (fpm_fiber_draining) {
+		/* Ostatni request w locie skonczony — mozna wychodzic. Polaczenia
+		 * nie trzymamy: nowy request trafi do nastepcy. */
+		if (!fcgi_is_closed(req)) {
+			fcgi_finish_request(req, 1);
+		}
+		fcgi_destroy_request(req);
+		if (fpm_coop_in_flight() == 0) {
+			event_base_loopbreak(fpm_fiber_base);
+		}
+		return;
+	}
+
 	if (fcgi_is_closed(req)) {
 		fcgi_destroy_request(req);
 		return;
@@ -162,7 +189,28 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 		kept->fd = fd;
 		kept->ev = event_new(fpm_fiber_base, fd, EV_READ, fpm_fiber_kept_cb, kept);
 		event_add(kept->ev, &fpm_fiber_keep_idle);
+		kept->prev = NULL;
+		kept->next = fpm_fiber_kept_head;
+		if (fpm_fiber_kept_head) {
+			fpm_fiber_kept_head->prev = kept;
+		}
+		fpm_fiber_kept_head = kept;
 	}
+}
+/* }}} */
+
+static void fpm_fiber_kept_unlink(struct fpm_fiber_kept_s *kept) /* {{{ */
+{
+	if (kept->prev) {
+		kept->prev->next = kept->next;
+	} else {
+		fpm_fiber_kept_head = kept->next;
+	}
+	if (kept->next) {
+		kept->next->prev = kept->prev;
+	}
+	event_free(kept->ev);
+	efree(kept);
 }
 /* }}} */
 
@@ -173,8 +221,7 @@ static void fpm_fiber_kept_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 	int new_fd = kept->fd;
 
 	(void) fd;
-	event_free(kept->ev);
-	efree(kept);
+	fpm_fiber_kept_unlink(kept);
 
 	if (!(what & EV_READ)) {
 		/* idle timeout */
@@ -316,6 +363,9 @@ static void fpm_fiber_accept_cb(evutil_socket_t fd, short what, void *arg) /* {{
 		event_base_loopbreak(fpm_fiber_base);
 		return;
 	}
+	if (fpm_fiber_draining) {
+		return;
+	}
 	req = fpm_coop_accept(fpm_fiber_listen_fd, &conn_fd);
 	if (!req) {
 		return;
@@ -333,6 +383,64 @@ static void fpm_fiber_tick_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 	if (fcgi_in_shutdown()) {
 		event_base_loopbreak(fpm_fiber_base);
 	}
+	if (fpm_fiber_draining) {
+		zlog(ZLOG_DEBUG, "[pool %s] fiber: draining, %u request(s) still in flight",
+			fpm_coop_pool_name(), fpm_coop_in_flight());
+	}
+}
+/* }}} */
+
+/* Wejscie w drain — patrz komentarz przy fpm_fiber_draining. */
+static void fpm_fiber_drain_begin(void) /* {{{ */
+{
+	fpm_fiber_draining = true;
+	event_del(fpm_fiber_ev_accept);
+	if (fpm_fiber_ev_reval) {
+		event_del(fpm_fiber_ev_reval);
+	}
+
+	/* Bezczynne keep-alive: zamykamy od razu. Bramka HTTP traktuje EOF na
+	 * bezczynnym polaczeniu jak po pm.max_requests (fpm_http_upstream_fail,
+	 * clean_eof) i laczy sie na nowo — do nastepcy. */
+	while (fpm_fiber_kept_head) {
+		struct fpm_fiber_kept_s *kept = fpm_fiber_kept_head;
+
+		fcgi_finish_request(kept->req, 1);
+		fcgi_destroy_request(kept->req);
+		fpm_fiber_kept_unlink(kept);
+	}
+
+	if (fpm_coop_in_flight() == 0) {
+		event_base_loopbreak(fpm_fiber_base);
+	}
+}
+/* }}} */
+
+/* Co fiber.revalidate_freq sekund, z petli zdarzen (zaden request nie jest
+ * wtedy na procesorze): jeden przebieg stat() po zapamietanych plikach.
+ * To jedyne miejsce, gdzie stat() dzieje sie po rejestracji pliku — koszt
+ * jest funkcja czasu i liczby plikow, nie liczby requestow. */
+static void fpm_fiber_reval_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
+{
+	const char *path = NULL;
+	char why[160];
+	unsigned files, sweeps, stats;
+
+	(void) fd; (void) what; (void) arg;
+
+	if (fpm_fiber_draining || fcgi_in_shutdown()) {
+		return;
+	}
+	if (fpm_coop_reval_sweep(&path, why, sizeof(why))) {
+		fpm_coop_reval_stats(&files, &sweeps, &stats);
+		zlog(ZLOG_NOTICE, "[pool %s] fiber: %s changed on disk (%s); worker will exit after %u request(s) in flight finish, master respawns it on fresh code",
+			fpm_coop_pool_name(), path, why, fpm_coop_in_flight());
+		fpm_fiber_drain_begin();
+		return;
+	}
+	fpm_coop_reval_stats(&files, &sweeps, &stats);
+	zlog(ZLOG_DEBUG, "[pool %s] fiber: revalidate sweep #%u, %u file(s) unchanged, %u stat() since start",
+		fpm_coop_pool_name(), sweeps, files, stats);
 }
 /* }}} */
 
@@ -368,13 +476,33 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	event_add(fpm_fiber_ev_accept, NULL);
 	event_add(fpm_fiber_ev_tick, &tick);
 
+	/* fiber.revalidate_freq: hook kompilacji (po container_start, ktory
+	 * sprawdza zend_compile_file) + timer sweepu. 0 = nic z tego nie istnieje. */
+	if (wp->config->fiber_revalidate_freq > 0) {
+		struct timeval every = { wp->config->fiber_revalidate_freq, 0 };
+
+		fpm_coop_reval_start(wp->config->fiber_revalidate_freq);
+		fpm_fiber_ev_reval = event_new(fpm_fiber_base, -1, EV_PERSIST, fpm_fiber_reval_cb, NULL);
+		event_add(fpm_fiber_ev_reval, &every);
+		zlog(ZLOG_NOTICE, "[pool %s] fiber: revalidate_freq = %ds, worker replaces itself when an included file changes on disk",
+			wp->config->name, wp->config->fiber_revalidate_freq);
+	}
+
 	zlog(ZLOG_NOTICE, "[pool %s] fiber: child %d ready, PHP %s, libevent %s (%s), one process, N requests in flight",
 		wp->config->name, (int) getpid(), PHP_VERSION, event_get_version(), event_base_get_method(fpm_fiber_base));
 
 	event_base_dispatch(fpm_fiber_base);
 
-	zlog(ZLOG_NOTICE, "[pool %s] fiber: shutdown requested, %u request(s) in flight abandoned",
-		wp->config->name, fpm_coop_in_flight());
+	if (fpm_fiber_draining && !fcgi_in_shutdown()) {
+		unsigned files, sweeps, stats;
+
+		fpm_coop_reval_stats(&files, &sweeps, &stats);
+		zlog(ZLOG_NOTICE, "[pool %s] fiber: exiting for fresh code, %u request(s) in flight, %u file(s) tracked, %u sweep(s), %u stat() total",
+			wp->config->name, fpm_coop_in_flight(), files, sweeps, stats);
+	} else {
+		zlog(ZLOG_NOTICE, "[pool %s] fiber: shutdown requested, %u request(s) in flight abandoned",
+			wp->config->name, fpm_coop_in_flight());
+	}
 
 	fpm_stdio_flush_child();
 	exit(FPM_EXIT_OK);

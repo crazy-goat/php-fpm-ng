@@ -179,6 +179,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
 	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
+	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
+	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
+	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },

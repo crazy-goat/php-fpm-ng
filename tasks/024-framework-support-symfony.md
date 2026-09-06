@@ -107,15 +107,14 @@ Full-run result: **PASS=19 ERROR=2 NOT MEASURED=0** over 21 scenarios.
 
 - `APP_ENV=prod` — the four core scenarios pass on a dedicated prod pool
   (`APP_DEBUG=0`); each response reports `environment: prod`. **Measured.**
-- `pm.max_children = 2` — mix and object-identity pass; **session and
-  stateful-auth intermittently stall** in the cookie-replay round (some
-  requests never reach the scenario gate, completing exactly at the 90 s
-  BLPOP timeout; `llen` observed 2-7 of 8). The failure reproduces in every
-  full run in at least one pm2 scenario, across several runs, including after
-  isolating each scenario on a fresh pool. **Retained as ERROR.**
-- `pm-max-children` (derived scenario) is therefore recorded ERROR and the
-  support claim for `pm.max_children > 1` with stateful Symfony traffic is
-  **not supported** on this build.
+- `pm.max_children = 2` — the initial pre-fix run showed mix and
+  object-identity passing while session and stateful-auth intermittently
+  stalled in the cookie-replay round (some requests never reached the scenario
+  gate, completing exactly at the 90 s BLPOP timeout; `llen` observed 2-7 of 8).
+  The failure was retained as ERROR in that historical run.
+- `pm-max-children` — after the accept-race fix described below, the complete
+  two-worker suite passes; the earlier ERROR was a blocking accept race, not a
+  session or flock problem.
 - `fiber.revalidate_freq` — controlled deploy: the pool starts with
   `fiber.revalidate_freq = 1`, the probe changes `DeployMarker::VALUE` on
   disk, and subsequent requests serve the updated code without a manual

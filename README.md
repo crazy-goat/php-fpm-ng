@@ -26,6 +26,10 @@ Zweryfikowane 2026-09-05:
   oznacza klasyczny `fastcgi` i zachowuje zgodnosc z upstreamowym FPM
 - `fastcgi-ng` i `http` przyjmuja opcjonalne
   `pool.executor = classic | fiber | async` (domyslnie `classic`)
+- metryki: `pool.type = status` wystawia wbudowane `/metrics` (Prometheus)
+  i `/status` (JSON); metryki aplikacyjne z PHP (`fpm_metric_register/inc/
+  set/observe`, NOTES 3k/3w) przez rozszerzenie `ext/fpmng_metrics/`,
+  rowniez z CLI przez `fpm_metric_render()`
 - executory `fiber` i `async` sa eksperymentalne i nie sa przeznaczone do
   produkcji; Fiber wymaga wylaczonego OPcache, a dla True Async nadal jest to
   zalecane; ograniczenia opisuje `docs/NOTES.md`, sekcje 3t–3u

@@ -2731,15 +2731,16 @@ dev i prod.
    "jedna binarka trzyma certyfikat i statyki" z "aplikacja jest osobnym
    procesem". Kontekst i skad sie to wzielo: sekcja 3s.
 
-### Stan na 2026-09-05
+### Stan na 2026-09-06
 
 Zrobione: 1 (pool.type z kontraktem rozszerzalnosci), 2 (supervisor),
-3 (cron), 5 (pliki statyczne), 0 (statyczna binarka musl) — plus optymalizacje
-syscalli blokujacego workera (3t), ktorych w pierwotnym planie nie bylo.
-W robocie: `pool.type = status` (czesc punktu 4) i eksperymentalny
-`pool.type = async` (3s).
-Zostalo: 4 (metryki z PHP, `fpm_metric_*`), 6 (self-runner), 7 (reload),
-8 (TLS+ACME), 9 (proxy), oraz dlugi ogon braków bramki z sekcji 6.
+3 (cron), 4 (metryki: pool.type = status 2026-09-05 + metryki aplikacyjne
+z PHP, patrz 3w), 5 (pliki statyczne), 0 (statyczna binarka musl) — plus
+optymalizacje syscalli blokujacego workera (3t) i eksperymentalne
+executory fiber/async (POC).
+W robocie: nic aktualnie otwartego.
+Zostalo: 6 (self-runner), 7 (reload), 8 (TLS+ACME), 9 (proxy),
+oraz dlugi ogon braków bramki z sekcji 6.
 
 ## 8. Utrzymanie: nowa wersja PHP = przebudowa
 
@@ -3317,3 +3318,78 @@ Regresje, wszystkie na AFTER z rzeczywistym outputem:
 - Bez `/etc/resolv.conf` (kontener scratch) `evdns_base_new` zwraca NULL —
   jedno ostrzezenie w logu i powrot do blokujacej sciezki.
 - Redis po nazwie nie testowany (brak pod reka); mysqli tak.
+
+## 3w. Metryki aplikacyjne z PHP (`fpm_metric_*`) — ZAIMPLEMENTOWANE (2026-09-06)
+
+Punkt 4 planu, czesc opisana w 3k. Rozszerzenie `ext/fpmng_metrics/`
+(kopiowane przez `prepare.sh` obok `sapi/fpmng/`), wlaczone domyslnie, pod
+`--enable-fpmng` wymuszone (kod SAPI wolac jego symbole — wymuszenie lezy w
+`config.m4` ROZSZERZENIA po `PHP_ARG_ENABLE`, bo `--disable-all` nadpisuje
+preset przez PHP_ENABLE_ALL, patrz `PHP_REAL_ARG_ENABLE` w `build/php.m4`).
+
+API zgodne z 3k: `fpm_metric_register/inc/set/observe` (bool = wykrycie
+problemu) + `fpm_metric_render()` — zwraca gotowy tekst Prometheus, po to,
+zeby to samo dzialalo z CLI bez poola status.
+
+Co poszlo dokladnie tak, jak zaplanowano w 3k:
+- sloty per worker, zero atomikow: kazdy worker ma WLASNA tablice serii
+  w shm, sumowanie przy odczycie. Slot = suma `pm.max_children` poolow
+  wczesniejszych w configu + indeks ze scoreboardu (nie pid — recycling
+  `pm.max_requests` nie zeruje licznikow). Region alokuje master po
+  `fpm_conf_init_main` (jeden `fpm_shm_alloc`, dzieci dziedzicza mape).
+- porazka alokacji NIE zabija FPM — metryki to dodatek; wtedy funkcje
+  zwracaja false (swiadome odejscie od lancucha bledow w `fpm_init`).
+- kardynalnosc: `fpmng_metrics.series_limit` (INI, domyslnie 256) serii na
+  workera; po wyczerpaniu false + E_WARNING RAZ na metryke, Z NAZWA.
+  Zweryfikowane: limit 3, 4. seria odrzucona, istniejace nadal zapisywalne,
+  ostrzezenie raz na nazwe.
+- histogramy z kubelkami (domyslne 5 ms — 60 s, jak w 3k), bez exemplary;
+  `observe` to jedyna droga do metryk consumera, granice zadania zna
+  tylko aplikacja.
+- rozwidlenie SAPI/rozsz. rozwiazane tak jak w 3k: pod fpm-ng backend w
+  shm, pod CLI (i kazdym innym SAPI) magazyn w procesie + `render()`.
+
+Decyzje dodatkowe, podjete przy implementacji (uzupelniaja 3k):
+1. **Automatyczna etykieta `pool="..."`** na kazdej serii pod fpm-ng.
+   Bez niej `jobs_total` aplikacji i consumera zlewalyby sie w jedna serie
+   bez sledu. Etykieta `pool` od uzytkownika ODRZUCANA (false + warning).
+   W CLI etykieta nie jest dodawana.
+2. **register w trybie shm to METADANE, nie seria.** Goly klucz (bez
+   etykiet) nigdy nie zderzy sie z kluczem z inc/set/observe (bo kazdy
+   dostaje pool=...), wiec wpis register niesie tylko HELP/TYPE/kubelki
+   i NIE jest emitowany jako seria — inaczej kazdy register produkowalby
+   falszywa serie `name 0` (dokladnie ta pulapke zlapalismy na poligonie).
+   W CLI goly klucz JEST seria (inc bez etykiet daje ten sam klucz).
+3. **Kubelki sa czescia tozsamosci le, nie serii.** Dwa workery z roznym
+   zestawem kubelkow (np. consumer bez register → domyslne, www
+   z register → wlasne) emituja rozne zbiory le i sie nie gryza; sumowanie
+   po identycznych granicach. Ograniczenie: definicja kubelkow dziala
+   per slot workera — register musi byc wywolany w procesie, ktory
+   observe'uje (typowo: na starcie kazdego requestu/zadania, tak samo
+   jak w Prometheus clientach PHP).
+4. **gauge: dwie agregacje** — `gauge` (suma po slotach) i `gauge_max`
+   (maksimum), wybrane w register; auto-typ z `set` to `gauge`.
+5. Ostrzezenia przez `php_error(E_WARNING)` (trafiaja do logu PHP/FPM),
+   nie przez zlog — rozszerzenie nie zalezy od symboli SAPI i buduje sie
+   tez do CLI. Raz na temat, lista tematow w procesie, zelazny limit 64.
+
+Poligon (debug build, mac/arm64, http 4 workery + supervisor + cron +
+status): 41 requestow przez 12 rownoleglych klientow — trzy niezalezne
+liczniki zgodne (`app_requests_total{pool="www"} 41` = `app_jobs_total 41`
+= suma `app_worker_hits_total` po etykietach 41 = wbudowane
+`fpmng_pool_requests_total 41`), histogram count 41, kubelki sumuja sie
+do 41, zapisy rownolegle bez synchronizacji nie psuja sum. CLI: render
+dziala bez fpm-ng, limit i odrzucenia sprawne.
+
+Znane ograniczenia (celowe, na pozniej):
+- typ metryki brany z pierwszego slotu przy konflikcie typow miedzy
+  workerami (rozny kod w roznych workerach) — wartosci i tak sumowane,
+  TYPE w HELP moze byc wtedy mylace; zostawione do czasu realnych
+  uzytkownikow;
+- /status (JSON) nie pokazuje metryk aplikacyjnych — tylko /metrics;
+  swiadome, JSON ma ksztalt per-pool.
+
+Kolejnosc przy mergu: galaz `metrics-php`, pliki: `ext/fpmng_metrics/`
+(caly katalog), `sapi/fpmng/fpm/fpm_metrics.[ch]`, po jednej linii w
+`fpm.c` (dwa wolania), `fpm_pool_status.c` (doklejanie do /metrics),
+`config.m4` (include path), `build/prepare.sh` (kopiowanie ext/).

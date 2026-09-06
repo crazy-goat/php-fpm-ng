@@ -22,6 +22,7 @@
 #include "fpm_stdio.h"
 #include "fpm_log.h"
 #include "fpm_request.h"
+#include "fpm_metrics.h"
 #include "fastcgi.h"
 #include "zend_signal.h"
 #include "zlog.h"
@@ -83,6 +84,11 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 		zlog(ZLOG_ERROR, "FPM initialization failed");
 		return FPM_INIT_ERROR;
 	}
+
+	/* Metryki aplikacyjne (NOTES 3k): region shm dla slotow workera.
+	 * Swiadomie POZA lańcuchem wyzej — porazka nie zabija FPM, bo
+	 * metryki aplikacyjne to dodatek; wtedy fpm_metric_* zwracaja false. */
+	fpm_metrics_init_main();
 
 	fpm_stdio_init_final();
 	zlog(ZLOG_NOTICE, "fpm is running, pid %d", (int) fpm_globals.parent_pid);
@@ -155,6 +161,9 @@ run_child: /* only workers reach this point */
 		if (child_wp) {
 			fpm_request_set_cpu_tracking(child_wp->config->request_cpu_tracking);
 		}
+		/* Slot metryk trzeba przypisac PRZED cleanups — potem lista poolow
+		 * i pm.max_children wczesniejszych znikaja (patrz fpm_metrics.c). */
+		fpm_metrics_child_init();
 		if (type && (!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http"))) {
 			fcgi_set_optimized_transport(true);
 			zend_signal_use_persistent_handlers(true);

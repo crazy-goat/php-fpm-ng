@@ -2735,12 +2735,12 @@ dev i prod.
 
 Zrobione: 1 (pool.type z kontraktem rozszerzalnosci), 2 (supervisor),
 3 (cron), 4 (metryki: pool.type = status 2026-09-05 + metryki aplikacyjne
-z PHP, patrz 3w), 5 (pliki statyczne), 0 (statyczna binarka musl) — plus
-optymalizacje syscalli blokujacego workera (3t) i eksperymentalne
-executory fiber/async (POC).
+z PHP, patrz 3w), 5 (pliki statyczne), 7 (graceful reload, patrz 3x),
+0 (statyczna binarka musl) — plus optymalizacje syscalli blokujacego
+workera (3t) i eksperymentalne executory fiber/async (POC).
 W robocie: nic aktualnie otwartego.
-Zostalo: 6 (self-runner), 7 (reload), 8 (TLS+ACME), 9 (proxy),
-oraz dlugi ogon braków bramki z sekcji 6.
+Zostalo: 6 (self-runner), 8 (TLS+ACME), 9 (proxy), oraz dlugi ogon
+braków bramki z sekcji 6.
 
 ## 8. Utrzymanie: nowa wersja PHP = przebudowa
 
@@ -3393,3 +3393,37 @@ Kolejnosc przy mergu: galaz `metrics-php`, pliki: `ext/fpmng_metrics/`
 (caly katalog), `sapi/fpmng/fpm/fpm_metrics.[ch]`, po jednej linii w
 `fpm.c` (dwa wolania), `fpm_pool_status.c` (doklejanie do /metrics),
 `config.m4` (include path), `build/prepare.sh` (kopiowanie ext/).
+
+## 3x. Graceful reload — ZAIMPLEMENTOWANE I ZWERYFIKOWANE (2026-09-06)
+
+Punkt 7 planu. Zwykly reload FPM przez `SIGUSR2` nadal robi `execvp()`
+**tego samego mastera** i zachowuje gniazdka przez `FPM_SOCKETS*` w srodowisku
+procesu. Zmienil sie tylko rozdzial sygnalu wysylanego przy pierwszej fazie
+reloadu:
+
+- worker requestowy (`fastcgi`/`http`, takze fiber/async) dostaje `SIGQUIT`:
+  zamyka przyjmowanie nowych polaczen i dopala biezacy request;
+- pool `supervisor`, `cron` i `status` dostaje `SIGTERM`:
+  supervisor korzysta ze swojego handlera, ustawia flage, uzbraja watchdog
+  i po zakonczeniu aktualnej iteracji wychodzi; cron budzony ze snu wychodzi
+  bez uruchamiania kolejnego przebiegu; status nie ma pracy PHP do dokańczania;
+- po zebraniu wszystkich dzieci master robi `execvp()`, nowa generacja
+  dziedziczy te same sockety i uruchamia sie pod tym samym PID-em.
+
+Implementacja jest w nadpisanym `sapi/fpmng/fpm/fpm_process_ctl.c`.
+Warunek jest swiadomie ograniczony do `fpm_state == RELOADING` i `SIGQUIT`:
+`SIGQUIT` przy zwyklym graceful stopie oraz przy rotacji logow zachowuje stare
+znaczenie i nie zabija consumerow przez nowa sciezke.
+
+Poligon (macOS/arm64, debug, `http` + `supervisor` + `cron`):
+- request z `sleep(3)` dostal reload w trakcie i zwrocil `request-done`, z
+  logiem `start` i `end` tego samego workera;
+- log mastera pokazal `web -> SIGQUIT`, `consumer -> SIGTERM`,
+  `cron -> SIGTERM`;
+- supervisor zakonczyl biezaca iteracje (`iter-end`), po czym wystartowal
+  nowy proces pod nowym PID-em;
+- po reloadzie log pokazal `using inherited socket` i nowy master odpowiadal
+  na ten sam port.
+
+To nie jest prawdziwy hot-reload diffujacy konfiguracje i dotykajacy tylko
+zmienionego poola — ten zakres nadal pozostaje odlozony.

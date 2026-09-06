@@ -12,15 +12,24 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 [ -d "$PHPSRC/sapi/fpm" ] || { echo "to nie wyglada na php-src: $PHPSRC" >&2; exit 1; }
 
 # MUSI byc PRZED odtworzeniem katalogu: nizej sapi/fpmng jest kasowane i robione
-# na nowo z upstreamowego sapi/fpm, w ktorym nie ma bloku PHP_FPMNG_FILES.
+# na nowo z upstreamowego sapi/fpm, w ktorym nie ma blokow PHP_FPMNG_*_FILES.
 # Sluzy do wykrycia, czy doszedl albo znikl plik .c — patrz ostrzezenie na koncu.
+# Lista jest podzielona na trzy bloki (bazowy, fiber, async) — patrz nizej —
+# ale do wykrycia zmiany bierzemy je razem, bo interesuje nas caly zestaw
+# plikow niezaleznie od tego, do ktorego bloku trafily.
 OLD_SOURCES=""
 if [ -f "$PHPSRC/sapi/fpmng/config.m4" ]; then
-  # Tylko blok PHP_FPMNG_FILES — w config.m4 sa tez inne wzmianki o plikach
-  # (fpm_systemd.c, fpm_trace.c, www.c pod warunkami), ktore nie naleza do listy.
-  OLD_SOURCES=$(sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
-      "$PHPSRC/sapi/fpmng/config.m4" \
-    | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u)
+  # Tylko bloki PHP_FPMNG_*_FILES="..." — w config.m4 sa tez inne wzmianki
+  # o plikach (fpm_systemd.c, fpm_trace.c, www.c pod warunkami), ktore nie
+  # naleza do zadnej z tych list.
+  OLD_SOURCES=$( { \
+      sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
+        "$PHPSRC/sapi/fpmng/config.m4"; \
+      sed -n '/PHP_FPMNG_FIBER_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
+        "$PHPSRC/sapi/fpmng/config.m4"; \
+      sed -n '/PHP_FPMNG_ASYNC_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
+        "$PHPSRC/sapi/fpmng/config.m4"; \
+    } | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u)
 fi
 
 rm -rf "$PHPSRC/sapi/fpmng"
@@ -52,9 +61,36 @@ for f in $(cd "$REPO/sapi/fpmng" && find fpm -name '*.c' | sort); do
 $f"
 done
 
-LIST=$(echo "$SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
-awk -v list="$LIST" '{ gsub(/@FPMNG_SOURCES@/, "\n" list "\n  "); print }' \
-  "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
+# Podzial na trzy grupy: fiber (fiber + cala warstwa coop, uzywana wylacznie
+# przez fiber) i async (fpm_pool_async.c) trafiaja pod --enable-fpmng-fiber /
+# --enable-fpmng-async (obie domyslnie "no"); reszta jest budowana zawsze.
+# Podzial zweryfikowany po referencjach symboli — coop.* nie jest uzywane
+# poza fiber, async nie odwoluje sie do coop.
+# Dopasowanie po PREFIKSIE nazwy, nie po wyliczeniu plikow. Wyliczenie
+# cofaloby cala idee tego skryptu: lista zrodel ma sie brac z 'find', zeby
+# nowy plik nie wymagal edycji. Przy wyliczeniu nowy fpm_pool_coop_cokolwiek.c
+# NIE pasowalby do wzorca, wpadlby cicho do listy bazowej i wyladowal w
+# domyslnej binarce — czyli dokladnie to, czemu te flagi maja zapobiegac.
+FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
+ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
+
+BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN")
+FIBER_SOURCES=$(echo "$SOURCES" | grep -E "$FIBER_PATTERN")
+ASYNC_SOURCES=$(echo "$SOURCES" | grep -E "$ASYNC_PATTERN")
+
+[ -n "$FIBER_SOURCES" ] || { echo "nie znaleziono plikow fiber/coop w liscie zrodel" >&2; exit 1; }
+[ -n "$ASYNC_SOURCES" ] || { echo "nie znaleziono fpm_pool_async.c w liscie zrodel" >&2; exit 1; }
+
+BASE_LIST=$(echo "$BASE_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
+FIBER_LIST=$(echo "$FIBER_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
+ASYNC_LIST=$(echo "$ASYNC_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
+
+awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" '{
+    gsub(/@FPMNG_SOURCES@/, "\n" base "\n  ");
+    gsub(/@FPMNG_FIBER_SOURCES@/, "\n" fiber "\n  ");
+    gsub(/@FPMNG_ASYNC_SOURCES@/, "\n" async "\n  ");
+    print
+  }' "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"
 
 # Czy lista zrodel sie zmienila wzgledem poprzedniego przebiegu? Jesli tak, to

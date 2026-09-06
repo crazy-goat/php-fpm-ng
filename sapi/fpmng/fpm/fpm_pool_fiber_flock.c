@@ -192,7 +192,8 @@ static bool fpm_flock_add_waiter(struct fpm_flock_entry_s *e, void *owner) /* {{
 		if (!fpm_flock_waiters_full_warned) {
 			fpm_flock_waiters_full_warned = true;
 			zlog(ZLOG_WARNING, "fiber: flock wait queue full for one file (%d waiters); "
-				"falling back to NB-retry/blocking for the overflow waiter", FPM_FLOCK_MAX_WAITERS);
+				"failing the lock attempt for the overflow waiter with EWOULDBLOCK instead of "
+				"blocking the process on a same-process holder", FPM_FLOCK_MAX_WAITERS);
 		}
 		return false;
 	}
@@ -375,18 +376,41 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 				return -1;	/* wywolujacy prosil o LOCK_NB — nie wolno zawieszac ani blokowac */
 			}
 			if (!fpm_pool_fiber_can_wait() || !fpm_flock_add_waiter(entry, owner)) {
-				/* Nie mozemy zawiesic tego fibera (zagniezdzony Fiber
-				 * uzytkownika, destruktor pod GC, ...) albo kolejka pelna:
-				 * spadamy do prawdziwego blokujacego flock() ponizej —
-				 * proces zawiesi sie na OS-owym flock() dokladnie jak
-				 * dzisiaj (regresja TYLKO dla tego jednego wywolania w tym
-				 * rzadkim przypadku, nie dla calego procesu w typowym
-				 * przypadku, ktory ta laka wlasnie usuwa). */
-				ret = fpm_flock_real(stream, mode, ptrparam);
-				if (ret == 0) {
-					fpm_flock_register_holder(entry, owner, mode);
-				}
-				return ret;
+				/* FIX (was: fall through to a real BLOCKING flock() here).
+				 * We just confirmed, above, that another fiber IN THIS SAME
+				 * PROCESS holds a conflicting lock. That holder cannot run
+				 * again — the one OS thread this process has is about to
+				 * be the caller of a blocking flock() — until this call
+				 * returns, so a real blocking flock() here can never be
+				 * satisfied: permanent, whole-process deadlock, exactly the
+				 * bug this file exists to remove, just reached from the
+				 * "can't suspend" or "queue full" edge instead of the
+				 * two-phase-loop edge fixed earlier in this same spike (see
+				 * the report). There is no safe blocking fallback for an
+				 * in-process conflict, ever, by construction: the process
+				 * has one thread and the holder is one of this process's
+				 * own fibers.
+				 *
+				 * So: fail the lock attempt instead, exactly the way a
+				 * real non-blocking flock() fails when it cannot be
+				 * granted right away (see the `nb` branch a few lines
+				 * above, and php_flock_common() in ext/standard/file.c:
+				 * flock($fp, LOCK_EX) returns false and, if $wouldblock
+				 * was passed, sets it to true when errno is EWOULDBLOCK;
+				 * file_put_contents(..., LOCK_EX) returns false with an
+				 * E_WARNING). This is documented, ordinary, userland-
+				 * visible lock failure, not a crash and not silent data
+				 * loss — it is materially better than losing the whole
+				 * worker and every request in flight.
+				 *
+				 * This applies identically to BOTH reasons for landing
+				 * here: a fiber that structurally cannot suspend (a nested
+				 * user Fiber, a destructor running under GC) has exactly
+				 * the same "the holder can't run" problem as a full
+				 * waiter queue -- neither can be turned into a safe block.
+				 */
+				errno = EWOULDBLOCK;
+				return -1;
 			}
 			fpm_pool_fiber_wait_wake(NULL);
 			/* Po obudzeniu wracamy na SAM POCZATEK tej wewnetrznej petli —

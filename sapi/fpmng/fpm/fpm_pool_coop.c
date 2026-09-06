@@ -28,6 +28,7 @@
 #include "zend_exceptions.h"
 #include "zend_extensions.h"
 #include "zend_ini.h"
+#include "zend_compile.h"		/* zend_is_auto_global(), ZEND_STR_AUTOGLOBAL_* */
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -656,6 +657,32 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * i uzbraja JIT-owe ($_SERVER, $_ENV, $_REQUEST) na czas kompilacji —
 	 * dokladnie to, co php_hash_environment() w php_request_startup(). */
 	zend_activate_auto_globals();
+
+	/* $_SERVER/$_ENV/$_REQUEST maja jit == PG(auto_globals_jit) ZAMROZONE
+	 * w chwili php_startup_auto_globals() (main/php_variables.c) — to jest
+	 * jeden raz na proces, w php_module_startup(), PRZED tym jak FPM w ogole
+	 * stosuje php_admin_value poola po forku. php_admin_value[auto_globals_jit]
+	 * w konfiguracji poola NIC tu nie zmienia: flaga jest juz przeczytana.
+	 * Z jit == 1 (domyslne) zend_activate_auto_globals() tylko UZBRAJA wpis
+	 * (armed = 1) — realny callback odpala dopiero przy KOMPILACJI pliku,
+	 * ktory uzywa tej zmiennej (zend_is_auto_global, wolane z zend_compile.c
+	 * przy kazdym uzyciu $_SERVER itp.). Przy FPMNG_SHARED_INCLUDES=1 vendor
+	 * nie jest rekompilowany od 2. requestu, wiec jesli skrypt wejsciowy sam
+	 * nie dotyka autoglobali (Laravel: dotyka ich dopiero phpdotenv w
+	 * vendorze), callback nigdy sie nie wola i te zmienne globalne po prostu
+	 * nie istnieja — "Undefined global variable $_SERVER" i dalej TypeError
+	 * na null zamiast array. Wymuszamy wiec utworzenie tu, niezaleznie od
+	 * tego, czy TEN skrypt je kompiluje. zend_is_auto_global() sam pilnuje,
+	 * zeby nie zrobic podwojnej roboty: czyta i zeruje flage "armed" (patrz
+	 * zend_auto_global_check w zend_compile.c), wiec gdy skrypt i tak
+	 * skompiluje uzycie $_SERVER, callback juz nie wystartuje drugi raz.
+	 * Kolejnosc bez znaczenia: php_auto_globals_create_request czyta
+	 * $_GET/$_POST/$_COOKIE (utworzone wyzej, jit=0, wiec juz gotowe), nie
+	 * $_SERVER/$_ENV. Koszt per request: trzy male tablice + jeden getenv-owy
+	 * przebieg po environ dla $_ENV — tanie wobec ceny calego requestu. */
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_SERVER));
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV));
+	zend_is_auto_global(ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_REQUEST));
 
 	/* Fiber startuje z EG(error_reporting) z ini (zend_fibers.c:
 	 * zend_fiber_execute), nie z wartosci biezacej; bez php.ini to moze byc

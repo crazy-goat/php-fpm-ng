@@ -25,14 +25,16 @@ Verified 2026-09-05:
 - the frontend selects `pool.type = fastcgi | fastcgi-ng | http`; no directive
   means classic `fastcgi` and stays compatible with upstream FPM
 - `fastcgi-ng` and `http` accept an optional
-  `pool.executor = classic | fiber | async` (default `classic`)
+  `pool.executor = classic | fiber | async` (default `classic`; `async` is
+  currently rejected during configuration validation)
 - metrics: `pool.type = status` exposes a built-in `/metrics` (Prometheus)
   and `/status` (JSON); application metrics from PHP (`fpm_metric_register/inc/
   set/observe`, NOTES 3k/3w) through the `ext/fpmng_metrics/` extension,
   also from CLI via `fpm_metric_render()`
-- the `fiber` and `async` executors are experimental and not intended for
-  production; Fiber requires OPcache disabled, and for True Async this is
-  still recommended; limitations are described in `docs/NOTES.md`, sections 3t-3u
+- the `fiber` executor is experimental and not intended for production, while
+  `async` is currently rejected during configuration validation until it has
+  the same hardening; limitations are described in `docs/async_errors.md` and
+  `docs/NOTES.md`, sections 3t-3u
 
 ## Plan
 

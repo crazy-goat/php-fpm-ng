@@ -1,15 +1,17 @@
-/* fpm-ng: pool.executor = async — EKSPERYMENT (patrz fpm_pool_async.h, NOTES 3t).
+/* fpm-ng: pool.executor = async — EXPERIMENT (see fpm_pool_async.h, NOTES 3t).
  *
- * Model: dziecko robi JEDEN php_request_startup() ("request-kontener"), a potem
- * kazdy request FastCGI dostaje wlasna korutyne True Async. Stan SAPI (SG)
- * i superglobale sa przelaczane przy kazdym przelaczeniu korutyny przez
- * switch-handler forka (ZEND_COROUTINE_ADD_SWITCH_HANDLER). Reszta stanu
- * requestu (EG(symbol_table), tablice klas/funkcji, included_files, ini,
- * memory_limit, max_execution_time) jest WSPOLNA — to swiadome ograniczenie
- * POC, nie przeoczenie. Lista w NOTES 3t.
+ * Model: the child performs ONE php_request_startup() (the "request container"),
+ * then each FastCGI request gets its own True Async coroutine. SAPI state (SG)
+ * and superglobals are switched on every coroutine switch by the fork's
+ * switch handler (ZEND_COROUTINE_ADD_SWITCH_HANDLER). The remaining request
+ * state (EG(symbol_table), class/function tables, included_files, ini,
+ * memory_limit, max_execution_time) is SHARED — a deliberate POC limitation,
+ * not an oversight. See NOTES 3t for the full list.
  *
- * Na silniku bez True Async API plik kompiluje sie do samego validate(),
- * ktory odrzuca pool czytelnym komunikatem.
+ * For now validate() rejects the pool on every engine: the request container
+ * does not yet have the isolation or guards required to serve multiple requests
+ * safely. The implementation remains in the tree as material for future
+ * hardening.
  */
 
 #include "fpm_config.h"
@@ -65,34 +67,13 @@ const char *const fpm_pool_async_rejects[] = {
 
 int fpm_pool_async_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-#ifndef FPMNG_ASYNC_ENGINE
-# ifdef FPMNG_ASYNC_NO_ZTS
-	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async is not supported in a ZTS build (PHP %s)",
-		wp->config->name, PHP_VERSION);
-# else
-	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async requires a PHP engine with the True Async API "
-		"(Zend/zend_async_API.h); this binary is PHP %s without it",
-		wp->config->name, PHP_VERSION);
-# endif
+	/* The implementation is kept for a future hardening pass, but it currently
+	 * shares process-wide request state without the guards used by fiber. Do not
+	 * let a True Async build turn this experimental POC into a supported pool. */
+	zlog(ZLOG_ALERT, "[pool %s] pool.executor = async is disabled: it is not hardened "
+		"for concurrent requests; use pool.executor = classic or fiber until async parity is implemented",
+		wp->config->name);
 	return -1;
-#else
-	/* fpm_init() biegnie PO php_module_startup() (fpm_main.c: startup() przed
-	 * fpm_init()), wiec MINIT ext/async juz zarejestrowal scheduler i reaktor
-	 * — mozna to sprawdzic tutaj, a nie dopiero w dziecku. */
-	if (!zend_async_is_enabled()) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: the engine has the True Async API (%s) "
-			"but no scheduler/reactor is registered — ext/async is not loaded",
-			wp->config->name, ZEND_ASYNC_API);
-		return -1;
-	}
-	if (wp->config->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async supports only pm = static "
-			"(dynamic/ondemand scale on scoreboard idle/active counters this type does not maintain)",
-			wp->config->name);
-		return -1;
-	}
-	return 0;
-#endif
 }
 /* }}} */
 

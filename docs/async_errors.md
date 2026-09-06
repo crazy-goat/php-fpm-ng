@@ -1,10 +1,10 @@
 # Known issues in the Async executor
 
-State as of 2026-09-06. `pool.executor = async` is an experiment and is not
-intended for production use. It only works on the `true-async/php-src` fork
-with `ext/async` loaded; on the upstream engine
-`fpm_pool_async_validate()` rejects the pool with a readable message
-(`fpm_pool_async.c:68`).
+State as of 2026-09-06. `pool.executor = async` is an experiment and is
+currently rejected during configuration validation on every engine. It is not
+intended for production use. `fpm_pool_async_validate()` logs that the
+executor lacks the hardening required for multiple requests in one process
+(`fpm_pool_async.c`).
 
 ## Why this file exists
 
@@ -28,59 +28,58 @@ Async has **its own** `validate()` and **its own** `child_main()`
 checked: the only call in the whole tree is `fpm_pool_fiber.c:358`.
 None of the mechanisms above cover it.
 
-## What is specifically left open
+## Why parity is not safe yet
 
-### `max_execution_time` is accepted silently
+### `max_execution_time` was accepted silently
 
-`fpm_pool_async_validate()` checks only: presence of the True Async API, ZTS,
-a registered scheduler/reactor and `pm = static`. It does not check
-`max_execution_time`. The file's own header lists `max_execution_time` among
-the state SHARED across requests in flight (`fpm_pool_async.c:6-8`), so a
-non-zero value is accepted and unenforced — the Zend timeout is one
+Before the refusal, `fpm_pool_async_validate()` checked only the presence of the
+True Async API, ZTS, a registered scheduler/reactor and `pm = static`. It did not
+check `max_execution_time`. The file's own header lists `max_execution_time`
+among the state SHARED across requests in flight (`fpm_pool_async.c:6-8`), so a
+non-zero value would be accepted and unenforced — the Zend timeout is one
 `setitimer()`/`SIGPROF` per process, and the process serves N requests.
 
-Fix symmetric to Fiber's: reject in `fpm_pool_async_validate()`.
+The Fiber implementation rejects this configuration; Async needs equivalent
+validation before it can be enabled.
 
-### Opcache is not checked
+### Opcache was not checked
 
 Fiber rejects opcache when enabled, because the auto-globals mask and file
 timestamps are reset once per request container. Async has the same model and
-**does not have this check**. This is a gap, not a deliberate allowance.
+**did not have this check**. This was a gap in the POC, not a deliberate
+allowance.
 
 ### The process-wide `pcntl` API is not blocked
 
 `pcntl_signal()` sets one table per process
 (`PCNTL_G(php_signal_table)` and `SIGG(handlers)`), and `pcntl_fork()`/`pcntl_exec()`
 duplicate or replace the whole multi-request process along with its scheduler,
-descriptors and requests in flight. Async does not remove these functions.
+descriptors and requests in flight. The POC did not remove these functions.
 
 ### `set_time_limit()` is not cleaned up after the request
 
 `set_time_limit()`/`ini_set()` goes through `OnUpdateTimeout` to
 `zend_set_timeout()` and arms the process timer. Fiber restores the ini entry
-after the script; Async does not, so the value and the timer outlive the
+after the script; the POC did not, so the value and the timer outlived the
 request that changed them.
 
-## Asymmetry introduced deliberately
+## Decision from task 019: refusal
 
 Fiber's safeguards were deliberately placed in `fpm_pool_coop.c`, in code that
 the fiber type already has — so as not to add an `if (type == ...)` to the
-core (the contract from `fpm_pool_type.h`). A side effect is that Async, which
-has its own core, inherited none of it.
+core (the contract from `fpm_pool_type.h`). Async has its own core and a
+different coroutine-switching mechanism, so merely calling
+`fpm_coop_container_start()` would not provide correct isolation.
 
-This is not an oversight, it is a deferred decision: Async requires an engine
-fork, so nobody runs it by accident, and aligning the safeguards only makes
-sense once it stops being a POC. Options:
+The chosen decision is **refusal**: `fpm_pool_async_validate()` rejects
+`pool.executor = async` on every engine with a message naming the missing
+hardening and the `classic`/`fiber` alternatives. The POC implementation stays
+in the tree for future work, but configuration cannot start it.
 
-1. **Copy** the checks into `fpm_pool_async_validate()` and the block into
-   `fpm_pool_async_child_main()` — simplest, duplicates code.
-2. **Extract** the shared part (ini validation + the list of blocked
-   functions) into a function shared by both cores — cleaner, because the
-   problem comes from the shared SHAPE, not from shared implementation.
-
-Recommendation: option 2, but only at the next serious round of work on Async.
-As long as `validate()` rejects the pool on every upstream engine, the
-practical risk is zero.
+The concurrent-session, ini-isolation, autoglobal and persistent-connection
+measurements were not repeated for Async. After choosing refusal, there is no
+supported execution path; the measurements in section 3t of `docs/NOTES.md`
+remain historical POC results, not a compatibility claim.
 
 ## Beyond pcntl — shared with Fiber
 

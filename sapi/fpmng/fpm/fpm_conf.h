@@ -130,6 +130,9 @@ struct fpm_worker_pool_config_s {
 						 * i wloz oryginalna sciezke w PATH_INFO. Domyslnie "/index.php" — wbudowany serwer PHP
 						 * (php -S) daje ten sam efekt bez zadnej konfiguracji (patrz php_cli_server_request_translate_vpath()),
 						 * wiec bramka HTTP nie powinna byc mniej uprzejma. Puste = wylaczone, dzisiejsze zachowanie. */
+	char *http_tls_cert;			/* sciezka do PEM z certyfikatem (z lancuchem); puste = zwykly HTTP, jak dzis */
+	char *http_tls_key;			/* sciezka do PEM z kluczem prywatnym */
+	char *http_tls_min_version;		/* "TLSv1.2" (domyslne) albo "TLSv1.3" */
 	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
 	struct key_value_s *env;

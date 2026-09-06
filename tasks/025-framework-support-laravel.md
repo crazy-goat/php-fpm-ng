@@ -14,12 +14,19 @@ With this configuration:
 
     fiber.isolate_statics = Illuminate\Container\Container::instance,\
                             Illuminate\Support\Facades\Facade::app,\
-                            Illuminate\Support\Facades\Facade::resolvedInstance
+                            Illuminate\Support\Facades\Facade::resolvedInstance,\
+                            Illuminate\Database\Eloquent\Model::resolver
 
 - `/session`, 8 concurrent: 8/8 correct, distinct `app_oid` and
-  `container_request_oid`. A negative control with the directive empty
-  reproduced the original 4-5/8 failure.
+  `container_request_oid`. The current runner's empty-list negative control
+  returns HTTP 200 responses that all share one `app_oid` and fails its data
+  assertion; the earlier hand run measured 4-5/8 wrong.
 - `Auth::login` for two users followed by 8 concurrent `/me`: 8/8 correct.
+- The repository-owned Eloquent probe found that `Model::$resolver` also needs
+  isolation: with the four-entry list, concurrent Eloquent and mixed DB/Cache/
+  Redis requests are 8/8 correct; with only the previous three entries they
+  return HTTP 500 with `Cannot execute queries while other unbuffered queries
+  are active`.
 
 Application changes still required, in `public/index.php`:
 
@@ -37,11 +44,14 @@ The spike concluded that `Container::$instance` alone was sufficient. It was —
 for `/session`. Adding one more scenario, an authenticated flow, immediately
 required two more entries: without them most concurrent `/me` requests returned
 `user: null`, because the `AuthManager` resolved through the Facade cache
-belonged to whichever request had bootstrapped last.
+belonged to whichever request had bootstrapped last. The repository-owned
+Eloquent scenario then found a fourth required entry, `Model::$resolver`; with
+only the three-entry list, Eloquent reused a PDO connection that still had
+another request's unbuffered query active and returned HTTP 500.
 
 Nothing tells us the list is complete. A code path nobody has exercised may need
-a fourth entry, and when it does, Laravel will return HTTP 200 with another
-user's data and log nothing.
+a fifth entry, and when it does, Laravel may return HTTP 200 with another user's
+data and log nothing.
 
 ## What this task must produce
 
@@ -85,15 +95,23 @@ static on the isolation list?*
 
 | Scenario | Assertion | Status |
 |---|---|---|
-| `/session`, N=8 | own sid, own `sess_user`, distinct `app_oid` / `container_request_oid` | 8/8 |
-| same run, `fiber.isolate_statics` empty | must reproduce the failure | 4-5/8 wrong — negative control holds |
-| `Auth::login` + N=8 `/me` | own identity per request | 8/8, and **fails without** `Facade::app` / `Facade::resolvedInstance` |
+| `/session`, N=8 | own sid, own `sess_user`, distinct `app_oid` / `container_request_oid` | 8/8 with the four-entry list |
+| same run, `fiber.isolate_statics` empty | must reproduce the failure | `ERROR`: all responses shared one `app_oid`; negative control holds |
+| `Auth::login` + N=8 `/me` | own identity per request | 8/8 with the four-entry list; empty-list control fails |
+| DB + Cache + Redis + Eloquent, N=8 | own values and no shared unbuffered PDO query | 8/8 with `Model::$resolver`; `ERROR` with only three entries |
+| facade/object identity, N=8 | distinct application, request, container and facade roots | 8/8 |
+| middleware + `terminate()`, N=8 | own request marker in response and termination record | 8/8 |
+| CSRF and validation flash data, N=8 | own token/error data; cross-session token rejected | 8/8 |
+| sync queue and broadcast, N=8 | dispatching request's context and own event marker | 8/8 |
 
 ### Facades — each one is a candidate for the isolation list
 
-The list currently has three entries. It was extended once already, when the
-auth flow was added. Every facade below resolves through the same cache and
-needs a concurrency test before we can claim the list is complete.
+The list currently has four entries. It was extended for the auth flow and
+then for Eloquent's `Model::$resolver`. The runner covers DB, Cache, Redis,
+Session, Event, Queue and facade application identity; Log, Config, View, Route
+and Mail remain unmeasured or only indirectly exercised. Every facade below
+resolves through the same cache and needs a concurrency test before we can claim
+the list is complete.
 
 | Facade | Assertion under N=8 concurrency |
 |---|---|
@@ -111,22 +129,22 @@ needs a concurrency test before we can claim the list is complete.
 
 ### Eloquent
 
-| Scenario | Risk | Assertion |
-|---|---|---|
-| `Model::$resolver` | a static holding the connection resolver | A and B use their own connection |
-| model events / observers | registered statically during boot | an observer registered by A does not fire for B's model |
-| global scopes | stored statically on the model class | a scope applied by A does not leak into B's query |
-| `Model::$booted` | boot-once **per process** here, not per request as under classic FPM — a known side effect of the coop model, consequence unexplored | boot side effects are not request-dependent |
+| Scenario | Risk | Assertion | Status |
+|---|---|---|---|
+| `Model::$resolver` | a static holding the connection resolver | A and B use their own connection | 8/8 with the fourth isolation entry; HTTP 500 with only three |
+| model events / observers | registered statically during boot | an observer registered by A does not fire for B's model | NOT MEASURED |
+| global scopes | stored statically on the model class | a scope applied by A does not leak into B's query | NOT MEASURED |
+| `Model::$booted` | boot-once **per process** here, not per request as under classic FPM — a known side effect of the coop model, consequence unexplored | boot side effects are not request-dependent | NOT MEASURED |
 
 ### Request lifecycle
 
-| Scenario | Risk | Assertion |
-|---|---|---|
-| CSRF middleware | token in the session | A's token validates only A's request |
-| rate limiter | cache-backed, keyed by identity | limits are attributed to the right user |
-| validation with a redirect back | errors flashed into the session | A's errors never render in B's response |
-| middleware groups / `terminate()` | terminable middleware runs after the response | attributed to the right request |
-| `LARAVEL_START` | constants are process-wide and will stay that way | first request's value survives; nothing depends on it being per request |
+| Scenario | Risk | Assertion | Status |
+|---|---|---|---|
+| CSRF middleware | token in the session | A's token validates only A's request | 8/8; cross-session token rejected |
+| rate limiter | cache-backed, keyed by identity | limits are attributed to the right user | NOT MEASURED |
+| validation with a redirect back | errors flashed into the session | A's errors never render in B's response | 8/8 |
+| middleware groups / `terminate()` | terminable middleware runs after the response | attributed to the right request | 8/8 |
+| `LARAVEL_START` | constants are process-wide and will stay that way | first request's value survives; nothing depends on it being per request | observed defined; value isolation NOT MEASURED |
 
 ### Configuration completeness — the point of this task
 
@@ -138,6 +156,7 @@ needs a concurrency test before we can claim the list is complete.
 
 ### Versions
 
-Only Laravel **13.30.1** has been tested. A framework upgrade may add or move a
-static; the list must be re-verified per minor version, and that requirement
-belongs in the user-facing documentation.
+Only Laravel **13.30.1** has been tested. The repository fixture locks
+`predis/predis` **3.6.0**; the measured test-box run used phpredis **6.3.0RC1**.
+A framework upgrade may add or move a static; the list must be re-verified per
+minor version, and that requirement belongs in the user-facing documentation.

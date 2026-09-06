@@ -1,4 +1,4 @@
-# Symfony and Laravel on `pool.executor = fiber`
+# Symfony, Laravel, and Slim 4 on `pool.executor = fiber`
 
 Measurement from 2026-09-06 on the test box (Ubuntu 26.04, epoll, MySQL 8.4, Redis,
 phpredis 6.3.0RC1), binary from commit `a5800e4`. **Symfony 8.1.6** (skeleton +
@@ -357,3 +357,95 @@ Note that Symfony needs no `fiber.isolate_statics` entries for this — its
 security state lives in the container and in the session, both of which are
 already per request. The class-static isolation is a Laravel requirement, not a
 general one.
+
+---
+
+# Slim 4 on `pool.executor = fiber`
+
+Measurement from 2026-09-06 on the shared test box, using the current-main fiber
+build rather than the older `a5800e4` binary. The probe uses Slim **4.15.3**,
+**slim/psr7 1.8.0**, and **predis/predis 3.6.0**. The pool has
+`pool.executor = fiber`, `pm.max_children = 1`, and
+`env[FPMNG_SHARED_INCLUDES] = 1`; it uses MySQL database `slim4` and Redis
+database `2`.
+
+## Verdict
+
+**Slim 4: YES for the measured surface, with conditions** — the normal
+`public/index.php` survived repeated requests with shared includes, and the
+core plus listed PSR-7/middleware scenarios passed concurrently in one fiber
+worker. The probe configured no `fiber.isolate_statics` entries and did not need
+any: all tested request, application, route-collector, and default-container
+observations stayed isolated. No Slim-specific C support was added.
+
+This is not a claim that every Slim integration is supported. PHP-DI and route
+cache were not provisioned, and the broader unmeasured matrix is listed below.
+
+## Binary and command
+
+The exact executable was:
+
+    /home/piotr/rd/tasks/026-slim4/build/sapi/fpmng/php-fpm-ng
+
+It reported:
+
+    PHP 8.5.11-dev (fpm-fcgi) (built: Sep  6 2026 11:01:33) (NTS)
+
+The binary SHA-256 was
+`90a592e2f027fb50bbe94292dcc451b64d8a16b0490c6ed53abe085af95eeca6`.
+`strings` confirmed the `FPMNG_SHARED_INCLUDES` and fiber-child literals. The
+source tree's base commit was
+`67d1476d4d8015c7a7ddf3221eb062c423869818`; the build also included the
+uncommitted current-main worktree changes present in that build directory.
+
+The final run was:
+
+    cd /home/piotr/rd/tasks/026-slim4/slim4-tests
+    RUN_DIR=/home/piotr/rd/tasks/026-slim4/slim4-tests/.run \
+    PHP=/home/piotr/rd/tasks/026-slim4/build/sapi/cli/php \
+    FPMNG=/home/piotr/rd/tasks/026-slim4/build/sapi/fpmng/php-fpm-ng \
+    HTTP_PORT=22626 FCGI_PORT=22625 ./bin/run.sh
+
+The runner uses bare paths such as `/health`. The current gateway's default
+`http.front_controller = /index.php` invokes the normal entry script while
+leaving `/health`, `/mix`, and the other route paths intact for Slim. An initial
+harness attempt using `/index.php/<route>` reached Slim but produced Slim's own
+404 because `/index.php` remained part of the route path; that setup defect was
+fixed before counting results and was not treated as framework evidence.
+
+## Results
+
+All measured rows ran with N=8 concurrent requests unless stated otherwise.
+Assertions were on response data, not only HTTP status.
+
+| Scenario | Assertion | Result |
+|---|---|---|
+| repeated stock entry script | 8 health requests through shared includes | **PASS** |
+| `/mix?sleep=1` | 8/8 own MySQL item/tag and Redis value | **PASS** |
+| `/session?sleep=1` | two rounds: 8/8 own sid and user; round 2 count=2 | **PASS** |
+| authenticated route | 8 concurrent login flows and 8/8 own `/me` identity | **PASS** |
+| object identity | distinct app, request, and route collector; default container mode consistently `none` | **PASS** |
+| PSR-7 request body | 8/8 own JSON marker/hash and complete 64 KiB body | **PASS** |
+| PSR-7 response body | 8/8 exact `start-N`/`end-N` stream output | **PASS** |
+| middleware stack | 8/8 own middleware id and one hit | **PASS** |
+| error middleware | 8/8 HTTP 500 responses contained only their own error tag | **PASS** |
+| PHP-DI container variant | no PHP-DI probe provisioned | **NOT MEASURED** |
+| route cache enabled | route-cache mode has not been enabled | **NOT MEASURED** |
+
+Final runner summary: **PASS=9, ERROR=0, NOT MEASURED=2**. An `ERROR` remains a
+failure in `bin/run.php` and makes the command exit non-zero; no failing scenario
+was deleted or weakened.
+
+## What remains unmeasured
+
+- PHP-DI and Slim route-cache modes;
+- a classic/non-fiber baseline and a separate negative-control comparison;
+- other Slim 4 minors and other PSR-7 implementations;
+- `pm.max_children > 1` and `fiber.revalidate_freq`;
+- longer-duration stability, production-style configuration, and Slim features
+  outside this probe.
+
+The empty/default `fiber.isolate_statics` configuration is the measured Slim
+configuration. No separate non-empty static-isolation comparison was run because
+this probe has no request-scoped Slim static candidate to configure; that is not
+evidence for PHP-DI or other integrations.

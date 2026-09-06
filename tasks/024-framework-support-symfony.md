@@ -94,6 +94,51 @@ The measured report was `PASS=6 ERROR=0 NOT MEASURED=4`:
 The task remains open: this first automated probe does not yet cover every
 matrix item or provide the user-facing support statement requested above.
 
+## UPDATE 2026-09-06 (second session): matrix items measured
+
+The probe now covers the remaining matrix items. Measured on 2026-09-06
+against a locally built php-fpm-ng `PHP 8.6.0-dev (fpm-fcgi) (built:
+Sep  6 2026 15:00:30) (NTS)`, SHA-256
+`862c180037fee77b38c64ee50c359a8d257b336c4fbea13266a9c9a0d6e3a881`, all four
+feature markers verified via `strings`, source commit `65ec755` (worktree
+branch `task/024-symfony-tests`), Symfony 8.1.6 with predis.
+
+Full-run result: **PASS=19 ERROR=2 NOT MEASURED=0** over 21 scenarios.
+
+- `APP_ENV=prod` — the four core scenarios pass on a dedicated prod pool
+  (`APP_DEBUG=0`); each response reports `environment: prod`. **Measured.**
+- `pm.max_children = 2` — mix and object-identity pass; **session and
+  stateful-auth intermittently stall** in the cookie-replay round (some
+  requests never reach the scenario gate, completing exactly at the 90 s
+  BLPOP timeout; `llen` observed 2-7 of 8). The failure reproduces in every
+  full run in at least one pm2 scenario, across several runs, including after
+  isolating each scenario on a fresh pool. **Retained as ERROR.**
+- `pm-max-children` (derived scenario) is therefore recorded ERROR and the
+  support claim for `pm.max_children > 1` with stateful Symfony traffic is
+  **not supported** on this build.
+- `fiber.revalidate_freq` — controlled deploy: the pool starts with
+  `fiber.revalidate_freq = 1`, the probe changes `DeployMarker::VALUE` on
+  disk, and subsequent requests serve the updated code without a manual
+  restart. **PASS.**
+- Longer run watching RSS — 200 sequential requests in one worker; RSS from
+  `getrusage()` (portable: `/proc/self/status` on Linux), growth ≤ 6144 KiB
+  (measured 1.6-1.7 MB). **PASS.**
+- Framework surface — Twig `renderView` with a custom extension doing real
+  blocking Redis I/O inside the template (`app.user` and request data
+  asserted in the rendered HTML), form submit with a `NotBlank` constraint
+  (valid/invalid split asserted on validator errors), and synchronous
+  Messenger dispatch with the handler result asserted through `HandledStamp`.
+  **All PASS** under 4-5 concurrent gated requests.
+- Fixes made to the probe along the way: per-scenario fresh pools, per-suite
+  unique Redis gate names, warm-up request before each gated window, portable
+  RSS reporting (a failed `fopen('/proc/self/status')` inside the pool is
+  fatal for the whole response on this build — suppressed or not), 90 s gate
+  windows, per-pool logs (each pool start truncated the previous pool's log).
+
+The task remains open for: root-causing the `pm.max_children = 2` stall, the
+user-facing support statement in `README.md` (item 3), and the version-scope
+decision (item 4).
+
 ## Detailed test matrix
 
 Everything below is **unmeasured** unless this document says otherwise. The

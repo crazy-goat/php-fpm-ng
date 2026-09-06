@@ -16,7 +16,7 @@ mkdir -p "$APP_DIR" "$RESULT_ROOT"
 FPMNG_BIN=${FPMNG_BIN:-}
 SERVICE_MODE=${SERVICE_MODE:-docker}
 COUNT=${FPMNG_SCENARIO_COUNT:-8}
-HTTP_TIMEOUT=${FPMNG_HTTP_TIMEOUT:-45}
+HTTP_TIMEOUT=${FPMNG_HTTP_TIMEOUT:-120}
 MYSQL_PORT=${MYSQL_PORT:-13306}
 REDIS_PORT=${REDIS_PORT:-16379}
 REDIS_DB=${REDIS_DB:-15}
@@ -34,21 +34,40 @@ BINARY_VERSION=unknown
 BINARY_MARKERS=FPMNG_SHARED_INCLUDES,http.front_controller,fiber.revalidate_freq,fiber.isolate_statics
 REDIS_CLIENT=predis
 BASE_URL=
+ACTIVE_PREFIX=
+ACTIVE_RESULT_ROOT=$RESULT_ROOT
+CURRENT_ENV=dev
+START_POOL_SEQ=0
 
 SCENARIO_NAMES=(
     mix
     session
     stateful-auth
     object-identity
+    prod-mix
+    prod-session
+    prod-stateful-auth
+    prod-object-identity
     negative-shared-includes
     unsupported-configuration
-    app-env-prod
-    pm-max-children
+    pm2-mix
+    pm2-session
+    pm2-stateful-auth
+    pm2-object-identity
+    framework-twig
+    framework-form-validation
+    framework-messenger
+    rss-stability
     fiber-revalidate
-    framework-surface
+    app-env-comparison
+    pm-max-children
 )
 SCENARIO_STATUS=()
 SCENARIO_DETAIL=()
+
+result_name() {
+    printf '%s%s' "$ACTIVE_PREFIX" "$1"
+}
 
 record() {
     local name=$1
@@ -190,6 +209,8 @@ write_pool_config() {
     local shared=$4
     local executor=${5:-fiber}
     local error_log=${6:-$RUN_ROOT/fpm.log}
+    local children=${7:-1}
+    local revalidate_freq=${8:-0}
 
     cat > "$path" <<EOF
 [global]
@@ -204,7 +225,7 @@ group = $(id -gn)
 chdir = $APP_DIR/public
 listen = 127.0.0.1:$fcgi_port
 pm = static
-pm.max_children = 1
+pm.max_children = $children
 catch_workers_output = yes
 clear_env = no
 pool.type = http
@@ -214,6 +235,9 @@ http.front_controller = /index.php
 php_admin_value[max_execution_time] = 0
 php_admin_value[opcache.enable] = 0
 EOF
+    if (( revalidate_freq > 0 )); then
+        printf 'fiber.revalidate_freq = %s\n' "$revalidate_freq" >> "$path"
+    fi
     if [[ $shared -eq 1 ]]; then
         printf '%s\n' 'env[FPMNG_SHARED_INCLUDES] = 1' >> "$path"
     fi
@@ -344,11 +368,15 @@ wait_for_gate_ready() {
     local expected=$1
     local length
     local attempt
-    for attempt in {1..300}; do
+    GATE_LAST_STATE="unknown"
+    for attempt in {1..900}; do
         if length=$(redis_cli llen "$GATE_READY_KEY" 2>/dev/null); then
+            GATE_LAST_STATE="llen=$length"
             if [[ $length =~ ^[0-9]+$ ]] && (( length >= expected )); then
                 return 0
             fi
+        else
+            GATE_LAST_STATE="redis-error"
         fi
         sleep 0.1
     done
@@ -364,7 +392,7 @@ release_gate() {
 }
 
 run_mix() {
-    local directory=$RESULT_ROOT/mix
+    local directory=$ACTIVE_RESULT_ROOT/mix
     local index
     local detail
     mkdir -p "$directory"
@@ -373,22 +401,27 @@ run_mix() {
         start_request "$directory" "$index" "$BASE_URL/mix?id=$index&sleep=0.3"
     done
     wait_requests || true
-    if detail=$(python3 "$SUITE_DIR/assert.py" mix "$directory" "$COUNT" 2>&1); then
-        record mix PASS "8 concurrent requests: $detail"
+    if detail=$(python3 "$SUITE_DIR/assert.py" mix "$directory" "$COUNT" "$CURRENT_ENV" 2>&1); then
+        record "$(result_name mix)" PASS "APP_ENV=$CURRENT_ENV; 8 concurrent requests: $detail"
     else
-        record mix ERROR "$detail"
+        record "$(result_name mix)" ERROR "$detail"
     fi
 }
 
 run_session() {
-    local round_one=$RESULT_ROOT/session-round1
-    local round_two=$RESULT_ROOT/session-round2
-    local gate_one=${RUN_ID}_session_one
-    local gate_two=${RUN_ID}_session_two
+    local round_one=$ACTIVE_RESULT_ROOT/session-round1
+    local round_two=$ACTIVE_RESULT_ROOT/session-round2
+    local gate_one=${RUN_ID}_${ACTIVE_PREFIX}session_one
+    local gate_two=${RUN_ID}_${ACTIVE_PREFIX}session_two
     local index
     local jar
     local detail
     mkdir -p "$round_one" "$round_two"
+
+    # Warm session/bootstrapping before the gated round so the gate measures
+    # concurrency, not first-hit compilation.
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/session?user=warmup" -o "$RESULT_ROOT/session-warmup.body" || true
 
     prepare_gate "$gate_one"
     REQUEST_PIDS=()
@@ -400,7 +433,7 @@ run_session() {
     done
     if ! wait_for_gate_ready "$COUNT"; then
         stop_requests
-        record session ERROR "round 1 did not reach its Redis gate"
+        record "$(result_name session)" ERROR "APP_ENV=$CURRENT_ENV; round 1 did not reach its Redis gate (${GATE_LAST_STATE})"
         return
     fi
     release_gate "$COUNT"
@@ -415,24 +448,24 @@ run_session() {
     done
     if ! wait_for_gate_ready "$COUNT"; then
         stop_requests
-        record session ERROR "round 2 did not reach its Redis gate"
+        record "$(result_name session)" ERROR "APP_ENV=$CURRENT_ENV; round 2 did not reach its Redis gate (${GATE_LAST_STATE})"
         return
     fi
     release_gate "$COUNT"
     wait_requests || true
 
-    if detail=$(python3 "$SUITE_DIR/assert.py" session "$round_one" "$round_two" "$COUNT" 2>&1); then
-        record session PASS "8/8 own session IDs and data; second cookie round count=2: $detail"
+    if detail=$(python3 "$SUITE_DIR/assert.py" session "$round_one" "$round_two" "$COUNT" "$CURRENT_ENV" 2>&1); then
+        record "$(result_name session)" PASS "APP_ENV=$CURRENT_ENV; 8/8 own session IDs and data; second cookie round count=2: $detail"
     else
-        record session ERROR "$detail"
+        record "$(result_name session)" ERROR "$detail"
     fi
 }
 
 run_auth() {
-    local round_one=$RESULT_ROOT/auth-round1
-    local round_two=$RESULT_ROOT/auth-round2
-    local gate_one=${RUN_ID}_auth_one
-    local gate_two=${RUN_ID}_auth_two
+    local round_one=$ACTIVE_RESULT_ROOT/auth-round1
+    local round_two=$ACTIVE_RESULT_ROOT/auth-round2
+    local gate_one=${RUN_ID}_${ACTIVE_PREFIX}auth_one
+    local gate_two=${RUN_ID}_${ACTIVE_PREFIX}auth_two
     local users=(alice alice alice alice bob bob bob bob)
     local index
     local user
@@ -451,7 +484,7 @@ run_auth() {
     done
     if ! wait_for_gate_ready "${#users[@]}"; then
         stop_requests
-        record stateful-auth ERROR "authenticated round 1 did not reach its Redis gate"
+        record "$(result_name stateful-auth)" ERROR "APP_ENV=$CURRENT_ENV; authenticated round 1 did not reach its Redis gate (${GATE_LAST_STATE})"
         return
     fi
     release_gate "${#users[@]}"
@@ -466,22 +499,22 @@ run_auth() {
     done
     if ! wait_for_gate_ready "${#users[@]}"; then
         stop_requests
-        record stateful-auth ERROR "authenticated round 2 did not reach its Redis gate"
+        record "$(result_name stateful-auth)" ERROR "APP_ENV=$CURRENT_ENV; authenticated round 2 did not reach its Redis gate (${GATE_LAST_STATE})"
         return
     fi
     release_gate "${#users[@]}"
     wait_requests || true
 
-    if detail=$(python3 "$SUITE_DIR/assert.py" auth "$round_one" "$round_two" "${users[@]}" 2>&1); then
-        record stateful-auth PASS "4 alice + 4 bob; round 2 had no Authorization header: $detail"
+    if detail=$(python3 "$SUITE_DIR/assert.py" auth "$round_one" "$round_two" "$CURRENT_ENV" "${users[@]}" 2>&1); then
+        record "$(result_name stateful-auth)" PASS "APP_ENV=$CURRENT_ENV; 4 alice + 4 bob; round 2 had no Authorization header: $detail"
     else
-        record stateful-auth ERROR "$detail"
+        record "$(result_name stateful-auth)" ERROR "$detail"
     fi
 }
 
 run_identity() {
-    local directory=$RESULT_ROOT/identity
-    local gate=${RUN_ID}_identity
+    local directory=$ACTIVE_RESULT_ROOT/identity
+    local gate=${RUN_ID}_${ACTIVE_PREFIX}identity
     local index
     local detail
     mkdir -p "$directory"
@@ -492,15 +525,15 @@ run_identity() {
     done
     if ! wait_for_gate_ready "$COUNT"; then
         stop_requests
-        record object-identity ERROR "identity requests did not reach their Redis gate"
+        record "$(result_name object-identity)" ERROR "APP_ENV=$CURRENT_ENV; identity requests did not reach their Redis gate"
         return
     fi
     release_gate "$COUNT"
     wait_requests || true
-    if detail=$(python3 "$SUITE_DIR/assert.py" identity "$directory" "$COUNT" 2>&1); then
-        record object-identity PASS "kernel, container, request, EntityManager and DBAL objects are distinct: $detail"
+    if detail=$(python3 "$SUITE_DIR/assert.py" identity "$directory" "$COUNT" "$CURRENT_ENV" 2>&1); then
+        record "$(result_name object-identity)" PASS "APP_ENV=$CURRENT_ENV; kernel, container, request, EntityManager and DBAL objects are distinct: $detail"
     else
-        record object-identity ERROR "$detail"
+        record "$(result_name object-identity)" ERROR "$detail"
     fi
 }
 
@@ -685,7 +718,7 @@ setup_services() {
         MYSQL_PORT=$(choose_free_port "$MYSQL_PORT")
         REDIS_PORT=$(choose_free_port "$REDIS_PORT")
         export MYSQL_PORT REDIS_PORT MYSQL_ROOT_PASSWORD
-        COMPOSE_PROJECT="fpmng-symfony-$RUN_ID"
+        COMPOSE_PROJECT="fpmng-symfony-$(printf '%s' "$RUN_ID" | tr 'A-Z:' 'a-z--')"
         COMPOSE=(docker compose -f "$SUITE_DIR/compose.yaml" -p "$COMPOSE_PROJECT")
         if ! "${COMPOSE[@]}" up -d >"$RUN_ROOT/compose.log" 2>&1; then
             mark_not_measured "Docker Compose could not start MySQL and Redis; see $RUN_ROOT/compose.log"
@@ -773,29 +806,279 @@ write_runtime_environment() {
     export FPMNG_SHARED_INCLUDES=1
 }
 
-run_main_suite() {
-    local config=$RUN_ROOT/fpm.conf
+start_pool() {
+    # start_pool CHILDREN REVALIDATE_FREQ -> starts the verified binary with a
+    # fresh pool config for the currently exported runtime environment.
+    local children=$1
+    local revalidate_freq=${2:-0}
+    START_POOL_SEQ=$((START_POOL_SEQ + 1))
+    local tag="${CURRENT_ENV}-${children}-${revalidate_freq}-${START_POOL_SEQ}"
+    local config=$RUN_ROOT/fpm-pool-$tag.conf
     FPM_HTTP_PORT=$(choose_free_port "$FPM_HTTP_PORT")
     FPM_FCGI_PORT=$(choose_free_port "$FPM_FCGI_PORT")
     BASE_URL="http://127.0.0.1:$FPM_HTTP_PORT"
-    write_pool_config "$config" "$FPM_HTTP_PORT" "$FPM_FCGI_PORT" 1 fiber
-    start_fpm "$config" 1 "$RUN_ROOT/fpm.log"
+    write_pool_config "$config" "$FPM_HTTP_PORT" "$FPM_FCGI_PORT" 1 fiber \
+        "$RUN_ROOT/fpm-pool-$tag.log" "$children" "$revalidate_freq"
+    start_fpm "$config" 1 "$RUN_ROOT/fpm-pool-$tag.log"
     if ! wait_for_port "$FPM_HTTP_PORT" || ! wait_for_health; then
         local log
         log=$(tail -40 "$RUN_ROOT/fpm.log" 2>/dev/null || true)
-        record mix "NOT MEASURED" "the verified FPM binary did not start the Symfony pool: $log"
-        record session "NOT MEASURED" "the verified FPM binary did not start the Symfony pool"
-        record stateful-auth "NOT MEASURED" "the verified FPM binary did not start the Symfony pool"
-        record object-identity "NOT MEASURED" "the verified FPM binary did not start the Symfony pool"
         stop_pid "$FPM_PID"
         FPM_PID=
+        echo "POOL_START_FAILED: $log" >&2
         return 1
     fi
+    return 0
+}
 
+run_core_scenarios() {
     run_mix
     run_session
     run_auth
     run_identity
+}
+
+run_suite() {
+    # run_suite PREFIX ENV CHILDREN -> run the four core scenarios under one
+    # dedicated pool so APP_ENV and pm.max_children are isolated per suite.
+    local prefix=$1
+    local environment=$2
+    local children=$3
+    ACTIVE_PREFIX=$prefix
+    ACTIVE_RESULT_ROOT=$RESULT_ROOT/${prefix:-dev}
+    CURRENT_ENV=$environment
+    mkdir -p "$ACTIVE_RESULT_ROOT"
+    export APP_ENV=$environment
+    export APP_DEBUG=$([ "$environment" = prod ] && echo 0 || echo 1)
+    if ! start_pool "$children"; then
+        local name
+        for name in mix session stateful-auth object-identity; do
+            record "${prefix}${name}" "NOT MEASURED" "APP_ENV=$environment; the verified FPM binary did not start the Symfony pool (children=$children)"
+        done
+        return 1
+    fi
+    # Each scenario gets a fresh pool: a request that stalls inside one
+    # scenario (e.g. a fiber blocked in a gate BLPOP) must not poison the
+    # measurements of the scenarios that follow it.
+    run_mix
+    stop_pid "$FPM_PID"; FPM_PID=
+    start_pool "$children" || return 1
+    run_session
+    stop_pid "$FPM_PID"; FPM_PID=
+    start_pool "$children" || return 1
+    run_auth
+    stop_pid "$FPM_PID"; FPM_PID=
+    start_pool "$children" || return 1
+    run_identity
+    stop_pid "$FPM_PID"; FPM_PID=
+}
+
+run_framework_twig() {
+    local directory=$RESULT_ROOT/framework-twig
+    local users=(alice bob alice bob)
+    local index
+    local user
+    local detail
+    mkdir -p "$directory"
+    # Warm the endpoint (compile Twig, form, validator classes) before the
+    # gated window so the gate measures concurrency, not cold compilation.
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/twig?marker=warmup&value=warmup" -u 'alice:alice' \
+        -o "$directory/warmup.body" -w '%{http_code}' >"$directory/warmup.code" || true
+    prepare_gate "${RUN_ID}_twig"
+    REQUEST_PIDS=()
+    for index in $(seq 1 "${#users[@]}"); do
+        user=${users[$((index - 1))]}
+        start_request "$directory" "$index" \
+            "$BASE_URL/twig?marker=marker-$index&value=value-$index&gate=${RUN_ID}_twig" \
+            -u "$user:$user"
+    done
+    if wait_for_gate_ready "${#users[@]}"; then
+        release_gate "${#users[@]}"
+        GATE_RELEASE_CHECK="release=$(redis_cli llen "$GATE_RELEASE_KEY" 2>/dev/null) ready=$(redis_cli llen "$GATE_READY_KEY" 2>/dev/null)"
+    else
+        record framework-twig ERROR "twig gate: only ${GATE_LAST_STATE} of ${#users[@]} ready after the wait window"
+        wait_requests || true
+        return
+    fi
+    wait_requests || true
+    if detail=$(python3 "$SUITE_DIR/assert.py" twig "$directory" "$CURRENT_ENV" "${users[@]}" 2>&1); then
+        record framework-twig PASS "Twig renderView + custom extension gate; app.user and request data rendered per user: $detail"
+    else
+        record framework-twig ERROR "$GATE_RELEASE_CHECK; $detail"
+    fi
+}
+
+run_framework_form_validation() {
+    local directory=$RESULT_ROOT/framework-form-validation
+    local names=(alpha '' beta '' gamma)
+    local index
+    local name
+    local encoded
+    local detail
+    mkdir -p "$directory"
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/form?name=warmup" -o "$directory/warmup.body" -w '%{http_code}' \
+        >"$directory/warmup.code" || true
+    prepare_gate "${RUN_ID}_form"
+    for index in $(seq 1 "${#names[@]}"); do
+        name=${names[$((index - 1))]}
+        encoded=$(url_encode "$name")
+        start_request "$directory" "$index" "$BASE_URL/form?name=$encoded&gate=${RUN_ID}_form"
+    done
+    if wait_for_gate_ready "${#names[@]}"; then
+        release_gate "${#names[@]}"
+    else
+        record framework-form-validation ERROR "form gate: only ${GATE_LAST_STATE} of ${#names[@]} ready after the wait window"
+        wait_requests || true
+        return
+    fi
+    wait_requests || true
+    if detail=$(python3 "$SUITE_DIR/assert.py" form "$directory" "$CURRENT_ENV" "${names[@]}" 2>&1); then
+        record framework-form-validation PASS "form submit + NotBlank validator; valid/invalid split asserted on response data: $detail"
+    else
+        record framework-form-validation ERROR "$detail"
+    fi
+}
+
+run_framework_messenger() {
+    local directory=$RESULT_ROOT/framework-messenger
+    local values=(msg-one msg-two msg-three msg-four)
+    local index
+    local value
+    local detail
+    mkdir -p "$directory"
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/messenger?value=warmup" -u 'alice:alice' -o "$directory/warmup.body" \
+        -w '%{http_code}' >"$directory/warmup.code" || true
+    prepare_gate "${RUN_ID}_messenger"
+    for index in $(seq 1 "${#values[@]}"); do
+        value=${values[$((index - 1))]}
+        start_request "$directory" "$index" "$BASE_URL/messenger?value=$value&gate=${RUN_ID}_messenger" \
+            -u "alice:alice"
+    done
+    if wait_for_gate_ready "${#values[@]}"; then
+        release_gate "${#values[@]}"
+    else
+        record framework-messenger ERROR "messenger gate: only ${GATE_LAST_STATE} of ${#values[@]} ready after the wait window"
+        wait_requests || true
+        return
+    fi
+    wait_requests || true
+    if detail=$(python3 "$SUITE_DIR/assert.py" messenger "$directory" "$CURRENT_ENV" "${values[@]}" 2>&1); then
+        record framework-messenger PASS "sync Messenger bus dispatch + handler result asserted on HandledStamp data: $detail"
+    else
+        record framework-messenger ERROR "$detail"
+    fi
+}
+
+run_rss_stability() {
+    local directory=$RESULT_ROOT/rss-stability
+    local rounds=200
+    local max_growth_kb=6144
+    local index
+    local detail
+    mkdir -p "$directory"
+    for index in $(seq 1 "$rounds"); do
+        start_request "$directory" "$index" "$BASE_URL/identity?id=$index"
+        wait_requests || true
+    done
+    if detail=$(python3 "$SUITE_DIR/assert.py" rss "$directory" "$rounds" "$CURRENT_ENV" "$max_growth_kb" 2>&1); then
+        record rss-stability PASS "$rounds sequential requests in one worker, RSS growth limit ${max_growth_kb} KiB: $detail"
+    else
+        record rss-stability ERROR "$detail"
+    fi
+}
+
+run_fiber_revalidate() {
+    local directory=$RESULT_ROOT/fiber-revalidate
+    local marker_file=$APP_DIR/src/Probe/DeployMarker.php
+    mkdir -p "$directory"
+    CURRENT_ENV=dev
+    ACTIVE_PREFIX=
+    ACTIVE_RESULT_ROOT=$RESULT_ROOT
+    export APP_ENV=dev
+    export APP_DEBUG=1
+    if ! start_pool 1 1; then
+        record fiber-revalidate "NOT MEASURED" "the verified FPM binary did not start the revalidation pool"
+        return 1
+    fi
+
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/deploy" -o "$directory/first.body" -w '%{http_code}' >"$directory/first.code" || true
+    sed -i '' 's/release-1/release-2/' "$marker_file" 2>/dev/null \
+        || sed -i 's/release-1/release-2/' "$marker_file"
+    sleep 2
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/deploy" -o "$directory/immediate.body" -w '%{http_code}' >"$directory/immediate.code" || true
+    sleep 2
+    curl --silent --show-error --http1.1 --connect-timeout 5 --max-time "$HTTP_TIMEOUT" \
+        "$BASE_URL/deploy" -o "$directory/eventual.body" -w '%{http_code}' >"$directory/eventual.code" || true
+    stop_pid "$FPM_PID"
+    FPM_PID=
+
+    if detail=$(python3 "$SUITE_DIR/assert.py" deploy "$directory" dev 2>&1); then
+        record fiber-revalidate PASS "deploy marker changed on disk with fiber.revalidate_freq=1; updated code served: $detail"
+    else
+        record fiber-revalidate ERROR "$detail"
+    fi
+}
+
+run_framework_surface() {
+    if ! start_pool 1; then
+        record framework-twig "NOT MEASURED" "the verified FPM binary did not start the framework-surface pool"
+        record framework-form-validation "NOT MEASURED" "the verified FPM binary did not start the framework-surface pool"
+        record framework-messenger "NOT MEASURED" "the verified FPM binary did not start the framework-surface pool"
+        record rss-stability "NOT MEASURED" "the verified FPM binary did not start the framework-surface pool"
+        return 1
+    fi
+    run_framework_twig
+    run_framework_form_validation
+    run_framework_messenger
+    run_rss_stability
+    stop_pid "$FPM_PID"
+    FPM_PID=
+}
+
+run_app_env_comparison() {
+    local dev_status=${SCENARIO_STATUS[$(scenario_index mix)]:-}
+    local prod_status=${SCENARIO_STATUS[$(scenario_index prod-mix)]:-}
+    if [[ $dev_status == PASS && $prod_status == PASS ]]; then
+        record app-env-comparison PASS "APP_ENV=dev and APP_ENV=prod pools both served the concurrent mix with the correct kernel environment reported in each response"
+    else
+        record app-env-comparison ERROR "dev mix=$dev_status, prod mix=$prod_status; both environments must pass mix to claim the comparison"
+    fi
+}
+
+run_pm_max_children() {
+    local statuses=()
+    local name
+    local status
+    for name in pm2-mix pm2-session pm2-stateful-auth pm2-object-identity; do
+        statuses+=("${SCENARIO_STATUS[$(scenario_index "$name")]:-}")
+    done
+    local failed=0
+    for status in "${statuses[@]}"; do
+        [[ $status == PASS ]] || failed=1
+    done
+    if (( failed == 0 )); then
+        record pm-max-children PASS "pm.max_children=2 pool served all concurrent scenarios (mix/session/auth/identity): ${statuses[*]}"
+    else
+        record pm-max-children ERROR "pm.max_children=2 pool did not serve all concurrent scenarios: ${statuses[*]}"
+    fi
+}
+
+run_main_suite() {
+    run_suite "" dev 1
+    run_suite prod- prod 1
+    run_suite pm2- dev 2
+    CURRENT_ENV=dev
+    ACTIVE_PREFIX=
+    ACTIVE_RESULT_ROOT=$RESULT_ROOT
+    run_framework_surface
+    run_fiber_revalidate
+    run_app_env_comparison
+    run_pm_max_children
 }
 
 write_report() {
@@ -875,11 +1158,6 @@ main() {
     run_main_suite || true
     run_negative_shared_includes || true
     run_unsupported_configuration || true
-
-    record app-env-prod "NOT MEASURED" 'APP_ENV=prod is in the task matrix but this runner currently measures dev only'
-    record pm-max-children "NOT MEASURED" 'pm.max_children > 1 is intentionally not measured; the concurrency claim requires one worker'
-    record fiber-revalidate "NOT MEASURED" 'fiber.revalidate_freq and deploy/reload behavior are not implemented in this probe'
-    record framework-surface "NOT MEASURED" 'Twig, forms, validation, messenger and the longer RSS run remain outside this first probe'
 
     write_report
 }

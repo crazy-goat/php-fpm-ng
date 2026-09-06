@@ -541,9 +541,41 @@ if test "$PHP_FPMNG" != "no"; then
   dnl gdy upstream doda albo usunie plik (np. events/devpoll.c).
   PHP_FPMNG_FILES="@FPMNG_SOURCES@"
 
+  dnl Multi-request executors (pool.executor = fiber / async) are opt-in and
+  dnl OFF by default, so a default build carries none of their code. Each
+  dnl flag pulls in its own source list, substituted by build/prepare.sh from
+  dnl the same file the base list comes from (see NOTES: podzial zrodel).
+  PHP_ARG_ENABLE([fpmng-fiber],
+    [whether to build the fiber-based multi-request executor in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-fiber],
+      [Build fpm-ng with pool.executor = fiber support])],
+    [no],
+    [no])
+
+  PHP_ARG_ENABLE([fpmng-async],
+    [whether to build the async multi-request executor in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-async],
+      [Build fpm-ng with pool.executor = async support])],
+    [no],
+    [no])
+
+  PHP_FPMNG_FIBER_FILES=""
+  AS_VAR_IF([PHP_FPMNG_FIBER], [no],, [
+    AC_DEFINE([HAVE_FPMNG_FIBER], [1],
+      [Define to 1 if fpm-ng has the fiber-based multi-request executor.])
+    PHP_FPMNG_FIBER_FILES="@FPMNG_FIBER_SOURCES@"
+  ])
+
+  PHP_FPMNG_ASYNC_FILES=""
+  AS_VAR_IF([PHP_FPMNG_ASYNC], [no],, [
+    AC_DEFINE([HAVE_FPMNG_ASYNC], [1],
+      [Define to 1 if fpm-ng has the async multi-request executor.])
+    PHP_FPMNG_ASYNC_FILES="@FPMNG_ASYNC_SOURCES@"
+  ])
+
   PHP_SELECT_SAPI([fpmng],
     [program],
-    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES],
+    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES],
     [-I$abs_srcdir/sapi/fpm -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
   AS_CASE([$host_alias],

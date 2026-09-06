@@ -67,3 +67,65 @@ accident.
   (`/mix`, `/sleep`, `/session`, `/me`, `/who`, `/leak`). It is worth turning
   into something the repository owns rather than something that exists only on
   one machine.
+
+## Detailed test matrix
+
+Everything below is **unmeasured** unless this document says otherwise. The
+"risk" column says why the item is on the list at all — an item with no
+mechanism behind it does not belong here.
+
+### Already measured (turn these into tests first)
+
+| Scenario | Assertion | Status |
+|---|---|---|
+| `/session`, N=8 | own sid, own `sess_user`, `count` increments on round 2 | 8/8 |
+| `http_basic` + session, N=8 | own identity with, and **without**, the `Authorization` header | 8/8 both rounds |
+| `/mix`, N=8 | own MySQL row, own Redis value, own cache value | 8/8 |
+| 600 sequential | no errors, RSS stable (40.2 → 42.4 MB) | passed |
+
+### Session-backed state — same mechanism as the failures we already found
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| CSRF token in a form | tokens live in the session; a shared session mixes them | request A's form validates only with A's token, and rejects B's |
+| Flash messages | session-backed, read-once | a flash set by A is never visible to B |
+| `logout()` under concurrency | invalidates the session and migrates the id | logging A out leaves B authenticated |
+| remember-me cookie | separate token storage path from the session | A's cookie never authenticates B |
+| two firewalls, different contexts | token storage keyed per firewall | identities do not cross between firewalls |
+
+### Doctrine — per-request object graph on a shared connection
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| identity map | the EM is per request, the connection is intercepted | A and B fetching the same row get their own entity instances |
+| transaction across a suspension | one connection, two requests in flight | A's uncommitted write is invisible to B; interleaving does not commit A's work inside B's transaction |
+| lazy proxy resolved after suspension | the proxy loads mid-request, after a fiber switch | the loaded data belongs to the request that owns the proxy |
+| EM closed by an exception | `EntityManager::close()` — is it per request? | B's EM still works after A's is closed |
+
+### Output and the response lifecycle
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| `StreamedResponse` | output buffering is swapped per request (`OG`), but `flush()` writes to a real socket | A's chunks never appear inside B's response body |
+| file upload | `$_FILES` and rfc1867 temporary-file handling are process-level | each request sees only its own upload; temp files are cleaned up per request |
+| `RedirectResponse` and headers | `SG(sapi_headers)` is per request | headers do not leak between concurrent responses |
+| exception → error page | our error handlers are swapped per request | A's exception page does not appear in B's response |
+| `kernel.terminate` | runs after the response is sent, still inside the fiber | terminate work attributed to the right request |
+
+### Framework surface never touched
+
+| Scenario | Risk |
+|---|---|
+| Twig with `app.user` and globals | Twig caches the environment; globals resolved per request |
+| translator / `setLocale` | locale is per request, catalogues are cached per process |
+| Messenger `dispatch()` (sync transport) | handlers resolved from the container |
+| cache pool invalidation by tag | tag store is shared; invalidation is global by design — confirm it is not *accidentally* per request |
+| Serializer / normalizer with circular refs | keeps state during a single normalization |
+| `APP_ENV=prod` | the entire measured history is `dev`; prod is a different code path (compiled container, no profiler) |
+| `pm.max_children > 1` | never run; the interaction of several workers with shared includes is unverified |
+
+### Versions
+
+Only Symfony **8.1.6** has been tested. Record the version with every result.
+The `symfony/runtime` interaction that forces a hand-written `index.php`
+(task 007) is version-sensitive and must be re-checked per major version.

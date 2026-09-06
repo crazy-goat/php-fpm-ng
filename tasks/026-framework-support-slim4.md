@@ -63,3 +63,50 @@ asserting on **data**, not HTTP status.
   stream behaviour.
 - Worth checking whether the PSR-7 request body stream interacts with the
   transport interception in `fpm_pool_fiber_xport.c`.
+
+## Detailed test matrix
+
+Nothing here is measured. The point of the matrix is that Slim is the **control
+group**: if our diagnosis is right — that the trouble comes from process-wide
+state, and specifically from parking a container in a class static — then most
+of these should pass with no configuration beyond `FPMNG_SHARED_INCLUDES=1`.
+
+Record a result for every row even when it passes trivially. A row that passes
+here and fails in Laravel is evidence about *the framework*, which is exactly
+what makes this worth running.
+
+### Core, mirroring the other two frameworks
+
+| Scenario | Assertion |
+|---|---|
+| `/mix`, N=8 | own MySQL row, own Redis value per request |
+| `/session`, N=8 | own sid, own session data, `count` increments on round 2 |
+| authenticated route, N=8 | own identity per request |
+| object identity in every response | container and request instances distinct per request |
+
+### Slim-specific
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| PSR-7 request body stream | this project's entire concurrency story is about stream behaviour; a PSR-7 implementation may buffer, seek or lazily read the body | A's POST body is never visible to B; a large body is read completely |
+| PSR-7 response body stream | `StreamInterface` writes reach output buffering, which we swap per request | A's output never appears in B's response |
+| middleware stack | built per request or once? | middleware state does not carry between requests |
+| container: built-in vs PHP-DI | PHP-DI compiles and caches; the question is whether any instance is static | no cross-request instance sharing |
+| route cache enabled | cache file written once, shared per process | routing is correct; the cache is not rewritten per request |
+| error middleware | our error handlers are swapped per request | A's error response does not appear in B's |
+
+### The question this task exists to answer
+
+| Question | Why it matters |
+|---|---|
+| does it need `fiber.isolate_statics` at all? | a **no** confirms the diagnosis; a **yes** means the problem is broader than two frameworks and every task above needs revisiting |
+| does its stock `public/index.php` survive shared includes? | if yes, Slim is the first framework for which task 007 does not bite, and that is a documentable selling point |
+| does anything fail that passes in Symfony? | would mean our model of the failure is incomplete |
+
+### Versions
+
+Pin and record: the Slim 4 minor version, **and** the PSR-7 implementation
+(`slim/psr7`, `nyholm/psr7`, `laminas-diactoros`). They differ in stream
+handling, which is the part most likely to interact with
+`sapi/fpmng/fpm/fpm_pool_fiber_xport.c`. A result without both versions recorded
+is not reproducible.

@@ -108,6 +108,13 @@ int fpm_run(int *max_requests) /* {{{ */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
 
+		if (0 > fpm_pool_type_prepare_listening_socket(wp)) {
+			zlog(ZLOG_ERROR, "[pool %s] failed to prepare listening socket for pool type '%s'",
+				wp->config->name, type->name);
+			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+			fpm_event_loop(1);
+		}
+
 		if (type->init_main && 0 > type->init_main(wp)) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to initialize pool type '%s'",
 				wp->config->name, type->name);

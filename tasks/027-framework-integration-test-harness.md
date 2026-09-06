@@ -1,5 +1,12 @@
 # 027 — An automated harness for the framework tests
 
+**Track:** main line, but it needs re-scoping. This task was written to serve
+tasks 024, 025 and 026, which have since moved to `tasks/nice-to-have/`
+because they measure frameworks on `pool.executor = fiber`. The harness
+itself is not fiber-specific and stays here: running a real framework over
+the HTTP gateway on the default executor is worth at least as much. Whoever
+picks this up decides the executor matrix first and says so in the task.
+
 **Priority:** high. Without it, tasks 024, 025 and 026 have nowhere to put their
 tests, and every framework result stays a one-off hand measurement.
 **Status:** open.

@@ -1,5 +1,11 @@
 # 025 — Laravel on the fiber executor: the statics list is the open risk
 
+**Track:** nice-to-have. This task only applies to `pool.executor = fiber`,
+which is moving behind a build flag that is **off by default**, so a stock
+binary does not contain this code at all. The `Priority:` line below is the
+priority *within* the fiber track — it is not a claim against the HTTP,
+cron, scheduler or proxy work, which is where the project is focused.
+
 **Priority:** high. It works, and the way it works carries a specific danger
 that needs to be either bounded or documented very plainly.
 **Status:** open.

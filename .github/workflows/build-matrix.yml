@@ -1,0 +1,210 @@
+name: build matrix
+
+# Task 002: prove the tree still builds across the axes where breakage is
+# silent, and that our php-src patches still apply. See tasks/002-ci-build-matrix.md.
+#
+# Runs on pull_request only (not on every push): a full php-src build per
+# matrix cell is slow on GitHub-hosted runners, and only a PR is a candidate
+# for merging into main.
+on:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      php_src_ref:
+        description: "php-src commit/tag to build against (overrides the pinned default)"
+        required: false
+        default: ""
+
+env:
+  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinowany tagiem,
+  # nie galezia"). Bumping this is a deliberate version bump, not an automatic
+  # moving target — see docs/NOTES.md:2748-2755 on what a patch vs. minor bump
+  # requires.
+  PHP_SRC_REPO: https://github.com/php/php-src.git
+  PHP_SRC_REF: ${{ github.event.inputs.php_src_ref || 'php-8.5.9' }}
+
+jobs:
+  # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
+  # revision. build/prepare.sh already exits 1 and prints "BLAD: latka nie
+  # naklada sie..." on a genuine failure (build/prepare.sh:108-109) — this job
+  # just needs to run it and let that exit code fail the job.
+  patches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+      - name: apply patches (build/prepare.sh)
+        run: ./build/prepare.sh "$PWD/php-src"
+
+  build:
+    needs: patches
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        zts: ["no", "yes"]
+        session: ["static", "shared", "disabled"]
+        tls: ["with", "without"]
+    env:
+      # Known-broken cell, tracked here rather than silently excluded: under
+      # ZTS, sapi/fpmng/fpm/fpm_pool_coop.c uses bare sapi_globals/output_globals
+      # (8 places), which are only plain variables in a non-ZTS build — under
+      # ZTS they are macros. See docs/spike-tsrm-context.md Q5 and this task's
+      # context section. continue-on-error keeps this from blocking the rest of
+      # the matrix; when it starts passing, that's CI telling us it's fixed.
+      EXPECT_FAIL: ${{ matrix.zts == 'yes' && 'yes' || 'no' }}
+    continue-on-error: ${{ matrix.zts == 'yes' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: known-failure notice
+        if: env.EXPECT_FAIL == 'yes'
+        run: |
+          echo "::warning::ZTS is a known-failing cell (bare sapi_globals/output_globals under ZTS) — see docs/spike-tsrm-context.md Q5. Not skipped, so a pass here is CI telling us it got fixed."
+
+      - name: install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential autoconf automake libtool bison re2c pkg-config \
+            libevent-dev libssl-dev zlib1g-dev ccache
+
+      - name: remove libevent_openssl (tls=without cell)
+        if: matrix.tls == 'without'
+        run: |
+          sudo find /usr -name 'libevent_openssl*.pc' -delete
+          sudo find /usr -name 'libevent_openssl*' \( -name '*.so*' -o -name '*.a' \) -delete
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: build-${{ matrix.zts }}-${{ matrix.session }}-${{ matrix.tls }}
+
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+
+      - name: buildconf --force
+        working-directory: php-src
+        run: ./buildconf --force
+
+      - name: configure
+        working-directory: php-src
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          case "${{ matrix.session }}" in
+            static)   SESSION_FLAG="--enable-session" ;;
+            shared)   SESSION_FLAG="--enable-session=shared" ;;
+            disabled) SESSION_FLAG="--disable-session" ;;
+          esac
+          ZTS_FLAG=""
+          [ "${{ matrix.zts }}" = "yes" ] && ZTS_FLAG="--enable-zts"
+          # shellcheck disable=SC2086 # SESSION_FLAG/ZTS_FLAG are single flags or empty, meant to word-split
+          ./configure --disable-all --enable-fpmng $SESSION_FLAG $ZTS_FLAG \
+            2>&1 | tee ../configure.log
+
+      - name: build
+        working-directory: php-src
+        run: make -j"$(nproc)" fpmng cli 2>&1 | tee ../make.log
+
+      - name: verify the binary that got built
+        working-directory: php-src
+        run: |
+          test -x sapi/fpmng/php-fpm-ng
+          file sapi/fpmng/php-fpm-ng
+          strings sapi/fpmng/php-fpm-ng | grep -q 'X-Powered-By: PHP' || true
+          sapi/fpmng/php-fpm-ng -v
+
+      - name: upload canonical build (for the phpt job)
+        if: matrix.zts == 'no' && matrix.session == 'static' && matrix.tls == 'with'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpmng-canonical-build
+          path: |
+            php-src/sapi/fpmng/php-fpm-ng
+            php-src/sapi/cli/php
+            php-src/sapi/fpmng/tests
+          retention-days: 3
+
+  # Correct static musl build of sapi/fpmng (not sapi/fpm — see task 004,
+  # which owns fixing build/static-full.sh itself; this is a separate,
+  # deliberately-not-shared invocation so this task doesn't silently fix 004).
+  static-musl:
+    needs: patches
+    runs-on: ubuntu-latest
+    container: alpine:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: apk add
+        run: |
+          apk add --no-cache git patch file \
+            build-base autoconf bison re2c pkgconf linux-headers \
+            libevent-dev libevent-static openssl-dev openssl-libs-static \
+            zlib-dev zlib-static curl-dev curl-static libxml2-dev libxml2-static \
+            sqlite-dev sqlite-static xz-static brotli-static nghttp2-static nghttp3-static \
+            ngtcp2-static zstd-static libidn2-static libpsl-static libunistring-static
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+      - name: buildconf --force
+        working-directory: php-src
+        run: ./buildconf --force
+      - name: configure (static, musl, -static-pie)
+        working-directory: php-src
+        env:
+          PKG_CONFIG: pkg-config --static
+          LDFLAGS: -static-pie
+        run: |
+          ./configure --disable-all --enable-fpmng \
+            --enable-opcache --enable-mbstring --disable-mbregex \
+            --enable-sockets --enable-pcntl --enable-posix \
+            --with-curl --with-openssl --with-zlib --enable-pdo --with-pdo-mysql=mysqlnd \
+            --without-pear --disable-cgi --disable-phpdbg --disable-shared \
+            --prefix=/usr/local 2>&1 | tee ../configure-static.log
+      - name: build
+        working-directory: php-src
+        run: make -j"$(nproc)" fpmng 2>&1 | tee ../make-static.log
+      - name: verify statically linked, PIE (README warns plain -static silently yields a dynamic binary)
+        working-directory: php-src
+        run: |
+          file sapi/fpmng/php-fpm-ng | tee /tmp/file-output.txt
+          grep -q 'statically linked' /tmp/file-output.txt
+
+  # Task 001 landed the copied upstream FPM .phpt suite and its runner
+  # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
+  phpt:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: run the upstream FPM .phpt suite against php-fpm-ng
+        run: |
+          chmod +x build-out/php-src/sapi/fpmng/php-fpm-ng build-out/php-src/sapi/cli/php
+          mkdir -p build-out/php-src/sapi/fpmng
+          TEST_PHP_EXECUTABLE="$PWD/build-out/php-src/sapi/cli/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/php-src/sapi/fpmng/php-fpm-ng" \
+          ./build/run-fpm-phpt.sh "$PWD/build-out/php-src" "$PWD/phpt-results"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: phpt-results
+          path: phpt-results

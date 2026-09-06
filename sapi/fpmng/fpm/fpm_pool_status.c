@@ -74,6 +74,7 @@ const char *const fpm_pool_status_rejects[] = {
 	"supervisor.",
 	"cron.",
 	"http.",
+	"fiber.",
 	NULL
 };
 

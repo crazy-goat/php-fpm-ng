@@ -178,6 +178,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
+	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif

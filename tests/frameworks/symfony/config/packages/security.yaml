@@ -1,0 +1,19 @@
+security:
+    password_hashers:
+        Symfony\Component\Security\Core\User\InMemoryUser: plaintext
+    providers:
+        probe_users:
+            memory:
+                users:
+                    alice: { password: 'alice', roles: ['ROLE_USER'] }
+                    bob: { password: 'bob', roles: ['ROLE_USER'] }
+    firewalls:
+        dev:
+            pattern: ^/(_(profiler|wdt)|css|images|js)/
+            security: false
+        main:
+            lazy: true
+            provider: probe_users
+            http_basic: ~
+    access_control:
+        - { path: ^/me, roles: ROLE_USER }

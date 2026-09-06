@@ -1,0 +1,8 @@
+framework:
+    secret: '%env(APP_SECRET)%'
+    session:
+        handler_id: '%env(REDIS_DSN)%'
+        name: '%env(SESSION_COOKIE_NAME)%'
+        cookie_secure: false
+        cookie_samesite: lax
+        cookie_httponly: true

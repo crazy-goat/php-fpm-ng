@@ -73,3 +73,71 @@ user's data and log nothing.
 - The mechanism itself (`sapi/fpmng/fpm/fpm_pool_coop_statics.c`) knows nothing
   about Laravel and should stay that way. Everything in this task is about the
   configuration and its verification, not about the C code.
+
+## Detailed test matrix
+
+Everything below is **unmeasured** unless stated. Laravel's specific danger is
+that state lives in class statics, so the question for almost every item is the
+same: *does this subsystem park a resolved instance in a static, and is that
+static on the isolation list?*
+
+### Already measured (turn these into tests first)
+
+| Scenario | Assertion | Status |
+|---|---|---|
+| `/session`, N=8 | own sid, own `sess_user`, distinct `app_oid` / `container_request_oid` | 8/8 |
+| same run, `fiber.isolate_statics` empty | must reproduce the failure | 4-5/8 wrong — negative control holds |
+| `Auth::login` + N=8 `/me` | own identity per request | 8/8, and **fails without** `Facade::app` / `Facade::resolvedInstance` |
+
+### Facades — each one is a candidate for the isolation list
+
+The list currently has three entries. It was extended once already, when the
+auth flow was added. Every facade below resolves through the same cache and
+needs a concurrency test before we can claim the list is complete.
+
+| Facade | Assertion under N=8 concurrency |
+|---|---|
+| `DB::` | each request's query results are its own; no `Cannot execute queries while other unbuffered queries are active` |
+| `Cache::` | a value written by A is not read by B under a different key |
+| `Redis::` | replies match requests; no `unserialize` of another request's response |
+| `Session::` | covered by `/session`, but assert the facade path specifically |
+| `Log::` | Monolog handlers hold open file handles; lines are not interleaved mid-line or attributed to the wrong request |
+| `Config::` | config is boot-once and shared by design — confirm nothing writes to it per request |
+| `View::` / Blade | view composers and shared data resolved per request |
+| `Event::` | listeners registered during boot; a listener registered by A does not fire for B |
+| `Queue::` (sync driver) | the job runs in the dispatching request's context |
+| `Route::` | route model binding resolves the caller's model |
+| `Mail::` (array/log transport) | messages are attributed to the right request |
+
+### Eloquent
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| `Model::$resolver` | a static holding the connection resolver | A and B use their own connection |
+| model events / observers | registered statically during boot | an observer registered by A does not fire for B's model |
+| global scopes | stored statically on the model class | a scope applied by A does not leak into B's query |
+| `Model::$booted` | boot-once **per process** here, not per request as under classic FPM — a known side effect of the coop model, consequence unexplored | boot side effects are not request-dependent |
+
+### Request lifecycle
+
+| Scenario | Risk | Assertion |
+|---|---|---|
+| CSRF middleware | token in the session | A's token validates only A's request |
+| rate limiter | cache-backed, keyed by identity | limits are attributed to the right user |
+| validation with a redirect back | errors flashed into the session | A's errors never render in B's response |
+| middleware groups / `terminate()` | terminable middleware runs after the response | attributed to the right request |
+| `LARAVEL_START` | constants are process-wide and will stay that way | first request's value survives; nothing depends on it being per request |
+
+### Configuration completeness — the point of this task
+
+| Scenario | Assertion |
+|---|---|
+| every scenario above, with `fiber.isolate_statics` **empty** | the ones that need isolation must fail; this is what proves the list is doing the work |
+| a scenario that fails only with an incomplete list | document it — this is the evidence for how the failure presents |
+| the final list, with the Laravel version it was verified against | published in `docs/frameworks.md` as a versioned snippet |
+
+### Versions
+
+Only Laravel **13.30.1** has been tested. A framework upgrade may add or move a
+static; the list must be re-verified per minor version, and that requirement
+belongs in the user-facing documentation.

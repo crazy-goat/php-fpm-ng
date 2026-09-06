@@ -4,6 +4,21 @@ One file per unit of work. English only, even though most of the codebase and
 `docs/` are still Polish (see `011-code-comment-language-policy.md` and
 `012-translate-docs-to-english.md`).
 
+## Tracks
+
+- `tasks/` — the main line: the HTTP gateway, cron, the scheduler, proxying,
+  packaging, CI and the tests. This is where the project is focused.
+- `tasks/nice-to-have/` — work that only applies to `pool.executor = fiber`.
+  The fiber executor sits behind a build flag that is **off by default**, so a
+  stock binary does not contain that code. These tasks keep their own
+  `Priority:` line, which ranks them *against each other*, not against the main
+  line.
+- `tasks/done/` — finished, with an `Outcome` section (see the rules below).
+
+Moving a task between tracks is a normal edit, not a decision that needs
+ceremony: if fiber stops being optional, or a nice-to-have turns out to block
+the main line, move the file and say why in the commit message.
+
 ## Rules
 
 - A task describes **what** and **why**, never **how**. No code, no patches, no

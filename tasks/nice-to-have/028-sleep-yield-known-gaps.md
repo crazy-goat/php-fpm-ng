@@ -1,5 +1,11 @@
 # 028 — Two known gaps in the fiber sleep interception
 
+**Track:** nice-to-have. This task only applies to `pool.executor = fiber`,
+which is moving behind a build flag that is **off by default**, so a stock
+binary does not contain this code at all. The `Priority:` line below is the
+priority *within* the fiber track — it is not a claim against the HTTP,
+cron, scheduler or proxy work, which is where the project is focused.
+
 **Priority:** low. Neither gap makes anything worse than it was before the
 interception landed; both are places where we knowingly differ from upstream.
 **Status:** open.

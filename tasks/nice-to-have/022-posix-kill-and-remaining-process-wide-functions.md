@@ -1,5 +1,11 @@
 # 022 — Process-wide functions still reachable from a request on the fiber executor
 
+**Track:** nice-to-have. This task only applies to `pool.executor = fiber`,
+which is moving behind a build flag that is **off by default**, so a stock
+binary does not contain this code at all. The `Priority:` line below is the
+priority *within* the fiber track — it is not a claim against the HTTP,
+cron, scheduler or proxy work, which is where the project is focused.
+
 **Priority:** medium. One known hole, and no systematic check that there are not
 more.
 **Status:** open.

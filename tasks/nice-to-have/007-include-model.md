@@ -1,5 +1,11 @@
 # 007 — Decide and implement the include model for shared includes
 
+**Track:** nice-to-have. This task only applies to `pool.executor = fiber`,
+which is moving behind a build flag that is **off by default**, so a stock
+binary does not contain this code at all. The `Priority:` line below is the
+priority *within* the fiber track — it is not a claim against the HTTP,
+cron, scheduler or proxy work, which is where the project is focused.
+
 **Priority:** medium. Currently resolved by an undocumented default, which is
 the worst of the options.
 **Status:** open. This is item 4 of the fix list in `docs/frameworks.md`.

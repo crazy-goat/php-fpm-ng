@@ -126,6 +126,10 @@ struct fpm_worker_pool_config_s {
 	char *http_allowed_clients;		/* jak listen.allowed_clients, ale dla bramki HTTP; puste = brak ograniczenia */
 	char *http_trusted_proxies;		/* adresy, z ktorych ufamy naglowkom X-Forwarded-*; puste = nikomu (bezpieczny domyslny), patrz fpm_http_forwarded.c */
 	char *http_access_log;			/* sciezka do logu dostepu bramki HTTP; puste = wylaczony, patrz fpm_http_access_log.c */
+	char *http_front_controller;		/* try_files jak w nginx: gdy wyliczony SCRIPT_FILENAME nie istnieje, podstaw ten skrypt
+						 * i wloz oryginalna sciezke w PATH_INFO. Domyslnie "/index.php" — wbudowany serwer PHP
+						 * (php -S) daje ten sam efekt bez zadnej konfiguracji (patrz php_cli_server_request_translate_vpath()),
+						 * wiec bramka HTTP nie powinna byc mniej uprzejma. Puste = wylaczone, dzisiejsze zachowanie. */
 	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
 	struct key_value_s *env;

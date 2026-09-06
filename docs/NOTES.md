@@ -3233,3 +3233,87 @@ Końcowa regresja PHP 8.5 przeszła dla `fastcgi`, `fastcgi-ng` i `http`: mała 
 - Bufory wejściowe 8/16/32 KB dały odpowiednio 86,591 / 87,321 / 86,564 us na request. Różnice poniżej 1% nie uzasadniają zmiany; pozostaje 16 KB.
 - Batching małej odpowiedzi nie oszczędza zapisu FastCGI: odpowiedź już trafia do jednego `write()`, a drugi obserwowany zapis dotyczy innego deskryptora.
 - Cache dwóch `getpid()` na request odrzucono, ponieważ wywołania należą do timeoutów Zend i wykrywania `fork()`.
+
+## 3x. Executor `fiber`: asynchroniczny DNS przez evdns (2026-09-06)
+
+Dziura w 3u: `getaddrinfo()` siedzi w `php_network_connect_socket_to_host`,
+czyli WEWNATRZ delegowanego connectu, i blokowal caly proces z wszystkimi
+requestami w locie. Kazde swieze polaczenie do MySQL/Redis po nazwie hosta
+zatrzymywalo wspolbieznosc, ktora jest sensem tego executora.
+
+### Co zostalo zrobione
+
+- `fpm_fiber_xop_connect` (`fpm_pool_fiber_xport.c`) dla transportu `tcp`
+  najpierw rozwiazuje nazwe przez **evdns z libeventa** (`evdns_getaddrinfo` na
+  `event_base` schedulera; libevent i tak linkujemy), zawiesza fiber do
+  callbacku i podaje oryginalnemu connectowi literal IP. Baza evdns powstaje raz
+  na proces, leniwie przy pierwszym connect z nazwa, z `/etc/resolv.conf`
+  **i `/etc/hosts`** (`EVDNS_BASE_INITIALIZE_NAMESERVERS` = `DNS_OPTIONS_ALL`;
+  `evdns_getaddrinfo` sprawdza hosts przed siecia). Randomizacja 0x20 wylaczona,
+  jak w getaddrinfo.
+- Adresy A/AAAA sa probowane po kolei z resztka wspolnego timeoutu, jak
+  w upstreamie. To **przywrocilo fallback**, ktory asynchroniczny connect fibera
+  wczesniej gubil: `connect()` z EINPROGRESS jest dla petli upstreamu sukcesem,
+  wiec nigdy nie przechodzila do kolejnego adresu. Objaw przed zmiana:
+  `fsockopen('localhost', ...)` do serwera na 127.0.0.1 padal "Connection
+  refused" na `::1` (CLI PHP laczyl sie przez fallback).
+- Nowe prymitywy w `fpm_pool_fiber.{h,c}`: `fpm_pool_fiber_waiter()` /
+  `wait_wake()` / `wake()` (czekanie na callback zamiast na fd) oraz accessor
+  `fpm_pool_fiber_event_base()`. Zadnych nowych plikow, `config.m4` bez zmian.
+- Przy okazji naprawiony blad schedulera: `event_add` liczy deadline od czasu
+  cache'owanego na poczatku tury petli, wiec 60 ms blokujacej pracy w fiberze
+  (getaddrinfo, `usleep`) zjadalo 50-ms timeout connectu — "Operation timed
+  out" natychmiast. `event_base_update_cache_time()` przed uzbrojeniem timera.
+
+### Pomiary (macOS, jeden worker fiber, `pool.type = http` + `pool.executor = fiber`)
+
+Nazwy unikalne `*.localtest.me` (kazda wymaga prawdziwego zapytania sieciowego,
+~60-100 ms), dwie naprzemienne serie BEFORE/AFTER:
+
+| test | BEFORE | AFTER |
+| --- | --- | --- |
+| 4 x `fsockopen()` po nazwie, cel odpowiada od razu | 367 / 343 ms | **163 / 115 ms** |
+| 8 x j.w. | 540 / 534 ms | **166 / 148 ms** |
+| 4 x j.w., cel odpowiada po 500 ms | 874 / 843 ms | **661 / 669 ms** |
+| 4 x mysqli po nazwie, `SELECT SLEEP(0.5)` | 809 ms (connect 44/128/159/238 ms) | **628 ms** (connect 73/73/74/75 ms) |
+
+Na BEFORE `connect_ms` rosnie schodkowo — DNS ustawia requesty w kolejke. Przy
+przecizonym resolverze BEFORE dal 24 s dla 4 requestow (wszystkie staly za
+jednym blokujacym getaddrinfo).
+
+Regresje, wszystkie na AFTER z rzeczywistym outputem:
+
+- `localhost` (hosts: `::1` i `127.0.0.1`, serwer tylko na 127.0.0.1) i wpisy
+  z `/etc/hosts` (`api.subscription.local`, `sub-api.localhost`): lacza sie,
+  `connect_ms` 0; w logu debug baza evdns powstaje, ale brak "Resolve requested"
+  — hosts obsluzone lokalnie;
+- literal `127.0.0.1`, `127.1`, `[::1]`: zero linii evdns w logu (przy
+  `log_level = debug` evdns loguje kazde zapytanie przez `evdns_set_log_fn`);
+- nieistniejaca nazwa: `false`, `$errstr` = "php_network_getaddresses:
+  getaddrinfo for X failed: nodename nor servname provided, or not known",
+  to samo E_WARNING co upstream, 36 ms; NODATA daje "non-recoverable failure
+  in name resolution" (inne slowa niz getaddrinfo, ten sam prefiks);
+- timeout 10 ms z nazwa wymagajaca sieci: "getaddrinfo for X failed: timed out",
+  errno 60, po 11 ms — zadnego wiszenia;
+- zagniezdzony `Fiber` uzytkownika (`can_wait() == 0`): stara blokujaca
+  sciezka, dziala;
+- TLS: `tcp://` + `stream_socket_enable_crypto` do www.google.com — OK, cert CN
+  `www.google.com`; `wrong.host.badssl.com` — ODRZUCONE ("did not match
+  expected CN"); `expired.badssl.com` — ODRZUCONE ("certificate verify
+  failed"); `file_get_contents('https://...')` OK / odrzucone jak wyzej.
+  `peer_name`/SNI biora nazwe z resourcename w fabryce (`xp_ssl.c`
+  `php_openssl_get_url_name`), nie z nazwy podanej connectowi.
+
+### Ograniczenia
+
+- Transporty `ssl://`, `tls://` (a wiec `https://`) nie sa hookowane w ogole —
+  tam DNS i handshake blokuja jak dotad. Nie rozszerzano swiadomie: sam
+  handshake tez by blokowal (openssl polluje samo).
+- `STREAM_CLIENT_ASYNC_CONNECT` (op `CONNECT_ASYNC` od uzytkownika) idzie stara
+  sciezka z blokujacym getaddrinfo.
+- evdns nie zna macOS-owych `/etc/resolver/*`, mDNS (`.local`), split-DNS
+  z VPN ani `/etc/gai.conf`; `/etc/hosts` czyta raz przy starcie dziecka.
+  Kolejnosc adresow = kolejnosc z evdns, bez sortowania RFC 6724.
+- Bez `/etc/resolv.conf` (kontener scratch) `evdns_base_new` zwraca NULL —
+  jedno ostrzezenie w logu i powrot do blokujacej sciezki.
+- Redis po nazwie nie testowany (brak pod reka); mysqli tak.

@@ -273,3 +273,68 @@ nie jest wolany) — ta zmiana rozciaga ja na caly bootstrap.
 
 Zasada do dokumentacji uzytkownika: **deploy konczy sie `SIGUSR2`**, tak samo
 jak w Octane, Swoole i RoadRunnerze. Reload jest graceful i dziala (req4).
+Alternatywa dla dev: `fiber.revalidate_freq` ponizej.
+
+### `fiber.revalidate_freq` — worker wymienia sie sam po zmianie pliku
+
+Dyrektywa poola, sekundy, **domyslnie `0` = wylaczone**. Przy `N > 0` worker
+zapamietuje mtime/rozmiar/inode kazdego pliku w chwili, gdy silnik go
+kompiluje (hook `zend_compile_file` w `fpm_pool_coop_reval.c` — ten sam
+moment, w ktorym `opened_path` trafia do `EG(included_files)`; skrypt
+wejsciowy jest pomijany, bo i tak jest czytany z dysku per request), a co N
+sekund z petli zdarzen robi jeden przebieg `stat()` po tej tablicy. Zadnego
+`stat()` per request — koszt to (liczba plikow / N) na sekunde, niezaleznie
+od ruchu. Zmiana ktoregokolwiek pliku (mtime, rozmiar, inode po `rename`,
+albo `stat()` bledny — plik usuniety w trakcie deployu) daje NOTICE z nazwa
+pliku i **drain**: worker przestaje przyjmowac polaczenia, zamyka bezczynne
+keep-alive, konczy requesty w locie i wychodzi z kodem 0; master go wymienia
+ta sama sciezka, ktora recykluje klasyczny worker po `pm.max_requests`
+(`fpm_children_bury`, `restart_child = 1`). To NIE jest sciezka SIGQUIT
+(`fcgi_in_shutdown`), ktora porzuca requesty w locie.
+
+Zmierzone (2026-09-06, `pm.max_children = 1`, z `FPMNG_SHARED_INCLUDES=1`
+i bez):
+
+    freq = 1:  req1 lib=WERSJA-1 pid=2137 | podmiana | req2 (od razu) lib=WERSJA-1 pid=2137
+               req3 (po 1.5 s) lib=WERSJA-2 pid=2166 — NOTICE "lib.php changed on disk (mtime ...)"
+    w locie:   slow.php (3 s na gniezdzie) w trakcie podmiany: "worker will exit after
+               1 request(s) in flight finish", "draining, 1 request(s) still in flight",
+               request skonczyl sie po 3.09 s z poprawna odpowiedzia; "abandoned" w logu: 0
+    freq = 0:  podmiana -> lib=WERSJA-1 ten sam pid po 2.2 s (zachowanie jak dotad)
+    freq = 2:  sweepy co 2.000 s; podmiana tuz po sweepie: +0.3 s stare, +1.3 s stare, +2.5 s nowe;
+               200 requestow w oknie -> licznik stat() rosl o 1 na sweep, nie o 200
+    fastcgi / http classic: bez zmian; dyrektywa odrzucana:
+               ALERT: [pool fc] 'fiber.revalidate_freq' is not supported by pool.type = fastcgi
+    4 x fsockopen 500 ms rownolegle: 504 ms lacznie (klasyczny worker: 2017 ms)
+
+Dlaczego domyslnie `0`: (1) proces sam sie zabijajacy to nowe zachowanie i ma
+byc opt-in — istniejace configi dzialaja jak dotad; (2) w produkcji sa pliki
+wczytywane przez `require`, ktore aplikacja LEGALNIE nadpisuje w trakcie pracy
+(skompilowane szablony Twig/Blade, `bootstrap/cache/*.php`, kontener DI) —
+z automatem kazdy taki zapis wymienialby workera; (3) deploy przez `rsync`
+nie jest atomowy — worker moglby wystartowac na polowie skopiowanego drzewa
+i wymienic sie jeszcze raz w nastepnym oknie. W dev `fiber.revalidate_freq = 1`
+daje "skopiowales pliki, dziala nowy kod" bez pamietania o `SIGUSR2`.
+
+Ograniczenia:
+
+- **Symlink-deploy (`current -> release-N`) nie jest wykrywany.**
+  `EG(included_files)` trzyma realpathy, wiec pliki starego wydania sie nie
+  zmieniaja — przelaczenie dowiazania nie rusza ich mtime. Tam nadal
+  `SIGUSR2`.
+- W trakcie drain nowe polaczenia czekaja w backlogu gniazda az wystartuje
+  nastepca (przy `pm.max_children = 1` tyle, ile trwa najdluzszy request
+  w locie; przy wiekszej liczbie dzieci przejmuja je pozostale). Bezczynne
+  keep-alive bramki sa zamykane od razu — bramka traktuje to jak EOF po
+  `pm.max_requests` i laczy sie na nowo; request, ktory bramka wyslala
+  dokladnie w tym oknie, przepada tak samo jak dzis przy `pm.max_requests`.
+- Request zawieszony poza schedulerem (`Fiber::suspend()` w glownym fiberze,
+  juz dzis logowany jako "dropping it") nigdy nie zejdzie z licznika w locie,
+  wiec drain sie nie skonczy; tick loguje wtedy co sekunde "draining, N
+  request(s) still in flight".
+- Pierwszy stan pliku wygrywa: `stat()` po sciezce robimy tuz PO pierwszej
+  kompilacji; podmiana w tym mikrosekundowym oknie zapisze nowy stan przy
+  starym kodzie.
+- Sledzone sa tylko pliki przechodzace przez `zend_compile_file`: `eval()`,
+  dane czytane `file_get_contents` (konfiguracja YAML/JSON) i szablony
+  nie-PHP nie sa widziane.

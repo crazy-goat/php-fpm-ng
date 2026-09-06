@@ -50,11 +50,19 @@ and `NOT MEASURED=0`.
 
 ## Observed repeatability
 
-Three full runs used the same source and binaries. Two runs observed the
-`gh16432-status-high-nprocs.phpt` test as PASS and one run reported it as FAIL;
-a five-run isolated repetition of that test was **5/5 PASS**. This is recorded
-as an intermittent full-suite/test-order failure, not silently erased from the
-history. The final full-run table below reflects the third run.
+The original Task 001 measurement used the same source and binaries for three
+full runs. Two runs observed the `gh16432-status-high-nprocs.phpt` test as PASS
+and one run reported it as FAIL; a five-run isolated repetition of that test was
+**5/5 PASS**. The intermittent observation is retained in the historical table
+below rather than silently erased.
+
+Task 029 reproduced the mechanism and fixed it. The fpm-ng metrics backend was
+faulting in and clearing about 3.2 GiB for `pm.max_children = 12800` before the
+startup notices. After removing that eager clear, three fresh full suites and
+five isolated repetitions passed the test; a clean upstream FPM control also
+passed five isolated repetitions. The detailed source and binary fingerprints,
+startup/RSS measurements and raw result directory are recorded in
+[`tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md`](../tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md).
 
 The `WARN` row is the upstream `XFAIL` test
 `log-bwd-multiple-msgs-stdout-stderr.phpt`: the test passed despite its
@@ -71,13 +79,14 @@ pass or hidden as a skip.
   `docs/NOTES.md`, section 3i (`pool.type`); it is not a deleted or weakened
   test. Task 015 separately tracks the `http.listen` default for TCP HTTP
   pools.
-- `gh16432-status-high-nprocs.phpt` — **unclassified intermittent
-  observation**; see [follow-up task 029](../tasks/029-fpm-phpt-gh16432-intermittent-failure.md).
-  It failed once in three complete runs but passed five isolated repetitions
-  with the same binary. The failure is retained in the repeatability record and
-  needs a separate investigation under full-suite/resource pressure; it is not
-  silently counted as a pass or classified as a stable regression from this
-  evidence.
+- `gh16432-status-high-nprocs.phpt` — **our bug**, fixed in
+  `ext/fpmng_metrics/fpmng_metrics.c`. The default per-worker metrics table
+  faulted in and cleared about 3.2 GiB for `pm.max_children = 12800`, making FPM
+  startup exceed the PHPT harness's three-second startup-log timeout under
+  full-suite pressure. The unchanged upstream test passed in the fixed binary
+  in all three fresh full-suite runs and five isolated repetitions; see the
+  [completed task 029](../tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md)
+  for the exact verdict, commands and fingerprints.
 - `log-bwd-multiple-msgs-stdout-stderr.phpt` — **upstream expected-failure
   warning**. The test is marked `XFAIL` as intermittent and passed in this run;
   the raw status is `WARNED`, recorded as `WARN`.

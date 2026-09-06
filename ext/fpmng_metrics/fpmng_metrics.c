@@ -121,7 +121,9 @@ void fpmng_metrics_shm_init(void *mem, size_t size, uint32_t slots, uint32_t lim
 	if (!mem || !slots || !limit || size < fpmng_metrics_shm_size(slots, limit)) {
 		return;
 	}
-	memset(shm, 0, size);
+	/* fpm_shm_alloc() returns a fresh MAP_ANONYMOUS mapping, which the kernel
+	 * zero-fills lazily. Do not eagerly fault in the whole per-worker region:
+	 * pm.max_children=12800 and series_limit=256 reserve about 3.2 GiB. */
 	shm->magic = FPMNG_METRICS_MAGIC;
 	shm->slots = slots;
 	shm->limit = limit;

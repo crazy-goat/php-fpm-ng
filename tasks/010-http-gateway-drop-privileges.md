@@ -63,3 +63,64 @@ Decide what identity the gateway should run as, and make it so.
 - The key is currently read once in the master before the first fork; that is a
   deliberate choice recorded in `fpm_http_tls.h` and it helps here, since the
   child never needs to open the key file itself.
+
+## Decision — 2026-09-06
+
+The gateway drops to the pool's own `'user'`/`'group'` — the same identity
+`fpm_unix_init_child()` (`sapi/fpm/fpm/fpm_unix.c`) already puts the request
+workers under, resolved once by `fpm_unix_conf_wp()` before the first fork
+(`wp->set_uid`/`set_gid`/`set_user`). No new `http.user`/`http.group`
+directive: nothing to configure, no way for the gateway's identity to drift
+from the worker's it forwards requests to, satisfying acceptance criterion 2
+(default-safe, zero operator configuration) directly.
+
+**What needs root, and when it ends:** binding `http.reuseport`'s own listener
+(a possibly-privileged port, opened by the child itself *after* fork — the
+ordering hazard called out above) and holding the TLS private key the master
+already read before the first fork. Both are done by the time
+`fpm_http_gateway_run()` reaches the reuseport block in
+`sapi/fpmng/fpm/fpm_http.c`. Everything after — the access log, static files,
+TLS handshakes, proxying to the pool — needs no privilege at all, so
+`fpm_http_gateway_drop_privileges()` runs right there, before
+`http.access_log` is even opened (moved to open *after* the drop, so the file
+is created by the dropped-to identity, not root).
+
+**Pool with no `user`/`group` at all:** only reachable under FPM's existing
+`--allow-to-run-as-root` escape hatch (`fpm_conf.c` refuses it otherwise). The
+operator explicitly asked for root there, so the gateway stays root too —
+matching `fpm_unix_init_child()`'s own behaviour for workers — but says so
+with a `ZLOG_WARNING`, never silently.
+
+**Failure to drop** (`setgid`/`initgroups`/`setuid` returning nonzero, or
+still being root right after) is fatal: `exit(FPM_EXIT_SOFTWARE)`, logged via
+`ZLOG_SYSERROR`/`ZLOG_ERROR`. Never continue serving a TLS private key as
+root.
+
+## Outcome — 2026-09-06
+
+Implemented in `sapi/fpmng/fpm/fpm_http.c`:
+`fpm_http_gateway_settings()` copies `wp->set_uid`/`set_gid`/`set_user` (or
+`wp->config->user` when the pool's user was given by name, mirroring
+`fpm_unix_init_child()`'s own fallback) onto the new `gw->drop_uid/drop_gid/
+drop_user` fields; `fpm_http_gateway_drop_privileges()` performs the actual
+`setgid`/`initgroups`/`setuid` drop and is called from
+`fpm_http_gateway_run()` right after the `http.reuseport` bind, before the
+access log is opened.
+
+Verified by `build/test-http-gateway-privileges.sh`, wired into CI as the
+`gateway-privileges` job in `.github/workflows/build-matrix.yml` (needs a root
+master, so it runs under `sudo`, in its own job rather than folded into
+`phpt`). It starts a real `php-fpm-ng` as root with a `pool.type = http` pool
+and inspects `/proc/<pid>/status` of the actual running gateway process —
+never just reads the code — across three scenarios: plain, `http.reuseport =
+yes` (the ordering hazard), and a pool with no `user`/`group` under
+`--allow-to-run-as-root` (expected to stay root, with the warning logged).
+Each scenario also does one real HTTP round-trip through the gateway
+post-drop and checks `http.access_log`'s owner, covering acceptance criterion
+3.
+
+Compiled locally against the pinned `php-8.5.9` php-src with no warnings on
+`fpm_http.c`. The test script itself needs a root master, which this
+(non-root-sudo) machine cannot provide; it is exercised by the
+`gateway-privileges` CI job instead — see that job's result on the PR before
+treating this as verified.

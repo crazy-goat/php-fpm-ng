@@ -421,24 +421,21 @@ runner stops with NOT MEASURED only when the environment itself is unusable).
 | RSS stability | 200 sequential requests in one worker, growth limit 6144 KiB | PASS (measured growth 1.7 MB) |
 | `fiber.revalidate_freq` | controlled deploy: `DeployMarker::VALUE` changed on disk with `fiber.revalidate_freq = 1`; updated code served without a manual restart | PASS |
 
-## Retained failure: `pm.max_children = 2` with stateful traffic
+## Historical failure: `pm.max_children = 2` with stateful traffic
 
-The `pm2-*` suite runs each scenario on a fresh 2-worker pool. `pm2-mix`,
-`pm2-session`, `pm2-stateful-auth` and `pm2-object-identity` each PASSED in at
-least one run, but **at least one of them fails in every full run** with the
-same signature: in the cookie-replay round (no `Authorization` header), some
-requests never reach the scenario's Redis gate — the runner observes
-`llen` 2-7 of the expected 8 after a 90 s wait, the stuck requests complete
-exactly at the gate's 90 s BLPOP timeout, and a stalled scenario's blocked
-fibers degrade everything that follows on the same pool (the runner now gives
-each scenario a fresh pool to contain this). The runner keeps the failing
-scenario as ERROR, so `pm-max-children` is recorded as ERROR.
+Before the accept fix below, the `pm2-*` suite ran each scenario on a fresh
+2-worker pool. `pm2-mix`, `pm2-session`, `pm2-stateful-auth` and
+`pm2-object-identity` each PASSED in at least one run, but **at least one of
+them failed in every full run** with the same signature: in the cookie-replay
+round (no `Authorization` header), some requests never reached the scenario's
+Redis gate — the runner observed `llen` 2-7 of the expected 8 after a 90 s wait,
+the stuck requests completed exactly at the gate's 90 s BLPOP timeout, and a
+stalled scenario's blocked fibers degraded everything that followed on the same
+pool. The runner retained the failing scenario as ERROR.
 
-**Consequence for the support claim: `pm.max_children > 1` for Symfony must be
-treated as NOT supported** until this stall is root-caused. The
-single-worker (`pm.max_children = 1`) verdict "YES, sessions and stateful
-firewall included" stands — that configuration passed every data assertion in
-every run, in both `APP_ENV=dev` and `APP_ENV=prod`.
+This was a pre-fix result, not the current support verdict. The root cause and
+fix are recorded below. After the fix, the same four scenarios pass with
+`pm.max_children = 2`.
 
 ## Root cause of the pm2 stall: blocking accept() (fixed)
 

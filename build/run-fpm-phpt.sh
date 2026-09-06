@@ -154,8 +154,9 @@ write_counts() {
             printf "PASS=%d\n", count["PASS"] + 0
             printf "FAIL/ERROR=%d\n", count["FAIL/ERROR"] + 0
             printf "SKIP=%d\n", count["SKIP"] + 0
+            printf "WARN=%d\n", count["WARN"] + 0
             printf "NOT MEASURED=%d\n", count["NOT MEASURED"] + 0
-            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["NOT MEASURED"]) + 0
+            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["NOT MEASURED"]) + 0
         }
     ' "$RESULTS"
 }
@@ -256,23 +257,30 @@ set -e
 
 {
     printf 'test\tcategory\traw_status\n'
-    awk -F '\t' -v status_file="$STATUS_RAW" '
+    awk -F '\t' -v status_file="$STATUS_RAW" -v source_root="$PHPSRC" '
+        function normalize(path, prefix) {
+            sub(/^\.\//, "", path)
+            prefix = source_root "/"
+            if (index(path, prefix) == 1) {
+                path = substr(path, length(prefix) + 1)
+            }
+            return path
+        }
         FILENAME == status_file {
             if (NF >= 2) {
-                key = $2
-                sub(/^\.\//, "", key)
-                status[key] = $1
+                status[normalize($2)] = $1
             }
             next
         }
         {
-            key = $0
-            sub(/^\.\//, "", key)
+            key = normalize($0)
             raw = status[key]
             if (raw == "PASSED") {
                 category = "PASS"
             } else if (raw == "SKIPPED") {
                 category = "SKIP"
+            } else if (raw == "WARNED") {
+                category = "WARN"
             } else if (raw == "") {
                 raw = "NOT_MEASURED"
                 category = "NOT MEASURED"

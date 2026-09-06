@@ -32,6 +32,13 @@ rm -rf "$PHPSRC/sapi/fpmng/tests"
 # Nasze pliki nadpisuja upstream.
 cp -r "$REPO/sapi/fpmng/." "$PHPSRC/sapi/fpmng/"
 
+# Rozszerzenie fpmng_metrics (NOTES 3k): ext/ wykrywany tym samym globem
+# co sapi/, wiec tez zero latek na upstream. Katalog naszego repo:
+[ -d "$REPO/ext/fpmng_metrics" ] && {
+  rm -rf "$PHPSRC/ext/fpmng_metrics"
+  cp -r "$REPO/ext/fpmng_metrics" "$PHPSRC/ext/fpmng_metrics"
+}
+
 # Lista zrodel bierze sie z config.m4 TEGO php-src, a nie z naszej kopii —
 # inaczej dryfuje przy kazdej zmianie w upstreamie (np. usunieciu events/devpoll.c).
 SOURCES=$(sed -n '/PHP_FPM_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' "$PHPSRC/sapi/fpm/config.m4" \
@@ -143,6 +150,9 @@ fi
 echo "  zrodel z upstreamu + naszych: $(echo "$SOURCES" | wc -l | tr -d ' ')"
 echo "  nasze pliki:"
 (cd "$REPO/sapi/fpmng" && find . -type f | sed 's|^\./|    |' | sort)
+if [ -d "$REPO/ext/fpmng_metrics" ]; then
+  (cd "$REPO/ext/fpmng_metrics" && find . -type f | sed 's|^|    ext/fpmng_metrics/|' | sort)
+fi
 
 if [ -n "$SOURCES_CHANGED" ]; then
   echo

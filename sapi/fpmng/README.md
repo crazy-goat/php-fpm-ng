@@ -16,6 +16,7 @@ Nasze pliki. Reszta SAPI jest kopiowana z `sapi/fpm/` upstreamu przez
 | `fpm/fpm_pool_fiber.c` | EKSPERYMENT: `pool.executor = fiber` dla `fastcgi-ng` i `http` na upstreamowym PHP, scheduler libevent (NOTES 3u) |
 | `fpm/fpm_pool_fiber.h` | |
 | `fpm/fpm_pool_fiber_xport.c` | zawieszanie Fiberow na transportach `tcp` i `unix` |
+| `fpm/fpm_metrics.c` | glue metryk aplikacyjnych (NOTES 3k/3w): master alokuje shm slotow, dziecko w `run_child:` dostaje slot + etykiete pool |
 
 Docelowo dojda `fpm/fpm_conf.c`, `fpm/fpm_status.c` i `fpm/fpm_main.c` —
 to jedyne pliki FPM z realnym churnem upstreamu (patrz `docs/NOTES.md`).

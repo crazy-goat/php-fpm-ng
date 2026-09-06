@@ -36,6 +36,20 @@ int fpm_pool_fiber_can_wait(void);
  * 1 = gotowy, 0 = timeout, -1 = nie mozna czekac (wolajacy ma blokowac). */
 int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout);
 
+/* Czekanie na cos innego niz fd (np. odpowiedz evdns). Wolajacy pobiera
+ * uchwyt PRZED startem operacji asynchronicznej i daje go jej callbackowi,
+ * a callback budzi fiber przez fpm_pool_fiber_wake(). Callback moze przyjsc
+ * synchronicznie, jeszcze przed wait_wake — wolajacy rozpoznaje to po wlasnym
+ * stanie i wtedy nie czeka; wake poza czekaniem jest bezpieczne (no-op).
+ * wait_wake: 1 = obudzony, 0 = timeout (NULL = bez limitu), -1 = nie mozna czekac. */
+void *fpm_pool_fiber_waiter(void);
+int fpm_pool_fiber_wait_wake(struct timeval *timeout);
+void fpm_pool_fiber_wake(void *waiter);
+
+/* event_base schedulera, do wlasnych zrodel zdarzen na tej samej petli
+ * (evdns). NULL poza dzieckiem executora fiber. */
+struct event_base *fpm_pool_fiber_event_base(void);
+
 /* Podmiana transportow tcp/unix na wariant zawieszajacy fiber. Wolac raz,
  * w dziecku, po MINIT wszystkich rozszerzen (ext/openssl nadpisuje "tcp"
  * w swoim MINIT — musimy byc PO nim). */

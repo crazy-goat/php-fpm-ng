@@ -112,6 +112,9 @@ jobs:
           cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
           cp php-src/sapi/cli/php stage/bin/
           cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+          # run-fpm-phpt.sh (build/run-fpm-phpt.sh:88) requires run-tests.php
+          # directly below the "prepared php-src" path it's given.
+          cp php-src/run-tests.php stage/prepared/
 
       - name: upload build (for the phpt job)
         uses: actions/upload-artifact@v4

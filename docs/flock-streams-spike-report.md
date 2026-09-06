@@ -380,3 +380,82 @@ test).
   18931-18933/18940-18941 (within the assigned 18931-18950 range) was
   touched, except read-only reads of `~/rd/a9/test/` to copy its harness
   scripts.
+
+## Fix applied after this spike: never block on a confirmed in-process conflict
+
+Date: 2026-09-06, same branch, follow-up commit. Found by re-reading this
+report's own "What this does NOT cover" section against the
+`tests/fiber-blocking-red` suite (item 11): the "cannot suspend / waiter
+queue full" fallback in `fpm_fiber_flock_set_option()`'s conflict loop fell
+through to a real *blocking* `flock()` right after confirming, in the same
+iteration, that a fiber in this same process holds the conflicting lock.
+That holder cannot run again until the calling fiber's blocking `flock()`
+returns — the process has exactly one OS thread — so that call can never
+be satisfied. This is not "a documented rare-case regression to today's
+behavior for this one call" as the original comment claimed; it is the
+exact permanent whole-process deadlock this file exists to remove, reached
+from a different edge (queue-full or can't-suspend) than the two-phase-loop
+bug found and fixed earlier in this same spike (see above). Every request
+in flight in that worker dies with it.
+
+**Fix:** both trigger conditions (fiber cannot suspend per
+`fpm_pool_fiber_can_wait()`; 64-slot waiter queue full) now fail the lock
+attempt immediately — `errno = EWOULDBLOCK; return -1;` — instead of
+calling `fpm_flock_real()`. This is exactly the failure shape a real
+non-blocking `flock()` already produces elsewhere in this same function
+(the `nb` branch), and exactly what `ext/standard/file.c` already turns
+into ordinary, documented userland behavior: `php_flock_common()`
+(`flock($fp, LOCK_EX, $wouldblock)`) returns `false` and, when `$wouldblock`
+was passed by reference, sets it to `true` on `EWOULDBLOCK`;
+`file_put_contents($f, $d, LOCK_EX)` returns `false` with an `E_WARNING`
+when `php_stream_lock()` fails. Verified against php-src
+(`ext/standard/file.c:179-204` `php_flock_common`, `:472,490`
+`php_stream_lock` call in `PHP_FUNCTION(file_put_contents)`) before
+deciding this, not assumed. No in-process holder is ever registered on this
+path (the early `return -1` skips `fpm_flock_register_holder()` entirely),
+so mutual exclusion is unaffected — a failed attempt never becomes a
+phantom holder.
+
+Decisions made alongside the fix, and the reasoning:
+
+- **The two 64-slot caps (waiter queue, `LOCK_SH` holder list) are left as
+  they are.** Growing either only raises the threshold at which the same
+  problem resurfaces — a fixed-size registry can always be overrun by
+  enough concurrent contention, and this spike's whole point is that
+  *overrunning it must fail cleanly, not block*, so the cap's exact size is
+  no longer safety-critical, only a performance/memory knob. The registry is
+  a **static** array (`FPM_FLOCK_MAX_ENTRIES` = 4096 files per process,
+  each carrying its own 64-slot waiter array and 64-slot `sh_owners` array
+  inline, `struct fpm_flock_entry_s`), so raising either 64 multiplies by
+  4096 entries per worker process regardless of how many files are actually
+  contended in practice (e.g. 64 -> 256 waiters would add roughly
+  4096 * (256-64) * 2 * sizeof(void*) ~= 12.6 MB of always-resident memory
+  per worker, for a slot that is empty in the overwhelmingly common case).
+  Keeping the cap and failing cleanly on overflow gets the same safety
+  outcome as growing it, at zero extra static memory cost. If real
+  workloads are later measured to hit 64 waiters on one file under
+  *ordinary* load (not the 70-waiter stress test built specifically to
+  exceed it), that would be a reason to revisit the number — not yet
+  observed.
+- **A fiber that genuinely cannot suspend (a nested user `Fiber`, a
+  destructor running under GC) fails immediately, same as the queue-full
+  case, not handled specially.** There is no third option: it cannot
+  suspend on the in-process wait queue by construction (that queue is
+  serviced by the very fiber scheduler such a context is already outside
+  of), and blocking is exactly the deadlock this fix removes. Immediate
+  failure is the only safe outcome available to it.
+- **The cross-process polling defaults (5 attempts x 20 ms, then one real
+  blocking `flock()`) are UNCHANGED and UNMEASURED beyond what this spike
+  already reported.** They remain defensible in a way the in-process case
+  never was: by the time this code reaches that final blocking call, it has
+  just re-confirmed (same loop iteration, per the earlier two-phase-loop
+  fix) that nobody in this process holds the conflicting lock, so the
+  blocking call can only be satisfied by a *different, running* process —
+  bounded by that process's own hold time, not by a suspended fiber that
+  can never resume. But the specific numbers (5 x 20ms = up to ~100ms of
+  cooperative backoff before the blocking fallback) were carried over
+  as-is from the original spike defaults and were not re-derived or
+  re-measured for this fix — stated plainly rather than left implicit.
+
+See the task's suite run (`tests/fiber-blocking-red`, item 11 and items
+5a/5b/6/7) for the acceptance measurements against this fix.

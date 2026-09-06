@@ -357,3 +357,51 @@ Note that Symfony needs no `fiber.isolate_statics` entries for this — its
 security state lives in the container and in the session, both of which are
 already per request. The class-static isolation is a Laravel requirement, not a
 general one.
+
+---
+
+# UPDATE 2026-09-06: automated Symfony probe — remaining task-024 scenarios measured
+
+`tests/frameworks/symfony/run.sh` now covers the whole task-024 matrix
+end-to-end (it provisions its own Symfony copy, private MySQL database and
+Redis namespace per run, and asserts on response data, never on HTTP status).
+Measured on macOS (arm64, kqueue) against a locally built php-fpm-ng
+`PHP 8.6.0-dev (fpm-fcgi) (built: Sep  6 2026 15:00:30) (NTS)`, SHA-256
+`862c180037fee77b38c64ee50c359a8d257b336c4fbea13266a9c9a0d6e3a881`, all four
+feature markers present (`FPMNG_SHARED_INCLUDES`, `http.front_controller`,
+`fiber.revalidate_freq`, `fiber.isolate_statics`), pool.executor = fiber,
+`FPMNG_SHARED_INCLUDES=1`, opcache off, Symfony 8.1.6, predis.
+
+Result of the full run: **PASS=19 ERROR=2 NOT MEASURED=0** (21 scenarios; the
+runner stops with NOT MEASURED only when the environment itself is unusable).
+
+| Area | Scenario | Result |
+|---|---|---|
+| concurrency (baseline) | mix / session / stateful-auth / object-identity, `APP_ENV=dev`, 1 worker | PASS |
+| `APP_ENV=prod` | same four scenarios on a dedicated prod pool (`APP_DEBUG=0`) | PASS |
+| `pm.max_children = 2` | mix / object-identity / session | PASS |
+| `pm.max_children = 2` | stateful-auth | **ERROR, see below** |
+| Twig | `renderView` + custom Twig extension that performs real blocking Redis I/O inside the template, `app.user` rendered per user | PASS |
+| Forms + validation | form submit with `NotBlank`, valid/invalid split asserted on the validator's errors | PASS |
+| Messenger (sync) | bus dispatch, handler result asserted through `HandledStamp` | PASS |
+| RSS stability | 200 sequential requests in one worker, growth limit 6144 KiB | PASS (measured growth 1.7 MB) |
+| `fiber.revalidate_freq` | controlled deploy: `DeployMarker::VALUE` changed on disk with `fiber.revalidate_freq = 1`; updated code served without a manual restart | PASS |
+
+## Retained failure: `pm.max_children = 2` with stateful traffic
+
+The `pm2-*` suite runs each scenario on a fresh 2-worker pool. `pm2-mix`,
+`pm2-session`, `pm2-stateful-auth` and `pm2-object-identity` each PASSED in at
+least one run, but **at least one of them fails in every full run** with the
+same signature: in the cookie-replay round (no `Authorization` header), some
+requests never reach the scenario's Redis gate — the runner observes
+`llen` 2-7 of the expected 8 after a 90 s wait, the stuck requests complete
+exactly at the gate's 90 s BLPOP timeout, and a stalled scenario's blocked
+fibers degrade everything that follows on the same pool (the runner now gives
+each scenario a fresh pool to contain this). The runner keeps the failing
+scenario as ERROR, so `pm-max-children` is recorded as ERROR.
+
+**Consequence for the support claim: `pm.max_children > 1` for Symfony must be
+treated as NOT supported** until this stall is root-caused. The
+single-worker (`pm.max_children = 1`) verdict "YES, sessions and stateful
+firewall included" stands — that configuration passed every data assertion in
+every run, in both `APP_ENV=dev` and `APP_ENV=prod`.

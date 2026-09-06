@@ -71,7 +71,7 @@ opportunistically, in the same commit as a real change to that code.
 
 ## Test box
 
-`192.168.8.103`, user `piotr`, passwordless sudo. It is **shared** — other work
+`192.168.8.50`, user `piotr`, passwordless sudo. It is **shared** — other work
 runs there concurrently.
 
 - Work in your own directory and your own port range.

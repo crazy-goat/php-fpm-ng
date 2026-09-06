@@ -32,5 +32,5 @@ One file per unit of work. English only, even though most of the codebase and
   An existing build directory has a frozen object list and will not see a new
   `.c` file — `buildconf --force` plus `config.nice` is required. The script
   warns about this at the end of its output.
-- The test box (`192.168.8.103`, user `piotr`, passwordless sudo) is shared.
+- The test box (`192.168.8.50`, user `piotr`, passwordless sudo) is shared.
   Work in your own directory, use your own port range, and never `pkill php-fpm`.

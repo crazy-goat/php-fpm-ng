@@ -62,7 +62,7 @@ still apply.
 - Deployment, releases, publishing images. "CD" is not part of this task.
 - Performance benchmarking in CI. The numbers in `docs/` come from a dedicated
   box precisely because shared CI runners cannot produce comparable ones.
-- Running anything that needs the shared test box at `192.168.8.103`.
+- Running anything that needs the shared test box at `192.168.8.50`.
 
 ## Open questions for whoever picks this up
 

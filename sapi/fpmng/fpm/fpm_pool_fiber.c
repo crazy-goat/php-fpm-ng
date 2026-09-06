@@ -5,7 +5,8 @@
  * Dlatego nie potrzebujemy switch-handlerow forka — stan requestu wchodzi do
  * globali tuz przed zend_fiber_start/resume i wychodzi tuz po ich powrocie
  * (fpm_coop_req_enter/leave). Fiber requestu zawiesza sie tylko przez
- * fpm_pool_fiber_wait_fd() (z fpm_pool_fiber_xport.c) i zawsze wraca tu.
+ * fpm_pool_fiber_wait_fd()/wait_wake() (z fpm_pool_fiber_xport.c) i zawsze
+ * wraca tu.
  */
 
 #include "fpm_config.h"
@@ -47,6 +48,10 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 int fpm_pool_fiber_can_wait(void) { return 0; }
 int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) { (void) fd; (void) events; (void) timeout; return -1; }
+void *fpm_pool_fiber_waiter(void) { return NULL; }
+int fpm_pool_fiber_wait_wake(struct timeval *timeout) { (void) timeout; return -1; }
+void fpm_pool_fiber_wake(void *waiter) { (void) waiter; }
+struct event_base *fpm_pool_fiber_event_base(void) { return NULL; }
 
 #else /* !ZTS */
 
@@ -305,6 +310,63 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 		return 0;
 	}
 	return 1;
+}
+/* }}} */
+
+void *fpm_pool_fiber_waiter(void) /* {{{ */
+{
+	return fpm_fiber_current;
+}
+/* }}} */
+
+/* Jak wait_fd, ale zdarzenie nie ma fd — sam timer. Budzi je fpm_pool_fiber_wake
+ * przez event_active (dziala tez na zdarzeniu bez timeoutu, czyli nie-pending). */
+int fpm_pool_fiber_wait_wake(struct timeval *timeout) /* {{{ */
+{
+	struct fpm_fiber_req_s *fr = fpm_fiber_current;
+	zval rv;
+
+	if (!fpm_pool_fiber_can_wait()) {
+		return -1;
+	}
+
+	event_base_update_cache_time(fpm_fiber_base);	/* jak w wait_fd */
+	if (event_assign(fr->ev, fpm_fiber_base, -1, 0, fpm_fiber_io_cb, fr) < 0
+		|| (timeout && event_add(fr->ev, timeout) < 0)) {
+		return -1;
+	}
+	fr->wait_result = 0;
+	fr->waiting = true;
+
+	ZVAL_UNDEF(&rv);
+	zend_fiber_suspend(fr->fiber, NULL, &rv);
+	zval_ptr_dtor(&rv);
+
+	event_del(fr->ev);
+	if (fr->wait_result & EV_TIMEOUT) {
+		return 0;
+	}
+	return 1;
+}
+/* }}} */
+
+void fpm_pool_fiber_wake(void *waiter) /* {{{ */
+{
+	struct fpm_fiber_req_s *fr = waiter;
+
+	/* Poza czekaniem (callback synchroniczny, albo fiber juz obudzony przez
+	 * timeout) nie ma kogo budzic. Jesli timer i wake trafia w te sama ture
+	 * petli, event_active dopisze EV_READ do juz aktywnego zdarzenia — jeden
+	 * callback, wait_result z oboma bitami. */
+	if (fr && fr->waiting) {
+		event_active(fr->ev, EV_READ, 0);
+	}
+}
+/* }}} */
+
+struct event_base *fpm_pool_fiber_event_base(void) /* {{{ */
+{
+	return fpm_fiber_base;
 }
 /* }}} */
 

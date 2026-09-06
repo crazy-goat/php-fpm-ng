@@ -1,7 +1,7 @@
 # 001 — Run upstream FPM's `.phpt` suite against `php-fpm-ng`
 
 **Priority:** highest. Everything else in `tasks/` is easier to trust once this exists.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -80,3 +80,18 @@ thing to silence.
   `TEST_FPM_RUN_AS_ROOT` (`tester.inc:543`) and `TEST_FPM_EXTENSION_DIR`
   (`tester.inc:531`). Expect a non-trivial number of environment-dependent
   skips and report them as skips, not as passes.
+
+## Outcome
+
+`build/prepare.sh` now retains the upstream `sapi/fpm/tests` directory when it
+creates `sapi/fpmng/`. `build/run-fpm-phpt.sh` runs that copied suite against
+explicit `TEST_PHP_EXECUTABLE` and `TEST_PHP_FPM_EXECUTABLE` paths, fingerprints
+the binaries before starting tests, and writes per-test TSV results plus a
+summary with `PASS`, `FAIL/ERROR`, `SKIP` and `NOT MEASURED` categories.
+
+The runner and prerequisites are documented in `docs/fpm-phpt.md`. The full
+suite was **not measured** in this environment: no compatible prepared source
+checkout and no binary built from the retry branch were available. The
+150-row inventory and exact source/patch blocker are recorded in
+`docs/fpm-phpt-results.md`; no failure was observed, so no failure triage or
+separate defect task was created.

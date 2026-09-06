@@ -9,7 +9,7 @@ Our files. The rest of the SAPI is copied from upstream `sapi/fpm/` by
 | `fpm/fpm.c` | hook `fpm_http_init_main()` in `fpm_run()` — the attachment point for pool types |
 | `fpm/fpm_http.c` | HTTP gateway |
 | `fpm/fpm_http.h` | |
-| `fpm/fpm_pool_async.c` | EXPERIMENT: `pool.executor = async` for `fastcgi-ng` and `http` — a True Async coroutine per request; even with cache-hit support, `opcache.enable=0` is still recommended (NOTES 3t) |
+| `fpm/fpm_pool_async.c` | POC `pool.executor = async` for `fastcgi-ng` and `http` — the True Async implementation stays in the tree, but validation rejects the executor until it has the required hardening (NOTES 3t, `docs/async_errors.md`) |
 | `fpm/fpm_pool_async.h` | |
 | `fpm/fpm_pool_coop.c` | shared request state for the experimental multi-request executors |
 | `fpm/fpm_pool_coop.h` | |

@@ -2,7 +2,7 @@
 
 **Priority:** medium. It is shipped and it is less safe than the executor it
 resembles.
-**Status:** open. Recorded in `docs/async_errors.md`.
+**Status:** done. Decision: refusal; recorded in `docs/async_errors.md`.
 
 ## Context
 
@@ -53,3 +53,16 @@ Bring `async` to parity, or refuse it.
 - The class-statics problem (task 008) and the include model (task 007) apply to
   `async` identically. Whatever is decided there should be checked against this
   executor too rather than rediscovered.
+
+## Outcome
+
+Chose **refusal** rather than parity. `fpm_pool_async_validate()` now rejects
+`pool.executor = async` on every engine with a message explaining that the
+executor is not hardened for concurrent requests and naming `classic` and
+`fiber` as alternatives. The POC implementation remains in the tree for a
+future hardening pass, but configuration cannot start it.
+
+Updated the user-facing README files and `docs/async_errors.md` to record the
+decision and the known hazards. No new Async measurements were run: the
+executor is not a supported execution path; the measurements in
+`docs/NOTES.md` section 3t are historical POC evidence.

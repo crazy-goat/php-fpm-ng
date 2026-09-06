@@ -271,7 +271,7 @@ someone else's session, sharing one `Application` and one `Request` object.
 **Now, with a configured, per-request-isolated list of class static
 properties** (task 008, `sapi/fpmng/fpm/fpm_pool_coop_statics.c`):
 
-    fiber.isolate_statics = Illuminate\Container\Container::instance,Illuminate\Support\Facades\Facade::app,Illuminate\Support\Facades\Facade::resolvedInstance
+    fiber.isolate_statics = Illuminate\Container\Container::instance,Illuminate\Support\Facades\Facade::app,Illuminate\Support\Facades\Facade::resolvedInstance,Illuminate\Database\Eloquent\Model::resolver
 
 Measured on the same `/session?user=X&sleep=0.3`, N=8, `pm.max_children = 1`:
 8/8 correct, distinct `sess_user`, distinct `app_oid` and
@@ -286,7 +286,41 @@ Also measured: an authenticated flow not covered by the spike --
 the list (isolating `Container::instance` alone), this came back mostly
 wrong (`user: null` for most requests) — the AuthManager instance resolved
 through the Facade cache belonged to whichever *other* request bootstrapped
-last. With all three items isolated: 8/8 correct.
+last. With the four-item list below: 8/8 correct.
+
+### Laravel 13.30.1 repository-owned runner result
+
+The Task 025 runner lives in `tests/frameworks/laravel/` and uses Laravel
+13.30.1, Predis 3.6.0 locked in Composer, phpredis 6.3.0RC1, MySQL 8.4.11 and
+Redis 8.0.5. On 2026-09-06 it used PHP-FPM-NG 8.5.11-dev, source worktree
+HEAD `67d1476d4d8015c7a7ddf3221eb062c423869818` with the uncommitted fpm-ng
+source overlay, binary SHA-256
+`90a592e2f027fb50bbe94292dcc451b64d8a16b0490c6ed53abe085af95eeca6`,
+`pool.executor = fiber`, `FPMNG_SHARED_INCLUDES=1`, `pm.max_children = 1`,
+FastCGI port 22725, HTTP port 22726, database `laravel025` and Redis DB 3.
+The binary was verified with `strings` before the run; it contained both
+`fiber.isolate_statics` and `FPMNG_SHARED_INCLUDES`.
+
+With this four-entry configuration, all ten implemented concurrent scenarios
+passed: session rounds, authenticated `/me`, DB + Cache + Redis + Eloquent,
+facade/object identity, Eloquent resolver identity, middleware/`terminate()`,
+CSRF/session isolation, validation flash data, sync queue context and sync
+broadcast context. The suite keeps rate limiting, mail attribution, Blade
+view composers and request-dependent observers/global scopes as `NOT MEASURED`.
+
+The fourth entry was found by the Eloquent test. With only the three entries
+above, both the mixed DB/Cache/Redis/Eloquent test and the dedicated Eloquent
+test returned HTTP 500 with `Cannot execute queries while other unbuffered
+queries are active`; adding `Illuminate\Database\Eloquent\Model::resolver`
+made both pass. The empty-list negative control retained errors: `/session`
+returned HTTP 200 responses sharing one `app_oid`, while the authenticated and
+mixed scenarios failed (including transport/connection failures). This is the
+important failure mode: an incomplete list can return a correct-looking HTTP
+200 response with another request's data.
+
+This does not close the Laravel task. The list is still empirical, the
+remaining matrix is not measured, and the four-entry configuration must be
+re-verified for every Laravel minor-version upgrade.
 
 **The mechanism does not know about Laravel.** The directive is a
 comma-separated list of `Class\Name::property` read from pool configuration;

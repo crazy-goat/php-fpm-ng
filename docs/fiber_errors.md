@@ -250,3 +250,26 @@ Prawdziwego Symfony ani Laravela — tylko wzorzec bootstrapu. Nie wiadomo, ile
 w realnych frameworkach jest miejsc polegajacych na wartosci zwracanej przez
 `require_once` ani na efektach ubocznych wczytania pliku. To jest nastepny
 krok i jest wykonalny od reki: binarka istnieje.
+
+### Podmiana plikow na dysku: deploy WYMAGA reloadu
+
+Zmierzone przy `FPMNG_SHARED_INCLUDES=1`, podmiana obu plikow miedzy requestami:
+
+    req1                     entry=ENTRY-1  lib=WERSJA-1
+    req2 (po podmianie)      entry=ENTRY-2  lib=WERSJA-1   <- stan MIESZANY
+    req3                     entry=ENTRY-2  lib=WERSJA-1
+    req4 (po SIGUSR2)        entry=ENTRY-2  lib=WERSJA-2
+
+Skrypt wejsciowy jest czytany z dysku przy KAZDYM requescie, bo wykonujemy go
+bezposrednio, a nie przez `require_once`. Wszystko, co on wciaga, zostaje
+zamrozone w procesie. Po `git pull` bez reloadu dziala wiec nowy `index.php`
+na starym bootstrapie — bledy bez sensu i bez tropu.
+
+To jest ZMIANA ZACHOWANIA, nie tylko nowe ograniczenie: wczesniej podmiana
+pliku z funkcja dawala glosny fatal "Cannot redeclare" przy drugim requescie,
+teraz dostaje sie cichy stary kod. Dla klas ladowanych autoloaderem
+nieswiezosc istniala juz wczesniej (klasa siedzi w tablicy procesu, autoloader
+nie jest wolany) — ta zmiana rozciaga ja na caly bootstrap.
+
+Zasada do dokumentacji uzytkownika: **deploy konczy sie `SIGUSR2`**, tak samo
+jak w Octane, Swoole i RoadRunnerze. Reload jest graceful i dziala (req4).

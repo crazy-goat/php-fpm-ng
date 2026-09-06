@@ -565,9 +565,10 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		}
 	}
 
-	/* HTTPS/REQUEST_SCHEME: the gateway itself never terminates TLS (docs/NOTES.md,
-	 * section 5), so these are "http"/unset unless a trusted proxy in front says
-	 * otherwise via X-Forwarded-Proto. */
+	/* HTTPS/REQUEST_SCHEME: "http"/unset unless either the gateway terminated
+	 * TLS on this connection itself (http.tls_cert, see fpm_http_tls.h -- that
+	 * overrides the headers in fpm_http_request()) or a trusted proxy in front
+	 * said so via X-Forwarded-Proto. */
 	fpm_http_param(c, "REQUEST_SCHEME", c->fwd.scheme);
 	if (c->fwd.https) {
 		fpm_http_param(c, "HTTPS", "on");

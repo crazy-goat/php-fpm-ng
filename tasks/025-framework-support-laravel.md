@@ -55,7 +55,7 @@ user's data and log nothing.
    - decide the list cannot be made reliable, and say so
 2. **A published, versioned configuration snippet** for Laravel, with the
    Laravel version it was verified against. Not a suggestion in prose.
-3. **Tests**, per tasks 001 and 003, asserting on data. At minimum the two
+3. **Tests** in the framework harness from task 027, asserting on data. At minimum the two
    scenarios already measured, plus queues, broadcasting and any other subsystem
    that keeps a resolved instance in a static.
 4. **A user-facing warning** wherever this configuration is documented, saying

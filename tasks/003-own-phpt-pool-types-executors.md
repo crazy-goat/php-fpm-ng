@@ -66,8 +66,10 @@ type that ignores it is a configuration trap.
 
 - Benchmarks and timing assertions. Wall-clock numbers on a shared runner are
   noise; the concurrency tests here must assert on *correctness* only.
-- Testing frameworks (Symfony, Laravel). That belongs to a manual, documented
-  procedure — see `docs/frameworks.md` — not to `.phpt`.
+- Testing frameworks (Symfony, Laravel, Slim). They need MySQL, Redis, a
+  `composer install` and real application trees, which do not fit `.phpt`. They
+  are **not** out of scope for the project, only for this task — they have their
+  own harness in task 027 and their own per-framework tasks in 024, 025 and 026.
 
 ## Notes
 

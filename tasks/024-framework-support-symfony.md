@@ -36,8 +36,8 @@ Everything above was measured **by hand, once, on one machine**. There is no
 automated test, so any commit can silently undo it and we would find out by
 accident.
 
-1. The measurements above, as automated tests, using the harness from task 001
-   and the conventions from task 003. Assertions on **data**, not HTTP status —
+1. The measurements above, as automated tests, in the framework harness from
+   task 027. Assertions on **data**, not HTTP status —
    the Laravel failure this document records returned HTTP 200 for every request
    while serving other users' sessions.
 2. Coverage of what was never measured at all:

@@ -335,3 +335,25 @@ the process-wide globals that some entries set through `on_modify` — e.g.
 `serialize`, so it is still shared between requests in flight there. A full
 fix would require swapping the globals of every such module, the way
 `fpm_pool_coop_session.c` does for sessions.
+
+## Symfony: stateful firewall, measured after the fixes
+
+The earlier note above records a stateful firewall (`http_basic` plus a session)
+failing under concurrency: 2 of 6 parallel requests correct, 4 of 6 wrong. That
+was a consequence of the shared `ext/session` state, and it was left unmeasured
+when that was fixed. Measured now, on a build carrying all of the per-request
+isolation (autoglobals, all ini entries, `ext/session`, ini values, class
+statics), 8 concurrent requests, 4 as `alice` and 4 as `bob`, `pm.max_children = 1`,
+`/me?sleep=0.3` (the route is behind `access_control: { path: ^/me, roles: ROLE_USER }`):
+
+    round 1, Authorization: Basic sent    8/8 correct, all HTTP 200
+    round 2, NO Authorization header      8/8 correct, all HTTP 200, auth_header=no
+
+Round 2 is the one that matters: with no credentials on the request, the token
+came back from the session through `ContextListener`, which is exactly the
+stateful path that used to mix users up. Each request saw its own identity.
+
+Note that Symfony needs no `fiber.isolate_statics` entries for this — its
+security state lives in the container and in the session, both of which are
+already per request. The class-static isolation is a Laravel requirement, not a
+general one.

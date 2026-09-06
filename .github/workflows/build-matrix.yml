@@ -85,7 +85,15 @@ jobs:
           CC: ccache gcc
           CXX: ccache g++
         run: |
-          ./configure --disable-all --enable-fpmng --enable-session \
+          # --with-openssl: the C-level HAVE_FPM_HTTP_TLS (gateway TLS termination)
+          # comes from libssl-dev alone, but the CLI php built here also needs
+          # ext/openssl itself -- our own .phpt tests for TLS features (task 039's
+          # http-tls-chain.phpt, and more to come for 040/041/042) drive the
+          # gateway over a real TLS handshake via PHP's ssl:// stream wrapper and
+          # openssl_x509_parse(), both of which live in ext/openssl, not in core.
+          # Without this flag those tests silently SKIP ("requires the openssl
+          # extension") instead of running -- caught on task 039's first CI run.
+          ./configure --disable-all --enable-fpmng --enable-session --with-openssl \
             2>&1 | tee ../configure.log
 
       - name: build

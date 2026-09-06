@@ -440,6 +440,54 @@ single-worker (`pm.max_children = 1`) verdict "YES, sessions and stateful
 firewall included" stands — that configuration passed every data assertion in
 every run, in both `APP_ENV=dev` and `APP_ENV=prod`.
 
+## Root cause of the pm2 stall: blocking accept() (fixed)
+
+Root-caused on 2026-09-06 (worktree `symfony-pm2-stall`, binary rebuilt from
+this source). The stall has nothing to do with sessions — the same freeze was
+reproduced in round 1 of the auth scenario (before any session round-trip
+mattered) and it does not need session state at all. It is an accept race that
+only exists with more than one child.
+
+With `pm.max_children > 1` the children share one listening socket. For one
+pending connection, kqueue wakes the accept callback in **all** of them, and
+`fcgi_accept_request()` does a **blocking** `accept()` — the child that loses
+the race blocks in the kernel and freezes its whole scheduler: every fiber in
+flight stops being serviced, including its timers, until the NEXT connection
+arrives. Evidence from the live repro (2 children, 8 requests, a Redis gate in
+the handler):
+
+- `sample` of the stalled child: ~1740 samples in `accept()` under
+  `fpm_fiber_accept_cb` (`fpm_pool_coop.c`), while the sibling served
+  everything;
+- the frozen child's fibers stayed registered in libevent (per-second watchdog
+  in the scheduler) and sat in `kevent` idle, while the Redis replies (gate
+  releases) were already in the sockets' receive queues (`netstat`, Recv-Q up
+  to 163 bytes, never read);
+- downstream effects visible in the scenario data: requests whose round-1
+  fiber never woke never wrote their security token to the session, so the
+  cookie-replay round answered HTTP 401 (empty session) and never reached the
+  gate — that is why the failing rounds showed `llen` 2-7 of 8.
+
+Gate-free scenarios (`pm2-mix`) self-heal: the next connection arrives quickly
+and unblocks the frozen child, which is why only gated scenarios failed
+reproducibly.
+
+**Fix:** `fpm_coop_accept()` (fiber pool acceptor) makes the listening socket
+non-blocking for the duration of the accept — the same treatment
+`fpm_coop_accept_kept()` already applies for the keep-alive path. With nothing
+pending it gets -1/EAGAIN and returns; the accept callback already handles
+that. With the fix, 30/30 loop rounds of the targeted pm2 repro pass (a stall
+previously appeared every 1-6 rounds), and the full suite result is
+**PASS=21 ERROR=0 NOT MEASURED=0** over the same 21 scenarios, measured
+2026-09-06 on macOS (arm64, kqueue) with the binary rebuilt from this source:
+`PHP 8.6.0-dev (fpm-fcgi) (built: Sep  6 2026 15:00:30) (NTS)`, SHA-256
+`1d002fbff74530876245e2d055662de7c13acfc5ecd77569ee1c9c4c5ab1729d`, source
+commit `d617976` — all four `pm2-*` scenarios pass their data assertions in
+the same run, including `pm2-stateful-auth` round 2 (cookie replay).
+`pool.executor = async` has the same latent pattern in
+`fpm_pool_async.c` and is currently a rejected configuration; it needs the
+same treatment before it can be enabled.
+
 ---
 
 # Slim 4 on `pool.executor = fiber`

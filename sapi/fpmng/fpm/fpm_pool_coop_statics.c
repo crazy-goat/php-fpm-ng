@@ -92,6 +92,16 @@
  * at a point the script did not choose, which is exactly the kind of
  * surprise side effect this file avoids for the autoloader case too.
  *
+ * A second, easy-to-miss lazy-init case: CE_STATIC_MEMBERS(info->ce) being
+ * non-NULL does not mean info->ce->ce_flags has ZEND_ACC_CONSTANTS_UPDATED
+ * -- default_static_members_table entries can still be an unresolved
+ * IS_CONSTANT_AST if constants have not been updated yet, and this file
+ * reads that same table (see "restoring the default" below), so it checks
+ * ZEND_ACC_CONSTANTS_UPDATED explicitly and skips the item if it is not
+ * set, rather than assume the ordering zend_std_get_static_property_with_info
+ * happens to use (constants-update, then init-statics).
+ *
+
  * --- Property-offset stability across zend_update_class_constants ------
  *
  * info->offset is assigned once, when the class is linked (either at
@@ -127,12 +137,22 @@
  *
  * --- Memory ownership: PROVEN, not assumed --------------------------------
  *
- * The transfer is ZVAL_COPY_VALUE(dst, src) + ZVAL_UNDEF(src) -- no
- * incref/decref, exactly the existing pattern for SG/OG/http_globals
- * (fpm_pool_coop.c) and ini_entry->value/orig_value (fpm_pool_coop_ini.c).
- * The claim to prove is: "at the moment of a context switch, the static
- * property slot's zval is the only zval that needs its OWN CONTENTS moved,
- * and moving it (not copying it) cannot corrupt any refcount, anywhere."
+ * Taking a request's own value OUT of the live slot is
+ * ZVAL_COPY_VALUE(dst, src) -- no incref/decref, exactly the existing
+ * pattern for SG/OG/http_globals (fpm_pool_coop.c) and ini_entry->value/
+ * orig_value (fpm_pool_coop_ini.c). The claim to prove is: "at the moment
+ * of a context switch, the static property slot's zval is the only zval
+ * that needs its OWN CONTENTS moved, and moving it (not copying it) cannot
+ * corrupt any refcount, anywhere." Unlike SG/OG/ini_entry->value, the slot
+ * is not then left as IS_UNDEF -- it is refilled with the class's own
+ * compiled-in default (ZVAL_COPY_OR_DUP from
+ * ce->default_static_members_table; see fpm_coop_statics_req_leave()) so
+ * that any OTHER, unrelated request that touches this same property for
+ * the first time while this one is away sees the class's real default, not
+ * an artificial hole. That refill is ordinary, engine-sanctioned zval
+ * duplication -- the same macro zend_class_init_statics() itself uses --
+ * not a second "move", so it does not affect the argument below, which is
+ * about the request's own value.
  *
  * ZVAL_COPY_VALUE copies the zval's bytes (type + value union -- for a
  * refcounted type, that union IS a pointer to a zend_refcounted*, e.g. an
@@ -382,19 +402,25 @@ void fpm_coop_statics_container_start(const char *pool_name) /* {{{ */
 }
 /* }}} */
 
-/* Resolves one configured item to its live slot, or NULL when there is
- * nothing to isolate yet (class not loaded, or loaded but its statics
- * table has not been allocated -- see file header, lazy-init hazard). Never
- * triggers autoload, never forces static initialisation. */
-static zval *fpm_coop_statics_slot(struct fpm_coop_static_item *item) /* {{{ */
+/* Resolves one configured item to its live slot plus the class's compiled-in
+ * DEFAULT for that same property (ce->default_static_members_table), or
+ * returns false when there is nothing to isolate yet (class not loaded, or
+ * loaded but its statics table has not been allocated, or its constant
+ * expressions not yet resolved -- see file header, lazy-init hazard). Never
+ * triggers autoload, never forces static initialisation.
+ *
+ * The default is needed by fpm_coop_statics_req_leave(): see the comment
+ * there for why leaving the live slot as IS_UNDEF (the spike's approach,
+ * and this file's own first version) is a genuine bug, not merely a style
+ * choice, whenever the property has a declared type. */
+static bool fpm_coop_statics_resolve(struct fpm_coop_static_item *item, zval **slot_out, zval **default_out) /* {{{ */
 {
 	zend_class_entry *ce;
 	zend_property_info *info;
-	zval *slot;
 
 	ce = zend_hash_str_find_ptr(EG(class_table), item->class_lower, item->class_lower_len);
 	if (!ce) {
-		return NULL;
+		return false;
 	}
 	info = zend_hash_str_find_ptr(&ce->properties_info, item->prop_name, item->prop_len);
 	if (!info || !(info->flags & ZEND_ACC_STATIC)) {
@@ -403,16 +429,20 @@ static zval *fpm_coop_statics_slot(struct fpm_coop_static_item *item) /* {{{ */
 				"isolation skipped for this item, request runs unisolated for it", fpm_coop_pool_name(), item->label);
 			item->warned = true;
 		}
-		return NULL;
+		return false;
 	}
 	/* Resolve through the DECLARING class (info->ce), never through the
 	 * configured one -- see file header, inherited-statics discussion. */
-	if (CE_STATIC_MEMBERS(info->ce) == NULL) {
-		return NULL;	/* not yet initialised on this process; not an error */
+	if (!(info->ce->ce_flags & ZEND_ACC_CONSTANTS_UPDATED)) {
+		return false;	/* default_static_members_table may still hold an unresolved IS_CONSTANT_AST */
 	}
-	slot = CE_STATIC_MEMBERS(info->ce) + info->offset;
-	ZVAL_DEINDIRECT(slot);
-	return slot;
+	if (CE_STATIC_MEMBERS(info->ce) == NULL) {
+		return false;	/* not yet initialised on this process; not an error */
+	}
+	*slot_out = CE_STATIC_MEMBERS(info->ce) + info->offset;
+	ZVAL_DEINDIRECT(*slot_out);
+	*default_out = &info->ce->default_static_members_table[info->offset];
+	return true;
 }
 /* }}} */
 
@@ -431,9 +461,9 @@ void fpm_coop_statics_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 	slots = (zval *) ctx->statics;
 
 	for (i = 0; i < fpm_coop_statics_count; i++) {
-		zval *slot = fpm_coop_statics_slot(&fpm_coop_statics_items[i]);
+		zval *slot, *def;
 
-		if (!slot) {
+		if (!fpm_coop_statics_resolve(&fpm_coop_statics_items[i], &slot, &def)) {
 			resolved[i] = NULL;
 			continue;
 		}
@@ -457,9 +487,25 @@ void fpm_coop_statics_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		if (!slot) {
 			continue;
 		}
-		/* Move, not copy -- see file header, memory-ownership section. */
+		/* Move this request's own value out (not a copy -- see file header,
+		 * memory-ownership section), THEN put the class's compiled-in
+		 * DEFAULT back in the live slot -- never IS_UNDEF. A request that
+		 * has never touched this item before (ctx->statics freshly
+		 * allocated above, entry still IS_UNDEF) does nothing on its next
+		 * enter() (see below), so between here and then the live slot is
+		 * what any OTHER, unrelated request needs to see: the class's own
+		 * fresh default, exactly as if nobody had ever suspended holding
+		 * it away. Leaving IS_UNDEF instead (the spike's approach) is a
+		 * real bug for any TYPED property with no nullable/default: PHP
+		 * throws "must not be accessed before initialization" on the very
+		 * first read by that other request -- reproduced with
+		 * tests/statics_reference.php before this fix, see its git log
+		 * entry. ZVAL_COPY_OR_DUP, not ZVAL_COPY_VALUE, because the
+		 * default template can itself be a refcounted value (e.g. an
+		 * array-literal default) that must not be aliased between the
+		 * class's permanent default table and the live slot. */
 		ZVAL_COPY_VALUE(&slots[i], slot);
-		ZVAL_UNDEF(slot);
+		ZVAL_COPY_OR_DUP(slot, def);
 	}
 }
 /* }}} */
@@ -479,13 +525,12 @@ void fpm_coop_statics_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	for (i = 0; i < fpm_coop_statics_count; i++) {
 		zval *saved = &slots[i];
-		zval *slot;
+		zval *slot, *def;
 
 		if (Z_TYPE_P(saved) == IS_UNDEF) {
 			continue; /* nothing stashed for this item at the last leave() */
 		}
-		slot = fpm_coop_statics_slot(&fpm_coop_statics_items[i]);
-		if (!slot) {
+		if (!fpm_coop_statics_resolve(&fpm_coop_statics_items[i], &slot, &def)) {
 			/* The class "un-loaded" between leave() and enter() -- cannot
 			 * happen (EG(class_table) only grows for the life of the
 			 * process), but if it ever did, there is nowhere to give the
@@ -493,6 +538,13 @@ void fpm_coop_statics_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 			 * again) rather than segfault or silently drop a reference. */
 			continue;
 		}
+		/* Whatever is currently in the live slot is the default placeholder
+		 * this same req_leave() put there (or another request's leave(),
+		 * if that request never got a turn in between) -- release it
+		 * before overwriting, since ZVAL_COPY_OR_DUP may have allocated it
+		 * (e.g. duplicated an array default). Then move this request's own
+		 * value back in -- again a move, not a copy. */
+		zval_ptr_dtor(slot);
 		ZVAL_COPY_VALUE(slot, saved);
 		ZVAL_UNDEF(saved);
 	}

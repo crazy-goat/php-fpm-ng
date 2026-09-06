@@ -36,6 +36,7 @@
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_session.h"
 #include "fpm_pool_coop_ini.h"
+#include "fpm_pool_coop_statics.h"
 #include "zlog.h"
 
 const char *const fpm_coop_rejects[] = {
@@ -398,6 +399,8 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	 * session (jesli w ogole zaladowany) po wlasnym RINIT kontenera. */
 	fpm_coop_session_container_start();
 
+	fpm_coop_statics_container_start(pool_name);
+
 	return 0;
 }
 /* }}} */
@@ -506,6 +509,7 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		EG(user_exception_handlers) = ctx->user_exception_handlers;
 		fpm_coop_session_req_enter(ctx);
 		fpm_coop_ini_req_enter(ctx);
+		fpm_coop_statics_req_enter(ctx);
 	}
 }
 /* }}} */
@@ -555,6 +559,7 @@ void fpm_coop_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		ctx->user_exception_handlers = EG(user_exception_handlers);
 		fpm_coop_session_req_save(ctx);
 		fpm_coop_ini_req_leave(ctx);
+		fpm_coop_statics_req_leave(ctx);
 		fpm_coop_base_tables_restore();
 	}
 }
@@ -862,6 +867,7 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 	fcgi_request *req = ctx->req;
 
 	fpm_coop_ini_req_free(ctx);
+	fpm_coop_statics_req_free(ctx);
 	efree(ctx);
 	return req;
 }

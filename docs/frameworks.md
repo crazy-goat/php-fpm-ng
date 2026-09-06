@@ -172,7 +172,7 @@ In order: cheap and blocking everything first.
 5. **Laravel: class statics per fiber** (`Container::$instance`,
    `Facade::$app`). This is the direction the True Async fork took and then
    **reverted**. Without this, Laravel on a fiber is at best one request in
-   flight.
+   flight. **Done** — see "Laravel: fix 5 landed" below.
 6. **HTTP gateway: fallback to the front controller** — `/mix` currently gives
    "File not found", you have to use `/index.php/mix`. A separate gap, also
    documented in NOTES ("index.php hardcoded / no try_files").
@@ -262,6 +262,70 @@ change, not weaker.
 The difference between the frameworks is not in their quality: Symfony keeps
 state in a container passed explicitly, Laravel in a class static — and class
 statics are process-wide and we do not separate them.
+
+## Laravel: fix 5 landed — class statics per request (`fiber.isolate_statics`)
+
+**Previously ("Laravel: still NO" above):** 5/8 correct, three requests got
+someone else's session, sharing one `Application` and one `Request` object.
+
+**Now, with a configured, per-request-isolated list of class static
+properties** (task 008, `sapi/fpmng/fpm/fpm_pool_coop_statics.c`):
+
+    fiber.isolate_statics = Illuminate\Container\Container::instance,Illuminate\Support\Facades\Facade::app,Illuminate\Support\Facades\Facade::resolvedInstance
+
+Measured on the same `/session?user=X&sleep=0.3`, N=8, `pm.max_children = 1`:
+8/8 correct, distinct `sess_user`, distinct `app_oid` and
+`container_request_oid` per request. A negative control (same run, empty
+`fiber.isolate_statics`) reproduced the original failure (4-5/8 wrong,
+several requests sharing one `app_oid`), confirming the isolation is what
+fixes it, not something else about the measurement.
+
+Also measured: an authenticated flow not covered by the spike --
+`Auth::login()` for two users (`alice`, `bob`) followed by 4 concurrent
+`/me` requests per user. Without `Facade::app`/`Facade::resolvedInstance` in
+the list (isolating `Container::instance` alone), this came back mostly
+wrong (`user: null` for most requests) — the AuthManager instance resolved
+through the Facade cache belonged to whichever *other* request bootstrapped
+last. With all three items isolated: 8/8 correct.
+
+**The mechanism does not know about Laravel.** The directive is a
+comma-separated list of `Class\Name::property` read from pool configuration;
+`fpm_pool_coop_statics.c` has no Laravel-specific code, no hardcoded class
+name, and resolves any class/property pair the same way. The Laravel value
+above is documentation, not code.
+
+**Memory ownership is not merely assumed to be safe — it is argued, and the
+one hazard that turned up experimentally has since been fixed.** The
+transfer of a request's own value is a relocation (`ZVAL_COPY_VALUE`, no
+incref/decref), exactly like the existing `SG`/`OG`/`ini_entry->value` swaps;
+seeing this through required also fixing what the *live slot* holds while no
+request owns it. Leaving it `IS_UNDEF` (the spike's approach) is a genuine
+bug for any typed property with no default: a second, unrelated request
+touching the same property for the first time while the first is suspended
+elsewhere hit "Cannot access uninitialized non-nullable property ... by
+reference" — reproduced with `tests/statics_reference.php` and fixed by
+refilling the slot with the class's own compiled-in default
+(`ZVAL_COPY_OR_DUP` from `default_static_members_table`) instead. References
+(`$x = &Class::$static;`) across a real suspension point (a blocking MySQL
+query, not `usleep()` — see the caveat below) are covered by that same test
+and pass. See the commit and `fpm_pool_coop_statics.c`'s own comments for
+the complete argument, hazard by hazard.
+
+**Caveat worth stating plainly: `sleep()`/`usleep()` do not suspend the fiber
+in this build** (`docs/fiber_async_io.md`) — they block the whole process.
+The `?sleep=0.3` parameter above does not itself cause interleaving; the
+interleaving that makes the `/session` and `/me` measurements meaningful
+comes from the real Redis/MySQL I/O Laravel's own bootstrap and session
+handling already do. This was checked with a negative control before relying
+on it (see above), not assumed.
+
+**Cost when unconfigured:** `fpm_coop_statics_req_enter()`/`_req_leave()`
+both start with `if (fpm_coop_statics_count == 0) { return; }` — no
+allocation, no lookup, when the directive is empty (the default). Latency
+measurement attempted (50 sequential requests via curl, empty vs. 4 isolated
+items) was within run-to-run noise (curl process spawn dominates at this
+scale) and is not reported as a number for that reason; the zero-cost claim
+rests on the code path, not on that measurement.
 
 ## Known limitation of fix 4
 

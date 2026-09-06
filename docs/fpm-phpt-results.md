@@ -72,10 +72,10 @@ pass or hidden as a skip.
   test. Task 015 separately tracks the `http.listen` default for TCP HTTP
   pools.
 - `gh16432-status-high-nprocs.phpt` — **unclassified intermittent
-  observation; task remains open**. It failed once in three complete runs but
-  passed five isolated repetitions with the same binary. The failure is
-  retained in the repeatability record and needs a separate investigation
-  under full-suite/resource pressure before task 001 can be closed; it is not
+  observation**; see [follow-up task 029](../tasks/029-fpm-phpt-gh16432-intermittent-failure.md).
+  It failed once in three complete runs but passed five isolated repetitions
+  with the same binary. The failure is retained in the repeatability record and
+  needs a separate investigation under full-suite/resource pressure; it is not
   silently counted as a pass or classified as a stable regression from this
   evidence.
 - `log-bwd-multiple-msgs-stdout-stderr.phpt` — **upstream expected-failure

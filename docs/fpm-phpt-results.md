@@ -61,19 +61,23 @@ The `WARN` row is the upstream `XFAIL` test
 `--XFAIL--` section, so upstream emitted `WARNED`. It is not counted as a
 pass or hidden as a skip.
 
-## Triage of non-PASS results
+## Triage and follow-up of non-PASS results
 
-- `http-basic.phpt` — **test artifact / intended difference**. The upstream
-  test assumes the old global `--with-fpm-http` mode and a pool with no
-  `pool.type`. In fpmng the HTTP gateway starts only for `pool.type = http` and
-  uses the fpmng gateway configuration. The test therefore receives connection
-  refused rather than testing the fpmng HTTP pool. This is the documented
-  migration difference behind task 015, not a deleted or weakened test.
-- `gh16432-status-high-nprocs.phpt` — **intermittent observation**. It failed
-  once in three complete runs but passed five isolated repetitions with the
-  same binary. The failure is retained in the repeatability record and needs a
-  separate investigation if it recurs; it is not classified as a stable
-  php-fpm-ng regression from this evidence.
+- `http-basic.phpt` — **intended difference**. The upstream test assumes the
+  old global `--with-fpm-http` mode and a pool with no `pool.type`. In fpmng the
+  HTTP gateway starts only for `pool.type = http` and uses the fpmng gateway
+  configuration. The test therefore receives connection refused rather than
+  testing the fpmng HTTP pool. This deliberate behavior is documented in
+  `docs/NOTES.md`, section 3i (`pool.type`); it is not a deleted or weakened
+  test. Task 015 separately tracks the `http.listen` default for TCP HTTP
+  pools.
+- `gh16432-status-high-nprocs.phpt` — **unclassified intermittent
+  observation; task remains open**. It failed once in three complete runs but
+  passed five isolated repetitions with the same binary. The failure is
+  retained in the repeatability record and needs a separate investigation
+  under full-suite/resource pressure before task 001 can be closed; it is not
+  silently counted as a pass or classified as a stable regression from this
+  evidence.
 - `log-bwd-multiple-msgs-stdout-stderr.phpt` — **upstream expected-failure
   warning**. The test is marked `XFAIL` as intermittent and passed in this run;
   the raw status is `WARNED`, recorded as `WARN`.

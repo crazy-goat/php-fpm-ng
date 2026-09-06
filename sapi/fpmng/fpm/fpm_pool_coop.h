@@ -35,6 +35,13 @@
 #include "php_variables.h"
 #include "zend_stack.h"
 #include "fastcgi.h"
+/* zend_ps_globals — TYLKO po rozmiar struktury (sizeof ponizej). Dolaczenie
+ * tego naglowka nie tworzy zaleznosci linkera samo z siebie (dokladnie tak
+ * samo, bez zadnej ochrony, dolacza go ext/standard/basic_functions.c,
+ * kompilowane zawsze) — zaleznosc powstalaby dopiero przy uzyciu
+ * ZEND_EXTERN_MODULE_GLOBALS(ps) albo odwolaniu do ps_globals po nazwie,
+ * a tego nigdzie w fpm_pool_coop*.c nie ma. Patrz fpm_pool_coop_session.c. */
+#include "ext/session/php_session.h"
 
 /* Stan jednego requestu w locie, gdy NIE jest na procesorze. Gdy jest —
  * to samo lezy w globalach silnika, a ta struktura jest nieaktualna. */
@@ -57,6 +64,15 @@ struct fpm_coop_req_s {
 	zend_stack user_error_handlers_error_reporting;
 	zend_stack user_error_handlers;
 	zend_stack user_exception_handlers;
+
+	/* Snapshot ps_globals (ext/session) tego requestu, gdy NIE jest na
+	 * procesorze — patrz fpm_pool_coop_session.[ch]. Niezalezne od "live":
+	 * zerowe bajty przed pierwszym fpm_coop_session_req_save() sa nieszkodliwe
+	 * (nigdy nie sa czytane, dopoki fpm_coop_session_request_startup() nie
+	 * zapisze do zywych globali stanu bazowego). Rozmiar liczony zawsze,
+	 * nawet gdy session nie jest zaladowane — koszt to kilkaset bajtow na
+	 * kontekst requestu, bez alokacji. */
+	unsigned char session_globals[sizeof(zend_ps_globals)];
 
 	void *type_data;			/* prywatne typu poola (fiber: zend_fiber + event) */
 };

@@ -113,3 +113,37 @@ scenario that was measured.
 - Symfony works not because it is better written but because it passes its
   container explicitly; Laravel keeps it in a class static. This distinction is
   the whole content of the task and should survive into whatever gets documented.
+
+## Outcome (2026-09-06)
+
+Implemented as `fiber.isolate_statics` (pool config, comma-separated
+`Class\Name::property` list), `sapi/fpmng/fpm/fpm_pool_coop_statics.c`/`.h`,
+following the existing `fpm_pool_coop_session.c`/`fpm_pool_coop_ini.c`
+enter/leave pattern. No Laravel-specific code; the Laravel value is
+documentation only (`docs/frameworks.md`). Rejected for non-fiber-executor
+pools for free via the existing "fiber." prefix in `rejects[]`.
+
+Measured on the test box: `/session` N=8 8/8 (was 5/8), `Auth::login` + `/me`
+N=8 8/8 (a prior attempt reported 5/6 wrong), Symfony `/session` N=8 8/8 with
+`count` incrementing correctly on a second round (no regression),
+`pool.executor = classic` unaffected and the directive rejected for it,
+misconfiguration (bad syntax) fails pool start, misconfiguration (missing
+class/non-static property) logs a warning and keeps the pool running.
+
+Memory ownership: argued as a relocation of the request's own zval (no
+incref/decref needed), same pattern as the existing SG/OG/ini swaps. One real
+bug was found and fixed during this task, not merely reasoned about: leaving
+the live slot as `IS_UNDEF` after taking a request's value away (the spike's
+approach) crashes on the very next unrelated request to touch a *typed*
+static property with no default, while the first request is still away.
+Fixed by refilling the live slot with the class's compiled-in default
+(`ZVAL_COPY_OR_DUP` from `default_static_members_table`) instead of leaving a
+hole. Caught and reproduced by `tests/statics_reference.php`, which also
+covers the reference-across-suspension case the spike never tested.
+
+Left undone / not measured: `/mix` (uses `Item::find()`) errors with an
+unrelated 500 on this box (DB fixture issue, not part of the acceptance
+criteria) and was not investigated. Latency cost of an empty
+`fiber.isolate_statics` was not cleanly measured (curl process-spawn noise
+dominated a 50-request loop); the zero-cost claim rests on the code path
+(`if (count == 0) return;`), not on a number.

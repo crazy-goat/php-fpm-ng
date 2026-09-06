@@ -1,82 +1,82 @@
 # php-fpm-ng
 
-POC. PHP-FPM z dodatkowymi trybami pracy: HTTP, supervisor, cron i metryki —
-tak, żeby obraz kontenera zawierał jedną binarkę i kod aplikacji, bez nginxa,
-bez supervisord i bez crona z systemu.
+POC. PHP-FPM with additional operating modes: HTTP, supervisor, cron and
+metrics — so that the container image holds one binary and the application
+code, without nginx, without supervisord and without a system cron.
 
-**Grupa docelowa: małe projekty.** Jeden VPS, jedna instancja, typowo aplikacja
-plus jeden lub dwa consumery plus kilka cronów. Nie k8s.
+**Target audience: small projects.** One VPS, one instance, typically an
+application plus one or two consumers plus a few cron jobs. Not k8s.
 
-Argumentem nie jest wydajność — zmierzone kilka procent CPU przy realnym
-obciążeniu (szczegóły w notatkach). Argumentem jest jeden plik konfiguracyjny
-opisujący całość i jedna binarka do skanowania.
+The argument is not performance — measured a few percent CPU under real load
+(details in the notes). The argument is one configuration file describing the
+whole thing and one binary to scan.
 
-## Stan na dziś
+## State as of today
 
-Działa POC bramki HTTP na libevent, jako gałąź w php-src:
+The HTTP gateway POC on libevent works, as a branch in php-src:
 https://github.com/s2x/php-src/tree/fpm-http-poc
 
-Zweryfikowane 2026-09-05:
+Verified 2026-09-05:
 
-- pełne statyczne budowanie na musl (`-static-pie`) z opcache, mbstring, curl
+- full static build on musl (`-static-pie`) with opcache, mbstring, curl
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
-- uruchomienie w gołym `FROM scratch`, FPM jako PID 1, HTTP 200, cały obraz
-  20 MB w wersji minimalnej
-- frontend wybiera `pool.type = fastcgi | fastcgi-ng | http`; brak dyrektywy
-  oznacza klasyczny `fastcgi` i zachowuje zgodnosc z upstreamowym FPM
-- `fastcgi-ng` i `http` przyjmuja opcjonalne
-  `pool.executor = classic | fiber | async` (domyslnie `classic`)
-- metryki: `pool.type = status` wystawia wbudowane `/metrics` (Prometheus)
-  i `/status` (JSON); metryki aplikacyjne z PHP (`fpm_metric_register/inc/
-  set/observe`, NOTES 3k/3w) przez rozszerzenie `ext/fpmng_metrics/`,
-  rowniez z CLI przez `fpm_metric_render()`
-- executory `fiber` i `async` sa eksperymentalne i nie sa przeznaczone do
-  produkcji; Fiber wymaga wylaczonego OPcache, a dla True Async nadal jest to
-  zalecane; ograniczenia opisuje `docs/NOTES.md`, sekcje 3t–3u
+- runs in a bare `FROM scratch`, FPM as PID 1, HTTP 200, whole image
+  20 MB in the minimal variant
+- the frontend selects `pool.type = fastcgi | fastcgi-ng | http`; no directive
+  means classic `fastcgi` and stays compatible with upstream FPM
+- `fastcgi-ng` and `http` accept an optional
+  `pool.executor = classic | fiber | async` (default `classic`)
+- metrics: `pool.type = status` exposes a built-in `/metrics` (Prometheus)
+  and `/status` (JSON); application metrics from PHP (`fpm_metric_register/inc/
+  set/observe`, NOTES 3k/3w) through the `ext/fpmng_metrics/` extension,
+  also from CLI via `fpm_metric_render()`
+- the `fiber` and `async` executors are experimental and not intended for
+  production; Fiber requires OPcache disabled, and for True Async this is
+  still recommended; limitations are described in `docs/NOTES.md`, sections 3t-3u
 
 ## Plan
 
-Docelowo **osobne SAPI** w `sapi/fpmng/`, nie fork php-src — `configure.ac`
-wykrywa katalogi w `sapi/` globem, więc nie trzeba tknąć żadnego istniejącego
-pliku. Szczegóły, decyzje, zmierzone liczby i lista znanych problemów:
-[`docs/NOTES.md`](docs/NOTES.md).
+Eventually a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src —
+`configure.ac` finds directories under `sapi/` by glob, so no existing file
+needs to be touched. Details, decisions, measured numbers and the list of
+known issues: [`docs/NOTES.md`](docs/NOTES.md).
 
-## Zalecana konfiguracja poola dla lekkich endpointów
+## Recommended pool configuration for lightweight endpoints
 
-Zysk bez linijki kodu, zmierzony na poligonie (szczegóły: `docs/NOTES.md`, 3m i 3t):
+Gain with no line of code, measured on the test box (details: `docs/NOTES.md`, 3m and 3t):
 
 ```ini
-listen = /run/php/pool.sock          ; UDS zamiast loopbacku TCP: -7..-11 us/req
-php_admin_value[max_execution_time] = 0   ; bez setitimer per request: -3 us/req
-catch_workers_output = no            ; logi przez error_log()/stderr do wlasnego stosu
-request_cpu_tracking = no            ; jesli nikt nie czyta "last request cpu" ani %C
+listen = /run/php/pool.sock          ; UDS instead of TCP loopback: -7..-11 us/req
+php_admin_value[max_execution_time] = 0   ; no setitimer per request: -3 us/req
+catch_workers_output = no            ; logs via error_log()/stderr to our own stack
+request_cpu_tracking = no            ; if nobody reads "last request cpu" or %C
 ```
 
-`request_terminate_timeout` nadal pilnuje czasu ściennego, więc
-`max_execution_time = 0` nie zostawia requestu bez strażnika.
+`request_terminate_timeout` still guards wall-clock time, so
+`max_execution_time = 0` does not leave a request without a guard.
 
-## Budowanie
+## Building
 
-Skrypty w `build/` uruchamiane w kontenerze Alpine, budowanie out-of-tree:
+Scripts in `build/` run in an Alpine container, building out-of-tree:
 
 ```sh
 docker run --rm \
-  -v /sciezka/do/php-src:/src \
+  -v /path/to/php-src:/src \
   -v $PWD/build-dir:/build \
   -v $PWD:/out \
   alpine:latest sh /out/build/static-full.sh
 ```
 
-Dwie flagi, bez których to wygląda na zepsute bez powodu:
+Two flags without which this looks broken for no reason:
 
-- `LDFLAGS=-static-pie` — samo `-static` nie działa, bo toolchain Alpine
-  domyślnie robi PIE i linker po cichu produkuje binarkę dynamiczną,
-  a build kończy się sukcesem
-- `PKG_CONFIG="pkg-config --static"` — inaczej statyczny curl nie przechodzi
-  testu konfiguracji, bo brakuje jego zależności na linii linkowania
+- `LDFLAGS=-static-pie` — plain `-static` does not work, because the Alpine
+  toolchain defaults to PIE and the linker silently produces a dynamic
+  binary, and the build still succeeds
+- `PKG_CONFIG="pkg-config --static"` — otherwise static curl fails the
+  configure test, because its dependencies are missing from the link line
 
-Alpine nie ma `oniguruma-static`, więc mbstring buduje się z `--disable-mbregex`.
+Alpine has no `oniguruma-static`, so mbstring is built with `--disable-mbregex`.
 
-## Licencja
+## License
 
-PHP License 3.01 — kod pochodzi z PHP-FPM.
+PHP License 3.01 — code comes from PHP-FPM.

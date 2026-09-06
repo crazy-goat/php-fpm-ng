@@ -338,3 +338,53 @@ Ograniczenia:
 - Sledzone sa tylko pliki przechodzace przez `zend_compile_file`: `eval()`,
   dane czytane `file_get_contents` (konfiguracja YAML/JSON) i szablony
   nie-PHP nie sa widziane.
+
+## Polaczenia trwale: ZABLOKOWANE (zmierzone na poligonie)
+
+`EG(persistent_list)` jest PROCESOWA, a rdzen coop jej nie podmienia przy
+przelaczaniu requestow — wiec dwa requesty w locie moga dostac ten sam socket.
+Protokoly bazodanowe sa naprzemienne (zapytanie-odpowiedz), wiec to nie jest
+spowolnienie, tylko rozjechany protokol.
+
+**Zmierzone** (Ubuntu 26.04, epoll, jeden worker, 4 rownolegle requesty, ten sam
+DSN, MySQL 8):
+
+    PDO z ATTR_PERSISTENT, przebieg 1:  3 requesty WISZA do timeoutu klienta (60 s),
+                                        1 konczy sie poprawnie
+    PDO z ATTR_PERSISTENT, przebieg 2:  3 x HTTP 502, czwarty
+                                        "PDOException: Trying to access array offset on false",
+                                        worker padl i zostal wymieniony
+    PDO bez persistent, ten sam test:   1,019 s, czysto
+
+    mysqli z prefiksem "p:":            NIE psul sie — cztery ROZNE identyfikatory
+                                        sesji (215-218), tag_ok=true, 1,017 s
+
+Czyli bezpieczenstwo zalezy od tego, czy dany klient pilnuje zajetosci
+polaczenia: PDO nie pilnuje, mysqli pilnuje. Z warstwy transportu tego nie
+widac i nie kontrolujemy tego, wiec **blokujemy oba**. Lepiej odmowic glosno
+przy nawiazywaniu polaczenia niz rozjechac protokol w losowym requescie.
+
+### Gdzie i dlaczego tam
+
+W fabryce transportu (`fpm_pool_fiber_xport.c`), nie w `validate()` — persistent
+to atrybut polaczenia podawany w kodzie aplikacji, a nie dyrektywa konfiguracji,
+wiec w momencie walidacji poola nie ma czego sprawdzac. Odmowa dotyczy tylko
+executora fiber (`fpm_pool_fiber_can_wait()`); `fastcgi` i `http/classic` sa
+nietkniete — zmierzone, `classic` z persistent dalej dziala jak dotad.
+
+### Komunikat: dwa odbiorcy
+
+Programista dostaje `E_WARNING` z wyjasnieniem. **Ale PDO lapie blad polaczenia
+i rzuca wlasny `PDOException: SQLSTATE[HY000] [2002] Unknown error while
+connecting`, wiec do autora kodu nasze ostrzezenie NIE dociera** — zmierzone.
+Dlatego operator dostaje osobny `ZLOG_NOTICE` w logu workera, raz na proces.
+
+**`persistent_id` NIE jest logowany**: PDO sklada ten klucz z DSN wraz
+z uzytkownikiem i haslem, wiec trafiloby to do error logu.
+
+### Regresje sprawdzone
+
+    pdo nietrwaly N=4       1,018 s
+    mysqli nietrwaly N=4    1,018 s
+    phpredis N=4 (BLPOP)    1,116 s
+    classic z persistent    2,019 s (bez zmian)

@@ -66,7 +66,12 @@ done
 # --enable-fpmng-async (obie domyslnie "no"); reszta jest budowana zawsze.
 # Podzial zweryfikowany po referencjach symboli — coop.* nie jest uzywane
 # poza fiber, async nie odwoluje sie do coop.
-FIBER_PATTERN='^fpm/fpm_pool_fiber(_xport|_flock|_sleep)?\.c$|^fpm/fpm_pool_coop(_ini|_reval|_session|_session_patch|_statics)?\.c$'
+# Dopasowanie po PREFIKSIE nazwy, nie po wyliczeniu plikow. Wyliczenie
+# cofaloby cala idee tego skryptu: lista zrodel ma sie brac z 'find', zeby
+# nowy plik nie wymagal edycji. Przy wyliczeniu nowy fpm_pool_coop_cokolwiek.c
+# NIE pasowalby do wzorca, wpadlby cicho do listy bazowej i wyladowal w
+# domyslnej binarce — czyli dokladnie to, czemu te flagi maja zapobiegac.
+FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
 ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
 
 BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN")

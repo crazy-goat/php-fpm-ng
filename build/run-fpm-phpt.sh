@@ -224,6 +224,15 @@ mkdir -p "$HARNESS_DIR/bin" "$HARNESS_DIR/fpm"
 HARNESS_FPM=$HARNESS_DIR/bin/php-fpm-ng
 ln -s "$FPM_BIN" "$HARNESS_FPM"
 ln -s "$FPM_BIN" "$HARNESS_DIR/fpm/php-fpm"
+# tester.inc::findExecutable() (as shipped in the php-8.5.9 tag; the newer
+# dev snapshot task 001 was validated against reads TEST_PHP_FPM_EXECUTABLE
+# directly, but that isn't upstream API to rely on) never looks at
+# TEST_PHP_FPM_EXECUTABLE. It strips two path components off
+# TEST_PHP_EXECUTABLE and checks "<that>/fpm/php-fpm" — so TEST_PHP_EXECUTABLE
+# must itself live two levels under a directory containing fpm/php-fpm, i.e.
+# under $HARNESS_DIR, not at the caller-supplied $CLI_BIN path.
+HARNESS_CLI=$HARNESS_DIR/bin/php
+ln -s "$CLI_BIN" "$HARNESS_CLI"
 write_metadata
 
 TIMEOUT=${TEST_FPM_TIMEOUT-60}
@@ -238,12 +247,12 @@ printf '%s\n' "Binary: $FPM_BIN" >&2
 set +e
 (
     cd "$PHPSRC" || exit 1
-    TEST_PHP_EXECUTABLE="$CLI_BIN" \
+    TEST_PHP_EXECUTABLE="$HARNESS_CLI" \
     TEST_PHP_FPM_EXECUTABLE="$HARNESS_FPM" \
     "$CLI_BIN" -n run-tests.php \
         -q -n --offline --no-progress --no-color \
         --set-timeout "$TIMEOUT" \
-        -p "$CLI_BIN" \
+        -p "$HARNESS_CLI" \
         -W "$STATUS_RAW" \
         -w "$FAILED" \
         -s "$OUTPUT_LOG" \

@@ -126,6 +126,8 @@ struct fpm_worker_pool_config_s {
 	char *http_allowed_clients;		/* jak listen.allowed_clients, ale dla bramki HTTP; puste = brak ograniczenia */
 	char *http_trusted_proxies;		/* adresy, z ktorych ufamy naglowkom X-Forwarded-*; puste = nikomu (bezpieczny domyslny), patrz fpm_http_forwarded.c */
 	char *http_access_log;			/* sciezka do logu dostepu bramki HTTP; puste = wylaczony, patrz fpm_http_access_log.c */
+	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
+	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

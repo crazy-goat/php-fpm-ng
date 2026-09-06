@@ -20,9 +20,16 @@
 #include "zlog.h"
 
 /* http.* dostraja bramke, ktora startuje wylacznie pod pool.type = http —
- * na kazdym innym typie te dyrektywy nie maja czego dostrajac. */
+ * na kazdym innym typie te dyrektywy nie maja czego dostrajac. fiber.* dotyczy
+ * wylacznie pool.executor = fiber (fpm_coop_rejects go nie zawiera). */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
+	"fiber.",
+	NULL
+};
+
+static const char *const fpm_pool_http_classic_rejects[] = {
+	"fiber.",
 	NULL
 };
 
@@ -65,6 +72,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		.rejects         = fpm_pool_http_classic_rejects,
 		.validate        = fpm_http_validate_pool,
 		.init_main       = fpm_pool_type_http_init,
 	},

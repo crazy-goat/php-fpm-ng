@@ -388,3 +388,35 @@ z uzytkownikiem i haslem, wiec trafiloby to do error logu.
     mysqli nietrwaly N=4    1,018 s
     phpredis N=4 (BLPOP)    1,116 s
     classic z persistent    2,019 s (bez zmian)
+
+## ODRZUCONE: executor fiber wylacznie w ZTS, kontekst TSRM per request
+
+Pomysl: skoro w ZTS wszystkie globale (`EG`, `SG`, `PG` i globale KAZDEGO
+modulu, w tym `ps_globals`) sa przesunieciami w bloku zasobow watku, to gdyby
+kazdy request w locie mial wlasny blok, jednym ruchem znikaja sesje per
+request, wpisy ini, statyki klas frameworka (`Container::$instance`,
+`Facade::$app`) i cala sciana `Cannot redeclare` / `require_once` — bo kazdy
+request bylby swiezym interpreterem.
+
+**Sprawdzone eksperymentalnie i odrzucone.** Pelny raport z surowymi wynikami:
+`docs/spike-tsrm-context.md`. Skrot:
+
+- Przelaczanie przez reczne `TSRMLS_CACHE` DZIALA dla kodu wkompilowanego
+  statycznie (zmierzone na `EG(precision)`), ale nie ma settera dla sciezki
+  `tsrm_get_ls_cache()` — przelaczanie jest wiec jednokierunkowe i niepelne.
+- Rozszerzenie ladowane DYNAMICZNIE ma **fizycznie oddzielna kopie**
+  `_tsrm_ls_cache`, zamrozona przy starcie procesu. `readelf -sW` pokazuje ten
+  symbol jako `TLS LOCAL` osobno w `sapi/cli/php` i w
+  `ext/session/.libs/session.so`. Zadna podmiana w binarce glownej nie ma
+  prawa byc przez nie widziana — i to bez bledu kompilacji i bez ostrzezenia.
+- Blok utworzony przez `ts_resource_ex(0, &fake_tid)` powstaje, ale **nie jest
+  dzialajacym interpreterem**: wykonanie w nim nawet trywialnego pliku PHP
+  konczy sie segfaultem. API, ktore robilo to poprawnie
+  (`tsrm_set_interpreter_context()`), usunieto w PHP 8 (`bd73607b9e4`).
+- Niezaleznie od powyzszego build ZTS `sapi/fpmng` i tak dzis nie przechodzi:
+  `fpm_pool_coop.c` uzywa golych `sapi_globals`/`output_globals`, ktore w ZTS
+  sa makrami, nie symbolami (8 wystapien) — spojne z tym, ze
+  `fpm_coop_validate()` odrzuca ZTS juz w runtime.
+
+Koszt pamieci pustego bloku zmierzono na ~285-292 kB; koszt z zaladowanym
+frameworkiem NIE zostal zmierzony, bo do tego nigdy nie doszlo.

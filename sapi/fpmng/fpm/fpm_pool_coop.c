@@ -35,6 +35,8 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_session.h"
+#include "fpm_pool_coop_session_lock.h"
+#include "fpm_pool_coop_session_patch.h"
 #include "fpm_pool_coop_ini.h"
 #include "fpm_pool_coop_statics.h"
 #include "zlog.h"
@@ -368,6 +370,13 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 	fpm_coop_orig_import_env = php_import_environment_variables;
 	php_import_environment_variables = fpm_coop_import_environment_variables;
 
+	/* MUSI byc PRZED php_request_startup() nizej: ext/session resolwuje
+	 * session.save_handler na nowo przy KAZDYM RINIT (nie raz na proces) -
+	 * patrz fpm_pool_coop_session_lock.c - wiec modul "files_arb" musi juz
+	 * byc zarejestrowany, zanim ten proces wykona swoj PIERWSZY RINIT. */
+	fpm_coop_session_lock_container_start();
+	fpm_coop_session_patch_container_start();
+
 	/* Request-kontener: jedyny php_request_startup() w zyciu procesu. Daje
 	 * aktywny executor, RINIT rozszerzen i arene pamieci. */
 	SG(server_context) = NULL;
@@ -508,6 +517,8 @@ void fpm_coop_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		EG(user_error_handlers) = ctx->user_error_handlers;
 		EG(user_exception_handlers) = ctx->user_exception_handlers;
 		fpm_coop_session_req_enter(ctx);
+		fpm_coop_session_lock_req_enter(ctx);
+		fpm_coop_session_patch_req_enter(ctx);
 		fpm_coop_ini_req_enter(ctx);
 		fpm_coop_statics_req_enter(ctx);
 	}
@@ -676,6 +687,7 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	 * request; tu wolany per request mimo jednego php_request_startup() na
 	 * proces kontenera). No-op, gdy session nie jest zaladowane. */
 	fpm_coop_session_request_startup();
+	fpm_coop_session_patch_req_apply();
 
 	/* Buduje $_GET/$_POST/$_COOKIE/$_FILES z BIEZACEGO SG do BIEZACEJ tablicy
 	 * i uzbraja JIT-owe ($_SERVER, $_ENV, $_REQUEST) na czas kompilacji —
@@ -868,6 +880,8 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 
 	fpm_coop_ini_req_free(ctx);
 	fpm_coop_statics_req_free(ctx);
+	fpm_coop_session_lock_req_free(ctx);
+	fpm_coop_session_patch_req_free(ctx);
 	efree(ctx);
 	return req;
 }

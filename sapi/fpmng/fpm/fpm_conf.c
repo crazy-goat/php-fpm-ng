@@ -178,6 +178,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
+	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
@@ -667,6 +668,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT w fpm_http.c */
 	wp->config->http_static = 1;
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS w fpm_http.c */
+	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: patrz komentarz przy polu w fpm_conf.h */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif
@@ -759,6 +761,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_allowed_clients);
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
+	free(wpc->http_front_controller);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

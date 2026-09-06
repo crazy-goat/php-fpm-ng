@@ -70,6 +70,10 @@ struct fpm_fiber_ops_map_s {
 static struct fpm_fiber_ops_map_s fpm_fiber_ops_map[FPM_FIBER_OPS_MAX];
 static int fpm_fiber_ops_count = 0;
 
+/* Ostrzezenie o odmowie polaczenia trwalego: raz na proces, zeby jedna zapetlona
+ * aplikacja nie zalala logu. */
+static bool fpm_fiber_persistent_warned = false;
+
 static php_stream_transport_factory fpm_fiber_orig_tcp_factory;
 static php_stream_transport_factory fpm_fiber_orig_unix_factory;
 
@@ -644,7 +648,55 @@ static php_stream *fpm_fiber_xport_factory_ex(php_stream_transport_factory orig_
 		struct timeval *timeout,
 		php_stream_context *context STREAMS_DC) /* {{{ */
 {
-	php_stream *stream = orig_factory(proto, protolen, resourcename, resourcenamelen,
+	php_stream *stream;
+
+	/* Polaczenia TRWALE sa zabronione w tym executorze. Lista trwalych strumieni
+	 * (EG(persistent_list)) jest PROCESOWA, a rdzen coop jej nie podmienia przy
+	 * przelaczaniu requestow — wiec dwa requesty w locie moga dostac TEN SAM
+	 * socket. Protokoly bazodanowe sa naprzemienne (zapytanie-odpowiedz), wiec
+	 * to nie jest spowolnienie, tylko rozjechany protokol.
+	 *
+	 * Zmierzone na poligonie (Ubuntu 26.04, epoll, jeden worker, 4 rownolegle
+	 * requesty, ten sam DSN): PDO z ATTR_PERSISTENT — w jednym przebiegu trzy
+	 * requesty zawisly do timeoutu klienta, w drugim trzy dostaly 502, czwarty
+	 * "PDOException: Trying to access array offset on false", a worker padl
+	 * i zostal wymieniony. Bez persistent ten sam test: 1,019 s, czysto.
+	 *
+	 * mysqli z prefiksem "p:" w tym samym tescie NIE psul sie — wydawal kolejne
+	 * polaczenia z puli (cztery rozne identyfikatory sesji) i konczyl w 1,017 s.
+	 * Blokujemy mimo to OBA, bo bezpieczenstwo zalezy wtedy od tego, czy dany
+	 * klient pilnuje zajetosci polaczenia, a tego nie kontrolujemy ani nie
+	 * widzimy z tej warstwy. Lepiej odmowic glosno przy nawiazywaniu polaczenia
+	 * niz rozjechac protokol w losowym requescie.
+	 *
+	 * Odmowa jest tutaj, a nie w validate(), bo persistent to atrybut polaczenia
+	 * podawany w kodzie aplikacji, a nie dyrektywa konfiguracji — w momencie
+	 * walidacji poola nie ma czego sprawdzac. */
+	if (persistent_id && fpm_pool_fiber_can_wait()) {
+		/* PDO lapie blad polaczenia i rzuca wlasny PDOException ("Unknown error
+		 * while connecting"), wiec ostrzezenie ponizej NIE dociera do autora
+		 * kodu — zmierzone. Zeby operator mial czego szukac, mowimy to raz na
+		 * proces do logu workera. */
+		if (!fpm_fiber_persistent_warned) {
+			fpm_fiber_persistent_warned = true;
+			/* NIE logujemy persistent_id: PDO sklada ten klucz z DSN wraz z
+			 * uzytkownikiem i haslem, wiec trafiloby to do error logu. */
+			zlog(ZLOG_NOTICE, "[pool %s] fiber: refused a persistent stream; "
+				"the persistent stream list is per process while this process serves many "
+				"requests at once, so two requests could share one socket. Measured with "
+				"PDO::ATTR_PERSISTENT: hung requests, 502s and a dead worker. Drop "
+				"PDO::ATTR_PERSISTENT or the \"p:\" prefix — see docs/fiber_errors.md",
+				fpm_coop_pool_name());
+		}
+		php_error_docref(NULL, E_WARNING,
+			"persistent connections are not supported with pool.executor = fiber: "
+			"the persistent stream list is per process while this process serves many "
+			"requests at once, so two requests could share one socket (see "
+			"docs/fiber_errors.md); drop PDO::ATTR_PERSISTENT or the \"p:\" prefix");
+		return NULL;
+	}
+
+	stream = orig_factory(proto, protolen, resourcename, resourcenamelen,
 		persistent_id, options, flags, timeout, context STREAMS_REL_CC);
 
 	if (stream) {

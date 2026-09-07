@@ -30,6 +30,18 @@ jobs:
   # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
+  english:
+    # Fast and deterministic (stdlib only). Runs the full tree every time
+    # instead of diffing against the base commit: a full run takes well under
+    # a second, needs no merge-base logic, and also catches drift introduced
+    # by merges. Allow-listed quoted material lives in
+    # build/english-allow.txt (file:line prefixes).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: english-only check (build/check-english.py)
+        run: python3 build/check-english.py --commits "${{ github.event.pull_request.base.sha }}..HEAD" || python3 build/check-english.py
+
   patches:
     runs-on: ubuntu-latest
     steps:

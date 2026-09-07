@@ -1,4 +1,0 @@
-# Line-level exceptions (file:line prefix) for quoted material that must stay
-# verbatim. Currently: the translation rule in task 012 quotes the Polish word
-# "zmierzone" itself as part of the rule's definition.
-tasks/done/012-translate-docs-and-comments-to-english.md:59:

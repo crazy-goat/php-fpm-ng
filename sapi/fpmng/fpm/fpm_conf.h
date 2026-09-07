@@ -135,6 +135,16 @@ struct fpm_worker_pool_config_s {
 	char *http_tls_cert;			/* sciezka do PEM z certyfikatem (z lancuchem); puste = zwykly HTTP, jak dzis */
 	char *http_tls_key;			/* sciezka do PEM z kluczem prywatnym */
 	char *http_tls_min_version;		/* "TLSv1.2" (domyslne) albo "TLSv1.3" */
+	/* Additional certificates selected by SNI (task 041), on top of the
+	 * default http.tls_cert/http.tls_key pair above. Comma-separated list of
+	 * "servername:cert_path:key_path" entries, e.g.
+	 * "example.org:/certs/example.org/fullchain.pem:/certs/example.org/privkey.pem,
+	 *  example.net:/certs/example.net/fullchain.pem:/certs/example.net/privkey.pem".
+	 * Whitespace around commas/colons is trimmed. Empty/unset = no extra SNI
+	 * certificates, exactly today's single-certificate behaviour. A
+	 * connection with no SNI, or an unrecognized servername, falls back to
+	 * the default http.tls_cert/http.tls_key pair -- see fpm_http_tls.c. */
+	char *http_tls_sni_cert;
 	int http_tls_reload_check;		/* sekundy miedzy sprawdzeniami mtime cert/key na dysku, bez restartu bramki (task 040);
 						 * nieustawione -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = wylaczone */
 	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */

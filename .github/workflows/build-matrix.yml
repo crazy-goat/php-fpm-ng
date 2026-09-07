@@ -118,6 +118,11 @@ jobs:
           cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
           cp php-src/sapi/cli/php stage/bin/
           cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+          # acme-state.phpt (task 044) requires ../acme/state.php relative to
+          # the test itself -- stage that source alongside tests/, the same
+          # way tests/ itself is staged, or the require fails on this job's
+          # copy even though it works from a full build/prepare.sh tree.
+          cp -r php-src/sapi/fpmng/acme stage/prepared/sapi/fpmng/acme
           # run-fpm-phpt.sh (build/run-fpm-phpt.sh:88) requires run-tests.php
           # directly below the "prepared php-src" path it's given.
           cp php-src/run-tests.php stage/prepared/

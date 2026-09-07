@@ -27,13 +27,21 @@
  * change: peer_name/SNI in ext/openssl takes the name from resourcename in the
  * factory, not from the name passed to connect; stream_socket_get_name() is
  * getpeername(); "Unable to connect to <host>" is assembled by ext/standard
- * from the user-supplied name. ssl/tls transports (and therefore https://) are
- * not hooked.
+ * from the user-supplied name.
+ *
+ * TLS (ssl/tls/https/...) is non-blocking too, but not from here: it needs code
+ * inside ext/openssl (the handshake and SSL_read/SSL_write loops live there and
+ * poll internally), so it is done by patch 0007 (patches/0007-fiber-tls-*.patch,
+ * HAVE_FPMNG_FIBER_TLS), which wraps the ext/openssl ops table through our
+ * fpm_fiber_xport_wrap() and re-arms the ssl/tls transports with its own
+ * factory. That keeps every upstream behavior change in a gated patch with an
+ * expiry path; this file only lends it the wrapper.
  *
  * What this does NOT catch (because it does not go through stream transports):
- * sleep(), curl, libpq (pdo_pgsql), ordinary files, the TLS handshake and
- * SSL_read/SSL_write (OpenSSL has its own polling), DNS outside connect
- * (gethostbyname, dns_get_record), and DNS in ssl/tls transports.
+ * sleep(), curl, libpq (pdo_pgsql), ordinary files, DNS outside connect
+ * (gethostbyname, dns_get_record). The TLS handshake and SSL_read/SSL_write
+ * block unless patch 0007 (HAVE_FPMNG_FIBER_TLS) is in — without it the ssl/tls
+ * transports are upstream's and OpenSSL polls the whole process.
  */
 
 #include "fpm_config.h"
@@ -57,6 +65,7 @@
 
 #include "fpm_pool_coop.h"
 #include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_xport.h"
 #include "zlog.h"
 
 /* Ops wrapper per original table (generic tcp, unix, OpenSSL).
@@ -68,7 +77,12 @@ struct fpm_fiber_ops_map_s {
 	php_stream_ops wrap;
 	bool dns;
 };
-#define FPM_FIBER_OPS_MAX 4
+/* Two entries are enough (generic tcp + unix), but the TLS patch
+ * (0007, HAVE_FPMNG_FIBER_TLS) wraps ext/openssl's tables through this map as
+ * well — and then only from request fibers, so without headroom a wrap
+ * failure would make TLS non-blocking under concurrency but silently blocking
+ * outside fibers. One slot stays in reserve for that wrapper. */
+#define FPM_FIBER_OPS_MAX 5
 static struct fpm_fiber_ops_map_s fpm_fiber_ops_map[FPM_FIBER_OPS_MAX];
 static int fpm_fiber_ops_count = 0;
 
@@ -737,6 +751,18 @@ static php_stream *fpm_fiber_unix_factory(const char *proto, size_t protolen,
 }
 /* }}} */
 
+/* Exported for the TLS patch (0007, patches/0007-fiber-tls-*.patch): its
+ * ssl/tls factory returns a stream whose ops point DIRECTLY at ext/openssl's
+ * table; wrapping happens on the first call from a request fiber
+ * (fpm_fiber_tls_wrap_ops_once there calls into this). Returning NULL keeps
+ * the stream functional but blocking — must never happen: we keep one map
+ * slot in reserve (FPM_FIBER_OPS_MAX comment). */
+const php_stream_ops *fpm_fiber_xport_wrap(const php_stream_ops *orig) /* {{{ */
+{
+	return fpm_fiber_wrap_ops(orig, false);
+}
+/* }}} */
+
 void fpm_pool_fiber_xport_install(void) /* {{{ */
 {
 	HashTable *xports = php_stream_xport_get_hash();
@@ -750,6 +776,9 @@ void fpm_pool_fiber_xport_install(void) /* {{{ */
 	if (fpm_fiber_orig_unix_factory) {
 		php_stream_xport_register("unix", fpm_fiber_unix_factory);
 	}
+#ifdef HAVE_FPMNG_FIBER_TLS
+	fpm_fiber_tls_xport_install();
+#endif
 
 	zlog(ZLOG_DEBUG, "[pool %s] fiber: stream transports hooked: tcp=%s unix=%s",
 		fpm_coop_pool_name(),

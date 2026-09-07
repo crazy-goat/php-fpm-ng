@@ -7,6 +7,15 @@ PHP=${PHP:-php}
 FPMNG=${FPMNG:-php-fpm-ng}
 FCGI_PORT=${FCGI_PORT:-22725}
 HTTP_PORT=${HTTP_PORT:-22726}
+# SERVICE_MODE=docker (default) provisions a private MySQL/Redis via
+# compose.yaml so the runner works on a clean machine with nothing
+# pre-provisioned but Docker. SERVICE_MODE=external keeps the previous
+# behaviour of pointing at already-running services via the LARAVEL_DB_*
+# and LARAVEL_REDIS_* variables below (e.g. the shared test box).
+SERVICE_MODE=${SERVICE_MODE:-docker}
+MYSQL_PORT=${MYSQL_PORT:-13307}
+REDIS_PORT=${REDIS_PORT:-16380}
+MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-fpmng-laravel-root}
 LARAVEL_DB_HOST=${LARAVEL_DB_HOST:-127.0.0.1}
 LARAVEL_DB_PORT=${LARAVEL_DB_PORT:-3306}
 LARAVEL_DB_NAME=${LARAVEL_DB_NAME:-laravel025}
@@ -18,11 +27,81 @@ LARAVEL_REDIS_DB=${LARAVEL_REDIS_DB:-3}
 REDIS_CLIENT=${REDIS_CLIENT:-phpredis}
 REDIS_EXTENSION=${REDIS_EXTENSION:-}
 STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver}
+DOCKER_STARTED=0
+RUN_ID=${FPMNG_RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)_$$}
 
 if ! command -v curl >/dev/null 2>&1; then
     echo "curl is required by the HTTP concurrency runner and Composer provisioner" >&2
     exit 2
 fi
+
+command_exists() {
+    command -v "$1" >/dev/null 2>&1
+}
+
+port_is_free() {
+    ! nc -z 127.0.0.1 "$1" >/dev/null 2>&1
+}
+
+# Same pattern as tests/frameworks/symfony/run.sh: bump past whatever is
+# already bound instead of failing, so parallel runs and a busy dev machine
+# do not need manual port bookkeeping.
+choose_free_port() {
+    local port=$1
+    while ! port_is_free "$port"; do
+        port=$((port + 1))
+    done
+    echo "$port"
+}
+
+setup_services() {
+    if [ "$SERVICE_MODE" != docker ] && [ "$SERVICE_MODE" != external ]; then
+        echo "SERVICE_MODE must be docker or external" >&2
+        exit 2
+    fi
+
+    if [ "$SERVICE_MODE" = docker ]; then
+        if ! command_exists docker || ! docker compose version >/dev/null 2>&1; then
+            echo "Docker Compose is required in SERVICE_MODE=docker; use SERVICE_MODE=external with explicit *_HOST/*_PORT variables" >&2
+            exit 2
+        fi
+        MYSQL_PORT=$(choose_free_port "$MYSQL_PORT")
+        REDIS_PORT=$(choose_free_port "$REDIS_PORT")
+        export MYSQL_PORT REDIS_PORT MYSQL_ROOT_PASSWORD
+        COMPOSE_PROJECT="fpmng-laravel-$(printf '%s' "$RUN_ID" | tr 'A-Z' 'a-z')"
+        COMPOSE=(docker compose -f "$ROOT/compose.yaml" -p "$COMPOSE_PROJECT")
+        if ! "${COMPOSE[@]}" up -d >"$RUN_DIR/compose.log" 2>&1; then
+            echo "Docker Compose could not start MySQL and Redis; see $RUN_DIR/compose.log" >&2
+            exit 2
+        fi
+        DOCKER_STARTED=1
+        local attempt
+        local ready=0
+        for attempt in $(seq 1 90); do
+            if "${COMPOSE[@]}" exec -T mysql mysqladmin ping --protocol=tcp -h 127.0.0.1 \
+                -uroot -p"$MYSQL_ROOT_PASSWORD" >/dev/null 2>&1 \
+                && "${COMPOSE[@]}" exec -T redis redis-cli ping >/dev/null 2>&1; then
+                ready=1
+                break
+            fi
+            sleep 1
+        done
+        if [ "$ready" -ne 1 ]; then
+            echo "Docker services did not become ready; see $RUN_DIR/compose.log" >&2
+            exit 2
+        fi
+        LARAVEL_DB_HOST=127.0.0.1
+        LARAVEL_DB_PORT=$MYSQL_PORT
+        LARAVEL_DB_USER=root
+        LARAVEL_DB_PASSWORD=$MYSQL_ROOT_PASSWORD
+        # A per-run database name, same discipline as the Symfony runner:
+        # never collide with, or reuse state from, another run.
+        LARAVEL_DB_NAME="laravel025_${RUN_ID}"
+        LARAVEL_REDIS_HOST=127.0.0.1
+        LARAVEL_REDIS_PORT=$REDIS_PORT
+        LARAVEL_REDIS_DB=0
+    fi
+}
 
 if [ ! -f "$ROOT/vendor/autoload.php" ]; then
     PHP="$PHP" RUN_DIR="$RUN_DIR" "$ROOT/bin/provision.sh"
@@ -31,6 +110,11 @@ if [ ! -f "$ROOT/vendor/autoload.php" ]; then
     echo "Laravel dependency provisioning did not create vendor/autoload.php" >&2
     exit 2
 fi
+
+mkdir -p "$RUN_DIR"
+setup_services
+FCGI_PORT=$(choose_free_port "$FCGI_PORT")
+HTTP_PORT=$(choose_free_port "$HTTP_PORT")
 
 if [ "$REDIS_CLIENT" = phpredis ]; then
     if [ -z "$REDIS_EXTENSION" ] || [ ! -f "$REDIS_EXTENSION" ]; then
@@ -58,13 +142,6 @@ mkdir -p "$RUN_DIR" "$RUN_DIR/sessions" "$RUN_DIR/storage/framework/cache/data" 
 : > "$RUN_DIR/php-fpm-ng-configured.log"
 : > "$RUN_DIR/php-fpm-ng-negative.log"
 rm -f "$RUN_DIR"/results-*.log "$RUN_DIR"/health-*.json
-
-if command -v ss >/dev/null 2>&1; then
-    if ss -lnt | grep -Eq ":(${FCGI_PORT}|${HTTP_PORT})[[:space:]]"; then
-        echo "one of the Laravel probe ports is already occupied: FastCGI=$FCGI_PORT HTTP=$HTTP_PORT" >&2
-        exit 2
-    fi
-fi
 
 cat > "$ROOT/.env" <<ENV
 APP_NAME=Laravel025Probe
@@ -292,6 +369,12 @@ cleanup() {
     stop_pool configured || true
     stop_pool negative || true
     rm -f "$ROOT/.env"
+    if [ "$DOCKER_STARTED" -eq 1 ]; then
+        # Never FLUSHALL/FLUSHDB: the whole private compose project (and its
+        # volumes) is torn down instead, so no shared MySQL/Redis is touched.
+        "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+        DOCKER_STARTED=0
+    fi
 }
 trap cleanup EXIT INT TERM
 

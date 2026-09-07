@@ -1883,7 +1883,8 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	 * fpm_http_gateway_spawn() forks the first child -- see fpm_http_tls.h. */
 	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
 		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
-			wp->config->http_tls_key, wp->config->http_tls_min_version);
+			wp->config->http_tls_key, wp->config->http_tls_min_version,
+			wp->config->http_tls_sni_cert);
 	}
 	if (gw->tls) {
 		/* http.tls_reload_check: unset -> a sensible non-zero default (task
@@ -2126,7 +2127,7 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * before fpm_http_init_pool_ex() forks a single gateway child, not
 		 * as a crash or a silent plain-HTTP fallback at request time. */
 		if (fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
-				wp->config->http_tls_min_version) != 0) {
+				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert) != 0) {
 			return -1; /* fpm_http_tls_validate() already logged what is wrong */
 		}
 #else

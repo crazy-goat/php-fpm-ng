@@ -18,6 +18,7 @@ Our files. The rest of the SAPI is copied from upstream `sapi/fpm/` by
 | `fpm/fpm_pool_fiber_xport.c` | suspending Fibers on the `tcp` and `unix` transports |
 | `fpm/fpm_metrics.c` | application-metrics glue (NOTES 3k/3w): the master allocates shm slots, the child in `run_child:` gets a slot + pool label |
 | `fpm/fpm_process_ctl.c` | reload: on `SIGUSR2` request workers get `SIGQUIT`, while supervisor/cron/status get `SIGTERM`, so the consumer can finish its current iteration (NOTES 3x) |
+| `acme/state.php` | ACME state layout on a writable volume (NOTES 3y): account key, account record, per-domain certificate key and chain — used by the project-owned ACME client that task 043 puts in a `pool.type = cron` process |
 
 Eventually `fpm/fpm_conf.c`, `fpm/fpm_status.c` and `fpm/fpm_main.c` will be
 added — those are the only FPM files with real upstream churn (see

@@ -8,7 +8,7 @@ cron, scheduler or proxy work, which is where the project is focused.
 
 **Priority:** high. This is the largest remaining gap in the fiber executor's
 usefulness.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -80,3 +80,70 @@ for the `fiber` executor only.
 - Do not log connection identifiers that may embed credentials. A previous
   change nearly leaked a PDO persistent-connection key, which is built from the
   DSN including user and password.
+
+## Outcome (2026-09-07)
+
+**Done.** TLS-wrapped connections suspend the fiber instead of blocking, for
+`pool.executor = fiber` only, via `patches/0007-fiber-tls-nonblocking-transports.patch`
+(gated on `HAVE_FPMNG_FIBER_TLS` — defined only with `--enable-fpmng-fiber`
+and a static `--with-openssl`; a shared `openssl.so` gets a configure warning
+and upstream-blocking TLS).
+
+How it works: ext/openssl's internal waits (`php_pollfd_for` in the handshake
+loop and in `SSL_read`/`SSL_write` retries) are re-pointed at
+`fpm_pool_fiber_wait_fd` (`fpm_fiber_tls_wait`), so suspension happens INSIDE
+the handshake, not around it. `SSL_MODE_AUTO_RETRY` is enabled so an
+in-progress renegotiation is re-driven by OpenSSL and `SSL_want` keeps
+reporting real socket state; the reneg rate limiter is re-checked explicitly
+per handshake step. The ssl/sslv3/tls/tlsv1.x transports are re-armed in the
+fiber worker (`fpm_fiber_tls_xport_install`, after MINIT); the returned
+streams keep upstream ops identity and are wrapped lazily on the first call
+from a request fiber (`fpm_fiber_xport_wrap`, one reserved slot in the ops
+map), so accepted sockets and non-fiber code are untouched. All fpmng symbols
+are reached through weak references, because ext/openssl objects also link
+into `cli`.
+
+**Measured** (poligon, 8-core shared box, php-8.5.11-dev tree, one worker,
+`pm = static`, `pm.max_children = 1`, `pool.type = http`,
+`pool.executor = fiber`):
+
+- criterion 1 (https): 4 concurrent requests to four TLS endpoints sleeping
+  500 ms each: **0.524–0.533 s** wall (serialized would be ≥ 2.0 s). 3 runs.
+- criterion 2 (TLS database): 4 concurrent requests each opening a MySQL 8.4
+  connection as a `REQUIRE SSL` user (TLSv1.3) and running
+  `SELECT SLEEP(0.5)`: **0.523–0.527 s**, each with a distinct
+  `CONNECTION_ID()`. 2 runs.
+- criterion 3 (data, not timing): every response carried its own id
+  (`tls-body-A`..`tls-body-D`; MySQL conn ids 1016–1019), asserted in
+  `sapi/fpmng/tests/fpmng-fiber-tls-concurrency.phpt`.
+- criterion 4 (classic unaffected): `pool.executor = classic` with 4 children
+  serves the same 4 TLS requests correctly, 0.523–0.527 s; the interception
+  is installed only in the fiber child (`fpm_pool_fiber_xport_install` runs
+  from `fpm_pool_fiber_child_main`), other executors never call it. The
+  non-fiber build links and runs because all fpmng symbols in the patch are
+  weak references (verified: `cli` binary has them as `w` in `nm`).
+- criterion 5 (no ext/openssl): `--enable-fpmng-fiber` without
+  `--with-openssl` builds and runs; `HAVE_FPMNG_FIBER_TLS` is undefined and
+  no TLS code is compiled in.
+- criterion 6 (explicit failure modes), measured live:
+  `ssl.allow_blocking = true` on connect and server-side
+  `stream_socket_server("tls://...")` from a request fiber are both refused
+  with a specific `E_WARNING` naming the reason, plus a once-per-process
+  `ZLOG_NOTICE` (same shape as the persistent-connection refusal).
+
+Regression suites on the poligon: `build/run-fpmng-phpt.sh` PASS=9 of 11; the
+2 failures (`fpmng-fiber-request-isolation.phpt`,
+`fpmng-pool-type-fiber-matrix.phpt`) are pre-existing on any fiber build —
+they lack `php_admin_value[max_execution_time] = 0` and hit the coop
+validation refusal; recorded in `findings.md`, not caused by this change.
+
+**Left out / known limits:**
+
+- `stream_get_meta_data()` `crypto` data, session resumption, early data:
+  unchanged (delegated to upstream ops).
+- The `zlog` NOTICE from refusals does not reach `error_log` from a fiber
+  child at all (child stderr is /dev/null and child zlog output was not
+  observed for the pre-existing persistent refusal either — same mechanism);
+  the `E_WARNING` is the reliable channel. Recorded in `findings.md`.
+- Server-side TLS over stream transports is refused, not supported (the HTTP
+  gateway terminates TLS in libevent and does not use these transports).

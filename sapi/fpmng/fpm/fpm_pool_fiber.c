@@ -5,8 +5,8 @@
  * Therefore we do not need the fork's switch handlers — request state enters
  * the globals immediately before zend_fiber_start/resume and leaves immediately
  * after they return (fpm_coop_req_enter/leave). The request Fiber suspends only
- * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c) and
- * always returns here.
+ * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c and
+ * the TLS patch, 0007) and always returns here.
  */
 
 #include "fpm_config.h"

@@ -1,18 +1,19 @@
-/* fpmng_metrics: magazyn metryk aplikacyjnych z PHP (NOTES 3k).
+/* fpmng_metrics: application-metrics store fed from PHP (NOTES 3k).
  *
- * Naglowek intencjonalnie bez zaleznosci od php.h — wlacza go takze strona
- * SAPI (sapi/fpmng/fpm/fpm_metrics.c), ktora potrzebuje layoutu shm i paru
- * funkcji, a nie ma sensu wciagac tam calego ZEND_API.
+ * The header intentionally has no dependency on php.h — the SAPI side
+ * (sapi/fpmng/fpm/fpm_metrics.c) also includes it, because it needs the shm
+ * layout and a few functions; pulling the whole ZEND_API in there would make
+ * no sense.
  *
- * Model pamieci (NOTES 3k, "SLOTY PER WORKER, nie atomiki"):
- * kazdy worker pisze do WLASNEJ tablicy serii w pamieci dzielonej, bez
- * zadnej synchronizacji; sumowanie robi sie przy odczycie (render). Slot
- * kluczowany GLOBALNYM indeksem workera (suma pm.max_children poolow
- * wczesniejszych w configu + indeks ze scoreboardu wlasnego poola), nie
- * pidem — po to, zeby recykling po pm.max_requests nie zerowal licznikow.
+ * Memory model (NOTES 3k, "PER-WORKER SLOTS, not atomics"): every worker
+ * writes to its OWN series array in shared memory, with no synchronization
+ * at all; aggregation happens at read time (render). The slot is keyed by a
+ * GLOBAL worker index (sum of pm.max_children of earlier pools in the config
+ * plus the index from the worker's own scoreboard), not by pid — so
+ * recycling after pm.max_requests does not zero the counters.
  *
- * Ten sam kod dziala w CLI: bez pamieci dzielonej, z tablica w procesie
- * (jeden slot), a skrypt wystawia tekst przez fpm_metric_render().
+ * The same code runs under CLI: no shared memory, a process-local array
+ * (one slot), and the script exposes the text through fpm_metric_render().
  */
 
 #ifndef PHP_FPMNG_METRICS_H
@@ -27,24 +28,24 @@
 #define FPMNG_METRICS_LBLNAME_MAX  32
 #define FPMNG_METRICS_LBL_MAX      8
 #define FPMNG_METRICS_BUCKETS_MAX  32
-/* name{ k="v", ... } — musi pomiescic name + etykiete pool + LBL_MAX etykiet */
+/* name{ k="v", ... } — must fit name + the pool label + LBL_MAX labels */
 #define FPMNG_METRICS_KEY_MAX      384
 
 #define PHP_FPMNG_METRICS_VERSION "0.1.0"
 
-/* Zwykle makro w naglowku ext — dla buildu statycznego (internal_functions*).
- * Samo #define jest nieszkodliwe tez po stronie SAPI, ktora wlacza ten
- * naglowek (tam nie jest uzywane). Deklaracja extern tylko wtedy, gdy
- * zend_modules.h zostal juz wciagniety (php.h) — po stronie SAPI jest, bo
- * fpm.h zaczyna sie od php.h; czysty C (np. przyszly inny konsument) nie
- * dostaje nic. */
+/* A plain macro in an ext header — for the static build (internal_functions*).
+ * The #define itself is harmless on the SAPI side too, which includes this
+ * header (it is not used there). The extern declaration only when
+ * zend_modules.h has already been included (php.h) — on the SAPI side it
+ * has, because fpm.h starts with php.h; plain C (e.g. a future other
+ * consumer) gets nothing. */
 #ifdef MODULES_H
 extern zend_module_entry fpmng_metrics_module_entry;
 #endif
 #define phpext_fpmng_metrics_ptr &fpmng_metrics_module_entry
 
-/* Domykne kubelki histogramu: 5 ms do 60 s (NOTES 3k — zadania consumera
- * trwaja dluzej niz requesty, wiec dalej niz typowe dla HTTP). */
+/* Default histogram buckets: 5 ms to 60 s (NOTES 3k — consumer jobs take
+ * longer than requests, so further out than typical HTTP latencies). */
 extern const double fpmng_metrics_default_buckets[13];
 #define FPMNG_METRICS_DEFAULT_BUCKETS_N 13
 
@@ -55,67 +56,68 @@ enum fpmng_metric_type_e {
 	FPMNG_METRIC_HISTOGRAM,
 };
 
-/* Jeden wpis serii w tablicy (wlasnej!) jednego workera. Kolejnosc pol:
- * najpierw doubly (wyrownanie 8 bez paddingu), potem chary, na koncu male.
+/* One series entry in ONE worker's (own!) array. Field order: doubles first
+ * (8-byte alignment, no padding), then chars, small fields last.
  *
- * v[] ma staly rozmiar BUCKETS_MAX+2, niezalezny od liczby kubelkow tej
- * serii, zeby pozycje sumy i licznika nie zalezaly od bucket_count:
- *   histogram:  v[0..bucket_count-1] = zliczenia kubelkow
- *               v[BUCKETS_MAX]   = suma obserwowanych wartosci
- *               v[BUCKETS_MAX+1] = liczba obserwacji
- *   counter:    v[0] = licznik
- *   gauge_*:    v[0] = wartosc
+ * v[] has the fixed size BUCKETS_MAX+2, independent of this series' bucket
+ * count, so the positions of the sum and the count do not depend on
+ * bucket_count:
+ *   histogram:  v[0..bucket_count-1] = bucket counts
+ *               v[BUCKETS_MAX]   = sum of observed values
+ *               v[BUCKETS_MAX+1] = number of observations
+ *   counter:    v[0] = counter
+ *   gauge_*:    v[0] = value
  */
 struct fpmng_metrics_entry_s {
 	double v[FPMNG_METRICS_BUCKETS_MAX + 2];
 	double buckets[FPMNG_METRICS_BUCKETS_MAX];
 	char key[FPMNG_METRICS_KEY_MAX];
 	char help[FPMNG_METRICS_HELP_MAX];
-	uint16_t bucket_count;		/* histogram: liczba kubelkow */
+	uint16_t bucket_count;		/* histogram: number of buckets */
 	uint8_t type;			/* enum fpmng_metric_type_e */
 	uint8_t in_use;
 };
 
-/* Tablica serii JEDNEGO workera. Pisze wylacznie wlasciciel; czytana
- * przy renderze przez inne procesy (pool.type = status, render w CLI). */
+/* The series array of ONE worker. Only the owner writes; read at render
+ * time by other processes (pool.type = status, render under CLI). */
 struct fpmng_metrics_slot_s {
-	uint32_t used;			/* rosnie, nigdy nie maleje */
+	uint32_t used;			/* grows, never shrinks */
 	/* struct fpmng_metrics_entry_s entries[limit]; */
 };
 
-/* Naglowek regionu w pamieci dzielonej, wypelniany raz przez mastera
- * (fpmng_metrics_shm_init) przed forkiem dzieci. */
+/* Header of the shared-memory region, filled once by the master
+ * (fpmng_metrics_shm_init) before children fork. */
 struct fpmng_metrics_shm_s {
 	uint32_t magic;
-	uint32_t slots;			/* liczba slotow workera */
-	uint32_t limit;			/* serii na slot */
+	uint32_t slots;			/* number of worker slots */
+	uint32_t limit;			/* series per slot */
 	/* struct fpmng_metrics_slot_s slot_tables[slots]; */
 };
 
 #define FPMNG_METRICS_MAGIC 0x4e474d54u	/* "NGMT" */
 
-/* ===== API po stronie C, wolane przez sapi/fpmng/fpm/fpm_metrics.c ===== */
+/* ===== C-side API, called from sapi/fpmng/fpm/fpm_metrics.c ===== */
 
-/* Rozmiar regionu pod zadana liczbe slotow i limit serii. */
+/* Size of the region for a given number of slots and series limit. */
 size_t fpmng_metrics_shm_size(uint32_t slots, uint32_t limit);
 
-/* Master, po sparsowaniu konfiguracji, przed forkiem: przygotowuje region
- * (mem zaalokowany przez strone SAPI przez fpm_shm_alloc). */
+/* Master, after parsing the configuration, before forking: prepares the
+ * region (mem allocated by the SAPI side through fpm_shm_alloc). */
 void fpmng_metrics_shm_init(void *mem, size_t size, uint32_t slots, uint32_t limit);
 
-/* Dziecko workera: od teraz funkcje PHP pisza do slotu o tym indeksie;
- * pool_name trafia do automatycznej etykiety pool="..." kazdej serii.
- * Bez tego wywolania funkcji w procesie bramki/mastera zwracaja false. */
+/* Worker child: from now on the PHP functions write to the slot with this
+ * index; pool_name becomes the automatic pool="..." label of every series.
+ * Without this call the functions in a gateway/master process return false. */
 void fpmng_metrics_child_attach(uint32_t slot_index, const char *pool_name);
 
-/* Limit serii z INI (fpmng_metrics.series_limit). Wolane przez mastera. */
+/* Series limit from INI (fpmng_metrics.series_limit). Called by the master. */
 uint32_t fpmng_metrics_series_limit(void);
 
-/* Pelny tekst Prometheus WSZYSTKICH serii (agregacja po slotach: sumy dla
- * counterow/gauge_sum, maksimum dla gauge_max, sumy kubelkow dla
- * histogramow). Malloc-owany bufor do zwolnienia przez wolajacego.
- * Zwraca 0/-1. Nie dotyka ZEND_API ani pamieci zendowej — wolane takze
- * z dziecka pool.type = status, bez zadnego kontekstu requestu. */
+/* The full Prometheus text of ALL series (aggregation across slots: sums for
+ * counters/gauge_sum, the maximum for gauge_max, bucket sums for
+ * histograms). Malloc'ed buffer, freed by the caller. Returns 0/-1. Touches
+ * neither ZEND_API nor zend memory — also called from a pool.type = status
+ * child, without any request context. */
 int fpmng_metrics_render_text(char **out, size_t *len);
 
 #endif

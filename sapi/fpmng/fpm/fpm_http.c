@@ -239,6 +239,34 @@ struct fpm_http_gateway_s {
 	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
 	unsigned nupstreams;
 	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
+	struct fpm_http_read_deadline_s *deadlines;	/* armed read deadlines, one per connection still reading its first request */
+};
+
+/* One armed read deadline per accepted connection (task 031). Bounds the total
+ * time a client may spend delivering ONE request, regardless of how the bytes
+ * are spaced: libevent's own evhttp timeout (bufferevent read timeout) is an
+ * *idle* timer restarted on every received byte, so a slow-loris client
+ * trickling one byte at a time never trips it. The deadline is armed in the
+ * gateway's bevcb and disarmed by fpm_http_request() -- evhttp invokes the
+ * request callback only after the whole request (headers + body) has arrived,
+ * so reaching it means the client delivered in time. A deadline that fires
+ * frees the bufferevent, closing the connection mid-read with no response:
+ * there is no complete request to answer to.
+ *
+ * Keep-alive: the deadline covers the first request on a connection. Later
+ * requests on the same connection are a deliberate gap (arming a new one
+ * would need a request-start hook libevent does not offer); the per-read
+ * idle timeout still applies to them.
+ *
+ * The gw->deadlines list exists only so fpm_http_request() can find and
+ * disarm its own deadline by bufferevent pointer: one linear scan per
+ * dispatched request, over one node per connection still reading its first
+ * request, so n stays small. */
+struct fpm_http_read_deadline_s {
+	struct fpm_http_gateway_s *gw;
+	struct bufferevent *bev;
+	struct event *ev;
+	struct fpm_http_read_deadline_s *next;
 };
 
 static struct fpm_http_gateway_s *gateways = NULL;
@@ -289,6 +317,7 @@ struct _fpm_http_upstream {
 };
 
 static void fpm_http_pump(struct fpm_http_gateway_s *gw);
+static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 
 /* Claims one of the pool's workers for a persistent connection, or fails when they are all taken. */
 static int fpm_http_budget_take(struct fpm_http_gateway_s *gw)
@@ -1439,6 +1468,13 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
 	}
 
+	/* Reaching this callback means the client delivered the whole request
+	 * (evhttp buffers headers AND body before dispatching), so its read
+	 * deadline (task 031, armed at accept) is spent. */
+	if (gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
+	}
+
 	if (gw->acl && !fpm_http_acl_check(gw->acl, peer_addr)) {
 		/* ACL is about the direct network peer, so it (and its log entry) is
 		 * deliberately NOT run through X-Forwarded-For -- an address rejected
@@ -1593,6 +1629,95 @@ static void fpm_http_gateway_drop_privileges(struct fpm_http_gateway_s *gw) /* {
 }
 /* }}} */
 
+/* The read deadline fired while the client was still delivering its first
+ * request: close the connection by freeing the bufferevent (BEV_OPT_CLOSE_ON_FREE
+ * is set on both the plain and the TLS bev). No response is sent -- a
+ * slow-loris peer has not earned one, and a partial request cannot be
+ * answered anyway. The node is unlinked and freed here; fpm_http_request()
+ * can no longer find it, which is correct: a request that never completed
+ * will never reach the callback. */
+static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_read_deadline_s *dl = arg;
+	struct fpm_http_gateway_s *gw = dl->gw;
+	struct fpm_http_read_deadline_s **p;
+
+	(void) fd; (void) what;
+	for (p = &gw->deadlines; *p; p = &(*p)->next) {
+		if (*p == dl) {
+			*p = dl->next;
+			break;
+		}
+	}
+	bufferevent_free(dl->bev);
+	event_free(dl->ev);
+	free(dl);
+}
+
+/* Arms the per-connection read deadline (see struct fpm_http_read_deadline_s). */
+static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
+{
+	struct fpm_http_read_deadline_s *dl = calloc(1, sizeof(*dl));
+
+	if (!dl) {
+		return; /* OOM: degrade to libevent's idle timeout only, the listener still works */
+	}
+	dl->gw = gw;
+	dl->bev = bev;
+	dl->ev = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_read_deadline_fire, dl);
+	if (!dl->ev) {
+		free(dl);
+		return;
+	}
+	dl->next = gw->deadlines;
+	gw->deadlines = dl;
+	event_add(dl->ev, &gw->read_timeout);
+}
+
+/* The first request on this connection has fully arrived: its deadline is
+ * spent. Safe to call when none is armed (read_timeout = 0 or OOM above). */
+static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
+{
+	struct fpm_http_read_deadline_s **p, *dl;
+
+	if (!bev) {
+		return;
+	}
+	for (p = &gw->deadlines; *p; p = &(*p)->next) {
+		if ((*p)->bev == bev) {
+			dl = *p;
+			*p = dl->next;
+			event_free(dl->ev);
+			free(dl);
+			return;
+		}
+	}
+}
+
+/* The gateway's bevcb: builds the bufferevent for a new client connection and
+ * arms its read deadline. TLS connections get their SSL bufferevent from
+ * fpm_http_tls_bevcb() with the pool's CURRENT SSL_CTX (gw->tls_ctx), so a
+ * hot-reloaded certificate (fpm_http_tls_reload.c) applies to new connections
+ * without this wrapper being re-registered. */
+static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	struct bufferevent *bev;
+
+#ifdef HAVE_FPM_HTTP_TLS
+	if (gw->tls_ctx) {
+		bev = fpm_http_tls_bevcb(base, gw->tls_ctx);
+	} else
+#endif
+	{
+		bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+	}
+	if (bev && gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_arm(gw, bev);
+	}
+	return bev;
+}
+
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -1669,24 +1794,24 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		if (!gw->tls_ctx) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
-		evhttp_set_bevcb(gw->http, fpm_http_tls_bevcb, gw->tls_ctx);
 
 		/* Own generation-watch timer, on this child's own base -- see
-		 * fpm_http_tls_reload.h. No-op when gw->reload is NULL. */
-		fpm_http_tls_reload_child_init(gw->reload, gw->base, gw->http, &gw->tls_ctx);
+		 * fpm_http_tls_reload.h. No-op when gw->reload is NULL. The bevcb
+		 * pair keeps a reload from dropping the read deadline (task 031). */
+		fpm_http_tls_reload_child_init(gw->reload, gw->base, gw->http, &gw->tls_ctx,
+			fpm_http_bevcb, gw);
 	}
 #endif
+	/* One bevcb for every listener (TLS and plain alike): it wraps the
+	 * bufferevent AND arms the per-connection read deadline (task 031).
+	 * evhttp's own timeout is NOT used -- a bufferevent read timeout is an
+	 * idle timer restarted on every received byte, so a slow-loris client
+	 * trickling one byte at a time would never trip it. See
+	 * struct fpm_http_read_deadline_s. */
+	evhttp_set_bevcb(gw->http, fpm_http_bevcb, gw);
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 		EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_max_body_size(gw->http, gw->max_body);
-	/* One deadline for the whole client-side read (headers + body, task 031):
-	 * a slow client (slow-loris style, trickling a byte at a time) is cut off
-	 * instead of pinning a gateway connection forever. http.idle_timeout
-	 * covers the *idle keep-alive* case; this covers the *in-progress* read.
-	 * 0 disables the deadline, restoring pre-task-031 behaviour. */
-	if (gw->read_timeout_ms > 0) {
-		evhttp_set_timeout_tv(gw->http, &gw->read_timeout);
-	}
 	evhttp_set_gencb(gw->http, fpm_http_request, gw);
 	evutil_make_socket_nonblocking(gw->listen_fd);
 	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {

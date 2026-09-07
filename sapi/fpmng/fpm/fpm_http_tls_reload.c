@@ -109,6 +109,13 @@ struct fpm_http_tls_reload_s {
 	struct event *child_timer;
 	struct evhttp *child_http;
 	SSL_CTX **child_ctx_slot;
+	/* task 031: after a reload the listener must keep its bevcb WRAPPER
+	 * (fpm_http.c arms the per-connection read deadline there), with the
+	 * gateway as arg -- the wrapper reads the new *child_ctx_slot itself.
+	 * Reinstalling fpm_http_tls_bevcb directly would silently drop the
+	 * read deadline from every connection accepted after the reload. */
+	struct bufferevent *(*child_bevcb)(struct event_base *, void *);
+	void *child_bevcb_arg;
 	char local_cert_pem[FPM_HTTP_TLS_RELOAD_MAX_CERT];
 	char local_key_pem[FPM_HTTP_TLS_RELOAD_MAX_KEY];
 };
@@ -302,7 +309,17 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 		return;
 	}
 
-	evhttp_set_bevcb(r->child_http, fpm_http_tls_bevcb, new_ctx);
+	/* Keep the listener's own bevcb (the gateway's wrapper -- task 031):
+	 * it reads *r->child_ctx_slot at connection-accept time, so updating the
+	 * slot below is enough for new connections to get the reloaded cert.
+	 * NULL means this child predates the wrapper (cannot happen today;
+	 * fpm_http.c always passes it), in which case the plain TLS bevcb is
+	 * the correct historical fallback. */
+	if (r->child_bevcb) {
+		evhttp_set_bevcb(r->child_http, r->child_bevcb, r->child_bevcb_arg);
+	} else {
+		evhttp_set_bevcb(r->child_http, fpm_http_tls_bevcb, new_ctx);
+	}
 	SSL_CTX_free(*r->child_ctx_slot);
 	*r->child_ctx_slot = new_ctx;
 	r->last_seen_generation = gen;
@@ -312,7 +329,8 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 /* }}} */
 
 void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
-	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot) /* {{{ */
+	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
+	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg) /* {{{ */
 {
 	struct timeval every;
 
@@ -322,7 +340,8 @@ void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 
 	reload->child_http = http;
 	reload->child_ctx_slot = ctx_slot;
-	/* Whatever generation *ctx_slot was JUST built from (fpm_http_tls_ctx_new(),
+	reload->child_bevcb = bevcb;
+	reload->child_bevcb_arg = bevcb_arg;	/* Whatever generation *ctx_slot was JUST built from (fpm_http_tls_ctx_new(),
 	 * called right before this) -- not 0 -- so this does not immediately
 	 * "reload" itself against the exact bytes it just started with. */
 	reload->last_seen_generation = reload->shared->generation;

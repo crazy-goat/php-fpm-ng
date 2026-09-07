@@ -67,7 +67,8 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
  * `reload` is NULL or its check interval is 0 (http.tls_reload_check off,
  * or master-side setup failed). */
 void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
-	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot);
+	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
+	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg);
 
 /* Master-only: releases the shared-memory double buffer and the struct
  * itself. Never called by a gateway child -- children exit() rather than

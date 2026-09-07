@@ -144,9 +144,16 @@ $addr = $tester->getAddr('ipv4', '[gw]');
 [, $negotiated] = alpnProtocol($timeoutBin, $addr, 'http/1.1');
 echo 'ALPN http/1.1: ', var_export($negotiated, true), "\n";
 
-[$bogusCode, $bogusOut] = sClient($timeoutBin, $addr, ['-alpn', 'some-bogus-protocol']);
+// What the acceptance criterion actually requires is that the handshake
+// fails (nonzero exit) and that no ALPN protocol was negotiated. The exact
+// human-readable alert text ("no application protocol", etc.) is an
+// implementation detail of the openssl CLI that varies across OpenSSL /
+// LibreSSL versions and platforms -- e.g. this differs between the macOS
+// LibreSSL s_client used during development and the OpenSSL 3.x s_client on
+// CI's ubuntu-latest -- so it is not something to assert on.
+[$bogusCode, $bogusNegotiated] = alpnProtocol($timeoutBin, $addr, 'some-bogus-protocol');
 echo 'ALPN unsupported-only: exit=', $bogusCode,
-    ', alert seen=', var_export(str_contains($bogusOut, 'no application protocol'), true), "\n";
+    ', negotiated=', var_export($bogusNegotiated, true), "\n";
 
 // A client sending no ALPN extension at all must still get a normal,
 // working HTTPS response (today's, pre-041, behaviour).
@@ -176,7 +183,7 @@ foreach (glob("$certDir/*") as $f) {
 Done
 --EXPECTF--
 ALPN http/1.1: 'http/1.1'
-ALPN unsupported-only: exit=1, alert seen=true
+ALPN unsupported-only: exit=1, negotiated=NULL
 no-ALPN request body: 'worker-hit
 '
 SNI other.test: 'other.test'

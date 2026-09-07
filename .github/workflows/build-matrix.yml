@@ -260,3 +260,21 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
+
+  plain-http-listener:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify the redirect-only plain HTTP companion (task 042)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"

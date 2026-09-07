@@ -152,12 +152,64 @@ was used for Laravel — see `findings.md`):
   not_measured=2` in the default mode, `pass=11 error=0 not_measured=0` with
   `SLIM_CONTAINER=php-di SLIM_ROUTE_CACHE=1`. Compose project torn down
   cleanly on exit.
-- `tests/frameworks/run-all.sh` end to end: Symfony `PASS` (`PASS=21
-  ERROR=0 NOT MEASURED=0`), Laravel `ERROR` (see `findings.md` for why a
-  fully-successful Laravel run is not zero-exit today — a pre-existing,
-  documented convention in `laravel/bin/run.sh`, not something this task
-  changed), Slim 4 `PASS` (`pass=9 error=0 not_measured=2`). All three
-  Docker Compose projects torn down cleanly.
+- `tests/frameworks/run-all.sh` end to end (post-review, see below): Symfony
+  `PASS` (`PASS=21 ERROR=0 NOT MEASURED=0`), Laravel `PASS`
+  (`configured_pass=10 configured_error=0 negative_pass=1 negative_error=9`
+  — a healthy negative-control result, verdicted PASS by `run-all.sh`'s own
+  `classify_laravel`, not by Laravel's raw exit status; see "Post-review
+  fixes" below), Slim 4 `PASS` (`pass=9 error=0 not_measured=2`). All three
+  Docker Compose projects torn down cleanly; overall exit **0**.
+
+**Post-review fixes.** An independent review of the branch found six major
+issues, all fixed in follow-up commits (not amended):
+
+1. `setup_services` in `laravel/bin/run.sh` and `slim4/bin/run.sh` could
+   set `DOCKER_STARTED=1` and then `exit 2` on a later precondition (e.g.
+   Laravel's default-path phpredis-extension check, which fires on any
+   machine without a built `redis.so` — exactly the machine used for
+   verification) before the `cleanup()` trap was installed, leaking the
+   compose project and its volume forever. Fixed by trapping a
+   `cleanup_services()` function immediately after `mkdir -p "$RUN_DIR"`,
+   before any code that can exit; confirmed no leaked containers/volumes
+   after reproducing the exact early-exit path directly.
+2. `run-all.sh` mapped Laravel's raw exit status straight to ERROR, but
+   Laravel's own `bin/run.sh` exits non-zero whenever a negative control
+   correctly demonstrates the expected failure — the designed, healthy
+   outcome — so the combined summary could never report Laravel as PASS.
+   Fixed by parsing Laravel's own `SUMMARY configured_pass=...
+   configured_error=...` line instead of its exit status: PASS when
+   `configured_error=0`. Laravel's own script and negative controls are
+   unchanged.
+3. `FCGI_PORT` and `HTTP_PORT` were chosen by two independent
+   `choose_free_port` searches only 1 apart by default; if the FCGI default
+   was occupied, both searches could land on the same bumped port,
+   producing a broken pool config. Fixed by starting the `HTTP_PORT` search
+   strictly after the `FCGI_PORT` actually chosen; reproduced the collision
+   and confirmed the fix picks distinct ports.
+4. Slim 4 had no dependency provisioner (`bin/run.sh` just told the user to
+   run `composer install` manually), unlike Symfony and Laravel. Added
+   `slim4/bin/provision.sh` (same pattern as Laravel's) and wired it in
+   automatically. Also, `run-all.sh` forwarded no `REDIS_CLIENT` to
+   Laravel, so Laravel defaulted to `phpredis` and aborted without
+   `REDIS_EXTENSION`; `run-all.sh` now defaults `REDIS_CLIENT=predis` for
+   the Laravel run unless the caller has set `REDIS_CLIENT` or
+   `REDIS_EXTENSION`.
+5. `port_is_free` shells out to `nc -z`; if `nc` is missing, it silently
+   treats every port as free, turning `choose_free_port` into a no-op.
+   Added an `nc` precondition check (alongside `curl`) to both runners.
+6. `RUN_ID` (caller-controllable via `FPMNG_RUN_ID`) was not sanitized
+   before use as a MySQL database name or a Docker Compose project name.
+   Fixed to match `tests/frameworks/symfony/run.sh`'s originals:
+   `${RUN_ID//[^A-Za-z0-9]/_}` for the database name, `tr 'A-Z:' 'a-z--'`
+   for the Compose project name.
+
+Re-verified end to end after all six fixes: `laravel/bin/run.sh` and
+`slim4/bin/run.sh` individually in `SERVICE_MODE=docker` (same pass/error
+counts as above), the simulated early-exit leak path confirmed clean
+(`docker ps -a` / `docker volume ls` empty), the FCGI/HTTP port collision
+confirmed fixed under a forced port conflict, and `tests/frameworks/run-all.sh`
+end to end with no `REDIS_CLIENT`/`REDIS_EXTENSION` set: all three
+frameworks PASS, overall exit 0, no leaked containers or volumes.
 
 **Explicitly left out** (per the task's own "Explicitly out of scope"
 section, plus decisions made along the way):
@@ -169,7 +221,9 @@ section, plus decisions made along the way):
 - Reproducing the exact recorded phpredis numbers for Laravel (this
   machine has no `ext-redis`; `REDIS_CLIENT=predis` was used instead, which
   `laravel/README.md` already documents as a different measurement).
-- Changing Laravel's own exit-status convention so a fully-successful run
-  is zero-exit (recorded as a follow-up in `findings.md`; not done here to
-  avoid touching existing scenario/assertion logic beyond what unblocking
-  Docker-mode plumbing required).
+- Changing Laravel's own `bin/run.sh` exit-status convention itself (a
+  fully-successful run there is still a non-zero process exit by design;
+  only how `run-all.sh` *interprets* that result was changed, per the
+  review). Giving Laravel's own script a distinct "healthy" exit code is a
+  possible follow-up, not done here to avoid touching existing
+  scenario/assertion logic beyond what the review required.

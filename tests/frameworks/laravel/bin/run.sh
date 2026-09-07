@@ -29,11 +29,14 @@ REDIS_EXTENSION=${REDIS_EXTENSION:-}
 STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver}
 DOCKER_STARTED=0
 RUN_ID=${FPMNG_RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)_$$}
+COMPOSE=()
 
-if ! command -v curl >/dev/null 2>&1; then
-    echo "curl is required by the HTTP concurrency runner and Composer provisioner" >&2
-    exit 2
-fi
+for command in curl nc; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "$command is required (port checks and the HTTP concurrency runner need it)" >&2
+        exit 2
+    fi
+done
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
@@ -54,6 +57,19 @@ choose_free_port() {
     echo "$port"
 }
 
+# Split out from cleanup() (defined later, once stop_pool exists) so it can
+# be trapped immediately around setup_services: any exit between "docker
+# compose up" and the full cleanup() trap being installed would otherwise
+# leak the compose project and its volume forever.
+cleanup_services() {
+    if [ "$DOCKER_STARTED" -eq 1 ]; then
+        # Never FLUSHALL/FLUSHDB: the whole private compose project (and its
+        # volumes) is torn down instead, so no shared MySQL/Redis is touched.
+        "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
+        DOCKER_STARTED=0
+    fi
+}
+
 setup_services() {
     if [ "$SERVICE_MODE" != docker ] && [ "$SERVICE_MODE" != external ]; then
         echo "SERVICE_MODE must be docker or external" >&2
@@ -68,7 +84,10 @@ setup_services() {
         MYSQL_PORT=$(choose_free_port "$MYSQL_PORT")
         REDIS_PORT=$(choose_free_port "$REDIS_PORT")
         export MYSQL_PORT REDIS_PORT MYSQL_ROOT_PASSWORD
-        COMPOSE_PROJECT="fpmng-laravel-$(printf '%s' "$RUN_ID" | tr 'A-Z' 'a-z')"
+        # tr 'A-Z:' 'a-z--' (not just 'A-Z') because RUN_ID may contain ':'
+        # (an ISO-8601 timestamp) or other characters a Compose project name
+        # cannot carry; same as tests/frameworks/symfony/run.sh.
+        COMPOSE_PROJECT="fpmng-laravel-$(printf '%s' "$RUN_ID" | tr 'A-Z:' 'a-z--')"
         COMPOSE=(docker compose -f "$ROOT/compose.yaml" -p "$COMPOSE_PROJECT")
         if ! "${COMPOSE[@]}" up -d >"$RUN_DIR/compose.log" 2>&1; then
             echo "Docker Compose could not start MySQL and Redis; see $RUN_DIR/compose.log" >&2
@@ -95,8 +114,10 @@ setup_services() {
         LARAVEL_DB_USER=root
         LARAVEL_DB_PASSWORD=$MYSQL_ROOT_PASSWORD
         # A per-run database name, same discipline as the Symfony runner:
-        # never collide with, or reuse state from, another run.
-        LARAVEL_DB_NAME="laravel025_${RUN_ID}"
+        # never collide with, or reuse state from, another run. Sanitized
+        # the same way (setup.php requires ^[A-Za-z0-9_]+$ for DB names, and
+        # RUN_ID is caller-controllable via FPMNG_RUN_ID).
+        LARAVEL_DB_NAME="laravel025_${RUN_ID//[^A-Za-z0-9]/_}"
         LARAVEL_REDIS_HOST=127.0.0.1
         LARAVEL_REDIS_PORT=$REDIS_PORT
         LARAVEL_REDIS_DB=0
@@ -112,8 +133,22 @@ if [ ! -f "$ROOT/vendor/autoload.php" ]; then
 fi
 
 mkdir -p "$RUN_DIR"
+# Installed before setup_services (which can set DOCKER_STARTED=1 and then
+# exit 2 on a later precondition, e.g. the phpredis check below) so a
+# Docker Compose project is never left running past this script's exit.
+# Replaced with the fuller cleanup() trap further down, once stop_pool
+# exists.
+trap cleanup_services EXIT INT TERM
 setup_services
 FCGI_PORT=$(choose_free_port "$FCGI_PORT")
+# Search for HTTP_PORT starting strictly after the FCGI port that was
+# actually chosen: two independent choose_free_port searches only 1 apart
+# by default (22725/22726) can both land on the same bumped port when the
+# default FCGI port is occupied, producing a broken pool config (listen and
+# http.listen on the same port).
+if (( HTTP_PORT <= FCGI_PORT )); then
+    HTTP_PORT=$((FCGI_PORT + 1))
+fi
 HTTP_PORT=$(choose_free_port "$HTTP_PORT")
 
 if [ "$REDIS_CLIENT" = phpredis ]; then
@@ -369,12 +404,7 @@ cleanup() {
     stop_pool configured || true
     stop_pool negative || true
     rm -f "$ROOT/.env"
-    if [ "$DOCKER_STARTED" -eq 1 ]; then
-        # Never FLUSHALL/FLUSHDB: the whole private compose project (and its
-        # volumes) is torn down instead, so no shared MySQL/Redis is touched.
-        "${COMPOSE[@]}" down --volumes --remove-orphans >/dev/null 2>&1 || true
-        DOCKER_STARTED=0
-    fi
+    cleanup_services
 }
 trap cleanup EXIT INT TERM
 

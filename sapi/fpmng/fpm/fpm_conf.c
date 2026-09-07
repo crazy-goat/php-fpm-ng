@@ -1029,18 +1029,19 @@ static int fpm_conf_process_all_pools(void)
 			return -1;
 		}
 
-		/* Type-specific checks. */
-		if (type->validate && 0 > type->validate(wp)) {
-			return -1;
-		}
-
-		/* alert if user is not set; only if we are root and fpm is not running with --allow-to-run-as-root */
-		if (!wp->config->user && !geteuid() && !fpm_globals.run_as_root) {
-			zlog(ZLOG_ALERT, "[pool %s] 'user' directive has not been specified when running as a root without --allow-to-run-as-root", wp->config->name);
-			return -1;
-		}
-
-		/* listen */
+		/* listen — resolved before type->validate() (fpmng: task 015) so that
+		 * wp->listen_address_domain is populated by the time a type's validate()
+		 * reads it. fpm_http_validate_pool() needs this to tell a TCP listen
+		 * (where http.listen may default to the FastCGI port + 1) from a unix
+		 * socket (where it can't); with the original upstream ordering
+		 * (validate() before listen) that check always saw the zero, unset
+		 * value — matching neither FPM_AF_UNIX nor FPM_AF_INET — and treated
+		 * every http pool as if it listened on a unix socket. This must still
+		 * run before type->validate(), because fpm_pool_status_validate() and
+		 * fpm_pool_supervisor_validate() set wp->config->pm/pm_max_children,
+		 * which the "pm" checks further below depend on — moving listen later
+		 * than those would work too, but moving validate() before listen would
+		 * reintroduce this bug. */
 		if (wp->config->listen_address && *wp->config->listen_address) {
 			wp->listen_address_domain = fpm_sockets_domain_from_address(wp->config->listen_address);
 
@@ -1049,6 +1050,17 @@ static int fpm_conf_process_all_pools(void)
 			}
 		} else if (type->requires_listen) {
 			zlog(ZLOG_ALERT, "[pool %s] no listen address have been defined!", wp->config->name);
+			return -1;
+		}
+
+		/* Type-specific checks. */
+		if (type->validate && 0 > type->validate(wp)) {
+			return -1;
+		}
+
+		/* alert if user is not set; only if we are root and fpm is not running with --allow-to-run-as-root */
+		if (!wp->config->user && !geteuid() && !fpm_globals.run_as_root) {
+			zlog(ZLOG_ALERT, "[pool %s] 'user' directive has not been specified when running as a root without --allow-to-run-as-root", wp->config->name);
 			return -1;
 		}
 

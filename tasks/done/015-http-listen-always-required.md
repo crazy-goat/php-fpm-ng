@@ -1,7 +1,7 @@
 # 015 — `http.listen` is effectively always required, contradicting its own error message
 
 **Priority:** low. Small, self-contained, and user-facing.
-**Status:** open. Found while doing something else and deliberately not fixed
+**Status:** done. Found while doing something else and deliberately not fixed
 then; recorded in `docs/NOTES.md` around line 2515.
 
 ## Context
@@ -44,3 +44,34 @@ Make the validation see the value it is testing, so the documented default
 
 - Worth checking whether any other `type->validate()` implementation reads pool
   fields that are not yet populated at that point. This may not be the only one.
+
+## Outcome
+
+- Established what the original ordering (type-specific checks, i.e.
+  `type->validate()`, before the `/* listen */` block) actually depends on:
+  `fpm_pool_status_validate()` and `fpm_pool_supervisor_validate()`
+  (`fpm_pool_status.c:90`, `fpm_pool_supervisor.c:163-164`) both set
+  `wp->config->pm`/`pm_max_children`, which the "pm" validation further down
+  `fpm_conf_process_all_pools()` (`fpm_conf.c`, around what was line 1008)
+  depends on. That dependency only requires `type->validate()` to run before
+  those "pm" checks — not before `/* listen */`, which already ran before them
+  too.
+- Fix: moved the `/* listen */` block in `fpm_conf.c`'s
+  `fpm_conf_process_all_pools()` to run before `type->validate()` (and kept it
+  before the "pm" checks, unchanged). `wp->listen_address_domain` is now
+  populated by the time `fpm_http_validate_pool()` reads it, so `listen =
+  host:port` with no `http.listen` is accepted and defaults to the FastCGI
+  port + 1 (`fpm_http.c:1750`), while a unix-socket listen is still refused
+  with the existing, now-accurate message.
+- Added `sapi/fpmng/tests/fpmng-http-listen-default.phpt`: starts a TCP
+  `pool.type = http` pool with no `http.listen` and confirms a request on the
+  FastCGI port + 1 is served; separately confirms a unix-socket `pool.type =
+  http` pool with no `http.listen` is still rejected with "pool.type = http
+  requires http.listen when listen is a unix socket". Not run locally (no
+  prepared php-src tree in this worktree) — verified through CI's
+  `fpmng-phpt`/`phpt` jobs on the PR instead.
+- Updated `docs/NOTES.md` (~line 2576, the original "found incidentally, not
+  fixed" note) to point at this task as the fix.
+- Left out: did not remove the now-redundant `http.listen` from existing test
+  configurations that only carried it because of this bug — out of scope for
+  this task, and removing it everywhere would be its own unrelated diff.

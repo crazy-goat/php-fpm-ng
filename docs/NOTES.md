@@ -2573,7 +2573,7 @@ hard-coded — invisible while the function had one caller. Reusing it for
 the wrong directive). Fixed by adding a `directive` parameter to
 `fpm_http_acl_parse()` (the signature changed and all four call sites were updated).
 
-**Found incidentally, NOT fixed (out of scope for this work)**: the order of
+**Found incidentally, NOT fixed here (task 015, fixed later)**: the order of
 checks in `fpm_conf.c` (the "type-specific directives" section before the
 `/* listen */` block) means `type->validate()` (that is,
 `fpm_http_validate_pool()` sees `wp->listen_address_domain` still UNSET (zero,
@@ -2585,7 +2585,8 @@ today, not only for UDS as the error message and documentation say. Harmless:
 the requirement is only TOO BROAD, not too narrow, but the error message is
 misleading. Tests in this work therefore always had to add `http.listen` — even
 for `listen = 127.0.0.1:9001`. A separate small fix, not touched here to avoid
-mixing tasks.
+mixing tasks. Task 015 fixed this by moving the "listen" block in
+`fpm_conf_process_all_pools()` before `type->validate()`.
 
 **How it was built and tested**: a separate php-src clone (PHP-8.5,
 `/private/tmp`, NOT the user's `~/work/php-src`) + `build/prepare.sh` +

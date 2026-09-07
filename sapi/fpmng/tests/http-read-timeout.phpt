@@ -115,7 +115,6 @@ if ($elapsed < 1) {
     echo sprintf("FAIL: cut off suspiciously early, %.1f s -- wrong reason?\n", $elapsed);
     exit(1);
 }
-printf("cut off after %.1f s\n", $elapsed);
 
 $tester->terminate();
 $tester->expectLogTerminatingNotices();

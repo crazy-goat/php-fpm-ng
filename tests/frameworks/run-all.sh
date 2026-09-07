@@ -26,7 +26,12 @@ set -Eeuo pipefail
 # coverage is explicitly out of scope for this harness.
 #
 # Exit status is non-zero unless every framework's runner reports PASS; a
-# framework that could not run (NOT MEASURED) is not a pass.
+# framework that could not run (NOT MEASURED) is not a pass. Laravel's own
+# runner exits non-zero whenever its negative controls correctly demonstrate
+# the expected failure (by design, see laravel/README.md); this script
+# reinterprets that from Laravel's own SUMMARY line (see classify_laravel
+# below) rather than from its raw exit status, so a fully healthy Laravel
+# run still reports PASS here.
 
 SUITE_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 RUN_ID=${FPMNG_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)-$$}
@@ -63,6 +68,19 @@ run_symfony() {
 
 run_laravel() {
     local log=$1
+    # Default to the predis client so the one documented command completes
+    # on a machine with nothing but Docker/Composer/PHP/the binary: Laravel's
+    # own default (REDIS_CLIENT=phpredis) requires a REDIS_EXTENSION pointing
+    # at a compiled redis.so, which is not part of a clean-machine baseline.
+    # predis/predis is already a locked Composer dependency. A caller who
+    # sets REDIS_CLIENT explicitly, or sets REDIS_EXTENSION to get the
+    # phpredis measurement, is respected as-is.
+    local laravel_redis_client=${REDIS_CLIENT:-}
+    if [[ -z $laravel_redis_client && -z ${REDIS_EXTENSION:-} ]]; then
+        laravel_redis_client=predis
+    fi
+
+    REDIS_CLIENT="$laravel_redis_client" \
     FPMNG="$FPMNG_BIN" \
     PHP="$RESOLVED_PHP" \
     SERVICE_MODE=${SERVICE_MODE:-docker} \
@@ -100,6 +118,34 @@ summary_line() {
     grep -E "$pattern" "$log" | tail -n 1
 }
 
+# classify_laravel LINE -> Laravel's bin/run.sh exits non-zero whenever any
+# negative-control scenario reports ERROR, which is the *expected, correct*
+# outcome of a working negative control (see findings.md and
+# laravel/README.md: a healthy run is configured_error=0, negative_error>0).
+# So its raw exit status cannot tell "the harness is healthy" apart from
+# "an unexpected assertion failed" — parse its own SUMMARY line instead:
+# PASS when the configured suite has no errors (negative-control errors are
+# the correct, designed outcome, not a harness failure); ERROR when a
+# configured scenario failed unexpectedly; NOT MEASURED when the line is
+# absent (setup did not get far enough to print it at all).
+classify_laravel() {
+    local line=$1
+    local configured_error
+
+    [[ -n $line ]] || { echo "NOT MEASURED"; return; }
+    if [[ $line =~ configured_error=([0-9]+) ]]; then
+        configured_error=${BASH_REMATCH[1]}
+    else
+        echo "NOT MEASURED"
+        return
+    fi
+    if (( configured_error > 0 )); then
+        echo ERROR
+    else
+        echo PASS
+    fi
+}
+
 run_one() {
     local name=$1
     local log=$RUN_ROOT/$name.log
@@ -113,17 +159,27 @@ run_one() {
         status=$?
     fi
 
+    local verdict
     case $name in
         symfony)
-            detail=$(summary_line "$log" '^Summary: PASS=') ;;
+            detail=$(summary_line "$log" '^Summary: PASS=')
+            verdict=$(classify_exit "$status")
+            ;;
         laravel)
-            detail=$(summary_line "$log" '^SUMMARY configured_pass=') ;;
+            detail=$(summary_line "$log" '^SUMMARY configured_pass=')
+            # Not classify_exit: see classify_laravel's comment above for why
+            # Laravel's raw exit status is not "PASS means the harness is
+            # healthy" here.
+            verdict=$(classify_laravel "$detail")
+            ;;
         slim4)
-            detail=$(summary_line "$log" '^SUMMARY pass=') ;;
+            detail=$(summary_line "$log" '^SUMMARY pass=')
+            verdict=$(classify_exit "$status")
+            ;;
     esac
     [[ -n $detail ]] || detail="(no summary line found; see $log)"
 
-    FRAMEWORK_STATUS+=("$(classify_exit "$status")")
+    FRAMEWORK_STATUS+=("$verdict")
     FRAMEWORK_DETAIL+=("$detail")
 }
 

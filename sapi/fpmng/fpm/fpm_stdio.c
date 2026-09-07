@@ -21,8 +21,9 @@
 #include "zlog.h"
 
 static int fd_stderr_original = -1;
-/* fpm-ng: przy catch_workers_output = no fd 2 dziecka to /dev/null, wiec znacznik
- * FPM_STDIO_CMD_FLUSH po kazdym requescie nie ma odbiorcy — oszczedzamy ten write(). */
+/* fpm-ng: with catch_workers_output = no, the child's fd 2 is /dev/null, so the
+ * FPM_STDIO_CMD_FLUSH marker after every request has no reader — we save that
+ * write(). */
 static bool fpm_stdio_child_flush_needed = true;
 static int fd_stdout[2];
 static int fd_stderr[2];

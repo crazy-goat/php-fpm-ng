@@ -219,8 +219,8 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out, /
 		return -1;
 	}
 
-	/* Dzien tygodnia: 0-7, gdzie zarowno 0 jak i 7 znacza niedziele —
-	 * parsujemy w tymczasowym bitmapie 0..7, potem 7 skladamy w 0. */
+	/* Day of week: 0-7, where both 0 and 7 mean Sunday — parse into a
+	 * temporary 0..7 bitmap, then fold 7 into 0. */
 	if (0 > fpm_cron_parse_field(fields[4], 0, 7, wday_tmp, sizeof(wday_tmp), "day-of-week",
 			&out->wday_is_star, err, err_len)) {
 		return -1;
@@ -250,13 +250,13 @@ static int fpm_cron_schedule_matches(const struct fpm_cron_schedule_s *sched, co
 		return 0;
 	}
 
-	/* Klasyczna, zaskakujaca semantyka crona: kiedy OBA pola dnia sa
-	 * ograniczone (zadne nie jest literalnym "*"), dopasowanie to SUMA (OR),
-	 * nie iloczyn (AND). Musi tak byc, zeby harmonogramy przeniesione
-	 * z systemowego crona dzialaly tak samo (np. "13. kazdego miesiaca ORAZ
-	 * kazdy piatek", nie "13. tylko jesli akurat wypada w piatek"). Kiedy
-	 * ktores z pol jest "*", sprowadza sie to do zwyklego AND, bo "*" i tak
-	 * nie ogranicza niczego. */
+	/* Classic, surprising cron semantics: when BOTH day fields are
+	 * restricted (neither is a literal "*"), the match is a UNION (OR),
+	 * not an intersection (AND). It must be this way so schedules moved
+	 * from a system cron behave the same (e.g. "the 13th of every month OR
+	 * every Friday", not "the 13th only if it happens to be a Friday").
+	 * When one of the fields is "*", it reduces to a plain AND, because "*"
+	 * does not restrict anything anyway. */
 	if (sched->mday_is_star && sched->wday_is_star) {
 		day_match = 1;
 	} else if (sched->mday_is_star) {
@@ -309,22 +309,22 @@ static void fpm_cron_schedule_tz_pop(char *saved) /* {{{ */
 
 time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after, const char *tz) /* {{{ */
 {
-	/* Zawsze zaczynamy szukanie od NASTEPNEJ pelnej minuty po "after", nigdy
-	 * od samego "after" ani od "ostatnio widzianej minuty" — to jest cale
-	 * "brak nadrabiania zgubionych przebiegow" i "brak podwojnego odpalenia
-	 * w tej samej minucie po szybkim powrocie" za darmo. Nie pytamy "co
-	 * przegapilem", tylko "co jest najblizej w przyszlosci" — wiec proces
-	 * odrodzony chwile po tym, jak poprzedni skonczyl przebieg w tej samej
-	 * minucie, nigdy nie znajdzie ponownie minuty, ktora wlasnie minela,
-	 * a master wylaczony na godzine po prostu leci od najblizszego
-	 * przyszlego terminu, bez dwunastu zalegych przebiegow naraz. */
+	/* Always start the search at the NEXT full minute after "after", never
+	 * at "after" itself nor at "the last minute seen" — this gets the whole
+	 * "no catching up of missed runs" and "no double firing in the same
+	 * minute after a quick return" for free. We do not ask "what did I
+	 * miss", only "what is nearest in the future" — so a process resurrected
+	 * a moment after the previous one finished its run in the same minute
+	 * never finds the minute that just passed again, and a master that was
+	 * off for an hour simply starts from the nearest future due time,
+	 * without twelve overdue runs at once. */
 	time_t t = (after / 60 + 1) * 60;
-	/* Limit poszukiwan: ok. 4 lata w minutach. Chroni WYLACZNIE przed
-	 * harmonogramem, ktory strukturalnie nigdy nie moze zajsc (np. dzien 30
-	 * lutego z dniem tygodnia rowniez ograniczonym do czegos, co nigdy nie
-	 * wypada w lutym, wiec regula OR tez nie ratuje) — walidacja przy
-	 * starcie nie lapie tego dzis, wiec to jest ostatnia siatka
-	 * bezpieczenstwa przed nieskonczona petla, nie normalna sciezka. */
+	/* Search limit: about 4 years in minutes. Protects ONLY against a
+	 * schedule that structurally can never occur (e.g. day 30 of February
+	 * combined with a day-of-week also restricted to something that never
+	 * falls in February, so the OR rule does not save it either) — startup
+	 * validation does not catch this today, so this is the last safety net
+	 * against an infinite loop, not a normal path. */
 	time_t limit = t + (time_t) 4 * 366 * 24 * 60 * 60;
 	char *saved_tz = NULL;
 	time_t result = (time_t) -1;

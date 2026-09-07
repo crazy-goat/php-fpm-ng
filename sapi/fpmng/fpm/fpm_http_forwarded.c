@@ -35,20 +35,20 @@ void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer
 	const char *xff, *xfp, *xfport;
 
 	memset(out, 0, sizeof(*out));
-	out->scheme = "http"; /* bramka sama nigdy nie mowi TLS, patrz docs/NOTES.md sekcja 5 */
+	out->scheme = "http"; /* the gateway never claims TLS; see docs/NOTES.md section 5 */
 
 	if (!trusted || !fpm_http_acl_check(trusted, peer_addr)) {
-		return; /* polaczenie nie jest z zaufanego proxy: X-Forwarded-* jest ignorowany */
+		return; /* connection is not from a trusted proxy: ignore X-Forwarded-* */
 	}
 
 	xff = evhttp_find_header(headers, "X-Forwarded-For");
 	if (xff && *xff) {
-		/* Idziemy od PRAWEJ, pomijajac adresy, ktore same sa zaufanymi proxy,
-		 * i bierzemy pierwszy, ktory nie jest -- to jedyny element, ktorego
-		 * klient nie mogl podrobic. Wziecie pierwszego z lewej byloby dziura:
-		 * nginx z domyslnym $proxy_add_x_forwarded_for DOPISUJE adres klienta
-		 * do tego, co klient przyslal, wiec lewa strona listy pochodzi wprost
-		 * od klienta. Dziala tak samo dla jednego proxy i dla lancucha. */
+		/* Walk from the RIGHT, skipping addresses that are themselves trusted
+		 * proxies, and take the first one that is not — it is the only element
+		 * the client could not forge. Taking the first from the left is a hole:
+		 * nginx's default $proxy_add_x_forwarded_for APPENDS the client address
+		 * to what the client sent, so the left side comes directly from the
+		 * client. This works for one proxy and for a chain. */
 		const char *end = xff + strlen(xff);
 
 		while (end > xff) {
@@ -64,11 +64,11 @@ void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer
 				memcpy(out->remote_addr, candidate, sizeof(candidate));
 				break;
 			}
-			/* element pusty albo sam jest zaufanym proxy: idziemy dalej w lewo */
+			/* Empty element or a trusted proxy: continue to the left. */
 			end = (start > xff) ? start - 1 : xff;
 		}
-		/* wszystkie elementy zaufane (albo lista pusta): nie ma czym nadpisac
-		 * REMOTE_ADDR, zostaje adres bezposredniego peera */
+		/* All elements trusted (or the list is empty): there is nothing to
+		 * override REMOTE_ADDR with; keep the direct peer address. */
 	}
 
 	xfp = evhttp_find_header(headers, "X-Forwarded-Proto");
@@ -80,7 +80,7 @@ void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer
 			out->https = 0;
 			out->scheme = "http";
 		}
-		/* inna wartosc: nieznana, zostaje domyslne "http" -- nie ma czego zgadywac */
+		/* Other value: unknown; keep the "http" default — do not guess. */
 	}
 
 	xfport = evhttp_find_header(headers, "X-Forwarded-Port");
@@ -91,7 +91,7 @@ void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer
 		if (!*end && port > 0 && port <= 65535) {
 			snprintf(out->server_port, sizeof(out->server_port), "%ld", port);
 		}
-		/* niepoprawna wartosc: server_port zostaje pusty, wolajacy uzyje wlasnego portu */
+		/* Invalid value: leave server_port empty; the caller uses its own port. */
 	}
 }
 /* }}} */

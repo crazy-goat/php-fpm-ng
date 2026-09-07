@@ -35,8 +35,8 @@ const char *fpm_request_get_stage_name(int stage) {
 	return requests_stages[stage];
 }
 
-/* fpm-ng: request_cpu_tracking. Wylaczone = brak times() na start i koniec requestu;
- * "last request cpu" w statusie i %C w access.format pokazuja wtedy 0. */
+/* fpm-ng: request_cpu_tracking. Disabled = no times() at request start and
+ * end; "last request cpu" in the status and %C in access.format then show 0. */
 static bool fpm_request_cpu_tracking = true;
 
 void fpm_request_set_cpu_tracking(bool on)

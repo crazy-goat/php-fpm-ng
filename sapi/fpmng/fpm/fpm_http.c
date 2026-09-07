@@ -141,15 +141,18 @@ struct {								\
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
+#define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
 /* A crash loop (bad bind, OOM, ...) must not turn into an unbounded fork()
  * storm: after this many respawns within RESPAWN_WINDOW seconds, a gateway
  * slot gives up and stays dead until the next reload. */
 #define FPM_HTTP_RESPAWN_MAX_BURST 5
 #define FPM_HTTP_RESPAWN_WINDOW_SEC 10
-#define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)
+#define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)	/* http.max_body default; the gateway buffers a whole request body in memory (task 031) */
 #define FPM_HTTP_MAX_CGI_HEADERS (64 * 1024)
 #define FCGI_MAX_RECORD_LEN      0xffff
 #define FPM_HTTP_BAD_GATEWAY     502 /* libevent has no constant for it */
+#define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
+#define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
 
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
@@ -186,6 +189,9 @@ struct fpm_http_gateway_s {
 	int static_files;				/* http.static, per pool: fork() copies it into every gateway process */
 	int idle_ms;					/* http.idle_timeout, milliseconds; 0 = never drop an idle pinned connection */
 	struct timeval idle_timeout;			/* idle_ms split into {sec, usec} for event_add() */
+	int read_timeout_ms;				/* http.read_timeout, milliseconds; 0 = no client-side read deadline */
+	struct timeval read_timeout;			/* read_timeout_ms split into {sec, usec} for evhttp_set_timeout_tv() */
+	size_t max_body;					/* http.max_body, bytes; evhttp buffers a whole body in memory before dispatch (task 031) */
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
@@ -283,7 +289,6 @@ struct _fpm_http_upstream {
 };
 
 static void fpm_http_pump(struct fpm_http_gateway_s *gw);
-static void fpm_http_retry_later(struct fpm_http_gateway_s *gw);
 
 /* Claims one of the pool's workers for a persistent connection, or fails when they are all taken. */
 static int fpm_http_budget_take(struct fpm_http_gateway_s *gw)
@@ -1006,9 +1011,23 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 			idle = fpm_http_upstream_new(gw);
 		}
 		if (!idle && gw->nupstreams == 0) {
-			/* no connection of our own and no budget left: another gateway holds every worker,
-			 * so look again shortly instead of waiting for an END_REQUEST that cannot come */
-			fpm_http_retry_later(gw);
+			/* no connection of our own and no budget left: every worker is held
+			 * by another gateway, so no END_REQUEST can arrive for us. Answer
+			 * 503 + Retry-After instead of queueing forever (task 031): a full
+			 * pool is a transient condition, and the client deserves to know it
+			 * is different from a broken one (which is 502, fpm_http_finish).
+			 * fpm_http_conn_free() removes c from gw->waiting itself (queued=1). */
+			while (!TAILQ_EMPTY(&gw->waiting)) {
+				c = TAILQ_FIRST(&gw->waiting);
+				c->status = FPM_HTTP_SERVICE_UNAVAIL;
+				if (c->evcon) {
+					evhttp_add_header(evhttp_request_get_output_headers(c->req), "Retry-After", FPM_HTTP_RETRY_AFTER);
+					evhttp_send_error(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
+				}
+				fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+					c->remote_user, c->status, c->bytes_out);
+				fpm_http_conn_free(c);
+			}
 			return;
 		}
 		if (!idle) {
@@ -1027,18 +1046,6 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		fpm_http_upstream_write(idle, ZSTR_VAL(c->out.s), ZSTR_LEN(c->out.s));
 		smart_str_free(&c->out);
 	}
-}
-
-static void fpm_http_retry_cb(evutil_socket_t fd, short what, void *arg)
-{
-	fpm_http_pump(arg);
-}
-
-static void fpm_http_retry_later(struct fpm_http_gateway_s *gw)
-{
-	static const struct timeval retry = {0, 2000};
-
-	event_base_once(gw->base, -1, EV_TIMEOUT, fpm_http_retry_cb, gw, &retry);
 }
 
 /* the client went away: stop writing to it, but let the pool finish so the connection stays usable */
@@ -1671,7 +1678,15 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 #endif
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 		EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
-	evhttp_set_max_body_size(gw->http, FPM_HTTP_MAX_BODY);
+	evhttp_set_max_body_size(gw->http, gw->max_body);
+	/* One deadline for the whole client-side read (headers + body, task 031):
+	 * a slow client (slow-loris style, trickling a byte at a time) is cut off
+	 * instead of pinning a gateway connection forever. http.idle_timeout
+	 * covers the *idle keep-alive* case; this covers the *in-progress* read.
+	 * 0 disables the deadline, restoring pre-task-031 behaviour. */
+	if (gw->read_timeout_ms > 0) {
+		evhttp_set_timeout_tv(gw->http, &gw->read_timeout);
+	}
 	evhttp_set_gencb(gw->http, fpm_http_request, gw);
 	evutil_make_socket_nonblocking(gw->listen_fd);
 	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
@@ -1929,6 +1944,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->idle_ms = idle_ms;
 	gw->idle_timeout.tv_sec = idle_ms / 1000;
 	gw->idle_timeout.tv_usec = (idle_ms % 1000) * 1000;
+
+	gw->read_timeout_ms = wp->config->http_read_timeout;
+	gw->read_timeout.tv_sec = wp->config->http_read_timeout / 1000;
+	gw->read_timeout.tv_usec = (wp->config->http_read_timeout % 1000) * 1000;
+	gw->max_body = wp->config->http_max_body;
 
 	if (fpm_conf_directive_was_set(wp->config, "http.listen") && wp->config->http_listen && *wp->config->http_listen) {
 		gw->http_listen_override = strdup(wp->config->http_listen);
@@ -2202,6 +2222,10 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (fpm_conf_directive_was_set(wp->config, "http.idle_timeout") && wp->config->http_idle_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.idle_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_read_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.read_timeout must not be negative", wp->config->name);
 		return -1;
 	}
 	if (wp->listen_address_domain != FPM_AF_INET) {

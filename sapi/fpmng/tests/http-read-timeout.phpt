@@ -1,0 +1,120 @@
+--TEST--
+FPM http gateway: http.read_timeout cuts off a client that trickles its request (task 031)
+--SKIPIF--
+<?php
+include "skipif.inc";
+?>
+--FILE--
+<?php
+
+require_once "tester.inc";
+
+// Task 031, acceptance criterion 1: a client sending one byte at a time,
+// never going fully idle, must be cut off within a bounded, documented time
+// -- http.read_timeout. The timeout is one budget for the whole client-side
+// read (headers + body), handed to libevent via evhttp_set_timeout_tv().
+
+$config = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+process_control_timeout = 5
+[read]
+listen = {{ADDR[fastcgi]}}
+pool.type = http
+pm = static
+pm.max_children = 1
+http.listen = {{ADDR[http]}}
+http.read_timeout = 2000
+EOT;
+
+$tester = new FPM\Tester($config, '<?php echo "ok";');
+$tester->start();
+$tester->expectLogStartNotices();
+
+$httpAddr = $tester->getAddr('ipv4', '[http]');
+[$host, $port] = explode(':', $httpAddr);
+
+// Baseline: a normal request answers 200, proving the listener is up before
+// we start the trickle (otherwise the assertions below could pass for the
+// wrong reason -- a gateway that never came up also never answers).
+$fp = fsockopen($host, (int) $port, $errno, $errstr, 5);
+if (!$fp) {
+    echo "FAIL: baseline connect: $errstr ($errno)\n";
+    exit(1);
+}
+fwrite($fp, "GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
+$baseline = '';
+while (!feof($fp)) {
+    $baseline .= fgets($fp);
+}
+fclose($fp);
+if (!str_starts_with($baseline, 'HTTP/1.1 200') && !str_starts_with($baseline, 'HTTP/1.0 200')) {
+    echo "FAIL: baseline request did not return 200:\n$baseline\n";
+    exit(1);
+}
+
+// Trickle: send one header byte every 100 ms. With read_timeout = 2000 ms the
+// gateway must close the connection roughly two seconds after the request
+// started, long before the (never completed) 60-second header block.
+$fp = fsockopen($host, (int) $port, $errno, $errstr, 5);
+if (!$fp) {
+    echo "FAIL: trickle connect: $errstr ($errno)\n";
+    exit(1);
+}
+stream_set_blocking($fp, false);
+
+$request = "GET / HTTP/1.1\r\nHost: $host\r\nContent-Length: 1\r\n\r\n";
+$sent = 0;
+$start = microtime(true);
+$closed = false;
+
+while (microtime(true) - $start < 20) {
+    if ($sent < strlen($request)) {
+        $n = @fwrite($fp, $request[$sent]);
+        if ($n === 1) {
+            $sent++;
+        }
+        usleep(100000); // 100 ms between bytes: slow, but never idle past 2 s
+        continue;
+    }
+    $read = [$fp];
+    $write = $except = null;
+    if (stream_select($read, $write, $except, 1) > 0) {
+        $data = @fread($fp, 8192);
+        if ($data === '' || $data === false) {
+            $closed = true; // EOF: the gateway cut us off
+            break;
+        }
+    }
+}
+$elapsed = microtime(true) - $start;
+fclose($fp);
+
+if (!$closed) {
+    echo "FAIL: trickling client was still connected after 20 s\n";
+    exit(1);
+}
+if ($elapsed > 10) {
+    echo sprintf("FAIL: cut off too late, %.1f s (read_timeout = 2000 ms)\n", $elapsed);
+    exit(1);
+}
+if ($elapsed < 1) {
+    echo sprintf("FAIL: cut off suspiciously early, %.1f s -- wrong reason?\n", $elapsed);
+    exit(1);
+}
+printf("cut off after %.1f s\n", $elapsed);
+
+$tester->terminate();
+$tester->expectLogTerminatingNotices();
+$tester->close();
+
+?>
+Done
+--EXPECT--
+Done
+--CLEAN--
+<?php
+require_once "tester.inc";
+FPM\Tester::clean();
+?>

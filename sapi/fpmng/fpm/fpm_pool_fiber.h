@@ -52,13 +52,6 @@ void fpm_pool_fiber_wake(void *waiter);
  * NULL outside a Fiber-executor child. */
 struct event_base *fpm_pool_fiber_event_base(void);
 
-/* Suspend the request fiber for `ms` milliseconds (ms < 0 = no limit).
- * Used by the TLS patch (0007): SSL_accept refuses to drive a renegotiation
- * that is already pending on the socket, so a post-handshake reneg request
- * is drained step by step with a guaranteed turn of the scheduler between
- * steps. 1 = elapsed/woken, -1 = cannot wait. */
-int fpm_pool_fiber_sleep_ms(long ms);
-
 /* Replace tcp/unix transports with the Fiber-suspending variant. Call once in
  * the child, after MINIT for all extensions (ext/openssl overwrites "tcp" in
  * its MINIT, so we must run AFTER it). */

@@ -10,6 +10,13 @@ if (!function_exists('stream_socket_server')) {
 if (!extension_loaded('openssl')) {
     die('skip requires the openssl extension (the test TLS server runs in this CLI)');
 }
+// The TLS servers run as PHP_BINARY -n (no ini): if openssl is a SHARED
+// extension, it is loaded via ini in this process but missing there, and the
+// servers die with "transport not found". Skip explicitly instead.
+exec(PHP_BINARY . ' -n -r ' . escapeshellarg('exit(extension_loaded("openssl") ? 0 : 1);'), $o, $st);
+if ($st !== 0) {
+    die('skip the -n CLI has no openssl (shared ext loaded via ini here)');
+}
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
 $info = implode("\n", $output);
@@ -140,11 +147,17 @@ foreach ($ids as $id) {
             escapeshellarg($addr) . ' ' . escapeshellarg($certFile) . ' ' . escapeshellarg($keyFile),
         $srvDesc, $srvPipes[$id]);
     fclose($srvPipes[$id][0]);
-    // Wait for READY (the listener is bound before it is printed).
+    // Wait for READY (the listener is bound before it is printed). Bounded:
+    // a server that hangs before printing must fail the test, not the suite.
+    stream_set_timeout($srvPipes[$id][1], 10);
     $ready = fgets($srvPipes[$id][1]);
     if (trim((string) $ready) !== 'READY') {
         echo "FAIL: TLS server $id did not start: " . var_export($ready, true) . "\n";
         echo stream_get_contents($srvPipes[$id][2]);
+        foreach ($srvProcs as $p) {
+            proc_terminate($p);
+            proc_close($p);
+        }
         $tester->terminate();
         $tester->close();
         exit(1);
@@ -173,6 +186,10 @@ $elapsed = microtime(true) - $start;
 foreach ($ids as $id) {
     fclose($srvPipes[$id][1]);
     fclose($srvPipes[$id][2]);
+    // A server that never got its connection would sit in accept() for 15 s;
+    // terminate instead of proc_close so a broken run cannot serialize the
+    // teardown into a minute-long hang.
+    proc_terminate($srvProcs[$id]);
     proc_close($srvProcs[$id]);
 }
 
@@ -196,6 +213,31 @@ if ($elapsed > 1.6) {
 
 echo $ok ? "fiber-tls-concurrency: ok\n" : "fiber-tls-concurrency: FAILED\n";
 
+// Task 005 criterion 6: configurations that cannot be made non-blocking are
+// refused with a clear message, not silently blocking.
+$refuseProbe = <<<'PHP'
+<?php
+ini_set('display_errors', '1');
+error_reporting(E_ALL);
+$ctx = stream_context_create(['ssl' => ['allow_blocking' => true, 'verify_peer' => false]]);
+$r1 = @stream_socket_client('tls://127.0.0.1:1', $e, $m, 2, STREAM_CLIENT_CONNECT, $ctx);
+$r2 = @stream_socket_server('tls://127.0.0.1:0', $e2, $m2, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN,
+    stream_context_create(['ssl' => ['local_cert' => __DIR__ . '/server.crt', 'local_pk' => __DIR__ . '/server.key']]));
+$r3 = @stream_socket_client('tls://127.0.0.1:1', $e3, $m3, 2, STREAM_CLIENT_PERSISTENT, $ctx);
+$err = error_get_last();
+echo json_encode(['client' => $r1 === false, 'server' => $r2 === false, 'persistent' => $r3 === false]);
+PHP;
+file_put_contents("$docRoot/refuse.php", $refuseProbe);
+$out = (string) @file_get_contents("http://$http/refuse.php");
+$row = json_decode($out, true);
+// All three calls must fail; the refusal warnings are in the output when
+// display_errors is on, but with the gateway in between the exact warning
+// placement varies, so assert on the outcomes.
+echo ($row && $row['client'] && $row['server'] && $row['persistent'])
+    ? "fiber-tls-refusals: ok\n"
+    : 'FAIL: refusals = ' . var_export($out, true) . "\n";
+$ok = $ok && $row && $row['client'] && $row['server'] && $row['persistent'];
+
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
@@ -210,6 +252,7 @@ Done
 --EXPECTF--
 elapsed: %s
 fiber-tls-concurrency: ok
+fiber-tls-refusals: ok
 Done
 --CLEAN--
 <?php

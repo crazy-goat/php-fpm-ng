@@ -1348,8 +1348,8 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 		return 0;			/* let fpm_http_build_request produce the 400 */
 	}
 
-	/* Kolejnosc bedzie miala znaczenie, gdy dojda ACME i /status: najpierw
-	 * rzeczy o ustalonej sciezce, dopiero na koncu pliki z dysku. */
+	/* Order will matter once ACME and /status arrive: fixed-path things
+	 * first, files from disk only at the end. */
 	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr, script_missing);
 
 	free(path);

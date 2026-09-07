@@ -414,8 +414,8 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 
 		if (shared && *shared == '1') {
 			fpm_coop_shared_includes = true;
-			zlog(ZLOG_NOTICE, "[pool %s] coop: EKSPERYMENT — included_files wspolne dla procesu "
-				"(require_once wykonuje sie raz na proces, bootstrap nie redeklaruje klas)", pool_name);
+			zlog(ZLOG_NOTICE, "[pool %s] coop: EXPERIMENT — included_files shared per process "
+				"(require_once runs once per process, bootstrap does not redeclare classes)", pool_name);
 		}
 	}
 

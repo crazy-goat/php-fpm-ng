@@ -10,7 +10,7 @@ design time.
 ## Context
 
 `fpm_pool_cron.c:1-40` is a design-rationale comment, not a changelog. It is
-explicit that these are choices: "to bedzie zmiana projektowa, nie poprawka"
+explicit that these are choices: "this will be a design change, not a fix"
 (line 33, of the missed-run limit) — this task is exactly that kind of
 revisit, done on purpose, not a bug report.
 
@@ -64,7 +64,7 @@ missed gets made up."
 This gap was anticipated, not discovered: `docs/NOTES.md:1430-1432` already
 says, in the same words as the source header, "someone will someday want
 to add catching up on missed runs — this is meant to be a deliberate design
-projektowa ..., nie poprawka," and `docs/NOTES.md:129-130` (point 3 of the
+change ..., not a fix," and `docs/NOTES.md:129-130` (point 3 of the
 same four-point list referenced above) flags it again from the original
 design pass. The decision was made deliberately and recorded twice in dev
 notes; it has never been carried into anything an operator reads.
@@ -150,7 +150,7 @@ documentation (not just the source comment, which only a code reader sees).
   in the same header comment, alongside two design pillars this task does
   not touch: no timers in the master (lines 4-13) and no shared control
   state driving cron's own behaviour (lines 16-24, `consecutive_failures`
-  exists "na nic nie wplywa" per the struct's own comment). Neither of those
+  exists "it has no effect on anything" per the struct's own comment). Neither of those
   two is in scope here; this task is only about (a), (b) and (c) as framed
   above.
 

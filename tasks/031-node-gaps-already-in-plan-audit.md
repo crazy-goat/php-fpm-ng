@@ -54,7 +54,7 @@ request-body-read timeout, or any slow-loris-style guard on an
 gateway's point of view.
 
 **Verdict: genuinely open, and untracked. `docs/node_server_gaps.md` itself
-says "nie ma jeszcze kompletnej ochrony" — this is the missing part.**
+says "there is not yet complete protection" — this is the missing part.**
 
 ### 3. Request body streaming / backpressure — not implemented, untracked
 

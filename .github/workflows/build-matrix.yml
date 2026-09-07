@@ -18,8 +18,8 @@ on:
         default: ""
 
 env:
-  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinowany tagiem,
-  # nie galezia"). Bumping this is a deliberate version bump, not an automatic
+  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinned by
+  # tag, not branch"). Bumping this is a deliberate version bump, not an automatic
   # moving target — see docs/NOTES.md:2748-2755 on what a patch vs. minor bump
   # requires.
   PHP_SRC_REPO: https://github.com/php/php-src.git

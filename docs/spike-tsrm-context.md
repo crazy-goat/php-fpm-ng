@@ -15,7 +15,7 @@ in `~/rd/a5/phpsrc`), `./configure --disable-all --enable-fpmng --enable-zts
 --prefix=/home/piotr/rd/a5/inst`.
 
 Verification that I am measuring MY OWN binary: `strings sapi/cli/php | grep -c 'Q4a:
-przed utworzeniem'` -> `1` (our string is in the binary), `php -v` -> `(ZTS)`,
+before creating'` -> `1` (our string is in the binary), `php -v` -> `(ZTS)`,
 `php -m | grep tsrm_spike` -> `tsrm_spike` (module loaded).
 
 ## Preliminary findings (research, not measurement — but backed by configure.ac and readelf)
@@ -67,9 +67,9 @@ globals (like a new real thread in a threaded SAPI).
 
 Raw output (`tsrm_spike_run()`):
 ```
-Q1: prawdziwy watek=130144153527872, tsrm_get_ls_cache() (ctxA)=0x617b00d055d0, TSRMLS_CACHE=0x617b00d055d0
-Q1: ts_resource_ex(0, fake_tid=130144153551077) -> ctxB=0x617b00f17b30 (utworzony=tak, rozny od A=tak)
-Q1: po utworzeniu B, tsrm_get_ls_cache()=0x617b00f17b30, TSRMLS_CACHE=0x617b00f17b30 (oczekiwane: oba == ctxB - efekt uboczny allocate_new_resource przelaczyl PRAWDZIWY watek)
+Q1: real thread=130144153527872, tsrm_get_ls_cache() (ctxA)=0x617b00d055d0, TSRMLS_CACHE=0x617b00d055d0
+Q1: ts_resource_ex(0, fake_tid=130144153551077) -> ctxB=0x617b00f17b30 (created=yes, different from A=yes)
+Q1: after creating B, tsrm_get_ls_cache()=0x617b00f17b30, TSRMLS_CACHE=0x617b00f17b30 (expected: both == ctxB - side effect of allocate_new_resource switching the REAL thread)
 ```
 
 **Caveat discovered ALONG THE WAY (more important than the YES answer itself):**
@@ -92,9 +92,9 @@ because that is one, shared variable (`TSRMLS_MAIN_CACHE_EXTERN()` in
 
 Raw output:
 ```
-Q2: ustawilem EG(precision)=111 w A, =222 w B. W B odczytuje=222 (oczekiwane 222)
-Q2: po powrocie TSRMLS_CACHE=ctxA, EG(precision)=111 (oczekiwane 111, NIE 222)
-Q2: WNIOSEK: przelaczanie EG() (kod statyczny) przez reczne TSRMLS_CACHE dziala = TAK
+Q2: I set EG(precision)=111 in A, =222 in B. In B it reads=222 (expected 222)
+Q2: after returning TSRMLS_CACHE=ctxA, EG(precision)=111 (expected 111, NOT 222)
+Q2: CONCLUSION: switching EG() (statically compiled code) via a manual TSRMLS_CACHE works = YES
 ```
 (The order of the lines in the terminal was shuffled relative to the order in
 which the code executed — see the "Side effect on the output layer" section
@@ -113,8 +113,8 @@ below; the values are correct, only the output buffer FLUSH is unpredictable.)
 2. Runtime, A<->A path (test works): we set `session.save_path` in A,
    read it in A — correctly, isolation is fine as long as we stay in A:
 ```
-Q3: w A ustawilem save_path=/spike/A, session_save_path() zwraca teraz: /spike/A
-Q3: po powrocie TSRMLS_CACHE=ctxA (statyczny EG/PG juz widzi A), session_save_path() (dynamicznie zaladowany session.so) zwraca: /spike/A
+Q3: in A I set save_path=/spike/A, session_save_path() now returns: /spike/A
+Q3: after returning, TSRMLS_CACHE=ctxA (the static EG/PG already sees A), session_save_path() (dynamically loaded session.so) returns: /spike/A
 ```
 3. Runtime, attempt to read/write IN context B: **`call_user_function()` for
    `session_save_path` FAILED** (twice — set and get):
@@ -144,8 +144,8 @@ it — session always sees the context it had at the moment of its own MINIT
 ## Side effect discovered along the way: the output layer is also per-context
 
 Lines printed by `php_printf()` WHILE `TSRMLS_CACHE` pointed to B appeared in
-the terminal in a DIFFERENT order than in the code (e.g. the line "Q2: po
-powrocie... 111" appeared in the log BEFORE the line "Q1: ts_resource_ex(...) ->
+the terminal in a DIFFERENT order than in the code (e.g. the line "Q2: after
+returning... 111" appeared in the log BEFORE the line "Q1: ts_resource_ex(...) ->
 ctxB", even though the code has it the other way around). `php_printf` goes
 through SAPI output buffering (`OG()`/`output_globals`), which is also
 per-context TSRM (fast/static) — i.e. switching `TSRMLS_CACHE` mid-request
@@ -165,10 +165,10 @@ WITHOUT any PHP code inside (no request, no `require`).
 
 Raw output:
 ```
-N=1: Q4a: przed utworzeniem 1 dodatkowych blokow: VmRSS=16564 kB
-     Q4a: po utworzeniu 1 dodatkowych blokow: VmRSS=16856 kB (delta=292 kB, ~292.0 kB/blok)
-N=8: Q4a: przed utworzeniem 8 dodatkowych blokow: VmRSS=16664 kB
-     Q4a: po utworzeniu 8 dodatkowych blokow: VmRSS=18944 kB (delta=2280 kB, ~285.0 kB/blok)
+N=1: Q4a: before creating 1 additional block: VmRSS=16564 kB
+     Q4a: after creating 1 additional block: VmRSS=16856 kB (delta=292 kB, ~292.0 kB/block)
+N=8: Q4a: before creating 8 additional blocks: VmRSS=16664 kB
+     Q4a: after creating 8 additional blocks: VmRSS=18944 kB (delta=2280 kB, ~285.0 kB/block)
 ```
 ~285-292 kB per additional, EMPTY TSRM block (just the module structures after
 GINIT, zero user code). This IS a measurable baseline cost, but does not
@@ -180,8 +180,8 @@ answer the question of the real-world cost (see (b)).
 `zend_eval_string()` because `require` is a language construct, not a
 function) on a simple `tiny.php` file in the CURRENT context works correctly:
 ```
-Q4b: zend_eval_string(require /home/piotr/rd/a5/tiny.php) w kontekscie biezacym -> rv=0 (SUCCESS), exception=nie
-Q4b: VmRSS przed=16632 kB po=16640 kB (delta=8 kB)
+Q4b: zend_eval_string(require /home/piotr/rd/a5/tiny.php) in the current context -> rv=0 (SUCCESS), exception=no
+Q4b: VmRSS before=16632 kB after=16640 kB (delta=8 kB)
 PHP script survived to the end.
 ```
 but the same operation IN CONTEXT B (created via `ts_resource_ex`, as in Q1)

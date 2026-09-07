@@ -250,10 +250,10 @@ int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * can do anything. */
 	if (fpm_global_config.process_control_timeout < wp->config->cron_timeout) {
 		zlog(ZLOG_WARNING,
-			"[pool %s] cron.timeout = %ds, ale global process_control_timeout = %ds; "
-			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije biezacy przebieg przez "
-			"eskalacje mastera, zanim cron.timeout zdazy zadzialac — ustaw process_control_timeout "
-			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie przebiegu",
+			"[pool %s] cron.timeout = %ds but global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT sent to the MASTER (e.g. `docker stop`) kills the current run through "
+			"the master's escalation before cron.timeout can act — set process_control_timeout "
+			">= %ds in [global] if SIGTERM/docker stop should give this pool time to finish its run",
 			wp->config->name, wp->config->cron_timeout, fpm_global_config.process_control_timeout,
 			wp->config->cron_timeout);
 	}

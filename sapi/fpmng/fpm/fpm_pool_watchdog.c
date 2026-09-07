@@ -70,7 +70,7 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 				/* timeout, not POLLIN: the target is still alive */
 				fpm_pool_watchdog_pidfd_send_signal(pidfd, SIGKILL);
 			}
-			/* POLLIN: cel juz sam sie zakonczyl, nic do roboty */
+			/* POLLIN: the target already finished by itself, nothing to do */
 		} else {
 			/* Fallback without pidfd (non-Linux — local builds/tests only, never
 			 * the target platform): check once per second instead of blindly sleeping

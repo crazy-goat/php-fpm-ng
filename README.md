@@ -74,13 +74,16 @@ request. Full measurements, root causes and required configuration:
   other 8.x releases) are **not verified**: the `symfony/runtime` interaction
   that forces the hand-written `index.php` is version-sensitive and must be
   re-checked before extending this claim to another version.
-- **Laravel — supported, with a required, hand-picked static list.** Verified
-  on **Laravel 13.30.1**. Needs `env[FPMNG_SHARED_INCLUDES] = 1` and
-  `fiber.isolate_statics` naming the framework's request-scoped class statics
-  (`Container::instance`, `Facade::app`, `Facade::resolvedInstance`,
-  `Model::resolver`). Without that list, Laravel returns HTTP 200 while
-  silently serving one request's session and database objects to another —
-  there is no error to notice. Covered by `tests/frameworks/laravel/`.
+- **Laravel — supported for the measured surface, with a required, hand-picked
+  static list.** Verified on **Laravel 13.30.1**. Needs
+  `env[FPMNG_SHARED_INCLUDES] = 1` and `fiber.isolate_statics` naming the
+  framework's request-scoped class statics (`Container::instance`,
+  `Facade::app`, `Facade::resolvedInstance`, `Model::resolver`) — that list
+  must be re-verified for every Laravel minor version. Without it, Laravel
+  returns HTTP 200 while silently serving one request's session and database
+  objects to another — there is no error to notice. Rate limiting, mail
+  attribution, Blade view composers, and request-dependent observers/global
+  scopes are **not measured**. Covered by `tests/frameworks/laravel/`.
 - **Slim 4 — supported for the measured surface.** Verified on **Slim
   4.15.3** with `slim/psr7`; needs `env[FPMNG_SHARED_INCLUDES] = 1` and no
   `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.

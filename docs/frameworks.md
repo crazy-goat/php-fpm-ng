@@ -10,6 +10,12 @@ orm-pack + security-bundle, Doctrine ORM 3.6, sessions and cache on Redis),
 
 ## Verdict
 
+**Both verdicts below are initial-measurement snapshots, superseded by later
+fixes in this document** — Symfony by "UPDATE 2026-09-06: after fixes 1, 2, 3
+and ini value isolation" below, Laravel by "Laravel: fix 5 landed — class
+statics per request (`fiber.isolate_statics`)". Read to the end before citing
+either line.
+
 **Symfony: YES, with conditions** — `FPMNG_SHARED_INCLUDES=1`, own
 `public/index.php` without `symfony/runtime`, no PHP sessions and no stateful
 firewall under concurrency (i.e.: a stateless API, or one request in flight at

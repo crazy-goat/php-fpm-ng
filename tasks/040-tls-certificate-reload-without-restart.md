@@ -2,7 +2,8 @@
 
 **Priority:** high. Hard prerequisite for 020 (ACME renewal), and useful on its
 own for a certificate that arrives on a mounted volume.
-**Status:** open.
+**Status:** decided (2026-09-07) — trigger, propagation and torn-reads
+resolved below. Not yet implemented.
 
 ## Context
 
@@ -59,3 +60,108 @@ write triggers it.
 
 - 039 (chain) should land first: reloading a chain-less certificate just
   reproduces that bug on a timer.
+
+## Decision — 2026-09-07
+
+**Existing "reload" does not apply here.** The signal-based reload
+(`fpm_pctl_exec()`, `fpm_process_ctl.c:86-108`) sends `SIGQUIT`/`SIGTERM` to
+every child, waits for them to exit, then `execvp()`s the master itself
+(`docs/NOTES.md:3413-3446` — explicitly documented as *not* a real
+config-diffing hot reload). Reusing it would recreate every gateway
+process, which is exactly what this task exists to avoid. This task needs
+its own, separate mechanism, independent of that reload path.
+
+**Why an in-process swap is possible at all.** Each gateway child owns one
+`event_base`/`evhttp` for its whole life and calls
+`evhttp_set_bevcb(gw->http, fpm_http_tls_bevcb, gw->tls_ctx)` once, at
+startup (`fpm_http.c:1592`). `fpm_http_tls_bevcb()` only reads `arg` (the
+`SSL_CTX*`) at **accept time**, once per incoming connection
+(`fpm_http_tls.c:340-346`) — it is not baked into the listener or the event
+base. `evhttp_set_bevcb()` can be called again later on the same `gw->http`
+to point future connections at a new `SSL_CTX*`, without touching
+`gw->listen_fd` or `gw->base`. OpenSSL reference-counts `SSL_CTX` internally
+(`SSL_new()` takes a ref), so `SSL_CTX_free()`-ing the old one after the
+swap does not disturb `SSL*` objects already in use by in-flight
+connections — this is what makes acceptance criterion 2 (zero errors on
+connections in flight) achievable without any drain logic.
+
+**Trigger: a self-rearming timer in the master, not a signal and not
+per-request `stat()`.** The master already runs its own event loop after
+fork (used today for `pctl` timeouts, `fpm_process_ctl.c:57-63`); a
+periodic timer on that loop calls `stat()` on the configured cert/key paths
+every few seconds (a new `http.tls_reload_check` directive, seconds,
+default e.g. 5 — same idiom as `fiber.revalidate_freq`'s timer,
+`fpm_pool_fiber.c:576-583`) and compares mtimes against the last-loaded
+pair. This keeps `stat()` entirely out of the request path (satisfying the
+task's explicit constraint) and needs no operator-triggered signal — a
+certificate landing on a mounted volume (the task's own second use case,
+alongside ACME) has nobody to send a signal. A signal-based trigger is not
+ruled out for a later task, but is not required for this one's acceptance
+criteria.
+
+**Torn reads: enforced, not just documented.** On an mtime change the
+master calls the existing, already-stateless `fpm_http_tls_validate()`
+(`fpm_http_tls.c:194-227` — reads both files itself, builds a throwaway
+`SSL_CTX`, returns 0/-1, logs a message naming the problem, never logs key
+material) against the *candidate* paths before touching anything the
+children can see. A write-then-rename on the operator's side (documented as
+recommended practice, e.g. what `certbot`/ACME clients already do) makes
+the candidate atomic from the filesystem's point of view; the validate call
+is the enforced backstop for operators who don't rename atomically or who
+momentarily write a half-written pair. If validation fails, the master logs
+the error and does **not** advance anything — the old certificate keeps
+serving, satisfying acceptance criterion 3 without any special-casing in
+the children.
+
+**Propagation: master keeps owning the file reads; children get bytes, not
+paths, via a double-buffered shared-memory slot.** The existing
+"master-only file access" property (`fpm_http_tls.h` header comment) is
+kept, not relaxed — the alternative (each child re-reading the key file
+itself on its own timer) would multiply file opens across every gateway
+process and contradicts the documented reason that property exists in the
+first place. Concretely:
+
+- The shared-memory primitive available today (`fpm_shm_alloc()`,
+  upstream `fpm_shm.c:18-38`) is a plain anonymous `mmap(MAP_SHARED)` with
+  **no locking** — the only existing multi-process pattern
+  (`gw->upstreams_used`, `fpm_http.c:1986-1992`) is a single lock-free
+  atomic word (`atomic_cmp_set()`, `fpm_http.c:286-302`), which is not
+  enough by itself for variable-length PEM bytes.
+- So the new region holds **two** fixed-size slots (sized for the largest
+  chain the pool's config allows, same bound `fpm_http_tls_load()` already
+  enforces at startup) plus one `atomic_t generation` word. The master
+  writes a newly validated cert/key/ticket-key triple into whichever slot
+  is *not* the currently-published one, then bumps `generation` with the
+  same `atomic_cmp_set()` idiom already in use — the bump is the only thing
+  a reader needs to observe, and it publishes a fully-written slot,
+  never a partially-written one.
+- Each gateway child adds its **own** timer, in its own `gw->base` (same
+  `event_new(base, -1, EV_PERSIST, cb, NULL)` idiom as
+  `fpm_pool_fiber.c:576-583`), that cheaply reads `generation` every couple
+  of seconds. On change, it copies the now-published slot into a local
+  `struct fpm_http_tls_s`, builds a new `SSL_CTX` with the **existing,
+  unmodified** `fpm_http_tls_ctx_new()` (it already takes a
+  `struct fpm_http_tls_s*`, not a path — no change needed there), calls
+  `evhttp_set_bevcb()` again with the new context, and frees the old
+  `SSL_CTX`. No IPC signal from master to child is needed; the child polls
+  its own copy of `generation`, which is cheaper and simpler than
+  coordinating wakeups across an unbounded number of gateway processes.
+- Session resumption (criterion 5) falls out of this for free: the ticket
+  key lives in the same published slot, so every child adopts the same new
+  `ticket_key` at the same `generation` bump — no separate mechanism.
+
+**Signal budget, if a later task wants an explicit trigger too.** Gateway
+children reset `SIGUSR1`/`SIGUSR2` to `SIG_DFL` at startup and repurpose
+neither (`fpm_http.c:1532-1541`), so both are free if an explicit
+"reload now" signal is ever wanted in addition to the timer. Not needed for
+this task's acceptance criteria and left out of scope here.
+
+### Still open, for whoever implements this
+
+- The exact fixed slot size (bound the maximum chain size the way
+  `fpm_http_tls_load()` already bounds file reads at startup) and the
+  default `http.tls_reload_check` interval.
+- Whether the master's own `stat()` timer needs to exist per-pool or can be
+  one timer walking all TLS pools — a config/perf question, not a
+  correctness one, and not required to resolve before implementation
+  starts.

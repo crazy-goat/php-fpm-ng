@@ -265,7 +265,9 @@ struct fpm_http_gateway_s {
 struct fpm_http_read_deadline_s {
 	struct fpm_http_gateway_s *gw;
 	struct bufferevent *bev;
-	struct event *ev;
+	evutil_socket_t fd;			/* the connection's fd, for the EOF watcher; -1 until known */
+	struct event *ev;			/* the one-shot deadline timer */
+	struct event *ev_eof;			/* first a zero timer (fd pickup), then the persistent EOF watcher */
 	struct fpm_http_read_deadline_s *next;
 };
 
@@ -318,6 +320,9 @@ struct _fpm_http_upstream {
 
 static void fpm_http_pump(struct fpm_http_gateway_s *gw);
 static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
+static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl);
+static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg);
+static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void *arg);
 
 /* Claims one of the pool's workers for a persistent connection, or fails when they are all taken. */
 static int fpm_http_budget_take(struct fpm_http_gateway_s *gw)
@@ -1652,29 +1657,68 @@ static void fpm_http_gateway_drop_privileges(struct fpm_http_gateway_s *gw) /* {
  * error path, with the connection state consistent. A connection whose read
  * is not currently armed keeps existing, which is benign: it is either idle
  * keep-alive (harmless) or about to arm read again.
- * The node is unlinked and freed here; fpm_http_request() can no longer find
- * it, which is correct: a request that never completed will never reach the
- * callback. */
+ *
+ * The bev pointer is safe to touch here: a peer that went away meanwhile has
+ * already made our EV_EOF watcher (fpm_http_read_deadline_eof) disarm and
+ * free this node, so a fired deadline always refers to a connection evhttp
+ * still owns. */
 static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_read_deadline_s *dl = arg;
-	struct fpm_http_gateway_s *gw = dl->gw;
-	struct fpm_http_read_deadline_s **p;
 	static const struct timeval now = {0, 1};
 
 	(void) fd; (void) what;
-	for (p = &gw->deadlines; *p; p = &(*p)->next) {
+	bufferevent_set_timeouts(dl->bev, &now, &now);
+	fpm_http_read_deadline_forget(dl);
+}
+/* The peer closed the connection before its first request completed
+ * (EV_EOF), or libevent reports the fd as dead: evhttp will free the
+ * bufferevent, so the deadline must forget it NOW -- a timer that later
+ * fires into a freed bufferevent was the second use-after-free found on the
+ * test box. The watcher also sees EV_READ whenever a trickle byte arrives;
+ * only EOF (a zero-length peek) disarms. */
+static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_read_deadline_s *dl = arg;
+	char c;
+	ssize_t n;
+
+	(void) fd;
+	if (what & EV_READ) {
+		n = recv(dl->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+		if (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+			return; /* data available or transient: still alive */
+		}
+	}
+	fpm_http_read_deadline_forget(dl);
+}
+
+/* Unlinks and frees a deadline node. Safe to call twice is NOT required --
+ * both callers (fire and eof) free exactly once, and disarm() removes the
+ * node from the list first, so neither callback can find it afterwards. */
+static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl)
+{
+	struct fpm_http_read_deadline_s **p;
+
+	for (p = &dl->gw->deadlines; *p; p = &(*p)->next) {
 		if (*p == dl) {
 			*p = dl->next;
 			break;
 		}
 	}
-	bufferevent_set_timeouts(dl->bev, &now, &now);
-	event_free(dl->ev);
+	if (dl->ev) {
+		event_free(dl->ev);
+	}
+	if (dl->ev_eof) {
+		event_free(dl->ev_eof);
+	}
 	free(dl);
 }
 
-/* Arms the per-connection read deadline (see struct fpm_http_read_deadline_s). */
+/* Arms the per-connection read deadline (see struct fpm_http_read_deadline_s).
+ * The fd is read from the bev; on a TLS connection it is not yet assigned at
+ * bevcb time (bufferevent_setfd happens right after, in evhttp), so the EOF
+ * watcher is armed lazily on the first event loop pass via a zero timer. */
 static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
 {
 	struct fpm_http_read_deadline_s *dl = calloc(1, sizeof(*dl));
@@ -1684,31 +1728,52 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	}
 	dl->gw = gw;
 	dl->bev = bev;
+	dl->fd = -1;
 	dl->ev = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_read_deadline_fire, dl);
-	if (!dl->ev) {
-		free(dl);
+	dl->ev_eof = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_read_deadline_arm_eof, dl);
+	if (!dl->ev || !dl->ev_eof) {
+		fpm_http_read_deadline_forget(dl);
 		return;
 	}
 	dl->next = gw->deadlines;
 	gw->deadlines = dl;
 	event_add(dl->ev, &gw->read_timeout);
+	{
+		static const struct timeval zero = {0, 0};
+		event_add(dl->ev_eof, &zero); /* re-armed as EV_READ once the fd is known */
+	}
+}
+
+/* Second pass of arming: evhttp has called bufferevent_setfd() by now, so
+ * dl->fd is knowable. Turns ev_eof into the persistent EOF watcher. */
+static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_read_deadline_s *dl = arg;
+
+	(void) fd; (void) what;
+	dl->fd = bufferevent_getfd(dl->bev);
+	if (dl->fd < 0) {
+		/* still no fd (should not happen): without the watcher a peer close
+		 * would leave a dangling bev, so drop the deadline entirely */
+		fpm_http_read_deadline_forget(dl);
+		return;
+	}
+	event_assign(dl->ev_eof, dl->gw->base, dl->fd, EV_READ | EV_PERSIST, fpm_http_read_deadline_eof, dl);
+	event_add(dl->ev_eof, NULL);
 }
 
 /* The first request on this connection has fully arrived: its deadline is
  * spent. Safe to call when none is armed (read_timeout = 0 or OOM above). */
 static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
 {
-	struct fpm_http_read_deadline_s **p, *dl;
+	struct fpm_http_read_deadline_s **p;
 
 	if (!bev) {
 		return;
 	}
 	for (p = &gw->deadlines; *p; p = &(*p)->next) {
 		if ((*p)->bev == bev) {
-			dl = *p;
-			*p = dl->next;
-			event_free(dl->ev);
-			free(dl);
+			fpm_http_read_deadline_forget(*p);
 			return;
 		}
 	}

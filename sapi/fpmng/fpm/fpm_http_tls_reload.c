@@ -85,6 +85,24 @@ struct fpm_http_tls_reload_s {
 	/* shared across the master and every gateway child of this pool */
 	struct fpm_http_tls_reload_shared_s *shared;
 
+	/* task 041: http.tls_sni_cert's parsed PEM bytes, BORROWED (not owned,
+	 * not deep-copied, not part of the shared-memory slot) from `initial`
+	 * (the same struct fpm_http_tls_s fpm_http_tls_load() built once at
+	 * gateway startup and that fpm_http_tls_reload_master_init() below
+	 * receives as its `initial` argument -- gw->tls in fpm_http.c). This
+	 * borrow is safe because gw->tls is never freed while the gateway child
+	 * that owns this fpm_http_tls_reload_s stays alive: fpm_http_tls_free()
+	 * is called on gw->tls nowhere in fpm_http.c (checked every call site of
+	 * fpm_http_tls_free() there before relying on this) -- gw->tls lives in
+	 * the master for the master's entire lifetime, and every gateway child
+	 * is a fork() of the master, so the bytes stay valid for exactly as long
+	 * as this pointer is used (fpm_http_tls_reload_child_tick() below).
+	 * SNI certificates themselves are NOT hot-reloaded (only the primary
+	 * cert/key are, unchanged from task 040) -- a changed http.tls_sni_cert
+	 * path or file needs a restart, same as before this task existed. */
+	struct fpm_http_tls_sni_s *sni;
+	size_t sni_count;
+
 	/* child-only: private per gateway process after fork(), never read or
 	 * written by the master or by any sibling gateway process. */
 	unsigned long last_seen_generation;
@@ -120,7 +138,12 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	/* Torn reads, tasks/040 decision: enforced, not just documented. Reuses
 	 * the exact check config-validation already runs at startup -- never
 	 * logs key material. */
-	if (fpm_http_tls_validate(r->pool, r->cert_path, r->key_path, r->min_version) != 0) {
+	/* sni_spec: NULL -- this tick only ever re-checks http.tls_cert/
+	 * http.tls_key's mtimes (task 040's original scope), never
+	 * http.tls_sni_cert's paths (task 041's scope cut, see
+	 * fpm_http_tls_reload_s.sni/sni_count below): SNI certificates are not
+	 * hot-reloaded, only the primary cert/key are. */
+	if (fpm_http_tls_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL) != 0) {
 		/* fpm_http_tls_validate() already logged what's wrong. Remember
 		 * these mtimes anyway so a persistently broken pair (operator
 		 * hasn't fixed it yet) does not re-log every tick; the next actual
@@ -130,7 +153,7 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	fresh = fpm_http_tls_load(r->pool, r->cert_path, r->key_path, r->min_version);
+	fresh = fpm_http_tls_load(r->pool, r->cert_path, r->key_path, r->min_version, NULL);
 	if (!fresh) {
 		/* fpm_http_tls_load() already logged (re-read failed between the
 		 * validate above and here, or RAND_bytes() failed) -- do not update
@@ -214,6 +237,9 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	r->key_path = strdup(key_path);
 	r->min_version = min_version && *min_version ? strdup(min_version) : NULL;
 	r->check_interval_sec = check_interval_sec;
+	/* Borrowed, not copied -- see the fields' declaration above. */
+	r->sni = initial->sni;
+	r->sni_count = initial->sni_count;
 
 	if (stat(cert_path, &st) == 0) {
 		r->cert_mtime = st.st_mtime;
@@ -260,6 +286,12 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 	tmp.key_len = slot->key_len;
 	tmp.min_version = slot->min_version;
 	memcpy(tmp.ticket_key, slot->ticket_key, sizeof(tmp.ticket_key));
+	/* SNI certificates are not part of the reload/mtime-check machinery
+	 * (task 041 scope cut, see the fields' declaration above) -- borrow them
+	 * from the original, never-freed gw->tls so a hot-reload of the primary
+	 * cert does not silently rebuild the ctx with zero SNI certificates. */
+	tmp.sni = r->sni;
+	tmp.sni_count = r->sni_count;
 
 	new_ctx = fpm_http_tls_ctx_new(r->pool, &tmp);
 	if (!new_ctx) {

@@ -1,12 +1,12 @@
-/* fpm-ng: pool.executor = fiber — scheduler na libevent + fibry silnika.
- * Patrz fpm_pool_fiber.h i docs/NOTES.md 3u.
+/* fpm-ng: pool.executor = fiber — libevent scheduler + engine Fibers.
+ * See fpm_pool_fiber.h and docs/NOTES.md 3u.
  *
- * Kto przelacza: WYLACZNIE ten plik, z kontekstu glownego (petla libevent).
- * Dlatego nie potrzebujemy switch-handlerow forka — stan requestu wchodzi do
- * globali tuz przed zend_fiber_start/resume i wychodzi tuz po ich powrocie
- * (fpm_coop_req_enter/leave). Fiber requestu zawiesza sie tylko przez
- * fpm_pool_fiber_wait_fd()/wait_wake() (z fpm_pool_fiber_xport.c) i zawsze
- * wraca tu.
+ * Who switches: ONLY this file, from the main context (the libevent loop).
+ * Therefore we do not need the fork's switch handlers — request state enters
+ * the globals immediately before zend_fiber_start/resume and leaves immediately
+ * after they return (fpm_coop_req_enter/leave). The request Fiber suspends only
+ * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c) and
+ * always returns here.
  */
 
 #include "fpm_config.h"
@@ -58,18 +58,18 @@ struct event_base *fpm_pool_fiber_event_base(void) { return NULL; }
 
 #else /* !ZTS */
 
-/* Request w locie z punktu widzenia schedulera. */
+/* In-flight request from the scheduler's point of view. */
 struct fpm_fiber_req_s {
 	struct fpm_coop_req_s *ctx;
 	zend_fiber *fiber;
-	struct event *ev;			/* jedno zdarzenie I/O na request, przypinane per czekanie */
-	short wait_result;			/* co obudzilo: EV_READ/EV_WRITE/EV_TIMEOUT */
+	struct event *ev;			/* one I/O event per request, attached for each wait */
+	short wait_result;			/* what woke it: EV_READ/EV_WRITE/EV_TIMEOUT */
 	bool waiting;
 };
 
-/* Polaczenie keep-alive miedzy requestami: czekamy na kolejny request.
- * Lista, zeby przy drain (patrz nizej) zamknac je wszystkie naraz, zamiast
- * czekac do 30 s na idle timeout. */
+/* Keep-alive connection between requests: wait for the next request. A list
+ * lets drain (see below) close them all at once instead of waiting up to 30 s
+ * for the idle timeout. */
 struct fpm_fiber_kept_s {
 	fcgi_request *req;
 	int fd;
@@ -84,33 +84,34 @@ static struct event *fpm_fiber_ev_reval;
 static int fpm_fiber_listen_fd = -1;
 static struct fpm_fiber_kept_s *fpm_fiber_kept_head;
 
-/* Drain: fiber.revalidate_freq wykrylo zmiane wczytanego pliku. Nie
- * przyjmujemy nowych polaczen, requesty w locie koncza sie normalnie, a gdy
- * nie ma zadnego — proces wychodzi z FPM_EXIT_OK i master go wymienia
- * (fpm_children_bury: restart_child = 1 dla kazdego wyjscia poza idle_kill,
- * ta sama sciezka, ktora wymienia klasycznego workera po pm.max_requests).
- * W odroznieniu od fcgi_in_shutdown() (SIGQUIT) NIC nie jest porzucane. */
+/* Drain: fiber.revalidate_freq detected a change in an included file. Do not
+ * accept new connections; in-flight requests finish normally, and when none
+ * remain the process exits with FPM_EXIT_OK and the master replaces it
+ * (fpm_children_bury: restart_child = 1 for every exit other than idle_kill,
+ * the same path that replaces a classic worker after pm.max_requests).
+ * Unlike fcgi_in_shutdown() (SIGQUIT), NOTHING is abandoned. */
 static bool fpm_fiber_draining = false;
 
-/* Request, ktorego fiber jest wlasnie na procesorze (NULL w petli zdarzen). */
+/* Request whose Fiber is currently on the processor (NULL in the event loop). */
 static struct fpm_fiber_req_s *fpm_fiber_current;
-/* Request, ktorego fiber wlasnie startuje (przekazanie ctx do funkcji wejsciowej). */
+/* Request whose Fiber is starting (passing ctx to the entry function). */
 static struct fpm_fiber_req_s *fpm_fiber_starting;
 
-/* Funkcja wewnetrzna bedaca "callable" fibera. Fiber to obiekt PHP i chce
- * fci/fci_cache; z fci_cache.function_handler ustawionym na gotowa
- * zend_function zend_call_function nie szuka nic po nazwie. Zero argumentow,
- * zero arg_info, bez rejestracji w tablicy funkcji — niewidoczna z PHP. */
+/* Internal function serving as the Fiber's "callable". A Fiber is a PHP object
+ * and needs fci/fci_cache; with fci_cache.function_handler set to a ready
+ * zend_function, zend_call_function does not look anything up by name. Zero
+ * arguments, zero arg_info, no registration in the function table — invisible
+ * to PHP. */
 static void fpm_fiber_entry_handler(INTERNAL_FUNCTION_PARAMETERS);
 static zend_internal_function fpm_fiber_entry_fn;
 
-/* Keep-alive: idle deadline na polaczeniu bez requestu. */
+/* Keep-alive: idle deadline on a connection without a request. */
 static const struct timeval fpm_fiber_keep_idle = { 30, 0 };
 
 static void fpm_fiber_start_request(fcgi_request *req, int fd);
 static void fpm_fiber_kept_cb(evutil_socket_t fd, short what, void *arg);
 
-/* --- fiber requestu ---------------------------------------------------------- */
+/* --- fiber request ------------------------------------------------------------ */
 
 static void fpm_fiber_entry_handler(INTERNAL_FUNCTION_PARAMETERS) /* {{{ */
 {
@@ -141,7 +142,7 @@ static zend_fiber *fpm_fiber_create(void) /* {{{ */
 }
 /* }}} */
 
-/* Po kazdym powrocie z fibera: skonczyl? — posprzataj i zajmij sie polaczeniem. */
+/* After every return from a Fiber: did it finish? Clean up and handle the connection. */
 static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 {
 	fcgi_request *req;
@@ -149,31 +150,31 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 
 	if (fr->fiber->context.status != ZEND_FIBER_STATUS_DEAD) {
 		if (!fr->waiting) {
-			/* Fiber zawiesil sie NIE przez nasze wait_fd (np. Fiber::suspend()
-			 * z kodu uzytkownika w glownym fiberze requestu). Nikt go nie
-			 * obudzi — traktujemy jak koniec requestu z bledem. */
+			/* The Fiber suspended NOT through our wait_fd (for example,
+			 * Fiber::suspend() from user code in the request's main Fiber). Nobody
+			 * will wake it — treat this as a request ending with an error. */
 			zlog(ZLOG_WARNING, "[pool %s] fiber: request #%u suspended outside the scheduler (Fiber::suspend() in the request's main fiber?); dropping it",
 				fpm_coop_pool_name(), fr->ctx->id);
-			/* SPIKE: ten request nigdy sie juz nie doczeka release_owner()
-			 * z fpm_coop_req_run() (nie wroci tam) — gdyby trzymal jakis
-			 * flock() z rejestru, zostalby tam NA ZAWSZE i zablokowal
-			 * kazdego przyszlego konkurenta w tym procesie. To jest
-			 * DOKLADNIE dziura, ktora fpm_pool_fiber_flock_release_owner()
-			 * ma zamykac — patrz jej naglowek. */
+			/* SPIKE: this request will never reach release_owner() from
+			 * fpm_coop_req_run() again (it will not return there). If it held an
+			 * flock() from the registry, it would remain there FOREVER and block
+			 * every future competitor in this process. This is EXACTLY the gap
+			 * that fpm_pool_fiber_flock_release_owner() closes — see its header. */
 			fpm_pool_fiber_flock_release_owner(fr);
 			fcgi_finish_request(fr->ctx->req, 1);
 			fr->ctx->req = NULL;
-			/* Obiekt fibera zwolnimy przy wyjsciu procesu — jego zniszczenie
-			 * w stanie SUSPENDED wznawia go z graceful exit w ZLYM stanie globali. */
+			/* Release the Fiber object when the process exits — destroying it in
+			 * the SUSPENDED state resumes it with graceful exit and the WRONG global
+			 * state. */
 			return;
 		}
 		return;
 	}
 
 	fd = fr->ctx->fd;
-	/* SPIKE: normalny koniec requestu (rowniez fatal blad z wnetrza
-	 * zend_catch w fpm_coop_req_run — to caly czas ten sam powrot tutaj).
-	 * Belt-and-suspenders, idempotentne: no-op, jesli fr nic nie trzyma. */
+	/* SPIKE: normal request completion (including a fatal error from inside
+	 * zend_catch in fpm_coop_req_run — it still returns here in exactly the same
+	 * way). Belt-and-suspenders and idempotent: no-op when fr holds nothing. */
 	fpm_pool_fiber_flock_release_owner(fr);
 	req = fpm_coop_req_free(fr->ctx);
 	event_free(fr->ev);
@@ -181,8 +182,8 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 	efree(fr);
 
 	if (fpm_fiber_draining) {
-		/* Ostatni request w locie skonczony — mozna wychodzic. Polaczenia
-		 * nie trzymamy: nowy request trafi do nastepcy. */
+		/* The last in-flight request finished — we can exit. Do not keep the
+		 * connection: the next request will reach the replacement. */
 		if (!fcgi_is_closed(req)) {
 			fcgi_finish_request(req, 1);
 		}
@@ -198,8 +199,8 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 		return;
 	}
 
-	/* Klient chce keep-alive (bramka HTTP tak robi): czekamy na nastepny
-	 * request na tym fd w petli zdarzen, nie blokujac. */
+	/* The client wants keep-alive (the HTTP gateway does this): wait for the next
+	 * request on this fd in the event loop, without blocking. */
 	{
 		struct fpm_fiber_kept_s *kept = emalloc(sizeof(*kept));
 
@@ -255,7 +256,7 @@ static void fpm_fiber_kept_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 }
 /* }}} */
 
-/* Wejscie na procesor: stan requestu -> globale, start/resume, stan <- globale. */
+/* Enter the processor: request state -> globals, start/resume, state <- globals. */
 static void fpm_fiber_switch_in(struct fpm_fiber_req_s *fr, bool start) /* {{{ */
 {
 	zval rv;
@@ -275,14 +276,14 @@ static void fpm_fiber_switch_in(struct fpm_fiber_req_s *fr, bool start) /* {{{ *
 			zend_fiber_resume(fr->fiber, NULL, &rv);
 		}
 	} zend_catch {
-		/* Bailout przeciekl z fibera (zend_fiber_switch_to przekazuje go
-		 * dalej). fpm_coop_req_run ma wlasne zend_try, wiec to awaria. */
+		/* A bailout escaped the Fiber (zend_fiber_switch_to passes it further).
+		 * fpm_coop_req_run has its own zend_try, so this is a failure. */
 		zlog(ZLOG_ERROR, "[pool %s] fiber: bailout escaped request #%u", fpm_coop_pool_name(), fr->ctx->id);
 	} zend_end_try();
 	zval_ptr_dtor(&rv);
 	if (EG(exception)) {
-		/* fiber rzucil (nie powinien: run() sprzata) — nie zostawiamy tego
-		 * kontekstowi glownemu, ktory nie ma ramki */
+		/* The Fiber threw (it should not: run() cleans up) — do not leave this
+		 * for the main context, which has no frame. */
 		zend_clear_exception();
 	}
 
@@ -316,7 +317,7 @@ static void fpm_fiber_start_request(fcgi_request *req, int fd) /* {{{ */
 }
 /* }}} */
 
-/* --- API dla transportu ---------------------------------------------------- */
+/* --- transport API ---------------------------------------------------------- */
 
 int fpm_pool_fiber_can_wait(void) /* {{{ */
 {
@@ -325,12 +326,12 @@ int fpm_pool_fiber_can_wait(void) /* {{{ */
 	if (!fr || !fpm_fiber_base) {
 		return 0;
 	}
-	/* Zagniezdzony Fiber uzytkownika: zend_fiber_suspend zawiesilby JEGO do
-	 * jego wolajacego, nie nasz request do schedulera. Wtedy blokujemy. */
+	/* Nested user Fiber: zend_fiber_suspend would suspend THAT Fiber to its
+	 * caller, not our request to the scheduler. Block in that case. */
 	if (EG(active_fiber) != fr->fiber) {
 		return 0;
 	}
-	/* Destruktory pod GC, ticks, pcntl: silnik zabrania przelaczen. */
+	/* Destructors during GC, ticks, and pcntl: the engine forbids switches. */
 	if (zend_fiber_switch_blocked()) {
 		return 0;
 	}
@@ -347,10 +348,10 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 		return -1;
 	}
 
-	/* event_add liczy deadline od czasu cache'owanego na poczatku tury petli.
-	 * Fiber mogl od tamtej pory blokowac (getaddrinfo, usleep, liczenie) —
-	 * bez odswiezenia 60 ms pracy zjada 50 ms timeoutu i czekanie konczy sie
-	 * natychmiast "Operation timed out". */
+	/* event_add calculates the deadline from the time cached at the start of
+	 * the loop iteration. The Fiber may have blocked since then (getaddrinfo,
+	 * usleep, computation) — without refreshing it, 60 ms of work consumes a
+	 * 50 ms timeout and the wait ends immediately with "Operation timed out". */
 	event_base_update_cache_time(fpm_fiber_base);
 	if (event_assign(fr->ev, fpm_fiber_base, fd, events, fpm_fiber_io_cb, fr) < 0
 		|| event_add(fr->ev, timeout) < 0) {
@@ -359,8 +360,9 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 	fr->wait_result = 0;
 	fr->waiting = true;
 
-	/* Do schedulera. Wracamy tu z fpm_fiber_io_cb -> zend_fiber_resume, juz
-	 * z podmienionym z powrotem stanem requestu (switch_in robi enter). */
+	/* Back to the scheduler. We return here from fpm_fiber_io_cb ->
+	 * zend_fiber_resume, with the request state already switched back
+	 * (switch_in performs enter). */
 	ZVAL_UNDEF(&rv);
 	zend_fiber_suspend(fr->fiber, NULL, &rv);
 	zval_ptr_dtor(&rv);
@@ -379,8 +381,9 @@ void *fpm_pool_fiber_waiter(void) /* {{{ */
 }
 /* }}} */
 
-/* Jak wait_fd, ale zdarzenie nie ma fd — sam timer. Budzi je fpm_pool_fiber_wake
- * przez event_active (dziala tez na zdarzeniu bez timeoutu, czyli nie-pending). */
+/* Like wait_fd, but the event has no fd — only a timer. fpm_pool_fiber_wake
+ * wakes it through event_active (which also works for an event without a
+ * timeout, that is, one that is not pending). */
 int fpm_pool_fiber_wait_wake(struct timeval *timeout) /* {{{ */
 {
 	struct fpm_fiber_req_s *fr = fpm_fiber_current;
@@ -414,10 +417,10 @@ void fpm_pool_fiber_wake(void *waiter) /* {{{ */
 {
 	struct fpm_fiber_req_s *fr = waiter;
 
-	/* Poza czekaniem (callback synchroniczny, albo fiber juz obudzony przez
-	 * timeout) nie ma kogo budzic. Jesli timer i wake trafia w te sama ture
-	 * petli, event_active dopisze EV_READ do juz aktywnego zdarzenia — jeden
-	 * callback, wait_result z oboma bitami. */
+	/* Outside a wait (a synchronous callback, or a Fiber already woken by a
+	 * timeout) there is nobody to wake. If the timer and wake arrive in the same
+	 * loop iteration, event_active adds EV_READ to the already active event — one
+	 * callback, with both bits in wait_result. */
 	if (fr && fr->waiting) {
 		event_active(fr->ev, EV_READ, 0);
 	}
@@ -430,7 +433,7 @@ struct event_base *fpm_pool_fiber_event_base(void) /* {{{ */
 }
 /* }}} */
 
-/* --- petla zdarzen ------------------------------------------------------------ */
+/* --- event loop -------------------------------------------------------------- */
 
 static void fpm_fiber_accept_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
 {
@@ -458,8 +461,8 @@ static void fpm_fiber_tick_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 {
 	(void) fd; (void) what; (void) arg;
 
-	/* SIGQUIT: fpm_signals.c sig_soft_quit zamyka gniazdo nasluchujace i
-	 * wola fcgi_terminate(); zdarzenie na zamknietym fd moze juz nie przyjsc. */
+	/* SIGQUIT: fpm_signals.c sig_soft_quit closes the listening socket and
+	 * calls fcgi_terminate(); an event on the closed fd may never arrive. */
 	if (fcgi_in_shutdown()) {
 		event_base_loopbreak(fpm_fiber_base);
 	}
@@ -470,7 +473,7 @@ static void fpm_fiber_tick_cb(evutil_socket_t fd, short what, void *arg) /* {{{ 
 }
 /* }}} */
 
-/* Wejscie w drain — patrz komentarz przy fpm_fiber_draining. */
+/* Enter draining — see the comment next to fpm_fiber_draining. */
 static void fpm_fiber_drain_begin(void) /* {{{ */
 {
 	fpm_fiber_draining = true;
@@ -479,9 +482,9 @@ static void fpm_fiber_drain_begin(void) /* {{{ */
 		event_del(fpm_fiber_ev_reval);
 	}
 
-	/* Bezczynne keep-alive: zamykamy od razu. Bramka HTTP traktuje EOF na
-	 * bezczynnym polaczeniu jak po pm.max_requests (fpm_http_upstream_fail,
-	 * clean_eof) i laczy sie na nowo — do nastepcy. */
+	/* Idle keep-alive connections: close them immediately. The HTTP gateway
+	 * treats EOF on an idle connection like the EOF after pm.max_requests
+	 * (fpm_http_upstream_fail, clean_eof) and reconnects to the replacement. */
 	while (fpm_fiber_kept_head) {
 		struct fpm_fiber_kept_s *kept = fpm_fiber_kept_head;
 
@@ -496,10 +499,10 @@ static void fpm_fiber_drain_begin(void) /* {{{ */
 }
 /* }}} */
 
-/* Co fiber.revalidate_freq sekund, z petli zdarzen (zaden request nie jest
- * wtedy na procesorze): jeden przebieg stat() po zapamietanych plikach.
- * To jedyne miejsce, gdzie stat() dzieje sie po rejestracji pliku — koszt
- * jest funkcja czasu i liczby plikow, nie liczby requestow. */
+/* Every fiber.revalidate_freq seconds, from the event loop (no request is on
+ * the processor then): one stat() sweep over the tracked files. This is the
+ * only place where stat() runs after file registration — the cost is a function
+ * of time and the number of files, not the number of requests. */
 static void fpm_fiber_reval_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
 {
 	const char *path = NULL;
@@ -536,7 +539,7 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
-	/* Funkcja wejsciowa fibera (patrz wyzej). */
+	/* Fiber entry function (see above). */
 	memset(&fpm_fiber_entry_fn, 0, sizeof(fpm_fiber_entry_fn));
 	fpm_fiber_entry_fn.type = ZEND_INTERNAL_FUNCTION;
 	fpm_fiber_entry_fn.function_name = zend_string_init_interned("fpmng_fiber_request", sizeof("fpmng_fiber_request") - 1, 1);
@@ -547,23 +550,23 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
-	/* Transporty: jestesmy po MINIT (fpm_main.c: startup() przed fpm_run()),
-	 * czyli po ext/openssl, ktore nadpisuje "tcp" w swoim MINIT. */
+	/* Transports: we are after MINIT (fpm_main.c: startup() before fpm_run()),
+	 * that is, after ext/openssl, which overrides "tcp" in its MINIT. */
 	fpm_pool_fiber_xport_install();
 
-	/* SPIKE (docs/flock-streams-spike-report.md): przechwycenie
-	 * PHP_STREAM_OPTION_LOCKING dla zwyklych plikow, zeby flock()/
-	 * file_put_contents(..., LOCK_EX) na plik trzymany przez INNY fiber w
-	 * tym procesie zawieszalo sie na kolejce w pamieci zamiast blokowac cala
-	 * petle zdarzen w kernelu (patrz docs/flock-fiber-deadlock-report.md,
-	 * spike/flock-fiber). Instalacja tu, nie w MINIT: ta sama zasada co
-	 * xport_install wyzej. */
+	/* SPIKE (docs/flock-streams-spike-report.md): intercept
+	 * PHP_STREAM_OPTION_LOCKING for ordinary files so that flock()/
+	 * file_put_contents(..., LOCK_EX) on a file held by ANOTHER Fiber in this
+	 * process suspends on an in-memory queue instead of blocking the entire event
+	 * loop in the kernel (see docs/flock-fiber-deadlock-report.md,
+	 * spike/flock-fiber). Install it here, not in MINIT: the same rule as
+	 * xport_install above. */
 	fpm_pool_fiber_flock_install();
 
-	/* Sleep-family (sleep/usleep/time_nanosleep): patrz fpm_pool_fiber_sleep.h.
-	 * Kolejnosc wzgledem xport_install nie ma tu znaczenia (rozne funkcje w
-	 * tablicy funkcji), ale trzymamy sie tego samego miejsca w child_main,
-	 * bo to jedyny punkt instalacji specyficzny dla typu poola fiber. */
+	/* Sleep family (sleep/usleep/time_nanosleep): see fpm_pool_fiber_sleep.h.
+	 * The order relative to xport_install does not matter here (different
+	 * functions in the function table), but keep the same location in child_main
+	 * because this is the only installation point specific to the fiber pool type. */
 	fpm_pool_fiber_sleep_install();
 
 	fpm_fiber_ev_accept = event_new(fpm_fiber_base, fpm_fiber_listen_fd, EV_READ | EV_PERSIST, fpm_fiber_accept_cb, NULL);
@@ -571,8 +574,8 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	event_add(fpm_fiber_ev_accept, NULL);
 	event_add(fpm_fiber_ev_tick, &tick);
 
-	/* fiber.revalidate_freq: hook kompilacji (po container_start, ktory
-	 * sprawdza zend_compile_file) + timer sweepu. 0 = nic z tego nie istnieje. */
+	/* fiber.revalidate_freq: compile hook (after container_start, which checks
+	 * zend_compile_file) plus a sweep timer. 0 = none of this exists. */
 	if (wp->config->fiber_revalidate_freq > 0) {
 		struct timeval every = { wp->config->fiber_revalidate_freq, 0 };
 

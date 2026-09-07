@@ -52,9 +52,9 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log) /* {{{ */
 }
 /* }}} */
 
-/* Ucieka cudzyslowy, backslashe i znaki kontrolne -- to log, nie protokol,
- * wiec po prostu ucina zamiast zglaszac blad. Zwraca dlugosc zapisana do
- * `out` (bez koncowego NUL). */
+/* Escape quotes, backslashes, and control characters — this is a log, not a
+ * protocol, so truncate instead of reporting an error. Returns the length
+ * written to `out` (without the final NUL). */
 static size_t fpm_http_access_log_escape(const char *in, char *out, size_t out_size) /* {{{ */
 {
 	size_t o = 0;
@@ -106,9 +106,9 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	localtime_r(&now, &tmv);
 	strftime(timebuf, sizeof(timebuf), "%d/%b/%Y:%H:%M:%S %z", &tmv);
 
-	/* remote_user pochodzi z base64 w naglowku Authorization, wiec moze
-	 * zawierac DOWOLNE bajty, z nowa linia wlacznie -- bez ucieczki klient
-	 * wstrzykiwalby wlasne linie do access logu. remote_addr dla porzadku. */
+	/* remote_user comes from base64 in the Authorization header, so it may
+	 * contain ANY bytes, including a newline — without escaping, a client could
+	 * inject its own lines into the access log. Escape remote_addr as well. */
 	fpm_http_access_log_escape(remote_addr, addr_esc, sizeof(addr_esc));
 	fpm_http_access_log_escape(remote_user, user_esc, sizeof(user_esc));
 	fpm_http_access_log_escape(uri, uri_esc, sizeof(uri_esc));
@@ -139,11 +139,11 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	}
 	total = (size_t) len >= sizeof(line) ? sizeof(line) - 1 : (size_t) len;
 
-	/* CELOWO jeden write(): to jest gwarancja braku mieszania linii z innych
-	 * procesow bramki na tym samym pliku O_APPEND (patrz naglowek pliku).
-	 * Krotki zapis (prawie zawsze ENOSPC na zwyklym pliku) moze uciac linie,
-	 * ale nie proboujemy dopisac reszty drugim write() -- to zepsuloby wlasnie
-	 * te gwarancje. */
+	/* DELIBERATELY one write(): this guarantees that lines from other gateway
+	 * processes do not interleave in the same O_APPEND file (see the header).
+	 * A short write (almost always ENOSPC on a regular file) may truncate the
+	 * line, but do not append the rest with a second write() — that would break
+	 * exactly this guarantee. */
 	do {
 		written = write(log->fd, line, total);
 	} while (written < 0 && errno == EINTR);

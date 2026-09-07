@@ -8,9 +8,11 @@ result.
 ## Context
 
 RFC 8555 is a protocol, not a call: account key, JWS signing, nonce handling,
-`order → authz → challenge → finalize → cert`, CSR generation. Per 020, the
-gateway process has neither an HTTP client nor a JSON parser today; whether it
-needs one at all depends on 043.
+`order → authz → challenge → finalize → cert`, CSR generation. Task 043 chose a
+project-owned PHP client embedded in the binary and run by a dedicated `cron`
+pool. The client requires the PHP OpenSSL extension and a documented HTTPS
+client mechanism; it must not depend on the user's application or Composer
+dependencies.
 
 Let's Encrypt rate limits are a practical hazard, not a theoretical one — a
 test loop against production can block the domain for a week.
@@ -18,7 +20,8 @@ test loop against production can block the domain for a week.
 ## Problem
 
 Obtain a certificate for a configured name and renew it before expiry,
-unattended.
+unattended, using the embedded PHP client and the bootstrap state machine from
+`docs/NOTES.md` section 3l.
 
 ## Acceptance criteria
 
@@ -42,6 +45,16 @@ unattended.
    state what the operator sees, and when.
 7. No log line at any level contains the account key, the private key, or a
    key authorization value.
+8. A build advertised as ACME-capable validates the required PHP OpenSSL
+   extension and the chosen HTTPS client capability at startup. A missing
+   requirement produces one clear error before an order is attempted.
+9. The project-owned ACME script is read from its distinct embedded
+   distribution payload (append-only payload plus typed footer from section
+   3l), not from the user's application payload or filesystem. Repacking an
+   application leaves the embedded ACME script unchanged.
+10. Fresh bootstrap follows `NO_CERT → ISSUING → READY`: port 443 remains
+    closed until atomic certificate installation, while port 80 answers only
+    active HTTP-01 challenges and otherwise does not forward to a worker.
 
 ## Explicitly out of scope
 

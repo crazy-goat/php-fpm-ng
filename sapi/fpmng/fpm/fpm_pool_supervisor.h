@@ -11,30 +11,29 @@
 
 struct fpm_worker_pool_s;
 
-/* Dyrektywy odrzucane dla pool.type = supervisor. NULL-terminated,
- * uzywane jako .rejects w fpm_pool_types[]. */
+/* Directives rejected for pool.type = supervisor. NULL-terminated, used as
+ * .rejects in fpm_pool_types[]. */
 extern const char *const fpm_pool_supervisor_rejects[];
 
-/* fpm_pool_type_s.validate — sprawdzenia i wartosci domyslne specyficzne dla
- * supervisora (supervisor.script wymagane, supervisor.restart poprawne,
- * mapowanie supervisor.processes na pm=static + pm.max_children). */
+/* fpm_pool_type_s.validate — supervisor-specific checks and defaults
+ * (supervisor.script required, supervisor.restart valid, mapping
+ * supervisor.processes to pm=static + pm.max_children). */
 int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.init_main — alokacja stanu w pamieci dzielonej (licznik
- * kolejnych porazek, backoff, terminal/gave_up) i rejestracja sprzatania
- * przy zamykaniu mastera (dla supervisor.fatal). Wolane w masterze, przed
- * forkiem dzieci. */
+/* fpm_pool_type_s.init_main — allocate shared state (consecutive failure count,
+ * backoff, terminal/gave_up) and register master-shutdown cleanup (for
+ * supervisor.fatal). Called in the master before workers fork. */
 int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.child_main — dziecko petli po wykonaniach skryptu zamiast
- * wracac do petli accept FastCGI. Nie wraca. */
+/* fpm_pool_type_s.child_main — child loop over script executions instead of
+ * returning to the FastCGI accept loop. Does not return. */
 void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;
 
-/* fpm_pool_type_s.status — stan tego poola dla pool.type = status. Czyta
- * WYLACZNIE pamiec dzielona alokowana w init_main (ten proces to nie ten
- * sam proces co supervisor, wiec zaden stan lokalny nie jest widoczny). */
+/* fpm_pool_type_s.status — state for this pool when read by pool.type = status.
+ * Reads ONLY shared memory allocated by init_main (this is not the same process
+ * as supervisor, so no local state is visible). */
 void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 
 #endif

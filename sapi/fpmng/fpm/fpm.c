@@ -85,9 +85,9 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 		return FPM_INIT_ERROR;
 	}
 
-	/* Metryki aplikacyjne (NOTES 3k): region shm dla slotow workera.
-	 * Swiadomie POZA lańcuchem wyzej — porazka nie zabija FPM, bo
-	 * metryki aplikacyjne to dodatek; wtedy fpm_metric_* zwracaja false. */
+	/* Application metrics (NOTES 3k): shared-memory region for worker slots.
+	 * Deliberately OUTSIDE the chain above — failure does not kill FPM because
+	 * application metrics are an add-on; fpm_metric_* then return false. */
 	fpm_metrics_init_main();
 
 	fpm_stdio_init_final();
@@ -103,8 +103,8 @@ int fpm_run(int *max_requests) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
 
-	/* Inicjalizacja typow pooli przed forkiem dzieci — bramki HTTP dziedzicza
-	 * wtedy to samo koncowe stdio co workery. */
+	/* Initialize pool types before child fork — HTTP gateways then inherit the
+	 * same final stdio state as workers. */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
 
@@ -145,31 +145,30 @@ int fpm_run(int *max_requests) /* {{{ */
 
 run_child: /* only workers reach this point */
 
-	/* Typ poola moze przejac dziecko zamiast petli accept (supervisor, cron).
-	 * Pool bierzemy ze scoreboardu, bo dzieci wskrzeszane w petli zdarzen
-	 * docieraja tu bez wskaznika na swoj pool.
+	/* A pool type may take over the child instead of the accept loop (supervisor,
+	 * cron). Find the pool through the scoreboard because children respawned from
+	 * the event loop arrive here without a pointer to their pool.
 	 *
-	 * WAZNE: to musi sie stac PRZED fpm_cleanups_run(FPM_CLEANUP_CHILD)
-	 * ponizej. fpm_worker_pool_init_main() (fpm_worker_pool.c, referencja)
-	 * rejestruje fpm_worker_pool_cleanup() na FPM_CLEANUP_ALL, czyli i na
-	 * CHILD — ta funkcja zwalnia CALA liste fpm_worker_all_pools, wlacznie
-	 * z wp->config (free()), i na koniec ustawia fpm_worker_all_pools = NULL.
-	 * Zrobione to specjalnie dla zwyklego workera FastCGI, ktory po tym
-	 * punkcie juz nigdy nie zagląda do wp/config (dziala dalej wylacznie na
-	 * fpm_globals). My (supervisor/cron) potrzebujemy wp->config przez CALY
-	 * czas zycia procesu, wiec odczytujemy go, ZANIM zniknie. */
+	 * IMPORTANT: this must happen BEFORE fpm_cleanups_run(FPM_CLEANUP_CHILD)
+	 * below. fpm_worker_pool_init_main() (fpm_worker_pool.c, reference) registers
+	 * fpm_worker_pool_cleanup() for FPM_CLEANUP_ALL, including CHILD — that
+	 * function frees the ENTIRE fpm_worker_all_pools list, including wp->config
+	 * (free()), and finally sets fpm_worker_all_pools = NULL. This was deliberate
+	 * for an ordinary FastCGI worker, which never looks at wp/config again after
+	 * this point (it uses only fpm_globals). We (supervisor/cron) need wp->config
+	 * for the ENTIRE process lifetime, so read it BEFORE it disappears. */
 	{
 		struct fpm_worker_pool_s *child_wp = fpm_pool_type_current_pool();
 		const struct fpm_pool_type_s *type = child_wp ? fpm_pool_type_of(child_wp) : NULL;
 
-		/* Zwykly worker FastCGI po fpm_cleanups_run() nie ma juz wp->config,
-		 * wiec to, co z konfiguracji poola ma dzialac per request, trzeba
-		 * odczytac tutaj. */
+		/* An ordinary FastCGI worker no longer has wp->config after
+		 * fpm_cleanups_run(), so read here anything from pool configuration that
+		 * must apply per request. */
 		if (child_wp) {
 			fpm_request_set_cpu_tracking(child_wp->config->request_cpu_tracking);
 		}
-		/* Slot metryk trzeba przypisac PRZED cleanups — potem lista poolow
-		 * i pm.max_children wczesniejszych znikaja (patrz fpm_metrics.c). */
+		/* Assign the metrics slot BEFORE cleanup — afterwards the pool list and
+		 * earlier pools' pm.max_children disappear (see fpm_metrics.c). */
 		fpm_metrics_child_init();
 		if (type && (!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http"))) {
 			fcgi_set_optimized_transport(true);
@@ -177,15 +176,14 @@ run_child: /* only workers reach this point */
 		}
 
 		if (type && type->child_main) {
-			/* Ten typ przejmuje caly proces na dobre — nie wraca, wiec
-			 * pomijamy fpm_cleanups_run(FPM_CLEANUP_CHILD) w ogole: i tak nie
-			 * ma juz kodu po tym punkcie, ktory by z niego skorzystal, a
-			 * zwolnienie wp/config pod nami zamienilyby kazdy dostep do
-			 * konfiguracji w tym procesie w use-after-free. System i tak
-			 * odzyska wszystko przy zakonczeniu procesu (exit() wolane z
-			 * child_main). */
+			/* This type takes over the entire process permanently — it does not
+			 * return, so skip fpm_cleanups_run(FPM_CLEANUP_CHILD) entirely: no code
+			 * after this point could use it anyway, and freeing wp/config underneath
+			 * us would turn every later configuration access in this process into a
+			 * use-after-free. The system reclaims everything when the process exits
+			 * (exit() called by child_main). */
 			type->child_main(child_wp);
-			/* nie wraca */
+			/* does not return */
 		}
 	}
 

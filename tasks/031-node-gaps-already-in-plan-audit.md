@@ -9,9 +9,9 @@ accountable for them.
 
 `docs/node_server_gaps.md` compares the HTTP gateway to a typical Node.js
 application server and ends with a `## Klasyfikacja` section that sorts every
-finding into three buckets. This task only looks at the first bucket, `### Już
-w planie` (six items). The other two buckets (`Do rozpoznania, ale nie w
-roadmapie`, `Świadomie nie traktować jako brak kompatybilności`) are
+finding into three buckets. This task only looks at the first bucket, `### Already
+in the plan` (six items). The other two buckets (`To explore, but not
+in the roadmap`, `Deliberately not treated as a compatibility gap`) are
 deliberately out of scope here — they are exploration or non-goals, not
 commitments.
 
@@ -54,7 +54,7 @@ request-body-read timeout, or any slow-loris-style guard on an
 gateway's point of view.
 
 **Verdict: genuinely open, and untracked. `docs/node_server_gaps.md` itself
-says "nie ma jeszcze kompletnej ochrony" — this is the missing part.**
+says "there is not yet complete protection" — this is the missing part.**
 
 ### 3. Request body streaming / backpressure — not implemented, untracked
 
@@ -111,7 +111,7 @@ is made.**
 
 ### HTTP/2 and gzip — correctly deprioritized, no action needed now
 
-The document files these as "nice to have po realizacji podstawowego planu,"
+The document files these as "nice to have after completing the basic plan,"
 explicitly after TLS/ALPN, timeouts and backpressure. `grep` confirms neither
 exists in `fpm_http.c`. Since items 2, 3 and 4 above (timeouts, backpressure,
 `503`) are themselves still open, HTTP/2 and gzip are correctly still waiting

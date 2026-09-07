@@ -1,4 +1,4 @@
-/* fpm-ng: glue metryk aplikacyjnych (NOTES 3k). Patrz fpm_metrics.h. */
+/* fpm-ng: glue for application metrics (NOTES 3k). See fpm_metrics.h. */
 
 #include "fpm_config.h"
 
@@ -29,8 +29,8 @@ int fpm_metrics_init_main(void) /* {{{ */
 	}
 
 	if (!slots) {
-		/* zero poolow z procesami (sam pool status ma wymuszone 1) —
-		 * nie ma komu pisac metryk, region niepotrzebny */
+		/* zero pools with processes (the status pool alone is forced to 1) —
+		 * nobody would write metrics, the region is not needed */
 		return 0;
 	}
 
@@ -38,8 +38,8 @@ int fpm_metrics_init_main(void) /* {{{ */
 	size = fpmng_metrics_shm_size(slots, limit);
 	mem = fpm_shm_alloc(size);
 	if (!mem) {
-		zlog(ZLOG_ERROR, "metrics: nie udalo sie zaalokowac %zu B pamieci dzielonej "
-			"(%u slotow x %u serii) — metryki aplikacyjne wylaczone", size, slots, limit);
+		zlog(ZLOG_ERROR, "metrics: failed to allocate %zu B of shared memory "
+			"(%u slots x %u series) — application metrics disabled", size, slots, limit);
 		return -1;
 	}
 
@@ -59,9 +59,9 @@ void fpm_metrics_child_init(void) /* {{{ */
 	uint32_t base = 0;
 	uint32_t slot;
 
-	/* Pool biezacego dziecka. Respawnione w petli zdarzen dzieci docieraja
-	 * do run_child bez wskaznika na swoj pool — dokladnie dlatego
-	 * fpm_pool_type_current_pool() dopasowuje przez scoreboard. */
+	/* The current child's pool. Children respawned by the event loop reach
+	 * run_child without a pointer to their pool — exactly why
+	 * fpm_pool_type_current_pool() matches through the scoreboard. */
 	wp = fpm_pool_type_current_pool();
 	if (!wp) {
 		return;
@@ -72,9 +72,9 @@ void fpm_metrics_child_init(void) /* {{{ */
 		return;
 	}
 
-	/* Wlasny indeks ze scoreboardu: proc_get(NULL, -1) zwraca proces
-	 * biezacego dziecka (dziecko ustawia fpm_scoreboard_i w
-	 * fpm_child_resources_use). Indeks = offset w tablicy procs. */
+	/* Own index from the scoreboard: proc_get(NULL, -1) returns the current
+	 * child's process (the child sets fpm_scoreboard_i in
+	 * fpm_child_resources_use). Index = offset in the procs array. */
 	proc = fpm_scoreboard_proc_get(sb, -1);
 	if (!proc) {
 		return;
@@ -88,9 +88,9 @@ void fpm_metrics_child_init(void) /* {{{ */
 
 	slot = base + (uint32_t) (proc - sb->procs);
 
-	/* Nazwa poola ze scoreboardu (nie z configu — scoreboard przezywa
-	 * cleanups dziecka, a i tak jestesmy przed nimi; przy okazji nie
-	 * dotykamy po tym punkcie niczego, co cleanups zwalnia). */
+	/* Pool name from the scoreboard (not from config — the scoreboard
+	 * survives the child's cleanups, and we run before them anyway; as a
+	 * bonus we touch nothing past this point that cleanups free). */
 	fpmng_metrics_child_attach(slot, sb->pool);
 }
 /* }}} */

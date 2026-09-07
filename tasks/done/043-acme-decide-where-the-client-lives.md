@@ -37,7 +37,7 @@ exactly A's advantages inverted.
 
 1. Each of the three checks answered with evidence: a line count from a real
    codebase, a described state machine, a yes/no with the mechanism named.
-2. A decision, written in `docs/NOTES.md` section 3l, replacing "NIEROZSTRZYGNIĘTE".
+2. A decision, written in `docs/NOTES.md` section 3l, replacing "UNSETTLED".
 3. The dependent tasks (044, 045, 046, 047) updated to match the choice —
    several of their acceptance criteria only make sense for one of the two.
 4. If the answer turns out to be "neither, mount a certificate instead", that is
@@ -46,3 +46,15 @@ exactly A's advantages inverted.
 ## Explicitly out of scope
 
 - Writing any ACME code before this file has an answer in it.
+
+## Outcome
+
+The client will be a project-owned PHP script embedded in the binary as a
+separate typed append-only payload and run by one dedicated `cron` pool.
+`docs/NOTES.md` section 3l records all three checks: a reproducible 8,327-line
+physical-source baseline from `uacme` revision
+`e9cfa6f052644864a28c7d9d04756900abfc653f`, the
+`NO_CERT → ISSUING → READY` bootstrap state machine, and the independent
+payload/footer embedding mechanism. Tasks 044-047 now assign writing and
+renewal to that PHP process and challenge/certificate handover to gateways.
+No ACME implementation was added.

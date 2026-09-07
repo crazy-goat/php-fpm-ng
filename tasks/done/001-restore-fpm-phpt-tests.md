@@ -27,8 +27,8 @@ so it can be pointed at a differently-named binary without patching it.
 
     rm -rf "$PHPSRC/sapi/fpmng/tests"
 
-with the comment *"Testy FPM odwoluja sie do binarki php-fpm, nie naszej. Wroca,
-gdy beda wlasne."* — the intent was always to bring them back.
+with the comment *"FPM tests reference the php-fpm binary, not ours. They will
+come back when we have our own."* — the intent was always to bring them back.
 
 ## Problem
 

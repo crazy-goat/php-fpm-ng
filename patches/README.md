@@ -1,141 +1,148 @@
 # patches/
 
-Łatki na pliki php-src **poza `sapi/`**. Normalnie fpm-ng nie tyka upstreamu —
-`prepare.sh` tworzy wyłącznie `sapi/fpmng/`. Te łatki są odstępstwem i mają być
-widoczne, policzalne i tymczasowe.
+Patches for php-src files **outside `sapi/`**. Normally fpm-ng does not touch
+upstream — `prepare.sh` creates only `sapi/fpmng/`. These patches are an
+exception and must remain visible, measurable, and temporary.
 
-## Zasady
+## Rules
 
-1. **Każda łatka ma termin ważności.** W nagłówku podaje PR upstreamu, na który
-   czeka. Znika w dniu, w którym tamten się zmerguje. Łatka bez drogi wyjścia
-   to ukryty fork.
-2. **Jedna łatka na jeden problem**, nie na jedną wersję PHP. Wersje obsługuje
-   się dopiero wtedy, gdy ta sama łatka przestaje się nakładać.
-3. **Więcej niż dwa warianty wersyjne jednej łatki to sygnał alarmowy** — wtedy
-   albo idzie do upstreamu, albo trzeba ją przeprojektować tak, żeby zmieściła
-   się w `sapi/fpmng/`.
-4. **CI buduje każdą wspieraną wersję PHP**, więc nienakładająca się łatka pada
-   przy budowaniu, a nie przy wydaniu.
+1. **Every patch has an expiry path.** Its header names the upstream PR it is
+   waiting for. It disappears when that PR is merged. A patch with no exit path
+   is a hidden fork.
+2. **One patch per problem**, not one patch per PHP version. Versions are handled
+   only when the same patch stops applying.
+3. **More than two version variants of one patch is a warning sign** — either send
+   it upstream or redesign it so it fits in `sapi/fpmng/`.
+4. **CI builds every supported PHP version**, so a patch that no longer applies
+   fails during the build, not at release time.
 
-## Układ
+## Layout
 
 ```
-patches/*.patch              nakładane zawsze
-patches/php-8.4/*.patch      tylko dla tej wersji, nadpisuje łatkę o tej nazwie
+patches/*.patch              always applied
+patches/php-8.4/*.patch      only for that version; overrides the same-named patch
 ```
 
-## Stan
+## Status
 
-| łatka | dotyczy | czeka na | sprawdzone na |
+| patch | touches | waiting for | checked on |
 |---|---|---|---|
-| `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (pełny PR, nie wycinek) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 przez wariant** `php-8.3/` (7 argumentów `fpm_scoreboard_update_commit`) |
-| `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | zgłoszenie do php/php-src — tekst gotowy w `0002-upstream-report.md`, jeszcze nie wysłane | 8.3, 8.4, 8.5, master |
-| `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | kandydat na PR do php/php-src, nie zgłoszone | 8.4, 8.5, master; **8.3 przez wariant** `php-8.3/` (inna sygnatura `safe_read`) |
-| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | przeniesienie przełącznika za API należące do `sapi/fpmng` | 8.5, master; starsze wersje do weryfikacji |
-| `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | kandydat na PR do php/php-src, nie zgłoszone | 8.5, master; starsze wersje do weryfikacji |
-| `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | przeniesienie przełącznika za API należące do `sapi/fpmng` albo propozycja upstream | 8.5; starsze wersje i master do weryfikacji |
+| `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (full PR, not an excerpt) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (7 arguments to `fpm_scoreboard_update_commit`) |
+| `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | report to php/php-src — text ready in `0002-upstream-report.md`, not sent yet | 8.3, 8.4, 8.5, master |
+| `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (different `safe_read` signature) |
+| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5, master; older versions to verify |
+| `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5, master; older versions to verify |
+| `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | move the switch behind an API owned by `sapi/fpmng`, or propose it upstream | 8.5; older versions and master to verify |
 
-Stos jest kolejnościowy: 0002 i 0003 zakładają nałożone 0001 (kontekst przy
-`accept()`), choć merytorycznie są od niego niezależne. `prepare.sh` nakłada
-wszystko po kolei na nietknięte drzewo, a „już nałożone" sprawdza dla całego
-stosu naraz (odwrotnie, z kopii dotkniętych plików) — test per łatka kłamie,
-gdy dwie łatki siedzą w tym samym miejscu.
+The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the
+context around `accept()`), although they are independent in substance.
+`prepare.sh` applies everything in order to an untouched tree, and checks
+"already applied" for the whole stack at once (in reverse, from copies of the
+touched files) — a per-patch test lies when two patches occupy the same location.
 
-### Dlaczego 0001 jest konieczna
+### Why 0001 is necessary
 
-Bramka trzyma trwałe połączenia do poola (`FCGI_KEEP_CONN`), więc fpm-ng jest
-dokładnie tym przypadkiem, który błąd GH-18956 psuje: licznik idle kontra active
-kłamie, a `pm = dynamic` i `ondemand` źle skalują pulę. Bez tej łatki wiarygodny
-jest tylko `pm = static`.
+The gateway keeps persistent connections to the pool (`FCGI_KEEP_CONN`), so
+fpm-ng is exactly the case broken by GH-18956: the idle-versus-active counter
+lies, and `pm = dynamic` and `ondemand` scale the pool incorrectly. Without this
+patch, only `pm = static` is trustworthy.
 
-Informacja o tym, czy `accept` przyszedł z połączenia trzymanego przy życiu,
-żyje w `main/fastcgi.c` — nie da się jej wyprodukować z samego `sapi/`.
-Towarzyszące zmiany w `fpm_request.c` i `fpm_request.h` niesiemy jako własne
-pliki w `sapi/fpmng/fpm/`, bo te są w `sapi/`.
+Information about whether `accept` came from a persistent connection lives in
+`main/fastcgi.c` — it cannot be produced from `sapi/` alone. The companion
+changes in `fpm_request.c` and `fpm_request.h` are carried as our own files in
+`sapi/fpmng/fpm/`, because they live under `sapi/`.
 
-### Dlaczego 0002 (`TCP_NODELAY`)
+### Why 0002 (`TCP_NODELAY`)
 
-Błąd upstreamu, nie nasza optymalizacja: `req->tcp` jest przypisywane tylko pod
-`_WIN32`, więc na Linuksie `TCP_NODELAY` nigdy nie trafia na połączenie
-keep-alive. Odpowiedź > 8 KB przez TCP idzie kilkoma `write()`, ostatni mały
-segment czeka na ACK: Nagle + delayed ACK, dziesiątki milisekund zamiast
-mikrosekund. Bramka trzyma połączenia do poola po TCP, więc to nas dotyczy
-wprost. Opis do zgłoszenia i reprodukcja: `0002-upstream-report.md`.
+An upstream bug, not our optimization: `req->tcp` is assigned only under
+`_WIN32`, so on Linux `TCP_NODELAY` is never applied to a keep-alive connection.
+A response larger than 8 KB over TCP uses several `write()` calls; the final
+small segment waits for ACK: Nagle + delayed ACK, tens of milliseconds instead
+of microseconds. The gateway keeps TCP connections to the pool, so this affects
+us directly. Report and reproducer: `0002-upstream-report.md`.
 
-### Dlaczego 0003 (bufor wejściowy + `accept4`)
+### Why 0003 (input buffer + `accept4`)
 
-Czysto transportowa oszczędność syscalli w workerze (jeden `read()` na nagłówek
-requestu zamiast sześciu, `accept4(SOCK_CLOEXEC)` zamiast `accept` + 2×`fcntl`),
-zero zmian na drucie. Liczby przed/po: `docs/NOTES.md`, sekcja 3t. Wykrywanie
-`accept4` robi nasz `sapi/fpmng/config.m4` (`AC_CHECK_FUNCS([accept4])`),
-bo upstream sprawdza to tylko w `ext/sockets`; bez `HAVE_ACCEPT4` kompiluje się
-stara ścieżka. Wersja dla upstreamu musiałaby dodać ten check do `configure.ac`.
+A purely transport-level syscall saving in the worker (one `read()` for the
+request header instead of six, `accept4(SOCK_CLOEXEC)` instead of `accept` +
+2x `fcntl`), with no wire changes. Before/after numbers: `docs/NOTES.md`,
+section 3t. Our `sapi/fpmng/config.m4` detects `accept4`
+(`AC_CHECK_FUNCS([accept4])`) because upstream checks it only in `ext/sockets`;
+without `HAVE_ACCEPT4`, the old path is compiled. An upstream version would
+need to add this check to `configure.ac`.
 
-### Dlaczego 0006 (trwałe handlery sygnałów)
+### Why 0006 (persistent signal handlers)
 
-Zend domyślnie sprawdza i ponownie rejestruje siedem handlerów przy aktywacji każdego requestu. `fastcgi-ng` i `http` włączają procesowy przełącznik, po którym pełna rejestracja odbywa się tylko dla pierwszego requestu workera; później nadal ustawiany jest `SIGPROF` dla timeoutu. Klasyczny `fastcgi` nie włącza tej ścieżki. Zmiana redukuje `fastcgi-ng` z około 25,2 do 18,2 syscalla/request i dała powtarzalnie około 7% mniej CPU/request.
+Zend normally checks and registers seven handlers again when every request is
+activated. `fastcgi-ng` and `http` enable a process-wide switch after which full
+registration happens only for the worker's first request; `SIGPROF` for the
+timeout is still set later. Classic `fastcgi` does not enable this path. The
+change reduces `fastcgi-ng` from about 25.2 to 18.2 syscalls/request and
+repeatedly produced about 7% less CPU/request.
 
-Logiczne handlery Zend nadal są resetowane per request, co potwierdzono z `pcntl_signal()`. Kompromisem jest brak automatycznej naprawy handlera podmienionego bezpośrednim libc `sigaction()` przez rozszerzenie przy domyślnym `zend.signal_check=0`; jawne `zend.signal_check=1` nadal wykrywa taką podmianę podczas shutdownu requestu.
+Logical Zend handlers are still reset per request, confirmed with
+`pcntl_signal()`. The trade-off is that an extension replacing a handler through
+direct libc `sigaction()` is not automatically repaired with the default
+`zend.signal_check=0`; explicit `zend.signal_check=1` still detects the change
+during request shutdown.
 
-### ROZWIĄZANE (droga 1): 0001 łamało `--enable-fpm --enable-fpmng` w jednym drzewie
+### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
 
-Decyzja koordynatora: droga 1. `0001` niesie teraz także hunki PR-a na
-`sapi/fpm/fpm/fpm_request.c/.h`, czyli jest PEŁNYM odpowiednikiem PR bukka#2
-(bez testów .phpt) i znika w całości w dniu jego merge'u. Oba SAPI budują się
-razem, stary FPM dostaje tę samą poprawkę. Weryfikacja: build
-`--enable-fpm --enable-fpmng` + pełny zestaw `sapi/fpm/tests` — wynik w
-`docs/NOTES.md` 3t. Poniżej pierwotna analiza, zachowana dla kontekstu.
+Coordinator decision: path 1. `0001` now also carries the PR hunks for
+`sapi/fpm/fpm/fpm_request.c/.h`, so it is the FULL equivalent of bukka#2's PR
+(without `.phpt` tests) and disappears entirely when that PR is merged. Both
+SAPIs build together and the old FPM receives the same fix. Verification:
+`--enable-fpm --enable-fpmng` build + the full `sapi/fpm/tests` suite — result in
+`docs/NOTES.md` 3t. The original analysis below is retained for context.
 
+`0001` changes the `fcgi_init_request()` hook signatures in `main/fastcgi.h` from
+`void(*)(void)` to `void(*)(bool)`. Upstream `sapi/fpm/fpm/fpm_main.c` passes
+`fpm_request_accepting`/`fpm_request_reading_headers` with the old signatures
+from upstream `fpm_request.h`, so GCC 14+ stops the build
+(`-Wincompatible-pointer-types` is an error). The promise that "old FPM keeps
+working alongside it" is broken here: today only `--enable-fpmng` works without
+`--enable-fpm`. Our `sapi/fpmng` compiles because it carries its own
+`fpm_request.c/.h` with `bool` signatures.
 
-`0001` zmienia w `main/fastcgi.h` sygnaturę hooków `fcgi_init_request()` z
-`void(*)(void)` na `void(*)(bool)`. Upstreamowe `sapi/fpm/fpm/fpm_main.c`
-przekazuje tam `fpm_request_accepting`/`fpm_request_reading_headers` ze starymi
-sygnaturami z upstreamowego `fpm_request.h`, więc GCC 14+ przerywa kompilację
-(`-Wincompatible-pointer-types` jest błędem). Obietnica „stary FPM działa dalej
-obok" jest w tym miejscu złamana: dziś działa tylko `--enable-fpmng` bez
-`--enable-fpm`. Nasz `sapi/fpmng` kompiluje się, bo niesie własne
-`fpm_request.c/.h` z sygnaturami `bool`.
+Size: **small**, because it does exactly what the upstream PR does. PR bukka#2
+(GH-18956) changes `main/fastcgi.c` **and** `sapi/fpm/fpm/fpm_request.c`,
+`sapi/fpm/fpm/fpm_request.h` (plus tests). Our `0001` was the `main/` portion;
+we carried the missing part as our own files in `sapi/fpmng/` — which is why
+upstream `sapi/fpm` fell behind.
 
-Rozmiar: **mały**, bo to dokładnie to, co robi upstreamowy PR. PR bukka#2
-(GH-18956) zmienia `main/fastcgi.c` **oraz** `sapi/fpm/fpm/fpm_request.c`,
-`sapi/fpm/fpm/fpm_request.h` (plus testy). Nasze `0001` to jego część
-ograniczona do `main/`; brakującą część niesiemy jako własne pliki w
-`sapi/fpmng/` — i właśnie dlatego upstreamowe `sapi/fpm` zostaje w tyle.
+Two paths:
 
-Dwie drogi:
+1. **Add the PR hunks for `sapi/fpm/fpm/fpm_request.c` and `fpm_request.h` to
+   `0001`** (~33 lines, identical to what we have in `sapi/fpmng/`). Both SAPIs
+   then build together, and upstream FPM in the same tree gets the GH-18956
+   counting fix — behavior upstream will merge anyway. Cost: the patch touches
+   `sapi/fpm/` for the first time, but it remains one problem = one patch, with
+   the same expiry path. The old FPM behavior changes only through correct
+   idle/active counters on keep-alive.
+2. **Redesign `0001` without changing signatures**: keep the old hooks and add a
+   separate setter in `fastcgi.c` (for example,
+   `fcgi_request_set_hooks_ex(req, on_accept(bool), on_read(bool))`). Upstream
+   `sapi/fpm` stays untouched, but our copied `fpm_main.c` calls
+   `fcgi_init_request()` with old prototypes and our `bool` functions — so we
+   would have to own `fpm_main.c` (20 commits/year) or add a hook to it. More
+   code, further from upstream's shape.
 
-1. **Dołożyć do `0001` hunki PR-a na `sapi/fpm/fpm/fpm_request.c` i
-   `fpm_request.h`** (~33 linie, identyczne z tym, co mamy w `sapi/fpmng/`).
-   Wtedy oba SAPI budują się razem, a upstreamowy FPM w tym samym drzewie
-   dostaje poprawkę liczenia GH-18956 — czyli zachowanie, które upstream i tak
-   zmerguje. Koszt: łatka po raz pierwszy dotyka `sapi/fpm/`, ale to nadal
-   jeden problem = jedna łatka, z tym samym terminem ważności. Zmiana
-   zachowania starego FPM ogranicza się do poprawnych liczników idle/active
-   przy keep-alive.
-2. **Przeprojektować `0001` bez zmiany sygnatur**: zostawić stare hooki, dodać
-   w `fastcgi.c` osobny setter (np. `fcgi_request_set_hooks_ex(req,
-   on_accept(bool), on_read(bool))`). Upstreamowe `sapi/fpm` kompiluje się
-   nietknięte, ale nasz skopiowany `fpm_main.c` woła `fcgi_init_request()` ze
-   starymi prototypami i naszymi `bool`-funkcjami — więc trzeba by wziąć
-   `fpm_main.c` na własność (20 commitów/rok) albo dodać do niego hook.
-   Więcej kodu, dalej od kształtu upstreamu.
+Recommendation: path 1. Zero new code, convergent with upstream, and
+`prepare.sh` could stop deleting `sapi/fpmng/tests` merely because the tests
+refer to the php-fpm binary — with `--enable-fpm` alongside it, upstream tests
+run in the same tree. Do this after the coordinator's decision, not in this task.
 
-Rekomendacja: droga 1. Zero nowego kodu, zbieżne z upstreamem, a
-`prepare.sh` może przestać usuwać `sapi/fpmng/tests` tylko dlatego, że
-„testy odwołują się do binarki php-fpm" — z `--enable-fpm` obok testy upstreamu
-biegną w tym samym drzewie. Do zrobienia po decyzji koordynatora, nie w tym
-zadaniu.
+### Version variants
 
-### Stan wariantów wersyjnych
+PHP-8.3 currently has TWO variants (`0001` — 7 arguments to
+`fpm_scoreboard_update_commit`; `0003` — `const void *buf` in `safe_read()`).
+That is exactly the warning threshold from rule 3. Both will disappear with the
+patches when upstream merges them; if 8.3 diverges further, dropping 8.3 from
+supported versions will be cheaper than a third variant.
 
-PHP-8.3 ma dziś DWA warianty (`0001` — 7 argumentów `fpm_scoreboard_update_commit`;
-`0003` — `const void *buf` w `safe_read()`). To jest dokładnie próg alarmowy
-z zasady 3. Oba znikną razem z łatkami po merge'u upstreamu; jeśli 8.3 rozjedzie
-się bardziej, tańsze będzie wypisanie 8.3 ze wspieranych wersji niż trzeci wariant.
-
-**DECYZJA (2026-09-05): 8.3 ZOSTAJE.** Ma nadal wsparcie bezpieczeństwa, a dwa
-warianty nie kosztują nas realnie nic — nakładają się czysto i są pokryte CI.
-Próg z zasady 3 pozostaje w mocy jako ostrzeżenie, nie jako automat: sam fakt,
-że jesteśmy na progu, NIE jest powodem do wypisania wersji. Powodem będzie
-dopiero trzeci wariant albo wariant, który wymaga innej logiki, a nie innej
-sygnatury. Do tego czasu nie wracamy do tej dyskusji.
+**DECISION (2026-09-05): KEEP 8.3.** It still receives security support, and the
+two variants cost us practically nothing — they apply cleanly and are covered
+by CI. The rule-3 threshold remains a warning, not an automatic cutoff: merely
+being at the threshold is NOT a reason to drop a version. The reason would be a
+third variant or a variant requiring different logic rather than a different
+signature. Until then, do not reopen this discussion.

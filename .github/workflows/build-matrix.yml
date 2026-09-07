@@ -170,6 +170,35 @@ jobs:
           name: phpt-results
           path: phpt-results
 
+  # Task 003: regression tests for pool.type, pool.executor, and request-less
+  # pool types. Fiber cases skip on the canonical build (--enable-fpmng-fiber is
+  # off by default); cron may take up to one minute.
+  fpmng-phpt:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: run fpmng-owned .phpt tests (task 003)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng build-out/bin/php build/run-fpmng-phpt.sh
+          TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          TEST_FPM_TIMEOUT=120 \
+          ./build/run-fpmng-phpt.sh "$PWD/build-out/prepared" "$PWD/fpmng-phpt-results"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fpmng-phpt-results
+          path: fpmng-phpt-results
+
   # Task 013: clang-tidy over our C sources only (never a prepared php-src
   # tree's mixed upstream copies). Non-blocking on purpose — a red build on
   # day one for pre-existing findings teaches people to ignore the job.

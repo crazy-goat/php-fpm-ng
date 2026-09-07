@@ -1,10 +1,9 @@
 name: build
 
 # Task 002: prove the tree still builds and our php-src patches still apply.
-# See tasks/002-ci-build-matrix.md. Currently a single build cell rather than
-# the full ZTS x session x TLS matrix the task describes — that matrix, plus
-# the static musl build, is deferred to release time (deliberate scope cut,
-# not an oversight; see the "build" job's own comment).
+# See tasks/done/002-ci-build-matrix.md. The dynamic build remains a single cell
+# rather than the full ZTS x session x TLS matrix. The static musl build is
+# covered separately below.
 #
 # Runs on pull_request only (not on every push): a full php-src build is slow
 # on GitHub-hosted runners, and only a PR is a candidate for merging into main.
@@ -44,10 +43,9 @@ jobs:
 
   # Deliberately a single cell for now (non-ZTS, session static, TLS on),
   # not the full ZTS x session x TLS matrix from tasks/002-ci-build-matrix.md.
-  # That matrix (and the static musl build) is release-time work — see the
-  # task file's acceptance criteria 3-4, not yet satisfied by this workflow.
-  # Re-add strategy.matrix (zts/session/tls) plus a static-musl job before
-  # the first release.
+  # That matrix remains release-time work — see the task file's acceptance
+  # criteria 3-4. Re-add strategy.matrix (zts/session/tls) before the first
+  # release.
   build:
     needs: patches
     runs-on: ubuntu-latest
@@ -212,6 +210,40 @@ jobs:
         with:
           name: lint-c-report
           path: lint-c-report.txt
+          retention-days: 14
+
+  # Task 004: prove that the shipped SAPI, not the historical php-src HTTP POC,
+  # links statically on musl and serves HTTP when it is the only executable in
+  # a scratch image.
+  static-musl:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+      - name: build static php-fpm-ng on Alpine
+        run: |
+          mkdir build-static out-static
+          docker run --rm \
+            -v "$PWD/php-src:/src" \
+            -v "$PWD/build-static:/build" \
+            -v "$PWD:/repo" \
+            -v "$PWD/out-static:/out" \
+            alpine:3.22 sh /repo/build/static-full.sh
+      - name: verify static binary in a scratch image
+        run: ./build/test-static-full.sh "$PWD/out-static/php-fpm-ng-full"
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: static-musl-logs
+          path: |
+            out-static/configure-full.log
+            out-static/make-full.log
           retention-days: 14
 
   # Task 010: the HTTP gateway must drop root before it ever accepts a

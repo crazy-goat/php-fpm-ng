@@ -60,7 +60,7 @@ struct fpm_http_tls_s {
 	size_t cert_len;
 	char *key_pem;
 	size_t key_len;
-	int min_version;			/* np. TLS1_2_VERSION, patrz fpm_http_tls.c */
+	int min_version;			/* e.g. TLS1_2_VERSION, see fpm_http_tls.c */
 	/* 80 = 16 (key name) + 32 (AES-256 key) + 32 (HMAC-SHA256 key), the
 	 * layout OpenSSL's classic SSL_CTX_set_tlsext_ticket_keys() expects
 	 * since it moved off AES-128/HMAC-SHA1 -- the old 48-byte layout from
@@ -70,13 +70,12 @@ struct fpm_http_tls_s {
 	size_t sni_count;
 };
 
-/* Wolane z fpm_http_validate_pool(), w fazie walidacji configu, przed
- * forkiem czegokolwiek: czyta cert+klucz z dysku do jednorazowego, rzucanego
- * SSL_CTX i sprawdza, ze sie parsuja i ze klucz pasuje do certyfikatu.
- * Nic nie zostaje w pamieci. Komunikat bledu mowi co jest nie tak (zla
- * sciezka, zly PEM, klucz nie pasuje do certyfikatu, nieznana
- * min_version) i NIGDY nie zawiera tresci klucza. Zwraca 0 albo -1,
- * loguje sam.
+/* Called from fpm_http_validate_pool(), during config validation, before
+ * anything forks: reads cert+key from disk into a throwaway SSL_CTX and
+ * verifies that they parse and that the key matches the certificate. Nothing
+ * stays in memory. The error message says what is wrong (bad path, bad PEM,
+ * key does not match certificate, unknown min_version) and NEVER contains key
+ * material. Returns 0 or -1, logging by itself.
  *
  * sni_spec is http.tls_sni_cert (task 041), possibly NULL/empty: each
  * "servername:cert_path:key_path" entry is validated exactly like the
@@ -84,22 +83,21 @@ struct fpm_http_tls_s {
 int fpm_http_tls_validate(const char *pool, const char *cert_path, const char *key_path,
 	const char *min_version, const char *sni_spec);
 
-/* Wolane raz na pool, w masterze, PRZED forkiem pierwszego dziecka bramki
- * (fpm_http_init_pool_ex()): czyta cert+klucz do pamieci (fork() skopiuje je
- * do kazdego dziecka) i generuje wspolny klucz session ticketow. Zaklada, ze
- * fpm_http_tls_validate() juz przeszla dla tych samych sciezek/sni_spec.
- * Zwraca NULL przy bledzie (zalogowanym), nigdy nie zwraca czesciowo
- * wypelnionej struktury. sni_spec: patrz fpm_http_tls_validate() powyzej;
- * wypelnia tls->sni/tls->sni_count. */
+/* Called once per pool, in the master, BEFORE the first gateway child forks
+ * (fpm_http_init_pool_ex()): reads cert+key into memory (fork() copies them
+ * into every child) and generates the shared session ticket key. Assumes
+ * fpm_http_tls_validate() already passed for the same paths/sni_spec.
+ * Returns NULL on error (logged), never a partially filled structure.
+ * sni_spec: see fpm_http_tls_validate() above; fills tls->sni/tls->sni_count. */
 struct fpm_http_tls_s *fpm_http_tls_load(const char *pool, const char *cert_path,
 	const char *key_path, const char *min_version, const char *sni_spec);
 
 void fpm_http_tls_free(struct fpm_http_tls_s *tls);
 
-/* Wolane w kazdym dziecku bramki, PO forku (fpm_http_gateway_run()): buduje
- * SSL_CTX z bajtow juz wczytanych w masterze (zero ponownego czytania pliku
- * klucza z dysku) i ustawia w nim wspolny klucz ticketow. Zwraca NULL przy
- * bledzie (zalogowanym pod nazwa poola).
+/* Called in every gateway child, AFTER the fork (fpm_http_gateway_run()):
+ * builds an SSL_CTX from bytes already loaded in the master (no key file is
+ * read from disk again) and sets the shared ticket key in it. Returns NULL on
+ * error (logged under the pool name).
  *
  * task 041: also registers an ALPN callback (advertises http/1.1 only,
  * rejects a client offering only something else) and, when tls->sni_count >
@@ -110,9 +108,9 @@ void fpm_http_tls_free(struct fpm_http_tls_s *tls);
  * note. */
 SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls);
 
-/* Callback dla evhttp_set_bevcb(): `arg` to SSL_CTX* danego gateway procesu.
- * evhttp wola to raz na kazde przychodzace polaczenie i samo doczepia
- * przyjety fd przez bufferevent_setfd() -- stad fd = -1 tutaj. */
+/* Callback for evhttp_set_bevcb(): `arg` is the SSL_CTX* of the gateway
+ * process. evhttp calls it once per incoming connection and attaches the
+ * accepted fd itself via bufferevent_setfd() — hence fd = -1 here. */
 struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg);
 
 #endif /* HAVE_FPM_HTTP_TLS */

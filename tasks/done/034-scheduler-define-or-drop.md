@@ -113,3 +113,11 @@ elaboration.
   and it's the one this task's author considers most likely given how the
   word was introduced (a one-line mention, no elaboration, alongside four
   other main-line nouns that all already have code or an open task).
+
+## Outcome
+
+Decided: "scheduler" named no capability beyond `cron`. None of the four
+candidates (job queue, dependent jobs, event-triggered runs, delayed one-off
+jobs) had actually been asked for. Retired the word from
+`tasks/README.md`'s main-line description, with a note pointing at this
+file for why. No code changes — this was a naming decision only.

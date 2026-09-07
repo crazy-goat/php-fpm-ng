@@ -43,6 +43,9 @@ Eventually a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src —
 needs to be touched. Details, decisions, measured numbers and the list of
 known issues: [`docs/NOTES.md`](docs/NOTES.md).
 
+`pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
+...) are documented for operators in [`docs/cron.md`](docs/cron.md).
+
 ## Recommended pool configuration for lightweight endpoints
 
 Gain with no line of code, measured on the test box (details: `docs/NOTES.md`, 3m and 3t):

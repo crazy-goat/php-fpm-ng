@@ -437,9 +437,13 @@ void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * run_child:) — the process simply exits immediately, which is correct
 	 * because status has no "current work" to complete (each connection is fully
 	 * handled in one accept() cycle and never lasts longer than one recv/send).
-	 * Any delay after SIGQUIT (graceful) until the master escalates to SIGTERM is
-	 * known and accepted behavior, the same as for supervisor/cron without a
-	 * custom SIGQUIT handler — see docs/NOTES.md 3p, scenario 2. */
+	 * On reload (SIGUSR2), fpm_process_ctl.c sends SIGTERM to this pool
+	 * directly for exactly that reason — see the comment at
+	 * fpm_process_ctl.c:165 and docs/NOTES.md 3x. Outside of reload — an
+	 * explicit graceful stop or log rotation — the ordinary SIGQUIT fan-out
+	 * still applies, and a delay until the master escalates to SIGTERM there
+	 * is known and accepted, the same as for supervisor/cron without a custom
+	 * SIGQUIT handler — see docs/NOTES.md 3p, scenario 2. */
 
 	for (;;) {
 		int fd = accept(listen_fd, NULL, NULL);

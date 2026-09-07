@@ -2,3 +2,4 @@ build-dir/
 *.log
 php-fpm
 php-fpm-*
+examples/http/certs/

@@ -74,7 +74,7 @@ static void fpm_pctl_exit(void)
 	exit(FPM_EXIT_OK);
 }
 
-#define optional_arg(c) (saved_argc > c ? ", \"" : ""), (saved_argc > c ? saved_argv[c] : ""), (saved_argc > c ? "\"" : "")
+#define optional_arg(c) ((saved_argc) > (c) ? ", \"" : ""), ((saved_argc) > (c) ? (saved_argv)[(c)] : ""), ((saved_argc) > (c) ? "\"" : "")
 
 static void fpm_pctl_exec(void)
 {

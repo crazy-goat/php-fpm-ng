@@ -140,9 +140,9 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		if (!c->supervisor_restart) {
 			return -1;
 		}
-	} else if (strcmp(c->supervisor_restart, "always") &&
-			strcmp(c->supervisor_restart, "on-failure") &&
-			strcmp(c->supervisor_restart, "never")) {
+	} else if (strcmp(c->supervisor_restart, "always") != 0 &&
+			strcmp(c->supervisor_restart, "on-failure") != 0 &&
+			strcmp(c->supervisor_restart, "never") != 0) {
 		zlog(ZLOG_ALERT, "[pool %s] supervisor.restart must be 'always', 'on-failure' or 'never', got '%s'",
 			c->name, c->supervisor_restart);
 		return -1;

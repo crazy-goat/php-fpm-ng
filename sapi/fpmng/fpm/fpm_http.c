@@ -1243,7 +1243,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	if (script_missing) {
 		*script_missing = 0;	/* file is there, whatever open()/fstat() below turn out to say about it */
 	}
-	if (strncmp(resolved, root, root_len) || (resolved[root_len] && resolved[root_len] != '/')) {
+	if (strncmp(resolved, root, root_len) != 0 || (resolved[root_len] && resolved[root_len] != '/')) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", gw->pool, path);
 		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
 		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
@@ -1987,11 +1987,24 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->upstreams_used = fpm_shm_alloc(sizeof(*gw->upstreams_used));
 		if (!gw->upstreams_used) {
 			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", wp->config->name);
+			close(gw->listen_fd);
+			fpm_http_acl_free(gw->acl);
+			free(gw->allowed_clients);
+			fpm_http_acl_free(gw->trusted_proxies_acl);
+			free(gw->trusted_proxies);
+			free(gw->front_controller);
+			free(gw->access_log_path);
+			free(gw->http_listen_override);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw);
 			return -1;
 		}
 		*gw->upstreams_used = 0;
 		gw->pids = calloc(gw->nproc, sizeof(pid_t));
-		gw->slots = calloc(gw->nproc, sizeof(*gw->slots));
+		/* array of pointers — sizeof(void *) is intentional */
+		gw->slots = calloc(gw->nproc, sizeof(void *));
 		gw->next = gateways;
 		gateways = gw;
 		zlog(ZLOG_NOTICE, "[pool %s] HTTP listener: %u gateway(s)%s%s, %u persistent connection(s) to the pool",

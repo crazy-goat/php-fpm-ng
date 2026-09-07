@@ -520,11 +520,21 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 	do {
 		n = recv(kept_fd, &c, 1, MSG_PEEK);
 	} while (n < 0 && errno == EINTR);
+	/* EAGAIN and EWOULDBLOCK are equal on Linux; both are checked for
+	 * portability where they differ. GCC -Wlogical-op flags the equality as
+	 * redundant — leave the idiom alone (docs/c-style.md, task 013). */
+#if defined(__GNUC__) && !defined(__clang__)
+# pragma GCC diagnostic push
+# pragma GCC diagnostic ignored "-Wlogical-op"
+#endif
 	if (n <= 0 && !(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
 		fcgi_finish_request(req, 1);
 		fcgi_destroy_request(req);
 		return NULL;
 	}
+#if defined(__GNUC__) && !defined(__clang__)
+# pragma GCC diagnostic pop
+#endif
 
 	/* If reading the request from this fd fails, fcgi_accept_request closes it
 	 * and falls back to accept() on the listening socket. The fiber type receives

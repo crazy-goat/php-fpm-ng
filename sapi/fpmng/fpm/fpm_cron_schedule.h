@@ -35,7 +35,7 @@ struct fpm_cron_schedule_s {
 int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out,
 	char *err, size_t err_len);
 
-/* Computes the next time (UTC epoch seconds, always exactly at the start of
+/* Computes the next time (epoch seconds, always exactly at the start of
  * a minute) that matches *sched and is strictly greater than `after`. Never
  * returns a time <= `after` — this is what makes "no catch-up" and "no
  * double-fire in the same minute after a fast run" free: the caller always
@@ -44,7 +44,21 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out,
  * horizon (a schedule that can structurally never match, e.g. day 30 of
  * February with day-of-week left unrestricted so the OR rule never saves
  * it) — this should have been caught by validation already, so this return
- * value is a last-resort guard, not a normal code path. */
-time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after);
+ * value is a last-resort guard, not a normal code path.
+ *
+ * `tz` is an IANA zone name (e.g. "Europe/Warsaw") or NULL/"" for UTC (the
+ * default, unchanged from before this parameter existed). When set, the
+ * schedule's minute/hour/day/month/weekday fields are matched against that
+ * zone's local time instead of UTC. Two local-time edge cases follow
+ * directly from scanning real UTC instants and converting each one, with no
+ * special-case code: a wall-clock time that a DST transition skips (spring
+ * forward) simply never matches, because no UTC instant maps to it; a
+ * wall-clock time that a transition repeats (fall back) can match twice in
+ * the same day, because two distinct UTC instants map to it. This is the
+ * same behaviour ordinary crontab(5) has when it runs in local time — an
+ * accepted once-a-year quirk, not something this function tries to correct.
+ * See fpm_pool_cron.c for how `tz` is applied (TZ environment variable,
+ * saved and restored around the call — see that file for why). */
+time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after, const char *tz);
 
 #endif

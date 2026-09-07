@@ -1,7 +1,7 @@
 # 013 — C style rules and a linter, matching upstream rather than inventing
 
 **Priority:** medium-low.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -56,3 +56,22 @@ Establish enforceable style and static-analysis rules that match php-src.
 
 - Comment-content rules (what deserves a comment) are **not** a linter's job and
   belong in `CLAUDE.md`. See 014.
+
+## Outcome
+
+- Added `.editorconfig` copied from php-src master (tabs/LF/final newline).
+- **clang-format: not adopted** — php-src has none; a divergent style would
+  make the prepare.sh overlay harder to diff. Reasoning in `docs/c-style.md`.
+  The file-list boundary for any future formatter is the same as for tidy:
+  `build/lint-c.sh` only walks this repo's `sapi/fpmng/` and
+  `ext/fpmng_metrics/`, never a prepared php-src tree.
+- Added `.clang-tidy` with a curated subset; enabled and deliberately-disabled
+  checks are listed with reasons in `docs/c-style.md`.
+- Site suppression for the known `-Wlogical-op` idiom at
+  `sapi/fpmng/fpm/fpm_pool_coop.c` (line ~523 today; task text said 426 —
+  drifted). GCC diagnostic pragma + comment; `misc-redundant-expression` left
+  off so clang-tidy does not re-flag the same idiom.
+- CI: non-blocking `lint` job in `.github/workflows/build-matrix.yml`
+  (`continue-on-error: true`), artifact `lint-c-report`.
+- Contributor how-to: `sapi/fpmng/README.md` → `./build/lint-c.sh`.
+- Not done (out of scope): bulk reformat; hard-fail on findings.

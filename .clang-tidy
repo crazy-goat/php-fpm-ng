@@ -1,0 +1,22 @@
+# Curated subset — see docs/c-style.md for why each check is on or off.
+# Do not switch to Checks: '*' and then disable; the enabled list is the contract.
+---
+Checks: >
+  -*,
+  bugprone-sizeof-expression,
+  bugprone-suspicious-memset-usage,
+  bugprone-macro-parentheses,
+  bugprone-integer-division,
+  bugprone-posix-return,
+  bugprone-suspicious-string-compare,
+  bugprone-unused-return-value,
+  clang-analyzer-core.NullDereference,
+  clang-analyzer-core.uninitialized.Assign,
+  clang-analyzer-unix.Malloc,
+  clang-analyzer-deadcode.DeadStores
+WarningsAsErrors: ''
+# Only diagnose our headers when a translation unit pulls them in. Upstream
+# headers under a prepared php-src tree must not become part of the report.
+HeaderFilterRegex: '(sapi/fpmng/|ext/fpmng_metrics/)'
+FormatStyle: none
+...

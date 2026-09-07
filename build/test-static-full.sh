@@ -37,7 +37,7 @@ cat > "$dir/www/index.php" <<'EOF'
 <?php echo "php-fpm-ng static scratch"; ?>
 EOF
 
-suffix=$(basename "$dir")
+suffix=$(basename "$dir" | tr '[:upper:]' '[:lower:]')
 image="php-fpm-ng-static-test-$suffix"
 docker build -t "$image" "$dir" >/dev/null
 container=$(docker run -d -p 127.0.0.1::9001 "$image")

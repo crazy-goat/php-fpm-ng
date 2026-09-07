@@ -195,6 +195,7 @@ struct fpm_http_gateway_s {
 	char *access_log_path;				/* http.access_log; NULL = disabled */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL in the master */
 	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
+	int front_controller_ok;			/* validated once by the master, before the first fork -- see fpm_http_front_controller_validate() */
 
 	/* Pool's resolved 'user'/'group' (wp->set_uid/set_gid/set_user, copied
 	 * once in the master by fpm_http_gateway_settings() -- fpm_unix_conf_wp()
@@ -369,7 +370,7 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 }
 
 static const char *fpm_http_method_name(enum evhttp_cmd_type type);
-static int fpm_http_front_controller_ok(struct fpm_http_gateway_s *gw);
+static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
 
 /* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
  * straight from the evhttp_request, callers only supply what they already know
@@ -444,9 +445,10 @@ static const char *fpm_http_method_name(enum evhttp_cmd_type type)
 }
 
 /* Builds BEGIN_REQUEST, PARAMS and STDIN in c->out. Returns an HTTP error code or 0.
- * script_missing_hint is fpm_http_try_local()'s realpath() verdict on the exact
- * path this function would otherwise stat() itself (0 = exists, 1 = confirmed
- * missing, -1 = not checked there) -- see the comment on fpm_http_serve_static(). */
+ * script_missing_hint is fpm_http_try_local()'s realpath()/fstat() verdict on the
+ * exact path this function would otherwise stat() itself (0 = exists as a regular
+ * file, 1 = confirmed missing or a directory, -1 = not checked there) -- see the
+ * comment on fpm_http_serve_static(). */
 static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 {
 	static const char begin_request[8] = {0, FCGI_RESPONDER, FCGI_KEEP_CONN, 0, 0, 0, 0, 0};
@@ -495,21 +497,25 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	smart_str_0(&filename);
 
 	/* try_files $uri http.front_controller$is_args$args, roughly: when the script
-	 * this request maps to does not exist, hand it to the front controller instead
-	 * and let PATH_INFO carry the original path -- same idea as php -S's own
-	 * fallback to index.php (php_cli_server_request_translate_vpath()), minus its
-	 * walk-left-and-stat() loop, which is fine for a dev server but too many
-	 * syscalls per request for here.
+	 * this request maps to does not exist -- or exists only as a directory with
+	 * no index.php of its own, e.g. "/somedir" -- hand it to the front controller
+	 * instead and let PATH_INFO carry the original path -- same idea as php -S's
+	 * own fallback to index.php (php_cli_server_request_translate_vpath()), minus
+	 * its walk-left-and-stat() loop, which is fine for a dev server but too many
+	 * syscalls per request for here. (Task 018 gap 1: this is a deliberate
+	 * difference from php -S, which additionally tries index.html; matching
+	 * nginx's try_files instead costs no extra syscall, see below.)
 	 *
 	 * Cost: when path_info is NULL and there was no trailing slash (the plain
 	 * "/mix" case, no .php split or appended index.php), fpm_http_try_local()
-	 * already ran this exact realpath() for GET/HEAD with http.static on, so
-	 * script_missing_hint answers it for free. Everywhere else -- POST/PUT/...,
-	 * http.static = 0, a request for a bare .php file (fpm_http_serve_static()
-	 * steps aside for those on purpose), or a trailing-slash/.php-split path --
-	 * this is the one extra stat() the fallback adds, and only when
-	 * http.front_controller is non-empty in the first place. */
-	if (fpm_http_front_controller_ok(c->gw)) {
+	 * already ran this exact realpath()+fstat() for GET/HEAD with http.static on,
+	 * so script_missing_hint answers it for free -- directory or not. Everywhere
+	 * else -- POST/PUT/..., http.static = 0, a request for a bare .php file
+	 * (fpm_http_serve_static() steps aside for those on purpose), or a
+	 * trailing-slash/.php-split path -- this is the one extra stat() the
+	 * fallback adds, and only when http.front_controller is non-empty in the
+	 * first place. */
+	if (c->gw->front_controller_ok) {
 		int missing;
 
 		if (!path_info && !trailing_slash && script_missing_hint >= 0) {
@@ -517,7 +523,13 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		} else {
 			struct stat st;
 
-			missing = (stat(ZSTR_VAL(filename.s), &st) != 0);
+			/* S_ISDIR counts as missing too: an existing directory with no
+			 * index is the same "nothing to serve here" case as a missing
+			 * file -- see the front-controller fallback's directory handling
+			 * in fpm_http_serve_static(), which this stat() mirrors for the
+			 * requests that don't go through that function (non-GET/HEAD,
+			 * http.static = 0, or a trailing-slash/.php-split path). */
+			missing = (stat(ZSTR_VAL(filename.s), &st) != 0 || S_ISDIR(st.st_mode));
 		}
 		if (missing) {
 			smart_str_free(&filename);
@@ -1147,56 +1159,61 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
 	return resolved[0] ? resolved : NULL;
 }
 
-/* Validates http.front_controller once per gateway process (empty option ->
- * fallback disabled, same as today). The value is admin config, not request
- * input, but it still goes through the same realpath()-under-docroot check as
- * a static file (see fpm_http_serve_static): a symlink can put a perfectly
- * innocent-looking path outside the document root, and there is no reason to
- * trust config more than we trust the filesystem. When the front controller
- * is not deployed yet, realpath() has nothing to resolve -- the fallback is
- * still enabled in that case, so a request that reaches it gets the worker's
- * usual "File not found" instead of silently behaving as if the option were
- * unset. */
-static int fpm_http_front_controller_ok(struct fpm_http_gateway_s *gw)
+/* Validates http.front_controller once, in the master, before the first gateway
+ * fork -- fork()'s COW then hands every gateway process gw->front_controller_ok
+ * already decided, exactly like fpm_http_tls_validate() decides TLS cert/key
+ * problems at pool-validation time instead of at first request (task 018 gap 2:
+ * this used to be a function-level static evaluated lazily on the first request
+ * of each gateway process; that was fine only because each gateway process
+ * serves exactly one pool, and it reported a misconfiguration late). The value
+ * is admin config, not request input, but it still goes through the same
+ * realpath()-under-docroot check as a static file (see fpm_http_serve_static):
+ * a symlink can put a perfectly innocent-looking path outside the document
+ * root, and there is no reason to trust config more than we trust the
+ * filesystem. When the front controller is not deployed yet, realpath() has
+ * nothing to resolve -- the fallback is still enabled in that case, so a
+ * request that reaches it gets the worker's usual "File not found" instead of
+ * silently behaving as if the option were unset.
+ *
+ * gw->docroot and gw->front_controller must already be set (fpm_http_init_pool_ex()
+ * calls this right after fpm_http_gateway_settings()); the master and every
+ * gateway child share the same filesystem view for this pool (no chroot/chdir
+ * happens between here and fpm_http_gateway_run()), so resolving the document
+ * root here is exactly as valid as resolving it later in the child. */
+static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
 {
-	static int state = 0; /* 0 = not checked yet, 1 = usable, -1 = disabled/invalid */
+	const char *fc = gw->front_controller;
 
-	if (!state) {
-		const char *fc = gw->front_controller;
+	gw->front_controller_ok = 0;
+	if (fc && *fc) {
+		const char *root = fpm_http_docroot_real(gw);
+		char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
 
-		state = -1;
-		if (fc && *fc) {
-			const char *root = fpm_http_docroot_real(gw);
-			char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
+		if (!root) {
+			zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller fallback disabled, document root does not resolve", gw->pool);
+		} else if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", gw->docroot, fc) >= sizeof(candidate)) {
+			zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' is too long, fallback disabled", gw->pool, fc);
+		} else if (!realpath(candidate, resolved)) {
+			gw->front_controller_ok = 1;	/* not deployed yet: still enable, see the comment above */
+		} else {
+			size_t root_len = strlen(root);
 
-			if (!root) {
-				zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller fallback disabled, document root does not resolve", gw->pool);
-			} else if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", gw->docroot, fc) >= sizeof(candidate)) {
-				zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' is too long, fallback disabled", gw->pool, fc);
-			} else if (!realpath(candidate, resolved)) {
-				state = 1;	/* not deployed yet: still enable, see the comment above */
+			if (!strncmp(resolved, root, root_len) && (!resolved[root_len] || resolved[root_len] == '/')) {
+				gw->front_controller_ok = 1;
 			} else {
-				size_t root_len = strlen(root);
-
-				if (!strncmp(resolved, root, root_len) && (!resolved[root_len] || resolved[root_len] == '/')) {
-					state = 1;
-				} else {
-					zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' resolves outside the document root, fallback disabled", gw->pool, fc);
-				}
+				zlog(ZLOG_WARNING, "[pool %s] http: http.front_controller '%s' resolves outside the document root, fallback disabled", gw->pool, fc);
 			}
 		}
 	}
-
-	return state == 1;
 }
 
 /* cmd == EVHTTP_REQ_GET or EVHTTP_REQ_HEAD, and http.static is on: fills in
- * *script_missing with what realpath() below finds out about the same path
- * fpm_http_build_request() would use as SCRIPT_FILENAME (0 = exists, 1 =
- * confirmed missing), so that build_request can skip its own stat() for the
- * one case this function already paid for. -1 (unchanged from the caller's
- * initial value) means this function never reached that check -- the caller
- * still doesn't know. */
+ * *script_missing with what realpath()/fstat() below find out about the same
+ * path fpm_http_build_request() would use as SCRIPT_FILENAME (0 = exists as a
+ * regular file, 1 = confirmed missing or a directory), so that build_request
+ * can skip its own stat() for the one case this function already paid for.
+ * -1 (unchanged from the caller's initial value) means this function never
+ * reached that check -- the caller still doesn't know. */
 static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *path, size_t path_len, const char *remote_addr, int *script_missing)
 {
@@ -1260,9 +1277,21 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	if (fd < 0) {
 		return 0;
 	}
-	if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+	if (fstat(fd, &st) < 0) {
 		close(fd);
-		return 0;			/* directories and specials go to the worker */
+		return 0;
+	}
+	if (!S_ISREG(st.st_mode)) {
+		close(fd);
+		/* A directory with no index.php is "nothing to serve" the same way a
+		 * missing file is: reuse this fstat() -- already paid for -- to tell
+		 * fpm_http_build_request() so, instead of it needing a stat() of its
+		 * own. Other non-regular types (sockets, devices, ...) are left as
+		 * before: the worker's business, not the front controller's. */
+		if (script_missing && S_ISDIR(st.st_mode)) {
+			*script_missing = 1;
+		}
+		return 0;
 	}
 
 	snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
@@ -2030,6 +2059,10 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
 		gw->backlog = wp->config->listen_backlog;
 		fpm_http_gateway_settings(wp, gw, &nproc_wanted, &reuseport);
+		/* Needs gw->docroot and gw->front_controller, both set above; runs once
+		 * here in the master so every forked gateway process inherits the
+		 * verdict instead of each evaluating it on its own first request. */
+		fpm_http_front_controller_validate(gw);
 
 #ifdef HAVE_FPM_HTTP_TLS
 		/* fpm_http_tls_load() already logged what went wrong; http.tls_cert

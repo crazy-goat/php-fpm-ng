@@ -408,8 +408,7 @@ than a loud error.
 - **`ssl.allow_blocking => true` in the stream context.** That option exists
   exactly to keep the stream blocking, which under this executor means
   "stop the world on every I/O". Drop the option; without it the stream is
-  fiber-aware. Measured behavior before the refusal existed: the handshake
-  blocked the whole process for its duration.
+  fiber-aware.
 - **Server-side `ssl://`/`tls://` from a request fiber**
   (`stream_socket_server("tls://...")`). An accepted client socket is
   allocated with the LISTENER's ops table (`php_openssl_tcp_sockop_accept`),
@@ -420,8 +419,7 @@ than a loud error.
 
 Not refused, still blocking (as before): a build with a **shared**
 `openssl.so` — configure prints a warning that the fiber TLS interception is
-off, and the "stream transports hooked" debug line at worker startup says
-`ssl/tls=0/7` with the reason.
+off, and TLS simply stays upstream-blocking.
 
 ## REJECTED: fiber executor only in ZTS, per-request TSRM context
 

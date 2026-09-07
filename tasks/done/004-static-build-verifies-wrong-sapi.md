@@ -1,7 +1,7 @@
 # 004 — `build/static-full.sh` verifies the wrong SAPI
 
 **Priority:** high. Cheap to fix, and it invalidates a headline claim.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -63,3 +63,19 @@ produces, and find out whether the claim still holds.
   question. If the php-src POC branch is now purely historical, the script
   should stop building it; if it is still a comparison baseline, it should build
   **both** and say which is which. Decide and write the decision down.
+
+## Outcome
+
+`build/static-full.sh` now builds only the shipped `sapi/fpmng` SAPI and copies
+`sapi/fpmng/php-fpm-ng` as `php-fpm-ng-full`. The historical php-src HTTP POC is
+not a comparison target for this repository, so the script no longer builds it.
+
+Measured on 2026-09-07 with Alpine 3.22 and php-src `php-8.5.9`: the resulting
+x86-64 binary was reported by `file` as `static-pie linked`. Configure detected
+`libevent_openssl` and linked its static archive. The binary ran as PID 1 in
+`docker/Dockerfile.scratch` and returned the expected HTTP response. The
+resulting scratch image was 33,885,546 bytes with the full, unstripped binary.
+
+`build/test-static-full.sh` now verifies both the static linkage and a real HTTP
+request through the scratch image. Publishing and size optimization remain out
+of scope.

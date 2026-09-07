@@ -18,9 +18,9 @@ static int fpm_http_b64_val(unsigned char c) /* {{{ */
 }
 /* }}} */
 
-/* Dekoduje do `out` (rozmiar out_size, zero-terminowane), po cichu ucinajac,
- * jesli sie nie miesci. Tolerancyjny na smieci w wejsciu (spacje itp.), jak
- * wiekszosc dekoderow base64 uzywanych do Basic Auth. */
+/* Decode into `out` (size out_size, NUL-terminated), silently truncating when
+ * it does not fit. Tolerant of input noise (spaces and so on), like most
+ * base64 decoders used for Basic Auth. */
 static void fpm_http_b64_decode(const char *in, size_t in_len, char *out, size_t out_size) /* {{{ */
 {
 	size_t o = 0, i;
@@ -70,7 +70,7 @@ void fpm_http_auth_parse(const char *authorization_header, /* {{{ */
 	space = strchr(authorization_header, ' ');
 	scheme_len = space ? (size_t) (space - authorization_header) : strlen(authorization_header);
 	if (scheme_len == 0 || scheme_len >= FPM_HTTP_AUTH_TYPE_LEN) {
-		return; /* pusty albo niewiarygodnie dlugi schemat: nie zgaduj */
+		return; /* empty or implausibly long scheme: do not guess */
 	}
 	memcpy(auth_type, authorization_header, scheme_len);
 	auth_type[scheme_len] = '\0';
@@ -95,10 +95,10 @@ void fpm_http_auth_parse(const char *authorization_header, /* {{{ */
 			memcpy(remote_user, decoded, user_len);
 			remote_user[user_len] = '\0';
 		}
-		/* brak dwukropka po dekodowaniu: naglowek zle sformowany, AUTH_TYPE
-		 * zostaje, REMOTE_USER nie -- tak samo zrobilby Apache */
+		/* No colon after decoding: malformed header; keep AUTH_TYPE but do not
+		 * set REMOTE_USER, as Apache would do. */
 	}
-	/* inne schematy (Bearer, Digest, Negotiate, ...): tylko AUTH_TYPE, tak jak
-	 * w kazdym innym wdrozeniu CGI -- dekodowanie tokenu to sprawa aplikacji */
+	/* Other schemes (Bearer, Digest, Negotiate, ...): only AUTH_TYPE, as in any
+	 * other CGI deployment — token decoding is the application's responsibility. */
 }
 /* }}} */

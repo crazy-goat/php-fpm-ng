@@ -101,41 +101,28 @@ struct fpm_worker_pool_config_s {
 	int decorate_workers_output;
 	int clear_env;
 	char *security_limit_extensions;
-	/* fpm-ng: pool.type = supervisor, patrz fpm_pool_supervisor.c */
+	/* fpm-ng: pool.type = supervisor, see fpm_pool_supervisor.c */
 	char *supervisor_script;
 	int supervisor_processes;
-	char *supervisor_restart;		/* "always" (domyslne) | "on-failure" | "never" */
+	char *supervisor_restart;		/* "always" (default) | "on-failure" | "never" */
 	int supervisor_restart_delay;
 	int supervisor_restart_delay_max;
-	int supervisor_restart_max;		/* 0 = bez limitu, nigdy nie poddawaj sie */
+	int supervisor_restart_max;		/* 0 = no limit, never give up */
 	int supervisor_stop_timeout;
-	int supervisor_fatal;			/* wyczerpanie restart_max ubija cala mastera */
-	/* fpm-ng: pool.type = cron, patrz fpm_pool_cron.c */
+	int supervisor_fatal;			/* exhausting restart_max kills the entire master */
+	/* fpm-ng: pool.type = cron, see fpm_pool_cron.c */
 	char *cron_schedule;
 	char *cron_script;
-	int cron_timeout;			/* sekundy, 0 = bez limitu (domyslne) */
-	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* wypelnia validate() */
+	int cron_timeout;			/* seconds, 0 = no limit (default) */
+	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* filled in by validate() */
 	char *cron_timezone;			/* IANA name, e.g. "Europe/Warsaw"; empty/NULL = UTC (default), see fpm_pool_cron.c */
 	char *cron_log;			/* optional: one line per run (start, exit code, duration) appended here; see fpm_pool_cron.c */
-	/* fpm-ng: pool.type = http, patrz fpm_http.c. Bramka startuje TYLKO gdy
-	 * pool.type = http (patrz fpm_pool_type.c) — te dyrektywy ja jedynie
-	 * dostrajaja, nigdy nie wlaczaja same z siebie na innym typie poola. */
-	char *http_listen;			/* pusty = FastCGI port + 1 (albo wymagane, gdy pool sluchał na UDS) */
+	/* fpm-ng: pool.type = http, see fpm_http.c. The gateway starts ONLY when
+	 * pool.type = http (see fpm_pool_type.c) — these directives merely tune it,
+	 * they never enable it by themselves on another pool type. */
+	char *http_listen;			/* empty = FastCGI port + 1 (or required when the pool listens on a UDS) */
 	char *http_plain_listen;		/* optional redirect-only plain HTTP companion for a TLS listener */
-	int http_gateways;			/* liczba procesow bramki, domyslnie 2 */
-	int http_reuseport;			/* kazda bramka wlasny SO_REUSEPORT socket */
-	int http_static;			/* serwowanie plikow statycznych bez PHP, domyslnie wlaczone */
-	int http_idle_timeout;			/* ms, zwalnia przypiete polaczenie po tylu ms bezczynnosci; 0 = nigdy */
-	char *http_allowed_clients;		/* jak listen.allowed_clients, ale dla bramki HTTP; puste = brak ograniczenia */
-	char *http_trusted_proxies;		/* adresy, z ktorych ufamy naglowkom X-Forwarded-*; puste = nikomu (bezpieczny domyslny), patrz fpm_http_forwarded.c */
-	char *http_access_log;			/* sciezka do logu dostepu bramki HTTP; puste = wylaczony, patrz fpm_http_access_log.c */
-	char *http_front_controller;		/* try_files jak w nginx: gdy wyliczony SCRIPT_FILENAME nie istnieje, podstaw ten skrypt
-						 * i wloz oryginalna sciezke w PATH_INFO. Domyslnie "/index.php" — wbudowany serwer PHP
-						 * (php -S) daje ten sam efekt bez zadnej konfiguracji (patrz php_cli_server_request_translate_vpath()),
-						 * wiec bramka HTTP nie powinna byc mniej uprzejma. Puste = wylaczone, dzisiejsze zachowanie. */
-	char *http_tls_cert;			/* sciezka do PEM z certyfikatem (z lancuchem); puste = zwykly HTTP, jak dzis */
-	char *http_tls_key;			/* sciezka do PEM z kluczem prywatnym */
-	char *http_tls_min_version;		/* "TLSv1.2" (domyslne) albo "TLSv1.3" */
+	int http_gateways;			/* number of gateway processes, default 2 */
 	/* Additional certificates selected by SNI (task 041), on top of the
 	 * default http.tls_cert/http.tls_key pair above. Comma-separated list of
 	 * "servername:cert_path:key_path" entries, e.g.
@@ -146,10 +133,10 @@ struct fpm_worker_pool_config_s {
 	 * connection with no SNI, or an unrecognized servername, falls back to
 	 * the default http.tls_cert/http.tls_key pair -- see fpm_http_tls.c. */
 	char *http_tls_sni_cert;
-	int http_tls_reload_check;		/* sekundy miedzy sprawdzeniami mtime cert/key na dysku, bez restartu bramki (task 040);
-						 * nieustawione -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = wylaczone */
-	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
-	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
+	int http_tls_reload_check;		/* seconds between cert/key mtime checks on disk, without restarting the gateway (task 040);
+						 * unset -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = disabled */
+	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
+	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */
 	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class
 	 * static properties; see fpm_pool_coop_statics.c. Comma-separated list of
 	 * Class\Name::property (declaring class, PHP property syntax without the
@@ -186,7 +173,7 @@ enum {
 int fpm_conf_init_main(int test_conf, int force_daemon);
 int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc);
 
-/* fpm-ng: sledzenie faktycznie ustawionych dyrektyw poola (patrz set_directives) */
+/* fpm-ng: tracking pool directives that were actually set (see set_directives) */
 int fpm_conf_note_directive(struct fpm_worker_pool_config_s *wpc, const char *name);
 bool fpm_conf_directive_was_set(struct fpm_worker_pool_config_s *wpc, const char *name);
 int fpm_conf_write_pid(void);

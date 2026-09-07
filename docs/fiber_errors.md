@@ -396,6 +396,33 @@ with the username and password, so it would end up in the error log.
     phpredis N=4 (BLPOP)      1,116 s
     classic with persistent   2,019 s (unchanged)
 
+## TLS configurations that cannot be non-blocking: REFUSED (task 005)
+
+With patch 0007 (`HAVE_FPMNG_FIBER_TLS`) the `ssl`/`tls` transports suspend
+the fiber like plain `tcp`. Two configurations cannot be made safe and are
+refused with an `E_WARNING` plus one `ZLOG_NOTICE` per process — the same
+shape as the persistent-connection refusal above, and for the same reason:
+silently blocking would stop every request in the process, which is worse
+than a loud error.
+
+- **`ssl.allow_blocking => true` in the stream context.** That option exists
+  exactly to keep the stream blocking, which under this executor means
+  "stop the world on every I/O". Drop the option; without it the stream is
+  fiber-aware. Measured behavior before the refusal existed: the handshake
+  blocked the whole process for its duration.
+- **Server-side `ssl://`/`tls://` from a request fiber**
+  (`stream_socket_server("tls://...")`). An accepted client socket is
+  allocated with the LISTENER's ops table (`php_openssl_tcp_sockop_accept`),
+  so wrapping the listener would hand accepted sockets a wrapper whose
+  `close()` frees a structure it does not own. Refused instead of corrupted.
+  This does not affect serving HTTPS: the fpm-ng HTTP gateway terminates TLS
+  in libevent (`fpm_http_tls.c`) and never touches these transports.
+
+Not refused, still blocking (as before): a build with a **shared**
+`openssl.so` — configure prints a warning that the fiber TLS interception is
+off, and the "stream transports hooked" debug line at worker startup says
+`ssl/tls=0/7` with the reason.
+
 ## REJECTED: fiber executor only in ZTS, per-request TSRM context
 
 Idea: since in ZTS all globals (`EG`, `SG`, `PG` and the globals of EVERY

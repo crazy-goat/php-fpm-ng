@@ -567,6 +567,26 @@ if test "$PHP_FPMNG" != "no"; then
     PHP_FPMNG_FIBER_FILES="@FPMNG_FIBER_SOURCES@"
   ])
 
+  dnl Fiber non-blocking TLS (patch 0007, HAVE_FPMNG_FIBER_TLS): needs
+  dnl ext/openssl compiled in AND linked into the fpmng binary. A shared
+  dnl openssl.so loads at runtime, after our check, so there is nothing to
+  dnl detect at build time — in that configuration the patch's ssl/tls
+  dnl transports stay upstream's (blocking) and fpm_pool_fiber.c says so in
+  dnl the "stream transports hooked" line. HAVE_OPENSSL_EXT is set by
+  dnl ext/openssl/config0.m4, which runs before this file (ext/ before sapi/).
+  AS_VAR_IF([PHP_FPMNG_FIBER], [no],, [
+    AS_VAR_IF([PHP_OPENSSL], [no],, [
+      AS_VAR_IF([ext_shared], [yes], [
+        AC_MSG_WARN([pool.executor = fiber: ext/openssl is shared, the fiber TLS interception (patch 0007) is off; https:// will block the process])
+      ], [
+        AC_DEFINE([HAVE_FPMNG_FIBER_TLS], [1],
+          [Define to 1 if fpm-ng intercepts ssl/tls transports for the fiber executor (patch 0007).])
+        PHP_EVAL_LIBLINE([$OPENSSL_LIBS], [FPMNG_EXTRA_LIBS], [yes])
+        PHP_EVAL_INCLINE([$OPENSSL_CFLAGS])
+      ])
+    ])
+  ])
+
   PHP_FPMNG_ASYNC_FILES=""
   AS_VAR_IF([PHP_FPMNG_ASYNC], [no],, [
     AC_DEFINE([HAVE_FPMNG_ASYNC], [1],

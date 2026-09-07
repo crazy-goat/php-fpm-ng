@@ -8,7 +8,22 @@ cron, scheduler or proxy work, which is where the project is focused.
 
 **Priority:** high. Symfony is the closest thing this project has to a working
 target, and the gap between that and "supported" is entirely test coverage.
-**Status:** open.
+**Status:** done.
+
+## Outcome
+
+Automated coverage (`tests/frameworks/symfony/`) exercises the full matrix
+from this document — dev/prod, `pm.max_children = 1` and `2`,
+`fiber.revalidate_freq` deploys, a 200-request RSS run, and framework surface
+beyond the four probe endpoints (Twig, form validation, synchronous
+Messenger) — with the `pm.max_children = 2` accept-race found and fixed along
+the way (`fpm_pool_coop.c`). `README.md` now carries a user-facing "Framework
+support on `pool.executor = fiber`" section. Version scope decision: only
+Symfony 8.1.6 is verified; other major versions need the probe re-run before
+the claim can be extended, since the `symfony/runtime`-avoiding `index.php`
+(task 007) is version-sensitive. Left out, by design: making that
+hand-written `index.php` unnecessary (task 007) and performance tuning
+(explicitly out of scope above).
 
 ## Where it actually stands
 
@@ -166,6 +181,23 @@ downstream effect (the frozen fiber never reached its session flush), not the
 cause. `pool.executor = async` has the same latent blocking accept in
 `fpm_pool_async.c` and stays rejected until fixed. This task remains open for
 the README support statement and the version-scope decision only.
+
+## UPDATE 2026-09-07 (fourth session): README statement and version scope
+
+Item 3 (user-facing support statement) is done: `README.md` now has a
+"Framework support on `pool.executor = fiber`" section summarizing the
+Symfony, Laravel and Slim 4 verdicts, required configuration, and what is
+verified versus not, linking to `docs/frameworks.md` for the full detail.
+
+Item 4 (version scope) decision: **only Symfony 8.1.6 is in scope / verified.**
+Reason: the `symfony/runtime`-avoiding hand-written `index.php` (task 007) is
+the load-bearing piece of the whole "supported" claim, and its shape is
+version-sensitive — nothing establishes it still applies unchanged to 6.4 LTS,
+7.x, or other 8.x releases. Extending the claim to another major version
+requires re-running the `tests/frameworks/symfony/` probe against that version
+first, not a document update. This is now stated in `README.md` and here.
+
+Both items closed; this task is done.
 
 ## Detailed test matrix
 

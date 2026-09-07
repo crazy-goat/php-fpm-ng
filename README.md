@@ -55,6 +55,42 @@ The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md).
 
+## Framework support on `pool.executor = fiber`
+
+The `fiber` executor runs several requests concurrently in one worker process,
+which only helps a framework that keeps no state outside what is isolated per
+request. Full measurements, root causes and required configuration:
+[`docs/frameworks.md`](docs/frameworks.md).
+
+- **Symfony — supported, with required configuration.** Verified only on
+  **Symfony 8.1.6** (skeleton + orm-pack + security-bundle, Doctrine ORM,
+  sessions and cache on Redis). Requires `env[FPMNG_SHARED_INCLUDES] = 1` and a
+  hand-written `public/index.php` without `symfony/runtime` (task 007); needs
+  **no** `fiber.isolate_statics` entries. Covered by an automated probe
+  (`tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
+  Doctrine identity, Twig, form validation, synchronous Messenger dispatch,
+  `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq` deploys, and a
+  200-request RSS run all pass. Other Symfony major versions (6.4 LTS, 7.x,
+  other 8.x releases) are **not verified**: the `symfony/runtime` interaction
+  that forces the hand-written `index.php` is version-sensitive and must be
+  re-checked before extending this claim to another version.
+- **Laravel — supported for the measured surface, with a required, hand-picked
+  static list.** Verified on **Laravel 13.30.1**. Needs
+  `env[FPMNG_SHARED_INCLUDES] = 1` and `fiber.isolate_statics` naming the
+  framework's request-scoped class statics (`Container::instance`,
+  `Facade::app`, `Facade::resolvedInstance`, `Model::resolver`) — that list
+  must be re-verified for every Laravel minor version. Without it, Laravel
+  returns HTTP 200 while silently serving one request's session and database
+  objects to another — there is no error to notice. Rate limiting, mail
+  attribution, Blade view composers, and request-dependent observers/global
+  scopes are **not measured**. Covered by `tests/frameworks/laravel/`.
+- **Slim 4 — supported for the measured surface.** Verified on **Slim
+  4.15.3** with `slim/psr7`; needs `env[FPMNG_SHARED_INCLUDES] = 1` and no
+  `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.
+
+None of this applies to the default `classic` executor, which runs one request
+at a time per worker like upstream FPM.
+
 ## Recommended pool configuration for lightweight endpoints
 
 Gain with no line of code, measured on the test box (details: `docs/NOTES.md`, 3m and 3t):

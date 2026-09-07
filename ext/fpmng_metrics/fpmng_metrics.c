@@ -598,8 +598,8 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 	size_t naggs = 0, cap = 0;
 	uint32_t si, ei;
 	struct fpmng_metrics_shm_s *shm = m_shm;
-	uint32_t slots = m_slot_count;
-	uint32_t limit = m_limit;
+	uint32_t slots;
+	uint32_t limit;
 	int is_local = 0;
 	size_t i;
 	char **names = NULL;
@@ -656,7 +656,8 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 				if (!m) {
 					if (nmetas == mcap) {
 						mcap = mcap ? mcap * 2 : 16;
-						struct meta_s **nm = realloc(metas, mcap * sizeof(*nm));
+						/* array of pointers — sizeof(void *) is intentional */
+						struct meta_s **nm = realloc(metas, mcap * sizeof(void *));
 						if (!nm) {
 							goto fail;
 						}
@@ -668,6 +669,7 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 					}
 					m->name = strdup(e->key);
 					if (!m->name) {
+						free(m);
 						goto fail;
 					}
 					metas[nmetas++] = m;
@@ -712,7 +714,8 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 			if (!a) {
 				if (naggs == cap) {
 					cap = cap ? cap * 2 : 64;
-					struct agg_s **na = realloc(aggs, cap * sizeof(*na));
+					/* array of pointers — sizeof(void *) is intentional */
+					struct agg_s **na = realloc(aggs, cap * sizeof(void *));
 					if (!na) {
 						goto fail;
 					}
@@ -725,6 +728,9 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 				a->key = strdup(e->key);
 				a->name = metric_name_of(e->key);
 				if (!a->key || !a->name) {
+					free(a->key);
+					free(a->name);
+					free(a);
 					goto fail;
 				}
 				a->type = e->type;
@@ -806,16 +812,17 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 	/* stabilne wyjscie: serie posortowane po kluczu — serie tej samej
 	 * metryki (ten sam prefix przed '{') laduja obok siebie */
 	{
-		struct agg_s **sorted = malloc(naggs * sizeof(*sorted));
+		/* array of pointers — sizeof(void *) is intentional */
+		struct agg_s **sorted = malloc(naggs * sizeof(void *));
 
 		if (!sorted) {
 			goto fail;
 		}
-		memcpy(sorted, aggs, naggs * sizeof(*sorted));
-		qsort(sorted, naggs, sizeof(*sorted), agg_cmp);
+		memcpy(sorted, aggs, naggs * sizeof(void *));
+		qsort(sorted, naggs, sizeof(void *), agg_cmp);
 
 		/* HELP/TYPE raz na metryke: przy pierwszej serii tej nazwy */
-		names = malloc(naggs * sizeof(*names));
+		names = malloc(naggs * sizeof(void *));
 		if (!names) {
 			free(sorted);
 			goto fail;

@@ -269,7 +269,7 @@ const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp
 		return NULL;
 	}
 
-	if (strcmp(type->name, "fastcgi-ng") && strcmp(type->name, "http")) {
+	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
 		return (!executor || !*executor) ? type : NULL;
 	}
 
@@ -305,12 +305,12 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 	if (!type || !executor || !*executor) {
 		return 0;
 	}
-	if (strcmp(type->name, "fastcgi-ng") && strcmp(type->name, "http")) {
+	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor is not supported by pool.type = %s",
 			wp->config->name, type->name);
 		return -1;
 	}
-	if (strcmp(executor, "classic") && strcmp(executor, "fiber") && strcmp(executor, "async")) {
+	if (strcmp(executor, "classic") != 0 && strcmp(executor, "fiber") != 0 && strcmp(executor, "async") != 0) {
 		zlog(ZLOG_ALERT, "[pool %s] unknown pool.executor '%s'; known executors: classic, fiber, async",
 			wp->config->name, executor);
 		return -1;

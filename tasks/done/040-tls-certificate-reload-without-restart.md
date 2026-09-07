@@ -2,8 +2,7 @@
 
 **Priority:** high. Hard prerequisite for 020 (ACME renewal), and useful on its
 own for a certificate that arrives on a mounted volume.
-**Status:** decided (2026-09-07) — trigger, propagation and torn-reads
-resolved below. Not yet implemented.
+**Status:** done (2026-09-07) — see Outcome below.
 
 ## Context
 
@@ -165,3 +164,91 @@ this task's acceptance criteria and left out of scope here.
   one timer walking all TLS pools — a config/perf question, not a
   correctness one, and not required to resolve before implementation
   starts.
+
+## Outcome — 2026-09-07
+
+Implemented exactly as decided above, in one new file plus minimal hooks
+into `fpm_http.c`:
+
+- **New file `sapi/fpmng/fpm/fpm_http_tls_reload.{c,h}`.** Owns the
+  double-buffered shared-memory region (`fpm_http_tls_reload_shared_s`: one
+  `atomic_t generation` plus two `fpm_http_tls_reload_slot_s` slots, each a
+  fixed `FPM_HTTP_TLS_RELOAD_MAX_CERT` = 64 KiB / `FPM_HTTP_TLS_RELOAD_MAX_KEY`
+  = 16 KiB buffer plus `ticket_key`/`min_version` — sizes picked as "generous
+  for a real fullchain.pem", not measured against a specific deployment; a
+  candidate exceeding them is rejected exactly like any other invalid one),
+  the master's mtime timer (`fpm_http_tls_reload_master_tick()`,
+  `fpm_http_tls_reload.c:98`, armed by `fpm_http_tls_reload_master_init()`,
+  `fpm_http_tls_reload.c:174`, via `fpm_event_set_timer()`/`fpm_event_add()` —
+  the same upstream FPM epoll timer `fpm_pctl_heartbeat()` uses, not
+  libevent), and each gateway child's adoption timer
+  (`fpm_http_tls_reload_child_tick()`, `fpm_http_tls_reload.c:234`, armed by
+  `fpm_http_tls_reload_child_init()`, `fpm_http_tls_reload.c:282`, via
+  libevent `event_new()`/`event_add()` on the child's own `gw->base` — the
+  same idiom as `fiber.revalidate_freq`'s timer). Reuses
+  `fpm_http_tls_validate()`, `fpm_http_tls_load()`, `fpm_http_tls_free()` and
+  `fpm_http_tls_ctx_new()` from `fpm_http_tls.c` completely unmodified — that
+  file did not need to change at all for this task.
+- **`fpm_http.c` hooks (all under the existing `HAVE_FPM_HTTP_TLS` guard):**
+  a `struct fpm_http_tls_reload_s *reload` field on `fpm_http_gateway_s`;
+  `fpm_http_tls_reload_master_init()` called right after
+  `fpm_http_tls_load()` in `fpm_http_gateway_settings()`
+  (`fpm_http.c:1900`); `fpm_http_tls_reload_child_init()` called right after
+  `evhttp_set_bevcb()` in `fpm_http_gateway_run()` (`fpm_http.c:1600`);
+  `fpm_http_tls_reload_free()` in `fpm_http_cleanup()` (`fpm_http.c:1774`).
+- **New directive `http.tls_reload_check`** (seconds; `fpm_conf.c`/
+  `fpm_conf.h`, `fpm_conf_set_time`), unset → `FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT`
+  = 5s (a config/perf choice, not measured against a target load), `0` →
+  off, same was-it-actually-set resolution pattern `http.gateways` already
+  uses (`fpm_conf_directive_was_set()`).
+- **Torn reads**, per the Decision: `fpm_http_tls_validate()` runs against
+  the candidate paths before anything is published; on failure the mtimes
+  are still recorded (so a persistently broken pair does not re-log every
+  tick) but nothing changes for any gateway child.
+- Adding this file needed `buildconf --force` + a config.nice reconfigure to
+  get picked up, per `build/prepare.sh`'s own end-of-run warning — confirmed
+  the hard way (first build linked with undefined references to the three
+  public functions until the reconfigure).
+
+### Verification
+
+Compiled cleanly (no warnings on any touched file) against the pinned
+`php-8.5.9` php-src, confirmed with `strings` on the resulting binary that
+the new log lines (`"TLS certificate reloaded from disk"`,
+`"adopted reloaded TLS certificate"`) are actually present before testing —
+i.e. testing the binary this change produced, not a stale one.
+
+All five acceptance criteria verified against a running gateway over real
+TLS handshakes (a locally generated 2-level test CA, root → intermediate →
+two leaves with different serials), both by hand and by the new
+`build/test-http-tls-reload.sh`, wired into CI as the `tls-reload` job in
+`.github/workflows/build-matrix.yml` (`needs: build`, no root required,
+unlike `gateway-privileges`):
+
+1. **Every gateway process serves the new certificate.** With
+   `http.gateways = 3` and `http.reuseport = yes`, 12 separate
+   `openssl s_client -CAfile root.crt` connections after the swap all show
+   the new leaf's serial and `Verify return code: 0 (ok)`.
+2. **Zero errors on connections in flight.** 300 sequential HTTPS requests
+   (via `curl --insecure`) run in a background loop spanning the file swap;
+   zero non-`ok` responses.
+3. **A broken candidate (cert/key mismatch) is rejected, old certificate
+   keeps serving.** `error_log` gets a
+   `"http.tls_cert/http.tls_key: private key rejected by OpenSSL"` line
+   (`fpm_http_tls_validate()`'s existing message, reused as-is); the
+   gateway keeps serving the previous (valid) leaf and keeps accepting
+   requests (`curl` still gets `ok`).
+4. **No key material in any log line** — grepped `error_log` and the
+   master's stdout for a PEM `BEGIN ... PRIVATE KEY` marker: none found.
+5. **Session resumption survives the reload.** A TLS1.2 session saved
+   against the post-reload certificate is reused (`Reused, TLSv1.2, ...`,
+   not a full handshake) across 5 further connections, each potentially
+   landing on a different `SO_REUSEPORT` gateway process — confirms the
+   shared `ticket_key` travels through the same `generation` bump as the
+   certificate.
+
+Not separately measured: behaviour under `http.gateways` values other than
+3, or under sustained production-scale load rather than a 300-request
+smoke loop — `build/test-http-tls-reload.sh`'s numbers (3 gateways, 300
+requests, 1s check interval) are what CI actually runs, not claimed to be
+exhaustive.

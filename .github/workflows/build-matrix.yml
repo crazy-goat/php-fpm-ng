@@ -236,3 +236,27 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           sudo ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
+
+  # Task 040: a renewed TLS certificate must take effect in every gateway
+  # process without a restart. Needs multiple real gateway processes under
+  # SO_REUSEPORT, a load generator running across the file swap, and a
+  # deliberately broken candidate -- a shell-driven scenario like
+  # gateway-privileges above, but no root needed (nothing here drops
+  # privileges), so it stays out of the phpt job rather than needing sudo.
+  tls-reload:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify TLS certificate reload without restart (tasks/040)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"

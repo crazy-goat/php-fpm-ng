@@ -80,21 +80,23 @@ $start = microtime(true);
 $closed = false;
 
 while (microtime(true) - $start < 20) {
-    if ($sent < strlen($request)) {
-        $n = @fwrite($fp, $request[$sent]);
-        if ($n === 1) {
-            $sent++;
-        }
-        usleep(100000); // 100 ms between bytes: slow, but never idle past 2 s
-        continue;
-    }
+    // Watch for EOF (the gateway closing on the deadline) in parallel with
+    // the trickle: once the deadline fires, writes may keep succeeding
+    // (kernel buffers, RST not yet arrived), so a write-only loop would
+    // never notice.
     $read = [$fp];
     $write = $except = null;
-    if (stream_select($read, $write, $except, 1) > 0) {
+    if (stream_select($read, $write, $except, 0, 100000) > 0) {
         $data = @fread($fp, 8192);
         if ($data === '' || $data === false) {
             $closed = true; // EOF: the gateway cut us off
             break;
+        }
+    }
+    if ($sent < strlen($request)) {
+        $n = @fwrite($fp, $request[$sent]);
+        if ($n === 1) {
+            $sent++;
         }
     }
 }

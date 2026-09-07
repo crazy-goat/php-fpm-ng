@@ -68,3 +68,16 @@ Candidate shapes, none chosen:
 
 - The ACME protocol itself. This task only makes the port and the path
   reachable; 046 fills the challenge response in.
+
+## Outcome
+
+Implemented `http.plain_listen` as an optional second listener in the same HTTP
+pool. It accepts only GET and HEAD, redirects ordinary requests with 308 while
+preserving host, path, and query, and locally returns 404 for the reserved
+`/.well-known/acme-challenge/` path until task 046 supplies challenge data.
+The plain listener has no path to the FastCGI request queue.
+
+`build/test-http-plain-listener.sh` exercises three gateways with
+`http.reuseport` both disabled and enabled. It verifies TLS application
+dispatch, redirect preservation, the empty redirect body, and the local ACME
+404 without application content.

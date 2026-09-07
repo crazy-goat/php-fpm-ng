@@ -57,10 +57,10 @@ index c8ca39ad..16ef1464 100644
  #if OPENSSL_VERSION_NUMBER < 0x40000000L && !defined(OPENSSL_NO_SSL3)
  	php_stream_xport_register("sslv3", php_openssl_ssl_socket_factory);
 diff --git a/ext/openssl/xp_ssl.c b/ext/openssl/xp_ssl.c
-index 269de954..c74cbfc8 100644
+index 269de954..f23bf81d 100644
 --- a/ext/openssl/xp_ssl.c
 +++ b/ext/openssl/xp_ssl.c
-@@ -51,6 +51,51 @@
+@@ -51,6 +51,77 @@
  # define MSG_DONTWAIT 0
  #endif
  
@@ -74,9 +74,23 @@ index 269de954..c74cbfc8 100644
 + * its own objects only, so from ext/openssl we go through the tree root. */
 +#include "sapi/fpm/fpm/zlog.h"
 +
++/* ext/openssl objects are linked into EVERY binary in the tree (cli, fpmng,
++ * ...), but the fiber scheduler exists only in fpm-ng. Weak references keep
++ * cli linkable: there they resolve to NULL and every fpm_fiber_tls_* call is
++ * skipped because can_wait is NULL. The indirection is per call site, not a
++ * function table, so a future LTO build cannot invent a non-NULL can_wait
++ * with a NULL wait_fd behind it — both are checked where used. */
++extern int fpm_pool_fiber_can_wait(void) __attribute__((weak));
++extern int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) __attribute__((weak));
++extern const php_stream_ops *fpm_fiber_xport_wrap(const php_stream_ops *orig) __attribute__((weak));
++extern const char *fpm_coop_pool_name(void) __attribute__((weak));
++extern void zlog_ex(const char *function, int line, int flags, const char *fmt, ...) __attribute__((weak));
++
 +/* Defined at the bottom of this file; the lazy wrapper below needs to compare
 + * against its address. */
 +static const php_stream_ops php_openssl_socket_ops;
++
++#define FPM_FIBER_TLS_ACTIVE (fpm_pool_fiber_can_wait && fpm_pool_fiber_can_wait())
 +
 +/* Wait for the socket instead of php_pollfd_for: suspend the fpm-ng request
 + * fiber on the scheduler when we can (in a request fiber), poll exactly as
@@ -85,7 +99,7 @@ index 269de954..c74cbfc8 100644
 +{
 +	int r;
 +
-+	if (fpm_pool_fiber_can_wait()) {
++	if (FPM_FIBER_TLS_ACTIVE && fpm_pool_fiber_wait_fd) {
 +		return fpm_pool_fiber_wait_fd(fd,
 +			(events & (POLLIN | POLLPRI)) ? EV_READ : EV_WRITE, timeout);
 +	}
@@ -103,8 +117,20 @@ index 269de954..c74cbfc8 100644
 + * then stays: the stream belongs to that request until close. */
 +static void fpm_fiber_tls_wrap_ops_once(php_stream *stream)
 +{
-+	if (fpm_pool_fiber_can_wait() && stream->ops == &php_openssl_socket_ops) {
++	if (FPM_FIBER_TLS_ACTIVE && fpm_fiber_xport_wrap &&
++			stream->ops == &php_openssl_socket_ops) {
 +		stream->ops = fpm_fiber_xport_wrap(&php_openssl_socket_ops);
++	}
++}
++
++/* zlog() is a macro over zlog_ex; go through the weak symbol directly so a
++ * cli link does not need zlog.o. Falls back to nothing: in cli these
++ * messages would be noise anyway (the E_WARNING is the user-visible part). */
++static void fpm_fiber_tls_log(int level, const char *msg)
++{
++	if (zlog_ex && fpm_coop_pool_name) {
++		zlog_ex(__func__, __LINE__, level, "[pool %s] %s",
++			fpm_coop_pool_name(), msg);
 +	}
 +}
 +#endif /* HAVE_FPMNG_FIBER_TLS */
@@ -112,7 +138,7 @@ index 269de954..c74cbfc8 100644
  #ifdef HAVE_ARPA_INET_H
  #include <arpa/inet.h>
  #endif
-@@ -2974,6 +3019,9 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -2974,6 +3045,9 @@ static int php_openssl_enable_crypto(php_stream *stream,
  	sslsock->last_status = STREAM_CRYPTO_STATUS_NONE;
  
  	if (cparam->inputs.activate && !sslsock->ssl_active) {
@@ -122,7 +148,7 @@ index 269de954..c74cbfc8 100644
  		struct timeval start_time, *timeout;
  		bool blocked = sslsock->s.is_blocked, has_timeout = false;
  
-@@ -3015,6 +3063,17 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3015,6 +3089,17 @@ static int php_openssl_enable_crypto(php_stream *stream,
  
  		SSL_set_mode(sslsock->ssl_handle, SSL_MODE_RELEASE_BUFFERS);
  
@@ -140,7 +166,7 @@ index 269de954..c74cbfc8 100644
  		if (SUCCESS == php_openssl_set_blocking(sslsock, 0)) {
  			/* The following mode are added only if we are able to change socket
  			 * to non blocking mode which is also used for read and write */
-@@ -3047,6 +3106,21 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3047,6 +3132,21 @@ static int php_openssl_enable_crypto(php_stream *stream,
  			if (n <= 0) {
  				/* in case of SSL_ERROR_WANT_READ/WRITE, do not retry in non-blocking mode */
  				retry = php_openssl_handle_ssl_error(stream, n, blocked);
@@ -162,7 +188,7 @@ index 269de954..c74cbfc8 100644
  				if (retry) {
  					/* wait until something interesting happens in the socket. It may be a
  					 * timeout. Also consider the unlikely of possibility of a write block  */
-@@ -3056,8 +3130,13 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3056,8 +3156,13 @@ static int php_openssl_enable_crypto(php_stream *stream,
  					if (has_timeout) {
  						left_time = php_openssl_subtract_timeval(*timeout, elapsed_time);
  					}
@@ -176,7 +202,7 @@ index 269de954..c74cbfc8 100644
  				}
  			} else {
  				retry = 0;
-@@ -3074,6 +3153,16 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3074,6 +3179,16 @@ static int php_openssl_enable_crypto(php_stream *stream,
  				cert_captured = php_openssl_capture_peer_certs(stream, sslsock, peer_cert);
  			}
  
@@ -193,7 +219,7 @@ index 269de954..c74cbfc8 100644
  			if (FAILURE == php_openssl_apply_peer_verification_policy(sslsock->ssl_handle, peer_cert, stream)) {
  				SSL_shutdown(sslsock->ssl_handle);
  				n = -1;
-@@ -3129,6 +3218,10 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3129,6 +3244,10 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  {
  	php_openssl_netstream_data_t *sslsock = (php_openssl_netstream_data_t*)stream->abstract;
  
@@ -204,7 +230,7 @@ index 269de954..c74cbfc8 100644
  	/* Only do this if SSL is active. */
  	if (sslsock->ssl_active) {
  		/* We have already returned some buffered data. Don't retry and don't
-@@ -3236,11 +3329,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3236,11 +3355,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  				 */
  				if (retry) {
  					if (read) {
@@ -226,7 +252,7 @@ index 269de954..c74cbfc8 100644
  					}
  				}
  			} else {
-@@ -3255,11 +3358,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3255,11 +3384,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  				/* Otherwise, we need to wait again (up to time_left or we get an error) */
  				if (began_blocked) {
  					if (read) {
@@ -248,7 +274,7 @@ index 269de954..c74cbfc8 100644
  					}
  				} else if (err == SSL_ERROR_WANT_READ) {
  					sslsock->last_status = STREAM_CRYPTO_STATUS_WANT_READ;
-@@ -3547,6 +3660,10 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3547,6 +3686,10 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  	php_stream_xport_crypto_param *cparam = (php_stream_xport_crypto_param *)ptrparam;
  	php_stream_xport_param *xparam = (php_stream_xport_param *)ptrparam;
  
@@ -259,7 +285,7 @@ index 269de954..c74cbfc8 100644
  	switch (option) {
  		case PHP_STREAM_OPTION_META_DATA_API:
  			if (sslsock->ssl_active) {
-@@ -3788,8 +3905,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3788,8 +3931,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  
  			break;
  
@@ -269,7 +295,7 @@ index 269de954..c74cbfc8 100644
  
  				case STREAM_XPORT_OP_CONNECT:
  				case STREAM_XPORT_OP_CONNECT_ASYNC:
-@@ -3848,6 +3964,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3848,6 +3990,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  					/* fall through */
  					break;
  			}
@@ -282,7 +308,7 @@ index 269de954..c74cbfc8 100644
  	}
  
  	return php_stream_socket_ops.set_option(stream, option, value, ptrparam);
-@@ -3924,6 +4046,114 @@ static const php_stream_ops php_openssl_socket_ops = {
+@@ -3924,6 +4072,117 @@ static const php_stream_ops php_openssl_socket_ops = {
  	php_openssl_sockop_set_option,
  };
  
@@ -316,13 +342,12 @@ index 269de954..c74cbfc8 100644
 +	 * whose close() would pefree() a struct it does not own. This does not
 +	 * affect the fpm-ng HTTP gateway, which terminates TLS in libevent
 +	 * (sapi/fpmng/fpm/fpm_http_tls.c), never through stream transports. */
-+	if ((flags & (STREAM_XPORT_SERVER | STREAM_XPORT_BIND)) && fpm_pool_fiber_can_wait()) {
++	if ((flags & (STREAM_XPORT_SERVER | STREAM_XPORT_BIND)) && FPM_FIBER_TLS_ACTIVE) {
 +		if (!fpm_fiber_tls_refusal_logged) {
 +			fpm_fiber_tls_refusal_logged = true;
-+			zlog(ZLOG_NOTICE, "[pool %s] fiber: refused a server-side TLS transport "
++			fpm_fiber_tls_log(ZLOG_NOTICE, "fiber: refused a server-side TLS transport "
 +				"(ssl/tls listen): accepted sockets would inherit the wrapper ops. "
-+				"Terminate TLS at the HTTP gateway (http.tls_cert) instead",
-+				fpm_coop_pool_name());
++				"Terminate TLS at the HTTP gateway (http.tls_cert) instead");
 +		}
 +		php_error_docref(NULL, E_WARNING,
 +			"server-side TLS transports are not supported with pool.executor = fiber: "
@@ -346,18 +371,18 @@ index 269de954..c74cbfc8 100644
 +	/* allow_blocking => true asks for a stream that must never be wrapped;
 +	 * under this executor that means a connect that can stop every request in
 +	 * the process, so it is refused loudly (the persistent-connection refusal
-+	 * in fpm_pool_fiber_xport.c is the precedent). */
-+	if (stream && fpm_pool_fiber_can_wait() && stream->ops == &php_openssl_socket_ops &&
-+			PHP_STREAM_CONTEXT(stream)) {
-+		zval *val = php_stream_context_get_option(PHP_STREAM_CONTEXT(stream), "ssl", "allow_blocking");
++	 * in fpm_pool_fiber_xport.c is the precedent). The context is the factory
++	 * ARGUMENT, not PHP_STREAM_CONTEXT(stream): streams.c attaches it to the
++	 * stream only after the factory returns. */
++	if (stream && FPM_FIBER_TLS_ACTIVE && stream->ops == &php_openssl_socket_ops && context) {
++		zval *val = php_stream_context_get_option(context, "ssl", "allow_blocking");
 +
 +		if (val && zend_is_true(val)) {
 +			if (!fpm_fiber_tls_refusal_logged) {
 +				fpm_fiber_tls_refusal_logged = true;
-+				zlog(ZLOG_NOTICE, "[pool %s] fiber: refused a TLS connection with "
++				fpm_fiber_tls_log(ZLOG_NOTICE, "fiber: refused a TLS connection with "
 +					"ssl.allow_blocking = true: a blocking TLS stream would stop every "
-+					"request in this process. Drop the option (see docs/fiber_errors.md)",
-+					fpm_coop_pool_name());
++					"request in this process. Drop the option (see docs/fiber_errors.md)");
 +			}
 +			php_error_docref(NULL, E_WARNING,
 +				"ssl.allow_blocking = true is not supported with pool.executor = fiber: "
@@ -386,11 +411,15 @@ index 269de954..c74cbfc8 100644
 +	/* Explicit about what got wrapped, like the "stream transports hooked"
 +	 * line for tcp/unix in fpm_pool_fiber_xport.c. n < 7 means ext/openssl's
 +	 * MINIT registrations were replaced by something else after MINIT — say
-+	 * so, because TLS then stays blocking with no other trace. */
-+	zlog(n == 7 ? ZLOG_DEBUG : ZLOG_WARNING,
-+		"[pool %s] fiber: stream transports hooked: ssl/tls=%zu/7%s",
-+		fpm_coop_pool_name(), n,
-+		n == 7 ? "" : " (unexpected transport owner; TLS stays blocking)");
++	 * so, because TLS then stays blocking with no other trace. The message is
++	 * built by hand because zlog() itself is a weak reference here (this file
++	 * also links into cli, which has no zlog.o). */
++	if (zlog_ex && fpm_coop_pool_name) {
++		zlog_ex(__func__, __LINE__, n == 7 ? ZLOG_DEBUG : ZLOG_WARNING,
++			"[pool %s] fiber: stream transports hooked: ssl/tls=%zu/7%s",
++			fpm_coop_pool_name(), n,
++			n == 7 ? "" : " (unexpected transport owner; TLS stays blocking)");
++	}
 +}
 +#endif /* HAVE_FPMNG_FIBER_TLS */
 +

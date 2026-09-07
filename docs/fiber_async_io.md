@@ -28,10 +28,13 @@ worker. Everything that goes through the PHP streams layer benefits:
 - TLS-wrapped databases and Redis (`tls://...` DSNs, e.g. managed MySQL that
   requires TLS).
 
-Measured (task 005, numbers in `tasks/done/005-*.md`): N parallel requests each
-fetching an `https://` endpoint that sleeps finished in roughly the time of
-one such request; each response was checked to carry its own marker, not
-another request's.
+Measured (task 005, test box, one worker): 4 parallel requests each fetching
+an `https://` endpoint that sleeps 500 ms finished in 0.524–0.533 s total
+(4 × 0.5 s serialized would be 2.0 s); the same against MySQL with
+`REQUIRE SSL` (`SELECT SLEEP(0.5)` per request) finished in 0.523–0.527 s.
+Each response was checked to carry its own marker, not another request's.
+Control: `pool.executor = classic` with 4 children serves the same 4 TLS
+requests correctly (each child blocks its own), 0.523–0.527 s.
 
 Measured: 4 parallel requests with `fsockopen()` to a server answering after
 500 ms finished in 508 ms in one process. As a control, 4 x `usleep(500 ms)`

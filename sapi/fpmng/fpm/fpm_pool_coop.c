@@ -472,29 +472,6 @@ int fpm_coop_container_start(const char *pool_name) /* {{{ */
 
 	fpm_coop_statics_container_start(pool_name);
 
-	/* O_NONBLOCK is a property of the OPEN FILE DESCRIPTION, not of this
-	 * child's file descriptor number: the listening socket is created in the
-	 * master before fork, so every child of this pool (and the master's own
-	 * copy of the fd) shares one open file description with it. Toggling the
-	 * flag on and off around each accept() (the previous fix) therefore races
-	 * across siblings — child A can restore it to blocking while child B is
-	 * mid-accept expecting non-blocking, reintroducing the exact freeze this
-	 * was meant to cure, just rarer.  Set it ONCE here, at container start,
-	 * and never touch it again for the lifetime of this child: a lost accept
-	 * race then always yields -1/EAGAIN (handled by the accept callback)
-	 * regardless of what any sibling child does concurrently. This function
-	 * only runs on the fiber pool's child_main path (fpm_pool_fiber.c), where
-	 * fpm_globals.listening_socket is already the pool's listening fd by the
-	 * time we get here; the async pool has its own separate acceptor
-	 * (fpm_pool_async.c) and does not call this function, so this has no
-	 * effect on it. */
-	{
-		int listen_flags = fcntl(fpm_globals.listening_socket, F_GETFL);
-		if (listen_flags >= 0 && !(listen_flags & O_NONBLOCK)) {
-			fcntl(fpm_globals.listening_socket, F_SETFL, listen_flags | O_NONBLOCK);
-		}
-	}
-
 	return 0;
 }
 /* }}} */
@@ -506,11 +483,9 @@ fcgi_request *fpm_coop_accept(int listen_fd, int *fd_out) /* {{{ */
 	fcgi_request *req = fcgi_init_request(listen_fd, NULL, NULL, NULL);
 	int fd;
 
-	/* The listening socket was made non-blocking once, permanently, in
-	 * fpm_coop_container_start() — see the comment there for why we no
-	 * longer toggle O_NONBLOCK around this call. With nothing pending we get
-	 * -1/EAGAIN here, which the accept callback already handles (returns,
-	 * waits for the next event). */
+	/* The master applies the fiber type's non-blocking socket policy before
+	 * forking this child. With nothing pending we get -1/EAGAIN here, which
+	 * the accept callback already handles by waiting for the next event. */
 	fd = fcgi_accept_request(req);
 
 	if (fd < 0) {
@@ -551,11 +526,10 @@ fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out) /* {{{ */
 		return NULL;
 	}
 
-	/* Gdy odczyt requestu z tego fd sie nie uda, fcgi_accept_request zamyka
-	 * go i przechodzi do accept() na gniezdzie nasluchujacym. Gniazdo
-	 * nasluchujace jest juz trwale nieblokujace (patrz
-	 * fpm_coop_container_start()), wiec zamiast zawisnac dostajemy tu -1
-	 * (EAGAIN) bez zadnego dodatkowego przelaczania flagi. */
+	/* If reading the request from this fd fails, fcgi_accept_request closes it
+	 * and falls back to accept() on the listening socket. The fiber type receives
+	 * a permanently non-blocking socket from the master, so this returns -1
+	 * (EAGAIN) instead of blocking, without toggling the flag again. */
 	fd = fcgi_accept_request(req);
 
 	if (fd < 0) {

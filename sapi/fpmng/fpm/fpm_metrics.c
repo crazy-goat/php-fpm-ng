@@ -1,4 +1,4 @@
-/* fpm-ng: glue metryk aplikacyjnych (NOTES 3k). Patrz fpm_metrics.h. */
+/* fpm-ng: glue for application metrics (NOTES 3k). See fpm_metrics.h. */
 
 #include "fpm_config.h"
 
@@ -29,8 +29,8 @@ int fpm_metrics_init_main(void) /* {{{ */
 	}
 
 	if (!slots) {
-		/* zero poolow z procesami (sam pool status ma wymuszone 1) —
-		 * nie ma komu pisac metryk, region niepotrzebny */
+		/* zero pools with processes (the status pool alone is forced to 1) —
+		 * nobody would write metrics, the region is not needed */
 		return 0;
 	}
 
@@ -38,8 +38,8 @@ int fpm_metrics_init_main(void) /* {{{ */
 	size = fpmng_metrics_shm_size(slots, limit);
 	mem = fpm_shm_alloc(size);
 	if (!mem) {
-		zlog(ZLOG_ERROR, "metrics: nie udalo sie zaalokowac %zu B pamieci dzielonej "
-			"(%u slotow x %u serii) — metryki aplikacyjne wylaczone", size, slots, limit);
+		zlog(ZLOG_ERROR, "metrics: failed to allocate %zu B of shared memory "
+			"(%u slots x %u series) — application metrics disabled", size, slots, limit);
 		return -1;
 	}
 

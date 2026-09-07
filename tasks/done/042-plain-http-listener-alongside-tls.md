@@ -40,7 +40,7 @@ Candidate shapes, none chosen:
   `http.static` serving the challenge directory, and another on :443. Costs a
   second pool block plus duplicated settings in a config file that is supposed
   to fit an application in forty lines (`docs/NOTES.md`, section 6,
-  "Konfiguracja").
+  "Configuration").
 - **A second listener inside one pool.** One `http.listen` for TLS plus
   something like a plain-HTTP companion port. Keeps the config small, but the
   gateway's listener setup is currently one socket per gateway process.

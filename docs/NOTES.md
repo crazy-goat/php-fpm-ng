@@ -1216,7 +1216,7 @@ signal test — no special wait is needed; it is the natural effect of
 ### Scenario 1: `SIGUSR2` (reload, `execvp()`)
 
 ```
-PRZED: pgrep -P 90726
+BEFORE: pgrep -P 90726
 90728 90729 90730 90732   # web, plainfcgi, sup_always, sup_parked
 
 kill -USR2 90726
@@ -1224,12 +1224,12 @@ kill -USR2 90726
 [...] NOTICE: reloading: execvp("php-fpm-ng", {"-y", "reload_test.conf", "-F", "-O"})
 [...] NOTICE: using inherited socket fd=8, ".../reload_web.sock"
 [...] NOTICE: using inherited socket fd=9, ".../reload_fcgi.sock"
-[...] NOTICE: fpm is running, pid 90726          # <- TEN SAM PID (execvp nie zmienia PID)
+[...] NOTICE: fpm is running, pid 90726          # <- SAME PID (execvp does not change the PID)
 [...] NOTICE: ready to handle connections
 
-PO (t+3s): master pid=90726 (ten sam)
-dzieci nowego mastera: 90739 90740 90741 90743
-wszystkie procesy pool sup*:
+AFTER (t+3s): master pid=90726 (the same)
+children of the new master: 90739 90740 90741 90743
+all pool sup* processes:
 90741 90726 php-fpm: pool sup_always
 90743 90726 php-fpm: pool sup_parked
 ```
@@ -1246,7 +1246,7 @@ the old process (pid 90730) finished ITS current iteration ("tick 0".."tick 5",
 ...
 2026-09-05T15:44:33+00:00 reload_always tick 5
 2026-09-05T15:44:33+00:00 reload_always iter end
-2026-09-05T15:44:33+00:00 reload_always iter start pid=90741   # nowa generacja, po reloadzie
+2026-09-05T15:44:33+00:00 reload_always iter start pid=90741   # new generation, after reload
 ```
 
 **Shared memory (backoff) after `execvp()`**: `fpm_shm_alloc()` uses
@@ -1266,12 +1266,12 @@ process instance, not a continuation of the old one.
 kill -QUIT 90858
 [...] NOTICE: Finishing ...
 [...] NOTICE: exiting, bye-bye!
-master zszedl po 0s (pomiar co 0.3s — bardzo szybko)
+master exited after 0s (sampled every 0.3s — very fast)
 
-reload_always.log (koniec):
+reload_always.log (end):
 ...tick 4
 ...tick 5
-...iter end        # <- dokonczyl biezaca iteracje przed zejsciem
+...iter end        # <- finished the current iteration before exiting
 ```
 
 Immediately after the master exited, `ps` briefly showed two processes with
@@ -1288,15 +1288,15 @@ our own watchdog mechanism, documented and accepted in 3o.
 kill -TERM 91009
 [...] NOTICE: Terminating ...
 [...] NOTICE: exiting, bye-bye!
-master zszedl po ~2s
+master exited after ~2s
 
-reload_always.log (koniec):
+reload_always.log (end):
 ...iter start pid=91013
 ...tick 0
 ...tick 1
 ...tick 2
 ...tick 3
-...tick 4          # <- BRAK "tick 5"/"iter end" — proces nie zdazyl dokonczyc
+...tick 4          # <- NO "tick 5"/"iter end" — the process did not finish in time
 ```
 
 **The difference from `SIGQUIT`/`SIGUSR2`, worth recording**: in the
@@ -2062,7 +2062,7 @@ for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
     if (wp == child->wp || wp == child->wp->shared) {
         continue;
     }
-    fpm_scoreboard_free(wp);   /* munmap() scoreboardu KAZDEGO INNEGO poola */
+    fpm_scoreboard_free(wp);   /* munmap() the scoreboard of EVERY OTHER pool */
 }
 ```
 
@@ -2674,7 +2674,7 @@ iterations (not only the first):
 ```
 [pool consumer] child 39020 exited with code 0 after 11.77s   # (a) SIGTERM during a short job -> exits by itself, exit 0
 [pool consumer] child 39136 exited on signal 9 (SIGKILL) after 26.75s  # (b) job longer than stop_timeout=3s -> hard kill after ~3s
-[pool job] child 39510 exited on signal 9 (SIGKILL) after 49.01s  # cron.timeout=3s liczone od startu SKRYPTU (start o :07:00, kill o :07:03), nie od startu procesu
+[pool job] child 39510 exited on signal 9 (SIGKILL) after 49.01s  # cron.timeout=3s counted from SCRIPT start (started at :07:00, killed at :07:03), not from process start
 ```
 
 #### SECOND PROBLEM FOUND (not fixed in code because it cannot be — documented and warned about)

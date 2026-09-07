@@ -222,10 +222,10 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * `docker stop` that fails in production. */
 	if (fpm_global_config.process_control_timeout < wp->config->supervisor_stop_timeout) {
 		zlog(ZLOG_WARNING,
-			"[pool %s] supervisor.stop_timeout = %ds, ale global process_control_timeout = %ds; "
-			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije to dziecko przez eskalacje "
-			"mastera, zanim supervisor.stop_timeout zdazy zadzialac — ustaw process_control_timeout "
-			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie zadania",
+			"[pool %s] supervisor.stop_timeout = %ds but global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT sent to the MASTER (e.g. `docker stop`) kills this child through the "
+			"master's escalation before supervisor.stop_timeout can act — set process_control_timeout "
+			">= %ds in [global] if SIGTERM/docker stop should give this pool time to finish its job",
 			wp->config->name, wp->config->supervisor_stop_timeout, fpm_global_config.process_control_timeout,
 			wp->config->supervisor_stop_timeout);
 	}

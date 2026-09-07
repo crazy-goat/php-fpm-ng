@@ -140,9 +140,9 @@ static bool fpm_coop_session_selfcheck(void) /* {{{ */
 	zend_long ini_val = zend_ini_long(ZEND_STRL("session.cookie_lifetime"), 0);
 
 	if (ps->cookie_lifetime != ini_val) {
-		zlog(ZLOG_ALERT, "[pool %s] coop-session: SELFCHECK NIEUDANY — session.cookie_lifetime spod wyliczonego "
-			"adresu ps_globals (" ZEND_LONG_FMT ") != wartosc z ini (" ZEND_LONG_FMT "); adres z wpisu ini "
-			"NIE wskazuje na prawdziwe ps_globals, izolacja stanu ext/session WYLACZONA",
+		zlog(ZLOG_ALERT, "[pool %s] coop-session: SELFCHECK FAILED — session.cookie_lifetime read from the computed "
+			"ps_globals address (" ZEND_LONG_FMT ") != value from ini (" ZEND_LONG_FMT "); the address from the ini entry "
+			"does NOT point at the real ps_globals, ext/session state isolation DISABLED",
 			fpm_coop_pool_name(), ps->cookie_lifetime, ini_val);
 		return false;
 	}
@@ -163,9 +163,9 @@ void fpm_coop_session_container_start(void) /* {{{ */
 
 	entry = zend_hash_str_find_ptr(EG(ini_directives), ZEND_STRL("session.save_path"));
 	if (!entry || !entry->mh_arg2) {
-		zlog(ZLOG_WARNING, "[pool %s] coop-session: modul session zaladowany, ale brak dzialajacego wpisu ini "
-			"'session.save_path' — punkt zaczepienia nie zadzialal, izolacja stanu ext/session WYLACZONA "
-			"(session_start() bedzie dzialac tylko przy jednym requescie w locie)",
+		zlog(ZLOG_WARNING, "[pool %s] coop-session: the session module is loaded, but no working ini entry for "
+			"'session.save_path' — the hook did not take effect, ext/session state isolation DISABLED "
+			"(session_start() will only work with one request in flight)",
 			fpm_coop_pool_name());
 		return;
 	}

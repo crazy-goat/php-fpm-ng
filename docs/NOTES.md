@@ -77,7 +77,7 @@ directives make sense for which type, and must **reject** nonsensical
 combinations (for example, `pm.max_children` in a supervisor pool) rather than
 silently ignoring them.
 
-## 3. Typy poola
+## 3. Pool types
 
 No `pool.type` → `fcgi`. Zero BC.
 

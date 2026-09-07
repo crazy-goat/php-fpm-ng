@@ -10,7 +10,7 @@ accountable for them.
 `docs/node_server_gaps.md` compares the HTTP gateway to a typical Node.js
 application server and ends with a `## Klasyfikacja` section that sorts every
 finding into three buckets. This task only looks at the first bucket, `### Already
-w planie` (six items). The other two buckets (`Do rozpoznania, ale nie w
+in the plan` (six items). The other two buckets (`To explore, but not
 in the roadmap`, `Deliberately not treated as a compatibility gap`) are
 deliberately out of scope here — they are exploration or non-goals, not
 commitments.
@@ -111,7 +111,7 @@ is made.**
 
 ### HTTP/2 and gzip — correctly deprioritized, no action needed now
 
-The document files these as "nice to have po realizacji podstawowego planu,"
+The document files these as "nice to have after completing the basic plan,"
 explicitly after TLS/ALPN, timeouts and backpressure. `grep` confirms neither
 exists in `fpm_http.c`. Since items 2, 3 and 4 above (timeouts, backpressure,
 `503`) are themselves still open, HTTP/2 and gzip are correctly still waiting

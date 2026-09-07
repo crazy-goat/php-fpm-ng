@@ -191,7 +191,7 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 		size_t len = strlen(*reject);
 
 		if (len && (*reject)[len - 1] == '.') {
-			/* prefiks: "pm." lapie kazda pm.* faktycznie ustawiona */
+			/* prefix: "pm." matches every pm.* directive that was actually set */
 			const char *p = wp->config->set_directives;
 			char needle[128];
 

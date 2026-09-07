@@ -816,7 +816,7 @@ void fpm_coop_req_run(struct fpm_coop_req_s *ctx) /* {{{ */
 	zlog(ZLOG_DEBUG, "[pool %s] coop: request #%u start (%s), in flight: %u",
 		fpm_coop_name, ctx->id, SG(request_info).request_uri ? SG(request_info).request_uri : "-", fpm_coop_in_flight_n);
 
-	/* 4. Skrypt. */
+	/* 4. Script. */
 	fpm_coop_execute(ctx);
 
 	/* ext/session: module RSHUTDOWN FOR THIS request, BEFORE destroying the

@@ -27,7 +27,7 @@ once:
   to a port it did not ask for) and for redirecting human traffic to HTTPS
 
 `docs/NOTES.md`, section 3l, flags this exactly: "check whether 'one pool,
-jeden port' wystarcza". It does not, and the answer shapes the configuration
+one port' is enough". It does not, and the answer shapes the configuration
 file that the whole project is selling.
 
 ## Problem

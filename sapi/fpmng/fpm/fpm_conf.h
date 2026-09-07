@@ -56,7 +56,7 @@ struct fpm_worker_pool_config_s {
 	char *name;
 	char *type;			/* fpm-ng: pool.type, empty = fastcgi (see fpm_pool_type.h) */
 	char *executor;			/* fpm-ng: pool.executor, empty = classic */
-	char *set_directives;		/* fpm-ng: ";nazwa;nazwa;" faktycznie ustawionych dyrektyw,
+	char *set_directives;		/* fpm-ng: ";name;name;" of the directives that were actually set,
 					 * so the pool type can reject the ones that do not
 					 * apply to it — the value alone cannot distinguish
 					 * "unset" from "set to the default" */

@@ -35,7 +35,7 @@ it against `time(NULL)`, interpreted as UTC).
 `cron.schedule`, and re-translate it twice a year if their timezone observes
 DST. The reasoning is written down, but only in `docs/NOTES.md:1435-1441`
 ("Time: exclusively UTC" — nearly the same wording as the source comment) and
-again, earlier and more tersely, in `docs/NOTES.md:127-128` (point 2 of "Cztery
+again, earlier and more tersely, in `docs/NOTES.md:127-128` (point 2 of "Four
 things to settle"). `docs/NOTES.md` opens by describing itself as
 "project memory" — a development journal (decisions, measurements, open
 questions) — not operator documentation. There is no README or user guide

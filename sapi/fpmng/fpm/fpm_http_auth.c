@@ -77,7 +77,7 @@ void fpm_http_auth_parse(const char *authorization_header, /* {{{ */
 
 	if (space && strcasecmp(auth_type, "Basic") == 0) {
 		const char *b64 = space + 1;
-		char decoded[FPM_HTTP_AUTH_USER_LEN + 256]; /* user + ':' + haslo */
+		char decoded[FPM_HTTP_AUTH_USER_LEN + 256]; /* user + ':' + password */
 		const char *colon;
 
 		while (*b64 == ' ' || *b64 == '\t') {

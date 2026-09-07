@@ -171,6 +171,68 @@ TECHNICAL = set("""
     preforking realloc ruid sandboxing sockaddr's spawnable ssl's
     strlcpy subclassed tcp's timezone's uds's uid's umask uname
     uninitialized url's utf's zval zvals zpp zend's zts's
+    sapi fpmng fpm phpt laravel symfony amphp predis phpredis mysqli
+    mysqlnd php-di slim4 rinit rshutdown minit mshutdown pcntl evdns
+    evhttp bevcb pollin pollset peekdata usleep nanosleep getaddrinfo
+    recv send sendto memcpy sizeof alloc addref incref decref undef
+    endif realpath inode sigalrm sigprof sigabrt eagain ewouldblock eintr
+    xport pctl respawned respawn musl aarch openssl epoll kqueue uring
+    superglobals autoglobals userland slowlog localhost nagle fcntl
+    fullchain certs timezone localtime iana systemd supervisord nts zts
+    worktree csprng oniguruma apparmor libevent libpq fcgibench
+    aaaa gai cas google github andrei nigmatulin
+    vlucas bukka nyholm aiven whmcs datadog cloudflare traefik certbot
+    tsrmls zend zendapi zendiag phpapi phpdotenv phpsessid
+    phpsec phpsrc php-fpm php-fpm-ng fpm-ng
+    sni mtime lifecycle servername reuseport backpressure segfault
+    respawns stderr uid backend frontend codebase readme abi repo stdio
+    autoload args nagle iana stdout stdin params unistd interruptibly
+    syslog ubuntu fsockopen csrf gzip toolchain ifdef cloexec inet reval
+    gmtime strdup tlsext shorthands phpapi resolv nameserver nonblock
+    attr autoglobal getenv filesystem sendfile strlen vars dbal
+    hardcoded blpop misconfigured hostname frontends seccomp swoole
+    realpaths ibrs xfail zlib standalone segfaults sudo versioned
+    ifndef stdint roadmap mutex pthread
+    bitness wallclock gateways fanout firewall firewalls sandbox
+    sandboxed sandboxing sid executor executors initializer destructors
+    datasource dep deps semver benchmarks benchmarking memoized
+    memoization unlogged enums readonly daemonized daemonizing
+    precompiled hotreload suite suites testcase testcases unittest
+    unittests docroot localhost upstream upstreams downstream
+    downstreams proxying proxied passthrough pipelined pipelining
+    chunked encoder decoders unixy
+    workaround workarounds workflow workflows wouldblock zoneinfo wakeups
+    waitpid wday vpath utime username usec unserialize unconfigured
+    unmaps unparsable tzalloc tzset triaged tokenizer tmpfs
+    sysctl tailq symlinks superglobal strcmp stopsignal sqlstate sigchld
+    sigg sighup sigs setitimer setsockopt setgid setfd servname selfcheck
+    segfaulted rsync rlimits rdlck returncode respawning
+    refcounts referer requestless resourcename readelf rebasing recvfrom
+    redeclarations refactor refactoring procs privkey popen preloading
+    preload pre-empts pton protos pcre pathinfo passwordless poolbbb
+    oolbbb ondemand ocsp offsetof nodata nodelay nodename nomatch
+    nameservers namespaces nbuckets ndots ngmt nlabels munmap munmaps
+    mtimes mtimespec mtim multipart memcmp memset memcached mqtt
+    llvm libuv liburing libmemcached libssl lowercased html hostent
+    hostnames hpack htaccess hyperthread hyperthreads hmac initgroups
+    inlen ioctl fionread fixme footgun fopen fstat func freeaddrinfo
+    fastify fatal-erroring fileinfo einprogress einval emalloc enoent
+    enospc entrypoint errbuf evbuffer execvp econnaborted
+    deindirect deprioritized deref desync desynchronise desyncs diffed
+    diffs dirs distroless dockerfile docroots downsides cidr chroot
+    closexec compat config-diffing configs crons ctor curated capistrano
+    php-amqplib phpinfo pgsql enable-tokenizer grep grepped
+    grep-able getaddresses getcwd gethostbyname getpeername ginit
+    laminas-diactoros handover hardcodes strl strtok strtol
+    addrstrlen aton atol atoi autoloaded backends bitmaps blockingly
+    brotli bugfix chroot compat configs deindirect deprioritized desync
+    desyncs diffed diffs dirs entrypoint fstat getaddresses ginit
+    lowercased mday nodata nameservers nodelay nomatch ndots resolv
+    nonblock sockop pushback sids serializer superglobal sysctl unistd
+    override overridable wouldblock bwc
+    changelog apps vixie pre-empts amqplib diactoros fatal-erroring
+    config-diffing aslr wlogical-op dzend autostart serializer
+    diffing erroring empts wlogical
 """.split())
 
 TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z'-]{2,}")
@@ -248,22 +310,37 @@ def polish_check(text, path, lineno, why):
         return hits
     for m in TOKEN_RE.finditer(text):
         tok = m.group(0)
-        stripped = tok.strip("'")
+        stripped = tok.strip("'-")
         # skip mixed-case identifiers (camelCase, macros), keep ALL-CAPS
         if any(c.isupper() for c in stripped[1:]) and not stripped.isupper():
             continue
         low = stripped.lower().translate(FOLD)
         if len(low) < 3 or low in POLISH_IGNORE:
             continue
-        if POLISH is not None and low in POLISH and low not in ENGLISH:
-            hits.append((path, lineno, text, f"{why}: Polish word '{tok}'"))
-            continue
-        if len(low) >= 4 and ENGLISH is not None and low not in ENGLISH and low not in TECHNICAL:
-            hits.append((path, lineno, text, f"{why}: not an English word '{tok}'"))
+        # Polish: the whole folded token, or any hyphen-separated part, is a
+        # Polish dictionary word
+        if POLISH is not None and low not in ENGLISH and low not in TECHNICAL:
+            parts = [w.translate(FOLD) for w in re.split(r"[-]", low)]
+            if (low in POLISH
+                    or any(w in POLISH and w not in ENGLISH and w not in TECHNICAL
+                           for w in parts if len(w) >= 3)):
+                hits.append((path, lineno, text, f"{why}: Polish word '{tok}'"))
+                continue
+        # not English: some hyphen/apostrophe-separated part is not an English
+        # dictionary word (handles "per-request", "request's", "ctx-123")
+        if ENGLISH is not None and len(low) >= 4:
+            parts = [w for w in re.split(r"[-']", low) if len(w) >= 4]
+            unknown = [w for w in parts
+                       if w not in ENGLISH and w not in TECHNICAL]
+            if unknown:
+                hits.append((path, lineno, text,
+                             f"{why}: not an English word '{tok}'"))
     return hits
 
 
 def add(path, lineno, text, why):
+    if path is not None and allowed(path, lineno):
+        return
     findings.append(f"{path}:{lineno}: {why}: {text.strip()[:120]}")
 
 

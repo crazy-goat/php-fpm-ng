@@ -6,7 +6,7 @@
 #include <stdint.h>
 #include "php.h"
 
-#define PM2STR(a) (a == PM_STYLE_STATIC ? "static" : (a == PM_STYLE_DYNAMIC ? "dynamic" : "ondemand"))
+#define PM2STR(a) ((a) == PM_STYLE_STATIC ? "static" : ((a) == PM_STYLE_DYNAMIC ? "dynamic" : "ondemand"))
 
 #define FPM_CONF_MAX_PONG_LENGTH 64
 

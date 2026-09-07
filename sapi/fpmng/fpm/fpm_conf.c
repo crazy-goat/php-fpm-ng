@@ -39,8 +39,8 @@
 #endif
 
 
-#define STR2STR(a) (a ? a : "undefined")
-#define BOOL2STR(a) (a ? "yes" : "no")
+#define STR2STR(a) ((a) ? (a) : "undefined")
+#define BOOL2STR(a) ((a) ? "yes" : "no")
 #define GO(field) offsetof(struct fpm_global_config_s, field)
 #define WPO(field) offsetof(struct fpm_worker_pool_config_s, field)
 
@@ -805,7 +805,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 
 #define FPM_WPC_STR_CP_EX(_cfg, _scfg, _sf, _df) \
 	do { \
-		if (_scfg->_df && !(_cfg->_sf = strdup(_scfg->_df))) { \
+		if ((_scfg)->_df && !((_cfg)->_sf = strdup((_scfg)->_df))) { \
 			return -1; \
 		} \
 	} while (0)

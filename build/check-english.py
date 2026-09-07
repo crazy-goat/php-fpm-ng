@@ -255,7 +255,7 @@ def polish_check(text, path, lineno, why):
         low = stripped.lower().translate(FOLD)
         if len(low) < 3 or low in POLISH_IGNORE:
             continue
-        if POLISH is not None and low in POLISH:
+        if POLISH is not None and low in POLISH and low not in ENGLISH:
             hits.append((path, lineno, text, f"{why}: Polish word '{tok}'"))
             continue
         if len(low) >= 4 and ENGLISH is not None and low not in ENGLISH and low not in TECHNICAL:

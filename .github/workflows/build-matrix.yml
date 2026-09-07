@@ -167,6 +167,53 @@ jobs:
           name: phpt-results
           path: phpt-results
 
+  # Task 013: clang-tidy over our C sources only (never a prepared php-src
+  # tree's mixed upstream copies). Non-blocking on purpose — a red build on
+  # day one for pre-existing findings teaches people to ignore the job.
+  # Turning any check into a hard failure is a separate, later decision.
+  # See docs/c-style.md for the enabled/disabled check contract.
+  lint:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install clang-tidy and configure deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-tidy \
+            build-essential autoconf automake libtool bison re2c pkg-config \
+            libevent-dev libssl-dev zlib1g-dev
+
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+
+      - name: buildconf + configure (headers only; no make)
+        working-directory: php-src
+        run: |
+          ./buildconf --force
+          ./configure --disable-all --enable-fpmng --enable-session --with-openssl \
+            2>&1 | tee ../configure-lint.log
+
+      - name: clang-tidy report (our files only)
+        run: |
+          chmod +x build/lint-c.sh
+          ./build/lint-c.sh "$PWD/php-src" 2>&1 | tee lint-c-report.txt
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-c-report
+          path: lint-c-report.txt
+          retention-days: 14
+
   # Task 010: the HTTP gateway must drop root before it ever accepts a
   # connection, instead of holding the master's identity (and the TLS private
   # key) for its whole life. Needs to run as root, which the phpt job's

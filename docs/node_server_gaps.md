@@ -1,207 +1,207 @@
-# Różnice względem serwera aplikacyjnego Node.js
+# Differences from a Node.js application server
 
-Stan na 2026-09-06. Dokument jest materiałem do analizy, a nie zatwierdzoną roadmapą.
+Status as of 2026-09-06. This document is analysis material, not an approved roadmap.
 
-Porównanie dotyczy typowego serwera aplikacyjnego Node.js (np. `node:http` z Express, Fastify lub Nest), a nie samego runtime'u bez bibliotek. Celem jest wychwycenie funkcji, które mogą mieć sens dla FPM-NG, bez automatycznego rozszerzania zakresu projektu.
+The comparison covers a typical Node.js application server (for example, `node:http` with Express, Fastify, or Nest), not the bare runtime without libraries. The goal is to identify features that may make sense for FPM-NG without automatically expanding the project's scope.
 
-## Różnica modelu
+## Model differences
 
-Produkcyjny FPM-NG `classic` realizuje model request-response: gateway przyjmuje żądanie, przekazuje je do workera PHP, worker wykonuje request i zwraca odpowiedź.
+Production FPM-NG `classic` uses a request-response model: the gateway accepts a request, passes it to a PHP worker, the worker executes the request, and returns the response.
 
-Node.js daje aplikacji bezpośrednią kontrolę nad event loopem, listenerem, połączeniem i cyklem życia odpowiedzi. Nie każdą funkcję Node należy kopiować do FPM-NG — część z nich wymagałaby zmiany modelu SAPI, a nie tylko rozbudowy gatewaya.
+Node.js gives the application direct control over the event loop, listener, connection, and response lifecycle. FPM-NG should not copy every Node feature — some would require changing the SAPI model rather than merely extending the gateway.
 
-## Braki istotne dla zwykłych aplikacji HTTP
+## Gaps that matter to ordinary HTTP applications
 
-### Routing i front controller
+### Routing and front controller
 
-Node może programowo mapować dowolną metodę i ścieżkę na handler. FPM-NG nadal opiera się na mapowaniu URI do skryptu lub `index.php`.
+Node can programmatically map any method and path to a handler. FPM-NG still maps a URI to a script or `index.php`.
 
-Brakuje konfigurowalnego odpowiednika:
+There is no configurable equivalent of:
 
 ```nginx
 try_files $uri $uri/ /index.php?$query_string;
 ```
 
-Ten punkt już znajduje się w planie FPM-NG i jest ważny dla frameworków PHP.
+This item is already in the FPM-NG plan and matters to PHP frameworks.
 
-### Timeouty klientów
+### Client timeouts
 
-Typowy serwer Node pozwala osobno kontrolować timeout nagłówków, requestu, bezczynnego socketu i keep-alive. HTTP gateway FPM-NG nie ma jeszcze kompletnej ochrony przed wolnymi klientami i slow loris.
+A typical Node server can control header, request, idle-socket, and keep-alive timeouts separately. The FPM-NG HTTP gateway does not yet have complete protection against slow clients and slow loris attacks.
 
-Ten punkt już znajduje się w planie.
+This item is already in the plan.
 
-### Streaming request body i backpressure
+### Request-body streaming and backpressure
 
-Node udostępnia request body jako strumień i może wstrzymywać odbiór, gdy konsument jest wolniejszy. Gateway FPM-NG buforuje body w pamięci przed przekazaniem requestu.
+Node exposes the request body as a stream and can pause receiving when the consumer is slower. The FPM-NG gateway buffers the body in memory before passing the request on.
 
-Brakuje:
+What is missing:
 
-- strumieniowego przekazywania body;
+- streaming request-body forwarding;
 - backpressure;
-- bezpiecznej obsługi dużych i wolnych uploadów;
-- kontrolowania wzrostu pamięci gatewaya.
+- safe handling of large and slow uploads;
+- control over gateway memory growth.
 
-Backpressure już znajduje się na liście znanych braków. Sposób implementacji, np. bufor plikowy, nie jest jeszcze decyzją projektową.
+Backpressure is already on the list of known gaps. The implementation method, such as a file buffer, is not yet a design decision.
 
-### Pełny stan przeciążenia
+### Full-pool overload response
 
-Przy pełnym poolu FPM-NG zwraca obecnie `502`. Plan zakłada poprawne `503 Service Unavailable` z `Retry-After`.
+When the pool is full, FPM-NG currently returns `502`. The plan is to return a correct `503 Service Unavailable` with `Retry-After`.
 
-Ewentualne kolejkowanie krótkich burstów nie jest obecnie częścią zatwierdzonego planu.
+Possible short-burst queuing is not currently part of the approved plan.
 
-## Długie i dwukierunkowe połączenia
+## Long-lived and bidirectional connections
 
 ### Server-Sent Events
 
-Node naturalnie obsługuje długą odpowiedź, okresowe flushowanie danych i wykrywanie rozłączenia klienta. FPM-NG nie ma obecnie produkcyjnie potwierdzonego modelu dla SSE.
+Node naturally handles long responses, periodic data flushing, and client-disconnect detection. FPM-NG does not currently have a production-validated model for SSE.
 
-Do zbadania:
+To investigate:
 
-- czy odpowiedź jest przekazywana strumieniowo bez nieograniczonego buforowania;
-- czy flush dociera do klienta;
-- zachowanie po rozłączeniu klienta;
-- timeouty i backpressure zapisu;
-- wpływ długiego requestu na zajętość workera.
+- whether the response is streamed without unbounded buffering;
+- whether flush reaches the client;
+- behavior after the client disconnects;
+- write timeouts and backpressure;
+- the effect of a long request on worker occupancy.
 
-SSE nie jest obecnie zatwierdzonym punktem roadmapy.
+SSE is not currently an approved roadmap item.
 
 ### WebSocket
 
-Node może wykonać HTTP Upgrade i przejąć dwukierunkowy socket. FPM-NG nie obsługuje WebSocketów ani przekazania połączenia aplikacji PHP.
+Node can perform an HTTP Upgrade and take over a bidirectional socket. FPM-NG does not support WebSockets or handing the connection to a PHP application.
 
-Potencjalne warianty:
+Potential options:
 
-1. nie obsługiwać WebSocketów i zostawić je reverse proxy;
-2. dodać tunelowanie WebSocket w przyszłym `pool.type = proxy`;
-3. udostępnić osobny model aplikacyjny, co byłoby znacznie większą zmianą.
+1. do not support WebSockets and leave them to a reverse proxy;
+2. add WebSocket tunneling in a future `pool.type = proxy`;
+3. expose a separate application model, which would be a much larger change.
 
-Najbardziej zgodny z obecną architekturą jest wariant drugi. WebSocket nie jest obecnie zatwierdzonym punktem roadmapy.
+The second option is the most compatible with the current architecture. WebSocket is not currently an approved roadmap item.
 
 ### Long polling
 
-Technicznie może działać jako długi request, ale zajmuje worker w executorze `classic`. Wymaga testów limitów, shutdownu, rozłączenia klienta i zachowania pełnego poola.
+It can technically work as a long request, but it occupies a worker in the `classic` executor. It requires tests for limits, shutdown, client disconnects, and behavior when the pool is full.
 
-## Kontrola transportu z poziomu aplikacji
+## Application-level transport control
 
-Node daje aplikacji bezpośredni dostęp do:
+Node gives the application direct access to:
 
 - chunked encoding;
-- flushowania fragmentów;
-- trailerów HTTP;
+- flushing response fragments;
+- HTTP trailers;
 - HTTP Upgrade;
-- zamknięcia lub przejęcia socketu;
-- zdarzeń rozłączenia klienta.
+- closing or taking over the socket;
+- client-disconnect events.
 
-PHP za SAPI kontroluje status, nagłówki i treść, ale gateway pozostaje właścicielem transportu. Nie należy dodawać bezpośredniego dostępu aplikacji do socketu bez osobnego projektu bezpieczeństwa i lifecycle.
+PHP controls the status, headers, and body through the SAPI, but the gateway remains the owner of the transport. Do not give the application direct socket access without a separate security and lifecycle project.
 
-### Anulowanie pracy po rozłączeniu klienta
+### Cancelling work after a client disconnect
 
-Node może propagować anulowanie przez zdarzenia socketu i `AbortSignal`. PHP ma `connection_aborted()`, ale FPM-NG nie ma spójnego mechanizmu anulowania aktywnych operacji aplikacyjnych lub asynchronicznych.
+Node can propagate cancellation through socket events and `AbortSignal`. PHP has `connection_aborted()`, but FPM-NG has no consistent mechanism for cancelling active application or asynchronous operations.
 
-Do zbadania:
+To investigate:
 
-- kiedy worker dowiaduje się o rozłączeniu;
-- czy blokujące I/O można przerwać;
-- czy anulowanie może bezpiecznie wywołać bailout;
-- jak zachowują się `classic`, Fiber i True Async.
+- when the worker learns about the disconnect;
+- whether blocking I/O can be interrupted;
+- whether cancellation can safely trigger a bailout;
+- how `classic`, Fiber, and True Async behave.
 
-Nie jest to obecnie zatwierdzony punkt roadmapy.
+This is not currently an approved roadmap item.
 
-## Protokół i funkcje serwera
+## Protocol and server features
 
 ### TLS
 
-Node ma moduły `tls` i `https`. FPM-NG nie ma jeszcze TLS ani ACME. TLS + ACME są już częścią planu i poprzedzają `pool.type = proxy`.
+Node has `tls` and `https` modules. FPM-NG does not yet have TLS or ACME. TLS + ACME are already part of the plan and precede `pool.type = proxy`.
 
 ### HTTP/2
 
-Node posiada moduł `http2`. FPM-NG obsługuje HTTP/1.1.
+Node has an `http2` module. FPM-NG supports HTTP/1.1.
 
-HTTP/2 zapisano jako nice to have po realizacji podstawowego planu. Ewentualna implementacja powinna używać sprawdzonej biblioteki, np. `nghttp2`, i nastąpić dopiero po TLS/ALPN, timeoutach oraz backpressure.
+HTTP/2 is listed as a nice-to-have after the basic plan is complete. Any implementation should use a proven library such as `nghttp2` and should come only after TLS/ALPN, timeouts, and backpressure.
 
-### Kompresja
+### Compression
 
-W ekosystemie Node kompresję zwykle dodaje middleware. FPM-NG nie kompresuje odpowiedzi.
+In the Node ecosystem, middleware usually adds compression. FPM-NG does not compress responses.
 
-Streamingowe `gzip` zapisano jako nice to have po realizacji podstawowego planu. Brotli nie jest obecnie częścią planu.
+Streaming `gzip` is listed as a nice-to-have after the basic plan. Brotli is not currently part of the plan.
 
-### Middleware gatewaya
+### Gateway middleware
 
-Frameworki Node oferują łańcuch middleware dla uwierzytelniania, logowania, rate limiting, routingu i modyfikowania odpowiedzi. FPM-NG nie ma rozszerzalnego systemu middleware w procesie gatewaya.
+Node frameworks offer middleware chains for authentication, logging, rate limiting, routing, and response modification. FPM-NG has no extensible middleware system inside the gateway process.
 
-Większość logiki aplikacyjnej powinna pozostać w frameworku PHP. Middleware gatewaya ma sens tylko dla funkcji transportowych lub wykonywanych przed uruchomieniem PHP. Nie jest obecnie częścią planu.
+Most application logic should remain in the PHP framework. Gateway middleware makes sense only for transport features or work performed before PHP starts. It is not currently part of the plan.
 
-## Model wykonania aplikacji
+## Application execution model
 
-### Stan między requestami
+### State between requests
 
-Node naturalnie utrzymuje stan procesu między requestami. Produkcyjny executor `classic` uruchamia pełny lifecycle requestu PHP, zachowując oczekiwaną izolację PHP-FPM.
+Node naturally keeps process state between requests. The production `classic` executor runs the complete PHP request lifecycle and preserves the isolation expected from PHP-FPM.
 
-Zmiana tego modelu grozi wyciekami stanu aplikacji i rozszerzeń. Nie jest to brak, który należy automatycznie usuwać — izolacja jest właściwością kompatybilności.
+Changing this model risks leaking application and extension state. This is not a gap that should be removed automatically — isolation is a compatibility property.
 
-### Asynchroniczne I/O
+### Asynchronous I/O
 
-Node może obsługiwać wiele operacji I/O w jednym procesie. `classic` przypisuje request do workera. FPM-NG ma eksperymentalne executory Fiber i True Async, ale nie są one gotowe produkcyjnie.
+Node can handle many I/O operations in one process. `classic` assigns a request to a worker. FPM-NG has experimental Fiber and True Async executors, but they are not production-ready.
 
-Znane problemy Fiber znajdują się w `docs/fiber_errors.md`. True Async wymaga osobnego forka silnika PHP.
+Known Fiber problems are documented in `docs/fiber_errors.md`. True Async requires a separate PHP engine fork.
 
-### Własne protokoły
+### Custom protocols
 
-Node może otwierać TCP/UDP i implementować dowolne protokoły. FPM-NG jest celowo skoncentrowany na FastCGI, HTTP i uruchamianiu PHP. MQTT, raw TCP/UDP czy własne protokoły nie są obecnie celem projektu.
+Node can open TCP/UDP sockets and implement arbitrary protocols. FPM-NG is deliberately focused on FastCGI, HTTP, and running PHP. MQTT, raw TCP/UDP, and custom protocols are not currently project goals.
 
-## Funkcje, których Node zwykle nie daje bez dodatkowego stosu
+## Features Node usually does not provide without an additional stack
 
-Porównanie nie oznacza, że Node ma wszystko w standardowej konfiguracji. Typowa instalacja potrzebuje dodatkowych bibliotek lub usług dla:
+The comparison does not mean that Node provides everything in a standard installation. A typical installation needs additional libraries or services for:
 
 - ACME;
-- routingu frameworka;
-- access logu;
-- kompresji middleware;
-- zarządzania procesami i restartami;
-- cronów i procesów nadzorowanych;
-- metryk;
-- konfiguracji graceful shutdown;
-- obsługi plików statycznych na poziomie reverse proxy.
+- framework routing;
+- access logging;
+- middleware compression;
+- process management and restarts;
+- cron jobs and supervised processes;
+- metrics;
+- graceful-shutdown configuration;
+- serving static files at the reverse-proxy layer.
 
-FPM-NG integruje już część tych funkcji w jednej binarce: zarządzanie workerami, supervisor, cron, status, statyki, ACL, trusted proxies i access log.
+FPM-NG already integrates some of these features in one binary: worker management, supervisor, cron, status, static files, ACLs, trusted proxies, and access logging.
 
-## Kandydaci do dalszego rozpoznania
+## Candidates for further investigation
 
-Bez wpisywania ich automatycznie do roadmapy warto wykonać małe testy techniczne w tej kolejności:
+Without automatically adding them to the roadmap, it is worth running small technical tests in this order:
 
-1. **SSE i flush odpowiedzi** — sprawdzić, co już działa oraz gdzie występuje buforowanie.
-2. **Rozłączenie klienta** — zmierzyć, kiedy gateway i worker wykrywają przerwanie.
-3. **Streaming uploadu** — opisać obecny przepływ pamięci i możliwe punkty backpressure.
-4. **Long polling** — sprawdzić shutdown, timeouty i zachowanie pełnego poola.
-5. **WebSocket przez przyszły proxy** — ocenić tunelowanie zamiast implementacji w SAPI.
-6. **API anulowania** — dopiero po poznaniu zachowania rozłączeń w każdym executorze.
+1. **SSE and response flushing** — check what already works and where buffering occurs.
+2. **Client disconnects** — measure when the gateway and worker detect an interruption.
+3. **Upload streaming** — describe the current memory flow and possible backpressure points.
+4. **Long polling** — check shutdown, timeouts, and behavior when the pool is full.
+5. **WebSocket through a future proxy** — evaluate tunneling instead of implementing it in the SAPI.
+6. **Cancellation API** — only after the disconnect behavior of each executor is understood.
 
-Największą szansę na użyteczną funkcję bez zmiany modelu PHP mają SSE, poprawne wykrywanie rozłączenia klienta i streaming body. WebSocket najlepiej rozważać jako funkcję przyszłego reverse proxy, a nie executora PHP.
+SSE, reliable client-disconnect detection, and request-body streaming have the best chance of being useful without changing the PHP model. WebSockets are best considered a future reverse-proxy feature, not an executor feature.
 
-## Klasyfikacja
+## Classification
 
-### Już w planie
+### Already in the plan
 
-- routing/odpowiednik `try_files`;
-- timeouty klientów;
-- backpressure request body;
-- `503 Retry-After` przy pełnym poolu;
+- routing / a `try_files` equivalent;
+- client timeouts;
+- request-body backpressure;
+- `503 Retry-After` for a full pool;
 - TLS + ACME;
 - `pool.type = proxy`;
-- HTTP/2 i gzip jako końcowe nice to have.
+- HTTP/2 and gzip as final nice-to-haves.
 
-### Do rozpoznania, ale nie w roadmapie
+### Investigate, but not on the roadmap
 
 - SSE;
-- WebSocket/tunelowanie WebSocket;
+- WebSocket / WebSocket tunneling;
 - long polling;
-- anulowanie pracy po rozłączeniu klienta;
-- rozbudowane streaming API;
-- middleware gatewaya.
+- cancelling work after a client disconnect;
+- an extended streaming API;
+- gateway middleware.
 
-### Świadomie nie traktować jako brak kompatybilności
+### Deliberately not treated as compatibility gaps
 
-- trwały globalny stan aplikacji między requestami;
-- bezpośrednie przejęcie socketu przez zwykły skrypt PHP;
-- dowolne serwery TCP/UDP w modelu requestowym;
-- własna implementacja HTTP/2.
+- persistent global application state between requests;
+- direct socket takeover by an ordinary PHP script;
+- arbitrary TCP/UDP servers in the request model;
+- a custom HTTP/2 implementation.

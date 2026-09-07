@@ -745,6 +745,23 @@ czy "jeden pool, jeden port" wystarcza.
   Koszt: bramka zyskuje drugie, zwykłe gniazdo HTTP na proces, dla poola,
   który się na to zdecyduje.
 
+**Implementation note (English, task 041, done):** both decisions above are
+implemented in `sapi/fpmng/fpm/fpm_http_tls.c`. ALPN: `SSL_CTX_set_alpn_select_cb()`
+on every `SSL_CTX` this file builds, advertising `http/1.1` only; a client
+offering ALPN without `http/1.1` gets `SSL_TLSEXT_ERR_ALERT_FATAL` (verified
+with `openssl s_client -alpn`). SNI: a new pool directive, `http.tls_sni_cert`
+(`servername:cert_path:key_path`, comma-separated, on top of the existing
+`http.tls_cert`/`http.tls_key` default pair), parsed and validated the same
+way as the primary pair; the per-servername `SSL_CTX*` switch table is built
+in `fpm_http_tls_ctx_new()`, per gateway process, exactly as this decision
+requires — never a new field of `struct fpm_http_tls_s` (that struct only
+carries the raw PEM bytes, read once in the master, the same way it already
+did for the primary pair). Test: `sapi/fpmng/tests/http-tls-alpn-sni.phpt`.
+Scope cut, not covered by this task: SNI certificates are validated once at
+startup but are NOT part of task 040's hot-reload mtime check — only the
+primary `http.tls_cert`/`http.tls_key` pair reloads without a restart; a
+renewed SNI certificate needs one. See `tasks/done/041-tls-alpn-and-sni.md`.
+
 
 ## 3m. `fcgi-async` — wyniki badania i PRAWDZIWY CEL: eksperymentalny build pod async
 

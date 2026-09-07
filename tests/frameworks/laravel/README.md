@@ -59,6 +59,20 @@ upgrade.
 The remaining matrix items are printed as `NOT MEASURED` rather than being
 silently skipped or counted as passes.
 
+## Service provisioning: SERVICE_MODE
+
+`SERVICE_MODE=docker` (the default) starts a private MySQL and Redis via
+`compose.yaml` — the same pinned images (`mysql:8.4.6`, `redis:7.4.2-alpine`)
+as `tests/frameworks/symfony/compose.yaml` — on free host ports, creates a
+per-run database, and tears the whole compose project down (`down --volumes
+--remove-orphans`) on exit. Nothing needs to be pre-provisioned except Docker
+itself.
+
+`SERVICE_MODE=external` is the previous behaviour: it points at MySQL/Redis
+that are already running, via the `LARAVEL_DB_*` / `LARAVEL_REDIS_*`
+variables below (e.g. the shared test box). It never issues `FLUSHDB` or
+`FLUSHALL` and never creates or drops anything outside its own database name.
+
 ## Dedicated test-box run
 
 The runner is designed for a private directory and private resources:
@@ -86,6 +100,20 @@ REDIS_EXTENSION=/path/to/redis.so \
 ./bin/run.sh
 ```
 
+On a clean machine (Docker Compose provisioning MySQL/Redis, no external
+services required):
+
+```sh
+cd tests/frameworks/laravel
+PHP=/path/to/php \
+FPMNG=/path/to/php-fpm-ng \
+REDIS_CLIENT=predis \
+./bin/run.sh
+```
+
+To point at already-running services instead, add
+`SERVICE_MODE=external LARAVEL_DB_HOST=... LARAVEL_REDIS_HOST=...`.
+
 To provision without starting a pool, run `PHP=/path/to/php ./bin/provision.sh`.
 The PHP CLI needs the extensions required by the locked Laravel dependencies;
 the runner also needs cURL for its concurrent HTTP client.
@@ -95,5 +123,8 @@ phpredis extension. The test-box evidence in Task 025 uses `phpredis`; a run
 with the alternative client must be reported as a different measurement.
 
 `RUN_DIR`, `FCGI_PORT`, `HTTP_PORT`, `LARAVEL_DB_*`, `LARAVEL_REDIS_*`, `PHP`,
-`FPMNG`, and `REDIS_EXTENSION` are overridable. The runner defaults to the
-ports and resources above so parallel framework tracks do not share them.
+`FPMNG`, `SERVICE_MODE`, `MYSQL_PORT`, `REDIS_PORT`, and `REDIS_EXTENSION` are
+overridable. The runner defaults to the ports and resources above so parallel
+framework tracks do not share them; `SERVICE_MODE=docker` additionally picks
+free host ports for its private MySQL/Redis containers, and a private
+per-run database name, so concurrent runs on one machine do not collide.

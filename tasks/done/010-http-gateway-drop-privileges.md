@@ -1,7 +1,7 @@
 # 010 — The HTTP gateway does not drop privileges, and now holds a TLS private key
 
 **Priority:** high, security-relevant.
-**Status:** open.
+**Status:** done (2026-09-06) — see Decision and Outcome below.
 
 ## Context
 

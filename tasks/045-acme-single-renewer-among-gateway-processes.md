@@ -7,21 +7,17 @@
 
 A `pool.type = http` pool runs `http.gateways` processes (default 2), each with
 its own listening socket under `SO_REUSEPORT` and its own `SSL_CTX` built after
-`fork()` (`sapi/fpmng/fpm/fpm_http_tls.h`, header comment). Nothing today
-elects one of them for anything.
+`fork()` (`sapi/fpmng/fpm/fpm_http_tls.h`, header comment).
 
-If every gateway process renews independently: N concurrent ACME orders for the
-same name, N account registrations or N racing writes to the same key file, and
-Let's Encrypt rate limits burned for real.
-
-If option B (a `cron` pool) wins in 043, the renewer is a separate process by
-construction and the election question mostly disappears — but the handover
-question does not.
+Task 043 chose one project-owned PHP client in a dedicated `cron` pool. That
+process is the sole renewer by construction; gateway election is not part of
+this task. The handover problem remains: every gateway must answer the active
+challenge and install the resulting certificate.
 
 ## Problem
 
-Ensure exactly one renewer exists, and get the new certificate into every
-process that terminates TLS.
+Ensure only one dedicated ACME process can run per configured certificate, and
+get its challenge and certificate updates into every gateway process.
 
 ## Acceptance criteria
 
@@ -29,15 +25,16 @@ process that terminates TLS.
    Verified against the staging endpoint by counting orders, or against a local
    test CA (pebble) by reading its log — not by inference from the absence of
    errors.
-2. Killing the elected renewer mid-renewal leaves the pool able to renew again
-   without an operator action. State the recovery time.
+2. Killing the ACME cron process mid-renewal leaves the pool able to renew again
+   without operator action. State the recovery time.
 3. After a successful renewal every gateway process serves the new certificate.
    This is 040's mechanism; this task must not grow a second one.
-4. No renewal happens twice in a row because two processes each thought they
-   were the writer. Verified by running the renewal trigger under all
-   `http.gateways` values used in the tests.
-5. The election mechanism is per-pool-type behaviour expressed as a field or a
-   callback in `fpm_pool_type_s`, never `if (type == ...)` — see `CLAUDE.md`.
+4. No renewal happens twice in a row because a scheduler restart or overlapping
+   tick started a second writer. Verify this while varying `http.gateways` and
+   while restarting the ACME cron process during one order.
+5. ACME scheduling and handover are per-pool-type behaviour expressed as a
+   field, callback or data in `fpm_pool_type_s`, never `if (type == ...)` — see
+   `CLAUDE.md`.
 
 ## Notes
 
@@ -45,3 +42,5 @@ process that terminates TLS.
   commit "share the connection budget through shared memory") is a precedent
   for cross-process state in this SAPI; look at it before inventing a second
   mechanism.
+- This task must not add leader election among gateway processes. The dedicated
+  ACME cron process owns issuance and renewal.

@@ -4,6 +4,10 @@ One file per unit of work. English only, even though most of the codebase and
 `docs/` are still Polish (see `011-code-comment-language-policy.md` and
 `012-translate-docs-to-english.md`).
 
+**How to execute a task:** [`workflow.md`](../workflow.md) — worktree, poligon
+or local build, tests, Bugbot review, PR, merge, cleanup. Scratch follow-ups
+discovered while coding belong in `findings.md` at the repo root (gitignored).
+
 ## Tracks
 
 - `tasks/` — the main line: the HTTP gateway, cron, proxying, packaging, CI
@@ -53,5 +57,6 @@ the main line, move the file and say why in the commit message.
 - The test box (`192.168.8.50`, user `piotr`, passwordless sudo) is shared.
   Work in your own directory, use your own port range, and never `pkill php-fpm`.
 - Comment content — what earns a comment, what to delete, and why there is no
-  bulk comment-cleanup pass — is in [`CLAUDE.md`](../CLAUDE.md#comments-what-earns-one)
-  (task 014). Do not prune comments by apparent redundancy.
+  bulk comment-cleanup pass — is in
+  [`workflow.md`](../workflow.md#comments-what-earns-one) (task 014). Do not
+  prune comments by apparent redundancy.

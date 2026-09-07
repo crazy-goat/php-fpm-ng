@@ -34,7 +34,7 @@ get its challenge and certificate updates into every gateway process.
    while restarting the ACME cron process during one order.
 5. ACME scheduling and handover are per-pool-type behaviour expressed as a
    field, callback or data in `fpm_pool_type_s`, never `if (type == ...)` — see
-   `CLAUDE.md`.
+   `workflow.md`.
 
 ## Notes
 

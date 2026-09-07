@@ -1,7 +1,7 @@
 # 023 — Reload signalling: the comment does not cover the `status` pool, and the README's churn note is stale
 
 **Priority:** low. Two small documentation defects in recently added code.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -59,3 +59,30 @@ Fix both, and while doing so make the reload behaviour's rationale complete.
 - This is worth doing while the change is fresh. The reasoning is currently
   reconstructible only by reading three files and noticing that a fourth pool
   type falls into the same branch.
+
+## Outcome
+
+- `sapi/fpmng/fpm/fpm_process_ctl.c:165` — rewrote the comment to cover all
+  three `serves_requests == 0` pool types and distinguish the two reasons:
+  `supervisor`/`cron` get `SIGTERM` to finish their current iteration;
+  `status` gets it because it has no work to finish and would otherwise wait
+  out the master's `SIGQUIT`→`SIGTERM` escalation for nothing. Cross-refs
+  `fpm_pool_status.c:435-439` and `:443-446`.
+- `sapi/fpmng/fpm/fpm_pool_status.c:435` — updated the "accepted delay" note:
+  it no longer applies on reload (fpm_process_ctl.c now sends `SIGTERM`
+  directly, see NOTES 3x), only to an explicit graceful stop or log rotation,
+  which still use the ordinary `SIGQUIT` fan-out.
+- `sapi/fpmng/README.md` — the `fpm_process_ctl.c` row now states status's
+  distinct reason instead of implying it also "finishes an iteration"; the
+  churn-list sentence now says explicitly why this already-taken-over file
+  isn't on it (small, self-contained change, not ongoing churn).
+- `docs/NOTES.md:2163` (status task's "Not done/uncertain" list) carried the
+  same now-stale claim that the escalation delay is unconditionally accepted;
+  added a cross-reference to 3x noting reload no longer has this delay.
+- No behaviour changed — this was comments and docs only, so no new test was
+  added. Verified by reading the edited comments against the actual line
+  numbers they cite (`grep -n`) rather than assuming they'd stay accurate
+  after the edits grew the comment blocks.
+- Left out: did not rename or renumber the duplicate `## 3x.` heading in
+  `docs/NOTES.md` (there is an unrelated, pre-existing `3x` about Fiber DNS at
+  line 3375) — out of scope for this task.

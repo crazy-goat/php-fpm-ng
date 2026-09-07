@@ -163,9 +163,17 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 			int res;
 
 			/* A reload is a special kind of graceful shutdown. Request
-			 * workers receive SIGQUIT so their current request can drain;
-			 * long-lived pool types have their own SIGTERM handler which
-			 * finishes the current script and prevents another iteration.
+			 * workers receive SIGQUIT so their current request can drain.
+			 * Every other pool type (serves_requests == 0) gets SIGTERM
+			 * instead, for one of two different reasons:
+			 *   - supervisor, cron: each has its own SIGTERM handler that
+			 *     finishes the current iteration and prevents another one;
+			 *   - status: has no SIGTERM handler and no work to finish
+			 *     (fpm_pool_status.c:435-439) — SIGTERM's default
+			 *     disposition just exits it immediately. Sending SIGTERM
+			 *     directly here also removes a delay that would otherwise be
+			 *     accepted: waiting for the master to escalate SIGQUIT to
+			 *     SIGTERM (fpm_pool_status.c:443-446).
 			 * Keep the ordinary SIGQUIT fan-out unchanged for log rotation
 			 * and an explicit graceful stop. */
 			if (fpm_state == FPM_PCTL_STATE_RELOADING && signo == SIGQUIT) {

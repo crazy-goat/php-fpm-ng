@@ -22,3 +22,23 @@ Our files. The rest of the SAPI is copied from upstream `sapi/fpm/` by
 Eventually `fpm/fpm_conf.c`, `fpm/fpm_status.c` and `fpm/fpm_main.c` will be
 added — those are the only FPM files with real upstream churn (see
 `docs/NOTES.md`).
+
+## Style and lint
+
+Style rules and the clang-tidy subset live in [`docs/c-style.md`](../../docs/c-style.md).
+EditorConfig matches php-src; there is no `.clang-format` (deliberate).
+
+Run the static-analysis pass locally (needs `clang-tidy` on `PATH`):
+
+```sh
+# Smoke check of the config against our .c files only (missing php.h is expected):
+./build/lint-c.sh
+
+# After build/prepare.sh + configure in a php-src tree, pass that path so
+# includes resolve:
+./build/lint-c.sh /path/to/prepared-php-src
+```
+
+The script never walks a prepared `sapi/fpmng/` inside php-src — only paths
+that exist in this repository — so upstream copies are not part of the report.
+CI runs the same script as a non-blocking report (see the `lint` job).

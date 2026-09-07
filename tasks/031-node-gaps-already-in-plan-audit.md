@@ -9,7 +9,7 @@ accountable for them.
 
 `docs/node_server_gaps.md` compares the HTTP gateway to a typical Node.js
 application server and ends with a `## Klasyfikacja` section that sorts every
-finding into three buckets. This task only looks at the first bucket, `### Już
+finding into three buckets. This task only looks at the first bucket, `### Already
 w planie` (six items). The other two buckets (`Do rozpoznania, ale nie w
 in the roadmap`, `Deliberately not treated as a compatibility gap`) are
 deliberately out of scope here — they are exploration or non-goals, not

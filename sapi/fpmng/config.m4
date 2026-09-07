@@ -536,15 +536,15 @@ if test "$PHP_FPMNG" != "no"; then
     [AS_IF([test -f "$abs_srcdir/sapi/fpmng/fpm/fpm_trace_$fpmng_trace_type.c"],
       [PHP_FPMNG_TRACE_FILES="fpm/fpm_trace.c fpm/fpm_trace_$fpmng_trace_type.c"])])
 
-  dnl Lista zrodel jest wstrzykiwana przez build/prepare.sh na podstawie
-  dnl sapi/fpm/config.m4 z tego konkretnego php-src — dzieki temu nie dryfuje,
-  dnl gdy upstream doda albo usunie plik (np. events/devpoll.c).
+  dnl The source list is injected by build/prepare.sh based on this php-src's
+  dnl sapi/fpm/config.m4 — so it does not drift when upstream adds or removes
+  dnl a file (e.g. events/devpoll.c).
   PHP_FPMNG_FILES="@FPMNG_SOURCES@"
 
   dnl Multi-request executors (pool.executor = fiber / async) are opt-in and
   dnl OFF by default, so a default build carries none of their code. Each
   dnl flag pulls in its own source list, substituted by build/prepare.sh from
-  dnl the same file the base list comes from (see NOTES: podzial zrodel).
+  dnl the same file the base list comes from (see NOTES: the source split).
   PHP_ARG_ENABLE([fpmng-fiber],
     [whether to build the fiber-based multi-request executor in fpm-ng],
     [AS_HELP_STRING([--enable-fpmng-fiber],

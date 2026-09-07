@@ -1,27 +1,27 @@
 #!/bin/sh
-# Sklada sapi/fpmng/ w drzewie php-src: najpierw stabilne zrodla FPM z upstreamu,
-# potem nasze pliki na wierzch. Repo trzyma tylko to, co nasze.
+# Assembles sapi/fpmng/ into a php-src tree: first the stable FPM sources from
+# upstream, then our files on top. The repo keeps only what is ours.
 #
-#   build/prepare.sh /sciezka/do/php-src
+#   build/prepare.sh /path/to/php-src
 #
-# Upstream nie jest modyfikowany — powstaje wylacznie nowy katalog sapi/fpmng/.
+# Upstream is not modified — only the new sapi/fpmng/ directory is created.
 set -e
-PHPSRC="${1:?podaj sciezke do php-src}"
+PHPSRC="${1:?provide a path to php-src}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-[ -d "$PHPSRC/sapi/fpm" ] || { echo "to nie wyglada na php-src: $PHPSRC" >&2; exit 1; }
+[ -d "$PHPSRC/sapi/fpm" ] || { echo "this does not look like php-src: $PHPSRC" >&2; exit 1; }
 
-# MUSI byc PRZED odtworzeniem katalogu: nizej sapi/fpmng jest kasowane i robione
-# na nowo z upstreamowego sapi/fpm, w ktorym nie ma blokow PHP_FPMNG_*_FILES.
-# Sluzy do wykrycia, czy doszedl albo znikl plik .c — patrz ostrzezenie na koncu.
-# Lista jest podzielona na trzy bloki (bazowy, fiber, async) — patrz nizej —
-# ale do wykrycia zmiany bierzemy je razem, bo interesuje nas caly zestaw
-# plikow niezaleznie od tego, do ktorego bloku trafily.
+# MUST run BEFORE the directory is rebuilt: below, sapi/fpmng is deleted and
+# recreated from the upstream sapi/fpm, which has no PHP_FPMNG_*_FILES blocks.
+# Used to detect whether a .c file appeared or disappeared — see the warning
+# at the end. The list is split into three blocks (base, fiber, async) — see
+# below — but for change detection we take them together, because the whole
+# set matters regardless of which block a file landed in.
 OLD_SOURCES=""
 if [ -f "$PHPSRC/sapi/fpmng/config.m4" ]; then
-  # Tylko bloki PHP_FPMNG_*_FILES="..." — w config.m4 sa tez inne wzmianki
-  # o plikach (fpm_systemd.c, fpm_trace.c, www.c pod warunkami), ktore nie
-  # naleza do zadnej z tych list.
+  # Only the PHP_FPMNG_*_FILES="..." blocks — config.m4 also mentions other
+  # files (fpm_systemd.c, fpm_trace.c, www.c under conditions) that do not
+  # belong to any of these lists.
   OLD_SOURCES=$( { \
       sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
         "$PHPSRC/sapi/fpmng/config.m4"; \
@@ -41,36 +41,36 @@ cp -r "$PHPSRC/sapi/fpm" "$PHPSRC/sapi/fpmng"
 # Our files override upstream.
 cp -r "$REPO/sapi/fpmng/." "$PHPSRC/sapi/fpmng/"
 
-# Rozszerzenie fpmng_metrics (NOTES 3k): ext/ wykrywany tym samym globem
-# co sapi/, wiec tez zero latek na upstream. Katalog naszego repo:
+# The fpmng_metrics extension (NOTES 3k): ext/ is discovered by the same glob
+# as sapi/, so also zero patches against upstream. This repo's directory:
 [ -d "$REPO/ext/fpmng_metrics" ] && {
   rm -rf "$PHPSRC/ext/fpmng_metrics"
   cp -r "$REPO/ext/fpmng_metrics" "$PHPSRC/ext/fpmng_metrics"
 }
 
-# Lista zrodel bierze sie z config.m4 TEGO php-src, a nie z naszej kopii —
-# inaczej dryfuje przy kazdej zmianie w upstreamie (np. usunieciu events/devpoll.c).
+# The source list comes from the config.m4 of THIS php-src, not our copy —
+# otherwise it drifts on every upstream change (e.g. removal of events/devpoll.c).
 SOURCES=$(sed -n '/PHP_FPM_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' "$PHPSRC/sapi/fpm/config.m4" \
   | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' \
   | sort -u)
-[ -n "$SOURCES" ] || { echo "nie udalo sie odczytac listy zrodel z sapi/fpm/config.m4" >&2; exit 1; }
+[ -n "$SOURCES" ] || { echo "failed to read the source list from sapi/fpm/config.m4" >&2; exit 1; }
 
-# Nasze wlasne pliki .c dochodza do listy, jesli upstream ich nie ma.
+# Our own .c files join the list when upstream does not have them.
 for f in $(cd "$REPO/sapi/fpmng" && find fpm -name '*.c' | sort); do
   echo "$SOURCES" | grep -qx "$f" || SOURCES="$SOURCES
 $f"
 done
 
-# Podzial na trzy grupy: fiber (fiber + cala warstwa coop, uzywana wylacznie
-# przez fiber) i async (fpm_pool_async.c) trafiaja pod --enable-fpmng-fiber /
-# --enable-fpmng-async (obie domyslnie "no"); reszta jest budowana zawsze.
-# Podzial zweryfikowany po referencjach symboli — coop.* nie jest uzywane
-# poza fiber, async nie odwoluje sie do coop.
-# Dopasowanie po PREFIKSIE nazwy, nie po wyliczeniu plikow. Wyliczenie
-# cofaloby cala idee tego skryptu: lista zrodel ma sie brac z 'find', zeby
-# nowy plik nie wymagal edycji. Przy wyliczeniu nowy fpm_pool_coop_cokolwiek.c
-# NIE pasowalby do wzorca, wpadlby cicho do listy bazowej i wyladowal w
-# domyslnej binarce — czyli dokladnie to, czemu te flagi maja zapobiegac.
+# Split into three groups: fiber (fiber + the whole coop layer, used only by
+# fiber) and async (fpm_pool_async.c) go under --enable-fpmng-fiber /
+# --enable-fpmng-async (both default "no"); the rest is always built.
+# The split was verified against symbol references — coop.* is not used
+# outside fiber, async does not reference coop.
+# Matching by NAME PREFIX, not by enumerating files. Enumeration would undo
+# the whole point of this script: the source list must come from 'find' so a
+# new file needs no edit. With enumeration, a new fpm_pool_coop_whatever.c
+# would NOT match the pattern, would silently land in the base list, and end
+# up in the default binary — exactly what these flags are meant to prevent.
 FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
 ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
 
@@ -78,8 +78,8 @@ BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PA
 FIBER_SOURCES=$(echo "$SOURCES" | grep -E "$FIBER_PATTERN")
 ASYNC_SOURCES=$(echo "$SOURCES" | grep -E "$ASYNC_PATTERN")
 
-[ -n "$FIBER_SOURCES" ] || { echo "nie znaleziono plikow fiber/coop w liscie zrodel" >&2; exit 1; }
-[ -n "$ASYNC_SOURCES" ] || { echo "nie znaleziono fpm_pool_async.c w liscie zrodel" >&2; exit 1; }
+[ -n "$FIBER_SOURCES" ] || { echo "no fiber/coop files found in the source list" >&2; exit 1; }
+[ -n "$ASYNC_SOURCES" ] || { echo "fpm_pool_async.c not found in the source list" >&2; exit 1; }
 
 BASE_LIST=$(echo "$BASE_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 FIBER_LIST=$(echo "$FIBER_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
@@ -93,14 +93,14 @@ awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" '{
   }' "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"
 
-# Czy lista zrodel sie zmienila wzgledem poprzedniego przebiegu? Jesli tak, to
-# istniejacy katalog budowania ma ZAMROZONA liste obiektow w Makefile i nie
-# zobaczy nowego pliku. Objawia sie to bledem linkowania PO przekompilowaniu
-# wszystkiego — albo, gdy nowy plik nie eksportuje uzywanych symboli, wcale:
-# build przechodzi i wychodzi binarka po cichu pozbawiona nowego typu poola.
-# Dlatego ostrzegamy glosno i na koncu, zeby nie zjechalo z ekranu.
-# Uwaga: ten skrypt to /bin/sh, wiec zadnych <(...) — porownanie idzie przez
-# pliki tymczasowe.
+# Did the source list change since the previous run? If so, the existing build
+# directory has a FROZEN object list in the Makefile and will not see the new
+# file. This shows up as a link error AFTER everything recompiles — or, when
+# the new file exports no symbols used by others, not at all: the build passes
+# and the binary silently leaves out the new pool type. Hence a loud warning
+# at the end, so it does not scroll off the screen.
+# Note: this script is /bin/sh, so no <(...) — the comparison goes through
+# temporary files.
 SOURCES_CHANGED=""
 NEW_SORTED=$(echo "$SOURCES" | sort -u)
 if [ -n "$OLD_SOURCES" ] && [ "$OLD_SOURCES" != "$NEW_SORTED" ]; then
@@ -111,45 +111,46 @@ if [ -n "$OLD_SOURCES" ] && [ "$OLD_SOURCES" != "$NEW_SORTED" ]; then
   rm -f "$_old" "$_new"
 fi
 
-# Latki na pliki poza sapi/ — odstepstwo od "upstream nietkniety", wiec glosno.
-# Zasady i terminy waznosci: patches/README.md
+# Patches for files outside sapi/ — a departure from "upstream untouched", so
+# loudly. Rules and validity windows: patches/README.md
 PHPVER=$(awk -F'"' '/PHP_VERSION /{print $2}' "$PHPSRC/main/php_version.h" 2>/dev/null)
 PHPMINOR=$(echo "$PHPVER" | cut -d. -f1,2)
-# Latki tworza stos i potrafia dotykac tego samego regionu (0002 i 0003 obie
-# siedza przy accept()). Wtedy test "czy juz nalozona" per latka klamie: odwrotny
-# dry-run 0002 pada, bo na niej lezy 0003. Decyzja zapada wiec raz, dla calego
-# stosu: albo drzewo jest nietkniete i nakladamy wszystko po kolei, albo caly
-# stos schodzi odwrotnie z kopii dotknietych plikow (= juz nalozony), albo BLAD.
+# Patches form a stack and can touch the same region (0002 and 0003 both sit
+# at accept()). Then the "is it already applied" test per patch lies: the
+# reverse dry-run of 0002 fails, because 0003 sits on top of it. The decision
+# is therefore made once, for the whole stack: either the tree is untouched
+# and we apply everything in order, or the whole stack comes off in reverse
+# from the copy of touched files (= already applied), or ERROR.
 PATCHES=""
 for p in "$REPO"/patches/*.patch; do
   [ -f "$p" ] || continue
   name=$(basename "$p")
-  # wariant wersyjny nadpisuje ogolny
+  # versioned variant overrides the generic one
   [ -f "$REPO/patches/php-$PHPMINOR/$name" ] && p="$REPO/patches/php-$PHPMINOR/$name"
   PATCHES="$PATCHES $p"
 done
 PATCHED=0
 if [ -n "$PATCHES" ]; then
   FIRST=${PATCHES%% *}; FIRST=${PATCHES# }; FIRST=${FIRST%% *}
-  # Kolejnosc ma znaczenie: NAJPIERW proba w przod. Odwrotne nalozenie na
-  # nietknietym drzewie tez potrafi zwrocic sukces (BSD patch), wiec test
-  # "-R" jako pierwszy dawalby cicho binarke bez latki z komunikatem, ze jest.
+  # Order matters: FIRST try forward. Applying in reverse to an untouched tree
+  # can also return success (BSD patch), so testing "-R" first would silently
+  # produce a binary without the patch and a message claiming it is there.
   if patch -d "$PHPSRC" -p1 --dry-run --forward --silent < "$FIRST" >/dev/null 2>&1; then
     for p in $PATCHES; do
       name=$(basename "$p")
       if patch -d "$PHPSRC" -p1 --forward --silent < "$p" >/dev/null 2>&1; then
-        echo "  ! latka nalozona na upstream: $name"
+        echo "  ! patch applied onto upstream: $name"
         PATCHED=$((PATCHED + 1))
       else
-        echo "BLAD: latka nie naklada sie na PHP $PHPVER: $name" >&2
-        echo "      patrz patches/README.md — albo upstream ja zmergowal (usun ja)," >&2
-        echo "      albo potrzebny jest wariant patches/php-$PHPMINOR/$name" >&2
+        echo "ERROR: patch does not apply to PHP $PHPVER: $name" >&2
+        echo "      see patches/README.md — either upstream merged it (remove it)," >&2
+        echo "      or a patches/php-$PHPMINOR/$name variant is needed" >&2
         exit 1
       fi
     done
   else
     TMP=$(mktemp -d)
-    # nazwa pliku konczy sie na pierwszym bialym znaku (diff -u dokleja tam date)
+    # the file name ends at the first whitespace (diff -u appends the date there)
     for f in $(cat $PATCHES | sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' | sort -u); do
       mkdir -p "$TMP/$(dirname "$f")"
       cp "$PHPSRC/$f" "$TMP/$f"
@@ -163,28 +164,28 @@ if [ -n "$PATCHES" ]; then
     rm -rf "$TMP"
     if [ "$OK" = 1 ]; then
       for p in $PATCHES; do
-        echo "  ! latka juz byla nalozona: $(basename "$p")"
+        echo "  ! patch was already applied: $(basename "$p")"
         PATCHED=$((PATCHED + 1))
       done
     else
-      echo "BLAD: latki nie nakladaja sie na PHP $PHPVER i drzewo nie wyglada na nietkniete" >&2
-      echo "      ($(echo $PATCHES | wc -w | tr -d ' ') latek, pierwsza: $(basename "$FIRST"))" >&2
-      echo "      patrz patches/README.md — albo upstream ktoras zmergowal (usun ja)," >&2
-      echo "      albo potrzebny jest wariant patches/php-$PHPMINOR/<nazwa>, albo drzewo" >&2
-      echo "      ma cudze zmiany w tych plikach (git status w $PHPSRC)" >&2
+      echo "ERROR: patches do not apply to PHP $PHPVER and the tree does not look untouched" >&2
+      echo "      ($(echo $PATCHES | wc -w | tr -d ' ') patches, first: $(basename "$FIRST"))" >&2
+      echo "      see patches/README.md — either upstream merged one of them (remove it)," >&2
+      echo "      or a patches/php-$PHPMINOR/<name> variant is needed, or the tree" >&2
+      echo "      has foreign changes in these files (git status in $PHPSRC)" >&2
       exit 1
     fi
   fi
 fi
 
-echo "sapi/fpmng gotowe."
+echo "sapi/fpmng ready."
 if [ "$PATCHED" -gt 0 ]; then
-  echo "  UWAGA: upstream zostal zmodyfikowany przez $PATCHED latke/i (patrz wyzej)"
+  echo "  WARNING: upstream was modified by $PATCHED patch(es) (see above)"
 else
-  echo "  upstream nietkniety — powstal wylacznie sapi/fpmng/"
+  echo "  upstream untouched — only sapi/fpmng/ was created"
 fi
-echo "  zrodel z upstreamu + naszych: $(echo "$SOURCES" | wc -l | tr -d ' ')"
-echo "  nasze pliki:"
+echo "  sources from upstream + ours: $(echo "$SOURCES" | wc -l | tr -d ' ')"
+echo "  our files:"
 (cd "$REPO/sapi/fpmng" && find . -type f | sed 's|^\./|    |' | sort)
 if [ -d "$REPO/ext/fpmng_metrics" ]; then
   (cd "$REPO/ext/fpmng_metrics" && find . -type f | sed 's|^|    ext/fpmng_metrics/|' | sort)
@@ -193,16 +194,16 @@ fi
 if [ -n "$SOURCES_CHANGED" ]; then
   echo
   echo "================================================================"
-  echo "UWAGA: zmienila sie lista plikow zrodlowych sapi/fpmng:"
+  echo "WARNING: the sapi/fpmng source file list changed:"
   echo "$SOURCES_CHANGED" | sed 's/^/    /'
   echo
-  echo "Istniejacy katalog budowania ma zamrozona liste obiektow i tego"
-  echo "NIE zobaczy. Zanim zbudujesz, wykonaj:"
+  echo "The existing build directory has a frozen object list and will NOT"
+  echo "see it. Before building, run:"
   echo
   echo "    cd $PHPSRC && ./buildconf --force"
-  echo "    cd <katalog-budowania> && ./config.nice && make"
+  echo "    cd <build-directory> && ./config.nice && make"
   echo
-  echo "Pominiecie tego konczy sie bledem linkowania — albo, co gorsza,"
-  echo "binarka bez nowego kodu, ktora buduje sie bez slowa skargi."
+  echo "Skipping this ends in a link error — or, worse, a binary without the"
+  echo "new code that builds without a word of complaint."
   echo "================================================================"
 fi

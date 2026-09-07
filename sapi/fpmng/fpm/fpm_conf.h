@@ -126,6 +126,8 @@ struct fpm_worker_pool_config_s {
 	int http_reuseport;			/* each gateway gets its own SO_REUSEPORT socket */
 	int http_static;			/* serving static files without PHP, enabled by default */
 	int http_idle_timeout;			/* ms, releases an attached connection after this many idle ms; 0 = never */
+	int http_read_timeout;			/* ms, one budget for the whole client-side read (headers + body); 0 = no client read timeout */
+	size_t http_max_body;			/* bytes, hard cap on a request body the gateway buffers whole; see fpm_http.c */
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */

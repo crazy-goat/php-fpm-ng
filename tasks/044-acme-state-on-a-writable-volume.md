@@ -7,7 +7,7 @@ section 3l says to settle it once, for both.
 ## Context
 
 Certificates and the ACME account key are **state, not code**
-(`docs/NOTES.md`, 3l, "DWIE RZECZY DO ZAPROJEKTOWANIA TERAZ"). The premise of
+(`docs/NOTES.md`, 3l, "TWO THINGS TO DESIGN NOW"). The premise of
 the project is an image containing one binary plus application code — immutable.
 So the split "immutable code / mutable state on a volume" has to be defined
 explicitly, and it is the same split the self-runner needs (section 3a).

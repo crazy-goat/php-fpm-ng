@@ -1,16 +1,16 @@
 /* fpm-ng: pool.type = supervisor.
  *
- * Patrz fpm_pool_supervisor.h i docs/NOTES.md dla uzasadnienia projektowego.
- * W skrocie: supervisor.processes mapuje sie na pm = static + pm.max_children,
- * wiec spawnowanie i wskrzeszanie procesow to cala robota fpm_children.c
- * (nietkniete, zgodnie z kontraktem z NOTES.md 3h). To, czego fpm_children.c
- * NIE potrafi, to WSTRZYMANIE wskrzeszenia (respawnuje natychmiast i
- * bezwarunkowo) — dlatego polityka restart/backoff/restart_max/fatal zyje
- * w pamieci dzielonej per pool i jest sprawdzana PRZEZ DZIECKO przy starcie
- * i miedzy kolejnymi wykonaniami skryptu, a nie przez zmiane fpm_children.c.
+ * See fpm_pool_supervisor.h and docs/NOTES.md for the design rationale. In
+ * short: supervisor.processes maps to pm = static + pm.max_children, so process
+ * spawning and resurrection are entirely handled by fpm_children.c (untouched,
+ * as required by the contract in NOTES.md 3h). What fpm_children.c CANNOT do is
+ * HOLD BACK a resurrection (it respawns immediately and unconditionally) —
+ * therefore the restart/backoff/restart_max/fatal policy lives in shared memory
+ * per pool and is checked BY THE CHILD at startup and between script executions,
+ * rather than by changing fpm_children.c.
  *
- * pidfd watchdog (stop_timeout) i wykonanie skryptu poza requestem FastCGI
- * sa wspoldzielone z pool.type = cron — patrz fpm_pool_watchdog.[ch] i
+ * The pidfd watchdog (stop_timeout) and script execution outside a FastCGI
+ * request are shared with pool.type = cron — see fpm_pool_watchdog.[ch] and
  * fpm_pool_script.[ch].
  */
 
@@ -34,16 +34,16 @@
 #include "fpm_shm.h"
 #include "zlog.h"
 
-/* Lista ODRZUCEN, nie dopuszczen — patrz fpm_pool_type_check_directives().
- * Nazwa konczaca sie kropka lapie cala rodzine (np. "pm." lapie
+/* Rejected, not allowed, directives — see fpm_pool_type_check_directives().
+ * A name ending in a dot matches the whole family (for example, "pm." matches
  * pm.max_children, pm.start_servers, ...).
  *
- * "pm" i "pm." odrzucone w calosci: supervisor.processes JEST pm.max_children
- * pod maska (patrz fpm_pool_supervisor_validate), wiec pozwolenie userowi
- * ustawic pm.* rownolegle dawaloby dwa zrodla prawdy dla tej samej liczby.
- * "listen" i "listen." odrzucone w calosci: ten typ nie nasluchuje niczego.
- * "ping." i "access." tez odrzucone w calosci — bez listen nie ma czego
- * pingowac ani logowac jako "dostep". */
+ * "pm" and "pm." are rejected entirely: supervisor.processes IS pm.max_children
+ * under another name (see fpm_pool_supervisor_validate), so allowing the user to
+ * set pm.* as well would create two sources of truth for the same number.
+ * "listen" and "listen." are rejected entirely: this type listens to nothing.
+ * "ping." and "access." are also rejected entirely — without listen there is
+ * nothing to ping or log as "access". */
 const char *const fpm_pool_supervisor_rejects[] = {
 	"listen",
 	"listen.",
@@ -62,26 +62,25 @@ const char *const fpm_pool_supervisor_rejects[] = {
 	NULL
 };
 
-/* Stan wspoldzielony miedzy WSZYSTKIMI procesami tego poola (a wiec przezywa
- * i respawny po crashu, i kolejne "iteracje" w tym samym procesie). */
+/* State shared by ALL processes of this pool (so it survives both a respawn
+ * after a crash and subsequent "iterations" in the same process). */
 struct fpm_supervisor_shared_s {
-	unsigned failures;			/* kolejne "szybkie" smierci/porazki z rzedu */
-	time_t next_allowed_start;		/* epoch; 0 albo przeszlosc = mozna startowac zaraz */
-	unsigned char terminal;			/* 1 = polityka mowi "koniec prob na dobre" */
-	unsigned char gave_up;			/* 1 = terminal z powodu wyczerpania restart_max
-						 * (prawdziwa porazka - patrz supervisor.fatal),
-						 * 0 = terminal bo restart=never/on-failure+sukces
-						 * (planowe zakonczenie, NIE porazka) */
-	unsigned char fatal_signaled;		/* SIGTERM do mastera wyslany juz raz (idempotencja) */
+	unsigned failures;			/* consecutive "fast" deaths/failures */
+	time_t next_allowed_start;		/* epoch; 0 or past = may start immediately */
+	unsigned char terminal;			/* 1 = policy says "no more attempts" */
+	unsigned char gave_up;			/* 1 = terminal because restart_max was exhausted
+						 * (a real failure — see supervisor.fatal),
+						 * 0 = terminal because restart=never/on-failure succeeded
+						 * (planned completion, NOT a failure) */
+	unsigned char fatal_signaled;		/* SIGTERM sent to the master once already (idempotent) */
 
-	/* Pola dolozone wylacznie na potrzeby pool.type = status (docs/NOTES.md
-	 * 3u) — dokladnie tyle, ile status faktycznie pokazuje, ani jednego
-	 * wiecej. "failures"/"terminal"/"gave_up" wyzej juz istnialy i sluza
-	 * jednoczesnie polityce i statusowi; te trzy ponizej sluza WYLACZNIE
-	 * statusowi, polityka ich nie czyta. */
-	unsigned char running;			/* 1 = skrypt aktualnie sie wykonuje */
-	time_t last_start;			/* epoch startu ostatniej iteracji, 0 = jeszcze zadnej */
-	int last_exit_code;			/* kod wyjscia ostatniej ZAKONCZONEJ iteracji */
+	/* Fields added solely for pool.type = status (docs/NOTES.md 3u) — exactly
+	 * what status actually shows, not one field more. "failures"/"terminal"/
+	 * "gave_up" above already existed and serve both policy and status; the three
+	 * below serve status ONLY, and the policy does not read them. */
+	unsigned char running;			/* 1 = the script is currently running */
+	time_t last_start;			/* epoch start of the last iteration, 0 = none yet */
+	int last_exit_code;			/* exit code of the last COMPLETED iteration */
 	unsigned char has_last_exit_code;
 };
 
@@ -103,27 +102,27 @@ static void fpm_pool_supervisor_sigterm(int signo)
 	if (!supervisor_term_requested) {
 		supervisor_term_requested = 1;
 
-		/* Siatka bezpieczenstwa: jesli biezaca iteracja (skrypt, ktory nie
-		 * sprawdza niczego miedzy wlasnymi krokami) nie skonczy sie sama w
-		 * ciagu stop_timeout, ubijamy sie sami sygnalem KILL.
+		/* Safety net: if the current iteration (a script that checks nothing
+		 * between its own steps) does not finish within stop_timeout, kill
+		 * ourselves with KILL.
 		 *
-		 * CELOWO nie uzywamy tu alarm()/SIGALRM: PHP samo uzywa SIGALRM (albo
-		 * SIGPROF, w zaleznosci od budowania) do wlasnego max_execution_time
-		 * (zend_set_timeout_ex(), Zend/zend_execute_API.c) i pod
-		 * ZEND_SIGNALS re-instaluje ten handler przy KAZDYM wykonaniu
-		 * skryptu — nasz raw sigaction(SIGALRM,...) zostalby po cichu
-		 * podmieniony i strzelilby w rece Zenda zamiast w nasze (zmierzone:
-		 * budowa tego projektu ma -DZEND_SIGNALS). Zamiast tego forkujemy
-		 * malutki proces-watchdog (fpm_pool_watchdog_arm(), wspoldzielony
-		 * z pool.type = cron — patrz fpm_pool_watchdog.h), calkowicie
-		 * niezalezny od stanu sygnalow PHP: czeka do stop_timeout, i jesli
-		 * my (proces supervisora) nadal zyjemy, ubija nas. Bezpieczne tu, w
-		 * handlerze — patrz komentarz w fpm_pool_watchdog.h. */
+		 * Deliberately do NOT use alarm()/SIGALRM here: PHP itself uses SIGALRM
+		 * (or SIGPROF, depending on the build) for its own max_execution_time
+		 * (zend_set_timeout_ex(), Zend/zend_execute_API.c), and under
+		 * ZEND_SIGNALS reinstalls that handler on EVERY script execution — our raw
+		 * sigaction(SIGALRM,...) would be silently replaced and would fire into
+		 * Zend's handler instead of ours (measured: this project builds with
+		 * -DZEND_SIGNALS). Instead, fork a tiny watchdog process
+		 * (fpm_pool_watchdog_arm(), shared with pool.type = cron — see
+		 * fpm_pool_watchdog.h), completely independent of PHP's signal state: it
+		 * waits for stop_timeout and, if we (the supervisor process) are still
+		 * alive, kills us. Safe here in the handler — see the comment in
+		 * fpm_pool_watchdog.h. */
 		fpm_pool_watchdog_arm(getpid(), (unsigned) supervisor_stop_timeout);
 	}
 }
 
-/* }}} sygnaly */
+/* }}} signals */
 
 int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 {
@@ -164,11 +163,10 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		c->supervisor_restart_max = 0;
 	}
 
-	/* Decyzja projektowa (patrz NOTES.md): supervisor.processes mapuje sie na
-	 * pm = static + pm.max_children, zeby spawnowanie/wskrzeszanie N procesow
-	 * bylo za darmo z istniejacej maszynerii fpm_children.c. Uzytkownik nie
-	 * ustawia pm.* sam (odrzucone przez rejects powyzej), wiec nie ma tu
-	 * konfliktu dwoch zrodel prawdy. */
+	/* Design decision (see NOTES.md): supervisor.processes maps to pm = static +
+	 * pm.max_children so spawning/resurrecting N processes comes for free from
+	 * the existing fpm_children.c machinery. The user does not set pm.* (rejected
+	 * by the rejects list above), so there are no two conflicting sources of truth. */
 	c->pm = PM_STYLE_STATIC;
 	c->pm_max_children = c->supervisor_processes;
 
@@ -183,11 +181,11 @@ static void fpm_pool_supervisor_exit_main(int which, void *arg) /* {{{ */
 	(void) which;
 	(void) arg;
 
-	/* Wolane z FPM_CLEANUP_PARENT_EXIT_MAIN, tuz przed exit(FPM_EXIT_OK)
-	 * w fpm_pctl_exit() (fpm_process_ctl.c, nietkniety). Jesli ktorykolwiek
-	 * pool supervisora poddal sie z powodu prawdziwej porazki i ma
-	 * supervisor.fatal=yes, ubijamy caly proces tutaj z niezerowym kodem —
-	 * inaczej fpm_pctl_exit() i tak zakonczylby kodem 0. */
+	/* Called from FPM_CLEANUP_PARENT_EXIT_MAIN, just before exit(FPM_EXIT_OK)
+	 * in fpm_pctl_exit() (fpm_process_ctl.c, untouched). If any supervisor pool
+	 * gave up because of a real failure and has supervisor.fatal=yes, terminate
+	 * the entire process here with a non-zero code — otherwise fpm_pctl_exit()
+	 * would finish with code 0 anyway. */
 	for (e = supervisor_registry; e; e = e->next) {
 		if (e->shared->gave_up && e->wp->config->supervisor_fatal) {
 			zlog(ZLOG_ALERT, "[pool %s] supervisor.fatal: master is going down with a non-zero exit code",
@@ -208,26 +206,26 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
-	/* ZMIERZONE (docs/NOTES.md, "wdziecznie zatrzymanie", scenariusz 3): kiedy
-	 * SIGTERM idzie do MASTERA (dokladnie to, co wysyla `docker stop`/systemd,
-	 * bez zadnej dodatkowej konfiguracji STOPSIGNAL), master jest w stanie
-	 * TERMINATING i eskaluje SAM, przez fpm_process_ctl.c (referencja,
-	 * nietkniete) — to zachowanie calego mastera FPM, nie cos wprowadzonego
-	 * przez ten typ poola. Domyslne process_control_timeout = 0 eskaluje do
-	 * SIGKILL niemal natychmiast, wiec supervisor.stop_timeout NIGDY nie
-	 * dostaje szansy zadzialac: proces ginie od SIGKILL-a mastera, zanim nasz
-	 * wlasny watchdog w ogole zdazy odliczyc. Nie da sie tego naprawic w tym
-	 * pliku (process_control_timeout jest globalny, wspoldzielony przez
-	 * wszystkie pule, i fpm_process_ctl.c jest referencyjny) — ale MOZNA
-	 * ostrzec operatora glosno, raz, przy starcie, zamiast zostawiac go z
-	 * cichym "dziala na moim teście" (gdzie SIGTERM leci PROSTO do dziecka,
-	 * nie do mastera) i niedzialajacym w produkcji `docker stop`. */
+	/* MEASURED (docs/NOTES.md, "graceful stopping", scenario 3): when SIGTERM
+	 * goes to the MASTER (exactly what `docker stop`/systemd sends, without any
+	 * additional STOPSIGNAL configuration), the master enters TERMINATING and
+	 * escalates on its own through fpm_process_ctl.c (reference code, untouched)
+	 * — this is behavior of the entire FPM master, not something introduced by
+	 * this pool type. The default process_control_timeout = 0 escalates to SIGKILL
+	 * almost immediately, so supervisor.stop_timeout NEVER gets a chance to work:
+	 * the process dies from the master's SIGKILL before our own watchdog even
+	 * starts counting. This cannot be fixed in this file
+	 * (process_control_timeout is global, shared by all pools, and
+	 * fpm_process_ctl.c is reference code) — but we CAN warn the operator loudly,
+	 * once, at startup, instead of leaving them with a quiet "works on my test"
+	 * (where SIGTERM goes DIRECTLY to the child, not the master) and a
+	 * `docker stop` that fails in production. */
 	if (fpm_global_config.process_control_timeout < wp->config->supervisor_stop_timeout) {
 		zlog(ZLOG_WARNING,
-			"[pool %s] supervisor.stop_timeout = %ds, ale global process_control_timeout = %ds; "
-			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije to dziecko przez eskalacje "
-			"mastera, zanim supervisor.stop_timeout zdazy zadzialac — ustaw process_control_timeout "
-			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie zadania",
+			"[pool %s] supervisor.stop_timeout = %ds but global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT sent to the MASTER (e.g. `docker stop`) kills this child through the "
+			"master's escalation before supervisor.stop_timeout can act — set process_control_timeout "
+			">= %ds in [global] if SIGTERM/docker stop should give this pool time to finish its job",
 			wp->config->name, wp->config->supervisor_stop_timeout, fpm_global_config.process_control_timeout,
 			wp->config->supervisor_stop_timeout);
 	}
@@ -275,19 +273,19 @@ static void fpm_pool_supervisor_wait(time_t seconds) /* {{{ */
 
 static void fpm_pool_supervisor_park(void) /* {{{ */
 {
-	/* Ten proces jest respawnem po tym, jak inny proces tego poola juz raz
-	 * zdecydowal "koniec". Nie robimy nic i nie znikamy — gdybysmy zaraz
-	 * exit()owali, fpm_children.c odrodzilby nas natychmiast w petli bez
-	 * konca. Sen do pierwszego sygnalu jest tani i nieszkodliwy. */
+	/* This process is a respawn after another process of this pool already
+	 * decided "finished". Do nothing and stay alive — if we called exit()
+	 * immediately, fpm_children.c would resurrect us in an endless loop. Sleeping
+	 * until the first signal is cheap and harmless. */
 	while (!supervisor_term_requested) {
 		pause();
 	}
 }
 /* }}} */
 
-/* Backoff i decyzja "czy probowac dalej", stosowana miedzy kolejnymi
- * wykonaniami skryptu w TYM SAMYM procesie, i tez przez kazdy swiezy respawn
- * po crashu (bo shared przezywa smierc procesu). */
+/* Backoff and the "should we try again?" decision, applied between subsequent
+ * script executions in the SAME process and also by every fresh respawn after a
+ * crash (because shared memory survives process death). */
 static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		struct fpm_supervisor_shared_s *shared, int exit_code, time_t duration) /* {{{ */
 {
@@ -312,20 +310,20 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 	}
 
 	if (exit_code == 0) {
-		/* Sukces: pod restart=always to normalny, oczekiwany koniec jednej
-		 * "jednostki pracy" (skrypt sam decyduje o tempie, np. wlasnym sleep()),
-		 * NIE porazka — zerujemy licznik i startujemy nastepna iteracje od
-		 * razu, bez sztucznego throttlingu z naszej strony. */
+		/* Success: with restart=always this is the normal, expected end of one
+		 * "work unit" (the script controls its own pace, for example with its own
+		 * sleep()), NOT a failure — reset the counter and start the next iteration
+		 * immediately, without artificial throttling on our side. */
 		shared->failures = 0;
 		shared->next_allowed_start = 0;
 		return;
 	}
 
-	/* Od tego miejsca: prawdziwa porazka (exit != 0). "Zyl dostatecznie dlugo"
-	 * przed porazka zeruje licznik — inaczej jeden pechowy restart po
-	 * tygodniach pracy liczylby sie do tego samego restart_max co prawdziwy
-	 * szybki crash-loop. Prog: restart_delay_max, czyli ta sama liczba, do
-	 * ktorej i tak eskaluje backoff. */
+	/* From here on: a real failure (exit != 0). "Ran long enough" before the
+	 * failure resets the counter — otherwise one unlucky restart after weeks of
+	 * operation would count toward the same restart_max as a genuine fast
+	 * crash-loop. Threshold: restart_delay_max, the same value at which backoff
+	 * would otherwise plateau. */
 	if (duration >= (time_t) c->supervisor_restart_delay_max) {
 		shared->failures = 0;
 	}
@@ -365,9 +363,9 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	struct sigaction sa;
 
 	if (!shared) {
-		/* Nie powinno sie zdarzyc — init_main alokuje to dla kazdego poola
-		 * supervisora zanim cokolwiek sforkuje. Bez tego stanu nie ma jak
-		 * bezpiecznie liczyc backoff/restart_max, wiec lepiej odmowic. */
+		/* Should not happen — init_main allocates this for every supervisor pool
+		 * before anything forks. Without this state there is no safe way to
+		 * calculate backoff/restart_max, so refuse to run. */
 		zlog(ZLOG_ERROR, "[pool %s] supervisor: no shared state, refusing to run", c->name);
 		exit(FPM_EXIT_SOFTWARE);
 	}
@@ -382,8 +380,8 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	fpm_pool_script_install_sapi_overrides();
 
 	if (shared->terminal) {
-		/* Respawn fpm_children.c po tym, jak poprzedni proces tego poola juz
-		 * raz zdecydowal "koniec". Patrz fpm_pool_supervisor_park(). */
+		/* fpm_children.c respawned us after a previous process of this pool had
+		 * already decided "finished". See fpm_pool_supervisor_park(). */
 		if (shared->gave_up && c->supervisor_fatal && !shared->fatal_signaled) {
 			shared->fatal_signaled = 1;
 			zlog(ZLOG_ALERT, "[pool %s] supervisor.fatal: asking the master to shut down", c->name);
@@ -442,9 +440,9 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 	memset(out, 0, sizeof(*out));
 
 	if (!shared) {
-		/* Nie powinno sie zdarzyc — init_main alokuje to dla kazdego poola
-		 * supervisora, w masterze, zanim ktokolwiek zdazy sforkowac
-		 * (w tym pool status). Zerowy stan jest bezpiecznym wynikiem. */
+		/* Should not happen — init_main allocates this for every supervisor pool
+		 * in the master before anything can fork (including the status pool). A
+		 * zero state is a safe result. */
 		return;
 	}
 
@@ -462,7 +460,7 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 	out->consecutive_failures = shared->failures;
 	out->has_backoff_until = 1;
 	out->backoff_until = shared->next_allowed_start;
-	/* next_run nie jest oznaczone jako dostepne — pojecie terminu z
-	 * harmonogramu ma sens tylko dla crona. */
+	/* next_run is not marked as available — a scheduled due time makes sense
+	 * only for cron. */
 }
 /* }}} */

@@ -26,8 +26,8 @@ once:
   be reachable over plain HTTP on port 80 — the CA will not follow a redirect
   to a port it did not ask for) and for redirecting human traffic to HTTPS
 
-`docs/NOTES.md`, section 3l, flags this exactly: "sprawdzić, czy 'jeden pool,
-jeden port' wystarcza". It does not, and the answer shapes the configuration
+`docs/NOTES.md`, section 3l, flags this exactly: "check whether 'one pool,
+one port' is enough". It does not, and the answer shapes the configuration
 file that the whole project is selling.
 
 ## Problem
@@ -40,7 +40,7 @@ Candidate shapes, none chosen:
   `http.static` serving the challenge directory, and another on :443. Costs a
   second pool block plus duplicated settings in a config file that is supposed
   to fit an application in forty lines (`docs/NOTES.md`, section 6,
-  "Konfiguracja").
+  "Configuration").
 - **A second listener inside one pool.** One `http.listen` for TLS plus
   something like a plain-HTTP companion port. Keeps the config small, but the
   gateway's listener setup is currently one socket per gateway process.

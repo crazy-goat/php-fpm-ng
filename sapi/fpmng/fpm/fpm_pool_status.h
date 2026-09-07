@@ -1,9 +1,9 @@
-/* fpm-ng: pool.type = status — pool ktory nie odpala PHP w ogole. Nasluchuje
- * HTTP na wlasnym porcie (ten sam mechanizm co listen dla fcgi/http, ale
- * bezposrednio, bez fcgi+1 jak bramka http), czyta scoreboardy i pamiec
- * dzielona WSZYSTKICH innych poolow w tym samym masterze i serializuje w
- * dwoch formatach: tekstowy Prometheus (/metrics) i JSON (/status). Patrz
- * docs/NOTES.md sekcja 3u dla uzasadnienia projektowego.
+/* fpm-ng: pool.type = status — a pool that does not run PHP at all. It listens
+ * for HTTP on its own port (the same mechanism as listen for fcgi/http, but
+ * directly, without fcgi+1 as the HTTP gateway), reads the scoreboards and
+ * shared memory of ALL other pools in the same master, and serializes them in
+ * two formats: Prometheus text (/metrics) and JSON (/status). See
+ * docs/NOTES.md section 3u for the design rationale.
  */
 
 #ifndef FPM_POOL_STATUS_H
@@ -11,21 +11,21 @@
 
 struct fpm_worker_pool_s;
 
-/* Dyrektywy odrzucane dla pool.type = status. NULL-terminated, uzywane jako
- * .rejects w fpm_pool_types[]. Uwaga: w odroznieniu od supervisor/cron,
- * "listen"/"listen." NIE sa tu odrzucane — status faktycznie nasluchuje. */
+/* Directives rejected for pool.type = status. NULL-terminated, used as
+ * .rejects in fpm_pool_types[]. Unlike supervisor/cron, "listen"/"listen."
+ * are NOT rejected here — status really does listen. */
 extern const char *const fpm_pool_status_rejects[];
 
-/* fpm_pool_type_s.validate — status nie ma zadnych wlasnych dyrektyw do
- * sprawdzenia; jedyna robota to programowe wymuszenie pm = static + 1
- * (jeden proces w zupelnosci wystarcza do obslugi scrapow monitoringu, wiec
- * nie ma sensu dodawac dyrektywy "ile procesow"). */
+/* fpm_pool_type_s.validate — status has no type-specific directives to check;
+ * the only job is to enforce pm = static + 1 programmatically (one process is
+ * entirely sufficient for monitoring scrapes, so no "number of processes"
+ * directive is needed). */
 int fpm_pool_status_validate(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.child_main — petla accept na wlasnym gnieznie (wp->listening_socket),
- * surowy HTTP/1.0 bez keep-alive: parsuje tylko linie zadania (GET <path>),
- * odpowiada tekstem Prometheus na /metrics albo JSON-em na /status, 404 na
- * wszystko inne. Nie wraca. */
+/* fpm_pool_type_s.child_main — accept loop on its own socket
+ * (wp->listening_socket), raw HTTP/1.0 without keep-alive: parses only the
+ * request line (GET <path>), returns Prometheus text on /metrics or JSON on
+ * /status, and 404 for everything else. Does not return. */
 void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp);
 
 #endif

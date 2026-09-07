@@ -74,7 +74,7 @@ expectConfigFailure(
     'http-unix-socket-requires-http-listen',
     <<<EOT
 [global]
-error_log = {{FILE:LOG2}}
+error_log = {{FILE:LOG}}
 [uxweb]
 listen = $sockPath
 pm = static

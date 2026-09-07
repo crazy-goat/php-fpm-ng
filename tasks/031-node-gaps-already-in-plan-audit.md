@@ -11,7 +11,7 @@ accountable for them.
 application server and ends with a `## Klasyfikacja` section that sorts every
 finding into three buckets. This task only looks at the first bucket, `### Już
 w planie` (six items). The other two buckets (`Do rozpoznania, ale nie w
-roadmapie`, `Świadomie nie traktować jako brak kompatybilności`) are
+in the roadmap`, `Deliberately not treated as a compatibility gap`) are
 deliberately out of scope here — they are exploration or non-goals, not
 commitments.
 

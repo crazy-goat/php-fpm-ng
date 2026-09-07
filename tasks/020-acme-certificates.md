@@ -15,7 +15,7 @@ remaining piece that normally requires another process.
 TLS termination with a static certificate exists — `http.tls_cert`,
 `http.tls_key`, `http.tls_min_version`, a session-ticket key shared across
 gateway processes (`sapi/fpmng/fpm/fpm_http_tls.c`). ACME was scoped out at
-that point on purpose. `docs/NOTES.md` section 5 still says "TLS na końcu",
+that point on purpose. `docs/NOTES.md` section 5 still says "TLS at the end",
 which predates that work.
 
 ## The split

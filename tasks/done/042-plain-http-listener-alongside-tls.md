@@ -26,7 +26,7 @@ once:
   be reachable over plain HTTP on port 80 — the CA will not follow a redirect
   to a port it did not ask for) and for redirecting human traffic to HTTPS
 
-`docs/NOTES.md`, section 3l, flags this exactly: "sprawdzić, czy 'jeden pool,
+`docs/NOTES.md`, section 3l, flags this exactly: "check whether 'one pool,
 jeden port' wystarcza". It does not, and the answer shapes the configuration
 file that the whole project is selling.
 

@@ -76,6 +76,75 @@ static int fpm_http_tls_resolve_min_version(const char *min_version)
 	return -1;
 }
 
+/* Installs every X.509 block found in cert_pem into ctx, in file order: the
+ * first block as the leaf (SSL_CTX_use_certificate(), same as before this
+ * fix), every block after it as a chain certificate
+ * (SSL_CTX_add_extra_chain_cert()) so a fullchain.pem's intermediates are
+ * actually sent to the client instead of being read into memory
+ * (fpm_http_tls_load()) and then never installed -- that was the bug
+ * (task 039). Shared by fpm_http_tls_check() (throwaway validation ctx) and
+ * fpm_http_tls_ctx_new() (the real per-child ctx), so both parse and both
+ * serve exactly the same way.
+ *
+ * Decision (039, acceptance criterion 4): this does NOT verify that block 2
+ * is the issuer of block 1 or that the chain terminates anywhere -- it only
+ * requires each block to parse as an X.509 certificate. A file whose blocks
+ * are not actually a valid chain is therefore installed and served exactly
+ * as given, byte for byte, in file order; a broken chain shows up at the
+ * client (openssl s_client, curl, ...), not here. Rejecting it here would
+ * need path-building (X509_verify_cert() against a trust store), which does
+ * not exist at load time and would be a second, different kind of check from
+ * "does this key match this leaf" below.
+ *
+ * SSL_CTX_use_certificate() does not take ownership of the X509 it is given
+ * (caller must free it); SSL_CTX_add_extra_chain_cert() DOES take ownership
+ * of every cert passed to it (SSL_CTX_free() frees them), so those must not
+ * be freed here. */
+static int fpm_http_tls_install_chain(SSL_CTX *ctx, const char *cert_pem, size_t cert_len, const char **what)
+{
+	BIO *bio;
+	X509 *leaf;
+	X509 *extra;
+
+	bio = BIO_new_mem_buf(cert_pem, (int)cert_len);
+	if (!bio) {
+		*what = "cannot allocate BIO for the certificate PEM";
+		return -1;
+	}
+
+	leaf = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+	if (!leaf) {
+		BIO_free(bio);
+		*what = "certificate is not a valid PEM X.509 certificate";
+		return -1;
+	}
+	if (SSL_CTX_use_certificate(ctx, leaf) != 1) {
+		X509_free(leaf);
+		BIO_free(bio);
+		*what = "certificate rejected by OpenSSL";
+		return -1;
+	}
+	X509_free(leaf);
+
+	while ((extra = PEM_read_bio_X509(bio, NULL, NULL, NULL)) != NULL) {
+		if (SSL_CTX_add_extra_chain_cert(ctx, extra) != 1) {
+			X509_free(extra);
+			BIO_free(bio);
+			*what = "intermediate certificate rejected by OpenSSL";
+			return -1;
+		}
+	}
+	/* PEM_read_bio_X509() returning NULL here is the ordinary "no more PEM
+	 * blocks in the BIO" end condition, not necessarily an error; it leaves
+	 * PEM_R_NO_START_LINE on OpenSSL's error queue, which would otherwise
+	 * surface as a bogus error the next time something calls ERR_get_error()
+	 * (e.g. libevent's TLS error logging on a later, unrelated handshake). */
+	ERR_clear_error();
+	BIO_free(bio);
+
+	return 0;
+}
+
 /* Parsuje cert+klucz z pamieci do jednorazowego SSL_CTX i sprawdza, ze
  * pasuja do siebie. Zwraca 0/-1, `what` opisuje co sie nie udalo (do
  * komunikatu wolajacego), NIGDY tresc klucza. */
@@ -84,7 +153,6 @@ static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char 
 {
 	SSL_CTX *ctx;
 	BIO *bio;
-	X509 *cert = NULL;
 	EVP_PKEY *key = NULL;
 
 	*what = NULL;
@@ -94,17 +162,7 @@ static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char 
 		return -1;
 	}
 
-	bio = BIO_new_mem_buf(cert_pem, (int)cert_len);
-	if (bio) {
-		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-		BIO_free(bio);
-	}
-	if (!cert) {
-		*what = "certificate is not a valid PEM X.509 certificate";
-		goto out;
-	}
-	if (SSL_CTX_use_certificate(ctx, cert) != 1) {
-		*what = "certificate rejected by OpenSSL";
+	if (fpm_http_tls_install_chain(ctx, cert_pem, cert_len, what) != 0) {
 		goto out;
 	}
 
@@ -126,9 +184,6 @@ static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char 
 		goto out;
 	}
 out:
-	if (cert) {
-		X509_free(cert);
-	}
 	if (key) {
 		EVP_PKEY_free(key);
 	}
@@ -235,8 +290,8 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 {
 	SSL_CTX *ctx;
 	BIO *bio;
-	X509 *cert = NULL;
 	EVP_PKEY *key = NULL;
+	const char *what = NULL;
 
 	ctx = SSL_CTX_new(TLS_server_method());
 	if (!ctx) {
@@ -244,32 +299,30 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 		return NULL;
 	}
 
-	bio = BIO_new_mem_buf(tls->cert_pem, (int)tls->cert_len);
-	if (bio) {
-		cert = PEM_read_bio_X509(bio, NULL, NULL, NULL);
-		BIO_free(bio);
+	/* Already validated once in the master (fpm_http_tls_load(), which calls
+	 * the same fpm_http_tls_check() / fpm_http_tls_install_chain()); getting
+	 * a failure here means something changed the in-memory bytes since then,
+	 * which should be impossible -- fail loudly rather than silently serve
+	 * plain HTTP or an incomplete chain. */
+	if (fpm_http_tls_install_chain(ctx, tls->cert_pem, tls->cert_len, &what) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot rebuild TLS context in gateway child: %s", pool, what);
+		SSL_CTX_free(ctx);
+		return NULL;
 	}
+
 	bio = BIO_new_mem_buf(tls->key_pem, (int)tls->key_len);
 	if (bio) {
 		key = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
 		BIO_free(bio);
 	}
-	if (!cert || !key || SSL_CTX_use_certificate(ctx, cert) != 1 || SSL_CTX_use_PrivateKey(ctx, key) != 1 ||
-			SSL_CTX_check_private_key(ctx) != 1) {
-		/* Already validated once in the master (fpm_http_tls_load()); getting
-		 * here means something changed the in-memory bytes, which should be
-		 * impossible -- fail loudly rather than silently serve plain HTTP. */
+	if (!key || SSL_CTX_use_PrivateKey(ctx, key) != 1 || SSL_CTX_check_private_key(ctx) != 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot rebuild TLS context in gateway child", pool);
-		if (cert) {
-			X509_free(cert);
-		}
 		if (key) {
 			EVP_PKEY_free(key);
 		}
 		SSL_CTX_free(ctx);
 		return NULL;
 	}
-	X509_free(cert);
 	EVP_PKEY_free(key);
 
 	SSL_CTX_set_min_proto_version(ctx, tls->min_version);

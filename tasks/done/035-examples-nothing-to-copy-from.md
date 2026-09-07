@@ -161,3 +161,89 @@ themselves.
   vs. `EXPOSE 9001`) is worth fixing as part of this task regardless of
   which example replaces it, since it is the one piece of configuration
   this project currently ships and it doesn't run as documented.
+
+## Outcome (2026-09-07)
+
+Built both tiers under `examples/`, plus fixed the `docker/fpm.conf` /
+`docker/Dockerfile.scratch` port mismatch directly (`listen` changed from
+`0.0.0.0:9000` to `0.0.0.0:9001`).
+
+### What was built
+
+- `examples/README.md` -- index, plus the exact build recipe (matches
+  `.github/workflows/build-matrix.yml`) to produce `php-fpm-ng` once and
+  copy it next to whichever example's `Dockerfile` is used.
+- `examples/combined/` -- Tier 1: one `fpm-ng.conf` with `[app]`
+  (`pool.type = http`), `[tick]` (`pool.type = cron`, `* * * * *`),
+  `[worker]` (`pool.type = supervisor`) and `[metrics]`
+  (`pool.type = status`), one `Dockerfile`, one `docker run`.
+- `examples/http/`, `examples/cron/`, `examples/supervisor/`,
+  `examples/status/` -- Tier 2: one pool type each, each config under 20
+  lines. `http` includes a `generate-cert.sh` for a self-signed cert (not
+  committed -- see `.gitignore`).
+- Not `FROM scratch`: task 004 (open) has not yet verified a static build
+  for `sapi/fpmng`, so every example's `Dockerfile` ships the dynamically-
+  linked binary CI actually produces, on `ubuntu:24.04` (same glibc as the
+  GitHub-hosted runner that builds it -- a `debian:bookworm-slim` runtime
+  base was tried first and failed with a `GLIBC_2.38 not found` error,
+  confirming the two toolchains aren't ABI-compatible here).
+
+### What was verified, and how (all done locally against a binary built
+from this branch, `php-8.5.9`, `--enable-fpmng --enable-session
+--with-openssl`, matching CI exactly -- not "the file exists on disk")
+
+**Tier 1** (`examples/combined/`), one running container, `docker run -d
+... -p 18080:8080 -p 18081:8081 fpmng-combined-example`:
+
+1. One image, one config, one `docker run` started all four pool types;
+   `docker logs` showed `fpm is running` / `ready to handle connections`
+   with no warnings (after adding `process_control_timeout = 15s` to
+   satisfy a real startup warning that appeared on the first run).
+2. All four observed together, same instance, same time window:
+   `curl http://localhost:18080/index.php` answered while `[tick]` and
+   `[worker]` were both already active; `curl http://localhost:18081/status`
+   in the same window returned one JSON body with `app`, `tick` and
+   `worker` all present at once.
+3. `curl /index.php` returned the expected body; `curl /hello.txt` was
+   served statically (`http.static`); `curl /nonexistent-route` fell
+   through to `http.front_controller` with `PATH_INFO=/nonexistent-route`;
+   `cron-tick.txt` and `cron.log` inside the container gained one line at
+   `09:56:00` and a second at `09:57:00` (real minute boundaries, not
+   synthetic); `worker-heartbeat.txt` updated continuously (pid 12,
+   `uptime` in `/status` climbing 6s -> 74s across the same window).
+
+**Tier 2**, one container each:
+
+1. `http`: `docker build` + `./generate-cert.sh` + `docker run`, then
+   `curl -ks https://localhost:18443/hello.txt` (static, confirmed
+   `HTTP/1.1 200 OK` over a real `TLSv1.3` handshake, `curl -v` showing
+   `subject: CN=php-fpm-ng.example`) and
+   `curl -ks https://localhost:18443/index.php` (PHP, body showed
+   `scheme: https`, confirming `$_SERVER['HTTPS']` from `fpm_http.c:589`).
+2. `cron`: started, waited for a real minute boundary (`sleep 65`),
+   `docker exec ... cat /www/data/tick.txt` and `.../cron.log` both showed
+   a fresh `09:54:00`-timestamped line.
+3. `supervisor`: `docker exec ... cat /www/data/heartbeat.txt` showed pid 7
+   alive; `kill -9 7` inside the container, then the same file showed pid
+   26 with a fresh timestamp within 3s -- `supervisor.restart = always`
+   confirmed restarting after a forced exit.
+4. `status`: baseline `curl /status` showed `"requests":0`; three
+   `curl /index.php` against the paired `[app]` pool, then `/status` showed
+   `"requests":3` and `/metrics` showed
+   `fpmng_pool_requests_total{pool="app"} 3` -- real data from the other
+   running pool, not a static shape.
+5. Each Tier 2 config is 8-20 lines, one pool section (plus `[global]`),
+   verified readable in full without cross-referencing the other examples.
+
+### Left out / scoped down
+
+- No static-musl / `FROM scratch` build for these examples -- that's task
+  004 (open), not re-litigated here; noted explicitly in
+  `examples/README.md`'s "Why not `docker/`" section instead of silently
+  diverging from the existing `docker/Dockerfile.scratch` pattern.
+- CI wiring for the two tiers (task 002's follow-up, per this task's own
+  "Dependency" section) is not done here -- left for a follow-up task so
+  examples don't silently drift again. Filed as a natural next step, not
+  as part of this PR.
+- `pool.type = proxy` and ACME are out of scope per the task's own
+  "Explicitly out of scope" section; nothing built here touches either.

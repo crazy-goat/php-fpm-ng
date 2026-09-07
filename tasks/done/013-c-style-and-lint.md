@@ -72,6 +72,9 @@ Establish enforceable style and static-analysis rules that match php-src.
   drifted). GCC diagnostic pragma + comment; `misc-redundant-expression` left
   off so clang-tidy does not re-flag the same idiom.
 - CI: non-blocking `lint` job in `.github/workflows/build-matrix.yml`
-  (`continue-on-error: true`), artifact `lint-c-report`.
+  (`continue-on-error: true`), artifact `lint-c-report`. First CI run showed
+  every TU failing on missing `config.h`; `build/lint-c.sh` was fixed to stub
+  that header onto `php_config.h` and reuse `EXTRA_INCLUDES` from the
+  configured php-src Makefile.
 - Contributor how-to: `sapi/fpmng/README.md` → `./build/lint-c.sh`.
 - Not done (out of scope): bulk reformat; hard-fail on findings.

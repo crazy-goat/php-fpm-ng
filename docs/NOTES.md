@@ -2163,7 +2163,10 @@ negligible); no other process pays this cost.
 - `SIGQUIT` graceful handling for `status` — no custom handler, with the same
   side effect as supervisor/cron without a `SIGQUIT` handler (delay until the
   master's `SIGTERM` escalation, see 3p scenario 2). Accepted because `status`
-  has no in-flight work to finish.
+  has no in-flight work to finish. This delay no longer occurs on reload: 3x
+  below has the master send `SIGTERM` to `status` directly instead of waiting
+  for escalation. It still applies to an explicit graceful stop or log
+  rotation, which keep the ordinary `SIGQUIT` fan-out.
 - "How many cron runs were skipped due to overlap" — see above; deliberately
   omitted as unnecessary complexity with `pm.max_children = 1`.
 - `SO_RCVTIMEO`/`SO_SNDTIMEO` (5s, `FPM_POOL_STATUS_IO_TIMEOUT_SEC`) on the

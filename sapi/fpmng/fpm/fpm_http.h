@@ -3,16 +3,16 @@
 
 struct fpm_worker_pool_s;
 
-/* Bramki HTTP dla jednego poola (patrz fpm_http.c). Wolane przez typ poola
- * "http" z fpm_pool_type.c, ze strony mastera, przed forkiem workerow. */
+/* HTTP gateways for one pool (see fpm_http.c). Called by the "http" pool type
+ * from fpm_pool_type.c, on the master side, before worker fork. */
 int fpm_http_init_pool(struct fpm_worker_pool_s *wp);
 
-/* Jak wyzej, ale dla executora obslugujacego wiele requestow na worker.
- * capacity = liczba rownoleglych polaczen FastCGI do calego poola. */
+/* As above, but for an executor handling multiple requests per worker.
+ * capacity = number of concurrent FastCGI connections for the whole pool. */
 int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity);
 
-/* Walidacja dyrektyw http.* dla pool.type = http, wolana z fpm_pool_type.c
- * (.validate) w fazie sprawdzania configu, przed forkiem czegokolwiek. */
+/* Validate http.* directives for pool.type = http, called from the pool type's
+ * .validate hook in fpm_pool_type.c while checking configuration, before any fork. */
 int fpm_http_validate_pool(struct fpm_worker_pool_s *wp);
 
 #endif

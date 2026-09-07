@@ -1,10 +1,10 @@
 /* fpm-ng: pool types.
  *
- * Dodanie nowego typu poola to nowy plik plus jedna linia w tablicy
- * fpm_pool_types[] w fpm_pool_type.c. Nic poza tym — w szczegolnosci ani
- * logika walidacji w fpm_conf.c, ani fpm_children.c nie moga o typie wiedziec.
- * Dlatego wymagania konfiguracyjne typ deklaruje DANYMI (pola ponizej),
- * a nie kodem rozsianym po walidacji.
+ * Adding a new pool type means one new file plus one line in the
+ * fpm_pool_types[] table in fpm_pool_type.c. Nothing else — in particular,
+ * neither validation logic in fpm_conf.c nor fpm_children.c may know about a
+ * type. Therefore a type declares configuration requirements as DATA (the
+ * fields below), not as code scattered through validation.
  */
 
 #ifndef FPM_POOL_TYPE_H
@@ -14,28 +14,28 @@
 
 struct fpm_worker_pool_s;
 
-/* Stan poola, ktory NIE obsluguje requestow (serves_requests = 0). Dla
- * poolow typu fcgi/http (serves_requests = 1) ksztalt danych jest inny
- * (idle/active/requests ze scoreboardu) i ten enum ich nie dotyczy — patrz
- * pool.status w fpm_pool_status.c. */
+/* State for a pool that does NOT handle requests (serves_requests = 0). For
+ * fcgi/http pools (serves_requests = 1), the data shape is different
+ * (idle/active/requests from the scoreboard) and this enum does not apply —
+ * see pool.status in fpm_pool_status.c. */
 enum fpm_pool_state_e {
-	FPM_POOL_STATE_RUNNING = 0,	/* aktualnie wykonuje skrypt */
-	FPM_POOL_STATE_BACKOFF,		/* czeka w opoznieniu przed kolejna proba (supervisor) */
-	FPM_POOL_STATE_GAVE_UP,		/* poddal sie na dobre, prawdziwa porazka (supervisor.restart_max) */
-	FPM_POOL_STATE_FINISHED,	/* zakonczyl sie planowo, nie porazka (restart=never/on-failure+sukces) */
-	FPM_POOL_STATE_IDLE		/* nic teraz nie robi, czeka na kolejny termin (cron miedzy przebiegami) */
+	FPM_POOL_STATE_RUNNING = 0,	/* currently running a script */
+	FPM_POOL_STATE_BACKOFF,		/* waiting during backoff before the next attempt (supervisor) */
+	FPM_POOL_STATE_GAVE_UP,		/* gave up permanently, real failure (supervisor.restart_max) */
+	FPM_POOL_STATE_FINISHED,	/* exited as planned, not a failure (restart=never/on-failure+success) */
+	FPM_POOL_STATE_IDLE		/* doing nothing now, waiting for the next due time (cron between runs) */
 };
 
-/* Wypelniane przez fpm_pool_type_s.status() dla typow serves_requests = 0.
- * Dokladnie tyle pol, ile pool.type = status faktycznie pokazuje — patrz
- * docs/NOTES.md sekcja 3u. */
+/* Filled by fpm_pool_type_s.status() for types with serves_requests = 0.
+ * Exactly the fields that pool.type = status actually shows — see
+ * docs/NOTES.md section 3u. */
 struct fpm_pool_status_s {
 	enum fpm_pool_state_e state;
-	time_t last_start;		/* epoch, 0 = jeszcze nigdy nie startowal */
+	time_t last_start;		/* epoch, 0 = never started */
 	int last_exit_code;
-	unsigned consecutive_failures;	/* kolejne exit_code != 0 z rzedu */
-	time_t next_run;		/* tylko cron: najblizszy termin z harmonogramu */
-	time_t backoff_until;		/* tylko supervisor: koniec biezacego backoffu */
+	unsigned consecutive_failures;	/* consecutive exit_code != 0 */
+	time_t next_run;		/* cron only: next due time from the schedule */
+	time_t backoff_until;		/* supervisor only: end of current backoff */
 	unsigned has_last_exit_code:1;
 	unsigned has_next_run:1;
 	unsigned has_backoff_until:1;
@@ -44,22 +44,22 @@ struct fpm_pool_status_s {
 struct fpm_pool_type_s {
 	const char *name;
 
-	/* Wymagania konfiguracyjne — czytane przez fpm_conf.c, ktory nie zna typow. */
-	unsigned requires_listen:1;		/* pool musi miec adres nasluchiwania */
-	unsigned requires_pm:1;			/* pool musi miec sensowne pm/pm.max_children */
-	unsigned serves_requests:1;		/* liczy sie w scoreboardzie requestow */
+	/* Configuration requirements — read by fpm_conf.c, which does not know types. */
+	unsigned requires_listen:1;		/* pool must have a listening address */
+	unsigned requires_pm:1;			/* pool must have meaningful pm/pm.max_children */
+	unsigned serves_requests:1;		/* counted in the request scoreboard */
 
-	/* Ten typ, w SWOIM WLASNYM dziecku, czyta scoreboard CUDZEGO poola
-	 * (pool.type = status: idle/active/requests innych poolow serves_requests=1).
-	 * Ustawione tylko dla "status". Patrz fpm_children.c:
-	 * fpm_child_resources_use() domyslnie zwalnia (munmap) scoreboardy
-	 * WSZYSTKICH poolow poza wlasnym zaraz po forku, jako higiena pamieci —
-	 * bezpieczne, bo do dzis zaden typ nie czytal cudzego scoreboardu. Ta
-	 * flaga wylacza to zwalnianie WYLACZNIE dla dziecka poola TEGO typu
-	 * (sprawdzane przez fpm_pool_type_of(child->wp) w fpm_children.c) — kazdy
-	 * inny pool w tym samym configu (w tym zwykly fcgi/http) nadal zwalnia
-	 * cudze scoreboardy dokladnie jak dzis, niezaleznie od tego, czy
-	 * gdziekolwiek w configu istnieje pool status. Patrz docs/NOTES.md 3u. */
+	/* This type, in its OWN child, reads another pool's FOREIGN scoreboard
+	 * (pool.type = status: idle/active/requests of other serves_requests=1 pools).
+	 * Set only for "status". See fpm_children.c:
+	 * fpm_child_resources_use() normally releases (munmaps) scoreboards for ALL
+	 * pools except its own immediately after fork, as memory hygiene — safe because
+	 * no type had read a foreign scoreboard until now. This flag disables the
+	 * release ONLY for a child of THIS type (checked through
+	 * fpm_pool_type_of(child->wp) in fpm_children.c); every other pool in the same
+	 * configuration (including ordinary fcgi/http) still releases foreign
+	 * scoreboards exactly as today, whether or not a status pool exists anywhere
+	 * in the configuration. See docs/NOTES.md 3u. */
 	unsigned reads_foreign_scoreboards:1;
 
 	/* Status flags are established on the master-side listening socket before
@@ -67,55 +67,55 @@ struct fpm_pool_type_s {
 	 * and its children, so a child must not change this after fork. */
 	unsigned listening_socket_nonblocking:1;
 
-	/* Dyrektywy, ktorych ten typ nie obsluguje. Zakonczona NULL-em, moze byc NULL.
-	 * Lista ODRZUCEN, nie dopuszczen — dzieki temu nowa dyrektywa jest domyslnie
-	 * dozwolona wszedzie i nie psuje zgodnosci wstecznej przez przeoczenie.
-	 * Nazwa konczaca sie kropka dziala jak prefiks: "pm." lapie cale pm.*. */
+	/* Directives unsupported by this type. NULL-terminated, may be NULL.
+	 * A REJECTION list, not an allow-list — a new directive is allowed everywhere
+	 * by default, so an omission does not break backward compatibility.
+	 * A name ending in a dot works as a prefix: "pm." matches all pm.*. */
 	const char *const *rejects;
 
-	/* Sprawdzenia specyficzne dla typu; NULL = brak. Zwraca 0 albo -1. */
+	/* Type-specific checks; NULL = none. Returns 0 or -1. */
 	int (*validate)(struct fpm_worker_pool_s *wp);
 
-	/* Strona mastera, po walidacji a przed forkiem dzieci; NULL = nic. */
+	/* Master side, after validation and before child fork; NULL = none. */
 	int (*init_main)(struct fpm_worker_pool_s *wp);
 
-	/* Co robi dziecko zamiast petli accept; NULL = zwykla petla FastCGI.
-	 * Nie wraca. */
+	/* What the child does instead of the accept loop; NULL = ordinary FastCGI
+	 * loop. Does not return. */
 	void (*child_main)(struct fpm_worker_pool_s *wp);
 
-	/* Jak sie ten typ pokazuje w pool.type = status, gdy serves_requests = 0.
-	 * NULL dla typow serves_requests = 1 (te maja idle/active/requests ze
-	 * scoreboardu, czytane bezposrednio przez fpm_pool_status.c) i dla
-	 * typow bez sensownego stanu do pokazania (np. status sam siebie).
-	 * Wolane z INNEGO procesu (poola status), wiec musi czytac wylacznie
-	 * z pamieci dzielonej / configu, nigdy z pamieci lokalnej procesu. */
+	/* How this type appears in pool.type = status when serves_requests = 0.
+	 * NULL for serves_requests = 1 types (they have idle/active/requests from the
+	 * scoreboard, read directly by fpm_pool_status.c) and for types without a
+	 * meaningful state to show (for example, status itself). Called from ANOTHER
+	 * process (the status pool), so it must read only shared memory/configuration,
+	 * never process-local memory. */
 	void (*status)(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 };
 
-/* Typ o tej nazwie albo NULL. Pusta nazwa daje typ domyslny (fastcgi) — bez
- * tego kazdy istniejacy fpm.conf przestalby dzialac. "fcgi" pozostaje aliasem
- * kompatybilnosci dla "fastcgi". */
+/* Type with this name, or NULL. An empty name gives the default (fastcgi) type
+ * — without this every existing fpm.conf would stop working. "fcgi" remains a
+ * compatibility alias for "fastcgi". */
 const struct fpm_pool_type_s *fpm_pool_type_get(const char *name);
 
-/* Efektywny wariant wynikajacy z pool.type + pool.executor albo NULL. */
+/* Effective variant resulting from pool.type + pool.executor, or NULL. */
 const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp);
 
-/* Sprawdza, czy pool.executor jest dozwolony i znany. */
+/* Check whether pool.executor is allowed and known. */
 int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp);
 
-/* Nazwy znanych typow, do komunikatu o bledzie. Bufor nalezy do wolajacego. */
+/* Names of known types for an error message. Buffer belongs to the caller. */
 void fpm_pool_type_list(char *buf, size_t len);
 
-/* Typ danego poola; nigdy NULL po udanej walidacji konfiguracji. */
+/* Type of the given pool; never NULL after successful configuration validation. */
 const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp);
 
 /* Apply the type's listening-socket status flags in the master, before fork. */
 int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp);
 
-/* Pool biezacego dziecka, albo NULL poza dzieckiem. */
+/* Pool of the current child, or NULL outside a child. */
 struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 
-/* Odrzuca dyrektywy nieobslugiwane przez ten typ. 0 albo -1. */
+/* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
 #endif

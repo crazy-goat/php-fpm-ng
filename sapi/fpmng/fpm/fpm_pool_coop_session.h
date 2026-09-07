@@ -1,11 +1,11 @@
-/* fpm-ng: izolacja stanu ext/session per request na executorze coop
- * (fiber). Patrz fpm_pool_coop_session.c po uzasadnienie i ostrzezenia.
+/* fpm-ng: isolate ext/session state per request in the coop executor (Fiber).
+ * See fpm_pool_coop_session.c for rationale and warnings.
  *
- * Zasada tego pliku: zero twardej zaleznosci linkera od ext/session. Nigdzie
- * tu nie ma ZEND_EXTERN_MODULE_GLOBALS(ps) ani odwolania do symboli
- * ps_globals / session_module_entry po nazwie — modul session moze byc
- * wkompilowany statycznie, zaladowany jako session.so, albo nie zaladowany
- * wcale, i we wszystkich trzech przypadkach ten plik sie linkuje.
+ * Rule of this file: zero hard linker dependency on ext/session. There is no
+ * ZEND_EXTERN_MODULE_GLOBALS(ps) or reference to ps_globals /
+ * session_module_entry by name here — the session module may be statically
+ * compiled, loaded as session.so, or not loaded at all, and this file links in
+ * all three cases.
  */
 
 #ifndef FPM_POOL_COOP_SESSION_H
@@ -13,45 +13,42 @@
 
 struct fpm_coop_req_s;
 
-/* Wolac raz z fpm_coop_container_start(), PO tym jak kontener przeszedl
- * przez wlasny php_request_startup() (ini juz zarejestrowane, modul session
- * — jesli jest — juz po WLASNYM RINIT kontenera, EG(ini_directives) i
- * module_registry juz wypelnione). Brak modulu session nie jest bledem:
- * sciezka po prostu zostaje wylaczona (patrz fpm_coop_session_enabled) i
- * reszta hookow ponizej kosztuje wtedy jedno sprawdzenie bool. */
+/* Call once from fpm_coop_container_start(), AFTER the container has gone
+ * through its own php_request_startup() (INI is registered, and the session
+ * module — if present — has completed its OWN container RINIT; EG(ini_directives)
+ * and module_registry are populated). A missing session module is not an error:
+ * the path is simply disabled (see fpm_coop_session_enabled), and the remaining
+ * hooks below cost one boolean check. */
 void fpm_coop_session_container_start(void);
 
-/* Wolac w fpm_coop_req_enter(), w bloku "if (ctx->live)": kopiuje zapisany
- * stan requestu (ctx->session_globals) do globali modulu session. Wolac
- * PRZED wznowieniem/uruchomieniem requestu. No-op, gdy session nie jest
- * zaladowane. */
+/* Call from fpm_coop_req_enter(), in the "if (ctx->live)" block: copy the saved
+ * request state (ctx->session_globals) into the session module globals. Call
+ * BEFORE resuming/starting the request. No-op when session is not loaded. */
 void fpm_coop_session_req_enter(struct fpm_coop_req_s *ctx);
 
-/* Wolac w fpm_coop_req_leave(), w bloku "if (ctx->live)", PRZED
- * fpm_coop_base_tables_restore(): kopiuje BIEZACE globale session do
- * ctx->session_globals. Wolac PO zejsciu requestu z procesora (zawieszenie
- * albo koniec). No-op, gdy session nie jest zaladowane. */
+/* Call from fpm_coop_req_leave(), in the "if (ctx->live)" block, BEFORE
+ * fpm_coop_base_tables_restore(): copy the CURRENT session globals into
+ * ctx->session_globals. Call AFTER the request leaves the processor (suspension
+ * or end). No-op when session is not loaded. */
 void fpm_coop_session_req_save(struct fpm_coop_req_s *ctx);
 
-/* Wolac z fpm_coop_base_tables_restore() (obok symbol_table/included_files):
- * globale session <- stan bazowy kontenera. No-op, gdy session nie jest
- * zaladowane. */
+/* Call from fpm_coop_base_tables_restore() (next to symbol_table/included_files):
+ * session globals <- container base state. No-op when session is not loaded. */
 void fpm_coop_session_base_restore(void);
 
-/* Wolac na POCZATKU fpm_coop_req_run(), obok tworzenia swiezej symbol_table,
- * PO ustawieniu ctx->live = true: zapisuje stan bazowy do globali session i
- * woła RINIT modulu session na tym swiezym stanie — to jest ten sam RINIT,
- * ktory klasyczny model wola raz na request; tutaj wolany per request mimo
- * jednego php_request_startup() na proces. Honoruje session.auto_start (patrz
- * uzasadnienie w .c). No-op, gdy session nie jest zaladowane. */
+/* Call at the START of fpm_coop_req_run(), next to creation of a fresh symbol
+ * table, AFTER setting ctx->live = true: save the base state to session globals
+ * and call session-module RINIT on this fresh state — the same RINIT that the
+ * classic model calls once per request; here it is called per request despite
+ * one php_request_startup() per process. Honors session.auto_start (see the
+ * rationale in .c). No-op when session is not loaded. */
 void fpm_coop_session_request_startup(void);
 
-/* Wolac PO fpm_coop_execute(), PRZED zniszczeniem EG(symbol_table) —
- * RSHUTDOWN robi php_session_flush() (I/O) i czyta $_SESSION, ktora musi
- * jeszcze zyc w tablicy symboli. Wolac PRZED oddaniem globali (ctx->live
- * wciaz true — zawieszenie w trakcie flush przelacza sie przez normalny
- * fpm_coop_req_leave/enter, przezroczyscie). No-op, gdy session nie jest
- * zaladowane. */
+/* Call AFTER fpm_coop_execute(), BEFORE destroying EG(symbol_table) — RSHUTDOWN
+ * calls php_session_flush() (I/O) and reads $_SESSION, which must still live in
+ * the symbol table. Call BEFORE returning globals (ctx->live is still true — a
+ * suspension during flush switches through normal fpm_coop_req_leave/enter,
+ * transparently). No-op when session is not loaded. */
 void fpm_coop_session_request_shutdown(void);
 
 #endif

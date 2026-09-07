@@ -1,33 +1,32 @@
-/* fpm-ng: pool.executor = fiber — sleep()/usleep()/time_nanosleep() bez
- * blokowania calego procesu. SPIKE — patrz docs/spike-sleep-yield-report.md.
+/* fpm-ng: pool.executor = fiber — sleep()/usleep()/time_nanosleep() without
+ * blocking the whole process. SPIKE — see docs/spike-sleep-yield-report.md.
  *
- * Podmienia zif_handler trzech funkcji wewnetrznych w CG(function_table) na
- * wariant, ktory (gdy fpm_pool_fiber_can_wait() pozwala) zawiesza fiber
- * requestu przez fpm_pool_fiber_wait_wake() zamiast wolac prawdziwe
- * sleep()/usleep()/nanosleep() i blokowac cala petle zdarzen. Poza fiberem
- * requestu (albo gdy przelaczanie jest zablokowane) wola oryginalny handler
- * bez zadnej zmiany — prawdziwe blokujace zachowanie.
+ * Replaces the zif_handler of three internal functions in CG(function_table)
+ * with a variant that, when fpm_pool_fiber_can_wait() permits, suspends the
+ * request fiber through fpm_pool_fiber_wait_wake() instead of calling real
+ * sleep()/usleep()/nanosleep() and blocking the whole event loop. Outside the
+ * request fiber (or when switching is blocked), calls the original handler
+ * unchanged — the real blocking behavior.
  *
- * CZEGO TO NIE OBEJMUJE (swiadomie, patrz raport):
- *  - pcntl_sleep() — dziala na SIGALRM/pauzie procesu, nie ma odpowiednika
- *    per-request w tym modelu (patrz fpm_pool_coop.c: funkcje pcntl.*
- *    procesowe i tak sa disable_functions w kontenerze fiber);
- *  - stream_select()/stream_socket_* z timeoutem na gniazdach spoza
- *    transportow tcp/unix — to juz teren fpm_pool_fiber_xport.c;
- *  - time_sleep_until() — nie ma jej w tablicy funkcji, gdy HAVE_NANOSLEEP
- *    jest wylaczone razem z time_nanosleep(); gdy jest, i tak pod spodem
- *    zapetla nanosleep() na EINTR — z braku realnego sygnalu w tym modelu
- *    nigdy by sie nie zapetlala, ale nie zostala pokryta w tym spike'u
- *    (nie ma jej w wymaganiach zadania — dopisac gdy zajdzie potrzeba,
- *    tym samym wzorcem co ponizej).
+ * WHAT THIS DOES NOT COVER (deliberately, see the report):
+ *  - pcntl_sleep() — works through SIGALRM/process pause and has no per-request
+ *    equivalent in this model (see process-wide pcntl.* functions in
+ *    fpm_pool_coop.c; they are disabled in the Fiber container anyway);
+ *  - stream_select()/stream_socket_* with a timeout on sockets outside the
+ *    tcp/unix transports — that is fpm_pool_fiber_xport.c's territory;
+ *  - time_sleep_until() — it is not in the function table when HAVE_NANOSLEEP
+ *    is disabled together with time_nanosleep(); when present, it loops over
+ *    nanosleep() on EINTR, which cannot loop in this model without a real signal,
+ *    but was not covered by this spike (it is not in the task requirements — add
+ *    it if needed, using the same pattern below).
  */
 
 #ifndef FPM_POOL_FIBER_SLEEP_H
 #define FPM_POOL_FIBER_SLEEP_H 1
 
-/* Wolac RAZ na dziecko poola fiber, po fpm_pool_fiber_xport_install().
- * Brakujace funkcje (np. nanosleep niedostepny na tej platformie) sa
- * pomijane z ostrzezeniem w logu — nigdy nie fatalnym bledem. */
+/* Call ONCE per Fiber-pool child, after fpm_pool_fiber_xport_install(). Missing
+ * functions (for example, nanosleep unavailable on the platform) are skipped
+ * with a log warning — never a fatal error. */
 void fpm_pool_fiber_sleep_install(void);
 
 #endif

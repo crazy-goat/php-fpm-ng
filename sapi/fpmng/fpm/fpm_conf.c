@@ -173,6 +173,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.timezone",             &fpm_conf_set_string,      WPO(cron_timezone) },
 	{ "cron.log",                  &fpm_conf_set_string,      WPO(cron_log) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
+	{ "http.plain_listen",         &fpm_conf_set_string,      WPO(http_plain_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
@@ -184,6 +185,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
+	{ "http.tls_sni_cert",         &fpm_conf_set_string,      WPO(http_tls_sni_cert) },
 	{ "http.tls_reload_check",     &fpm_conf_set_time,        WPO(http_tls_reload_check) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
@@ -667,7 +669,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->process_dumpable = 0;
 	wp->config->clear_env = 1;
 	wp->config->decorate_workers_output = 1;
-	wp->config->request_cpu_tracking = 1;	/* fpm-ng: domyslnie jak upstream */
+	wp->config->request_cpu_tracking = 1;	/* fpm-ng: upstream default */
 	wp->config->supervisor_processes = 1;
 	wp->config->supervisor_restart_delay = 1;
 	wp->config->supervisor_restart_delay_max = 60;
@@ -675,7 +677,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT w fpm_http.c */
 	wp->config->http_static = 1;
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS w fpm_http.c */
-	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: patrz komentarz przy polu w fpm_conf.h */
+	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: see the field comment in fpm_conf.h */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif
@@ -697,9 +699,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	return wp->config;
 }
 
-/* fpm-ng: dopisuje nazwe dyrektywy do listy ";a;b;". Delimitery po obu stronach
- * sprawiaja, ze wyszukiwanie nie da falszywego trafienia na prefiksie
- * ("pm" kontra "pm.max_children"). */
+/* fpm-ng: append a directive name to the ";a;b;" list. Delimiters on both
+ * sides prevent a prefix false positive ("pm" versus "pm.max_children"). */
 int fpm_conf_note_directive(struct fpm_worker_pool_config_s *wpc, const char *name)
 {
 	size_t have = wpc->set_directives ? strlen(wpc->set_directives) : 0;
@@ -767,6 +768,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_timezone);
 	free(wpc->cron_log);
 	free(wpc->http_listen);
+	free(wpc->http_plain_listen);
 	free(wpc->http_allowed_clients);
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
@@ -941,8 +943,8 @@ static int fpm_conf_process_all_pools(void)
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		const struct fpm_pool_type_s *type;
 
-		/* pool.type + pool.executor — rozwiazane raz, dalej sterujemy sie
-		 * wymaganiami efektywnej kombinacji. */
+		/* pool.type + pool.executor — resolve once; from here on, use the
+		 * requirements of the effective combination. */
 		type = fpm_pool_type_get(wp->config->type);
 		if (!type) {
 			char known[256];
@@ -969,12 +971,12 @@ static int fpm_conf_process_all_pools(void)
 			}
 		}
 
-		/* dyrektywy, ktorych ten typ nie obsluguje — odrzucamy, nie ignorujemy */
+		/* Directives unsupported by this type — reject, do not ignore. */
 		if (0 > fpm_pool_type_check_directives(wp, type)) {
 			return -1;
 		}
 
-		/* sprawdzenia specyficzne dla typu */
+		/* Type-specific checks. */
 		if (type->validate && 0 > type->validate(wp)) {
 			return -1;
 		}
@@ -1629,7 +1631,7 @@ static void fpm_conf_ini_parser_entry(zval *name, zval *value, void *arg) /* {{{
 				return;
 			}
 
-			/* fpm-ng: zapamietaj, ze ta dyrektywa zostala faktycznie ustawiona */
+			/* fpm-ng: remember that this directive was actually set */
 			if (in_pool && 0 > fpm_conf_note_directive(current_wp->config, parser->name)) {
 				zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry '%s'", ini_filename, ini_lineno, parser->name);
 				*error = 1;

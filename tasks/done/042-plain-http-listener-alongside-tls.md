@@ -26,8 +26,8 @@ once:
   be reachable over plain HTTP on port 80 — the CA will not follow a redirect
   to a port it did not ask for) and for redirecting human traffic to HTTPS
 
-`docs/NOTES.md`, section 3l, flags this exactly: "sprawdzić, czy 'jeden pool,
-jeden port' wystarcza". It does not, and the answer shapes the configuration
+`docs/NOTES.md`, section 3l, flags this exactly: "check whether 'one pool,
+one port' is enough". It does not, and the answer shapes the configuration
 file that the whole project is selling.
 
 ## Problem
@@ -40,7 +40,7 @@ Candidate shapes, none chosen:
   `http.static` serving the challenge directory, and another on :443. Costs a
   second pool block plus duplicated settings in a config file that is supposed
   to fit an application in forty lines (`docs/NOTES.md`, section 6,
-  "Konfiguracja").
+  "Configuration").
 - **A second listener inside one pool.** One `http.listen` for TLS plus
   something like a plain-HTTP companion port. Keeps the config small, but the
   gateway's listener setup is currently one socket per gateway process.
@@ -68,3 +68,16 @@ Candidate shapes, none chosen:
 
 - The ACME protocol itself. This task only makes the port and the path
   reachable; 046 fills the challenge response in.
+
+## Outcome
+
+Implemented `http.plain_listen` as an optional second listener in the same HTTP
+pool. It accepts only GET and HEAD, redirects ordinary requests with 308 while
+preserving host, path, and query, and locally returns 404 for the reserved
+`/.well-known/acme-challenge/` path until task 046 supplies challenge data.
+The plain listener has no path to the FastCGI request queue.
+
+`build/test-http-plain-listener.sh` exercises three gateways with
+`http.reuseport` both disabled and enabled. It verifies TLS application
+dispatch, redirect preservation, the empty redirect body, and the local ACME
+404 without application content.

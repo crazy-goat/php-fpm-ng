@@ -1,72 +1,67 @@
 /* fpm-ng: pool.type = cron.
  *
- * Patrz fpm_pool_cron.h i docs/NOTES.md dla uzasadnienia projektowego.
+ * See fpm_pool_cron.h and docs/NOTES.md for the design rationale.
  *
- * KLUCZOWA DECYZJA UPRASZCZAJACA: zadnych timerow po stronie mastera. Dziecko
- * tego poola, po starcie:
- *   1. liczy najblizszy termin z harmonogramu (fpm_cron_schedule_next()),
- *   2. spi do niego, przerywalnie — SIGTERM budzi je i konczy czysto,
- *   3. wykonuje skrypt RAZ,
- *   4. konczy proces.
- * FPM wskrzesza je istniejaca maszyneria (pm = static, pm.max_children = 1,
- * fpm_children.c respawnuje bezwarunkowo i natychmiast, NIETKNIETE), nowy
- * proces liczy kolejny termin od "teraz" i znowu spi. Dzieki temu NIE
- * dotykamy fpm_children.c ani fpm_events.c, dokladnie jak supervisor.
+ * KEY SIMPLIFYING DECISION: no timers on the master side. After starting, a
+ * child of this pool:
+ *   1. calculates the next due time from the schedule (fpm_cron_schedule_next()),
+ *   2. sleeps until then, interruptibly — SIGTERM wakes it and it exits cleanly,
+ *   3. runs the script ONCE,
+ *   4. exits.
+ * FPM respawns it through the existing machinery (pm = static,
+ * pm.max_children = 1, fpm_children.c respawns unconditionally and immediately,
+ * UNTOUCHED); the new process calculates the next due time from "now" and sleeps
+ * again. This means we do NOT touch fpm_children.c or fpm_events.c, exactly as
+ * supervisor does.
  *
- * Konsekwencja tej decyzji, nieoczywista, wiec zapisana wprost: cron nie ma
- * ZADNEGO stanu sterujacego w pamieci dzielonej. Minimalny stan historyczny
- * (ostatni start/wynik) istnieje wylacznie dla pool.type = status i nigdy nie
- * wplywa na zachowanie crona. Kazdy nowy proces liczy termin WYLACZNIE z
- * biezacego zegara i harmonogramu, nigdy z tego, co robil poprzednik.
- * To jest tez powod, dla
- * ktorego "nakladanie sie przebiegow" nie jest polityka, ktora trzeba
- * napisac: przy pm.max_children = 1 drugi proces tego poola fizycznie nie
- * istnieje, dopoki pierwszy nie skonczy dzialania (exit()) — fpm_children.c
- * odpala nastepny dopiero PO smierci poprzedniego. Nie ma wiec przebiegu,
- * z ktorym mialby sie nalozyc kolejny.
+ * A non-obvious consequence of this decision, recorded explicitly: cron has NO
+ * control state in shared memory. Minimal historical state (last start/result)
+ * exists only for pool.type = status and never affects cron behavior. Every new
+ * process calculates its due time ONLY from the current clock and schedule,
+ * never from what its predecessor did. This is also why "overlapping runs" is
+ * not a policy that needs to be written: with pm.max_children = 1, a second
+ * process of this pool physically does not exist until the first finishes
+ * (exit()) — fpm_children.c starts the next one only AFTER the previous one dies.
+ * There is therefore no run with which another could overlap.
  *
- * CZAS: domyslnie UTC (fpm_cron_schedule_next() uzywa gmtime_r()).
+ * TIME: UTC by default (fpm_cron_schedule_next() uses gmtime_r()).
  *
- * cron.timezone (task 033a, 2026-09-07): opcjonalna nazwa strefy IANA (np.
- * "Europe/Warsaw"). Gdy ustawiona, fpm_cron_schedule_next() liczy pola
- * harmonogramu wzgledem czasu lokalnego tej strefy (localtime_r() zamiast
- * gmtime_r()), tymczasowo podmieniajac TZ w srodowisku procesu i
- * przywracajac je zaraz potem (patrz fpm_cron_schedule.c — bezpieczne
- * wylacznie dlatego, ze zarowno dziecko poola cron, jak i watek petli
- * zdarzen mastera licza jeden harmonogram na raz, nigdy rownolegle).
- * Konsekwencja przejscia DST jest ZAMIERZONA, nie bledem: godzina, ktora
- * DST pomija (przestawienie do przodu) nigdy nie dopasuje sie do zadnej
- * chwili UTC, wiec przebieg po prostu nie wystapi; godzina, ktora DST
- * powtarza (przestawienie do tylu) moze dopasowac sie dwa razy tego samego
- * dnia. To jest DOKLADNIE zachowanie zwyklego crona uruchomionego w czasie
- * lokalnym — akceptowana usterka raz w roku, nie cos, co ta funkcja
- * probuje naprawiac dalej. Bez cron.timezone (domyslnie) nic sie nie
- * zmienia: UTC, bez DST, bez tego kompromisu.
+ * cron.timezone (task 033a, 2026-09-07): optional IANA zone name (for example,
+ * "Europe/Warsaw"). When set, fpm_cron_schedule_next() interprets schedule
+ * fields in that zone's local time (localtime_r() instead of gmtime_r()),
+ * temporarily replacing TZ in the process environment and restoring it
+ * immediately afterwards (see fpm_cron_schedule.c — safe ONLY because both a
+ * cron-pool child and the master's event-loop thread calculate one schedule at
+ * a time, never concurrently).
+ * The DST transition behavior is INTENTIONAL, not a bug: a time skipped by DST
+ * (spring-forward) never matches any UTC instant, so that run simply does not
+ * occur; a time repeated by DST (fall-back) may match twice on the same day.
+ * This is EXACTLY the behavior of ordinary cron running in local time — an
+ * accepted once-a-year imperfection, not something this function tries to fix.
+ * Without cron.timezone (the default), nothing changes: UTC, no DST, no such
+ * trade-off.
  *
- * NIE NADRABIAMY zgubionych przebiegow. fpm_cron_schedule_next() zawsze
- * liczy "co jest najblizej w przyszlosci od teraz", nigdy "co przegapilem
- * odkad ostatnio dzialalem" — jesli master byl wylaczony godzine, nastepny
- * przebieg to najblizszy przyszly termin, nie dwanascie zaleglych. Ktos
- * kiedys bedzie chcial to dodac — to bedzie zmiana projektowa, nie poprawka.
- * Task 033b (2026-09-07): rozstrzygniete jako trwale ograniczenie, nie
- * defekt do naprawienia — patrz docs/cron.md. Operator polegajacy na cronie
- * dla czegos wrazliwego na czas (backup, wygasniecie czegos) ma o tym
- * przeczytac PRZED skonfigurowaniem poola, nie odkryc po fakcie.
+ * We do NOT CATCH UP missed runs. fpm_cron_schedule_next() always calculates
+ * "what is nearest in the future from now", never "what did I miss since I last
+ * ran" — if the master was off for an hour, the next run is the nearest future
+ * time, not twelve overdue runs. Someone may want to add that later — it will be
+ * a design change, not a fix. Task 033b (2026-09-07) settled this as a permanent
+ * limitation, not a defect to fix — see docs/cron.md. An operator relying on cron
+ * for something time-sensitive (a backup, an expiration) must read this BEFORE
+ * configuring the pool, not discover it afterwards.
  *
- * cron.log (task 033c, 2026-09-07): opcjonalna sciezka pliku, do ktorego
- * kazdy przebieg dopisuje jedna linie (start, kod wyjscia, czas trwania) —
- * patrz fpm_pool_cron_child_main(). To jest historia przebiegow, ktorej
- * pamiec dzielona ponizej CELOWO nie trzyma (patrz komentarz przy
- * fpm_cron_shared_s) — dopisywanie do pliku nie wymaga zadnego stanu
- * sterujacego i dziala nawet miedzy restartami mastera.
+ * cron.log (task 033c, 2026-09-07): optional file path to which every run
+ * appends one line (start, exit code, duration) — see fpm_pool_cron_child_main().
+ * This is run history, which the shared memory below deliberately does NOT keep
+ * (see the comment next to fpm_cron_shared_s) — appending to a file needs no
+ * control state and works even across master restarts.
  *
- * cron.timeout uzywa DOKLADNIE tego samego mechanizmu co
- * supervisor.stop_timeout (fpm_pool_watchdog_arm(), wydzielone do
- * fpm_pool_watchdog.c) — pidfd, watchdog-fork, SIGKILL po przekroczeniu.
- * Wykonanie skryptu uzywa tej samej maszynerii co supervisor
- * (fpm_pool_script.c) — brak SG(request_info) z FastCGI, nadpisania
- * sapi_module bezpieczne z tego samego powodu (ten proces nigdy nie wraca do
- * petli accept).
+ * cron.timeout uses EXACTLY the same mechanism as supervisor.stop_timeout
+ * (fpm_pool_watchdog_arm(), factored into fpm_pool_watchdog.c) — pidfd, watchdog
+ * fork, SIGKILL after the limit. Script execution uses the same machinery as
+ * supervisor (fpm_pool_script.c) — no SG(request_info) from FastCGI; sapi_module
+ * overrides are safe for the same reason (this process never returns to the
+ * accept loop).
  */
 
 #include "fpm_config.h"
@@ -93,15 +88,16 @@
 #include "fpm_shm.h"
 #include "zlog.h"
 
-/* Lista ODRZUCEN, nie dopuszczen — patrz fpm_pool_type_check_directives()
- * w fpm_pool_type.c. Ten sam zestaw powodow co dla supervisora (patrz
- * fpm_pool_supervisor.c): "pm"/"pm." odrzucone w calosci, bo pm.max_children
- * jest generowane programowo (zawsze 1) i pozwolenie userowi ustawic je
- * rownolegle dawaloby dwa zrodla prawdy; "listen"/"listen." bo ten typ nie
- * nasluchuje niczego; "ping."/"access." bo bez listen nie ma czego pingowac
- * ani logowac jako "dostep"; dyrektywy requestowe (request_terminate_timeout,
- * request_slowlog_*, slowlog, security.limit_extensions) bo nie ma tu
- * requestow FastCGI; "supervisor." bo to dyrektywy DRUGIEGO typu poola. */
+/* Rejected, not allowed, directives — see fpm_pool_type_check_directives()
+ * in fpm_pool_type.c. The same reasons as for supervisor (see
+ * fpm_pool_supervisor.c): "pm"/"pm." are rejected entirely because
+ * pm.max_children is generated programmatically (always 1), and allowing the
+ * user to set it too would create two sources of truth; "listen"/"listen."
+ * because this type listens to nothing; "ping."/"access." because without
+ * listen there is nothing to ping or log as "access"; request directives
+ * (request_terminate_timeout, request_slowlog_*, slowlog,
+ * security.limit_extensions) because there are no FastCGI requests; and
+ * "supervisor." because those directives belong to the OTHER pool type. */
 const char *const fpm_pool_cron_rejects[] = {
 	"listen",
 	"listen.",
@@ -121,21 +117,20 @@ const char *const fpm_pool_cron_rejects[] = {
 	NULL
 };
 
-/* Stan WYLACZNIE do odczytu przez pool.type = status (docs/NOTES.md 3u).
- * W odroznieniu od supervisora, cron nadal nie ma zadnej polityki, ktora
- * czytalaby to z powrotem — kazdy nowy proces liczy termin wylacznie z
- * biezacego zegara i harmonogramu (patrz komentarz na gorze pliku),
- * niezaleznie od tego, co tu jest zapisane. Dokladnie trzy pola, tyle ile
- * status faktycznie pokazuje: next_run NIE jest tu trzymane, bo daje sie
- * policzyc w kazdej chwili z c->cron_parsed_schedule + time(NULL), bez
- * zadnego stanu — patrz fpm_pool_cron_status(). */
+/* State read ONLY by pool.type = status (docs/NOTES.md 3u). Unlike supervisor,
+ * cron still has no policy that reads this back — every new process calculates
+ * the due time only from the current clock and schedule (see the comment at the
+ * top of the file), regardless of what is stored here. Exactly three fields,
+ * as many as status actually shows: next_run is NOT stored here because it can
+ * be calculated at any time from c->cron_parsed_schedule + time(NULL), without
+ * any state — see fpm_pool_cron_status(). */
 struct fpm_cron_shared_s {
-	unsigned char running;		/* 1 = skrypt aktualnie sie wykonuje */
-	time_t last_run;		/* epoch startu ostatniego przebiegu, 0 = jeszcze zaden */
-	int last_exit_code;		/* kod wyjscia ostatniego ZAKONCZONEGO przebiegu */
+	unsigned char running;		/* 1 = the script is currently running */
+	time_t last_run;		/* epoch start of the last run, 0 = none yet */
+	int last_exit_code;		/* exit code of the last COMPLETED run */
 	unsigned char has_last_exit_code;
-	unsigned consecutive_failures;	/* kolejne exit_code != 0 z rzedu; na nic nie wplywa,
-					 * to tylko sygnal dla czlowieka/monitoringu */
+	unsigned consecutive_failures;	/* consecutive exit_code != 0; affects nothing,
+					 * it is only a signal for a human/monitoring */
 };
 
 struct fpm_cron_registry_s {
@@ -164,13 +159,13 @@ static volatile sig_atomic_t cron_term_requested = 0;
 static void fpm_pool_cron_sigterm(int signo) /* {{{ */
 {
 	(void) signo;
-	/* Tylko flaga — budzi sleep() ponizej. W odroznieniu od supervisora nie
-	 * uzbrajamy tu watchdoga: nie ma "biezacej iteracji, ktora moze sie nie
-	 * skonczyc sama" do pilnowania podczas SNU (nic sie nie wykonuje), a
-	 * podczas WYKONYWANIA skryptu granice ustawia cron.timeout (uzbrojony
-	 * osobno, patrz fpm_pool_cron_run()), nie SIGTERM. Standardowa eskalacja
-	 * mastera (process_control_timeout, patrz docs/NOTES.md 3p) dotyczy tego
-	 * typu tak samo jak kazdego innego. */
+	/* Only a flag — wakes the sleep() below. Unlike supervisor, do not arm a
+	 * watchdog here: there is no "current iteration that may fail to finish by
+	 * itself" to supervise during SLEEP (nothing is executing), and while the
+	 * script is RUNNING the limit is cron.timeout (armed separately, see
+	 * fpm_pool_cron_run()), not SIGTERM. Normal master escalation
+	 * (process_control_timeout, see docs/NOTES.md 3p) applies to this type just
+	 * as it does to every other type. */
 	cron_term_requested = 1;
 }
 /* }}} */
@@ -193,8 +188,8 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		c->cron_timeout = 0;
 	}
 
-	/* Zly harmonogram = config odrzucony TERAZ, ze startu, z czytelnym
-	 * komunikatem — nigdy po cichu, nigdy "mniej wiecej" w runtime. */
+	/* Bad schedule = reject the configuration NOW, at startup, with a clear
+	 * message — never silently and never "approximately" at runtime. */
 	parsed = calloc(1, sizeof(*parsed));
 	if (!parsed) {
 		zlog(ZLOG_ERROR, "[pool %s] cron: out of memory parsing schedule", c->name);
@@ -208,13 +203,12 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	free(c->cron_parsed_schedule);
 	c->cron_parsed_schedule = parsed;
 
-	/* cron.timezone: odrzucamy nieznana strefe TERAZ, tak samo jak zly
-	 * cron.schedule powyzej, zamiast po cichu spasc na UTC w runtime.
-	 * tzset()/localtime_r() nie zglaszaja bledu dla nieznanej nazwy strefy
-	 * (po prostu zachowuja sie jak dla UTC), wiec jedyny sposob, zeby
-	 * odrzucic literowke z czytelnym komunikatem, to sprawdzic istnienie
-	 * pliku danych strefy w zoneinfo (ta sama baza, ktora localtime_r()
-	 * i tak by uzyl). */
+	/* cron.timezone: reject an unknown zone NOW, just like the invalid
+	 * cron.schedule above, instead of silently falling back to UTC at runtime.
+	 * tzset()/localtime_r() do not report an error for an unknown zone name (they
+	 * simply behave as for UTC), so the only way to reject a typo with a clear
+	 * message is to check that the zoneinfo data file exists (the same database
+	 * localtime_r() would use anyway). */
 	if (c->cron_timezone && *c->cron_timezone) {
 		const char *tzdir = getenv("TZDIR");
 		char path[512];
@@ -228,11 +222,11 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 	}
 
-	/* Decyzja projektowa (patrz NOTES.md i fpm_pool_cron.h): cron mapuje sie
-	 * na pm = static + pm.max_children = 1, ZAWSZE 1 — nie ma dyrektywy
-	 * "liczba instancji" jak supervisor.processes, bo nakladanie sie
-	 * przebiegow ma byc niemozliwe Z KONSTRUKCJI, a nie z polityki. Uzytkownik
-	 * nie ustawia pm.* sam (odrzucone przez rejects powyzej). */
+	/* Design decision (see NOTES.md and fpm_pool_cron.h): cron maps to
+	 * pm = static + pm.max_children = 1, ALWAYS 1 — there is no "number of
+	 * instances" directive like supervisor.processes because overlapping runs
+	 * must be impossible BY CONSTRUCTION, not by policy. The user does not set
+	 * pm.* (rejected by the rejects list above). */
 	c->pm = PM_STYLE_STATIC;
 	c->pm_max_children = 1;
 
@@ -250,16 +244,16 @@ int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
-	/* Patrz identyczny komentarz w fpm_pool_supervisor_init_main() —
-	 * cron.timeout ma dokladnie ten sam problem z SIGTERM do MASTERA:
-	 * process_control_timeout globalnego mastera eskaluje do SIGKILL zanim
-	 * cron.timeout zdazy cokolwiek zrobic. */
+	/* See the identical comment in fpm_pool_supervisor_init_main() — cron.timeout
+	 * has exactly the same problem with SIGTERM to the MASTER: the global
+	 * master's process_control_timeout escalates to SIGKILL before cron.timeout
+	 * can do anything. */
 	if (fpm_global_config.process_control_timeout < wp->config->cron_timeout) {
 		zlog(ZLOG_WARNING,
-			"[pool %s] cron.timeout = %ds, ale global process_control_timeout = %ds; "
-			"SIGTERM/SIGQUIT wyslane do MASTERA (np. `docker stop`) ubije biezacy przebieg przez "
-			"eskalacje mastera, zanim cron.timeout zdazy zadzialac — ustaw process_control_timeout "
-			">= %ds w [global], jesli SIGTERM/docker stop ma dac temu poolowi czas na dokonczenie przebiegu",
+			"[pool %s] cron.timeout = %ds but global process_control_timeout = %ds; "
+			"SIGTERM/SIGQUIT sent to the MASTER (e.g. `docker stop`) kills the current run through "
+			"the master's escalation before cron.timeout can act — set process_control_timeout "
+			">= %ds in [global] if SIGTERM/docker stop should give this pool time to finish its run",
 			wp->config->name, wp->config->cron_timeout, fpm_global_config.process_control_timeout,
 			wp->config->cron_timeout);
 	}
@@ -277,12 +271,12 @@ int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
-/* Spi az do `next` (epoch UTC), przerywalnie SIGTERM-em. Zwraca 1 jesli
- * doczekalismy terminu, 0 jesli obudzil nas SIGTERM (wtedy trzeba konczyc
- * czysto, bez uruchamiania skryptu). Jedno wywolanie sleep() na "skok" zamiast
- * petli co sekunde — harmonogramy miesieczne dawalyby miliony bezuzytecznych
- * przebudzen, a sleep() jest i tak przerywane KAZDYM dostarczonym sygnalem,
- * dla ktorego mamy zainstalowany handler (patrz fpm_pool_cron_sigterm()). */
+/* Sleep until `next` (UTC epoch), interruptibly by SIGTERM. Returns 1 if the
+ * time was reached, 0 if SIGTERM woke us (then exit cleanly without running the
+ * script). One sleep() call per "jump" instead of a per-second loop — monthly
+ * schedules would otherwise cause millions of useless wakeups, and sleep() is
+ * interrupted by every delivered signal for which we installed a handler (see
+ * fpm_pool_cron_sigterm()). */
 static int fpm_pool_cron_sleep_until(time_t next) /* {{{ */
 {
 	for (;;) {
@@ -366,9 +360,9 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	int exit_code;
 
 	if (!c->cron_parsed_schedule) {
-		/* Nie powinno sie zdarzyc — validate() parsuje harmonogram RAZ, przy
-		 * starcie, zanim cokolwiek sforkuje. Bez tego nie ma jak policzyc
-		 * kolejnego terminu, wiec lepiej odmowic niz zgadywac. */
+		/* Should not happen — validate() parses the schedule ONCE at startup,
+		 * before anything forks. Without it there is no way to calculate the next
+		 * due time, so refuse rather than guess. */
 		zlog(ZLOG_ERROR, "[pool %s] cron: no parsed schedule, refusing to run", c->name);
 		exit(FPM_EXIT_SOFTWARE);
 	}
@@ -382,25 +376,24 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	next = fpm_cron_schedule_next(c->cron_parsed_schedule, time(NULL), c->cron_timezone);
 	if (next == (time_t) -1) {
-		/* Ostatnia siatka bezpieczenstwa — validate() akceptuje skladnie, nie
-		 * "czy harmonogram moze kiedykolwiek zajsc". Patrz fpm_cron_schedule.h. */
+		/* Last safety net — validate() accepts syntax, not "whether the schedule
+		 * can ever occur". See fpm_cron_schedule.h. */
 		zlog(ZLOG_ERROR, "[pool %s] cron: schedule '%s' never matches, refusing to run",
 			c->name, c->cron_schedule);
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
 	if (!fpm_pool_cron_sleep_until(next)) {
-		/* SIGTERM w trakcie snu — konczymy czysto, bez uruchamiania skryptu.
-		 * Zaden proces-dziecko nie zostal jeszcze utworzony, wiec nie ma
-		 * czego sierocic. */
+		/* SIGTERM during sleep — exit cleanly without starting the script.
+		 * No child process has been created yet, so there is nothing to orphan. */
 		exit(FPM_EXIT_OK);
 	}
 
-	/* cron.timeout: watchdog identyczny z supervisor.stop_timeout (ten sam
-	 * kod, fpm_pool_watchdog.c), tylko uzbrojony PRZED uruchomieniem skryptu
-	 * zamiast w handlerze SIGTERM. Jesli skrypt skonczy sie sam w czasie —
-	 * watchdog wykrywa to przez pidfd (POLLIN przy zakonczeniu PROCESU, nie
-	 * skryptu — patrz fpm_pool_watchdog.h) i nic nie robi. Jesli nie — SIGKILL. */
+	/* cron.timeout: watchdog identical to supervisor.stop_timeout (same code,
+	 * fpm_pool_watchdog.c), but armed BEFORE starting the script instead of in a
+	 * SIGTERM handler. If the script finishes by itself in time, the watchdog
+	 * detects it through pidfd (POLLIN when the PROCESS ends, not the script — see
+	 * fpm_pool_watchdog.h) and does nothing. Otherwise: SIGKILL. */
 	if (c->cron_timeout > 0) {
 		fpm_pool_watchdog_arm(getpid(), (unsigned) c->cron_timeout);
 	}
@@ -424,19 +417,19 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		fpm_pool_cron_log_run(c->cron_log, started, time(NULL), exit_code);
 	}
 
-	/* Kod wyjscia != 0 musi byc widoczny na poziomie ostrzezenia, nie debug —
-	 * pojedyncza instancja na VPS-ie nie ma klastra, ktory to wylapie. */
+	/* exit_code != 0 must be visible at warning level, not debug — a single
+	 * instance on a VPS has no cluster to catch it. */
 	if (exit_code != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] cron: script '%s' exited with non-zero code %d",
 			c->name, c->cron_script, exit_code);
 	}
 
-	/* Zawsze normalny exit(0), niezaleznie od exit_code skryptu — cron nie ma
-	 * polityki restart/backoff jak supervisor (patrz komentarz na gorze
-	 * pliku), wiec exit_code skryptu nie steruje niczym poza tym logiem.
-	 * fpm_children.c (pm = static, max_children = 1, NIETKNIETE) odradza
-	 * ten proces bezwarunkowo i natychmiast; nowy proces sam policzy
-	 * nastepny termin od biezacego zegara. */
+	/* Always normal exit(0), regardless of the script's exit_code — cron has no
+	 * restart/backoff policy like supervisor (see the comment at the top of the
+	 * file), so the script exit_code controls nothing beyond this log.
+	 * fpm_children.c (pm = static, max_children = 1, UNTOUCHED) respawns this
+	 * process unconditionally and immediately; the new process calculates the
+	 * next due time from the current clock. */
 	exit(FPM_EXIT_OK);
 }
 /* }}} */
@@ -447,12 +440,11 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 
 	memset(out, 0, sizeof(*out));
 
-	/* next_run NIE jest odczytywane z shared — liczymy je NA BIEZACO,
-	 * dokladnie tak samo jak sam cron liczy termin swojego kolejnego
-	 * przebiegu (fpm_cron_schedule_next() od "teraz"). To dziala nawet gdy
-	 * shared == NULL (np. init_main jeszcze sie nie wykonal) i jest jedynym
-	 * powodem, dla ktorego next_run nie wymagalo zadnego stanu w pamieci
-	 * dzielonej — patrz docs/NOTES.md 3u i 3r. */
+	/* next_run is NOT read from shared — calculate it ON DEMAND, exactly as cron
+	 * itself calculates the next run (fpm_cron_schedule_next() from "now"). This
+	 * works even when shared == NULL (for example, init_main has not run yet) and
+	 * is the only reason next_run needs no shared-memory state — see
+	 * docs/NOTES.md 3u and 3r. */
 	if (wp->config->cron_parsed_schedule) {
 		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL), wp->config->cron_timezone);
 		out->has_next_run = 1;

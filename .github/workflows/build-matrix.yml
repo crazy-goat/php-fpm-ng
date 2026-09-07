@@ -18,8 +18,8 @@ on:
         default: ""
 
 env:
-  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinowany tagiem,
-  # nie galezia"). Bumping this is a deliberate version bump, not an automatic
+  # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinned by
+  # tag, not branch"). Bumping this is a deliberate version bump, not an automatic
   # moving target — see docs/NOTES.md:2748-2755 on what a patch vs. minor bump
   # requires.
   PHP_SRC_REPO: https://github.com/php/php-src.git
@@ -27,8 +27,8 @@ env:
 
 jobs:
   # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
-  # revision. build/prepare.sh already exits 1 and prints "BLAD: latka nie
-  # naklada sie..." on a genuine failure (build/prepare.sh:108-109) — this job
+  # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
+  # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
     runs-on: ubuntu-latest
@@ -260,3 +260,21 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
+
+  plain-http-listener:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify the redirect-only plain HTTP companion (task 042)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"

@@ -177,6 +177,7 @@ struct fpm_http_gateway_s {
 	char *listen_address;			/* where the pool takes FastCGI */
 	char *docroot;
 	int listen_fd;
+	int plain_listen_fd;
 	int backlog;
 	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (http.reuseport) */
 	unsigned nproc;
@@ -188,11 +189,12 @@ struct fpm_http_gateway_s {
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
+	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
-	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = nikomu nie ufamy, see fpm_http_forwarded.h */
-	char *access_log_path;				/* http.access_log; NULL = wylaczony */
-	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL w masterze */
-	char *front_controller;			/* http.front_controller; puste = fallback wylaczony (dzisiejsze zachowanie) */
+	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
+	char *access_log_path;				/* http.access_log; NULL = disabled */
+	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL in the master */
+	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
 
 	/* Pool's resolved 'user'/'group' (wp->set_uid/set_gid/set_user, copied
 	 * once in the master by fpm_http_gateway_settings() -- fpm_unix_conf_wp()
@@ -205,17 +207,17 @@ struct fpm_http_gateway_s {
 	char *drop_user;
 
 #ifdef HAVE_FPM_HTTP_TLS
-	/* http.tls_cert/http.tls_key; NULL = zwykly HTTP, dokladnie jak dzis.
-	 * gw->tls jest wczytany DO PAMIECI w masterze, PRZED forkiem pierwszego
-	 * dziecka (fpm_http_tls_load()) -- fork() go kopiuje. gw->tls_ctx jest
-	 * per-proces: kazde dziecko buduje WLASNY SSL_CTX z tych samych bajtow
-	 * (fpm_http_tls_ctx_new(), wolane z fpm_http_gateway_run()), zeby
-	 * wspolny klucz ticketow w gw->tls dzialal dla wznowienia sesji miedzy
-	 * procesami, patrz fpm_http_tls.h. */
-	struct fpm_http_tls_s *tls;			/* NULL w dziecku po nieudanym starcie */
-	SSL_CTX *tls_ctx;				/* tylko w dziecku, NULL w masterze */
-	/* NULL gdy http.tls_reload_check = 0 albo alokacja shm sie nie udala --
-	 * bramka wtedy dziala dokladnie tak jak przed tym taskiem (task 040). */
+	/* http.tls_cert/http.tls_key; NULL = plain HTTP, exactly as today.
+	 * gw->tls is loaded INTO MEMORY in the master, BEFORE the first child forks
+	 * (fpm_http_tls_load()) — fork() copies it. gw->tls_ctx is per-process: each
+	 * child builds its OWN SSL_CTX from the same bytes
+	 * (fpm_http_tls_ctx_new(), called from fpm_http_gateway_run()), so the shared
+	 * ticket key in gw->tls supports session resumption across processes; see
+	 * fpm_http_tls.h. */
+	struct fpm_http_tls_s *tls;			/* NULL in the child after a failed startup */
+	SSL_CTX *tls_ctx;				/* only in the child, NULL in the master */
+	/* NULL when http.tls_reload_check = 0 or shared-memory allocation failed —
+	 * the gateway then behaves exactly as it did before this task (task 040). */
 	struct fpm_http_tls_reload_s *reload;
 #endif
 
@@ -1053,13 +1055,13 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 }
 
 /* ------------------------------------------------------------------------ *
- * Odpowiedzi, ktore bramka daje SAMA, bez zajmowania workera.
+ * Responses the gateway provides ITSELF, without occupying a worker.
  *
- * To jest jeden punkt na wszystkie takie przypadki. Dzis pliki statyczne;
- * pozniej doloza sie tu wyzwanie ACME (/.well-known/acme-challenge/) i
- * /status. Nie robic z tego doraznych if-ow w fpm_http_request — kazdy z tych
- * przypadkow potrzebuje dokladnie tego samego: rozwiazac sciezke, sprawdzic
- * zawieranie w katalogu, odpowiedziec bez FastCGI.
+ * This is the single point for all such cases. Today: static files; later, add
+ * the ACME challenge (/.well-known/acme-challenge/) and /status here. Do not
+ * turn these into ad-hoc if statements in fpm_http_request — each case needs
+ * exactly the same steps: resolve the path, check containment in the document
+ * root, and respond without FastCGI.
  * ------------------------------------------------------------------------ */
 
 static const struct {
@@ -1346,13 +1348,73 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 		return 0;			/* let fpm_http_build_request produce the 400 */
 	}
 
-	/* Kolejnosc bedzie miala znaczenie, gdy dojda ACME i /status: najpierw
-	 * rzeczy o ustalonej sciezce, dopiero na koncu pliki z dysku. */
+	/* Order will matter once ACME and /status arrive: fixed-path things
+	 * first, files from disk only at the end. */
 	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr, script_missing);
 
 	free(path);
 
 	return answered;
+}
+
+static int fpm_http_is_acme_challenge(struct evhttp_request *req)
+{
+	const struct evhttp_uri *uri = evhttp_request_get_evhttp_uri(req);
+	const char *path = uri ? evhttp_uri_get_path(uri) : NULL;
+	static const char prefix[] = "/.well-known/acme-challenge/";
+
+	return path && !strncmp(path, prefix, sizeof(prefix) - 1);
+}
+
+static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+{
+	const char *host = evhttp_find_header(evhttp_request_get_input_headers(req), "Host");
+	const char *uri = evhttp_request_get_uri(req);
+	struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
+	char *location;
+	char *redirect_host = NULL;
+	size_t len;
+
+	(void)arg;
+	if (fpm_http_is_acme_challenge(req)) {
+		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
+		return;
+	}
+	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
+		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		return;
+	}
+	if (host[0] == '[') {
+		const char *end = strchr(host, ']');
+
+		if (!end || (end[1] && end[1] != ':')) {
+			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			return;
+		}
+		redirect_host = strndup(host, (size_t)(end - host + 1));
+	} else {
+		const char *colon = strrchr(host, ':');
+
+		redirect_host = colon ? strndup(host, (size_t)(colon - host)) : strdup(host);
+	}
+	if (!redirect_host || !*redirect_host) {
+		free(redirect_host);
+		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		return;
+	}
+
+	len = sizeof("https://") - 1 + strlen(redirect_host) + strlen(uri) + 1;
+	location = malloc(len);
+	if (!location) {
+		free(redirect_host);
+		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		return;
+	}
+	snprintf(location, len, "https://%s%s", redirect_host, uri);
+	evhttp_add_header(headers, "Location", location);
+	evhttp_send_reply(req, 308, "Permanent Redirect", NULL);
+	free(location);
+	free(redirect_host);
 }
 
 static void fpm_http_request(struct evhttp_request *req, void *arg)
@@ -1399,10 +1461,10 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 #endif
 	effective_addr = fwd.remote_addr[0] ? fwd.remote_addr : peer_addr;
 
-	/* Odpowiedzi lokalne najpierw: nie ma sensu budowac parametrow FastCGI ani
-	 * zajmowac slotu workera dla pliku, ktory oddamy sami. -1 = "nie sprawdzano"
-	 * (nie GET/HEAD, albo http.static = 0): fpm_http_build_request() wtedy sam
-	 * zdecyduje, czy potrzebuje wlasnego stat() dla http.front_controller. */
+	/* Local responses first: there is no point building FastCGI parameters or
+	 * occupying a worker slot for a file we will serve ourselves. -1 = "not
+	 * checked" (not GET/HEAD, or http.static = 0): fpm_http_build_request() then
+	 * decides whether it needs its own stat() for http.front_controller. */
 	{
 		int script_missing = -1;
 
@@ -1561,6 +1623,13 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		if (gw->listen_fd < 0) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
+		if (gw->plain_listen_address) {
+			close(gw->plain_listen_fd);
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, 1);
+			if (gw->plain_listen_fd < 0) {
+				exit(FPM_EXIT_SOFTWARE);
+			}
+		}
 	}
 
 	/* Everything above this line is the only reason the gateway ever needed
@@ -1608,6 +1677,21 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
 		exit(FPM_EXIT_SOFTWARE);
+	}
+	if (gw->plain_listen_fd >= 0) {
+		struct evhttp *plain = evhttp_new(gw->base);
+
+		if (!plain) {
+			exit(FPM_EXIT_SOFTWARE);
+		}
+		evhttp_set_allowed_methods(plain, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD);
+		evhttp_set_max_body_size(plain, 0);
+		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
+		evutil_make_socket_nonblocking(gw->plain_listen_fd);
+		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed for http.plain_listen", gw->pool);
+			exit(FPM_EXIT_SOFTWARE);
+		}
 	}
 
 	event_base_dispatch(gw->base);
@@ -1766,6 +1850,9 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		if (gw->listen_fd >= 0) {
 			close(gw->listen_fd);
 		}
+		if (gw->plain_listen_fd >= 0) {
+			close(gw->plain_listen_fd);
+		}
 		if (gw->upstreams_used) {
 			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
 		}
@@ -1786,6 +1873,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->front_controller);
 		free(gw->access_log_path);
 		free(gw->http_listen_override);
+		free(gw->plain_listen_address);
 		free(gw->pool);
 		free(gw->listen_address);
 		free(gw->docroot);
@@ -1797,10 +1885,11 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 
 static int cleanup_registered = 0;
 
-/* Dyrektywa ma pierwszenstwo, gdy faktycznie ustawiona (fpm_conf_directive_was_set —
- * z samej wartosci nie da sie odroznic "nieustawione" od "ustawione na domyslna");
- * env zostaje jako fallback dla wdrozen, ktore go juz uzywaja. http.allowed_clients
- * jest nowa dyrektywa i celowo bez fallbacku envowego. */
+/* The directive takes precedence when actually set
+ * (fpm_conf_directive_was_set — the value alone cannot distinguish "unset" from
+ * "set to the default"); env remains a fallback for deployments that already
+ * use it. http.allowed_clients is a new directive and deliberately has no
+ * environment fallback. */
 static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned *nproc_wanted, int *reuseport_out) /* {{{ */
 {
 	const char *env;
@@ -1846,6 +1935,9 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	} else if ((env = getenv("FPM_HTTP_LISTEN")) && *env) {
 		gw->http_listen_override = strdup(env);
 	}
+	if (wp->config->http_plain_listen && *wp->config->http_plain_listen) {
+		gw->plain_listen_address = strdup(wp->config->http_plain_listen);
+	}
 
 	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
 		gw->allowed_clients = strdup(wp->config->http_allowed_clients);
@@ -1883,7 +1975,8 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	 * fpm_http_gateway_spawn() forks the first child -- see fpm_http_tls.h. */
 	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
 		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
-			wp->config->http_tls_key, wp->config->http_tls_min_version);
+			wp->config->http_tls_key, wp->config->http_tls_min_version,
+			wp->config->http_tls_sni_cert);
 	}
 	if (gw->tls) {
 		/* http.tls_reload_check: unset -> a sensible non-zero default (task
@@ -1904,9 +1997,10 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 }
 /* }}} */
 
-/* Wolane raz na pool typu http, ze strony mastera, przed forkiem workerow.
- * capacity_override jest potrzebne executorom wielorequestowym: klasyczny
- * worker trzyma jedno polaczenie, Fiber wiele. 0 zachowuje limit liczby dzieci. */
+/* Called once per http pool by the master, before worker forks.
+ * capacity_override is needed by multi-request executors: a classic worker
+ * holds one connection, while a Fiber holds many. 0 preserves the child-count
+ * limit. */
 static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity_override) /* {{{ */
 {
 	char cwd[MAXPATHLEN];
@@ -1929,6 +2023,8 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 
 		gw = calloc(1, sizeof(*gw));
+		gw->listen_fd = -1;
+		gw->plain_listen_fd = -1;
 		gw->pool = strdup(wp->config->name);
 		gw->listen_address = strdup(wp->config->listen_address);
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
@@ -1943,6 +2039,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->trusted_proxies);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1972,6 +2069,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1986,6 +2084,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -2002,14 +2101,34 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
 			free(gw);
 			return 0;
 		}
-		/* Klasyczny worker obsluguje jedno polaczenie naraz; executor
-		 * wielorequestowy podaje wlasna pojemnosc niezalezna od liczby dzieci. */
+		if (gw->plain_listen_address) {
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport);
+			if (gw->plain_listen_fd < 0) {
+				close(gw->listen_fd);
+				fpm_http_acl_free(gw->acl);
+				free(gw->allowed_clients);
+				fpm_http_acl_free(gw->trusted_proxies_acl);
+				free(gw->trusted_proxies);
+				free(gw->front_controller);
+				free(gw->access_log_path);
+				free(gw->http_listen_override);
+				free(gw->plain_listen_address);
+				free(gw->pool);
+				free(gw->listen_address);
+				free(gw->docroot);
+				free(gw);
+				return 0;
+			}
+		}
+		/* A classic worker handles one connection at a time; a multi-request
+		 * executor supplies its own capacity independently of the child count. */
 		gw->nproc = MIN(nproc_wanted, workers);
 		gw->max_upstreams = capacity;
 		gw->upstreams_used = fpm_shm_alloc(sizeof(*gw->upstreams_used));
@@ -2023,6 +2142,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -2050,12 +2170,17 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			/* the master's socket would otherwise take its share of connections and never accept them */
 			close(gw->listen_fd);
 			gw->listen_fd = -1;
+			if (gw->plain_listen_fd >= 0) {
+				close(gw->plain_listen_fd);
+				gw->plain_listen_fd = -1;
+			}
 		}
 	}
 
-	/* Sprzatanie rejestrujemy raz, przy pierwszym poolu http.
-	 * PARENT_EXEC tez, bo reload robi execvp() i bez tego bramki zostalyby
-	 * osierocone, trzymajac port, na ktorym nowy master chce sie zbindowac. */
+	/* Register cleanup once, when the first http pool is initialized.
+	 * PARENT_EXEC too, because reload calls execvp() and without this the
+	 * gateways would remain orphaned while holding the port on which the new
+	 * master wants to bind. */
 	if (!cleanup_registered) {
 		if (0 > fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_http_cleanup, 0) ||
 		    0 > fpm_cleanup_add(FPM_CLEANUP_PARENT_EXEC, fpm_http_cleanup, 0)) {
@@ -2067,8 +2192,8 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 }
 /* }}} */
 
-/* Sprawdzenia specyficzne dla pool.type = http, wolane przez fpm_pool_type.c
- * podczas walidacji configu, przed forkiem czegokolwiek. */
+/* Checks specific to pool.type = http, called by fpm_pool_type.c while
+ * validating the configuration, before anything forks. */
 int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways < 1) {
@@ -2115,6 +2240,11 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1;
 		}
 	}
+	if (wp->config->http_plain_listen && *wp->config->http_plain_listen &&
+			(!wp->config->http_tls_cert || !*wp->config->http_tls_cert)) {
+		zlog(ZLOG_ERROR, "[pool %s] http.plain_listen requires http.tls_cert", wp->config->name);
+		return -1;
+	}
 	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
 #ifdef HAVE_FPM_HTTP_TLS
 		if (!wp->config->http_tls_key || !*wp->config->http_tls_key) {
@@ -2126,7 +2256,7 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * before fpm_http_init_pool_ex() forks a single gateway child, not
 		 * as a crash or a silent plain-HTTP fallback at request time. */
 		if (fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
-				wp->config->http_tls_min_version) != 0) {
+				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert) != 0) {
 			return -1; /* fpm_http_tls_validate() already logged what is wrong */
 		}
 #else

@@ -1,115 +1,115 @@
-# Plan optymalizacji `fastcgi-ng`
+# `fastcgi-ng` optimization plan
 
-## Cel
+## Goal
 
-`pool.type = fastcgi-ng` ma być zoptymalizowanym frontendem FastCGI, podczas gdy:
+`pool.type = fastcgi-ng` is meant to be an optimized FastCGI frontend, while:
 
 ```ini
 pool.type = fastcgi
 ```
 
-ma zachować możliwie pełną zgodność z klasycznym upstreamowym PHP-FPM.
+should retain as much compatibility as possible with classic upstream PHP-FPM.
 
-Executor jest osobnym wymiarem:
+The executor is a separate dimension:
 
 ```ini
 pool.executor = classic | fiber | async
 ```
 
-Optymalizacje opisane tutaj dotyczą przede wszystkim:
+The optimizations described here primarily concern:
 
 ```ini
 pool.type = fastcgi-ng
 pool.executor = classic
 ```
 
-Executory `fiber` i `async` pozostają eksperymentalne i nie są przeznaczone do produkcji.
+The `fiber` and `async` executors remain experimental and are not intended for production.
 
-## Stan początkowy
+## Initial state
 
-Optymalizacje transportu znajdują się w `main/fastcgi.c`, ale są chronione procesowym przełącznikiem ustawianym przez worker po rozpoznaniu poola. Domyślnie przełącznik jest wyłączony, więc `pool.type = fastcgi` używa upstreamowej ścieżki odczytu i `accept() + fcntl()`. `pool.type = fastcgi-ng` oraz wewnętrzny transport frontendu `http` włączają buforowane odczyty i `accept4()` po forku dziecka.
+The transport optimizations live in `main/fastcgi.c`, but are protected by a process-wide switch set by the worker after identifying the pool. The switch is disabled by default, so `pool.type = fastcgi` uses the upstream read path and `accept() + fcntl()`. `pool.type = fastcgi-ng` and the internal transport of the `http` frontend enable buffered reads and `accept4()` after the child has forked.
 
-Rozdzielenie nie duplikuje całego `main/fastcgi.c`: mały interfejs `fcgi_set_optimized_transport()` zachowuje jedną implementację protokołu i wybiera wyłącznie zoptymalizowane operacje transportowe. Ponieważ każdy worker jest osobnym procesem przypisanym do jednego poola, ustawienie nie przecieka między poolami.
+The split does not duplicate all of `main/fastcgi.c`: the small `fcgi_set_optimized_transport()` interface keeps one protocol implementation and selects only the optimized transport operations. Because each worker is a separate process assigned to one pool, the setting cannot leak between pools.
 
-Obecne zmiany względem czystego upstreamu:
+Current changes relative to an unmodified upstream:
 
-1. bufor wejściowy FastCGI 16 KB: typowy nagłówek requestu jest pobierany jednym `read()` zamiast około sześciu;
-2. `accept4(..., SOCK_CLOEXEC)` zamiast `accept()` i dwóch `fcntl()`, jeśli platforma udostępnia `accept4`;
-3. pominięcie technicznego zapisu do fd 2, gdy `catch_workers_output = no`;
-4. opcjonalne `request_cpu_tracking = no`, usuwające dwa `times()` na request;
-5. naprawa ustawiania `TCP_NODELAY` dla połączeń FastCGI keep-alive po TCP;
-6. poprawka GH-18956 dla liczników idle/active na połączeniach keep-alive.
+1. 16 KB FastCGI input buffer: a typical request header is fetched with one `read()` instead of about six;
+2. `accept4(..., SOCK_CLOEXEC)` instead of `accept()` and two `fcntl()` calls when the platform provides `accept4`;
+3. skip the technical write to fd 2 when `catch_workers_output = no`;
+4. optional `request_cpu_tracking = no`, removing two `times()` calls per request;
+5. fix setting `TCP_NODELAY` for TCP FastCGI keep-alive connections;
+6. GH-18956 fix for idle/active counters on keep-alive connections.
 
-Naprawy `TCP_NODELAY` i GH-18956 są poprawkami błędów. Mogą pozostać wspólne dla `fastcgi` i `fastcgi-ng`. Optymalizacje zmieniające implementację transportu powinny być aktywowane tylko przez `fastcgi-ng`.
+The `TCP_NODELAY` and GH-18956 changes are bug fixes. They may remain shared by `fastcgi` and `fastcgi-ng`. Optimizations that change the transport implementation should be enabled only by `fastcgi-ng`.
 
-## Zmierzony punkt odniesienia
+## Measured baseline
 
-Poligon: `192.168.8.103`, użytkownik `piotr`, i7-6700T, 4 rdzenie fizyczne / 8 wątków logicznych, Linux 7.0.
+Test host: `192.168.8.103`, user `piotr`, i7-6700T, 4 physical cores / 8 logical threads, Linux 7.0.
 
-Kod bazowy PHP: upstream master, commit `5be4de10`. Porównywane binarki muszą być release buildami z tego samego checkoutu i wykonywać identyczny kod PHP.
+PHP baseline: upstream master, commit `5be4de10`. Compared binaries must be release builds from the same checkout and execute identical PHP code.
 
-### Przepustowość przy nasyceniu
+### Throughput at saturation
 
-`hello.php`, nginx, 4 workery, `wrk -t2 -c32`, siedem serii po 10 sekund:
+`hello.php`, nginx, 4 workers, `wrk -t2 -c32`, seven 10-second runs:
 
-| wariant | mediana |
+| variant | median |
 |---|---:|
 | upstream `php-fpm` | 11 583,73 req/s |
 | `php-fpm-ng`, `fastcgi-ng + classic` | 11 631,00 req/s |
 
-Różnica `+0,41%` jest na poziomie szumu. Ten wariant testu nasyca maszynę i mierzy również walkę nginx, `wrk` i workerów o rdzenie oraz hyperthready.
+The `+0,41%` difference is within noise. This test saturates the machine and also measures nginx, `wrk`, and workers competing for cores and hyperthreads.
 
-### CPU workera bez nasycania maszyny
+### Worker CPU without saturating the machine
 
-`hello.php`, nginx, 4 workery, `wrk -t1 -c2`, pięć naprzemiennych serii po 10 sekund:
+`hello.php`, nginx, 4 workers, `wrk -t1 -c2`, five alternating 10-second runs:
 
-| wariant | mediana CPU workera/request |
+| variant | median worker CPU/request |
 |---|---:|
 | upstream `php-fpm` | 114,53 us |
 | `php-fpm-ng`, `fastcgi-ng + classic` | 105,01 us |
 
-Aktualny zysk wynosi około `9,5 us/request`, czyli `8,3%` CPU samego workera. Mediana przepustowości wyniosła około 8812 req/s dla upstreamu i 8910 req/s dla fpm-ng (`+1,1%`).
+The current gain is about `9,5 us/request`, or `8,3%` of the worker's CPU. Median throughput was about 8812 req/s for upstream and 8910 req/s for fpm-ng (`+1,1%`).
 
-Wyniki na poligonie:
+Results from the test host:
 
 ```text
 /home/piotr/opencode-fiber-poligon/bench-fastcgi/results.txt
 /home/piotr/opencode-fiber-poligon/bench-fastcgi/cpu-results.txt
 ```
 
-## Plan prac
+## Work plan
 
-### 1. Faktycznie rozdzielić `fastcgi` i `fastcgi-ng` — wykonane, do pełnej regresji wersji PHP
+### 1. Actually separate `fastcgi` and `fastcgi-ng` — done, pending full PHP-version regression
 
-Wprowadzono wybór implementacji transportu na podstawie efektywnego `pool.type`.
+Transport implementation selection based on the effective `pool.type` has been introduced.
 
-Dla `fastcgi`:
+For `fastcgi`:
 
-- pozostawić upstreamową ścieżkę FastCGI;
-- nie obsługiwać `pool.executor`;
-- nie włączać optymalizacji specyficznych dla `fastcgi-ng`;
-- zachować domyślne zachowanie istniejących konfiguracji bez `pool.type`.
+- keep the upstream FastCGI path;
+- do not handle `pool.executor`;
+- do not enable `fastcgi-ng`-specific optimizations;
+- preserve the default behavior of existing configurations without `pool.type`.
 
-Dla `fastcgi-ng`:
+For `fastcgi-ng`:
 
-- aktywować buforowane odczyty FastCGI;
-- aktywować `accept4(SOCK_CLOEXEC)`;
-- aktywować przyszłe optymalizacje transportu;
-- domyślnie używać `pool.executor = classic`.
+- enable buffered FastCGI reads;
+- enable `accept4(SOCK_CLOEXEC)`;
+- enable future transport optimizations;
+- default to `pool.executor = classic`.
 
-Preferowane rozwiązanie nie powinno duplikować całego `main/fastcgi.c`. Należy znaleźć najmniejszy interfejs pozwalający ustawić wariant zachowania per worker przed rozpoczęciem pętli accept. Flaga nie może zmieniać zachowania innych pooli w tym samym procesie mastera.
+The preferred solution must not duplicate all of `main/fastcgi.c`. Find the smallest interface that can set the behavior variant per worker before the accept loop starts. The flag must not change the behavior of other pools in the same master process.
 
-Po rozdzieleniu należy ponownie wykonać benchmark trzech wariantów:
+After the split, run the benchmark for three variants again:
 
-1. czysty upstream `php-fpm`;
-2. `php-fpm-ng` z `pool.type = fastcgi`;
-3. `php-fpm-ng` z `pool.type = fastcgi-ng` i `pool.executor = classic`.
+1. unmodified upstream `php-fpm`;
+2. `php-fpm-ng` with `pool.type = fastcgi`;
+3. `php-fpm-ng` with `pool.type = fastcgi-ng` and `pool.executor = classic`.
 
-Wariant 2 powinien być wydajnościowo i behawioralnie równoważny upstreamowi. Wariant 3 powinien zachować obecny spadek CPU workera.
+Variant 2 should be performance- and behavior-equivalent to upstream. Variant 3 should retain the current reduction in worker CPU.
 
-### 2. Ustalić zalecaną konfigurację `fastcgi-ng`
+### 2. Establish the recommended `fastcgi-ng` configuration
 
-Dla lekkich endpointów mierzyć i dokumentować konfigurację:
+For lightweight endpoints, measure and document this configuration:
 
 ```ini
 pool.type = fastcgi-ng
@@ -120,180 +120,180 @@ request_cpu_tracking = no
 php_admin_value[max_execution_time] = 0
 ```
 
-Każdą opcję mierzyć także osobno:
+Measure each option separately as well:
 
-- UDS zamiast TCP loopback: dotychczas około `7-11 us/request` mniej;
-- `request_cpu_tracking = no`: usuwa dwa `times()`;
-- `max_execution_time = 0`: usuwa dwa `setitimer()` i część obsługi masek sygnałów;
-- `catch_workers_output = no`: pozwala pominąć techniczny `write()`.
+- UDS instead of TCP loopback: so far about `7-11 us/request` less;
+- `request_cpu_tracking = no`: removes two `times()` calls;
+- `max_execution_time = 0`: removes two `setitimer()` calls and part of signal-mask handling;
+- `catch_workers_output = no`: allows the technical `write()` to be skipped.
 
-Nie zmieniać wartości domyślnych klasycznego `fastcgi` w celu uzyskania lepszego wyniku benchmarku.
+Do not change the defaults of classic `fastcgi` to improve the benchmark result.
 
-### 3. Ponownie sprofilować gorącą ścieżkę
+### 3. Profile the hot path again
 
-Po rozdzieleniu frontendów zebrać dla obu wariantów:
+After splitting the frontends, collect the following for both variants:
 
-- `strace -c` na request dla TCP keep-alive;
-- `strace -c` dla nowych połączeń TCP;
-- te same dwa pomiary dla UDS;
-- CPU dzieci FPM z `/proc`, nie całego hosta;
-- `perf record` i `perf report` dla lekkiego `hello.php`;
-- przepustowość i latency przez prawdziwy nginx.
+- `strace -c` per request for TCP keep-alive;
+- `strace -c` for new TCP connections;
+- the same two measurements for UDS;
+- FPM child CPU from `/proc`, not the whole host;
+- `perf record` and `perf report` for a lightweight `hello.php`;
+- throughput and latency through real nginx.
 
-Poprzedni profil po optymalizacjach zawierał około 20 syscalli na request keep-alive. Największe pozostałe grupy to:
+The previous profile after the optimizations contained about 20 syscalls per keep-alive request. The largest remaining groups were:
 
-- 8 x `rt_sigaction` i 1 x `rt_sigprocmask`;
+- 8 x `rt_sigaction` and 1 x `rt_sigprocmask`;
 - 2 x `setitimer`;
-- 2 x `chdir` oraz `getcwd`;
-- 2 x `fcntl` pochodzące z OPcache;
+- 2 x `chdir` and `getcwd`;
+- 2 x `fcntl` originating in OPcache;
 - 2 x `times`;
-- pojedyncze `read` i `write` FastCGI.
+- individual FastCGI `read` and `write` calls.
 
-Dalsze prace wybierać dopiero na podstawie nowego profilu.
+Choose further work only on the basis of the new profile.
 
-### 4. Rozważyć rejestrację sygnałów raz na proces
+### 4. Consider registering signals once per process
 
-Największym potencjalnym kosztem pozostaje ponowne wykonywanie `rt_sigaction` dla każdego requestu.
+The largest potential remaining cost is registering `rt_sigaction` again for every request.
 
-Należy sprawdzić:
+Check:
 
-- które handlery są rzeczywiście niezmienne między requestami;
-- czy można je zainstalować raz podczas inicjalizacji workera;
-- które elementy muszą być resetowane per request;
-- zachowanie po fatal error, timeout, przerwaniu requestu i reloadzie;
-- zgodność z rozszerzeniami instalującymi własne handlery.
+- which handlers are actually immutable between requests;
+- whether they can be installed once during worker initialization;
+- which elements must be reset per request;
+- behavior after a fatal error, timeout, request interruption, and reload;
+- compatibility with extensions that install their own handlers.
 
-To jest zmiana w Zend, nie lokalna optymalizacja FPM. Nie implementować jej bez osobnego reproduktora, testów regresji i pomiaru zysku. Preferowana droga to zmiana nadająca się do upstreamu, a nie trwały fork Zend.
+This is a Zend change, not a local FPM optimization. Do not implement it without a separate reproducer, regression tests, and a measured gain. The preferred path is a change suitable for upstream, not a permanent Zend fork.
 
-### 5. Zbadać blokady OPcache per request
+### 5. Investigate OPcache locks per request
 
-Dwa `fcntl()` pozostające na gorącej ścieżce pochodzą z aktywacji i dezaktywacji OPcache.
+The two `fcntl()` calls remaining on the hot path come from OPcache activation and deactivation.
 
-Należy ustalić:
+Determine:
 
-- czego dokładnie chronią te blokady;
-- czy w klasycznym modelu jednego requestu naraz na worker można ograniczyć ich częstotliwość;
-- czy zmiana zachowuje poprawność przy restartach, invalidacji i współdzieleniu pamięci między workerami;
-- czy rozwiązanie może zostać wysłane do upstreamowego OPcache.
+- exactly what these locks protect;
+- whether their frequency can be reduced in the classic model, where one request runs at a time per worker;
+- whether the change remains correct across restarts, invalidation, and shared memory between workers;
+- whether the solution can be sent to upstream OPcache.
 
-Nie omijać blokad tylko na podstawie benchmarku Hello World.
+Do not bypass locks based only on a Hello World benchmark.
 
-### 6. Opcjonalny tryb bez zmiany CWD
+### 6. Optional mode without changing CWD
 
-`getcwd()` i dwa `chdir()` można potencjalnie usunąć dla aplikacji używających wyłącznie ścieżek absolutnych.
+`getcwd()` and two `chdir()` calls could potentially be removed for applications that use only absolute paths.
 
-Jeżeli profil potwierdzi istotny koszt, rozważyć jawną opcję tylko dla `fastcgi-ng`, domyślnie wyłączoną. Opcja musi jasno dokumentować zmianę semantyki względnych ścieżek, `include`, `require` i operacji plikowych.
+If the profile confirms a significant cost, consider an explicit option for `fastcgi-ng` only, disabled by default. The option must clearly document the semantic change for relative paths, `include`, `require`, and file operations.
 
-Nie stosować cache CWD jako niewidocznej optymalizacji, ponieważ może zmienić zachowanie aplikacji.
+Do not use an invisible CWD cache, because it could change application behavior.
 
-### 7. Sprawdzić rozmiar bufora wejściowego — wykonane dla 8/16/32 KB
+### 7. Check the input-buffer size — measured for 8/16/32 KB
 
-Pomiar CPU/request nie wykazał istotnej przewagi żadnego wariantu:
+The CPU/request measurement showed no significant advantage for any variant:
 
-| bufor | CPU/request |
+| buffer | CPU/request |
 |---|---:|
 | 8 KB | 86,591 us |
 | 16 KB | 87,321 us |
 | 32 KB | 86,564 us |
 
-Różnice pozostały poniżej 1%, dlatego bufor wejściowy pozostaje bez zmian: 16 KB.
+The differences stayed below 1%, so the input buffer remains unchanged at 16 KB.
 
-## Zaakceptowana optymalizacja dużych odpowiedzi
+## Accepted large-response optimization
 
-Dla dużego rekordu FastCGI zoptymalizowany transport na Unixie wysyła nagłówek i body jednym `writev()`. Klasyczny `fastcgi` oraz Windows zachowują dotychczasową ścieżkę `write()`.
+For a large FastCGI record, the optimized Unix transport sends the header and body with one `writev()`. Classic `fastcgi` and Windows retain the existing `write()` path.
 
-Dla odpowiedzi 262 144 B liczba operacji transportowych spadła z 11 do 6. Test `strace` na PHP 8.5 potwierdził 11 zapisów i brak `writev()` dla `fastcgi` oraz 5 `writev()` i końcowy zapis rekordu dla `fastcgi-ng`.
+For a 262 144 B response, the number of transport operations fell from 11 to 6. An `strace` test on PHP 8.5 confirmed 11 writes and no `writev()` for `fastcgi`, versus 5 `writev()` calls and a final record write for `fastcgi-ng`.
 
-Pięć naprzemiennych serii na PHP 8.5, `wrk -t1 -c2 -d10s`:
+Five alternating runs on PHP 8.5, `wrk -t1 -c2 -d10s`:
 
-| frontend | metryka | baseline | `writev` | zmiana |
+| frontend | metric | baseline | `writev` | change |
 |---|---|---:|---:|---:|
-| `fastcgi-ng` | CPU workera/request | 195,433 us | 178,824 us | **-8,5%** |
+| `fastcgi-ng` | worker CPU/request | 195,433 us | 178,824 us | **-8,5%** |
 | `fastcgi-ng` | req/s | 2018,63 | 2037,15 | **+0,9%** |
-| `http`, `Connection: close` | łączny CPU gatewaya i workera/request | 525,209 us | 490,612 us | **-6,6%** |
+| `http`, `Connection: close` | combined gateway and worker CPU/request | 525,209 us | 490,612 us | **-6,6%** |
 | `http`, `Connection: close` | req/s | 2682,67 | 2705,14 | **+0,8%** |
 
-Spadek CPU wystąpił we wszystkich pięciu parach obu benchmarków. Pierwszego pomiaru HTTP z keep-alive, około 50 req/s, nie użyto do oceny `writev()`, ponieważ brak `TCP_NODELAY` na listenerze HTTP uruchamiał Nagle/delayed ACK. Ustawienie tej opcji raz na listenerze (dziedziczonej przez zaakceptowane sockety) podniosło medianę dużej odpowiedzi keep-alive z 49,74 do 2686,13 req/s i obniżyło łączny CPU gatewaya i workera/request z 643,939 do 494,200 us.
+CPU fell in all five pairs of both benchmarks. The first HTTP keep-alive measurement, about 50 req/s, was not used to assess `writev()`, because the missing `TCP_NODELAY` on the HTTP listener triggered Nagle/delayed ACK. Setting this option once on the listener (inherited by accepted sockets) raised the median large keep-alive response from 49,74 to 2686,13 req/s and reduced combined gateway and worker CPU/request from 643,939 to 494,200 us.
 
-Regresja PHP 8.5 przeszła dla małej i dużej odpowiedzi, binarnego POST 65 792 B z kontrolą SHA-256, keep-alive/close oraz zerwanego odbiorcy. Odpowiedzi od 1 B do 1 MiB, w tym granice rekordów FastCGI, zostały wcześniej porównane bajt w bajt na masterze.
+The PHP 8.5 regression passed for small and large responses, a binary 65 792 B POST with SHA-256 verification, keep-alive/close, and a disconnected client. Responses from 1 B to 1 MiB, including FastCGI record boundaries, had already been compared byte for byte on master.
 
-Batching małej odpowiedzi odrzucono: kompletna mała odpowiedź FastCGI już trafia do jednego `write()`, a obserwowany drugi zapis dotyczy innego deskryptora. Nie daje to bezpiecznej oszczędności transportowej.
+Small-response batching was rejected: a complete small FastCGI response already reaches one `write()`, and the observed second write belongs to another descriptor. It provides no safe transport saving.
 
-## Metodologia benchmarków
+## Benchmark methodology
 
-Każde porównanie musi spełniać wszystkie warunki:
+Every comparison must satisfy all of these conditions:
 
-1. ten sam commit upstreamowego PHP;
-2. release build, bez `--enable-debug`;
-3. ten sam kompilator i flagi kompilacji;
-4. identyczny kod PHP i konfiguracja OPcache;
-5. identyczna liczba workerów;
-6. ten sam frontend nginx i ustawienia FastCGI;
-7. naprzemienna kolejność serii;
-8. warm-up przed pomiarem;
-9. minimum pięć serii, raportowanie mediany i rozrzutu;
-10. osobny pomiar CPU workerów oraz całkowitego throughputu;
-11. `wrk -t1 -c2` jako podstawowy pomiar kosztu CPU bez nasycania poligonu;
-12. testy o wysokiej współbieżności raportowane osobno jako test przepustowości całego systemu.
+1. the same upstream PHP commit;
+2. a release build, without `--enable-debug`;
+3. the same compiler and compiler flags;
+4. identical PHP code and OPcache configuration;
+5. the same number of workers;
+6. the same nginx frontend and FastCGI settings;
+7. alternating run order;
+8. a warm-up before measurement;
+9. at least five runs, reporting the median and spread;
+10. separate measurement of worker CPU and total throughput;
+11. `wrk -t1 -c2` as the primary measurement of CPU cost without saturating the test host;
+12. high-concurrency tests reported separately as whole-system throughput tests.
 
-Dla każdego wyniku zapisywać:
+For every result, record:
 
-- commit PHP i commit php-fpm-ng;
-- pełne polecenia configure/build;
-- konfiguracje FPM i nginx;
-- wersje nginx i `wrk`;
-- surowe wyniki;
-- liczbę rdzeni i stan innych obciążeń hosta.
+- the PHP commit and php-fpm-ng commit;
+- the complete configure/build commands;
+- the FPM and nginx configurations;
+- nginx and `wrk` versions;
+- raw results;
+- the number of cores and the state of other host workloads.
 
-## Kryteria poprawności
+## Correctness criteria
 
-Każda optymalizacja musi przejść:
+Every optimization must pass:
 
-- pełne testy `sapi/fpm/tests`;
-- GET i POST przez nginx;
-- małe i duże request body;
-- małe i wielomegabajtowe odpowiedzi;
-- keep-alive i nowe połączenia;
-- TCP i UDS;
-- `fastcgi_request_buffering` oraz `fastcgi_buffering` włączone i wyłączone;
-- zerwanie połączenia podczas requestu i odpowiedzi;
-- restart/reload mastera;
+- the complete `sapi/fpm/tests` suite;
+- GET and POST through nginx;
+- small and large request bodies;
+- small and multi-megabyte responses;
+- keep-alive and new connections;
+- TCP and UDS;
+- `fastcgi_request_buffering` and `fastcgi_buffering` enabled and disabled;
+- a connection dropped during a request and during a response;
+- master restart/reload;
 - `pm.max_requests`;
-- status, slowlog, access log i timeouty;
-- kontrolę braku wycieków deskryptorów i pamięci.
+- status, slowlog, access log, and timeouts;
+- checks for descriptor and memory leaks.
 
-Klasyczny `pool.type = fastcgi` musi dodatkowo przechodzić test porównawczy z czystym upstreamem.
+Classic `pool.type = fastcgi` must additionally pass a comparison test against unmodified upstream.
 
-## Kryteria przyjęcia optymalizacji
+## Optimization acceptance criteria
 
-Zmianę przyjmujemy tylko wtedy, gdy:
+Accept a change only when it:
 
-- nie zmienia protokołu FastCGI ani zachowania aplikacji bez jawnej opcji;
-- ma test regresji;
-- daje powtarzalny zysk CPU workera lub naprawia udowodniony problem;
-- zysk nie wynika z innej konfiguracji lub nasycenia hosta;
-- koszt utrzymania i odchylenia od upstreamu jest proporcjonalny do efektu;
-- istnieje plan wysłania do upstreamu dla zmian poza `sapi/fpmng`.
+- does not change the FastCGI protocol or application behavior without an explicit option;
+- has a regression test;
+- provides a repeatable worker-CPU gain or fixes a demonstrated problem;
+- does not gain its result from a different configuration or host saturation;
+- has a maintenance cost and upstream deviation proportional to the effect;
+- has a plan for sending changes outside `sapi/fpmng` upstream.
 
-Nie przyjmujemy mikrooptymalizacji wyłącznie na podstawie wzrostu req/s w nasyconym teście.
+Do not accept micro-optimizations based only on higher req/s in a saturated test.
 
-## Świadomie odrzucone kierunki
+## Deliberately rejected directions
 
-Na obecnym etapie nie wracamy do:
+At this stage, do not return to:
 
-- `SO_RCVTIMEO` zamiast `poll` po `accept`: psuje bezczynne TCP i nie dziedziczy się poprawnie dla UDS;
-- `SO_REUSEPORT` jako lekarstwo na thundering herd: blokujący accept nie wykazał takiego problemu;
-- `io_uring`: zbyt duża złożoność, osobny backend i problemy z domyślnym Docker seccomp;
-- niewidocznego cache `chdir`: ryzyko zmiany semantyki aplikacji;
-- optymalizowania wyłącznie wyniku Hello World kosztem BC;
-- dalszego rozwijania forka Zend bez drogi do upstreamu.
+- `SO_RCVTIMEO` instead of `poll` after `accept`: it breaks idle TCP and is not inherited correctly for UDS;
+- `SO_REUSEPORT` as a cure for thundering herd: blocking accept did not demonstrate that problem;
+- `io_uring`: too much complexity, a separate backend, and problems with the default Docker seccomp profile;
+- an invisible `chdir` cache: risk of changing application semantics;
+- optimizing only the Hello World result at the expense of BC;
+- further development of a Zend fork without a path to upstream.
 
-## Oczekiwany rezultat
+## Expected result
 
-Najbliższy konkretny rezultat to:
+The next concrete result should be:
 
-1. `fastcgi` rzeczywiście używa ścieżki zgodnej z upstreamem;
-2. `fastcgi-ng + classic` jawnie włącza zoptymalizowany transport;
-3. zachowany zostaje obecny zysk około `9-10 us` CPU workera na lekki request;
-4. zalecana konfiguracja UDS bez zbędnej telemetrii zostaje zmierzona osobno;
-5. dalsze zmiany są wybierane na podstawie `perf` i `strace`, a nie przypuszczeń.
+1. `fastcgi` really uses an upstream-compatible path;
+2. `fastcgi-ng + classic` explicitly enables the optimized transport;
+3. the current gain of about `9-10 us` worker CPU per lightweight request is retained;
+4. the recommended UDS configuration without unnecessary telemetry is measured separately;
+5. further changes are selected based on `perf` and `strace`, not assumptions.

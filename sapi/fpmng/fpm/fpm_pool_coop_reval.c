@@ -1,4 +1,4 @@
-/* fpm-ng: wykrywanie zmian wczytanych plikow — patrz fpm_pool_coop_reval.h. */
+/* fpm-ng: detect changes to loaded files — see fpm_pool_coop_reval.h. */
 
 #include "fpm_config.h"
 
@@ -15,8 +15,8 @@
 #include "fpm_pool_coop_reval.h"
 #include "zlog.h"
 
-/* Nanosekundy mtime: macOS trzyma st_mtimespec, glibc/musl st_mtim (i definiuja
- * st_mtime jako makro na jego tv_sec). Bez zadnego z nich zostaja sekundy. */
+/* Nanosecond mtime: macOS has st_mtimespec, glibc/musl st_mtim (and define
+ * st_mtime as a macro for its tv_sec). Fall back to seconds without either. */
 #if defined(__APPLE__)
 # define FPM_REVAL_MTIM(st) ((st)->st_mtimespec)
 #elif defined(st_mtime)
@@ -31,9 +31,9 @@ struct fpm_coop_reval_rec_s {
 	ino_t ino;
 };
 
-/* Klucz: opened_path (realpath, ten sam co w EG(included_files)); wartosc:
- * fpm_coop_reval_rec_s. Tablica trwala (persistent) — zyje przez cale zycie
- * procesu, poza arena requestu. */
+/* Key: opened_path (realpath, the same key as EG(included_files)); value:
+ * fpm_coop_reval_rec_s. Persistent table — lives for the process lifetime,
+ * outside the request arena. */
 static HashTable fpm_coop_reval_files;
 static bool fpm_coop_reval_on = false;
 static unsigned fpm_coop_reval_sweeps = 0;
@@ -69,10 +69,10 @@ static int fpm_coop_reval_stat(const char *path, struct stat *st) /* {{{ */
 }
 /* }}} */
 
-/* Pierwsze zobaczenie pliku w procesie: zapamietaj, jak wygladal. Kolejne
- * kompilacje tego samego pliku (require bez _once, tryb bez wspolnych
- * included_files) to tylko wyszukanie w tablicy — pierwszy stan wygrywa,
- * bo to od niego pochodza funkcje i klasy siedzace w tablicach procesu. */
+/* First sight of a file in the process: remember what it looked like. Later
+ * compilations of the same file (require without _once, mode without shared
+ * included_files) only look it up in the table — the first state wins, because
+ * it is the source of the functions and classes in the process tables. */
 static void fpm_coop_reval_remember(zend_string *path) /* {{{ */
 {
 	struct stat st;
@@ -82,9 +82,9 @@ static void fpm_coop_reval_remember(zend_string *path) /* {{{ */
 	if (zend_hash_exists(&fpm_coop_reval_files, path)) {
 		return;
 	}
-	/* stat() PO kompilacji, po sciezce: gdyby plik zostal podmieniony miedzy
-	 * open() a tym stat(), zapamietalibysmy nowy stan przy starym kodzie.
-	 * Okno to mikrosekundy pierwszej kompilacji; swiadomie prosto. */
+	/* Stat() AFTER compilation, by path: if the file was replaced between
+	 * open() and this stat(), we would remember the new state with old code.
+	 * The window is only the first-compilation microseconds; deliberately simple. */
 	if (fpm_coop_reval_stat(ZSTR_VAL(path), &st) < 0) {
 		zlog(ZLOG_DEBUG, "[pool %s] revalidate: cannot stat %s (%s), not tracked",
 			fpm_coop_pool_name(), ZSTR_VAL(path), strerror(errno));
@@ -94,25 +94,25 @@ static void fpm_coop_reval_remember(zend_string *path) /* {{{ */
 	fpm_coop_reval_rec_fill(rec, &st);
 	key = zend_string_init(ZSTR_VAL(path), ZSTR_LEN(path), 1);
 	zend_hash_add_new_ptr(&fpm_coop_reval_files, key, rec);
-	zend_string_release(key);	/* tablica trzyma wlasna referencje */
+	zend_string_release(key);	/* the table keeps its own reference */
 	zlog(ZLOG_DEBUG, "[pool %s] revalidate: tracking %s (%u files)",
 		fpm_coop_pool_name(), ZSTR_VAL(path), zend_hash_num_elements(&fpm_coop_reval_files));
 }
 /* }}} */
 
-/* Hook zend_compile_file: za oryginal (opcache zostawia swoj nawet wylaczone,
- * wiec chainujemy, nie podmieniamy). Skrypt wejsciowy pomijamy — patrz .h.
- * primary_script czytamy PRZED kompilacja: php_stream_open_for_zend_ex
- * (main/main.c) zeruje caly zend_file_handle przy otwieraniu strumienia i flaga
- * ginie — z tego samego powodu opcache sprawdza ja przed kompilacja. */
+/* zend_compile_file hook: chain behind the original (OPcache keeps its own even
+ * when disabled), do not replace it. Skip the entry script — see .h.
+ * Read primary_script BEFORE compilation: php_stream_open_for_zend_ex
+ * (main/main.c) clears the entire zend_file_handle while opening the stream and
+ * the flag is lost — for the same reason OPcache checks it before compilation. */
 static zend_op_array *fpm_coop_reval_compile_file(zend_file_handle *file_handle, int type) /* {{{ */
 {
 	bool primary = file_handle->primary_script;
 	zend_op_array *op_array = fpm_coop_reval_orig_compile_file(file_handle, type);
 
 	if (op_array && !primary && file_handle->handle.stream.handle) {
-		/* To samo, co compile_filename() wklada do EG(included_files):
-		 * opened_path, a gdy go nie ma — filename. */
+		/* The same value compile_filename() puts in EG(included_files):
+		 * opened_path, or filename when it is unavailable. */
 		fpm_coop_reval_remember(file_handle->opened_path ? file_handle->opened_path : file_handle->filename);
 	}
 	return op_array;
@@ -163,7 +163,7 @@ int fpm_coop_reval_sweep(const char **path, char *why, size_t why_len) /* {{{ */
 		} else if (now.size != rec->size) {
 			snprintf(why, why_len, "size %lld -> %lld", (long long) rec->size, (long long) now.size);
 		} else if (now.ino != rec->ino || now.dev != rec->dev) {
-			/* rename() na miejsce z zachowanym mtime i rozmiarem (rsync -t, cp -p) */
+			/* rename() in place with preserved mtime and size (rsync -t, cp -p) */
 			snprintf(why, why_len, "replaced, inode %llu -> %llu", (unsigned long long) rec->ino, (unsigned long long) now.ino);
 		} else {
 			continue;

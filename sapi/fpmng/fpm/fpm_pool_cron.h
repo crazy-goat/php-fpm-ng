@@ -10,37 +10,36 @@
 
 struct fpm_worker_pool_s;
 
-/* Dyrektywy odrzucane dla pool.type = cron. NULL-terminated, uzywane jako
- * .rejects w fpm_pool_types[]. */
+/* Directives rejected for pool.type = cron. NULL-terminated, used as
+ * .rejects in fpm_pool_types[]. */
 extern const char *const fpm_pool_cron_rejects[];
 
-/* fpm_pool_type_s.validate — cron.schedule/cron.script wymagane, harmonogram
- * parsowany RAZ tutaj (zly harmonogram = config odrzucony ze startu, nie
- * "mniej wiecej" w runtime), mapowanie na pm = static + pm.max_children = 1. */
+/* fpm_pool_type_s.validate — cron.schedule/cron.script required; schedule is
+ * parsed ONCE here (bad schedule = configuration rejected at startup, not
+ * interpreted "approximately" at runtime), mapping to pm = static +
+ * pm.max_children = 1. */
 int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.init_main — alokuje TYLKO to, czego pool.type = status
- * potrzebuje do pokazania last_run/last_exit_code (docs/NOTES.md 3u):
- * cron nadal NIE MA zadnej polityki restart/backoff, ktora musialaby
- * przetrwac smierc procesu (patrz uzasadnienie na gorze fpm_pool_cron.c) —
- * to jest stan wylacznie do ODCZYTU przez status, nigdy do sterowania
- * zachowaniem crona samego siebie. */
+/* fpm_pool_type_s.init_main — allocates ONLY what pool.type = status needs to
+ * show last_run/last_exit_code (docs/NOTES.md 3u). Cron still has NO
+ * restart/backoff policy that must survive process death (see the rationale at
+ * the top of fpm_pool_cron.c); this is READ-ONLY state for status, never state
+ * that controls cron behavior itself. */
 int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.child_main — liczy najblizszy termin, spi do niego
- * (przerywalnie SIGTERM-em), wykonuje skrypt raz, konczy proces. Nie wraca.
- * Wskrzeszenie na kolejny przebieg to zwykly, bezwarunkowy respawn
- * fpm_children.c (pm = static, max_children = 1) — polityka crona samego
- * w sobie nadal nie zalezy od zadnego stanu w pamieci dzielonej, w
- * odroznieniu od supervisora (patrz init_main wyzej: to co dolozono sluzy
- * WYLACZNIE statusowi, nie sterowaniu). */
+/* fpm_pool_type_s.child_main — calculates the next due time, sleeps until it
+ * (interruptibly by SIGTERM), runs the script once, and exits. Does not return.
+ * Respawn for the next run is the ordinary unconditional fpm_children.c respawn
+ * (pm = static, max_children = 1); cron policy itself still does not depend on
+ * shared memory, unlike supervisor (see init_main above: the added state is
+ * ONLY for status, not control). */
 void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;
 
-/* fpm_pool_type_s.status — stan tego poola dla pool.type = status.
- * last_run/last_exit_code z pamieci dzielonej, next_run POLICZONE NA
- * BIEZACO z harmonogramu i biezacego zegara (nie z zadnego stanu) — patrz
+/* fpm_pool_type_s.status — state for this pool when read by pool.type = status.
+ * last_run/last_exit_code come from shared memory; next_run is calculated ON
+ * DEMAND from the schedule and current clock (not from any stored state) — see
  * docs/NOTES.md 3u. */
 void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 

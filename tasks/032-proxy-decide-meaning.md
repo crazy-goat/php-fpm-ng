@@ -32,8 +32,8 @@ about.
 WebSocket support as "not the model's job to add directly" and names "a
 future `pool.type = proxy`" as the most architecturally consistent way to get
 WebSocket tunneling without changing the PHP execution model. That is one
-data point, not a decision — the document itself marks WebSocket as "nie jest
-obecnie zatwierdzonym punktem roadmapy."
+data point, not a decision — the document itself marks WebSocket as "not
+currently an approved roadmap item."
 
 ## The candidate meanings
 

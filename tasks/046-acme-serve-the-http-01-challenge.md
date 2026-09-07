@@ -1,7 +1,8 @@
 # 046 — ACME: serve the HTTP-01 challenge from the local-answer hook
 
 **Priority:** medium. Small, and the shape it must take is already decided.
-**Status:** open. Depends on 042 (the plain port) and on 043 choosing HTTP-01.
+**Status:** open. Depends on 042 (the plain port) and 045 (handover from the
+dedicated PHP ACME process chosen in 043).
 
 ## Context
 
@@ -21,7 +22,8 @@ designed early. This task is the payoff.
 
 Answer `GET /.well-known/acme-challenge/<token>` with the key authorization for
 that token, over plain HTTP, without touching a worker and without depending on
-`http.static`.
+`http.static`. The dedicated ACME cron process supplies and removes token state;
+it does not write a file under the document root.
 
 ## Acceptance criteria
 
@@ -38,6 +40,9 @@ that token, over plain HTTP, without touching a worker and without depending on
 6. Every gateway process answers it, whichever one `SO_REUSEPORT` hands the
    connection to — the CA gets one connection and no retry guarantee.
    Verified with `http.gateways` greater than 1.
+7. Starting, completing or failing a challenge in the dedicated ACME process
+   adds or removes the token in every gateway. No gateway executes the PHP
+   client and no challenge key authorization is written to a static-file path.
 
 ## Notes
 

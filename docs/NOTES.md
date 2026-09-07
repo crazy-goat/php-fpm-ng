@@ -669,65 +669,77 @@ a stan sesji siedzi w bramce. Wariant in-process musiałby dać każdemu workero
 własny stan TLS i obsługę certyfikatów. To praktycznie **zamyka** tamtą drogę,
 nie tylko odkłada. Nie wracać do tematu bez nowego argumentu.
 
-### Konsekwencja 2: gdzie napisać klienta ACME — NIEROZSTRZYGNIĘTE
+### Consequence 2: the ACME client is embedded PHP (decision, 2026-09-07)
 
-Piotr skłania się do C. Decyzja świadomie odłożona, obie drogi zapisane.
-Nie rozstrzygać bez odpowiedzi na pytania z końca tej sekcji.
+The client will be a project-owned PHP script run by a dedicated `cron` pool,
+not C in a gateway process. It is part of fpm-ng, not part of the user's
+application.
 
-**Opcja A: ACME w C, wewnątrz bramki**
+The three checks behind the decision:
 
-- **Bootstrap działa naturalnie.** Nie da się serwować HTTPS bez certyfikatu,
-  a pool typu `cron` startuje po uruchomieniu poolów — pierwsze wydanie
-  certyfikatu wypada wtedy w złym momencie cyklu życia. W C to jest wewnątrz
-  procesu, który i tak musi poczekać na certyfikat.
-- **Brak sprzężenia z aplikacją.** Zepsuta albo źle skonfigurowana aplikacja
-  użytkownika nie może doprowadzić do wygaśnięcia certyfikatu.
-- **"Jedna binarka" zostaje prawdą.** Skrypt PHP musiałby gdzieś mieszkać —
-  payload self-runnera pakuje aplikację użytkownika, nie nasze rzeczy, więc albo
-  sprzęgamy dwie funkcje, albo dokładamy plik obok binarki.
-- **Brak zależności od rozszerzeń PHP.** Podpisy JOSE potrzebują `openssl_sign`,
-  do tego klient HTTP. Jeśli ktoś zbuduje fpm-ng bez tych rozszerzeń, ACME
-  przestaje działać. W C OpenSSL i tak jest zlinkowany dla samego TLS.
-- Koszt: kilka tysięcy linii C i stała powierzchnia na błędy pamięci.
+1. **The measured C baseline is 8,327 physical lines.** The source is
+   `ndilieto/uacme` at revision
+   `e9cfa6f052644864a28c7d9d04756900abfc653f`. At that revision
+   `Makefile.am` names 13 production C/header files for `uacme` (excluding the
+   optional `ualpn` helper and optional `read-file` backend); counting those
+   files with `wc -l` gives 8,327. The count is reproducible with:
 
-**Opcja B: ACME w PHP jako pool typu `cron`**
+       git clone https://github.com/ndilieto/uacme.git
+       cd uacme
+       git checkout e9cfa6f052644864a28c7d9d04756900abfc653f
+       wc -l uacme.c base64.c base64.h crypto.c crypto.h \
+         curlwrap.c curlwrap.h json.c json.h jsmn.h msg.c msg.h
 
-- Kilkaset linii zamiast kilku tysięcy, biblioteki istnieją.
-- Reużywa maszynerii, którą i tak budujemy (`cron`, pliki statyczne dla
-  wyzwania HTTP-01 spod `/.well-known/acme-challenge/`).
-- Łatwiejsze do poprawienia bez przebudowy binarki.
-- Wady to dokładnie zalety opcji A odwrócone: bootstrap, sprzężenie
-  z aplikacją, dodatkowy plik, zależność od rozszerzeń.
+   `uacme` supports RFC 8555 and delegates challenge installation to a hook;
+   its `uacme.sh` at the same revision demonstrates HTTP-01 by writing the key
+   authorization under `/.well-known/acme-challenge/`. A single CA and
+   HTTP-01 remove CLI and alternate-challenge branches, but do not remove the
+   protocol, HTTP, JSON, JWS, key and CSR machinery represented by this real
+   baseline. Maintaining that machinery in project-owned C is not justified.
+2. **The PHP bootstrap is a small explicit state machine.** `NO_CERT` means
+   port 80 serves only a known HTTP-01 token (otherwise redirect/service
+   unavailable), port 443 is closed, and the dedicated ACME process is allowed
+   to issue. `ISSUING` adds exactly one token to the shared challenge state and
+   returns to `NO_CERT` with backoff on failure. An atomic certificate install
+   moves to `READY`; every gateway loads it, opens port 443, and port 80 returns
+   to challenge-or-redirect behavior. `READY` renewal failures retain the
+   current certificate and retry with backoff; successful renewal uses task
+   040's existing certificate-reload mechanism. These are three states and two
+   transitions, not per-request special cases. The only bootstrap-specific
+   behavior is withholding HTTPS until certificate installation.
+3. **Yes, the script can be embedded without coupling it to the
+   self-runner.** Use the same append-only payload plus footer mechanism
+   described in section 3a, but give the distribution payload its own magic,
+   offset and size. The build embeds the project-owned ACME script; the
+   optional pack command appends the user's application as a separate payload.
+   Runtime lookup selects the distribution entry by kind, so either payload
+   can exist without the other and repacking an application does not replace
+   ACME code.
 
-**Co rozstrzygnie ten wybór — do sprawdzenia przed decyzją**
+The PHP client therefore requires the PHP OpenSSL extension and an HTTPS
+client capability in supported builds. Task 047 must choose and document the
+concrete HTTP mechanism; this decision does not silently assume that the
+gateway's libevent HTTP client API is exposed to PHP.
 
-1. Ile realnie kodu C to jest? Obejrzeć minimalnego klienta ACME w C
-   (np. `uacme`, `acme-client`) i policzyć, ile z tego jest nam potrzebne przy
-   wyłącznie HTTP-01 i jednym CA.
-2. Czy bootstrap w opcji B da się rozwiązać sensownie — np. bramka startuje bez
-   TLS, wystawia tylko wyzwanie, a listener HTTPS wstaje po pierwszym wydaniu?
-3. Czy skrypt ACME dałoby się osadzić w binarce tym samym mechanizmem co
-   self-runner (sekcja 3a) bez sprzęgania obu funkcji?
+TLS termination remains in C through `bufferevent_openssl` (libevent provides
+it and OpenSSL is already linked statically; see section 3c). Certificate
+replacement in every gateway uses the no-disconnect reload mechanism from task
+040.
 
-Niezależnie od wyboru: w C zostaje TLS w bramce przez `bufferevent_openssl`
-(libevent to ma, OpenSSL już linkujemy statycznie — sekcja 3c) oraz
-przeładowanie certyfikatu bez zrywania połączeń, we wszystkich procesach bramki.
+### Two constraints to preserve
 
-### DWIE RZECZY DO ZAPROJEKTOWANIA TERAZ, NIE NA KOŃCU
+1. The gateway request path has one point that answers without a worker.
+   Static files, the ACME challenge and `/status` share that hook. Task 046
+   must put the fixed challenge path before disk-backed static files.
+2. Certificates and the ACME account are mutable state, not code. They live on
+   a writable volume under the immutable-code/mutable-state split shared with
+   the self-runner; task 044 defines that split once.
 
-1. **Ścieżka requestu w bramce potrzebuje JEDNEGO punktu, w którym odpowiadamy
-   bez workera.** Pliki statyczne, wyzwanie ACME, `/status` — to ten sam haczyk.
-   Jeśli pliki statyczne zrobimy doraźnym `if`-em, przy ACME będziemy przepisywać.
-2. **Certyfikaty i konto ACME to STAN, nie kod.** Muszą leżeć na wolumenie
-   zapisywalnym, nie w binarce — wchodzą do tego samego podziału "kod niezmienny
-   kontra stan na wolumenie", który i tak trzeba zdefiniować przy self-runnerze
-   (sekcja 3a, punkt 1). Rozstrzygnąć raz.
+### Configuration consequence
 
-### Konsekwencja konfiguracyjna
-
-HTTP-01 wymaga portu 80. Setup z ACME potrzebuje i 80, i 443 — jeden na wyzwanie
-i przekierowanie, drugi na ruch. Model konfiguracji musi to obsłużyć; sprawdzić,
-czy "jeden pool, jeden port" wystarcza.
+HTTP-01 requires port 80 while application traffic uses port 443. Task 042
+implemented the plain redirect companion in the same pool; task 046 extends
+its local-answer hook with HTTP-01.
 
 ### DECYZJE (2026-09-06, project owner) — patrz taski 039-042
 

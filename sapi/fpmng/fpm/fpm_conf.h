@@ -123,6 +123,20 @@ struct fpm_worker_pool_config_s {
 	char *http_listen;			/* empty = FastCGI port + 1 (or required when the pool listens on a UDS) */
 	char *http_plain_listen;		/* optional redirect-only plain HTTP companion for a TLS listener */
 	int http_gateways;			/* number of gateway processes, default 2 */
+	int http_reuseport;			/* each gateway gets its own SO_REUSEPORT socket */
+	int http_static;			/* serving static files without PHP, enabled by default */
+	int http_idle_timeout;			/* ms, releases an attached connection after this many idle ms; 0 = never */
+	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
+	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
+	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */
+	char *http_front_controller;		/* nginx-style try_files: when the resolved SCRIPT_FILENAME does not exist, substitute this
+						 * script and put the original path into PATH_INFO. Default "/index.php" — the built-in PHP
+						 * server (php -S) gives the same effect with no configuration (see
+						 * php_cli_server_request_translate_vpath()), so the HTTP gateway should not be less
+						 * polite. Empty = disabled, today's behavior. */
+	char *http_tls_cert;			/* path to a PEM certificate (with chain); empty = plain HTTP, as today */
+	char *http_tls_key;			/* path to a PEM private key */
+	char *http_tls_min_version;		/* "TLSv1.2" (default) or "TLSv1.3" */
 	/* Additional certificates selected by SNI (task 041), on top of the
 	 * default http.tls_cert/http.tls_key pair above. Comma-separated list of
 	 * "servername:cert_path:key_path" entries, e.g.

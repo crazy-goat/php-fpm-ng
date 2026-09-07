@@ -12,8 +12,8 @@
 
 #if defined(__linux__)
 #include <sys/syscall.h>
-/* Numery syscalli, nie zawsze wystawione przez naglowki libc (musl/starsze
- * glibc) — stale od lat te same na x86_64/aarch64. */
+/* Syscall numbers not always exposed by libc headers (musl/older glibc) —
+ * unchanged for years on x86_64/aarch64. */
 #ifndef SYS_pidfd_open
 #define SYS_pidfd_open 434
 #endif
@@ -52,9 +52,9 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 	int pidfd;
 	pid_t watchdog;
 
-	/* Otwieramy pidfd na cel ZANIM forkujemy — patrz fpm_pool_watchdog.h i
-	 * NOTES.md 3o dla pelnego uzasadnienia (m.in. dlaczego to jest bezpieczne
-	 * takze wywolane z handlera sygnalu). */
+	/* Open the pidfd for the target BEFORE forking — see fpm_pool_watchdog.h and
+	 * NOTES.md 3o for the full rationale (including why this is safe even when
+	 * called from a signal handler). */
 	pidfd = fpm_pool_watchdog_pidfd_open(target_pid);
 	watchdog = fork();
 
@@ -67,16 +67,17 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 			pfd.revents = 0;
 
 			if (poll(&pfd, 1, (int) timeout_seconds * 1000) == 0) {
-				/* timeout, nie POLLIN: cel wciaz zyje */
+				/* timeout, not POLLIN: the target is still alive */
 				fpm_pool_watchdog_pidfd_send_signal(pidfd, SIGKILL);
 			}
 			/* POLLIN: cel juz sam sie zakonczyl, nic do roboty */
 		} else {
-			/* Fallback bez pidfd (nie-Linux — tylko lokalne budowanie/testy,
-			 * nigdy docelowa platforma): sprawdzamy co sekunde zamiast spac na
-			 * slepo caly timeout, zeby nie zostawiac widocznego "ogona" po
-			 * celu, ktory skonczyl sie sam po ulamku sekundy. Udokumentowane,
-			 * wąskie okno wyscigu PID-owym miedzy kill(pid,0) a kill(pid,SIGKILL). */
+			/* Fallback without pidfd (non-Linux — local builds/tests only, never
+			 * the target platform): check once per second instead of blindly sleeping
+			 * for the whole timeout, so we do not leave a visible "tail" after a
+			 * target that finished by itself after a fraction of a second. The narrow
+			 * PID-reuse race window between kill(pid,0) and kill(pid,SIGKILL) is
+			 * documented. */
 			int remaining = (int) timeout_seconds;
 
 			while (remaining > 0) {

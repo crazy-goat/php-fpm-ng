@@ -136,6 +136,7 @@ struct {								\
 #include "fpm_http_access_log.h"
 #include "fpm_children_extra.h"
 #include "fpm_http_tls.h"
+#include "fpm_http_tls_reload.h"
 #include "zlog.h"
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
@@ -213,6 +214,9 @@ struct fpm_http_gateway_s {
 	 * procesami, patrz fpm_http_tls.h. */
 	struct fpm_http_tls_s *tls;			/* NULL w dziecku po nieudanym starcie */
 	SSL_CTX *tls_ctx;				/* tylko w dziecku, NULL w masterze */
+	/* NULL gdy http.tls_reload_check = 0 albo alokacja shm sie nie udala --
+	 * bramka wtedy dziala dokladnie tak jak przed tym taskiem (task 040). */
+	struct fpm_http_tls_reload_s *reload;
 #endif
 
 	/* how many persistent connections all the gateways of this pool may hold together */
@@ -1590,6 +1594,10 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 			exit(FPM_EXIT_SOFTWARE);
 		}
 		evhttp_set_bevcb(gw->http, fpm_http_tls_bevcb, gw->tls_ctx);
+
+		/* Own generation-watch timer, on this child's own base -- see
+		 * fpm_http_tls_reload.h. No-op when gw->reload is NULL. */
+		fpm_http_tls_reload_child_init(gw->reload, gw->base, gw->http, &gw->tls_ctx);
 	}
 #endif
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
@@ -1761,6 +1769,11 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		if (gw->upstreams_used) {
 			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
 		}
+#ifdef HAVE_FPM_HTTP_TLS
+		if (gw->reload) {
+			fpm_http_tls_reload_free(gw->reload);
+		}
+#endif
 		for (i = 0; i < gw->nproc; i++) {
 			free(gw->slots[i]);
 		}
@@ -1871,6 +1884,21 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
 		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version);
+	}
+	if (gw->tls) {
+		/* http.tls_reload_check: unset -> a sensible non-zero default (task
+		 * 040 exists precisely so a renewed certificate needs no operator
+		 * action beyond the write); explicitly 0 -> off. Same
+		 * was-it-set-at-all pattern as http.gateways above. */
+		int interval = fpm_conf_directive_was_set(wp->config, "http.tls_reload_check")
+			? wp->config->http_tls_reload_check
+			: FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT;
+
+		if (interval < 0) {
+			interval = 0;
+		}
+		gw->reload = fpm_http_tls_reload_master_init(gw->pool, wp->config->http_tls_cert,
+			wp->config->http_tls_key, wp->config->http_tls_min_version, gw->tls, interval);
 	}
 #endif
 }

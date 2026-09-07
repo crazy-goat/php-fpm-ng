@@ -135,6 +135,8 @@ struct fpm_worker_pool_config_s {
 	char *http_tls_cert;			/* sciezka do PEM z certyfikatem (z lancuchem); puste = zwykly HTTP, jak dzis */
 	char *http_tls_key;			/* sciezka do PEM z kluczem prywatnym */
 	char *http_tls_min_version;		/* "TLSv1.2" (domyslne) albo "TLSv1.3" */
+	int http_tls_reload_check;		/* sekundy miedzy sprawdzeniami mtime cert/key na dysku, bez restartu bramki (task 040);
+						 * nieustawione -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = wylaczone */
 	/* fpm-ng: pool.executor = fiber, patrz fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* sekundy miedzy sprawdzeniami mtime wczytanych plikow; 0 = wylaczone (domyslne) */
 	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class

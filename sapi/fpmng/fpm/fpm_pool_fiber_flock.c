@@ -1,4 +1,4 @@
-/* fpm-ng: pool.executor = fiber — flock() spike. Patrz fpm_pool_fiber_flock.h. */
+/* fpm-ng: pool.executor = fiber — flock() spike. See fpm_pool_fiber_flock.h. */
 
 #include "fpm_config.h"
 
@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/file.h>	/* LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB — standardowe stale BSD, tak samo jak w ext/standard/flock_compat.h */
+#include <sys/file.h>	/* LOCK_SH/LOCK_EX/LOCK_UN/LOCK_NB — standard BSD constants, as in ext/standard/flock_compat.h */
 #include <sys/stat.h>
 #include <sys/types.h>
 
@@ -18,22 +18,22 @@
 #include "fpm_pool_fiber_flock.h"
 #include "zlog.h"
 
-/* Jeden proces = jeden OS-owy watek, scheduler przelacza fibry WYLACZNIE
- * w jawnych punktach zawieszenia (fpm_pool_fiber_wait_wake/wait_fd). Miedzy
- * dwoma takimi punktami nic innego nie rusza tego rejestru — zero potrzeby
- * blokad. Gdyby kiedys ten plik mial dzialac tez pod executorem innym niz
- * fiber (async z watkami OS?), TO zalozenie trzeba by przeliczyc od nowa. */
+/* One process = one OS thread; the scheduler switches Fibers ONLY at explicit
+ * suspension points (fpm_pool_fiber_wait_wake/wait_fd). Nothing else touches
+ * this registry between two such points — no locks are needed. If this file
+ * ever also runs under an executor other than fiber (async with OS threads?),
+ * THIS assumption must be reconsidered from scratch. */
 
 #define FPM_FLOCK_MAX_ENTRIES   4096
 #define FPM_FLOCK_MAX_SH        64
 #define FPM_FLOCK_MAX_WAITERS   64
 
-/* Domyslne parametry probkowania NB+retry dla rywalizacji MIEDZYPROCESOWEJ
- * (drugi proces trzyma blokade jadra — nie mamy zadnego zdarzenia gotowosci,
- * wiec to jest z definicji odpytywanie). Nadpisywalne zmienna srodowiskowa
- * do pomiarow bez przebudowy: FPMNG_FLOCK_POLL_ATTEMPTS=0 wylacza probkowanie
- * calkowicie (pierwszy NB-fail od razu spada do prawdziwego blokujacego
- * flock()) — do porownania kosztu "poll then block" vs "just block". */
+/* Default NB+retry polling parameters for INTER-PROCESS contention (another
+ * process holds the kernel lock — there is no readiness event, so polling is
+ * inherent). Overridable through an environment variable for measurements
+ * without a rebuild: FPMNG_FLOCK_POLL_ATTEMPTS=0 disables polling completely
+ * (the first NB failure falls straight through to the real blocking flock()) —
+ * to compare the cost of "poll then block" with "just block". */
 #define FPM_FLOCK_POLL_ATTEMPTS_DEFAULT 5
 #define FPM_FLOCK_POLL_INTERVAL_USEC    20000	/* 20 ms */
 
@@ -41,10 +41,10 @@ struct fpm_flock_entry_s {
 	bool used;
 	dev_t dev;
 	ino_t ino;
-	void *ex_owner;			/* fiber waiter handle trzymajacy LOCK_EX w TYM procesie, albo NULL */
+	void *ex_owner;			/* Fiber waiter handle holding LOCK_EX in THIS process, or NULL */
 	void *sh_owners[FPM_FLOCK_MAX_SH];
 	int sh_count;
-	void *waiters[FPM_FLOCK_MAX_WAITERS];	/* fibry czekajace NA COS w tym procesie na ten plik */
+	void *waiters[FPM_FLOCK_MAX_WAITERS];	/* Fibers waiting for SOMETHING on this file in this process */
 	int n_waiters;
 };
 
@@ -56,7 +56,7 @@ static bool fpm_flock_waiters_full_warned = false;
 static int (*fpm_flock_orig_set_option)(php_stream *stream, int option, int value, void *ptrparam);
 static bool fpm_flock_installed = false;
 
-static int fpm_flock_poll_attempts = -1;	/* -1 = jeszcze nie odczytane z env */
+static int fpm_flock_poll_attempts = -1;	/* -1 = not read from env yet */
 
 static int fpm_flock_poll_attempts_get(void) /* {{{ */
 {
@@ -72,7 +72,7 @@ static int fpm_flock_poll_attempts_get(void) /* {{{ */
 }
 /* }}} */
 
-/* --- rejestr ---------------------------------------------------------- */
+/* --- registry --------------------------------------------------------- */
 
 static struct fpm_flock_entry_s *fpm_flock_find(dev_t dev, ino_t ino, bool create) /* {{{ */
 {
@@ -120,7 +120,7 @@ static bool fpm_flock_conflict(const struct fpm_flock_entry_s *e, void *owner, i
 			}
 		}
 	}
-	/* LOCK_SH: wspoldzieli sie z innymi LOCK_SH, konflikt tylko z ex_owner (juz sprawdzony). */
+	/* LOCK_SH: shares with other LOCK_SH holders; conflicts only with ex_owner (already checked). */
 	return false;
 }
 /* }}} */
@@ -145,16 +145,16 @@ static void fpm_flock_sh_add(struct fpm_flock_entry_s *e, void *owner) /* {{{ */
 
 	for (i = 0; i < e->sh_count; i++) {
 		if (e->sh_owners[i] == owner) {
-			return;	/* juz na liscie */
+			return;	/* already on the list */
 		}
 	}
 	if (e->sh_count == FPM_FLOCK_MAX_SH) {
-		/* Rekordowa liczba wspolnych czytelnikow tego samego pliku w jednym
-		 * procesie. Rejestr nie sledzi tego jednego dodatkowego czytelnika —
-		 * jego przyszly LOCK_UN po prostu nie znajdzie siebie na liscie (no-op),
-		 * a jego LOCK_EX-owi rywal moze sie NIE zablokowac w tym procesie
-		 * (padnie na prawdziwym flock() jak dzisiaj). Nie psuje to bezpieczenstwa
-		 * na poziomie jadra, tylko traci ten jeden skrot. */
+		/* Record number of shared readers of the same file in one process. The
+		 * registry does not track this one additional reader — its future LOCK_UN
+		 * simply will not find itself on the list (no-op), and a competitor for its
+		 * LOCK_EX may NOT be suspended in this process (it will fail at the real
+		 * flock(), as today). This does not compromise kernel-level safety; it only
+		 * loses this one optimization. */
 		return;
 	}
 	e->sh_owners[e->sh_count++] = owner;
@@ -164,11 +164,11 @@ static void fpm_flock_sh_add(struct fpm_flock_entry_s *e, void *owner) /* {{{ */
 static void fpm_flock_register_holder(struct fpm_flock_entry_s *e, void *owner, int mode) /* {{{ */
 {
 	if (mode == LOCK_EX) {
-		fpm_flock_sh_remove(e, owner);	/* upgrade SH->EX tego samego wlasciciela, jesli mial */
+		fpm_flock_sh_remove(e, owner);	/* upgrade SH->EX for the same owner, if it held SH */
 		e->ex_owner = owner;
 	} else { /* LOCK_SH */
 		if (e->ex_owner == owner) {
-			e->ex_owner = NULL;	/* downgrade EX->SH tego samego wlasciciela */
+			e->ex_owner = NULL;	/* downgrade EX->SH for the same owner */
 		}
 		fpm_flock_sh_add(e, owner);
 	}
@@ -227,20 +227,19 @@ void fpm_pool_fiber_flock_release_owner(void *owner) /* {{{ */
 			held = held || (e->sh_count != before);
 		}
 		if (held) {
-			/* Ten wlasciciel trzymal ten plik i wlasnie zniknal (koniec
-			 * requestu, w tym przypadek "zerwal sie" — patrz naglowek pliku).
-			 * Prawdziwa blokada jadra zwolni sie sama, gdy silnik zamknie
-			 * jego fd (destruktor strumienia) — niezaleznie od tego wpisu.
-			 * Ten wpis to WYLACZNIE nasza ksiegowosc; jesli go nie wyczyscimy,
-			 * kazdy przyszly konkurent w tym procesie zawiesi sie tu na zawsze
-			 * (dokladnie ten bug, ktory ten kod ma usunac). */
+			/* This owner held this file and has just disappeared (request end,
+			 * including the "it broke" case — see the file header). The real
+			 * kernel lock is released when the engine closes its fd (the stream
+			 * destructor), independently of this entry. This entry is ONLY our
+			 * bookkeeping; if we do not clear it, every future competitor in this
+			 * process will suspend here forever (exactly the bug this code removes). */
 			fpm_flock_wake_all(e);
 		}
-		/* n_waiters: ten wlasciciel mogl tez byc W KOLEJCE (a nie trzymac
-		 * lock) gdy jego request sie skonczyl (np. request skasowany w trakcie
-		 * oczekiwania — dzis nie powinno sie zdarzac, bo wait_wake nie ma
-		 * timeoutu na czekaniu na zwolnienie, ale sprzatamy dla bezpieczenstwa
-		 * zeby martwy wskaznik nigdy nie zostal obudzony/porownany). */
+		/* n_waiters: this owner may also have been IN THE QUEUE (rather than
+		 * holding a lock) when its request ended (for example, a request removed
+		 * while waiting — this should not happen today because wait_wake has no
+		 * timeout while waiting for release, but clean it up defensively so a dead
+		 * pointer is never woken or compared). */
 		{
 			int j;
 			for (j = 0; j < e->n_waiters; j++) {
@@ -294,15 +293,15 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 	if ((uintptr_t) ptrparam == PHP_STREAM_LOCK_SUPPORTED) {
-		/* Zapytanie o wsparcie (php_stream_supports_lock), nie akcja blokady. */
+		/* Support query (php_stream_supports_lock), not a locking operation. */
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 
 	owner = fpm_pool_fiber_waiter();
 	if (!owner) {
-		/* Poza kontekstem requestu fibera (np. skrypt kontenera przed
-		 * pierwszym requestem) — brak sensu w rejestrze procesowym, zachowaj
-		 * dokladnie oryginalne zachowanie. */
+		/* Outside a Fiber request context (for example, the container script
+		 * before the first request) — a process registry is not meaningful; retain
+		 * the exact original behavior. */
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 
@@ -327,10 +326,9 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 	}
 
 	if (fpm_flock_fd_identity(stream, &dev, &ino) != 0) {
-		/* Nie mozemy poznac tozsamosci pliku (fstat padl) — nie ma jak
-		 * bezpiecznie prowadzic rejestru kluczowanego dev+inode; oddaj
-		 * dokladnie oryginalne zachowanie (nadal poprawne, tylko bez
-		 * zawieszania zamiast blokowania). */
+		/* We cannot identify the file (fstat failed) — there is no safe way to
+		 * maintain a registry keyed by dev+inode; retain the exact original
+		 * behavior (still correct, only without suspending instead of blocking). */
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 
@@ -339,41 +337,38 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 
-	/* UWAGA (znaleziono i naprawiono W TRAKCIE tego spike'u, patrz raport):
-	 * Faza wewnatrzprocesowa i faza miedzyprocesowa MUSZA byc JEDNA petla,
-	 * ktora za kazdym razem od nowa sprawdza konflikt wewnatrzprocesowy PRZED
-	 * kolejna proba prawdziwego flock() — nie dwie oddzielne fazy uruchamiane
-	 * raz. Pierwsza wersja tego pliku robila to jako dwie fazy: (1) sprawdz
-	 * konflikt wewnatrzprocesowy RAZ, (2) jesli brak konfliktu, probkuj
-	 * prawdziwy flock() az do wyczerpania prob, potem zablokuj sie na
-	 * prawdziwym flock(). Miedzy kolejnymi probami w fazie (2) fiber
-	 * ODDAJE procesor (fpm_pool_fiber_wait_wake) — w tym oknie INNY fiber
-	 * W TYM SAMYM procesie mogl wejsc, tez nie zastac konfliktu (bo ten
-	 * pierwszy fiber jeszcze nic nie trzymal), wygrac prawdziwy flock() i
-	 * zawiesic sie na gniazdzie (poprawnie). Pierwszy fiber, wracajac z
-	 * probkowania, widzial dalej EWOULDBLOCK (bo TERAZ w tym samym procesie
-	 * ktos trzyma), ale jego petla probkowania nie sprawdzala juz rejestru
-	 * wewnatrzprocesowego — po wyczerpaniu prob wchodzil w PRAWDZIWY
-	 * BLOKUJACY flock(), zamrazajac caly OS-owy watek. Poniewaz posiadaczem
-	 * byl fiber W TYM SAMYM procesie zawieszony na gniazdzie, nigdy juz nie
-	 * odzyskiwal procesora, zeby dokonczyc i zwolnic — trwaly bezruch,
-	 * zmierzony (dwa osobne procesy, oba sparaliowane, gdb na zywym procesie
-	 * pokazal ramke dokladnie w tym prawdziwym blokujacym flock(), z
-	 * entry->ex_owner ustawionym na INNY fiber W TYM SAMYM procesie).
-	 * Naprawa: kazda iteracja najpierw sprawdza rejestr wewnatrzprocesowy
-	 * (i idzie w prawdziwe zawieszenie, jesli jest konflikt) i DOPIERO gdy
-	 * nikt w tym procesie nie trzyma, probuje prawdziwy flock(). */
+	/* NOTE (found and fixed DURING this spike, see the report): the in-process
+	 * phase and the inter-process phase MUST be one loop that rechecks the
+	 * in-process conflict from scratch BEFORE every next real flock() attempt —
+	 * not two separate phases run once. The first version of this file used two
+	 * phases: (1) check the in-process conflict ONCE, (2) if there was no
+	 * conflict, poll the real flock() until attempts were exhausted, then block
+	 * in the real flock(). Between retries in phase (2), the Fiber YIELDS the
+	 * processor (fpm_pool_fiber_wait_wake). During that window ANOTHER Fiber IN
+	 * THE SAME process could enter, also see no conflict (because the first
+	 * Fiber held nothing yet), win the real flock(), and suspend on a socket
+	 * (correctly). When the first Fiber returned from polling, it still saw
+	 * EWOULDBLOCK (because someone NOW held the lock in the same process), but its
+	 * polling loop no longer checked the in-process registry — after exhausting
+	 * attempts it entered the REAL BLOCKING flock(), freezing the entire OS
+	 * thread. Because the holder was a Fiber IN THE SAME process suspended on a
+	 * socket, it could never regain the processor to finish and release — a
+	 * permanent deadlock, measured (two separate processes both paralyzed; gdb on
+	 * the live process showed the frame exactly in the real blocking flock(), with
+	 * entry->ex_owner set to ANOTHER Fiber IN THE SAME process).
+	 * Fix: every iteration first checks the in-process registry (and enters a
+	 * real suspension if there is a conflict), and ONLY when nobody in this
+	 * process holds a conflicting lock does it try the real flock(). */
 	max_attempts = fpm_flock_poll_attempts_get();
 	attempts = 0;
 	for (;;) {
-		/* Wewnatrzprocesowo: dopoki ktos INNY w TYM procesie trzyma
-		 * sprzeczny tryb, zawieszamy sie na kolejce w pamieci — zero
-		 * probkowania, prawdziwe wait/wake, budzone przez LOCK_UN
-		 * posiadacza (fpm_flock_wake_all). */
+		/* In-process: while SOMEONE ELSE in THIS process holds a conflicting
+		 * mode, suspend on the in-memory queue — no polling, real wait/wake,
+		 * awakened by the holder's LOCK_UN (fpm_flock_wake_all). */
 		while (fpm_flock_conflict(entry, owner, mode)) {
 			if (nb) {
 				errno = EWOULDBLOCK;
-				return -1;	/* wywolujacy prosil o LOCK_NB — nie wolno zawieszac ani blokowac */
+				return -1;	/* caller requested LOCK_NB — do not suspend or block */
 			}
 			if (!fpm_pool_fiber_can_wait() || !fpm_flock_add_waiter(entry, owner)) {
 				/* FIX (was: fall through to a real BLOCKING flock() here).
@@ -413,15 +408,14 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 				return -1;
 			}
 			fpm_pool_fiber_wait_wake(NULL);
-			/* Po obudzeniu wracamy na SAM POCZATEK tej wewnetrznej petli —
-			 * sprawdzamy konflikt jeszcze raz (moglo obudzic sie kilku
-			 * czekajacych naraz, tylko jeden faktycznie wygra). */
+			/* After waking, return to the VERY START of this inner loop — check
+			 * the conflict again (several waiters may wake at once, but only one
+			 * actually wins). */
 		}
 
-		/* Nikt w TYM procesie nie trzyma sprzecznego trybu: mozemy probowac
-		 * prawdziwy flock(). Nie mamy zadnego zdarzenia gotowosci dla
-		 * advisory locka — LOCK_NB albo od razu wygrywa, albo od razu
-		 * przegrywa. */
+		/* Nobody in THIS process holds a conflicting mode: we can try the real
+		 * flock(). There is no readiness event for an advisory lock — LOCK_NB
+		 * either wins immediately or loses immediately. */
 		if (nb) {
 			ret = fpm_flock_real(stream, value, ptrparam);
 			if (ret == 0) {
@@ -436,17 +430,16 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 			return 0;
 		}
 		if (errno != EWOULDBLOCK) {	/* EAGAIN == EWOULDBLOCK on Linux; one check covers both there */
-			return ret;	/* prawdziwy blad, nie rywalizacja — nie ma sensu probowac dalej */
+			return ret;	/* real error, not contention — retrying makes no sense */
 		}
 
-		/* EWOULDBLOCK: albo rywalizacja MIEDZYPROCESOWA (inny proces trzyma
-		 * blokade jadra), albo — wlasnie to naprawiamy — ktos w TYM procesie
-		 * zdazyl wygrac prawdziwy flock() W TRAKCIE naszego poprzedniego
-		 * oddania procesora. Zamiast zakladac ktore to jest, po prostu
-		 * wracamy na goure petli "for": jesli ktos w tym procesie faktycznie
-		 * wygral, pierwsza rzecz, ktora zrobimy, to WLASNIE go zobaczymy w
-		 * fpm_flock_conflict() i pojdziemy w prawdziwe zawieszenie zamiast
-		 * dalej probkowac/blokowac sie na flock(). To jest calosc naprawy. */
+		/* EWOULDBLOCK: either INTER-PROCESS contention (another process holds the
+		 * kernel lock), or — the case fixed here — someone in THIS process won the
+		 * real flock() WHILE we previously yielded the processor. Instead of
+		 * guessing which one it is, simply return to the top of the "for" loop: if
+		 * someone in this process really won, the first thing we do is see that
+		 * holder in fpm_flock_conflict() and enter a real suspension instead of
+		 * polling/blocking on flock(). That is the entire fix. */
 		attempts++;
 		if (attempts >= max_attempts || !fpm_pool_fiber_can_wait()) {
 			break;
@@ -456,22 +449,21 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 
 			iv.tv_sec = FPM_FLOCK_POLL_INTERVAL_USEC / 1000000;
 			iv.tv_usec = FPM_FLOCK_POLL_INTERVAL_USEC % 1000000;
-			fpm_pool_fiber_wait_wake(&iv);	/* uspienie fibera bez blokowania procesu; wraca po timeoucie */
+			fpm_pool_fiber_wait_wake(&iv);	/* suspend the Fiber without blocking the process; returns on timeout */
 		}
 	}
 
-	/* Wyczerpane proby odpytywania (albo probkowanie wylaczone przez
-	 * FPMNG_FLOCK_POLL_ATTEMPTS=0, albo nie mozemy zawiesic fibera) I w tej
-	 * chwili fpm_flock_conflict() dalej nie widzi nikogo w TYM procesie
-	 * (sprawdzone na gorze tej samej iteracji petli, wiec to na pewno
-	 * rywalizacja MIEDZYPROCESOWA): ostatnia deska ratunku to prawdziwy
-	 * BLOKUJACY flock(). To zawiesza caly OS-owy watek jak dzisiaj, ale
-	 * tylko na czas trzymania blokady przez INNY PROCES, ktory z definicji
-	 * jest dzialajacy i skonczony w czasie (patrz E3 w
-	 * docs/flock-fiber-deadlock-report.md) — to jest ograniczone, nie martwa
-	 * petla, w przeciwienstwie do bugu, ktory ten plik usuwa (rywalizacja
-	 * MIEDZY FIBRAMI W TYM SAMYM procesie, gdzie posiadacz nigdy nie
-	 * odzyska procesora). */
+	/* Polling attempts exhausted (or polling disabled by
+	 * FPMNG_FLOCK_POLL_ATTEMPTS=0, or the Fiber cannot suspend) AND
+	 * fpm_flock_conflict() still sees nobody in THIS process at this moment
+	 * (checked at the top of the same loop iteration, so this is definitely
+	 * INTER-PROCESS contention): the last resort is the real BLOCKING flock().
+	 * This suspends the entire OS thread as it does today, but only while ANOTHER
+	 * PROCESS holds the lock; by definition that process is running and will
+	 * finish in finite time (see E3 in docs/flock-fiber-deadlock-report.md). This
+	 * is bounded, not a dead loop, unlike the bug removed by this file (contention
+	 * BETWEEN FIBERS IN THE SAME process, where the holder could never regain the
+	 * processor). */
 	ret = fpm_flock_real(stream, mode, ptrparam);
 	if (ret == 0) {
 		fpm_flock_register_holder(entry, owner, mode);

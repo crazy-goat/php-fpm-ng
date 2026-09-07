@@ -16,12 +16,12 @@ whole thing and one binary to scan.
 The HTTP gateway POC on libevent works, as a branch in php-src:
 https://github.com/s2x/php-src/tree/fpm-http-poc
 
-Verified 2026-09-05:
+Verified 2026-09-07 against `sapi/fpmng`:
 
 - full static build on musl (`-static-pie`) with opcache, mbstring, curl
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
-- runs in a bare `FROM scratch`, FPM as PID 1, HTTP 200, whole image
-  20 MB in the minimal variant
+- runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
+  33,885,546 bytes with the full, unstripped binary
 - the frontend selects `pool.type = fastcgi | fastcgi-ng | http`; no directive
   means classic `fastcgi` and stays compatible with upstream FPM
 - `fastcgi-ng` and `http` accept an optional
@@ -66,14 +66,22 @@ request_cpu_tracking = no            ; if nobody reads "last request cpu" or %C
 
 ## Building
 
-Scripts in `build/` run in an Alpine container, building out-of-tree:
+First prepare a pinned php-src tree with this repository's `sapi/fpmng`, then
+run the static build in Alpine, building out-of-tree:
 
 ```sh
+./build/prepare.sh /path/to/php-src
+rm -rf "$PWD/build-dir" "$PWD/out"
+mkdir "$PWD/build-dir" "$PWD/out"
+
 docker run --rm \
   -v /path/to/php-src:/src \
-  -v $PWD/build-dir:/build \
-  -v $PWD:/out \
-  alpine:latest sh /out/build/static-full.sh
+  -v "$PWD/build-dir:/build" \
+  -v "$PWD:/repo" \
+  -v "$PWD/out:/out" \
+  alpine:3.22 sh /repo/build/static-full.sh
+
+./build/test-static-full.sh "$PWD/out/php-fpm-ng-full"
 ```
 
 Two flags without which this looks broken for no reason:

@@ -46,6 +46,10 @@ known issues: [`docs/NOTES.md`](docs/NOTES.md).
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
 
+The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
+...), including how a renewed certificate reaches every gateway process
+without a restart, are documented in [`docs/tls.md`](docs/tls.md).
+
 ## Recommended pool configuration for lightweight endpoints
 
 Gain with no line of code, measured on the test box (details: `docs/NOTES.md`, 3m and 3t):

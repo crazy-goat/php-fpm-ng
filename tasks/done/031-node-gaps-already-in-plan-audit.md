@@ -3,7 +3,7 @@
 **Priority:** medium. Nothing here is a regression, but three of the six items
 below are user-visible gaps with no open task, which means nobody is
 accountable for them.
-**Status:** open.
+**Status:** done (2026-09-07).
 
 ## Context
 
@@ -162,3 +162,53 @@ on a full pool (item 4).
   calendar date. Whoever revisits this document next should consider adding a
   commit hash, since this task only exists because the classification had
   drifted from the code without anyone noticing.
+
+## Outcome (2026-09-07)
+
+All three acceptance criteria landed on branch
+`task-031-node-gaps-audit-20260907-131222` (PR #18):
+
+1. **Client timeouts** — decision: ONE shared budget for the whole read of the
+   first request on a connection, `http.read_timeout` (default 5000 ms,
+   0 = off). libevent's own `evhttp_set_timeout_tv()` turned out to be an
+   *idle* timer restarted on every received byte (verified on the test box: a
+   100 ms/byte trickle survived 20 s under a 1.5 s "timeout"), so the gateway
+   arms its own one-shot deadline in its bevcb at accept and disarms it in
+   `fpm_http_request()`, which evhttp only invokes once the request has fully
+   arrived. A fired deadline frees the bufferevent — the connection is closed
+   mid-read with no response. Documented gap: keep-alive requests after the
+   first get no new deadline. Verified by `http-read-timeout.phpt` (trickling
+   client cut off at the deadline) and by hand on the test box (cut off at
+   1.60 s against a 1.5 s budget; a 4 s worker script with an instantly-read
+   request still completes).
+2. **Backpressure** — decision: whole-body buffering stays (evhttp assembles
+   the request before the callback; streaming would re-plumb the FastCGI write
+   path for no benefit on the target deployment). The bound is explicit: the
+   32 MiB compile-time `FPM_HTTP_MAX_BODY` became `http.max_body` (K/M/G
+   suffixes via the new `fpm_conf_set_bytes()`), with the memory consequence
+   written into `docs/node_server_gaps.md`. Verified by `http-max-body.phpt`
+   (512-byte POST proxied, 2048-byte POST rejected with 413 before reaching a
+   worker).
+3. **`503` + `Retry-After`** — when no upstream is idle and the shared budget
+   is exhausted, the waiting queue is answered immediately with 503 +
+   `Retry-After: 1` instead of queueing towards an eventual 502; a broken pool
+   stays 502. No in-gateway queue retry (decision made with the user: a full
+   pool already implies a queue, so the client may as well do the retrying).
+   Found while implementing: `evhttp_send_error()` clears the output headers
+   (libevent `evhttp_send_page_()`), which would strip `Retry-After` — the 503
+   is sent with `evhttp_send_reply()` instead. Verified by
+   `http-pool-full-503.phpt` (pm.max_children=1, one gateway, slow script:
+   concurrent request gets an immediate 503 with the header while the
+   in-flight one completes 200) and by hand with curl.
+
+Side fix: the TLS hot-reload path (task 040) re-registers the bevcb on the
+listener; it now re-registers the gateway's *wrapper* (through a callback pair
+in the reload struct) instead of the raw `fpm_http_tls_bevcb`, so a
+certificate reload no longer drops the read deadline from later connections.
+
+`docs/node_server_gaps.md` was updated: the three items marked done with this
+task number, and the status line now names a commit (c807d13) per the note
+above.
+
+Full `sapi/fpmng/tests` suite on the test box (php-8.5.9): PASS=126 FAIL=0.
+

@@ -1642,17 +1642,25 @@ static void fpm_http_gateway_drop_privileges(struct fpm_http_gateway_s *gw) /* {
 /* }}} */
 
 /* The read deadline fired while the client was still delivering its first
- * request: close the connection by freeing the bufferevent (BEV_OPT_CLOSE_ON_FREE
- * is set on both the plain and the TLS bev). No response is sent -- a
- * slow-loris peer has not earned one, and a partial request cannot be
- * answered anyway. The node is unlinked and freed here; fpm_http_request()
- * can no longer find it, which is correct: a request that never completed
- * will never reach the callback. */
+ * request. The connection must NOT be torn down by hand: the bufferevent is
+ * owned by evhttp's evhttp_connection, and bufferevent_free() underneath it
+ * is a use-after-free (this exact mistake SIGSEGVed every gateway under the
+ * tls-reload load loop on the test box). Instead, shrink the connection's
+ * own read timeout to (almost) zero -- bufferevent_set_timeouts() re-arms
+ * the pending read event through be_ops->adj_timeouts, so the timeout fires
+ * immediately and evhttp closes the connection itself, through its own
+ * error path, with the connection state consistent. A connection whose read
+ * is not currently armed keeps existing, which is benign: it is either idle
+ * keep-alive (harmless) or about to arm read again.
+ * The node is unlinked and freed here; fpm_http_request() can no longer find
+ * it, which is correct: a request that never completed will never reach the
+ * callback. */
 static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_read_deadline_s *dl = arg;
 	struct fpm_http_gateway_s *gw = dl->gw;
 	struct fpm_http_read_deadline_s **p;
+	static const struct timeval now = {0, 1};
 
 	(void) fd; (void) what;
 	for (p = &gw->deadlines; *p; p = &(*p)->next) {
@@ -1661,7 +1669,7 @@ static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *ar
 			break;
 		}
 	}
-	bufferevent_free(dl->bev);
+	bufferevent_set_timeouts(dl->bev, &now, &now);
 	event_free(dl->ev);
 	free(dl);
 }

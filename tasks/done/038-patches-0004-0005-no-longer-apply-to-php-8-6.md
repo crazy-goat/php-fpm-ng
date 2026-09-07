@@ -3,7 +3,7 @@
 **Priority:** high. `build/prepare.sh` is the only way to assemble this project
 into a php-src tree, and it stops with `exit 1` on the current checkout. Nobody
 can build against php-src master until this is resolved.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -73,3 +73,16 @@ should confirm it.
   should not become the normal way to build this project.
 - This is unrelated to the build flags themselves; the patch mechanism is a
   separate thing that happened to be exercised at the same time.
+
+## Outcome
+
+Neither patch was merged upstream and neither needs a PHP 8.6 variant. The
+reported failures came from `prepare.sh` dry-running every patch against the
+untouched tree even though patches 0004 and 0005 use context introduced by
+earlier patches in the stack. Applying the stack cumulatively succeeds on both
+PHP 8.5.9 and PHP 8.6.0-dev.
+
+`prepare.sh` now applies each patch immediately after its successful probe.
+`build/test-prepare-patch-stack.sh` covers a second patch whose context is
+created by the first and also checks recognition of an already-applied stack.
+The validity table in `patches/README.md` records the checked versions.

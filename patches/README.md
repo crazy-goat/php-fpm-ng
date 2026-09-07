@@ -30,8 +30,8 @@ patches/php-8.4/*.patch      only for that version; overrides the same-named pat
 | `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (full PR, not an excerpt) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (7 arguments to `fpm_scoreboard_update_commit`) |
 | `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | report to php/php-src — text ready in `0002-upstream-report.md`, not sent yet | 8.3, 8.4, 8.5, master |
 | `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (different `safe_read` signature) |
-| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5, master; older versions to verify |
-| `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5, master; older versions to verify |
+| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5.9, 8.6.0-dev |
+| `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5.9, 8.6.0-dev |
 | `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | move the switch behind an API owned by `sapi/fpmng`, or propose it upstream | 8.5; older versions and master to verify |
 
 The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the

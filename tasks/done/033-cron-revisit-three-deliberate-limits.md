@@ -22,9 +22,9 @@ operator will actually read it before being surprised by it?
 
 ## (a) UTC only, no local time, no DST — `fpm_pool_cron.c:26-28`
 
-> "CZAS: liczymy wylacznie w UTC (fpm_cron_schedule_next() uzywa
-> gmtime_r()). Czas lokalny + zmiana czasu (DST) daje przebieg podwojny albo
-> zaden przy kazdym przejsciu — nie robimy tego."
+> "TIME: we calculate exclusively in UTC (fpm_cron_schedule_next() uses
+> gmtime_r()). Local time + DST gives a doubled run or none at each
+> transition — we are not doing that."
 
 Confirmed: `fpm_cron_schedule_next()` is called with `gmtime_r()`
 throughout `fpm_pool_cron.c` (e.g. the status computation at line ~353 calls
@@ -34,10 +34,10 @@ it against `time(NULL)`, interpreted as UTC).
 3am my time" has to compute their own UTC offset and hand-translate it into
 `cron.schedule`, and re-translate it twice a year if their timezone observes
 DST. The reasoning is written down, but only in `docs/NOTES.md:1435-1441`
-("Czas: wyłącznie UTC" — nearly the same wording as the source comment) and
+("Time: exclusively UTC" — nearly the same wording as the source comment) and
 again, earlier and more tersely, in `docs/NOTES.md:127-128` (point 2 of "Cztery
-rzeczy do rozstrzygnięcia"). `docs/NOTES.md` opens by describing itself as
-"pamięć projektu" — a development journal (decisions, measurements, open
+things to settle"). `docs/NOTES.md` opens by describing itself as
+"project memory" — a development journal (decisions, measurements, open
 questions) — not operator documentation. There is no README or user guide
 in this repository that documents `cron.schedule` at all: `README.md` (84
 lines) never mentions it. **So the decision itself looks sound, but it currently
@@ -46,10 +46,10 @@ where an operator writing a `cron.schedule` line would.**
 
 ## (b) No catch-up for missed runs — `fpm_pool_cron.c:30-34`
 
-> "NIE NADRABIAMY zgubionych przebiegow. fpm_cron_schedule_next() zawsze
-> liczy 'co jest najblizej w przyszlosci od teraz', nigdy 'co przegapilem
-> odkad ostatnio dzialalem' — jesli master byl wylaczony godzine, nastepny
-> przebieg to najblizszy przyszly termin, nie dwanascie zaleglych."
+> "We do NOT CATCH UP missed runs. fpm_cron_schedule_next() always
+> calculates 'what is nearest in the future from now', never 'what did I
+> miss since I last ran' — if the master was off for an hour, the next
+> run is the nearest future time, not twelve overdue ones."
 
 **What this means for the stated audience:** a single VPS is exactly the
 environment where the whole machine goes down for a kernel update, a reboot,
@@ -62,8 +62,8 @@ covers "the cron pool's *process* comes back," not "the *schedule* it
 missed gets made up."
 
 This gap was anticipated, not discovered: `docs/NOTES.md:1430-1432` already
-says, in the same words as the source header, "ktoś kiedyś będzie chciał
-dodać nadrabianie zaległych przebiegów — to ma być świadoma zmiana
+says, in the same words as the source header, "someone will someday want
+to add catching up on missed runs — this is meant to be a deliberate design
 projektowa ..., nie poprawka," and `docs/NOTES.md:129-130` (point 3 of the
 same four-point list referenced above) flags it again from the original
 design pass. The decision was made deliberately and recorded twice in dev
@@ -75,8 +75,8 @@ The shared-memory struct (`fpm_cron_shared_s`, `fpm_pool_cron.c:103-110`)
 keeps exactly three things: `running`, `last_run` (epoch of the last start),
 `last_exit_code` (+ `has_last_exit_code`), and `consecutive_failures`. The
 comment at line 100-102 is explicit that this is deliberately minimal and
-that cron never reads any of it back to make a decision — it exists "WYLACZNIE
-do odczytu przez pool.type = status."
+that cron never reads any of it back to make a decision — it exists "ONLY
+for reading by pool.type = status."
 
 `fpm_pool_cron_status()` (`fpm_pool_cron.c:337-365`) additionally computes
 `next_run` **live**, from the current clock and the parsed schedule, every

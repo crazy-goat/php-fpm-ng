@@ -30,7 +30,7 @@ returned" cache. **That was measured and rejected**: it fixes Laravel's
 `$app = require_once bootstrap/app.php` but does nothing for Symfony, whose
 entire runtime is a *side effect* of the include. When the include becomes a
 no-op, Symfony returns HTTP 200 with an empty body and nothing in the log
-(`docs/frameworks.md`, "Dlaczego cache wartosci `require_once` NIE pomoze").
+(`docs/frameworks.md`, "Why caching `require_once` values will NOT help").
 
 Today the project's answer is "write your own `index.php`" — but that is the
 answer by omission, not by decision. It is written in `docs/frameworks.md` as a

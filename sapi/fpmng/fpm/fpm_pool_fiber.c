@@ -5,8 +5,8 @@
  * Therefore we do not need the fork's switch handlers — request state enters
  * the globals immediately before zend_fiber_start/resume and leaves immediately
  * after they return (fpm_coop_req_enter/leave). The request Fiber suspends only
- * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c) and
- * always returns here.
+ * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c and
+ * the TLS patch, 0007) and always returns here.
  */
 
 #include "fpm_config.h"
@@ -51,6 +51,7 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 int fpm_pool_fiber_can_wait(void) { return 0; }
 int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) { (void) fd; (void) events; (void) timeout; return -1; }
+int fpm_pool_fiber_sleep_ms(long ms) { (void) ms; return -1; }
 void *fpm_pool_fiber_waiter(void) { return NULL; }
 int fpm_pool_fiber_wait_wake(struct timeval *timeout) { (void) timeout; return -1; }
 void fpm_pool_fiber_wake(void *waiter) { (void) waiter; }
@@ -372,6 +373,19 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 		return 0;
 	}
 	return 1;
+}
+/* }}} */
+
+int fpm_pool_fiber_sleep_ms(long ms) /* {{{ */
+{
+	struct timeval tv, *ptv = NULL;
+
+	if (ms >= 0) {
+		tv.tv_sec = ms / 1000;
+		tv.tv_usec = (long) ((ms % 1000) * 1000);
+		ptv = &tv;
+	}
+	return fpm_pool_fiber_wait_fd(-1, EV_TIMEOUT, ptv);
 }
 /* }}} */
 

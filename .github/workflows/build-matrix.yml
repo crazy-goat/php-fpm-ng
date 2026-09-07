@@ -25,6 +25,15 @@ env:
   PHP_SRC_REF: ${{ github.event.inputs.php_src_ref || 'php-8.5.9' }}
 
 jobs:
+  # Task 014: the comment-content contract in CLAUDE.md stays linked from the
+  # contributor entry points. Fast — checkout only.
+  comment-content-rule:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: verify comment-content rule links (task 014)
+        run: ./build/test-comment-content-rule.sh
+
   # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
   # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job

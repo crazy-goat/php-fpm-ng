@@ -1,7 +1,7 @@
 # 014 — Write down what a comment is for, instead of pruning comments
 
 **Priority:** low. Small, but it prevents an expensive mistake.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -56,3 +56,13 @@ something to prune *against*.
 
 - Formatting of comments — that is 013.
 - Comment language — that is 011.
+
+## Outcome
+
+- The rule already lived in `CLAUDE.md` (`## Comments: what earns one`); this
+  task linked it from `tasks/README.md` and `sapi/fpmng/README.md` and added a
+  regression test so the contract and links cannot drift silently.
+- `build/test-comment-content-rule.sh` checks the Keep/Delete/Never wording,
+  the no-scheduled-cleanup sentence, and both README anchors. Wired into CI as
+  a fast job (no php-src build).
+- Not measured on the test box — documentation-only change.

@@ -78,3 +78,6 @@ Establish enforceable style and static-analysis rules that match php-src.
   configured php-src Makefile.
 - Contributor how-to: `sapi/fpmng/README.md` → `./build/lint-c.sh`.
 - Not done (out of scope): bulk reformat; hard-fail on findings.
+  Follow-up on the same PR cleared the first report's ~29 findings
+  (strcmp/strncmp compares, macro parens, dead stores, leak paths,
+  intentional pointer-array `sizeof(void *)`).

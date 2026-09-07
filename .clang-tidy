@@ -15,8 +15,9 @@ Checks: >
   clang-analyzer-unix.Malloc,
   clang-analyzer-deadcode.DeadStores
 WarningsAsErrors: ''
-# Only diagnose our headers when a translation unit pulls them in. Upstream
-# headers under a prepared php-src tree must not become part of the report.
+# Only diagnose headers under this repository. build/lint-c.sh overrides this
+# with an absolute ^$REPO/(sapi/fpmng|ext/fpmng_metrics)/ filter so a prepared
+# php-src/sapi/fpmng/ tree (upstream copies) is never part of the report.
 HeaderFilterRegex: '(sapi/fpmng/|ext/fpmng_metrics/)'
 FormatStyle: none
 ...

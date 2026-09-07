@@ -77,7 +77,11 @@ fi
 # shellcheck disable=SC2086
 set -- $FILES
 echo "lint-c: $# translation units"
-# --quiet keeps the report to findings; config file is the check contract.
-# No -p / compile_commands: the file list is ours, compiler args follow --.
+# Header filter must be the absolute repo paths: a bare 'sapi/fpmng/' also
+# matches php-src/sapi/fpmng/ after prepare.sh (upstream copies we do not own).
 # shellcheck disable=SC2086
-clang-tidy --config-file="$REPO/.clang-tidy" --quiet "$@" -- $EXTRA_ARGS
+clang-tidy \
+	--config-file="$REPO/.clang-tidy" \
+	--header-filter="^$REPO/(sapi/fpmng|ext/fpmng_metrics)/" \
+	--quiet \
+	"$@" -- $EXTRA_ARGS

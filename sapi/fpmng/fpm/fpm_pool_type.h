@@ -62,6 +62,11 @@ struct fpm_pool_type_s {
 	 * gdziekolwiek w configu istnieje pool status. Patrz docs/NOTES.md 3u. */
 	unsigned reads_foreign_scoreboards:1;
 
+	/* Status flags are established on the master-side listening socket before
+	 * children are forked. The open file description is shared by the master
+	 * and its children, so a child must not change this after fork. */
+	unsigned listening_socket_nonblocking:1;
+
 	/* Dyrektywy, ktorych ten typ nie obsluguje. Zakonczona NULL-em, moze byc NULL.
 	 * Lista ODRZUCEN, nie dopuszczen — dzieki temu nowa dyrektywa jest domyslnie
 	 * dozwolona wszedzie i nie psuje zgodnosci wstecznej przez przeoczenie.
@@ -103,6 +108,9 @@ void fpm_pool_type_list(char *buf, size_t len);
 
 /* Typ danego poola; nigdy NULL po udanej walidacji konfiguracji. */
 const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp);
+
+/* Apply the type's listening-socket status flags in the master, before fork. */
+int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp);
 
 /* Pool biezacego dziecka, albo NULL poza dzieckiem. */
 struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);

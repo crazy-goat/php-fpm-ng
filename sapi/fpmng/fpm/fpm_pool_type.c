@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <fcntl.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -131,24 +132,26 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
  * fpm_pool_type_resolve() sa objete tym samym #ifdef. */
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
-	.name            = "fastcgi-ng",
-	.requires_listen = 1,
-	.requires_pm     = 1,
-	.serves_requests = 1,
-	.rejects         = fpm_coop_rejects,
-	.validate        = fpm_pool_type_fiber_validate,
-	.child_main      = fpm_pool_fiber_child_main,
+	.name                         = "fastcgi-ng",
+	.requires_listen              = 1,
+	.requires_pm                  = 1,
+	.serves_requests              = 1,
+	.listening_socket_nonblocking = 1,
+	.rejects                      = fpm_coop_rejects,
+	.validate                     = fpm_pool_type_fiber_validate,
+	.child_main                   = fpm_pool_fiber_child_main,
 };
 
 static const struct fpm_pool_type_s fpm_pool_http_fiber = {
-	.name            = "http",
-	.requires_listen = 1,
-	.requires_pm     = 1,
-	.serves_requests = 1,
-	.rejects         = fpm_coop_rejects,
-	.validate        = fpm_pool_type_fiber_validate,
-	.init_main       = fpm_pool_type_http_concurrent_init,
-	.child_main      = fpm_pool_fiber_child_main,
+	.name                         = "http",
+	.requires_listen              = 1,
+	.requires_pm                  = 1,
+	.serves_requests              = 1,
+	.listening_socket_nonblocking = 1,
+	.rejects                      = fpm_coop_rejects,
+	.validate                     = fpm_pool_type_fiber_validate,
+	.init_main                    = fpm_pool_type_http_concurrent_init,
+	.child_main                   = fpm_pool_fiber_child_main,
 };
 #endif /* HAVE_FPMNG_FIBER */
 
@@ -336,6 +339,40 @@ const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp)
 	const struct fpm_pool_type_s *type = fpm_pool_type_resolve(wp);
 
 	return type ? type : FPM_POOL_TYPE_DEFAULT;
+}
+
+int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp)
+{
+	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+	int flags;
+	int desired;
+
+	if (!type->requires_listen) {
+		return 0;
+	}
+
+	/* The socket is an open file description shared by the master and every
+	 * child. Set its status once here, while the master owns the configuration,
+	 * and repeat this after exec-based reloads to normalize inherited sockets. */
+	flags = fcntl(wp->listening_socket, F_GETFL);
+	if (flags < 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] failed to read listening socket flags",
+			wp->config->name);
+		return -1;
+	}
+
+	desired = type->listening_socket_nonblocking ? flags | O_NONBLOCK : flags & ~O_NONBLOCK;
+	if (desired == flags) {
+		return 0;
+	}
+
+	if (fcntl(wp->listening_socket, F_SETFL, desired) < 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] failed to set listening socket flags",
+			wp->config->name);
+		return -1;
+	}
+
+	return 0;
 }
 
 

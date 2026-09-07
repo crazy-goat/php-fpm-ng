@@ -116,3 +116,30 @@ Whoever picks this up decides the mechanism; this task does not prescribe it.
 - The `O_NONBLOCK`-once approach itself was a fix for a real accept race; see the
   comment it carries. Reverting to per-accept toggling is not an option — that
   was the earlier defect.
+
+## Outcome — 2026-09-06
+
+The listening-socket status policy is now declared on the effective pool type and
+applied by the master before it forks children. Fiber pool types deliberately use
+`O_NONBLOCK`; blocking types clear it. The same normalization runs after every
+exec-based reload, so an inherited fiber socket is made blocking before a
+classic child uses it. Children no longer mutate the shared open file description.
+
+Added two PHPT regression tests:
+
+- `task037-reload-listening-flags.phpt` covers fiber → classic → fiber on the
+  same listening address and inspects the master's `/proc` fd flags.
+- `task037-unrelated-listening-flags.phpt` covers a fiber pool next to an
+  unrelated classic pool and verifies both sockets still serve requests.
+
+Measured on the Polygon Linux host with PHP 8.5.11-dev:
+
+- fiber-enabled build: successful;
+- default build without fiber: successful;
+- both regression tests: **2/2 PASS**;
+- the fiber → classic path with repeated requests for 60 seconds: **PASS**,
+  with no unexpected child exits.
+
+The async acceptor was intentionally left unchanged; it does not use the coop
+accept path involved in this defect. The complete upstream PHPT suite was not
+rerun as part of this task.

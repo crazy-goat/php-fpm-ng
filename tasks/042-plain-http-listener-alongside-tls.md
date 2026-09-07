@@ -1,7 +1,19 @@
 # 042 — A plain HTTP listener alongside the TLS one (redirect, and ACME HTTP-01)
 
 **Priority:** medium. Blocks 020 if HTTP-01 is the chosen challenge type.
-**Status:** open, config-model question first.
+**Status:** decided (2026-09-06, project owner): redirect-only companion.
+Implementation open.
+
+## Decision
+
+Redirect-only companion, inside the same pool as the TLS listener. The plain
+port never reaches a worker: it answers only a 301/308 redirect to the same
+path on `https://host/`, and — once 046 lands — the ACME HTTP-01 challenge
+under `/.well-known/acme-challenge/`, both from the existing local-answer hook
+(`fpm_http.c:1041-1048`). This is the smallest surface of the three candidates
+and keeps the config file small (one extra directive, not a second pool
+block). Cost accepted: the gateway's "one socket per gateway process" listener
+setup gains a second, plain-HTTP socket per process for pools that opt in.
 
 ## Context
 

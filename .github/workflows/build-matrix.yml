@@ -27,8 +27,8 @@ env:
 
 jobs:
   # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
-  # revision. build/prepare.sh already exits 1 and prints "BLAD: latka nie
-  # naklada sie..." on a genuine failure (build/prepare.sh:108-109) — this job
+  # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
+  # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
     runs-on: ubuntu-latest

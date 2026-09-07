@@ -191,11 +191,16 @@ def check_md(p):
             in_fence = not in_fence
             continue
         if in_fence:
+            # Inside a fence, only diacritics are checked: the word lexicon
+            # would fire on quoted program output, but Polish diacritics in
+            # code/output are never legitimate here.
+            if DIACRITICS.search(ln):
+                add(p, lineno, ln, "Polish diacritics in code block")
             continue
-        # strip inline code and links
-        prose = re.sub(r"`[^`]*`", " ", ln)
-        prose = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", prose)
-        if WORD_RE.search(prose):
+        # strip links but NOT inline code (Polish diacritics hide there)
+        prose = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", ln)
+        no_inline = re.sub(r"`[^`]*`", " ", prose)
+        if WORD_RE.search(no_inline) or DIACRITICS.search(prose):
             add(p, lineno, ln, "Polish in markdown prose")
 
 

@@ -11,7 +11,7 @@
 #define FPM_CONF_MAX_PONG_LENGTH 64
 
 struct key_value_s;
-struct fpm_cron_schedule_s;	/* fpm-ng: definicja w fpm_cron_schedule.h, tu tylko wskaznik */
+struct fpm_cron_schedule_s;	/* fpm-ng: defined in fpm_cron_schedule.h, here only a pointer */
 
 struct key_value_s {
 	struct key_value_s *next;
@@ -54,12 +54,12 @@ extern struct fpm_global_config_s fpm_global_config;
  */
 struct fpm_worker_pool_config_s {
 	char *name;
-	char *type;			/* fpm-ng: pool.type, pusty = fastcgi (patrz fpm_pool_type.h) */
-	char *executor;			/* fpm-ng: pool.executor, pusty = classic */
+	char *type;			/* fpm-ng: pool.type, empty = fastcgi (see fpm_pool_type.h) */
+	char *executor;			/* fpm-ng: pool.executor, empty = classic */
 	char *set_directives;		/* fpm-ng: ";nazwa;nazwa;" faktycznie ustawionych dyrektyw,
-					 * zeby typ poola mogl odrzucic te, ktore go nie dotycza —
-					 * z samej wartosci nie da sie odroznic "nieustawione"
-					 * od "ustawione na domyslna" */
+					 * so the pool type can reject the ones that do not
+					 * apply to it — the value alone cannot distinguish
+					 * "unset" from "set to the default" */
 	char *prefix;
 	char *user;
 	char *group;
@@ -92,7 +92,7 @@ struct fpm_worker_pool_config_s {
 	int request_slowlog_trace_depth;
 	int request_terminate_timeout;
 	int request_terminate_timeout_track_finished;
-	int request_cpu_tracking;		/* fpm-ng: times() na start i koniec requestu; zasila "last request cpu" w statusie i %C w access.format */
+	int request_cpu_tracking;		/* fpm-ng: times() at request start and end; feeds "last request cpu" in the status and %C in access.format */
 	int rlimit_files;
 	int rlimit_core;
 	char *chroot;

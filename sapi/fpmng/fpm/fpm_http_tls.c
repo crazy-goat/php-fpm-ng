@@ -145,9 +145,9 @@ static int fpm_http_tls_install_chain(SSL_CTX *ctx, const char *cert_pem, size_t
 	return 0;
 }
 
-/* Parsuje cert+klucz z pamieci do jednorazowego SSL_CTX i sprawdza, ze
- * pasuja do siebie. Zwraca 0/-1, `what` opisuje co sie nie udalo (do
- * komunikatu wolajacego), NIGDY tresc klucza. */
+/* Parse cert+key from memory into a throwaway SSL_CTX and verify that they
+ * match. Returns 0/-1; `what` describes what failed (for the caller's error
+ * message), NEVER key material. */
 static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char *key_pem, size_t key_len,
 	const char **what)
 {
@@ -435,13 +435,13 @@ struct fpm_http_tls_s *fpm_http_tls_load(const char *pool, const char *cert_path
 		return NULL;
 	}
 
-	/* Wspolny klucz session ticketow dla WSZYSTKICH gateway procesow tego
-	 * poola: generowany raz, tutaj, w masterze, PRZED forkiem pierwszego
-	 * dziecka -- fork() kopiuje `tls` (a wiec i ten klucz) do kazdego
-	 * dziecka, ktore ustawia go w swoim WLASNYM SSL_CTX
-	 * (fpm_http_tls_ctx_new()). Bez tego kazdy proces bramki mialby wlasny,
-	 * losowy klucz i klient trafiajacy raz w jeden proces, raz w drugi
-	 * (SO_REUSEPORT) placilby pelny handshake za kazdym razem. */
+	/* Shared session ticket key for ALL gateway processes of this pool:
+	 * generated once, here, in the master, BEFORE the first child forks —
+	 * fork() copies `tls` (and thus this key) into every child, which sets
+	 * it in its OWN SSL_CTX (fpm_http_tls_ctx_new()). Without this every
+	 * gateway process would have its own random key, and a client hitting
+	 * one process and then the other (SO_REUSEPORT) would pay the full
+	 * handshake every time. */
 	if (RAND_bytes(tls->ticket_key, sizeof(tls->ticket_key)) != 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http: RAND_bytes() failed generating the TLS session ticket key", pool);
 		fpm_http_tls_free(tls);

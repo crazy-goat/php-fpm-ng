@@ -115,7 +115,7 @@ try {
     echo $leaksKeyMaterial ? "FAIL: error message contains key material\n" : "corrupt-key error: no key material in message\n";
 }
 
-// Cleanup -- own scratch directory only (CLAUDE.md: clean up temporary dirs).
+// Cleanup -- own scratch directory only (workflow.md: clean up temporary dirs).
 function rrmdir(string $dir): void
 {
     foreach (scandir($dir) as $entry) {

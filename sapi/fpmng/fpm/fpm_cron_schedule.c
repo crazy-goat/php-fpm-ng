@@ -7,6 +7,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "fpm_cron_schedule.h"
@@ -270,7 +271,43 @@ static int fpm_cron_schedule_matches(const struct fpm_cron_schedule_s *sched, co
 }
 /* }}} */
 
-time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after) /* {{{ */
+/* Applies `tz` as the process-wide TZ environment variable for the duration
+ * of the search below, and restores whatever was there before. Safe here
+ * (unlike a general-purpose reentrant helper would need to be) because both
+ * callers are single-threaded for this purpose: a cron pool's child process
+ * only ever computes its own single schedule (fpm_pool_cron_child_main()),
+ * and the master's status computation (fpm_pool_cron_status()) runs on its
+ * single event-loop thread, one pool at a time, never concurrently with
+ * itself. glibc/macOS have no reentrant tzalloc()/localtime_rz() available
+ * on every platform this project targets, so TZ + tzset() + localtime_r()
+ * is the portable choice. */
+static char *fpm_cron_schedule_tz_push(const char *tz) /* {{{ */
+{
+	char *saved = NULL;
+	const char *cur = getenv("TZ");
+
+	if (cur) {
+		saved = strdup(cur);
+	}
+	setenv("TZ", tz, 1);
+	tzset();
+	return saved;
+}
+/* }}} */
+
+static void fpm_cron_schedule_tz_pop(char *saved) /* {{{ */
+{
+	if (saved) {
+		setenv("TZ", saved, 1);
+		free(saved);
+	} else {
+		unsetenv("TZ");
+	}
+	tzset();
+}
+/* }}} */
+
+time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after, const char *tz) /* {{{ */
 {
 	/* Zawsze zaczynamy szukanie od NASTEPNEJ pelnej minuty po "after", nigdy
 	 * od samego "after" ani od "ostatnio widzianej minuty" — to jest cale
@@ -289,17 +326,32 @@ time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t af
 	 * starcie nie lapie tego dzis, wiec to jest ostatnia siatka
 	 * bezpieczenstwa przed nieskonczona petla, nie normalna sciezka. */
 	time_t limit = t + (time_t) 4 * 366 * 24 * 60 * 60;
+	char *saved_tz = NULL;
+	time_t result = (time_t) -1;
+
+	if (tz && *tz) {
+		saved_tz = fpm_cron_schedule_tz_push(tz);
+	}
 
 	while (t < limit) {
 		struct tm tmv;
 
-		gmtime_r(&t, &tmv);
+		if (tz && *tz) {
+			localtime_r(&t, &tmv);
+		} else {
+			gmtime_r(&t, &tmv);
+		}
 		if (fpm_cron_schedule_matches(sched, &tmv)) {
-			return t;
+			result = t;
+			break;
 		}
 		t += 60;
 	}
 
-	return (time_t) -1;
+	if (tz && *tz) {
+		fpm_cron_schedule_tz_pop(saved_tz);
+	}
+
+	return result;
 }
 /* }}} */

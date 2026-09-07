@@ -115,6 +115,8 @@ struct fpm_worker_pool_config_s {
 	char *cron_script;
 	int cron_timeout;			/* sekundy, 0 = bez limitu (domyslne) */
 	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* wypelnia validate() */
+	char *cron_timezone;			/* IANA name, e.g. "Europe/Warsaw"; empty/NULL = UTC (default), see fpm_pool_cron.c */
+	char *cron_log;			/* optional: one line per run (start, exit code, duration) appended here; see fpm_pool_cron.c */
 	/* fpm-ng: pool.type = http, patrz fpm_http.c. Bramka startuje TYLKO gdy
 	 * pool.type = http (patrz fpm_pool_type.c) — te dyrektywy ja jedynie
 	 * dostrajaja, nigdy nie wlaczaja same z siebie na innym typie poola. */

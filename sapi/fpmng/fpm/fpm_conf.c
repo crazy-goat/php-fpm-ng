@@ -170,6 +170,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
+	{ "cron.timezone",             &fpm_conf_set_string,      WPO(cron_timezone) },
+	{ "cron.log",                  &fpm_conf_set_string,      WPO(cron_log) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
@@ -761,6 +763,8 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_schedule);
 	free(wpc->cron_script);
 	free(wpc->cron_parsed_schedule);
+	free(wpc->cron_timezone);
+	free(wpc->cron_log);
 	free(wpc->http_listen);
 	free(wpc->http_allowed_clients);
 	free(wpc->http_trusted_proxies);

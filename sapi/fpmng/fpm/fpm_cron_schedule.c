@@ -309,7 +309,7 @@ static void fpm_cron_schedule_tz_pop(char *saved) /* {{{ */
 
 time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t after, const char *tz) /* {{{ */
 {
-	/	/* Always start the search at the NEXT full minute after "after", never
+	/* Always start the search at the NEXT full minute after "after", never
 	 * at "after" itself nor at "the last minute seen" — this gets the whole
 	 * "no catching up of missed runs" and "no double firing in the same
 	 * minute after a quick return" for free. We do not ask "what did I
@@ -325,7 +325,7 @@ time_t fpm_cron_schedule_next(const struct fpm_cron_schedule_s *sched, time_t af
 	 * falls in February, so the OR rule does not save it either) — startup
 	 * validation does not catch this today, so this is the last safety net
 	 * against an infinite loop, not a normal path. */
-time_t limit = t + (time_t) 4 * 366 * 24 * 60 * 60;
+	time_t limit = t + (time_t) 4 * 366 * 24 * 60 * 60;
 	char *saved_tz = NULL;
 	time_t result = (time_t) -1;
 

@@ -113,7 +113,7 @@ static struct fpmng_metrics_slot_s *shm_slot(struct fpmng_metrics_shm_s *shm, ui
 	return (struct fpmng_metrics_slot_s *) ((char *) shm + hdr + (size_t) i * slot_size(shm->limit));
 }
 
-/* ===== API po stronie C (patrz php_fpmng_metrics.h) ===== */
+/* ===== C-side API (see php_fpmng_metrics.h) ===== */
 
 void fpmng_metrics_shm_init(void *mem, size_t size, uint32_t slots, uint32_t limit)
 {
@@ -406,7 +406,7 @@ static const char *type_name(uint8_t t)
 	return "untyped";
 }
 
-/* ===== operacje ===== */
+/* ===== operations ===== */
 
 /* Prepares a series for an operation of type `type`. Returns NULL on error
  * (already warned). nbuckets/buckets only for the histogram. */
@@ -917,7 +917,7 @@ done:
 	return *out ? 0 : (naggs ? -1 : 0);
 }
 
-/* ===== funkcje PHP ===== */
+/* ===== PHP functions ===== */
 
 /* label arguments: a string => string HashTable. Splits into parallel
  * name/value arrays. Returns the label count or -1. */

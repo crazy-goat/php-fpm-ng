@@ -64,7 +64,7 @@ static char *fpm_http_tls_read_file(const char *path, size_t *out_len)
 	return buf;
 }
 
-/* "" or NULL -> TLSv1.2 (domyslna). Nieznana nazwa -> -1, caller loguje. */
+/* "" or NULL -> TLSv1.2 (default). Unknown name -> -1; the caller logs it. */
 static int fpm_http_tls_resolve_min_version(const char *min_version)
 {
 	if (!min_version || !*min_version || strcmp(min_version, "TLSv1.2") == 0) {
@@ -515,7 +515,7 @@ void fpm_http_tls_free(struct fpm_http_tls_s *tls)
 /* ALPN wire format (RFC 7301): a list of length-prefixed protocol name
  * strings; 8 = strlen("http/1.1"). Exactly one entry -- this is the server's
  * preference list, and the gateway speaks HTTP/1.1 and nothing else
- * (docs/NOTES.md, "Czego NIE robimy": no HTTP/2). */
+ * (docs/NOTES.md, "What we do NOT do": no HTTP/2). */
 static const unsigned char fpm_http_tls_alpn_protos[] = "\x08http/1.1";
 
 /* SSL_CTX_set_alpn_select_cb() callback, registered on every SSL_CTX this

@@ -111,7 +111,7 @@ static const struct timeval fpm_fiber_keep_idle = { 30, 0 };
 static void fpm_fiber_start_request(fcgi_request *req, int fd);
 static void fpm_fiber_kept_cb(evutil_socket_t fd, short what, void *arg);
 
-/* --- fiber requestu ---------------------------------------------------------- */
+/* --- fiber request ------------------------------------------------------------ */
 
 static void fpm_fiber_entry_handler(INTERNAL_FUNCTION_PARAMETERS) /* {{{ */
 {

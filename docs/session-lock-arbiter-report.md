@@ -109,7 +109,7 @@ commit checked out there at the time of reading (working tree matches the
   from the current `session.save_handler` ini string, every single request**
   — it is not "resolved once at MINIT and left alone" the way `session.save_path`
   is (which is why `fpm_pool_coop_session.c`'s `mh_arg2` trick works for that
-  directive but is not sufic for this one). There is no window in which we can
+  directive but is not sufficient for this one). There is no window in which we can
   install our wrapper into a live `ps_globals.mod` pointer and have it survive
   into the next request — `php_rinit_session()` throws that value away and
   looks the name up fresh, every time, via the exact table described above.

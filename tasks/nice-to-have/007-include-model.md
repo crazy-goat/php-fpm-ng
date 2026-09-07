@@ -16,7 +16,7 @@ Under `pool.executor = fiber` with `FPMNG_SHARED_INCLUDES=1`, `EG(included_files
 is shared across requests in the process. That removes the "Cannot redeclare
 class ComposerAutoloaderInit..." wall that otherwise kills the second request of
 any Composer application (measured: 30/30 requests succeed with it, request 2
-fatals without it — `docs/fiber_errors.md`, section "EKSPERYMENT").
+fatals without it — `docs/fiber_errors.md`, section "EXPERIMENT").
 
 It costs three things, documented in the same section:
 

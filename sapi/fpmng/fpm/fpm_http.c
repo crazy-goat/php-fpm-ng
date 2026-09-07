@@ -1039,13 +1039,16 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		if (!idle) {
 			idle = fpm_http_upstream_new(gw);
 		}
-		if (!idle && gw->nupstreams == 0) {
-			/* no connection of our own and no budget left: every worker is held
-			 * by another gateway, so no END_REQUEST can arrive for us. Answer
-			 * 503 + Retry-After instead of queueing forever (task 031): a full
-			 * pool is a transient condition, and the client deserves to know it
-			 * is different from a broken one (which is 502, fpm_http_finish).
-			 * fpm_http_conn_free() removes c from gw->waiting itself (queued=1). */
+		if (!idle) {
+			/* The pool is FULL for this gateway: every upstream connection it
+			 * holds is busy, and the shared budget says no new one may be
+			 * opened. Answer 503 + Retry-After instead of queueing towards a
+			 * later END_REQUEST (task 031): the wait would be unbounded and
+			 * invisible to the client, and a full pool is a transient
+			 * condition worth signalling -- a broken pool (no answer from an
+			 * accepted connection) is 502 instead, see fpm_http_finish().
+			 * fpm_http_conn_free() removes c from gw->waiting itself
+			 * (queued=1). */
 			while (!TAILQ_EMPTY(&gw->waiting)) {
 				c = TAILQ_FIRST(&gw->waiting);
 				c->status = FPM_HTTP_SERVICE_UNAVAIL;
@@ -1058,9 +1061,6 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 				fpm_http_conn_free(c);
 			}
 			return;
-		}
-		if (!idle) {
-			return; /* everything busy, the next END_REQUEST calls us again */
 		}
 
 		c = TAILQ_FIRST(&gw->waiting);

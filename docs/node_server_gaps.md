@@ -41,9 +41,9 @@ Decision (task 031): keep whole-body buffering. Streaming the body to the worker
 
 ### Full-pool overload response
 
-When the pool is full, FPM-NG returns `503 Service Unavailable` with a `Retry-After: 1` header (task 031). "Full" means the gateway cannot obtain an upstream connection: the shared upstream budget is exhausted, or — with no budget left — the pool's listen backlog would have to absorb the request, which is indistinguishable from overload. A broken pool (no answer from an accepted connection) still returns `502`, so the two failure modes are now distinguishable in the response.
+When the pool is full, FPM-NG returns `503 Service Unavailable` with a `Retry-After: 1` header (task 031). "Full" means the gateway has no idle upstream connection and the shared upstream budget (one connection per worker) is exhausted, so the request cannot be dispatched now. A broken pool (no answer from an accepted connection) still returns `502`, so the two failure modes are now distinguishable in the response.
 
-Queuing a request briefly before giving up was considered and rejected: a full pool already implies a queue, so the client might as well retry itself.
+Queuing a request briefly before giving up was considered and rejected: a full pool already implies a queue (in the pool's listen backlog), so the client might as well retry itself.
 
 ## Long-lived and bidirectional connections
 

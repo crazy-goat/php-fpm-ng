@@ -52,3 +52,6 @@ the main line, move the file and say why in the commit message.
   warns about this at the end of its output.
 - The test box (`192.168.8.50`, user `piotr`, passwordless sudo) is shared.
   Work in your own directory, use your own port range, and never `pkill php-fpm`.
+- Comment content — what earns a comment, what to delete, and why there is no
+  bulk comment-cleanup pass — is in [`CLAUDE.md`](../CLAUDE.md#comments-what-earns-one)
+  (task 014). Do not prune comments by apparent redundancy.

@@ -16,6 +16,8 @@ require_once "tester.inc";
 // for a new one, so the gateway answers 503 + Retry-After immediately
 // instead of queueing towards an eventual 502.
 
+$docroot = __DIR__;
+
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -26,6 +28,7 @@ listen = {{ADDR[fastcgi]}}
 pool.type = http
 pm = static
 pm.max_children = 1
+chdir = $docroot
 http.gateways = 1
 http.listen = {{ADDR[http]}}
 EOT;
@@ -33,6 +36,8 @@ EOT;
 $tester = new FPM\Tester($config, '<?php sleep(5); echo "slow";');
 $tester->start();
 $tester->expectLogStartNotices();
+
+$script = '/' . basename($tester->makeSourceFile());
 
 $httpAddr = $tester->getAddr('ipv4', '[http]');
 [$host, $port] = explode(':', $httpAddr);
@@ -44,7 +49,7 @@ if (!$fp1) {
     echo "FAIL: connect #1: $errstr ($errno)\n";
     exit(1);
 }
-fwrite($fp1, "GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
+fwrite($fp1, "GET $script HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
 stream_set_blocking($fp1, false);
 
 // Give the gateway a moment to dispatch request 1 to the worker before
@@ -58,7 +63,7 @@ if (!$fp2) {
     echo "FAIL: connect #2: $errstr ($errno)\n";
     exit(1);
 }
-fwrite($fp2, "GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
+fwrite($fp2, "GET $script HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
 $response = '';
 while (!feof($fp2)) {
     $chunk = fgets($fp2);

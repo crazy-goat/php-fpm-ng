@@ -15,6 +15,8 @@ require_once "tester.inc";
 // compile-time FPM_HTTP_MAX_BODY of 32 MiB; it is now the http.max_body
 // directive so small VPS deployments can lower it instead of forking.
 
+$docroot = __DIR__;
+
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -25,6 +27,7 @@ listen = {{ADDR[fastcgi]}}
 pool.type = http
 pm = static
 pm.max_children = 1
+chdir = $docroot
 http.listen = {{ADDR[http]}}
 http.max_body = 1k
 EOT;
@@ -33,17 +36,19 @@ $tester = new FPM\Tester($config, '<?php echo "len=", $_SERVER["CONTENT_LENGTH"]
 $tester->start();
 $tester->expectLogStartNotices();
 
+$script = '/' . basename($tester->makeSourceFile());
+
 $httpAddr = $tester->getAddr('ipv4', '[http]');
 [$host, $port] = explode(':', $httpAddr);
 
-function postBytes(string $host, int $port, int $length): string
+function postBytes(string $host, int $port, string $script, int $length): string
 {
     $fp = fsockopen($host, $port, $errno, $errstr, 5);
     if (!$fp) {
         echo "FAIL: connect: $errstr ($errno)\n";
         exit(1);
     }
-    $head = "POST / HTTP/1.1\r\nHost: $host\r\nContent-Length: $length\r\nConnection: close\r\n\r\n";
+    $head = "POST $script HTTP/1.1\r\nHost: $host\r\nContent-Length: $length\r\nConnection: close\r\n\r\n";
     fwrite($fp, $head . str_repeat('x', $length));
     $response = '';
     while (!feof($fp)) {
@@ -58,14 +63,14 @@ function postBytes(string $host, int $port, int $length): string
 }
 
 // Under the cap: the worker sees the request.
-$small = postBytes($host, (int) $port, 512);
+$small = postBytes($host, (int) $port, $script, 512);
 if (!str_contains($small, ' 200 ') || !str_contains($small, 'len=512')) {
     echo "FAIL: 512-byte POST was not proxied:\n$small\n";
     exit(1);
 }
 
 // Over the 1k cap: evhttp answers 413 itself, the worker never runs.
-$big = postBytes($host, (int) $port, 2048);
+$big = postBytes($host, (int) $port, $script, 2048);
 if (!str_contains($big, ' 413 ')) {
     echo "FAIL: 2048-byte POST was not rejected with 413:\n$big\n";
     exit(1);

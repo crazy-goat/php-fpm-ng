@@ -11,8 +11,12 @@ require_once "tester.inc";
 
 // Task 031, acceptance criterion 1: a client sending one byte at a time,
 // never going fully idle, must be cut off within a bounded, documented time
-// -- http.read_timeout. The timeout is one budget for the whole client-side
-// read (headers + body), handed to libevent via evhttp_set_timeout_tv().
+// -- http.read_timeout. The deadline is one budget for the whole client-side
+// read of the first request on a connection (headers + body), armed at
+// accept and disarmed when the request is fully assembled; see
+// struct fpm_http_read_deadline_s in fpm_http.c.
+
+$docroot = __DIR__;
 
 $config = <<<EOT
 [global]
@@ -24,6 +28,7 @@ listen = {{ADDR[fastcgi]}}
 pool.type = http
 pm = static
 pm.max_children = 1
+chdir = $docroot
 http.listen = {{ADDR[http]}}
 http.read_timeout = 2000
 EOT;
@@ -31,6 +36,11 @@ EOT;
 $tester = new FPM\Tester($config, '<?php echo "ok";');
 $tester->start();
 $tester->expectLogStartNotices();
+
+// The docroot is the tests directory (chdir above); the worker script is the
+// tester's own source file, addressed by basename -- the pattern
+// http-tls-chain.phpt already uses.
+$script = '/' . basename($tester->makeSourceFile());
 
 $httpAddr = $tester->getAddr('ipv4', '[http]');
 [$host, $port] = explode(':', $httpAddr);
@@ -43,7 +53,7 @@ if (!$fp) {
     echo "FAIL: baseline connect: $errstr ($errno)\n";
     exit(1);
 }
-fwrite($fp, "GET / HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
+fwrite($fp, "GET $script HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
 $baseline = '';
 while (!feof($fp)) {
     $baseline .= fgets($fp);
@@ -64,7 +74,7 @@ if (!$fp) {
 }
 stream_set_blocking($fp, false);
 
-$request = "GET / HTTP/1.1\r\nHost: $host\r\nContent-Length: 1\r\n\r\n";
+$request = "GET $script HTTP/1.1\r\nHost: $host\r\nContent-Length: 1\r\n\r\n";
 $sent = 0;
 $start = microtime(true);
 $closed = false;

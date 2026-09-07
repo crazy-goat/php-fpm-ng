@@ -2464,7 +2464,8 @@ Not at startup. See section 7.
 ### Blockers — CLOSED (2026-09-06, branch `http-config`)
 
 - Configuration: directives exist for `http.listen`, `http.gateways` (2),
-  `http.reuseport` (0), `http.static` (1), `http.idle_timeout` (500 ms), and
+  `http.reuseport` (0), `http.static` (1), `http.idle_timeout` (500 ms),
+  `http.read_timeout` (5000 ms, task 031), `http.max_body` (32m, task 031), and
   `http.allowed_clients`. Validation is in the pool-type `.validate` hook. The
   `FPM_HTTP_*` environment variables remain as a fallback, with the directive
   taking precedence. `rejects[]` on FastCGI types makes `http.*` outside
@@ -2600,10 +2601,10 @@ the client, instead of using two client addresses).
 
 ### Hardening
 
-- hard-coded limits: 32 MB body, 64 KB CGI headers;
-- no client-side timeouts (slow loris);
-- a full pool returns 502; it should return 503 with `Retry-After`;
-- no backpressure while sending the body — a large upload lands in gateway memory.
+- ~~hard-coded limits: 32 MB body, 64 KB CGI headers~~ — `http.max_body` (task 031) makes the body cap a directive; CGI headers remain a compile-time 64 KB;
+- ~~no client-side timeouts (slow loris)~~ — `http.read_timeout` (task 031) bounds one whole client read (headers + body);
+- ~~a full pool returns 502; it should return 503 with `Retry-After`~~ — done (task 031);
+- no backpressure while sending the body — a large upload lands in gateway memory. Decision (task 031): stays; bounded by `http.max_body`, consequence documented in `docs/node_server_gaps.md`.
 
 ### Supervisor and cron reliability
 

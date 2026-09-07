@@ -50,6 +50,7 @@ static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_long(zval *value, void **config, intptr_t offset);
 #endif
 static char *fpm_conf_set_time(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_bytes(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_boolean(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_string(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset);
@@ -178,6 +179,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
+	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
+	{ "http.max_body",             &fpm_conf_set_bytes,       WPO(http_max_body) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
@@ -367,6 +370,54 @@ static char *fpm_conf_set_time(zval *value, void **config, intptr_t offset) /* {
 	}
 
 	* (int *) ((char *) *config + offset) = seconds;
+	return NULL;
+}
+/* }}} */
+
+/* Byte-size value with an optional K/M/G suffix (base 1024), e.g. "32m" or
+ * "1048576". Lives next to fpm_conf_set_time() on purpose: same shape, but a
+ * size_t target so the full 32 MiB default (and beyond) fits. */
+static char *fpm_conf_set_bytes(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	char *val = Z_STRVAL_P(value);
+	size_t multiplier = 1, bytes;
+	int len = strlen(val);
+	char suffix;
+	const char *digits = val;
+	char *end;
+
+	if (!len) {
+		return "invalid byte size value";
+	}
+
+	suffix = val[len-1];
+	switch (suffix) {
+		case 'k' : case 'K' :
+			multiplier = 1024;
+			break;
+		case 'm' : case 'M' :
+			multiplier = 1024 * 1024;
+			break;
+		case 'g' : case 'G' :
+			multiplier = 1024 * 1024 * 1024;
+			break;
+		default :
+			if (suffix < '0' || suffix > '9') {
+				return "unknown suffix used in byte size value";
+			}
+			multiplier = 1;
+			break;
+	}
+
+	bytes = strtoull(digits, &end, 10);
+	if (end == digits || (multiplier > 1 && end != val + len - 1) || (multiplier == 1 && *end != '\0')) {
+		return "is not a valid byte size (number with an optional K/M/G suffix)";
+	}
+	if (multiplier > 1 && bytes > (size_t) -1 / multiplier) {
+		return "byte size value overflows";
+	}
+
+	* (size_t *) ((char *) *config + offset) = bytes * multiplier;
 	return NULL;
 }
 /* }}} */
@@ -674,9 +725,11 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->supervisor_restart_delay = 1;
 	wp->config->supervisor_restart_delay_max = 60;
 	wp->config->supervisor_stop_timeout = 10;
-	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT w fpm_http.c */
+	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT in fpm_http.c */
 	wp->config->http_static = 1;
-	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS w fpm_http.c */
+	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */
+	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
+	wp->config->http_max_body = 32 * 1024 * 1024;	/* fpm-ng: FPM_HTTP_MAX_BODY in fpm_http.c */
 	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: see the field comment in fpm_conf.h */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;

@@ -1,6 +1,6 @@
 # Differences from a Node.js application server
 
-Status as of 2026-09-06. This document is analysis material, not an approved roadmap.
+Status as of 2026-09-07, commit c807d13 (the previous "Status as of 2026-09-06" line carried no commit reference; this document drifted from the code without anyone noticing, which is why task 031 exists). This document is analysis material, not an approved roadmap.
 
 The comparison covers a typical Node.js application server (for example, `node:http` with Express, Fastify, or Nest), not the bare runtime without libraries. The goal is to identify features that may make sense for FPM-NG without automatically expanding the project's scope.
 
@@ -26,28 +26,24 @@ This item is already in the FPM-NG plan and matters to PHP frameworks.
 
 ### Client timeouts
 
-A typical Node server can control header, request, idle-socket, and keep-alive timeouts separately. The FPM-NG HTTP gateway does not yet have complete protection against slow clients and slow loris attacks.
+A typical Node server can control header, request, idle-socket, and keep-alive timeouts separately. The FPM-NG HTTP gateway now has two complementary ones (task 031):
 
-This item is already in the plan.
+- `http.read_timeout` (default 5000 ms, 0 = disabled) — one budget for the whole client-side read (headers + body), enforced by libevent (`evhttp_set_timeout_tv()`). A slow-loris client that trickles bytes without ever going idle is cut off once the budget is spent; libevent drops the connection.
+- `http.idle_timeout` (default 500 ms, 0 = never) — releases a pinned upstream connection after this much idle time on a keep-alive request; this protects a *worker slot*, not the client socket.
+
+There is deliberately no separate header-read vs body-read budget: a single budget covers both, which is simpler to reason about and still bounds the total time a slow client can hold a gateway connection.
 
 ### Request-body streaming and backpressure
 
-Node exposes the request body as a stream and can pause receiving when the consumer is slower. The FPM-NG gateway buffers the body in memory before passing the request on.
+Node exposes the request body as a stream and can pause receiving when the consumer is slower. The FPM-NG gateway buffers the body in memory before passing the request on (libevent `evhttp` assembles the whole request before invoking the callback).
 
-What is missing:
-
-- streaming request-body forwarding;
-- backpressure;
-- safe handling of large and slow uploads;
-- control over gateway memory growth.
-
-Backpressure is already on the list of known gaps. The implementation method, such as a file buffer, is not yet a design decision.
+Decision (task 031): keep whole-body buffering. Streaming the body to the worker would require re-plumbing the FastCGI write path for no benefit on the target deployment (small projects, single VPS). The memory bound is explicit instead: `http.max_body` (default `32m`, was the compile-time `FPM_HTTP_MAX_BODY`) caps one request body; under concurrent slow uploads the gateway holds at most `http.gateways` × `http.max_body` bytes of buffered bodies (each gateway process is single-threaded and holds one connection's body at a time per in-flight request — the true multiplier is concurrent in-flight uploads per gateway, bounded by the event loop).
 
 ### Full-pool overload response
 
-When the pool is full, FPM-NG currently returns `502`. The plan is to return a correct `503 Service Unavailable` with `Retry-After`.
+When the pool is full, FPM-NG returns `503 Service Unavailable` with a `Retry-After: 1` header (task 031). "Full" means the gateway has no idle upstream connection and the shared upstream budget (one connection per worker) is exhausted, so the request cannot be dispatched now. A broken pool (no answer from an accepted connection) still returns `502`, so the two failure modes are now distinguishable in the response.
 
-Possible short-burst queuing is not currently part of the approved plan.
+Queuing a request briefly before giving up was considered and rejected: a full pool already implies a queue (in the pool's listen backlog), so the client might as well retry itself.
 
 ## Long-lived and bidirectional connections
 
@@ -182,12 +178,12 @@ SSE, reliable client-disconnect detection, and request-body streaming have the b
 
 ### Already in the plan
 
-- routing / a `try_files` equivalent;
-- client timeouts;
-- request-body backpressure;
-- `503 Retry-After` for a full pool;
-- TLS + ACME;
-- `pool.type = proxy`;
+- routing / a `try_files` equivalent — done (`http.front_controller`), remaining gaps tracked in task 018;
+- client timeouts — done (task 031, `http.read_timeout` + `http.idle_timeout`);
+- request-body backpressure — decision made (task 031): whole-body buffering stays, bound is `http.max_body`;
+- `503 Retry-After` for a full pool — done (task 031);
+- TLS + ACME — TLS done, ACME tracked in task 020;
+- `pool.type = proxy` — decision pending, task 032;
 - HTTP/2 and gzip as final nice-to-haves.
 
 ### Investigate, but not on the roadmap

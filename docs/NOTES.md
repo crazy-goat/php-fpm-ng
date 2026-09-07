@@ -3564,3 +3564,84 @@ Test host (macOS/arm64, debug, `http` + `supervisor` + `cron`):
 
 This is not a real hot-reload that diffs configuration and touches only the
 changed pool — that scope remains postponed.
+
+## 3y. ACME state on a writable volume — layout, ownership, permissions (task 044, 2026-09-07)
+
+Task 043 decided the ACME client is project-owned PHP run by a dedicated
+`pool.type = cron` process (3l above). This settles the other half named
+there: certificates and the account key are **state, not code**, and the
+project's premise (immutable image, mutable volume) requires the split to be
+explicit and shared with the self-runner (3a).
+
+**What is state:** the ACME account private key, the account URL returned by
+registration, the certificate's own private key, the certificate chain
+(`fullchain.pem`), and per-certificate renewal metadata. Replay nonces and
+order state are not persisted — RFC 8555 nonces are single-use and fetched
+fresh per request; an in-flight order that is lost (process killed
+mid-renewal) is simply retried as a new order on the next scheduled run (see
+045), not resumed.
+
+**One base directory, several per-domain subdirectories**, not several base
+directories — a pool serving more than one certificate over SNI (041) needs
+one subdirectory per name, not a second configuration surface:
+
+```
+$ACME_STATE_DIR/
+  account.key            account private key (EC P-256), 0600
+  account.json           {"url": "..."} from registration, 0600
+  <domain>/
+    privkey.pem           certificate private key, 0600
+    fullchain.pem          leaf + intermediate, 0644 (public)
+    renewal.json           renewal metadata, 0600
+```
+
+**Configured by `env[ACME_STATE_DIR]`** on the ACME cron pool — the existing
+FPM pool directive for setting an environment variable, not a new C
+directive. This needed no change to `fpm_pool_cron.c` or `fpm_pool_type.h`:
+the state directory is purely the concern of the PHP script `cron.script`
+points at, which is why this task's implementation is entirely
+`sapi/fpmng/acme/state.php`, a small library the script uses, plus a test.
+
+**Ownership:** the ACME cron pool and every `http` pool serving a certificate
+it manages must share the same pool `user`/`group`. The private key is 0600 —
+task 044 acceptance criterion 2 — not group-readable, so a gateway running
+under a different uid after task 010's privilege drop could not read it. This
+is a documented operational requirement, not something the code enforces
+(there is no cross-pool identity check anywhere else in this SAPI either).
+
+**Startup checks, not renewal-time surprises:** the library's
+`assertUsable()` fails loudly and specifically, before any key is touched, in
+two cases the task calls out explicitly: the directory does not exist, and
+the directory exists but is not writable (probed with a throwaway file, not
+inferred from `is_writable()`, which does not account for a read-only bind
+mount reporting normal permission bits). Both produce one message naming the
+path; neither crashes and neither falls back to serving plain HTTP — the
+bootstrap state machine (3l) already keeps 443 closed and 80 challenge-only
+until a certificate exists, so a state-directory failure simply means no
+certificate is ever produced, which is the existing `NO_CERT` state, not a
+new failure mode.
+
+**Restart reuses existing material:** the account key, the account record and
+a certificate's key are created once, on first use, and loaded thereafter —
+`loadOrRegisterAccount()` takes the actual registration call as a callback and
+never invokes it a second time once `account.json` exists. Verified in
+`sapi/fpmng/tests/acme-state.phpt` by simulating two process "boots" against
+the same directory and asserting the registration callback runs exactly once
+and both the account key bytes and the account URL are identical across the
+two.
+
+**Sole writer:** the HTTP gateway has no code path that writes under this
+directory today — it only reads `http.tls_cert`/`http.tls_key` — so criterion
+7 holds by the absence of a write path, not by an added check.
+
+**Atomic writes:** every file this library writes goes through a temp file in
+the same directory, `chmod`ed to its final mode, then `rename()`d — a
+concurrent reader (a gateway reloading `http.tls_cert`/`http.tls_key`, task
+040) never observes a partial file, and a private file is never briefly
+visible under its final name with the wrong permissions.
+
+**Left to later tasks:** the actual RFC 8555 protocol calls (045's handover,
+047's issuance and renewal) are not part of this task; `state.php` only
+defines and manages the on-disk layout. `installCertificateChain()` exists as
+the write path 047 will call after a successful order; it is exercised in the
+test with a placeholder PEM string, not a real certificate.

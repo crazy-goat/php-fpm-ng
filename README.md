@@ -46,6 +46,11 @@ known issues: [`docs/NOTES.md`](docs/NOTES.md).
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
 
+Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
+`cron.timeout`, `request_terminate_timeout`) and what stock defaults do on
+`docker stop` are documented in
+[`docs/shutdown-timeouts.md`](docs/shutdown-timeouts.md).
+
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md).

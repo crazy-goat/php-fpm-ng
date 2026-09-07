@@ -78,3 +78,14 @@ size limit or rotation built in — that is the operator's responsibility, the
 same as any other log file this project writes. Failures are also logged at
 warning level regardless of `cron.log`, which is loud enough to notice on a
 single-instance deployment.
+
+## Shutdown and `docker stop`
+
+When the master receives `SIGTERM` (e.g. `docker stop`), a cron child that is
+**sleeping** before the next run exits immediately and skips that run. A child
+that is **already running a script** is stopped through the master's
+`process_control_timeout` escalation unless you raise that global value; when
+you set `cron.timeout`, it must be **≤** `process_control_timeout` or the
+master kills the run before `cron.timeout` can act. See
+[`docs/shutdown-timeouts.md`](shutdown-timeouts.md) for the full table,
+defaults, and startup warnings.

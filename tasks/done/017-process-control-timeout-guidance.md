@@ -1,7 +1,7 @@
 # 017 — `process_control_timeout` silently kills long-lived pools on shutdown
 
 **Priority:** low-medium. Documentation and possibly a warning; no mechanism.
-**Status:** open. Measured and recorded in `docs/NOTES.md` around line 1244.
+**Status:** done.
 
 ## Context
 
@@ -52,3 +52,26 @@ software should say something at startup.
   would be worse than the current situation.
 - The missing "child exited" log line. Cosmetic, verified harmless; if it is
   worth fixing it deserves its own task.
+
+## Outcome
+
+Added [`docs/shutdown-timeouts.md`](../shutdown-timeouts.md): operator reference
+with directive table, default `docker stop` behaviour, configuration guidance,
+and the startup-warning decision. Linked from root `README.md`; `docs/cron.md`
+gains a shutdown cross-reference.
+
+**Startup-warning decision (already implemented in code, now documented):**
+warn once at startup for `supervisor` when
+`process_control_timeout < supervisor.stop_timeout` (includes stock defaults);
+warn for `cron` only when `cron.timeout > 0` and
+`process_control_timeout < cron.timeout`; do not warn on request-serving pools
+at upstream defaults. Reasoning is in the doc's "Startup warnings" section.
+
+Regression test: `sapi/fpmng/tests/fpmng-shutdown-timeout-warnings.phpt`.
+
+**Measured:** fpmng phpt suite on poligon (192.168.8.50, 2026-09-07):
+`fpmng-shutdown-timeout-warnings.phpt` PASS; full `run-fpmng-phpt.sh` run 8/8
+pass, 2 skip (fiber/session). Behaviour otherwise taken from
+`docs/NOTES.md` section 3p (2026-09-06 live verification).
+
+**Left out:** no change to defaults or to `fpm_process_ctl.c` (reference code).

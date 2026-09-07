@@ -1047,14 +1047,26 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 			 * invisible to the client, and a full pool is a transient
 			 * condition worth signalling -- a broken pool (no answer from an
 			 * accepted connection) is 502 instead, see fpm_http_finish().
+			 * evhttp_send_error() cannot be used here: it CLEARS the output
+			 * headers (libevent's evhttp_send_page_), which would strip the
+			 * Retry-After this answer exists to send.
 			 * fpm_http_conn_free() removes c from gw->waiting itself
 			 * (queued=1). */
 			while (!TAILQ_EMPTY(&gw->waiting)) {
 				c = TAILQ_FIRST(&gw->waiting);
 				c->status = FPM_HTTP_SERVICE_UNAVAIL;
 				if (c->evcon) {
+					struct evbuffer *body = evbuffer_new();
+
 					evhttp_add_header(evhttp_request_get_output_headers(c->req), "Retry-After", FPM_HTTP_RETRY_AFTER);
-					evhttp_send_error(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
+					if (body) {
+						evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
+							"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
+						evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", body);
+						evbuffer_free(body);
+					} else {
+						evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", NULL);
+					}
 				}
 				fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 					c->remote_user, c->status, c->bytes_out);

@@ -1,7 +1,7 @@
 # 003 — Our own `.phpt` tests for pool types and executors
 
 **Priority:** high, after 001 (needs the harness) and ideally after 002.
-**Status:** open.
+**Status:** done.
 
 ## Context
 
@@ -77,3 +77,20 @@ type that ignores it is a configuration trap.
   requests are in flight in **one** process, so the test must actually overlap
   them (an endpoint that sleeps while holding state) rather than issue them
   sequentially. `pm.max_children = 1` is what forces the overlap to be real.
+
+## Outcome
+
+Nine `fpmng-*.phpt` files under `sapi/fpmng/tests/` cover the acceptance
+criteria. `build/run-fpmng-phpt.sh` runs only that prefix (not upstream's
+150-test suite) with a 120-second default timeout for cron. Documentation is in
+`docs/fpmng-phpt.md`. CI job `fpmng-phpt` runs the runner against the canonical
+build artifact.
+
+Measured on the test box (2026-09-07, PHP 8.5.9, `--enable-fpmng` without
+fiber): **6 PASS / 0 FAIL / 2 SKIP / 1 WARN** across the nine tests. Fiber
+matrix and fiber isolation skip without `--enable-fpmng-fiber` (by design).
+`fpmng-supervisor-restart.phpt` occasionally WARNs ("passed on retry") on a
+loaded host but exits zero; not re-measured after a dedicated fix.
+
+Framework integration, MySQL/Redis, and benchmarks remain out of scope per the
+task file.

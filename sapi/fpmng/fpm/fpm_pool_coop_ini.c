@@ -1,103 +1,97 @@
-/* fpm-ng: izolacja WARTOSCI wpisow ini (ini_set/ini_get) per request na
- * executorze coop (fiber).
+/* fpm-ng: isolate INI entry VALUES (ini_set/ini_get) per request in the coop
+ * executor (Fiber).
  *
- * Problem (zmierzony na Symfony, endpoint zwracajacy ini_get('session.save_handler')
- * pod 8 rownoleglymi requestami): fpm_pool_coop.c robi JEDEN php_request_startup()
- * na proces kontenera, wiec EG(ini_directives) — tablica zend_ini_entry —
- * jest DZIELONA przez wszystkie requesty w locie. ini_set() jednego requestu
- * pisze wprost do ini_entry->value, ktory jest ten sam dla kazdego innego
- * requestu, dopoki wszystkie sa zawieszone na tym samym procesie. Dotad
- * przywracalismy zmienione wpisy do wartosci bazowej dopiero na KONCU
- * requestu (zend_ini_deactivate() w fpm_pool_coop.c) — za pozno: requesty
- * WSPOLBIEZNE (inny fiber w locie na tym samym procesie) widza ini_set()
- * requestu, ktory jeszcze trwa.
+ * Problem (measured on Symfony, endpoint returning ini_get('session.save_handler')
+ * under 8 concurrent requests): fpm_pool_coop.c performs ONE
+ * php_request_startup() for the container process, so EG(ini_directives) — the
+ * zend_ini_entry table — is SHARED by all in-flight requests. One request's
+ * ini_set() writes directly to ini_entry->value, which is the same for every
+ * other request while all are suspended in the same process. Until now we
+ * restored changed entries to the baseline only at the END of the request
+ * (zend_ini_deactivate() in fpm_pool_coop.c) — too late: CONCURRENT requests
+ * (another Fiber in flight in the same process) see the ini_set() of a request
+ * that is still running.
  *
- * Rozwiazanie: dokladnie ten sam wzorzec co SG/OG/symbol_table w
- * fpm_pool_coop.c i ps_globals w fpm_pool_coop_session.c — swap stanu przy
- * kazdym wejsciu/zejsciu z procesora. Tutaj "stanem" jest WYLACZNIE
- * ini_entry->value (i towarzyszace mu pola modified/orig_value/modifiable)
- * dla wpisow, ktore TEN request zmienil — NIE caly EG(ini_directives)
- * (dzielona ze wszystkimi, kopiowanie calej tablicy przy kazdym przelaczeniu
- * fibera byloby bez sensu drogie).
+ * Solution: exactly the same pattern as SG/OG/symbol_table in fpm_pool_coop.c
+ * and ps_globals in fpm_pool_coop_session.c — swap state at every processor
+ * entry/leave. Here "state" is ONLY ini_entry->value (and its accompanying
+ * modified/orig_value/modifiable fields) for entries that THIS request changed
+ * — NOT the whole EG(ini_directives) (shared with everyone; copying the whole
+ * table on every Fiber switch would be pointlessly expensive).
  *
- * --- Dlaczego EG(modified_ini_directives) wystarcza za liste do przejscia -
+ * --- Why EG(modified_ini_directives) is sufficient as the iteration list -----
  *
- * zend_alter_ini_entry_ex (Zend/zend_ini.c) dopisuje kazdy zmieniony wpis do
- * EG(modified_ini_directives) (nazwa -> zend_ini_entry*) i ustawia na wpisie
- * modified=true, orig_value=wartosc SPRZED tej zmiany — ale TYLKO przy
- * PIERWSZEJ zmianie (if (!modified) {...}); kolejne ini_set() na tym samym
- * kluczu, w tej samej "rundzie modyfikacji", nie ruszaja orig_value. Skoro w
- * modelu coop w danej chwili wykonuje sie NAJWYZEJ JEDEN fiber (kooperacyjne
- * przelaczanie, nie watki), a MY dbamy o to, zeby KAZDE zejscie requestu z
- * procesora w pelni przywracalo zmienione wpisy do stanu bazowego i zerowalo
- * modified — to orig_value, ktory zend_alter_ini_entry_ex zobaczy przy
- * NASTEPNEJ modyfikacji (czy to tego samego requestu po wznowieniu, czy
- * innego requestu, ktory akurat dostanie procesor), zawsze jest prawdziwa
- * wartosc bazowa (config poola/php_admin_value), nigdy cudza wartosc w
- * locie. Innymi slowy: EG(modified_ini_directives) w tym modelu jest
- * DOKLADNIE lista "co TEN wlasnie dzialajacy request zmienil od swojego
- * ostatniego wejscia" — pod warunkiem, ze nikt inny nie zostawia
- * modified=true na wyjsciu. Ten plik jest tym warunkiem.
+ * zend_alter_ini_entry_ex (Zend/zend_ini.c) adds every changed entry to
+ * EG(modified_ini_directives) (name -> zend_ini_entry*) and sets modified=true
+ * on the entry, orig_value=the value BEFORE that change — but ONLY on the FIRST
+ * change (if (!modified) {...}); later ini_set() calls for the same key in the
+ * same "modification round" do not touch orig_value. Since the coop model runs
+ * AT MOST ONE Fiber at a time (cooperative switching, not threads), and WE make
+ * every request leave fully restore changed entries to baseline and clear
+ * modified, orig_value seen by zend_alter_ini_entry_ex at the NEXT modification
+ * (of the same request after resuming, or of another request that gets the
+ * processor) is always the real baseline value (pool config/php_admin_value),
+ * never another in-flight value. In other words, in this model
+ * EG(modified_ini_directives) is EXACTLY the list of "what THIS currently running
+ * request changed since its last entry" — provided nobody leaves with
+ * modified=true. This file is that condition.
  *
- * --- Co przenosimy i jak (transfer wlasnosci, bez refcountow) --------------
+ * --- What we move and how (ownership transfer, without refcounts) ----------
  *
- * Przy zejsciu (fpm_coop_ini_req_leave): dla kazdego wpisu w
- * EG(modified_ini_directives) chowamy JEGO BIEZACA wartosc (wlasna wartosc
- * TEGO requestu, np. "5" po ini_set('precision', '5')) do ctx->ini_values
- * (nazwa -> zend_string*, PRZENIESIENIE wskaznika, bez zend_string_copy/
- * release — jak memcpy SG/OG w fpm_pool_coop.c), przywracamy
- * ini_entry->value = ini_entry->orig_value (baza), modified = false,
- * orig_value = NULL, modifiable = orig_modifiable. Cala tablice
- * EG(modified_ini_directives) przenosimy en bloc do ctx->ini_mods (to zwykla
- * podmiana wskaznika — HashTable* i tak trzyma tylko zend_ini_entry*, ktore
- * nie naleza do nas) i zerujemy EG(modified_ini_directives), zeby nastepny
- * request na tym procesie zaczynal od czystego "nic nie zmienione".
+ * On leave (fpm_coop_ini_req_leave): for every entry in
+ * EG(modified_ini_directives), stash ITS CURRENT value (this request's own
+ * value, for example "5" after ini_set('precision', '5')) in ctx->ini_values
+ * (name -> zend_string*, POINTER TRANSFER, without zend_string_copy/release —
+ * like memcpy SG/OG in fpm_pool_coop.c), restore ini_entry->value =
+ * ini_entry->orig_value (baseline), modified = false, orig_value = NULL,
+ * modifiable = orig_modifiable. Move the entire EG(modified_ini_directives)
+ * table as a block to ctx->ini_mods (a simple pointer swap — HashTable* holds
+ * only zend_ini_entry* values that do not belong to us) and clear
+ * EG(modified_ini_directives), so the next request in this process starts from
+ * a clean "nothing changed" state.
  *
- * Przy wejsciu (fpm_coop_ini_req_enter): dla kazdego wpisu w ctx->ini_mods
- * odtwarzamy dokladnie to, co zend_alter_ini_entry_ex zrobilby SAM: biezaca
- * (bazowa) wartosc wpisu staje sie orig_value, wlasna wartosc requestu z
- * ctx->ini_values wraca do ini_entry->value, modified = true. Tablice
- * ctx->ini_mods oddajemy z powrotem jako EG(modified_ini_directives)
- * (znowu podmiana wskaznika) — dzieki temu zarowno kolejne ini_set() W TYM
- * requescie, jak i finalny zend_ini_deactivate() na koncu requestu
- * (fpm_pool_coop.c) dzialaja dokladnie tak, jakby nic sie nie stalo.
+ * On entry (fpm_coop_ini_req_enter): for every entry in ctx->ini_mods, restore
+ * exactly what zend_alter_ini_entry_ex itself would do: the current (baseline)
+ * entry value becomes orig_value, this request's value from ctx->ini_values
+ * returns to ini_entry->value, modified = true. Return ctx->ini_mods as
+ * EG(modified_ini_directives) (again a pointer swap) — so subsequent ini_set()
+ * IN THIS request and final zend_ini_deactivate() at request end
+ * (fpm_pool_coop.c) behave exactly as if nothing had happened.
  *
- * CELOWO NIE wolamy tu ini_entry->on_modify() przy zadnym przelaczeniu —
- * patrz nizej, sekcja "Czego ta izolacja NIE naprawia".
+ * We DELIBERATELY do NOT call ini_entry->on_modify() on any switch — see the
+ * section "What this isolation does NOT fix" below.
  *
- * --- Tania sciezka -----------------------------------------------------------
+ * --- Cheap path -------------------------------------------------------------
  *
- * Request, ktory nie ruszal ini od ostatniego wejscia, ma
- * EG(modified_ini_directives) == NULL — dokladnie tak samo jak dzis w
- * zend_ini_deactivate(). fpm_coop_ini_req_leave() sprawdza to jako PIERWSZE
- * i wraca bez alokacji i bez przejscia po jakiejkolwiek tablicy.
- * fpm_coop_ini_req_enter() sprawdza ctx->ini_mods == NULL rownie tanio. To
- * jest sciezka KAZDEGO przelaczenia fibera, ktory nie uzywa ini_set/
- * set_time_limit/session_set_save_handler/... — czyli zdecydowanej
- * wiekszosci przelaczen.
+ * A request that did not touch INI since its last entry has
+ * EG(modified_ini_directives) == NULL — exactly as zend_ini_deactivate() does
+ * today. fpm_coop_ini_req_leave() checks this FIRST and returns without an
+ * allocation or a walk over any table. fpm_coop_ini_req_enter() checks
+ * ctx->ini_mods == NULL just as cheaply. This is the path for EVERY Fiber
+ * switch that does not use ini_set/set_time_limit/session_set_save_handler/...
+ * — that is, the overwhelming majority of switches.
  *
- * --- Czego ta izolacja NIE naprawia (powiedziane wprost) -------------------
+ * --- What this isolation does NOT fix (stated explicitly) -------------------
  *
- * Wiele on_modify (Zend/zend_ini.c: OnUpdateLong/OnUpdateBool/...) NIE tylko
- * ustawia ini_entry->value — kopiuje tez sparsowana wartosc do PROCESOWEGO
- * pola przez ZEND_INI_GET_ADDR (mh_arg1 = offset, mh_arg2 = adres bazy
- * globali modulu; w buildzie NTS globale modulu sa JEDNĄ instancja na
- * caly proces, tak jak core_globals). Ten plik swapuje WYLACZNIE
- * ini_entry->value/orig_value/modified — NIE wola on_modify przy
- * przelaczeniu (patrz uzasadnienie wyzej: bezpieczenstwo i koszt), wiec
- * TO POLE PROCESOWE nie jest przelaczane. Przyklad: ini_set('precision', '5')
- * poprawi ini_get('precision') WYLACZNIE dla tego requestu (naprawione tu),
- * ale realna precyzja uzywana przez var_dump/serialize (core_globals.precision,
- * ustawiane przez OnUpdateLong) zostanie procesowa, dopoki jest live —
- * czyli moze przeciekac do innych requestow w locie mimo tej naprawy.
- * Jedyny wyjatek w tej bazie kodu to ext/session: PS(mod) (ustawiane przez
- * OnUpdateSaveHandler) jest bezpieczne, bo cale ps_globals (w tym PS(mod))
- * jest JUZ swapowane osobno, per request, przez fpm_pool_coop_session.c —
- * niezaleznie od tego pliku. Naprawienie ogolnego przypadku wymagaloby
- * swapowania globali KAZDEGO modulu z on_modify (jak ps_globals) — nie tego
- * dotyczy to zgloszenie (zmierzony objaw to konkretnie ini_get() widzi cudza
- * wartosc), wiec tu sie zatrzymujemy i mowimy to wprost zamiast udawac
- * pelna izolacje.
+ * Many on_modify callbacks (Zend/zend_ini.c: OnUpdateLong/OnUpdateBool/...) do
+ * more than set ini_entry->value — they also copy the parsed value to a
+ * PROCESS-WIDE field through ZEND_INI_GET_ADDR (mh_arg1 = offset, mh_arg2 = the
+ * module-global base address; in an NTS build module globals are ONE instance
+ * for the whole process, like core_globals). This file swaps ONLY
+ * ini_entry->value/orig_value/modified — it does NOT call on_modify on a
+ * switch (see the rationale above: safety and cost), so THAT PROCESS-WIDE FIELD
+ * is not switched. Example: ini_set('precision', '5') fixes ini_get('precision')
+ * ONLY for this request (fixed here), but the real precision used by
+ * var_dump/serialize (core_globals.precision, set by OnUpdateLong) remains
+ * process-wide while it is live — so it may leak to other in-flight requests
+ * despite this fix. The only exception in this codebase is ext/session:
+ * PS(mod) (set by OnUpdateSaveHandler) is safe because all ps_globals (including
+ * PS(mod)) are ALREADY swapped separately, per request, by
+ * fpm_pool_coop_session.c — independently of this file. Fixing the general case
+ * would require swapping the globals of EVERY module with on_modify (like
+ * ps_globals) — that is not what this report covers (the measured symptom is
+ * specifically that ini_get() sees another value), so we stop here and say so
+ * explicitly instead of pretending to provide full isolation.
  */
 
 #include "fpm_config.h"
@@ -122,11 +116,11 @@ void fpm_coop_ini_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 	zend_hash_init(values, zend_hash_num_elements(EG(modified_ini_directives)), NULL, NULL, false);
 
 	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(EG(modified_ini_directives), name, entry) {
-		/* Wlasna wartosc TEGO requestu — chowamy ja, transfer wskaznika. */
+		/* This request's OWN value — stash it by transferring the pointer. */
 		zend_hash_add_ptr(values, name, entry->value);
 
-		/* Baza wraca na wpis, dokladnie jak zend_restore_ini_entry_cb —
-		 * poza wolaniem on_modify, patrz uzasadnienie na gorze pliku. */
+		/* Restore the baseline to the entry, exactly as zend_restore_ini_entry_cb
+		 * does — except for calling on_modify; see the rationale at the top. */
 		entry->value = entry->orig_value;
 		entry->modifiable = entry->orig_modifiable;
 		entry->modified = false;
@@ -153,9 +147,9 @@ void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 	ZEND_HASH_MAP_FOREACH_STR_KEY_PTR(ctx->ini_mods, name, entry) {
 		value = zend_hash_find_ptr(ctx->ini_values, name);
 
-		/* Dokladnie to, co zend_alter_ini_entry_ex robi przy pierwszej
-		 * modyfikacji w "rundzie": biezaca (bazowa) wartosc -> orig_value,
-		 * wlasna wartosc requestu -> value. Transfer wskaznika, bez
+		/* Exactly what zend_alter_ini_entry_ex does on the first modification
+		 * in a "round": current (baseline) entry value -> orig_value, this
+		 * request's value -> value. Transfer the pointer, without
 		 * zend_string_copy/release. */
 		entry->orig_value = entry->value;
 		entry->orig_modifiable = entry->modifiable;
@@ -163,15 +157,15 @@ void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx) /* {{{ */
 		entry->modified = true;
 	} ZEND_HASH_FOREACH_END();
 
-	/* ini_values juz nie sa nam potrzebne — wartosci przeniesione wyzej,
-	 * NULL-owy destruktor, wiec destroy nie zwalnia niczyich stringow. */
+	/* ini_values are no longer needed — values were transferred above. Its
+	 * NULL destructor means destroy does not release anybody's strings. */
 	zend_hash_destroy(ctx->ini_values);
 	FREE_HASHTABLE(ctx->ini_values);
 	ctx->ini_values = NULL;
 
-	/* Tablica wraca jako EG(modified_ini_directives) — dalsze ini_set() w
-	 * tym requescie i finalny zend_ini_deactivate() na koncu requestu
-	 * (fpm_pool_coop.c) dzialaja jak gdyby nigdy nie zeszla z procesora. */
+	/* Return the table as EG(modified_ini_directives) — subsequent ini_set() in
+	 * this request and final zend_ini_deactivate() at request end
+	 * (fpm_pool_coop.c) work as if the request had never left the processor. */
 	EG(modified_ini_directives) = ctx->ini_mods;
 	ctx->ini_mods = NULL;
 }
@@ -181,14 +175,14 @@ void fpm_coop_ini_req_free(struct fpm_coop_req_s *ctx) /* {{{ */
 {
 	zend_string *value;
 
-	/* Normalna sciezka tu nie wchodzi: request konczy sie NA PROCESORZE, wiec
-	 * ostatni fpm_coop_ini_req_enter() juz oddal obie tablice, a
-	 * zend_ini_deactivate() na koncu requestu przywrocil wpisy z on_modify.
-	 * To jest zabezpieczenie na wypadek zniszczenia ctx requestu, ktory zszedl
-	 * z procesora i nigdy nie wrocil (np. fiber ubity przy zamykaniu workera).
-	 * Same wpisy ini sa juz wtedy w stanie bazowym — fpm_coop_ini_req_leave()
-	 * przywrocil je przed zejsciem — wiec zostaje tylko zwolnic osierocone
-	 * wartosci tego requestu. */
+	/* The normal path does not enter here: the request ends ON THE PROCESSOR,
+	 * so the last fpm_coop_ini_req_enter() has returned both tables, and
+	 * zend_ini_deactivate() at request end restored entries through on_modify.
+	 * This protects against destroying a request context that left the processor
+	 * and never returned (for example, a Fiber killed while the worker shuts
+	 * down). The INI entries are already at baseline — fpm_coop_ini_req_leave()
+	 * restored them before leaving — so only this request's orphaned values remain
+	 * to be released. */
 	if (ctx->ini_values) {
 		ZEND_HASH_MAP_FOREACH_PTR(ctx->ini_values, value) {
 			zend_string_release(value);

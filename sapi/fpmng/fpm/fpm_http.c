@@ -177,6 +177,7 @@ struct fpm_http_gateway_s {
 	char *listen_address;			/* where the pool takes FastCGI */
 	char *docroot;
 	int listen_fd;
+	int plain_listen_fd;
 	int backlog;
 	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (http.reuseport) */
 	unsigned nproc;
@@ -188,6 +189,7 @@ struct fpm_http_gateway_s {
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
+	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = nikomu nie ufamy, see fpm_http_forwarded.h */
 	char *access_log_path;				/* http.access_log; NULL = wylaczony */
@@ -1355,6 +1357,66 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	return answered;
 }
 
+static int fpm_http_is_acme_challenge(struct evhttp_request *req)
+{
+	const struct evhttp_uri *uri = evhttp_request_get_evhttp_uri(req);
+	const char *path = uri ? evhttp_uri_get_path(uri) : NULL;
+	static const char prefix[] = "/.well-known/acme-challenge/";
+
+	return path && !strncmp(path, prefix, sizeof(prefix) - 1);
+}
+
+static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+{
+	const char *host = evhttp_find_header(evhttp_request_get_input_headers(req), "Host");
+	const char *uri = evhttp_request_get_uri(req);
+	struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
+	char *location;
+	char *redirect_host = NULL;
+	size_t len;
+
+	(void)arg;
+	if (fpm_http_is_acme_challenge(req)) {
+		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
+		return;
+	}
+	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
+		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		return;
+	}
+	if (host[0] == '[') {
+		const char *end = strchr(host, ']');
+
+		if (!end || (end[1] && end[1] != ':')) {
+			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			return;
+		}
+		redirect_host = strndup(host, (size_t)(end - host + 1));
+	} else {
+		const char *colon = strrchr(host, ':');
+
+		redirect_host = colon ? strndup(host, (size_t)(colon - host)) : strdup(host);
+	}
+	if (!redirect_host || !*redirect_host) {
+		free(redirect_host);
+		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		return;
+	}
+
+	len = sizeof("https://") - 1 + strlen(redirect_host) + strlen(uri) + 1;
+	location = malloc(len);
+	if (!location) {
+		free(redirect_host);
+		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		return;
+	}
+	snprintf(location, len, "https://%s%s", redirect_host, uri);
+	evhttp_add_header(headers, "Location", location);
+	evhttp_send_reply(req, 308, "Permanent Redirect", NULL);
+	free(location);
+	free(redirect_host);
+}
+
 static void fpm_http_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
@@ -1561,6 +1623,13 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		if (gw->listen_fd < 0) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
+		if (gw->plain_listen_address) {
+			close(gw->plain_listen_fd);
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, 1);
+			if (gw->plain_listen_fd < 0) {
+				exit(FPM_EXIT_SOFTWARE);
+			}
+		}
 	}
 
 	/* Everything above this line is the only reason the gateway ever needed
@@ -1608,6 +1677,21 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
 		exit(FPM_EXIT_SOFTWARE);
+	}
+	if (gw->plain_listen_fd >= 0) {
+		struct evhttp *plain = evhttp_new(gw->base);
+
+		if (!plain) {
+			exit(FPM_EXIT_SOFTWARE);
+		}
+		evhttp_set_allowed_methods(plain, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD);
+		evhttp_set_max_body_size(plain, 0);
+		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
+		evutil_make_socket_nonblocking(gw->plain_listen_fd);
+		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed for http.plain_listen", gw->pool);
+			exit(FPM_EXIT_SOFTWARE);
+		}
 	}
 
 	event_base_dispatch(gw->base);
@@ -1766,6 +1850,9 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		if (gw->listen_fd >= 0) {
 			close(gw->listen_fd);
 		}
+		if (gw->plain_listen_fd >= 0) {
+			close(gw->plain_listen_fd);
+		}
 		if (gw->upstreams_used) {
 			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
 		}
@@ -1786,6 +1873,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->front_controller);
 		free(gw->access_log_path);
 		free(gw->http_listen_override);
+		free(gw->plain_listen_address);
 		free(gw->pool);
 		free(gw->listen_address);
 		free(gw->docroot);
@@ -1845,6 +1933,9 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		gw->http_listen_override = strdup(wp->config->http_listen);
 	} else if ((env = getenv("FPM_HTTP_LISTEN")) && *env) {
 		gw->http_listen_override = strdup(env);
+	}
+	if (wp->config->http_plain_listen && *wp->config->http_plain_listen) {
+		gw->plain_listen_address = strdup(wp->config->http_plain_listen);
 	}
 
 	if (wp->config->http_allowed_clients && *wp->config->http_allowed_clients) {
@@ -1930,6 +2021,8 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 
 		gw = calloc(1, sizeof(*gw));
+		gw->listen_fd = -1;
+		gw->plain_listen_fd = -1;
 		gw->pool = strdup(wp->config->name);
 		gw->listen_address = strdup(wp->config->listen_address);
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
@@ -1944,6 +2037,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->trusted_proxies);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1973,6 +2067,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -1987,6 +2082,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -2003,11 +2099,31 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
 			free(gw);
 			return 0;
+		}
+		if (gw->plain_listen_address) {
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport);
+			if (gw->plain_listen_fd < 0) {
+				close(gw->listen_fd);
+				fpm_http_acl_free(gw->acl);
+				free(gw->allowed_clients);
+				fpm_http_acl_free(gw->trusted_proxies_acl);
+				free(gw->trusted_proxies);
+				free(gw->front_controller);
+				free(gw->access_log_path);
+				free(gw->http_listen_override);
+				free(gw->plain_listen_address);
+				free(gw->pool);
+				free(gw->listen_address);
+				free(gw->docroot);
+				free(gw);
+				return 0;
+			}
 		}
 		/* Klasyczny worker obsluguje jedno polaczenie naraz; executor
 		 * wielorequestowy podaje wlasna pojemnosc niezalezna od liczby dzieci. */
@@ -2024,6 +2140,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -2051,6 +2168,10 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			/* the master's socket would otherwise take its share of connections and never accept them */
 			close(gw->listen_fd);
 			gw->listen_fd = -1;
+			if (gw->plain_listen_fd >= 0) {
+				close(gw->plain_listen_fd);
+				gw->plain_listen_fd = -1;
+			}
 		}
 	}
 
@@ -2115,6 +2236,11 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			zlog(ZLOG_ERROR, "[pool %s] http.front_controller must be an absolute path under the document root, without '..'", wp->config->name);
 			return -1;
 		}
+	}
+	if (wp->config->http_plain_listen && *wp->config->http_plain_listen &&
+			(!wp->config->http_tls_cert || !*wp->config->http_tls_cert)) {
+		zlog(ZLOG_ERROR, "[pool %s] http.plain_listen requires http.tls_cert", wp->config->name);
+		return -1;
 	}
 	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
 #ifdef HAVE_FPM_HTTP_TLS

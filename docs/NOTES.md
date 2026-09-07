@@ -760,6 +760,25 @@ did for the primary pair). Test: `sapi/fpmng/tests/http-tls-alpn-sni.phpt`.
 Scope cut, not covered by this task: SNI certificates are validated once at
 startup but are NOT part of task 040's hot-reload mtime check — only the
 primary `http.tls_cert`/`http.tls_key` pair reloads without a restart; a
+
+**Implementation note (English, task 042, done):** `http.plain_listen` adds a
+redirect-only plain HTTP companion to the TLS listener in the same pool. It
+returns 308 to the same host, path, and query over HTTPS. The
+`/.well-known/acme-challenge/` namespace is answered locally with 404 until
+task 046 provides challenge contents; it is never redirected or dispatched to
+a worker. The complete compact configuration is:
+
+```ini
+[app]
+pool.type = http
+listen = 127.0.0.1:9000
+pm = dynamic
+pm.max_children = 8
+http.listen = 0.0.0.0:443
+http.plain_listen = 0.0.0.0:80
+http.tls_cert = /state/acme/example.com/fullchain.pem
+http.tls_key = /state/acme/example.com/privkey.pem
+```
 renewed SNI certificate needs one. See `tasks/done/041-tls-alpn-and-sni.md`.
 
 

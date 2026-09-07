@@ -15,7 +15,7 @@
  * identity), with 8x200 and an empty log -- worse than the pre-isolation
  * failure mode (1x200, 4x500, 3 timeouts), because it looks like success.
  *
- * Fix: dokladnie ten sam wzorzec co SG/OG/symbol_table (fpm_pool_coop.c),
+ * Fix: exactly the same pattern as SG/OG/symbol_table (fpm_pool_coop.c),
  * ps_globals (fpm_pool_coop_session.c) and ini_entry->value
  * (fpm_pool_coop_ini.c) -- swap state at enter/leave. Unlike those three,
  * "state" here is not a whole struct or a whole module's globals: it is a

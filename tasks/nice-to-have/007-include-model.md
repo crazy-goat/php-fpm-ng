@@ -16,7 +16,7 @@ Under `pool.executor = fiber` with `FPMNG_SHARED_INCLUDES=1`, `EG(included_files
 is shared across requests in the process. That removes the "Cannot redeclare
 class ComposerAutoloaderInit..." wall that otherwise kills the second request of
 any Composer application (measured: 30/30 requests succeed with it, request 2
-fatals without it — `docs/fiber_errors.md`, section "EKSPERYMENT").
+fatals without it — `docs/fiber_errors.md`, section "EXPERIMENT").
 
 It costs three things, documented in the same section:
 
@@ -30,7 +30,7 @@ returned" cache. **That was measured and rejected**: it fixes Laravel's
 `$app = require_once bootstrap/app.php` but does nothing for Symfony, whose
 entire runtime is a *side effect* of the include. When the include becomes a
 no-op, Symfony returns HTTP 200 with an empty body and nothing in the log
-(`docs/frameworks.md`, "Dlaczego cache wartosci `require_once` NIE pomoze").
+(`docs/frameworks.md`, "Why caching `require_once` values will NOT help").
 
 Today the project's answer is "write your own `index.php`" — but that is the
 answer by omission, not by decision. It is written in `docs/frameworks.md` as a

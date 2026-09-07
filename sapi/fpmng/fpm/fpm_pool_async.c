@@ -37,9 +37,9 @@
 #include "fpm_stdio.h"
 #include "zlog.h"
 
-/* Wykrycie silnika: naglowek Zend/zend_async_API.h istnieje tylko w forku
- * true-async. Upstream go nie ma, wiec makro zostaje niezdefiniowane i
- * child_main nigdy nie zostanie wywolany (validate odrzuca pool). */
+/* Engine detection: Zend/zend_async_API.h exists only in the true-async fork.
+ * Upstream does not have it, so the macro remains undefined and child_main is
+ * never called (validate rejects the pool). */
 #if defined(__has_include)
 # if __has_include("zend_async_API.h")
 #  include "zend_async_API.h"
@@ -47,21 +47,21 @@
 # endif
 #endif
 
-/* POC operuje bezposrednio na sapi_globals (memcpy), co ma sens tylko w NTS. */
+/* The POC operates directly on sapi_globals (memcpy), which makes sense only in NTS. */
 #if defined(FPMNG_ASYNC_ENGINE) && defined(ZTS)
 # undef FPMNG_ASYNC_ENGINE
 # define FPMNG_ASYNC_NO_ZTS 1
 #endif
 
 const char *const fpm_pool_async_rejects[] = {
-	"pm.max_requests",			/* nie liczymy requestow per proces */
-	"request_terminate_timeout",		/* scoreboard nie widzi requestow w korutynach */
+	"pm.max_requests",			/* request counts are not tracked per process */
+	"request_terminate_timeout",		/* the scoreboard does not see coroutine requests */
 	"request_terminate_timeout_track_finished",
 	"request_slowlog_timeout",
 	"request_slowlog_trace_depth",
 	"slowlog",
-	"ping.",				/* ping obsluguje petla fpm_main.c, nie my */
-	"fiber.",				/* wymiana workera po zmianie plikow zyje w schedulerze fiber */
+	"ping.",				/* ping is handled by the fpm_main.c loop, not us */
+	"fiber.",				/* worker replacement after file changes lives in the Fiber scheduler */
 	NULL
 };
 
@@ -89,7 +89,7 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 #else /* FPMNG_ASYNC_ENGINE */
 
-/* Auto-globale, ktore trzeba ponownie uzbroic dla kazdego requestu. */
+/* Auto-globals that must be rearmed for every request. */
 static const struct {
 	const char *name;
 	size_t len;
@@ -104,23 +104,23 @@ static const struct {
 };
 #define FPM_ASYNC_NSG (sizeof(fpm_async_superglobals) / sizeof(fpm_async_superglobals[0]))
 
-/* Stan jednego requestu w locie. */
+/* State of one in-flight request. */
 struct fpm_async_req_s {
 	fcgi_request *req;
-	sapi_globals_struct sg;			/* SG tej korutyny, gdy nie jest na procesorze */
-	HashTable symbol_table;			/* EG(symbol_table) tej korutyny, gdy nie jest na procesorze */
-	HashTable included_files;		/* EG(included_files) tej korutyny, j.w. */
-	bool tables_live;			/* symbol_table/included_files zainicjowane i jeszcze nie zniszczone */
+	sapi_globals_struct sg;			/* this coroutine's SG while off the processor */
+	HashTable symbol_table;			/* this coroutine's EG(symbol_table) while off the processor */
+	HashTable included_files;		/* this coroutine's EG(included_files), likewise */
+	bool tables_live;			/* symbol_table/included_files initialized and not yet destroyed */
 	unsigned id;
 };
 
-/* Stan requestu-kontenera: to, co widza main i akceptor, gdy zaden request
- * nie jest na procesorze. Tablice kopiujemy PRZEZ WARTOSC (naglowek
- * HashTable, ~56 B): adres &EG(symbol_table) sie nie zmienia — zmienia sie
- * zawartosc pod nim. Ramka skryptu glownego trzyma wskaznik &EG(symbol_table)
- * (zend_execute -> execute_data->symbol_table), a wpisy IS_INDIRECT wskazuja
- * w sloty CV na stosie VM tej korutyny (kazda ma wlasny), wiec podmiana
- * zawartosci jest dla ramki niewidoczna. */
+/* Request-container state: what main and the acceptor see when no request is on
+ * the processor. Copy tables BY VALUE (the HashTable header, ~56 B): the address
+ * &EG(symbol_table) does not change — only the contents below it do. The main
+ * script frame holds the &EG(symbol_table) pointer
+ * (zend_execute -> execute_data->symbol_table), while IS_INDIRECT entries point
+ * into CV slots on this coroutine's VM stack (each has its own), so replacing
+ * the contents is invisible to the frame. */
 static sapi_globals_struct fpm_async_base_sg;
 static HashTable fpm_async_base_symbol_table;
 static HashTable fpm_async_base_included_files;
@@ -133,10 +133,11 @@ static size_t (*fpm_async_orig_ub_write)(const char *str, size_t str_length);
 static void (*fpm_async_orig_flush)(void *server_context);
 static void (*fpm_async_orig_import_env)(zval *array_ptr);
 
-/* fpm_main.c podmienia php_import_environment_variables na wariant czytajacy
- * srodowisko FastCGI DOPIERO po powrocie z fpm_run() — czyli po naszym
- * child_main, ktory nie wraca. Bez tej podmiany $_SERVER mialoby tylko
- * environ procesu. Odpowiednik cgi_php_import_environment_variables (static). */
+/* fpm_main.c replaces php_import_environment_variables with a variant that
+ * reads the FastCGI environment ONLY after fpm_run() returns — that is, after
+ * our child_main, which does not return. Without this replacement, $_SERVER
+ * would contain only the process environment. Equivalent to the static
+ * cgi_php_import_environment_variables. */
 static void fpm_async_load_env_var(const char *var, unsigned int var_len, char *val, unsigned int val_len, void *arg) /* {{{ */
 {
 	size_t new_val_len;
@@ -157,9 +158,9 @@ static void fpm_async_import_environment_variables(zval *array_ptr) /* {{{ */
 }
 /* }}} */
 
-/* Oryginaly z fpm_main.c rzutuja SG(server_context) na fcgi_request* bez
- * sprawdzenia. W kontekscie main/akceptora jest NULL, wiec tam piszemy na
- * stderr (to i tak tylko komunikaty bledow silnika). */
+/* The originals from fpm_main.c cast SG(server_context) to fcgi_request*
+ * without checking. It is NULL in the main/acceptor context, so write there to
+ * stderr (these are only engine error messages anyway). */
 static size_t fpm_pool_async_ub_write(const char *str, size_t str_length) /* {{{ */
 {
 	if (!SG(server_context)) {
@@ -178,14 +179,13 @@ static void fpm_pool_async_flush(void *server_context) /* {{{ */
 }
 /* }}} */
 
-/* --- przelaczanie stanu per korutyna ------------------------------------ */
+/* --- per-coroutine state switching -------------------------------------- */
 
-/* Ponownie uzbraja auto-globale ($_SERVER, $_GET, ...): ich callbacki
- * rozbrajaja sie po pierwszym zbudowaniu (php_variables.c: "don't rearm"),
- * a my nie przechodzimy przez zend_activate_auto_globals() per request.
- * Kompilacja/ladowanie skryptu zbuduje je od nowa z BIEZACEGO SG do
- * BIEZACEJ (swiezej, per korutyna) EG(symbol_table) — patrz
- * zend_auto_global_check w zend_compile.c. */
+/* Rearm auto-globals ($_SERVER, $_GET, ...): their callbacks disarm themselves
+ * after the first construction (php_variables.c: "don't rearm"), while we do
+ * not pass through zend_activate_auto_globals() per request. Compiling/loading
+ * the script rebuilds them from the CURRENT SG into the CURRENT (fresh,
+ * per-coroutine) EG(symbol_table) — see zend_auto_global_check in zend_compile.c. */
 static void fpm_async_superglobals_rearm(void) /* {{{ */
 {
 	size_t i;
@@ -223,8 +223,9 @@ static void fpm_async_tables_leave(struct fpm_async_req_s *ctx) /* {{{ */
 }
 /* }}} */
 
-/* Switch-handler forka: is_enter=true — korutyna wchodzi na procesor,
- * false — schodzi; is_finishing — schodzi na dobre. Zwrot false usuwa handler. */
+/* Fork switch handler: is_enter=true — the coroutine enters the processor,
+ * false — leaves; is_finishing — leaves permanently. Returning false removes
+ * the handler. */
 static bool fpm_async_switch_handler(zend_coroutine_t *coroutine, bool is_enter, bool is_finishing) /* {{{ */
 {
 	struct fpm_async_req_s *ctx = coroutine->extended_data;
@@ -239,7 +240,8 @@ static bool fpm_async_switch_handler(zend_coroutine_t *coroutine, bool is_enter,
 	}
 
 	if (is_finishing) {
-		/* request juz posprzatany w fpm_async_worker_entry() (tables_live == false); tu tylko wracamy do bazy */
+		/* Request already cleaned up in fpm_async_worker_entry() (tables_live ==
+		 * false); only return to the base state here. */
 		memcpy(&sapi_globals, &fpm_async_base_sg, sizeof(sapi_globals));
 		coroutine->extended_data = NULL;
 		efree(ctx);
@@ -251,10 +253,10 @@ static bool fpm_async_switch_handler(zend_coroutine_t *coroutine, bool is_enter,
 }
 /* }}} */
 
-/* --- jeden request -------------------------------------------------------- */
+/* --- one request --------------------------------------------------------- */
 
-/* Odpowiednik sapi_activate() + init_request_info() z fpm_main.c, ale na
- * SWIEZEJ kopii SG, bez php_request_startup(). */
+/* Equivalent to sapi_activate() + init_request_info() from fpm_main.c, but on
+ * a FRESH copy of SG, without php_request_startup(). */
 static void fpm_async_request_activate(struct fpm_async_req_s *ctx) /* {{{ */
 {
 	fcgi_request *req = ctx->req;
@@ -305,7 +307,7 @@ static void fpm_async_request_deactivate(struct fpm_async_req_s *ctx) /* {{{ */
 }
 /* }}} */
 
-/* Cialo korutyny requestu. Kontekst: ZEND_ASYNC_CURRENT_COROUTINE->extended_data. */
+/* Request coroutine body. Context: ZEND_ASYNC_CURRENT_COROUTINE->extended_data. */
 static void fpm_async_worker_entry(void) /* {{{ */
 {
 	zend_coroutine_t *self = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -320,21 +322,21 @@ static void fpm_async_worker_entry(void) /* {{{ */
 
 	fpm_async_request_activate(ctx);
 
-	/* Wlasna tablica symboli i lista included_files — jak init_executor()
-	 * (zend_execute_API.c) robi to dla kazdego requestu. Bez tego dwa skrypty
-	 * glowne zaczepiaja CV pod tymi samymi nazwami w JEDNEJ tablicy
-	 * (zend_attach_symbol_table), drugi przejmuje bitowo wartosci pierwszego
-	 * bez addref i zwalnia je pod nim — zmierzone: SIGABRT w gc_possible_root
-	 * na net.php z zasobem gniazda w $fp. */
+	/* Own symbol table and included_files list — as init_executor()
+	 * (zend_execute_API.c) creates them for every request. Without this, two main
+	 * scripts attach CVs with the same names to ONE table
+	 * (zend_attach_symbol_table); the second takes over the first's values bitwise
+	 * without addref and frees them underneath it — measured: SIGABRT in
+	 * gc_possible_root for net.php with a socket resource in $fp. */
 	zend_hash_init(&EG(symbol_table), 64, NULL, ZVAL_PTR_DTOR, 0);
 	zend_hash_init(&EG(included_files), 8, NULL, NULL, 0);
 	ctx->tables_live = true;
 	fpm_async_superglobals_rearm();
 
-	/* Nie polegamy na kompilatorze przy tworzeniu auto-globali: przy trafieniu
-	 * w opcache nie analizuje on ponownie odwolania do $_GET/$_SERVER. Jawna
-	 * inicjalizacja wypelnia swieza tablice symboli takze dla op_array z cache.
-	 * $_REQUEST musi powstac po $_GET, $_POST i $_COOKIE. */
+	/* Do not rely on the compiler to create auto-globals: on an OPcache hit it
+	 * does not analyze references to $_GET/$_SERVER again. Explicit
+	 * initialization fills the fresh symbol table even for a cached op_array.
+	 * $_REQUEST must be created after $_GET, $_POST, and $_COOKIE. */
 	zend_is_auto_global_str("_GET", sizeof("_GET") - 1);
 	zend_is_auto_global_str("_POST", sizeof("_POST") - 1);
 	zend_is_auto_global_str("_COOKIE", sizeof("_COOKIE") - 1);
@@ -343,9 +345,10 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	zend_is_auto_global_str("_ENV", sizeof("_ENV") - 1);
 	zend_is_auto_global_str("_REQUEST", sizeof("_REQUEST") - 1);
 
-	/* fiber_entry w ext/async (scheduler.c) ustawia EG(error_reporting) z ini
-	 * "error_reporting" zamiast dziedziczyc — bez php.ini daje to 0 i ostrzezenia
-	 * oraz "Uncaught ..." znikaja. Dziedziczymy wartosc requestu-kontenera. */
+	/* fiber_entry in ext/async (scheduler.c) sets EG(error_reporting) from the
+	 * "error_reporting" INI value instead of inheriting it — without php.ini this
+	 * becomes 0 and warnings plus "Uncaught ..." disappear. Inherit the
+	 * request-container value. */
 	EG(error_reporting) = fpm_async_base_error_reporting;
 
 	ZEND_COROUTINE_ADD_SWITCH_HANDLER(self, fpm_async_switch_handler);
@@ -361,23 +364,23 @@ static void fpm_async_worker_entry(void) /* {{{ */
 		zend_stream_init_filename(&file_handle, SG(request_info).path_translated);
 		file_handle.primary_script = 1;
 
-		/* NIE php_execute_script(): w forku wola ono
-		 * ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN, ktore traktuje biezaca korutyne
-		 * jak konczaca sie glowna i finalizuje ja (scheduler.c:
+		/* NOT php_execute_script(): in the fork it calls
+		 * ZEND_ASYNC_RUN_SCHEDULER_AFTER_MAIN, which treats the current coroutine
+		 * as the ending main coroutine and finalizes it (scheduler.c:
 		 * async_scheduler_main_coroutine_suspend). */
-		/* Fiber korutyny ma na dnie sztuczna ramke funkcji wewnetrznej
-		 * (ext/async scheduler.c: fiber_entry, root_function). zend_execute()
-		 * przy niepustym EG(current_execute_data) szuka tablicy symboli w gore
-		 * stosu (zend_rebuild_symbol_table) i dla takiej ramki dostaje NULL ->
-		 * SIGSEGV w zend_attach_symbol_table. Skrypt glowny ma zaczepic
-		 * EG(symbol_table), wiec na czas wykonania udajemy pusty stos. */
+		/* A coroutine Fiber has an artificial internal-function frame at its bottom
+		 * (ext/async scheduler.c: fiber_entry, root_function). With non-NULL
+		 * EG(current_execute_data), zend_execute() searches up the stack for the
+		 * symbol table (zend_rebuild_symbol_table) and gets NULL for this frame ->
+		 * SIGSEGV in zend_attach_symbol_table. The main script must attach to
+		 * EG(symbol_table), so pretend the stack is empty while executing it. */
 		zend_execute_data *saved_execute_data = EG(current_execute_data);
 		EG(current_execute_data) = NULL;
 		zend_try {
 			zend_execute_scripts(ZEND_REQUIRE, NULL, 1, &file_handle);
 			if (EG(exception)) {
-				/* zend_execute_script w forku pomija zend_exception_error
-				 * wewnatrz korutyny (Zend/zend.c), wiec robimy to sami — jak FPM: fatal, 255. */
+				/* zend_execute_script in the fork skips zend_exception_error inside
+				 * the coroutine (Zend/zend.c), so do it ourselves — as FPM does: fatal, 255. */
 				zend_exception_error(EG(exception), E_ERROR);
 			}
 		} zend_catch {
@@ -388,7 +391,8 @@ static void fpm_async_worker_entry(void) /* {{{ */
 		zend_destroy_file_handle(&file_handle);
 	}
 
-	/* Naglowki (jesli nic nie wypisano) + flush przez SAPI — jak php_request_shutdown -> php_output_end_all. */
+	/* Headers (if nothing was output) + SAPI flush — like php_request_shutdown
+	 * -> php_output_end_all. */
 	zend_try {
 		if (!SG(headers_sent)) {
 			sapi_send_headers();
@@ -397,9 +401,9 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	} zend_catch {
 	} zend_end_try();
 
-	/* POC: bez keep-alive po stronie poola — polaczenie zamykamy po odpowiedzi.
-	 * Keep-alive wymagalby asynchronicznego czekania na kolejny request na tym
-	 * samym fd (fcgi_accept_request na otwartym fd czyta blokujaco). */
+	/* POC: no keep-alive at the pool level — close the connection after the
+	 * response. Keep-alive would require asynchronous waiting for the next
+	 * request on the same fd (fcgi_accept_request reads blocking on an open fd). */
 	fcgi_request_set_keep(req, 0);
 	fcgi_finish_request(req, 0);
 
@@ -410,25 +414,25 @@ static void fpm_async_worker_entry(void) /* {{{ */
 	fcgi_destroy_request(req);
 	ctx->req = NULL;
 
-	/* Jak shutdown_executor(): zwalniamy zmienne globalne requestu (destruktory
-	 * obiektow biegna tu, jeszcze w kontekscie tej korutyny) i wracamy do
-	 * tablic kontenera. Skrypt glowny juz odczepil swoje CV. */
+	/* Like shutdown_executor(): release request global variables (object
+	 * destructors run here, still in this coroutine's context) and return to the
+	 * container tables. The main script has already detached its CVs. */
 	zend_hash_graceful_reverse_destroy(&EG(symbol_table));
 	zend_hash_destroy(&EG(included_files));
 	ctx->tables_live = false;
 	memcpy(&EG(symbol_table), &fpm_async_base_symbol_table, sizeof(HashTable));
 	memcpy(&EG(included_files), &fpm_async_base_included_files, sizeof(HashTable));
 	fpm_async_in_flight--;
-	/* reszta (powrot do bazowego SG, efree(ctx)) w switch-handlerze przy is_finishing */
+	/* The rest (return to base SG, efree(ctx)) happens in the switch handler at is_finishing. */
 }
 /* }}} */
 
-/* --- akceptor ------------------------------------------------------------- */
+/* --- acceptor ------------------------------------------------------------- */
 
-/* Czeka (asynchronicznie) na gotowosc gniazda nasluchujacego, potem
- * fcgi_accept_request(): accept() wraca od razu, poll na nowym fd jest w forku
- * asynchroniczny (main/network.c: php_poll2 -> php_poll2_async), a czytanie
- * naglowkow FastCGI jest blokujace, ale dane juz sa. */
+/* Wait (asynchronously) for the listening socket to become ready, then call
+ * fcgi_accept_request(): accept() returns immediately, polling the new fd is
+ * asynchronous in the fork (main/network.c: php_poll2 -> php_poll2_async), and
+ * reading FastCGI headers is blocking, but the data is already available. */
 static void fpm_async_acceptor_entry(void) /* {{{ */
 {
 	zend_coroutine_t *self = ZEND_ASYNC_CURRENT_COROUTINE;
@@ -486,7 +490,7 @@ static void fpm_async_acceptor_entry(void) /* {{{ */
 }
 /* }}} */
 
-/* --- dziecko -------------------------------------------------------------- */
+/* --- child ---------------------------------------------------------------- */
 
 void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
@@ -502,8 +506,9 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	fpm_async_orig_import_env = php_import_environment_variables;
 	php_import_environment_variables = fpm_async_import_environment_variables;
 
-	/* Request-kontener: jedyny php_request_startup() w zyciu procesu. Daje
-	 * aktywny executor, RINIT ext/async (ZEND_ASYNC_INITIALIZE) i arene pamieci. */
+	/* Request container: the only php_request_startup() in the process lifetime.
+	 * It provides the active executor, ext/async RINIT (ZEND_ASYNC_INITIALIZE),
+	 * and the memory arena. */
 	SG(server_context) = NULL;
 	memset(&SG(request_info), 0, sizeof(SG(request_info)));
 	SG(request_info).proto_num = 1000;
@@ -515,7 +520,8 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	SG(headers_sent) = 1;
 	SG(request_info).no_headers = 1;
-	/* max_execution_time dotyczy kontenera, czyli calego zycia procesu — wylaczamy. */
+	/* max_execution_time would apply to the container, that is, the entire
+	 * process lifetime — disable it. */
 	zend_unset_timeout();
 
 	memcpy(&fpm_async_base_sg, &sapi_globals, sizeof(sapi_globals));
@@ -529,8 +535,9 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
-	/* Pierwszy ZEND_ASYNC_SPAWN() uruchamia scheduler i zamienia biezacy
-	 * przebieg w korutyne glowna (ext/async scheduler.c: async_scheduler_launch). */
+	/* The first ZEND_ASYNC_SPAWN() starts the scheduler and turns the current
+	 * execution into the main coroutine (ext/async scheduler.c:
+	 * async_scheduler_launch). */
 	acceptor = ZEND_ASYNC_SPAWN();
 	if (!acceptor) {
 		zlog(ZLOG_ERROR, "[pool %s] async: cannot spawn the acceptor coroutine", wp->config->name);
@@ -542,9 +549,9 @@ void fpm_pool_async_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	zlog(ZLOG_NOTICE, "[pool %s] async: child %d ready, engine %s, one process, N requests in flight",
 		wp->config->name, (int) getpid(), ZEND_ASYNC_API);
 
-	/* Korutyna glowna: budzi sie co sekunde, zeby zauwazyc SIGTERM/SIGQUIT
-	 * (fpm_signals.c -> fpm_php_soft_quit -> fcgi_terminate). Cala reszta
-	 * dzieje sie w schedulerze, do ktorego oddajemy sterowanie w SUSPEND. */
+	/* Main coroutine: wake once per second to notice SIGTERM/SIGQUIT
+	 * (fpm_signals.c -> fpm_php_soft_quit -> fcgi_terminate). Everything else
+	 * happens in the scheduler, to which we yield control in SUSPEND. */
 	for (;;) {
 		zend_async_waker_new_with_timeout(NULL, 1000, NULL);
 		if (!ZEND_ASYNC_SUSPEND() && EG(exception)) {

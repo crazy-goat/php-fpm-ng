@@ -1,4 +1,4 @@
-/* fpm-ng: rejestr typow poola. Patrz fpm_pool_type.h. */
+/* fpm-ng: pool-type registry. See fpm_pool_type.h. */
 
 #include "fpm_config.h"
 
@@ -21,9 +21,9 @@
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
-/* http.* dostraja bramke, ktora startuje wylacznie pod pool.type = http —
- * na kazdym innym typie te dyrektywy nie maja czego dostrajac. fiber.* dotyczy
- * wylacznie pool.executor = fiber (fpm_coop_rejects go nie zawiera). */
+/* http.* tunes the gateway, which starts only under pool.type = http — on every
+ * other type these directives have nothing to tune. fiber.* applies only to
+ * pool.executor = fiber (fpm_coop_rejects does not include it). */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
 	"fiber.",
@@ -47,8 +47,8 @@ static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
 		return -1;
 	}
 	/* fiber.isolate_statics syntax check -- master side, before any fork.
-	 * See fpm_pool_coop_statics.c: class/property existence cannot be
-	 * checked here (no autoloader yet), only checked at runtime. */
+	 * See fpm_pool_coop_statics.c: class/property existence cannot be checked
+	 * here (no autoloader yet), only at runtime. */
 	return fpm_coop_statics_validate(wp);
 }
 #endif
@@ -56,14 +56,14 @@ static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
 #if defined(HAVE_FPMNG_FIBER) || defined(HAVE_FPMNG_ASYNC)
 static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
 {
-	/* Executor wielorequestowy moze obslugiwac wiele polaczen na worker. */
+	/* A multi-request executor can handle multiple connections per worker. */
 	return fpm_http_init_pool_with_capacity(wp, 128);
 }
 #endif
 
-/* Typy widoczne w konfiguracji. fastcgi-ng jest zoptymalizowanym torem
- * FastCGI; http uruchamia wbudowana bramke. Oba domyslnie uzywaja executora
- * classic, a ich wariant efektywny wybiera fpm_pool_type_resolve(). */
+/* Types visible in configuration. fastcgi-ng is the optimized FastCGI path;
+ * http starts the built-in gateway. Both default to the classic executor, and
+ * fpm_pool_type_resolve() selects their effective variant. */
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
@@ -91,7 +91,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "supervisor",
 		.requires_listen = 0,
-		.requires_pm     = 1,	/* pm.* jest generowane z supervisor.processes, patrz fpm_pool_supervisor.c */
+		.requires_pm     = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
 		.serves_requests = 0,
 		.rejects         = fpm_pool_supervisor_rejects,
 		.validate        = fpm_pool_supervisor_validate,
@@ -102,7 +102,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "cron",
 		.requires_listen = 0,
-		.requires_pm     = 0,	/* validate() ustawia pm=static+max_children=1 programowo, zawsze */
+		.requires_pm     = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
 		.serves_requests = 0,
 		.rejects         = fpm_pool_cron_rejects,
 		.validate        = fpm_pool_cron_validate,
@@ -112,8 +112,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                     = "status",
-		.requires_listen          = 1,	/* wlasny port HTTP, bezposrednio */
-		.requires_pm              = 0,	/* validate() ustawia pm=static+max_children=1 programowo, zawsze */
+		.requires_listen          = 1,	/* own HTTP port, directly */
+		.requires_pm              = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
 		.serves_requests          = 0,
 		.reads_foreign_scoreboards = 1,
 		.rejects                  = fpm_pool_status_rejects,
@@ -122,14 +122,14 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 };
 
-/* Efektywne kombinacje typu i executora. Nie sa osobnymi wartosciami
- * pool.type i dlatego nie trafiaja do listy typow w komunikatach.
+/* Effective type/executor combinations. They are not separate pool.type
+ * values and therefore do not appear in the type list in messages.
  *
- * Obie ponizsze grupy istnieja tylko w binarce zbudowanej z odpowiednia
- * flaga (--enable-fpmng-fiber / --enable-fpmng-async, obie domyslnie "no").
- * Bez flagi zrodla w ogole nie sa kompilowane (patrz build/prepare.sh i
- * sapi/fpmng/config.m4), wiec te struktury i ich uzycie nizej w
- * fpm_pool_type_resolve() sa objete tym samym #ifdef. */
+ * Both groups below exist only in a binary built with the corresponding flag
+ * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"). Without
+ * the flag the sources are not compiled at all (see build/prepare.sh and
+ * sapi/fpmng/config.m4), so these structures and their use below in
+ * fpm_pool_type_resolve() are protected by the same #ifdef. */
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.name                         = "fastcgi-ng",
@@ -191,7 +191,7 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 		size_t len = strlen(*reject);
 
 		if (len && (*reject)[len - 1] == '.') {
-			/* prefiks: "pm." lapie kazda pm.* faktycznie ustawiona */
+			/* prefix: "pm." matches every pm.* directive that was actually set */
 			const char *p = wp->config->set_directives;
 			char needle[128];
 
@@ -227,7 +227,7 @@ const struct fpm_pool_type_s *fpm_pool_type_get(const char *name)
 		return FPM_POOL_TYPE_DEFAULT;
 	}
 
-	/* Jawne "fcgi" bylo akceptowane przed zmiana nazwy na "fastcgi". */
+	/* Explicit "fcgi" was accepted before the name changed to "fastcgi". */
 	if (!strcmp(name, "fcgi")) {
 		return FPM_POOL_TYPE_DEFAULT;
 	}
@@ -376,10 +376,10 @@ int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp)
 }
 
 
-/* Dziecko musi znac swoj pool, a przy wskrzeszaniu w petli zdarzen wskaznik na
- * niego przepada w fpm_children.c. Scoreboard jest per pool i dziecko dostaje
- * swoj w fpm_scoreboard_init_child(), wiec wystarczy dopasowanie — bez
- * dotykania fpm_children.c. Wolane raz na starcie dziecka. */
+/* The child must find its pool, and when respawned from the event loop the
+ * pointer is lost in fpm_children.c. The scoreboard is per pool and the child
+ * receives its own in fpm_scoreboard_init_child(), so matching is enough —
+ * without touching fpm_children.c. Called once when the child starts. */
 struct fpm_worker_pool_s *fpm_pool_type_current_pool(void)
 {
 	struct fpm_scoreboard_s *sb = fpm_scoreboard_get();

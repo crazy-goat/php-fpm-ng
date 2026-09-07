@@ -1,115 +1,113 @@
-/* fpm-ng: izolacja stanu ext/session per request na executorze coop (fiber).
+/* fpm-ng: isolate ext/session state per request in the coop executor (Fiber).
  *
- * Problem (docs/frameworks.md, "Symfony — sesje PHP"): ext/session trzyma
- * caly swoj stan w PROCESIE — PS(session_status), PS(in_save_handler),
- * $_SESSION (PS(http_session_vars)), otwarty handler zapisu (np. polaczenie
- * do Redisa) — a executor coop robi JEDEN php_request_startup() na zycie
- * procesu (fpm_pool_coop.c), wiec RINIT/RSHUTDOWN modulu session NIGDY sie
- * nie wykonuja per request. Zmierzone: fiber A wisi w I/O Redisa wewnatrz
- * read() handlera zapisu, fiber B wola session_start() na tym samym procesie
- * i dostaje "Cannot call session save handler in a recursive manner" —
- * 20/20 rund, HTTP 500. Sekwencyjnie (jeden request w locie) dziala.
+ * Problem (docs/frameworks.md, "Symfony — PHP sessions"): ext/session keeps all
+ * its state in the PROCESS — PS(session_status), PS(in_save_handler), $_SESSION
+ * (PS(http_session_vars)), an open save handler (for example, a Redis
+ * connection) — while the coop executor performs ONE php_request_startup() for
+ * the process lifetime (fpm_pool_coop.c), so the session module's RINIT/RSHUTDOWN
+ * NEVER run per request. Measured: Fiber A waits in Redis I/O inside the save
+ * handler's read(), Fiber B calls session_start() in the same process and gets
+ * "Cannot call session save handler in a recursive manner" — 20/20 runs, HTTP
+ * 500. Sequentially (one request in flight) it works.
  *
- * Rozwiazanie: dokladnie ten sam wzorzec co SG/OG/symbol_table w
- * fpm_pool_coop.c — swap globali modulu przy enter/leave — plus wolanie
- * RINIT/RSHUTDOWN modulu session PER REQUEST (swap daje izolacje danych,
- * RINIT/RSHUTDOWN daje cykl zycia: sesja startuje i jest FLUSHOWANA do
- * storage'u dla KAZDEGO requestu, nie raz na proces).
+ * Solution: exactly the same pattern as SG/OG/symbol_table in fpm_pool_coop.c —
+ * swap module globals at enter/leave — plus call the session module's
+ * RINIT/RSHUTDOWN PER REQUEST (the swap isolates data, while RINIT/RSHUTDOWN
+ * provide the lifecycle: the session starts and is FLUSHED to storage for EVERY
+ * request, not once per process).
  *
- * --- Adres ps_globals bez zaleznosci linkera ------------------------------
+ * --- Address of ps_globals without a linker dependency ----------------------
  *
- * Twardy `extern ps_globals` (ZEND_EXTERN_MODULE_GLOBALS(ps) po nazwie w
- * naszym kodzie) tworzylby zaleznosc linkera od symbolu, ktory przy
- * --enable-session=shared siedzi w session.so, ktorego nasz .o nie linkuje —
- * build calej binarki padlby na linkowaniu (patrz odrzucona wersja tego
- * pomyslu, commit ed79db8 na branchu req-isolation, ktory zamiast tego
- * blokowal session_start() przez zend_disable_functions).
+ * A hard `extern ps_globals` (ZEND_EXTERN_MODULE_GLOBALS(ps) by name in our
+ * code) would create a linker dependency on a symbol that, with
+ * --enable-session=shared, lives in session.so, which our .o does not link —
+ * the complete binary would fail at link time (see the rejected version of this
+ * idea, commit ed79db8 on branch req-isolation, which instead blocked
+ * session_start() through zend_disable_functions).
  *
- * Trop, ktory tu uzywamy: STD_PHP_INI_ENTRY (Zend/zend_ini.h) zapisuje w
- * KAZDYM wpisie ini modulu:
- *   mh_arg1 = offsetof(zend_ps_globals, <pole>)
- *   mh_arg2 = w buildzie NIE-ZTS wskaznik NA BAZE globali modulu, czyli
- *             wprost &ps_globals (patrz STD_ZEND_INI_ENTRY w zend_ini.h,
- *             galaz #else — nasz build jest NTS, sprawdzone przez brak
- *             --enable-maintainer-zts / --enable-zts w config.nice na
- *             poligonie i przez fpm_coop_validate(), ktore juz dzis
- *             odrzuca ZTS dla tego executora z tego samego powodu).
- * Wpis "session.save_path" (ext/session/session.c, PHP_INI_BEGIN) jest
- * rejestrowany przez STD_PHP_INI_ENTRY, wiec:
+ * The route used here: STD_PHP_INI_ENTRY (Zend/zend_ini.h) writes into EVERY
+ * module INI entry:
+ *   mh_arg1 = offsetof(zend_ps_globals, <field>)
+ *   mh_arg2 = in a NON-ZTS build, a pointer TO the module-global base, that is
+ *             directly &ps_globals (see STD_ZEND_INI_ENTRY in zend_ini.h,
+ *             the #else branch — our build is NTS, verified by the absence of
+ *             --enable-maintainer-zts / --enable-zts in config.nice on the test
+ *             host and by fpm_coop_validate(), which already rejects ZTS for
+ *             this executor for the same reason).
+ * The "session.save_path" entry (ext/session/session.c, PHP_INI_BEGIN) is
+ * registered through STD_PHP_INI_ENTRY, so:
  *   zend_hash_str_find_ptr(EG(ini_directives), "session.save_path", ...)
- * daje zend_ini_entry*, ktorego mh_arg2 to adres ps_globals. Zero
- * zaleznosci linkera — dziala identycznie, gdy session jest wkompilowane
- * statycznie i gdy jest .so, bo to sama TABLICA WPISOW INI (wypelniana przez
- * zend_register_ini_entries_ex, Zend/zend_ini.c) niesie ten adres, a nie
- * symbol modulu.
+ * returns a zend_ini_entry whose mh_arg2 is the ps_globals address. Zero linker
+ * dependency — works identically when session is statically compiled and when
+ * it is a .so, because the INI ENTRY TABLE itself (filled by
+ * zend_register_ini_entries_ex, Zend/zend_ini.c) carries the address, not the
+ * module symbol.
  *
- * Rozmiar struktury: sizeof(zend_ps_globals), z DOLACZONEGO
- * ext/session/php_session.h. Naglowek WOLNO dolaczyc — sam nie tworzy
- * zaleznosci od symbolu (dokladnie tak samo dolacza go bez zadnej ochrony
- * ext/standard/basic_functions.c, kompilowane zawsze, niezaleznie od tego,
- * czy session jest wlaczone). Zaleznosc powstalaby dopiero przy uzyciu
- * ZEND_EXTERN_MODULE_GLOBALS(ps) (deklaruje "extern zend_ps_globals
- * ps_globals" — patrz Zend/zend_API.h) ALBO przy odwolaniu sie do
- * ps_globals / session_module_entry po nazwie (oba sa zadeklarowane w tym
- * naglowku jako extern). W tym pliku NIE MA ani jednego, ani drugiego:
- * adres ps_globals bierzemy WYLACZNIE z mh_arg2 wpisu ini, a modul session
- * (do wywolania RINIT/RSHUTDOWN) WYLACZNIE z module_registry po nazwie
- * "session" (haszowane wyszukanie, nie symbol).
+ * Struct size: sizeof(zend_ps_globals), from the INCLUDED
+ * ext/session/php_session.h. It is safe to include that header — it creates no
+ * symbol dependency by itself (ext/standard/basic_functions.c includes it
+ * without any guard too, is always compiled, regardless of whether session is
+ * enabled). A dependency would arise only from ZEND_EXTERN_MODULE_GLOBALS(ps)
+ * (declares "extern zend_ps_globals ps_globals" — see Zend/zend_API.h) OR from
+ * referring to ps_globals / session_module_entry by name (both are declared in
+ * this header as extern). This file does neither: it obtains the ps_globals
+ * address ONLY from the INI entry's mh_arg2, and the session module (for calling
+ * RINIT/RSHUTDOWN) ONLY from module_registry by the name "session" (hashed
+ * lookup, not a symbol).
  *
- * Sprawdzone eksperymentalnie (nie tylko na papierze): fpm_coop_session_selfcheck()
- * nizej porownuje pole odczytane spod wyliczonego adresu z wartoscia tej samej
- * dyrektywy odczytana normalna sciezka ini (zend_ini_long — to samo, co widzi
- * ini_get() z PHP). Niezgodnosc wylacza cala sciezke zamiast cicho psuc
- * pamiec. Na poligonie log potwierdza zgodnosc (patrz raport).
+ * Verified experimentally (not only on paper): fpm_coop_session_selfcheck()
+ * below compares a field read from the calculated address with the value of the
+ * same directive read through the normal INI path (zend_ini_long — the same
+ * value PHP's ini_get() sees). A mismatch disables the entire path instead of
+ * silently corrupting memory. The test-host log confirms agreement (see report).
  *
- * Uwaga ZTS: w buildzie ZTS mh_arg2 to *offset w TSRM* (int, nie wskaznik) —
- * ten trop by tam NIE dzialal. Projekt buduje sie NTS (patrz wyzej), wiec nie
- * obslugujemy tego przypadku; fpm_coop_validate() juz odrzuca ZTS dla tego
- * executora z innego powodu (memcpy SG/EG po wartosci), wiec i tak nigdy tu
- * nie dojdziemy w buildzie ZTS.
+ * ZTS warning: in a ZTS build mh_arg2 is an *offset in TSRM* (int, not a
+ * pointer) — this route would NOT work there. The project builds NTS (see
+ * above), so this case is not supported; fpm_coop_validate() already rejects
+ * ZTS for this executor for another reason (memcpy SG/EG by value), so we would
+ * never reach this code in a ZTS build anyway.
  *
- * --- Cykl zycia -------------------------------------------------------------
+ * --- Lifecycle --------------------------------------------------------------
  *
- * Modul znajdujemy w module_registry po nazwie "session" (zend_module_entry*,
- * pola request_startup_func/request_shutdown_func — Zend/zend_modules.h).
- * fpm_coop_session_request_startup() (wolane z fpm_coop_req_run tuz PRZED
- * skryptem, obok tworzenia swiezej symbol_table): zapisuje stan BAZOWY
- * (zdjety raz, w fpm_coop_session_container_start, PO wlasnym RINIT
- * kontenera — a wiec z poprawnymi wartosciami ini: save_path,
- * cookie_lifetime itd., ktore RINIT/RSHUTDOWN NIE dotykaja, bo sa
- * zarzadzane przez sam system ini) do zywych globali, POTEM woła RINIT.
- * RINIT sam resetuje pola per-request (php_rinit_session_globals w
- * session.c: id=NULL, session_status=none, in_save_handler=false, ...) i,
- * jesli session.auto_start=1, woła php_session_start() — TU, na tym
- * WLASNIE requescie, wiec auto_start dziala poprawnie PER REQUEST zamiast
- * startowac jedna wspolna sesje na caly proces (dziura, ktora mialby
- * fallback z blokada session_start() bez tej naprawy — patrz docs w
- * commicie ed79db8).
+ * Find the module in module_registry by the name "session"
+ * (zend_module_entry*, fields request_startup_func/request_shutdown_func —
+ * Zend/zend_modules.h). fpm_coop_session_request_startup() (called from
+ * fpm_coop_req_run immediately BEFORE the script, next to creation of a fresh
+ * symbol_table) copies the BASE state (captured once in
+ * fpm_coop_session_container_start, AFTER the container's own RINIT — therefore
+ * with correct INI values: save_path, cookie_lifetime, etc., which
+ * RINIT/RSHUTDOWN do not touch because the INI system manages them) into live
+ * globals, THEN calls RINIT. RINIT resets per-request fields itself
+ * (php_rinit_session_globals in session.c: id=NULL, session_status=none,
+ * in_save_handler=false, ...) and, if session.auto_start=1, calls
+ * php_session_start() — HERE, for THIS request, so auto_start works correctly
+ * PER REQUEST instead of starting one shared session for the whole process (the
+ * gap that a fallback blocking session_start() would have, without this fix —
+ * see the docs in commit ed79db8).
  *
- * fpm_coop_session_request_shutdown() (wolane z fpm_coop_req_run PO
- * skrypcie, PRZED zniszczeniem EG(symbol_table) — RSHUTDOWN robi
- * php_session_flush(), ktora czyta $_SESSION = PS(http_session_vars),
- * musi wiec zadzialac, zanim symbol_table zniknie) woła RSHUTDOWN. RSHUTDOWN
- * flushuje sesje do storage'u (I/O — na fiberze OK, zawieszenie w trakcie
- * przelacza sie normalnym fpm_coop_req_leave/enter, bo dzieje sie W
- * KONTEKSCIE requestu, taki sam mechanizm jak zawieszenie gdziekolwiek
- * indziej w skrypcie) i zwalnia zamkniecia user save handlera
- * (session_set_save_handler) — SESSION_FREE_USER_HANDLER w session.c.
+ * fpm_coop_session_request_shutdown() (called from fpm_coop_req_run AFTER the
+ * script, BEFORE destroying EG(symbol_table) — RSHUTDOWN calls
+ * php_session_flush(), which reads $_SESSION = PS(http_session_vars), so it
+ * must run before the symbol table disappears) calls RSHUTDOWN. RSHUTDOWN
+ * flushes sessions to storage (I/O — fine on a Fiber; a suspension during it
+ * switches through normal fpm_coop_req_leave/enter because it happens IN THE
+ * REQUEST CONTEXT, the same mechanism as a suspension anywhere else in the
+ * script) and releases user save-handler closures (session_set_save_handler) —
+ * SESSION_FREE_USER_HANDLER in session.c.
  *
- * --- Wlasnosc pamieci (swap przez wartosc, nie przez destruktor) ----------
+ * --- Memory ownership (swap by value, not by destructor) --------------------
  *
- * Jak SG/OG/symbol_table w fpm_pool_coop.c: swap to CZYSTY memcpy bajtow,
- * bez zmiany refcountow. To bezpieczne dopoki istnieje DOKLADNIE JEDNA
- * logiczna kopia na raz: albo w zywych globalach (request na procesorze albo
- * w trakcie RINIT/RSHUTDOWN), albo w ctx->session_globals (request
- * zawieszony). Kazde wejscie/wyjscie przenosi bajty, nigdy nie kopiuje ich
- * NA DWA miejsca na raz. Zamkniecia z session_set_save_handler (zvale w
- * PS(mod_user_names)) podrozuja tymi samymi bajtami — maja wlasciciela
- * dokladnie tak samo jak dowolny inny zval w tym swapie. Zwolnienie:
- * RSHUTDOWN (SESSION_FREE_USER_HANDLER) niszczy je normalnie, WEWNATRZ
- * zywych globali, PRZED jakimkolwiek restore bazy — nie ma podwojnego free,
- * bo baza nigdy nie zawiera "aktywnych" domkniec (zdjeta raz, na czystym
- * stanie kontenera, przed jakimkolwiek session_set_save_handler).
+ * As with SG/OG/symbol_table in fpm_pool_coop.c: swap is a PURE byte memcpy,
+ * without changing refcounts. This is safe while there is EXACTLY ONE logical
+ * copy at a time: either in live globals (request on the processor or during
+ * RINIT/RSHUTDOWN), or in ctx->session_globals (suspended request). Every
+ * entry/leave moves the bytes; it never copies them to TWO places at once.
+ * Closures from session_set_save_handler (stored in PS(mod_user_names)) travel
+ * in the same bytes and have an owner exactly like any other zval in this swap.
+ * Release: RSHUTDOWN (SESSION_FREE_USER_HANDLER) destroys them normally, INSIDE
+ * live globals, BEFORE any base restore — there is no double free because the
+ * base never contains "active" closures (captured once from a clean container
+ * state, before any session_set_save_handler).
  */
 
 #include "fpm_config.h"
@@ -131,20 +129,20 @@ static zend_module_entry *fpm_coop_session_mod;
 static void *fpm_coop_session_globals_addr;
 static unsigned char fpm_coop_session_base[sizeof(zend_ps_globals)];
 
-/* Porownanie pola spod wyliczonego adresu z wartoscia TEJ SAMEJ dyrektywy
- * odczytana normalna sciezka ini (zend_ini_long — to, co widzi ini_get()).
- * Niezgodnosc znaczy, ze trop z mh_arg2 nie zadzialal (np. build ZTS, ktorego
- * nie powinnismy tu w ogole zobaczyc, albo zmiana ukladu w przyszlym Zend) —
- * wylaczamy sciezke zamiast pisac po cudzej pamieci. */
+/* Compare the field at the calculated address with the value of THE SAME
+ * directive read through the normal INI path (zend_ini_long — what ini_get()
+ * sees). A mismatch means the mh_arg2 route did not work (for example, a ZTS
+ * build that should not reach this code, or a future Zend layout change) —
+ * disable the path instead of writing to foreign memory. */
 static bool fpm_coop_session_selfcheck(void) /* {{{ */
 {
 	php_ps_globals *ps = (php_ps_globals *) fpm_coop_session_globals_addr;
 	zend_long ini_val = zend_ini_long(ZEND_STRL("session.cookie_lifetime"), 0);
 
 	if (ps->cookie_lifetime != ini_val) {
-		zlog(ZLOG_ALERT, "[pool %s] coop-session: SELFCHECK NIEUDANY — session.cookie_lifetime spod wyliczonego "
-			"adresu ps_globals (" ZEND_LONG_FMT ") != wartosc z ini (" ZEND_LONG_FMT "); adres z wpisu ini "
-			"NIE wskazuje na prawdziwe ps_globals, izolacja stanu ext/session WYLACZONA",
+		zlog(ZLOG_ALERT, "[pool %s] coop-session: SELFCHECK FAILED — session.cookie_lifetime read from the computed "
+			"ps_globals address (" ZEND_LONG_FMT ") != value from ini (" ZEND_LONG_FMT "); the address from the ini entry "
+			"does NOT point at the real ps_globals, ext/session state isolation DISABLED",
 			fpm_coop_pool_name(), ps->cookie_lifetime, ini_val);
 		return false;
 	}
@@ -158,16 +156,16 @@ void fpm_coop_session_container_start(void) /* {{{ */
 	zend_module_entry *mod;
 
 	if (zend_get_module_started("session") != SUCCESS) {
-		/* Modul nie zaladowany (--disable-session albo request skryptu go nie
-		 * uzywa) — sciezka zostaje wylaczona, reszta hookow to jedno "if". */
+		/* Module not loaded (--disable-session or the request script does not
+		 * use it) — disable this path; the remaining hooks cost one "if". */
 		return;
 	}
 
 	entry = zend_hash_str_find_ptr(EG(ini_directives), ZEND_STRL("session.save_path"));
 	if (!entry || !entry->mh_arg2) {
-		zlog(ZLOG_WARNING, "[pool %s] coop-session: modul session zaladowany, ale brak dzialajacego wpisu ini "
-			"'session.save_path' — punkt zaczepienia nie zadzialal, izolacja stanu ext/session WYLACZONA "
-			"(session_start() bedzie dzialac tylko przy jednym requescie w locie)",
+		zlog(ZLOG_WARNING, "[pool %s] coop-session: the session module is loaded, but no working ini entry for "
+			"'session.save_path' — the hook did not take effect, ext/session state isolation DISABLED "
+			"(session_start() will only work with one request in flight)",
 			fpm_coop_pool_name());
 		return;
 	}
@@ -188,11 +186,10 @@ void fpm_coop_session_container_start(void) /* {{{ */
 		return;
 	}
 
-	/* Stan PO wlasnym RINIT kontenera (fpm_coop_container_start w
-	 * fpm_pool_coop.c wola nas dokladnie w tym miejscu): poprawne wartosci
-	 * ini (save_path, cookie_lifetime, ...), zadnej aktywnej sesji, zadnego
-	 * user save handlera. To jest stan, z ktorego kazdy nowy request
-	 * bezpiecznie startuje RINIT. */
+	/* State AFTER the container's own RINIT (fpm_coop_container_start in
+	 * fpm_pool_coop.c calls us exactly here): correct INI values (save_path,
+	 * cookie_lifetime, ...), no active session, no user save handler. This is the
+	 * state from which every new request safely starts RINIT. */
 	memcpy(fpm_coop_session_base, fpm_coop_session_globals_addr, sizeof(fpm_coop_session_base));
 	fpm_coop_session_ready = true;
 

@@ -1,7 +1,7 @@
 # 002 — CI: a build matrix over the combinations that break silently
 
 **Priority:** high, right after 001.
-**Status:** open.
+**Status:** done, scoped down — see Outcome.
 
 ## Context
 
@@ -71,3 +71,64 @@ still apply.
   on every push or only on pull requests, and say why in the config.
 - How is the pinned php-src revision bumped, and by whom? An unpinned checkout
   makes every red build ambiguous: our regression, or upstream's change?
+
+## Outcome — 2026-09-06
+
+`.github/workflows/build-matrix.yml` landed (PR #1, merged as `3e5c375`).
+Decisions made explicitly, not left as guesses:
+
+- **Runner:** GitHub-hosted (repo is private but small; a self-hosted runner
+  wasn't judged worth the upkeep yet).
+- **Trigger:** `pull_request` only, not every push — a full php-src build is
+  slow, and only a PR is a merge candidate.
+- **php-src pin:** tag `php-8.5.9` (a real release tag, per project
+  convention of pinning by tag, not branch — `docs/NOTES.md:2760`).
+
+Delivered, matching acceptance criteria 1, 2 and 6:
+
+- `patches` job: fails loudly if `patches/*.patch` stops applying to the
+  pinned tag (build/prepare.sh's own exit code).
+- `build` job: builds `sapi/fpmng` and `cli` and verifies the resulting
+  binary.
+- `phpt` job: runs the upstream FPM `.phpt` suite restored by task 001
+  against that build. Final measured result: 123 PASS / 0 FAIL / 17 SKIP /
+  1 WARN out of 141 discovered tests (the WARN is the same upstream
+  XFAIL-passed case task 001 already documented in
+  `docs/fpm-phpt-results.md`).
+
+**Deliberately not delivered, deferred to release time** (acceptance
+criteria 3, 4, 5 — not satisfied by this workflow, and the workflow's own
+comments say so):
+
+- The ZTS / session (static, shared, disabled) / TLS (with, without
+  `libevent_openssl`) build matrix. Currently a single cell (non-ZTS,
+  session static, TLS on). ~13 parallel php-src compiles per PR wasn't
+  judged worth it before there's a release to protect.
+- The fully static musl `-static-pie` build of `sapi/fpmng` (a corrected,
+  separate invocation from the still-broken `build/static-full.sh` — see
+  task 004, untouched here).
+- Surfacing new `-Wall -Wextra` warnings to a reviewer.
+
+Two real bugs were found and fixed along the way, surfaced specifically by
+running task 001's phpt harness against an actual release tag instead of
+the dev snapshot (php-src commit `67d1476d4d`, PHP 8.5.11-dev) task 001 was
+validated against — the two versions' `sapi/fpm/tests/tester.inc` differ:
+
+- `build/run-fpm-phpt.sh` created a `$HARNESS_DIR/fpm/php-fpm` symlink for
+  `tester.inc::findExecutable()`'s directory-relative lookup, but never
+  routed `TEST_PHP_EXECUTABLE` through that same harness directory — so the
+  lookup never matched. Fixed by symlinking `TEST_PHP_EXECUTABLE` into the
+  harness dir too.
+- `gh12621.phpt` reads a source-tree fixture
+  (`ext/standard/tests/misc/browscap.ini`) via a relative path; the CI
+  job's flattened build artifact didn't include it, so the test failed on
+  a missing file rather than on any real fpmng behavior. Fixed by staging
+  that one fixture file.
+- `http-basic.phpt`, task 001's one documented "intended difference,"
+  doesn't exist in php-8.5.9's copy of `sapi/fpm/tests` at all — 150 tests
+  discovered against the dev snapshot, 141 against this tag. Nothing to
+  reclassify for it here; it's simply a different upstream snapshot.
+
+Before the first release: re-add the full matrix and the static-musl job
+(both already sketched and then deliberately removed from the workflow —
+see its git history), and decide how to surface new compiler warnings.

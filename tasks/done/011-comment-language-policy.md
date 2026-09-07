@@ -1,7 +1,7 @@
 # 011 — Enforce the English-only rule so the tree does not drift back
 
 **Priority:** medium. The decision is made; only enforcement is left.
-**Status:** open. **Decision taken 2026-09-06: English, everywhere.** Recorded in
+**Status:** done. **Decision taken 2026-09-06: English, everywhere.** Recorded in
 `CLAUDE.md`.
 
 ## The decision
@@ -66,3 +66,27 @@ Add a check that fails when new Polish text lands in a file we own.
 - Consider whether the check should be a git hook, a CI step, or both. A hook
   gives fast feedback but is not enforced for anyone who does not install it;
   CI is authoritative but slow. Both is defensible; pick and say why.
+
+## Outcome
+
+Implemented as `build/check-english.py` (stdlib-only, deterministic), wired
+into `.github/workflows/build-matrix.yml` as a fast `english` job that also
+checks commit messages of the pushed range.
+
+- Scope is mechanical: owned roots (`sapi/fpmng/`, `ext/fpmng_metrics/`,
+  `docs/`, `tasks/`, `README.md`, `build/*.sh`, workflows, `config.m4`);
+  `patches/` payloads are excluded. No upstream files exist in this repo, so
+  no upstream exclusion list was needed.
+- Detection: Polish diacritics anywhere (including inline code and code
+  fences, where the word lexicon is not applied to avoid firing on quoted
+  program output) plus a diacritic-less Polish lexicon (`zeby`, `ktore`,
+  `wiec`, ...). The lexicon was validated against the whole tree; the
+  ambiguous words that fired on English prose (`no`, `ze`, `dla`, ...) were
+  removed. C/H scanning skips string literals, so error strings and log
+  lines never fire.
+- Residual quoted material would go through `build/english-allow.txt`
+  (`file:line` prefixes); the list is empty — everything in the tree is
+  English, including quotations of historical Polish sources.
+- Commit messages are covered via `--commits BASE..HEAD` in CI.
+- The check was introduced together with the translation (task 012): the
+  full-tree run is clean, so it fails for nobody on day one.

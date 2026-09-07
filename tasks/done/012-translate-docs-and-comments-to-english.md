@@ -1,7 +1,7 @@
 # 012 — Translate documentation and our own comments to English
 
 **Priority:** medium. Unblocked — the rule now exists.
-**Status:** open. The language decision was taken on 2026-09-06 (English,
+**Status:** done. The language decision was taken on 2026-09-06 (English,
 everywhere) and is recorded in `CLAUDE.md`. This task is the translation work
 itself; task 011 is the check that stops the tree drifting back.
 
@@ -73,3 +73,33 @@ technical sentences in the corpus. The result would read fine and mean less.
 
 - Rewriting or shortening while translating. If a document is wrong or stale,
   that is a separate change with its own commit, so it is visible.
+
+## Outcome
+
+All owned text is English, translated file by file in individual commits
+reviewable against the originals:
+
+- `README.md`, `sapi/fpmng/README.md`, all of `docs/` (`NOTES.md`,
+  `frameworks.md`, `fiber_errors.md`, `async_errors.md`, `fiber_async_io.md`,
+  `spike-tsrm-context.md`, `node_server_gaps.md`,
+  `FASTCGI_NG_OPTIMIZATION.md`, `cron.md`, `patches/README.md`)
+- all owned comments in `sapi/fpmng/fpm/**` (pool families, HTTP gateway,
+  cron schedule, watchdog, coop layers, metrics glue), including headers
+- `ext/fpmng_metrics/**` comments
+- `build/prepare.sh` (comments and its own error/log messages — they are
+  ours to change), `build/*.sh`, `sapi/fpmng/config.m4`,
+  `ext/fpmng_metrics/config.m4`, workflow comments
+- `tasks/` including quotations of historical Polish material, translated
+  rather than allow-listed (decision 2026-09-07: English everywhere means
+  quotations too)
+- commit messages on this branch are English and are checked by the task 011
+  checker in CI
+
+Numbers, error strings, paths and `file:line` references survived verbatim;
+quoted program output inside docs is untouched (checker skips code blocks
+for the lexicon and only flags diacritics there). The measured/reasoned/
+assumed distinctions were preserved in translation (`MEASURED` stays
+measured, hedges stay hedges).
+
+Enforcement: `python3 build/check-english.py` over the full tree reports
+0 findings; `git diff --check` clean; all build scripts pass `sh -n`.

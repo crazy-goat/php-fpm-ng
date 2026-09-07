@@ -31,8 +31,18 @@ case "$SLIM_ROUTE_CACHE" in
     *) echo "SLIM_ROUTE_CACHE must be 0 or 1" >&2; exit 2 ;;
 esac
 
+for command in curl nc; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "$command is required (port checks and the HTTP client need it)" >&2
+        exit 2
+    fi
+done
+
 if [ ! -f "$ROOT/vendor/autoload.php" ]; then
-    echo "Slim 4 dependencies are missing; run composer install in $ROOT" >&2
+    PHP="$PHP" RUN_DIR="$RUN_DIR" "$ROOT/bin/provision.sh"
+fi
+if [ ! -f "$ROOT/vendor/autoload.php" ]; then
+    echo "Slim 4 dependency provisioning did not create vendor/autoload.php" >&2
     exit 2
 fi
 
@@ -80,7 +90,10 @@ setup_services() {
         MYSQL_PORT=$(choose_free_port "$MYSQL_PORT")
         REDIS_PORT=$(choose_free_port "$REDIS_PORT")
         export MYSQL_PORT REDIS_PORT MYSQL_ROOT_PASSWORD
-        COMPOSE_PROJECT="fpmng-slim4-$(printf '%s' "$RUN_ID" | tr 'A-Z' 'a-z')"
+        # tr 'A-Z:' 'a-z--' (not just 'A-Z') because RUN_ID may contain ':'
+        # (an ISO-8601 timestamp) or other characters a Compose project name
+        # cannot carry; same as tests/frameworks/symfony/run.sh.
+        COMPOSE_PROJECT="fpmng-slim4-$(printf '%s' "$RUN_ID" | tr 'A-Z:' 'a-z--')"
         COMPOSE=(docker compose -f "$ROOT/compose.yaml" -p "$COMPOSE_PROJECT")
         if ! "${COMPOSE[@]}" up -d >"$RUN_DIR/compose.log" 2>&1; then
             echo "Docker Compose could not start MySQL and Redis; see $RUN_DIR/compose.log" >&2
@@ -107,8 +120,10 @@ setup_services() {
         SLIM_DB_USER=root
         SLIM_DB_PASSWORD=$MYSQL_ROOT_PASSWORD
         # A per-run database name, same discipline as the Symfony runner:
-        # never collide with, or reuse state from, another run.
-        SLIM_DB_NAME="slim4_${RUN_ID}"
+        # never collide with, or reuse state from, another run. Sanitized
+        # the same way (setup.php requires ^[A-Za-z0-9_]+$ for DB names, and
+        # RUN_ID is caller-controllable via FPMNG_RUN_ID).
+        SLIM_DB_NAME="slim4_${RUN_ID//[^A-Za-z0-9]/_}"
         SLIM_REDIS_HOST=127.0.0.1
         SLIM_REDIS_PORT=$REDIS_PORT
         SLIM_REDIS_DB=0
@@ -125,8 +140,21 @@ setup_services() {
 }
 
 mkdir -p "$RUN_DIR/sessions"
+# Installed before setup_services (which can set DOCKER_STARTED=1 and then
+# exit 2 on a later precondition) so a Docker Compose project is never left
+# running past this script's exit. Replaced with the fuller cleanup() trap
+# further down.
+trap cleanup_services EXIT INT TERM
 setup_services
 FCGI_PORT=$(choose_free_port "$FCGI_PORT")
+# Search for HTTP_PORT starting strictly after the FCGI port that was
+# actually chosen: two independent choose_free_port searches only 1 apart
+# by default (22625/22626) can both land on the same bumped port when the
+# default FCGI port is occupied, producing a broken pool config (listen and
+# http.listen on the same port).
+if (( HTTP_PORT <= FCGI_PORT )); then
+    HTTP_PORT=$((FCGI_PORT + 1))
+fi
 HTTP_PORT=$(choose_free_port "$HTTP_PORT")
 if [ "$SLIM_ROUTE_CACHE" = 1 ]; then
     rm -f "$SLIM_ROUTE_CACHE_FILE"

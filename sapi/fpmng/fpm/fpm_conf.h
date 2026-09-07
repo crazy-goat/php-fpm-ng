@@ -121,6 +121,7 @@ struct fpm_worker_pool_config_s {
 	 * pool.type = http (patrz fpm_pool_type.c) — te dyrektywy ja jedynie
 	 * dostrajaja, nigdy nie wlaczaja same z siebie na innym typie poola. */
 	char *http_listen;			/* pusty = FastCGI port + 1 (albo wymagane, gdy pool sluchał na UDS) */
+	char *http_plain_listen;		/* optional redirect-only plain HTTP companion for a TLS listener */
 	int http_gateways;			/* liczba procesow bramki, domyslnie 2 */
 	int http_reuseport;			/* kazda bramka wlasny SO_REUSEPORT socket */
 	int http_static;			/* serwowanie plikow statycznych bez PHP, domyslnie wlaczone */

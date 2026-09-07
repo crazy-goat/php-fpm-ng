@@ -25,15 +25,40 @@
  * odpala nastepny dopiero PO smierci poprzedniego. Nie ma wiec przebiegu,
  * z ktorym mialby sie nalozyc kolejny.
  *
- * CZAS: liczymy wylacznie w UTC (fpm_cron_schedule_next() uzywa gmtime_r()).
- * Czas lokalny + zmiana czasu (DST) daje przebieg podwojny albo zaden przy
- * kazdym przejsciu — nie robimy tego.
+ * CZAS: domyslnie UTC (fpm_cron_schedule_next() uzywa gmtime_r()).
+ *
+ * cron.timezone (task 033a, 2026-09-07): opcjonalna nazwa strefy IANA (np.
+ * "Europe/Warsaw"). Gdy ustawiona, fpm_cron_schedule_next() liczy pola
+ * harmonogramu wzgledem czasu lokalnego tej strefy (localtime_r() zamiast
+ * gmtime_r()), tymczasowo podmieniajac TZ w srodowisku procesu i
+ * przywracajac je zaraz potem (patrz fpm_cron_schedule.c — bezpieczne
+ * wylacznie dlatego, ze zarowno dziecko poola cron, jak i watek petli
+ * zdarzen mastera licza jeden harmonogram na raz, nigdy rownolegle).
+ * Konsekwencja przejscia DST jest ZAMIERZONA, nie bledem: godzina, ktora
+ * DST pomija (przestawienie do przodu) nigdy nie dopasuje sie do zadnej
+ * chwili UTC, wiec przebieg po prostu nie wystapi; godzina, ktora DST
+ * powtarza (przestawienie do tylu) moze dopasowac sie dwa razy tego samego
+ * dnia. To jest DOKLADNIE zachowanie zwyklego crona uruchomionego w czasie
+ * lokalnym — akceptowana usterka raz w roku, nie cos, co ta funkcja
+ * probuje naprawiac dalej. Bez cron.timezone (domyslnie) nic sie nie
+ * zmienia: UTC, bez DST, bez tego kompromisu.
  *
  * NIE NADRABIAMY zgubionych przebiegow. fpm_cron_schedule_next() zawsze
  * liczy "co jest najblizej w przyszlosci od teraz", nigdy "co przegapilem
  * odkad ostatnio dzialalem" — jesli master byl wylaczony godzine, nastepny
  * przebieg to najblizszy przyszly termin, nie dwanascie zaleglych. Ktos
  * kiedys bedzie chcial to dodac — to bedzie zmiana projektowa, nie poprawka.
+ * Task 033b (2026-09-07): rozstrzygniete jako trwale ograniczenie, nie
+ * defekt do naprawienia — patrz docs/cron.md. Operator polegajacy na cronie
+ * dla czegos wrazliwego na czas (backup, wygasniecie czegos) ma o tym
+ * przeczytac PRZED skonfigurowaniem poola, nie odkryc po fakcie.
+ *
+ * cron.log (task 033c, 2026-09-07): opcjonalna sciezka pliku, do ktorego
+ * kazdy przebieg dopisuje jedna linie (start, kod wyjscia, czas trwania) —
+ * patrz fpm_pool_cron_child_main(). To jest historia przebiegow, ktorej
+ * pamiec dzielona ponizej CELOWO nie trzyma (patrz komentarz przy
+ * fpm_cron_shared_s) — dopisywanie do pliku nie wymaga zadnego stanu
+ * sterujacego i dziala nawet miedzy restartami mastera.
  *
  * cron.timeout uzywa DOKLADNIE tego samego mechanizmu co
  * supervisor.stop_timeout (fpm_pool_watchdog_arm(), wydzielone do
@@ -46,7 +71,11 @@
 
 #include "fpm_config.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -179,6 +208,26 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	free(c->cron_parsed_schedule);
 	c->cron_parsed_schedule = parsed;
 
+	/* cron.timezone: odrzucamy nieznana strefe TERAZ, tak samo jak zly
+	 * cron.schedule powyzej, zamiast po cichu spasc na UTC w runtime.
+	 * tzset()/localtime_r() nie zglaszaja bledu dla nieznanej nazwy strefy
+	 * (po prostu zachowuja sie jak dla UTC), wiec jedyny sposob, zeby
+	 * odrzucic literowke z czytelnym komunikatem, to sprawdzic istnienie
+	 * pliku danych strefy w zoneinfo (ta sama baza, ktora localtime_r()
+	 * i tak by uzyl). */
+	if (c->cron_timezone && *c->cron_timezone) {
+		const char *tzdir = getenv("TZDIR");
+		char path[512];
+
+		if ((size_t) snprintf(path, sizeof(path), "%s/%s",
+				tzdir ? tzdir : "/usr/share/zoneinfo", c->cron_timezone) >= sizeof(path)
+				|| access(path, R_OK) != 0) {
+			zlog(ZLOG_ALERT, "[pool %s] cron.timezone '%s' is not a known IANA zone name (checked '%s')",
+				c->name, c->cron_timezone, path);
+			return -1;
+		}
+	}
+
 	/* Decyzja projektowa (patrz NOTES.md i fpm_pool_cron.h): cron mapuje sie
 	 * na pm = static + pm.max_children = 1, ZAWSZE 1 — nie ma dyrektywy
 	 * "liczba instancji" jak supervisor.processes, bo nakladanie sie
@@ -254,6 +303,60 @@ static int fpm_pool_cron_sleep_until(time_t next) /* {{{ */
 }
 /* }}} */
 
+/* cron.log: appends one line per completed run. No rotation, no reopen on
+ * reload — this is a plain append-only file, the operator's own job to
+ * rotate (same expectation as any other file this project writes to), kept
+ * deliberately this simple because the alternative (run count / "overdue"
+ * detection in pool.type = status, task 033c's other option) needs shared
+ * state and a design of its own that nobody has asked for yet; see
+ * docs/cron.md. Format is fixed and grep-able, not configurable: ISO 8601
+ * UTC start time, exit code, duration in whole seconds. */
+static void fpm_pool_cron_log_run(const char *path, time_t started, time_t ended, int exit_code) /* {{{ */
+{
+	int fd;
+	struct tm tmv;
+	char line[160];
+	int len;
+
+	gmtime_r(&started, &tmv);
+	len = snprintf(line, sizeof(line),
+		"%04d-%02d-%02dT%02d:%02d:%02dZ exit=%d duration=%lds\n",
+		tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+		tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+		exit_code, (long) (ended - started));
+	if (len <= 0 || (size_t) len >= sizeof(line)) {
+		return;
+	}
+
+	fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
+	if (fd < 0) {
+		zlog(ZLOG_WARNING, "cron.log: cannot open '%s' (%s)", path, strerror(errno));
+		return;
+	}
+
+	{
+		size_t left = (size_t) len;
+		const char *p = line;
+
+		while (left > 0) {
+			ssize_t n = write(fd, p, left);
+
+			if (n < 0) {
+				if (errno == EINTR) {
+					continue;
+				}
+				zlog(ZLOG_WARNING, "cron.log: write to '%s' failed (%s)", path, strerror(errno));
+				break;
+			}
+			p += n;
+			left -= (size_t) n;
+		}
+	}
+
+	close(fd);
+}
+/* }}} */
+
 void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -277,7 +380,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	fpm_pool_script_install_sapi_overrides();
 
-	next = fpm_cron_schedule_next(c->cron_parsed_schedule, time(NULL));
+	next = fpm_cron_schedule_next(c->cron_parsed_schedule, time(NULL), c->cron_timezone);
 	if (next == (time_t) -1) {
 		/* Ostatnia siatka bezpieczenstwa — validate() akceptuje skladnie, nie
 		 * "czy harmonogram moze kiedykolwiek zajsc". Patrz fpm_cron_schedule.h. */
@@ -317,6 +420,10 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->consecutive_failures = (exit_code != 0) ? shared->consecutive_failures + 1 : 0;
 	}
 
+	if (c->cron_log && *c->cron_log) {
+		fpm_pool_cron_log_run(c->cron_log, started, time(NULL), exit_code);
+	}
+
 	/* Kod wyjscia != 0 musi byc widoczny na poziomie ostrzezenia, nie debug —
 	 * pojedyncza instancja na VPS-ie nie ma klastra, ktory to wylapie. */
 	if (exit_code != 0) {
@@ -347,7 +454,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	 * powodem, dla ktorego next_run nie wymagalo zadnego stanu w pamieci
 	 * dzielonej — patrz docs/NOTES.md 3u i 3r. */
 	if (wp->config->cron_parsed_schedule) {
-		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL));
+		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL), wp->config->cron_timezone);
 		out->has_next_run = 1;
 		out->next_run = (n == (time_t) -1) ? 0 : n;
 	}

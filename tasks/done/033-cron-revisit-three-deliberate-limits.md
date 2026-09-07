@@ -153,3 +153,28 @@ documentation (not just the source comment, which only a code reader sees).
   exists "na nic nie wplywa" per the struct's own comment). Neither of those
   two is in scope here; this task is only about (a), (b) and (c) as framed
   above.
+
+## Outcome
+
+- **(a) UTC/DST:** changed behaviour. Added optional `cron.timezone` (IANA
+  zone name; unset = UTC, unchanged default). `fpm_cron_schedule_next()`
+  takes a `tz` parameter and uses `localtime_r()` with the `TZ` environment
+  variable set/restored around the search when given, `gmtime_r()`
+  otherwise (`fpm_cron_schedule.c`, `fpm_pool_cron.c`). The zone name is
+  validated at pool startup against the system zoneinfo database, rejected
+  like a bad `cron.schedule` if unknown. DST transition edge cases (a
+  schedule skipped once on "spring forward", fired twice on "fall back")
+  are documented as an accepted quirk, not fixed further — same as
+  `crontab(5)` in local time.
+- **(b) Missed runs:** documented as a permanent limitation, not changed.
+  No catch-up mode was designed.
+- **(c) Run history:** added optional `cron.log` (a file path; unset = no
+  extra log). One line appended per completed run (start time, exit code,
+  duration), no rotation. `pool.type = status` itself is unchanged — still
+  last-run-only, per the single-instance-VPS assumption the rest of the
+  file leans on; a running total or an "overdue" computation was not built,
+  since `cron.log` already answers "did cron actually run and how often"
+  for an operator willing to read a file.
+- All three decisions and the two new directives are documented for
+  operators in the new `docs/cron.md` (linked from `README.md`), not only
+  in source comments.

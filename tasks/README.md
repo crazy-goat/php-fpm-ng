@@ -6,8 +6,11 @@ One file per unit of work. English only, even though most of the codebase and
 
 ## Tracks
 
-- `tasks/` — the main line: the HTTP gateway, cron, the scheduler, proxying,
-  packaging, CI and the tests. This is where the project is focused.
+- `tasks/` — the main line: the HTTP gateway, cron, proxying, packaging, CI
+  and the tests. This is where the project is focused. ("The scheduler" used
+  to appear here as a separate item; task 034 decided it names no capability
+  `cron` doesn't already provide, so the word was retired — see
+  `tasks/done/034-scheduler-define-or-drop.md`.)
 - `tasks/nice-to-have/` — work that only applies to `pool.executor = fiber`.
   The fiber executor sits behind a build flag that is **off by default**, so a
   stock binary does not contain that code. These tasks keep their own

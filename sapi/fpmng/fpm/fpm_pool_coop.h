@@ -1,32 +1,32 @@
-/* fpm-ng: wspolny rdzen dla typow poola obslugujacych WIELE requestow FastCGI
- * w JEDNYM procesie PHP. Obecnie uzywa go pool.executor = fiber.
+/* fpm-ng: shared core for pool types handling MANY FastCGI requests in ONE
+ * PHP process. It is currently used by pool.executor = fiber.
  *
- * Model: dziecko robi JEDEN php_request_startup() ("request-kontener"),
- * a kazdy request FastCGI dostaje wlasny stan (SG, bufory wyjscia,
- * EG(symbol_table), EG(included_files), superglobale, handlery bledow),
- * ktory typ poola podmienia w globalach silnika tuz przed oddaniem procesora
- * temu requestowi (enter) i tuz po jego zejsciu (leave). KTO i KIEDY
- * przelacza — to sprawa typu poola (fiber ma wlasny scheduler na libevent).
- * Rdzen nie wie nic o fibrach ani korutynach.
+ * Model: the child performs ONE php_request_startup() (the "request container"),
+ * and every FastCGI request gets its own state (SG, output buffers,
+ * EG(symbol_table), EG(included_files), superglobals, error handlers), which the
+ * pool type swaps into the engine globals immediately before giving that
+ * request the processor (enter) and immediately after it leaves (leave). WHO
+ * switches and WHEN is the pool type's concern (Fiber has its own libevent
+ * scheduler). The core knows nothing about fibers or coroutines.
  *
- * Co jest WSPOLNE dla requestow w locie i czego ten rdzen NIE rozdziela
- * (swiadome ograniczenie, patrz docs/NOTES.md 3t i 3u): tablice funkcji
- * i klas, memory_limit, max_execution_time, statyki klas,
- * register_shutdown_function, RINIT/RSHUTDOWN rozszerzen, opcache, handlery
- * sygnalow (pcntl_signal: PCNTL_G(php_signal_table) i SIGG(handlers) to
- * jedna tablica na proces), timer SIGALRM (pcntl_alarm), fork/exec.
- * WARTOSC wpisow ini (ini_get/ini_set) JEST rozdzielona per request — patrz
- * fpm_pool_coop_ini.[ch] — ale tylko na poziomie ini_entry->value; procesowe
- * globale, ktore on_modify niektorych wpisow rowniez aktualizuje (np.
- * core_globals.precision), rozdzielone NIE SA (wyjatek: ext/session, patrz
- * fpm_pool_coop_session.c) — patrz uzasadnienie w fpm_pool_coop_ini.c.
- * Z tego ostatniego wynika, co validate() ODRZUCA (opcache wlaczone,
- * max_execution_time != 0) i co kontener BLOKUJE przez zend_disable_functions
- * (procesowe funkcje pcntl) — patrz fpm_pool_coop.c i docs/fiber_errors.md.
+ * What is SHARED between in-flight requests and what this core does NOT isolate
+ * (deliberate limitation, see docs/NOTES.md 3t and 3u): function and class
+ * tables, memory_limit, max_execution_time, class statics,
+ * register_shutdown_function, extension RINIT/RSHUTDOWN, OPcache, signal
+ * handlers (pcntl_signal: PCNTL_G(php_signal_table) and SIGG(handlers) are one
+ * process-wide table), SIGALRM timer (pcntl_alarm), fork/exec.
+ * The VALUE of ini entries (ini_get/ini_set) IS isolated per request — see
+ * fpm_pool_coop_ini.[ch] — but only at ini_entry->value level; process globals
+ * also updated by on_modify for some entries (for example core_globals.precision)
+ * are NOT isolated (exception: ext/session, see fpm_pool_coop_session.c) — see
+ * the rationale in fpm_pool_coop_ini.c. This explains what validate() REJECTS
+ * (OPcache enabled, max_execution_time != 0) and what the container BLOCKS with
+ * zend_disable_functions (process-wide pcntl functions) — see fpm_pool_coop.c
+ * and docs/fiber_errors.md.
  *
- * Powod istnienia osobnego pliku: zeby skasowanie jednego z dwoch typow
- * bylo skasowaniem jednego pliku i jednej linii w rejestrze, bez ruszania
- * kodu drugiego (decyzja w NOTES 3s).
+ * Reason for a separate file: removing either of the two types should mean
+ * removing one file and one registry line, without touching the other type's
+ * code (decision in NOTES 3s).
  */
 
 #ifndef FPM_POOL_COOP_H
@@ -40,27 +40,28 @@
 #include "php_variables.h"
 #include "zend_stack.h"
 #include "fastcgi.h"
-/* zend_ps_globals — TYLKO po rozmiar struktury (sizeof ponizej). Dolaczenie
- * tego naglowka nie tworzy zaleznosci linkera samo z siebie (dokladnie tak
- * samo, bez zadnej ochrony, dolacza go ext/standard/basic_functions.c,
- * kompilowane zawsze) — zaleznosc powstalaby dopiero przy uzyciu
- * ZEND_EXTERN_MODULE_GLOBALS(ps) albo odwolaniu do ps_globals po nazwie,
- * a tego nigdzie w fpm_pool_coop*.c nie ma. Patrz fpm_pool_coop_session.c. */
+/* zend_ps_globals — ONLY for the struct size (sizeof below). Including this
+ * header creates no linker dependency by itself (exactly as it does, without
+ * any guard, in ext/standard/basic_functions.c, which is always compiled) — a
+ * dependency would arise only from using ZEND_EXTERN_MODULE_GLOBALS(ps) or
+ * referring to ps_globals by name, and no fpm_pool_coop*.c does that. See
+ * fpm_pool_coop_session.c. */
 #include "ext/session/php_session.h"
 
-/* Stan jednego requestu w locie, gdy NIE jest na procesorze. Gdy jest —
- * to samo lezy w globalach silnika, a ta struktura jest nieaktualna. */
+/* State of one in-flight request when it is NOT on the processor. When it is,
+ * the same state lives in engine globals and this structure is stale. */
 struct fpm_coop_req_s {
 	fcgi_request *req;
-	int fd;					/* deskryptor polaczenia (fcgi_request jest nieprzezroczysty) */
+	int fd;					/* connection descriptor (fcgi_request is opaque) */
 	unsigned id;
 
-	sapi_globals_struct sg;			/* cale SG */
-	zend_output_globals og;			/* stos ob_*, flagi wyjscia */
+	sapi_globals_struct sg;			/* complete SG */
+	zend_output_globals og;			/* ob_* stack, output flags */
 
-	/* Ponizsze istnieja tylko miedzy fpm_coop_req_run() start a koniec (live). */
+	/* The following exist only from the start of fpm_coop_req_run() to its end
+	 * (live). */
 	bool live;
-	HashTable symbol_table;			/* $GLOBALS tego requestu */
+	HashTable symbol_table;			/* $GLOBALS for this request */
 	HashTable included_files;
 	zval http_globals[NUM_TRACK_VARS];	/* PG(http_globals): $_GET, $_POST, ... */
 	zval user_error_handler;
@@ -70,81 +71,84 @@ struct fpm_coop_req_s {
 	zend_stack user_error_handlers;
 	zend_stack user_exception_handlers;
 
-	/* Snapshot ps_globals (ext/session) tego requestu, gdy NIE jest na
-	 * procesorze — patrz fpm_pool_coop_session.[ch]. Niezalezne od "live":
-	 * zerowe bajty przed pierwszym fpm_coop_session_req_save() sa nieszkodliwe
-	 * (nigdy nie sa czytane, dopoki fpm_coop_session_request_startup() nie
-	 * zapisze do zywych globali stanu bazowego). Rozmiar liczony zawsze,
-	 * nawet gdy session nie jest zaladowane — koszt to kilkaset bajtow na
-	 * kontekst requestu, bez alokacji. */
+	/* Snapshot of ps_globals (ext/session) for this request when it is NOT on
+	 * the processor — see fpm_pool_coop_session.[ch]. Independent of "live":
+	 * zero bytes before the first fpm_coop_session_req_save() are harmless (they
+	 * are never read until fpm_coop_session_request_startup() writes the base
+	 * state to live globals). The size is always counted, even when session is
+	 * not loaded — the cost is a few hundred bytes per request context, with no
+	 * allocation. */
 	unsigned char session_globals[sizeof(zend_ps_globals)];
 
-	/* Wpisy ini, ktore TEN request zmienil, gdy NIE jest live — patrz
-	 * fpm_pool_coop_ini.[ch]. Oba NULL, dopoki request nie zawiesi sie z
-	 * niepustym EG(modified_ini_directives) — czyli w OGROMNEJ wiekszosci
-	 * przelaczen fibera (bez ini_set/set_time_limit/...) zero kosztu. */
-	HashTable *ini_mods;			/* nazwa -> zend_ini_entry* (ta sama tablica co EG(modified_ini_directives)) */
-	HashTable *ini_values;			/* nazwa -> zend_string* : wlasna wartosc TEGO requestu */
+	/* INI entries that THIS request changed while it was NOT live — see
+	 * fpm_pool_coop_ini.[ch]. Both are NULL until the request suspends with a
+	 * non-empty EG(modified_ini_directives) — so for the VAST MAJORITY of Fiber
+	 * switches (without ini_set/set_time_limit/...) the cost is zero. */
+	HashTable *ini_mods;			/* name -> zend_ini_entry* (same table as EG(modified_ini_directives)) */
+	HashTable *ini_values;			/* name -> zend_string*: this request's OWN value */
 
 	/* Values stashed from fiber.isolate_statics (fpm_pool_coop_statics.c)
-	 * while this request is not live. Array of zval, one per configured
-	 * item, NULL until the first fpm_coop_statics_req_leave() with a
-	 * non-empty item list allocates it (empty list, the default: never). */
+	 * while this request is not live. Array of zval, one per configured item,
+	 * NULL until the first fpm_coop_statics_req_leave() with a non-empty item
+	 * list allocates it (empty list, the default: never). */
 	void *statics;
 
-	void *type_data;			/* prywatne typu poola (fiber: zend_fiber + event) */
+	void *type_data;			/* pool-type private data (Fiber: zend_fiber + event) */
 };
 
-/* Jedyny php_request_startup() w zyciu procesu + zdjecie stanu bazowego
- * + podmiana hookow SAPI (ub_write/flush bez server_context, read_post bez
- * statycznego request_body_fd z fpm_main.c, import srodowiska FastCGI).
- * Wolac raz, w child_main, PRZED przyjeciem pierwszego polaczenia. 0 albo -1. */
+/* The only php_request_startup() in the process lifetime + capture of the base
+ * state + replacement of SAPI hooks (ub_write/flush without server_context,
+ * read_post without the static request_body_fd from fpm_main.c, FastCGI
+ * environment import). Call once in child_main, BEFORE accepting the first
+ * connection. Returns 0 or -1. */
 int fpm_coop_container_start(const char *pool_name);
 
-/* Nazwa poola do logow. */
+/* Pool name for logs. */
 const char *fpm_coop_pool_name(void);
 
-/* accept() + odczyt naglowkow FastCGI (blokujacy, ale wolany dopiero gdy
- * gniazdo nasluchujace jest gotowe). NULL: nic do obslugi (EAGAIN, blad,
- * shutdown). Zwrocony request nalezy oddac do fpm_coop_req_new(). */
+/* accept() + read FastCGI headers (blocking, but called only when the listening
+ * socket is ready). NULL: nothing to handle (EAGAIN, error, shutdown). Give the
+ * returned request to fpm_coop_req_new(). */
 fcgi_request *fpm_coop_accept(int listen_fd, int *fd_out);
 
-/* Jak wyzej, ale dla polaczenia trzymanego przy zyciu (keep-alive) po
- * poprzednim requescie: czyta kolejny request z tego samego fd. Gdy klient
- * zamknal polaczenie, niszczy req i zwraca NULL. Wolac dopiero, gdy fd jest
- * czytelny — inaczej blokuje. */
+/* As above, but for a persistent connection after the previous request: read
+ * the next request from the same fd. If the client closed the connection,
+ * destroy req and return NULL. Call only when fd is readable — otherwise it
+ * blocks. */
 fcgi_request *fpm_coop_accept_kept(fcgi_request *req, int *fd_out);
 
-/* Nowy kontekst requestu (jeszcze nic nie wykonane). */
+/* New request context (nothing executed yet). */
 struct fpm_coop_req_s *fpm_coop_req_new(fcgi_request *req, int fd);
 
-/* Stan requestu -> globale silnika. Wolac tuz PRZED oddaniem mu procesora. */
+/* Request state -> engine globals. Call immediately BEFORE giving it the
+ * processor. */
 void fpm_coop_req_enter(struct fpm_coop_req_s *ctx);
 
-/* Globale silnika -> stan requestu, stan bazowy (kontenera) -> globale.
- * Wolac tuz PO zejsciu requestu z procesora (zawieszenie albo koniec). */
+/* Engine globals -> request state, base (container) state -> globals. Call
+ * immediately AFTER the request leaves the processor (suspension or end). */
 void fpm_coop_req_leave(struct fpm_coop_req_s *ctx);
 
-/* Cala obsluga requestu: aktywacja SAPI, swieze tablice, skrypt, naglowki,
- * flush, fcgi_finish_request, sprzatanie. Wolac W KONTEKSCIE requestu
- * (na jego stosie, po enter). Moze oddawac procesor w srodku (I/O) — wtedy
- * typ poola robi leave/enter wokol kazdego przelaczenia. Po powrocie request
- * jest skonczony, a stan w globalach to wciaz "entered" (typ wola leave). */
+/* Complete request handling: SAPI activation, fresh tables, script, headers,
+ * flush, fcgi_finish_request, cleanup. Call IN THE REQUEST CONTEXT (on its
+ * stack, after enter). It may yield the processor in the middle (I/O) — the
+ * pool type performs leave/enter around every switch. On return the request is
+ * finished, while globals are still "entered" (the type calls leave). */
 void fpm_coop_req_run(struct fpm_coop_req_s *ctx);
 
-/* Zwalnia kontekst (po leave). Zwraca fcgi_request: !fcgi_is_closed(req)
- * gdy klient chce keep-alive i trzeba czekac na ctx->fd, inaczej do
- * fcgi_destroy_request. */
+/* Free the context (after leave). Returns fcgi_request: !fcgi_is_closed(req)
+ * when the client wants keep-alive and we must wait for ctx->fd; otherwise
+ * destroy it with fcgi_destroy_request. */
 fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx);
 
-/* Requesty w locie (statystyka do logow). */
+/* In-flight requests (log statistic). */
 unsigned fpm_coop_in_flight(void);
 
-/* Wspolna czesc validate() obu typow: pm = static, NTS. 0 albo -1. */
+/* Shared validation for both types: pm = static, NTS. Returns 0 or -1. */
 struct fpm_worker_pool_s;
 int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name);
 
-/* Wspolna lista odrzucanych dyrektyw (scoreboard nie widzi requestow w locie). */
+/* Shared rejected-directive list (the scoreboard does not see in-flight
+ * requests). */
 extern const char *const fpm_coop_rejects[];
 
 #endif

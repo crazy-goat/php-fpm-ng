@@ -1,23 +1,22 @@
-/* fpm-ng: pool.executor = fiber — sleep()/usleep()/time_nanosleep() bez
- * blokowania procesu. Patrz fpm_pool_fiber_sleep.h.
+/* fpm-ng: pool.executor = fiber — sleep()/usleep()/time_nanosleep() without
+ * blocking the process. See fpm_pool_fiber_sleep.h.
  *
- * Mechanizm: fpm_pool_fiber_wait_wake(timeout) juz umie zawiesic fiber
- * requestu do uplywu zadanego czasu (jego wewnetrzny event ma wlasny
- * timeout — patrz fpm_pool_fiber.c:fpm_pool_fiber_wait_wake) i jest przez
- * scheduler poprawnie sprzatany (event_del po powrocie, event_free przy
- * smierci fibera — dokladnie tak samo, jak dla kazdego wait_fd() z warstwy
- * transportow). Dlatego NIE zakladamy tu wlasnego zdarzenia libevent: druga,
- * niezalezna od schedulera zegara(-ow) tylko dublowalaby to, co wait_wake
- * juz robi jednym zegarem, i to WLASNIE TA druga sciezka wymagalaby wlasnego
- * haczyka sprzatajacego (fpm_coop_req_free-podobnego) na wypadek zniszczenia
- * fibera z zawisniętym timerem. Uzywajac wait_wake() bezposrednio, zaden
- * nowy obiekt zdarzenia nie powstaje — wiec nie ma czego osobno sprzatac
- * (patrz raport, sekcja "Cleanup safety" — decyzja i dowod empiryczny).
+ * Mechanism: fpm_pool_fiber_wait_wake(timeout) already knows how to suspend a
+ * request Fiber until the requested time elapses (its internal event has its
+ * own timeout — see fpm_pool_fiber.c:fpm_pool_fiber_wait_wake) and the scheduler
+ * cleans it up correctly (event_del after return, event_free when the Fiber
+ * dies — exactly as for every wait_fd() from the transport layer). Therefore do
+ * NOT create a separate libevent event here: a scheduler-independent clock
+ * would merely duplicate what wait_wake already does with one timer, and that
+ * SECOND path would itself need a cleanup hook (similar to fpm_coop_req_free)
+ * for a Fiber destroyed with a timer pending. By using wait_wake() directly, no
+ * new event object is created — so there is nothing separate to clean up (see
+ * the report, "Cleanup safety" section — decision and empirical evidence).
  *
- * fpm_pool_fiber_waiter()/fpm_pool_fiber_wake() (para do budzenia z ZEWNATRZ,
- * z callbacku innego zrodla zdarzen) tu wiec nie sa potrzebne — sleep nie ma
- * zadnego zewnetrznego zrodla przerwania w tym modelu (patrz naglowek pliku
- * .h, sekcja "czego to nie obejmuje").
+ * fpm_pool_fiber_waiter()/fpm_pool_fiber_wake() (the pair for waking from
+ * OUTSIDE, from a callback belonging to another event source) are therefore not
+ * needed here — sleep has no external interruption source in this model (see
+ * the .h header, "what this does not cover" section).
  */
 
 #include "fpm_config.h"
@@ -37,9 +36,9 @@ static zif_handler fpm_fiber_sleep_orig_sleep;
 static zif_handler fpm_fiber_sleep_orig_usleep;
 static zif_handler fpm_fiber_sleep_orig_time_nanosleep;
 
-/* Podmienia handler jednej funkcji wewnetrznej; *orig dostaje oryginal.
- * 0 = podmienione, -1 = funkcji nie ma (inna platforma/build) albo nie jest
- * wewnetrzna — wolajacy loguje i po prostu jej nie hookuje. */
+/* Replace the handler of one internal function; *orig receives the original.
+ * 0 = replaced, -1 = the function is missing (another platform/build) or is
+ * not internal — the caller logs it and simply does not hook that function. */
 static int fpm_fiber_sleep_swap(const char *name, size_t name_len, zif_handler repl, zif_handler *orig) /* {{{ */
 {
 	zend_function *fn = zend_hash_str_find_ptr(CG(function_table), name, name_len);
@@ -58,7 +57,7 @@ static int fpm_fiber_sleep_swap(const char *name, size_t name_len, zif_handler r
 static ZEND_FASTCALL void fpm_fiber_zif_sleep(INTERNAL_FUNCTION_PARAMETERS) /* {{{ */
 {
 	zend_long num;
-	const unsigned int max = UINT_MAX;	/* platforma docelowa: Linux, nie Windows */
+	const unsigned int max = UINT_MAX;	/* target platform: Linux, not Windows */
 	struct timeval tv;
 	int rc;
 
@@ -81,21 +80,21 @@ static ZEND_FASTCALL void fpm_fiber_zif_sleep(INTERNAL_FUNCTION_PARAMETERS) /* {
 
 	rc = fpm_pool_fiber_wait_wake(&tv);
 	if (rc < 0) {
-		/* can_wait() zmienil zdanie miedzy sprawdzeniem a wywolaniem (nie
-		 * powinno sie zdarzyc w kodzie jednowatkowym) — nie tracimy czasu
-		 * snu, wolamy prawdziwy blokujacy sleep(). */
+		/* can_wait() changed its mind between the check and the call (this
+		 * should not happen in single-threaded code) — do not lose the sleep time;
+		 * call the real blocking sleep(). */
 		fpm_fiber_sleep_orig_sleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 		return;
 	}
 
-	/* rc == 0: uplynal caly zadany czas — jak zwykly sleep() bez przerwania.
-	 * rc == 1: ktos obudzil fiber przed czasem (nie dzieje sie w tym
-	 * spike'u — nikt nie trzyma naszego waitera — ale gdyby kiedys sie
-	 * zdarzylo, zwracamy pozostale sekundy jak upstream przy EINTR. */
+	/* rc == 0: the entire requested time elapsed — like an uninterrupted
+	 * regular sleep(). rc == 1: someone woke the Fiber early (this does not
+	 * happen in this spike — nobody holds our waiter — but if it ever did,
+	 * return the remaining seconds as upstream does for EINTR). */
 	if (rc == 0) {
 		RETURN_LONG(0);
 	} else {
-		RETURN_LONG(0);	/* brak realnego zrodla wczesnego wybudzenia — patrz komentarz wyzej */
+		RETURN_LONG(0);	/* no real source of early wakeup — see the comment above */
 	}
 }
 /* }}} */
@@ -127,7 +126,7 @@ static ZEND_FASTCALL void fpm_fiber_zif_usleep(INTERNAL_FUNCTION_PARAMETERS) /* 
 	if (fpm_pool_fiber_wait_wake(&tv) < 0) {
 		fpm_fiber_sleep_orig_usleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 	}
-	/* usleep() nie zwraca nic (void) w obu galeziach. */
+	/* usleep() returns nothing (void) on either branch. */
 }
 /* }}} */
 
@@ -160,9 +159,10 @@ static ZEND_FASTCALL void fpm_fiber_zif_time_nanosleep(INTERNAL_FUNCTION_PARAMET
 		return;
 	}
 
-	/* Upstream nie sprawdza gorna granice tv_nsec sam — odkrywa ja nanosleep()
-	 * (EINVAL) i wtedy rzuca DOKLADNIE ten komunikat. My nie wolamy nanosleep(),
-	 * wiec sprawdzamy to samo sami, zeby zachowac ten sam kontrakt bledow. */
+	/* Upstream does not check the upper bound of tv_nsec itself — nanosleep()
+	 * discovers it (EINVAL) and then throws EXACTLY this message. We do not call
+	 * nanosleep(), so check the same condition ourselves to preserve the same
+	 * error contract. */
 	if (tv_nsec > 999999999L) {
 		zend_value_error("Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative");
 		RETURN_THROWS();
@@ -187,12 +187,11 @@ static ZEND_FASTCALL void fpm_fiber_zif_time_nanosleep(INTERNAL_FUNCTION_PARAMET
 			RETURN_TRUE;
 		}
 
-		/* rc == 1: wybudzony przed czasem — kontrakt upstreamu przy EINTR to
-		 * tablica seconds/nanoseconds pozostalego czasu. Nie mamy tu
-		 * prawdziwego "rem" z nanosleep(), wiec liczymy go z deadline minus
-		 * teraz — w tym spike'u ta galaz jest martwa (nic nie woła
-		 * fpm_pool_fiber_wake() na naszym waiterze, patrz komentarz w
-		 * zif_sleep), ale poprawna na wypadek, gdyby kiedys przestala byc. */
+		/* rc == 1: woken early — the upstream EINTR contract is an array of
+		 * seconds/nanoseconds remaining. We do not have nanosleep()'s real "rem",
+		 * so calculate it as deadline minus now — in this spike this branch is dead
+		 * (nothing calls fpm_pool_fiber_wake() on our waiter; see the comment in
+		 * zif_sleep), but it is correct if that ever changes. */
 		{
 			struct timeval now, rem;
 

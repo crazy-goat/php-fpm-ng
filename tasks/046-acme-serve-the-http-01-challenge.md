@@ -9,8 +9,8 @@ dedicated PHP ACME process chosen in 043).
 The gateway already has exactly one place for responses it produces without
 occupying a worker: `fpm_http_try_local()` (`sapi/fpmng/fpm/fpm_http.c:1303`),
 under a header comment that names this case explicitly
-(`fpm_http.c:1041-1048`): "dzis pliki statyczne; pozniej doloza sie tu wyzwanie
-ACME (/.well-known/acme-challenge/) i /status". There is also a note in the body
+(`fpm_http.c:1041-1048`): "Today: static files; later, add the ACME challenge
+(/.well-known/acme-challenge/) and /status here". There is also a note in the body
 that ordering will matter once ACME arrives: fixed paths first, files from disk
 last (`fpm_http.c:1339-1340`).
 

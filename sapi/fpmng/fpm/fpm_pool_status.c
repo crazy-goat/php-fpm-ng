@@ -1,31 +1,31 @@
 /* fpm-ng: pool.type = status.
  *
- * Patrz fpm_pool_status.h i docs/NOTES.md sekcja 3u dla uzasadnienia
- * projektowego. W skrocie: to jedyny typ poola, ktory nie odpala PHP w
- * ogole — dziecko robi wlasna petle accept na wlasnym gnieznie (ten sam
- * mechanizm co listen dla fcgi/http, ale nasluchujacy BEZPOSREDNIO, bez
- * fcgi+1 jak bramka http) i na kazde polaczenie odpowiada surowym HTTP,
- * bez przechodzenia przez PHP ani FastCGI.
+ * See fpm_pool_status.h and section 3u of docs/NOTES.md for the design
+ * rationale. In short: this is the only pool type that does not start PHP at
+ * all — the child runs its own accept loop on its own socket (the same
+ * mechanism as listen for fcgi/http, but listening DIRECTLY, without fcgi+1 as
+ * the HTTP gateway does) and answers every connection with raw HTTP, without
+ * going through PHP or FastCGI.
  *
- * KSZTALT DANYCH JEST INNY dla roznych typow poola (to jest sedno zadania,
- * nie szczegol) — rozgalezienie po fpm_pool_type_s.serves_requests:
- *   - serves_requests = 1 (fcgi, http): idle/active workers, requests —
- *     czytane bezposrednio ze scoreboardu tamtego poola (fpm_scoreboard_copy(),
- *     ten sam mechanizm co istniejacy fpm_status.c uzywa dla WLASNEGO poola —
- *     tu czytamy scoreboard CUDZEGO poola, z INNEGO procesu, stad kopia
- *     zamiast bezposredniego czytania pod lockiem).
- *   - serves_requests = 0 (supervisor, cron): stan/last_start/exit_code/
- *     consecutive_failures(/next_run dla crona) przez fpm_pool_type_s.status(),
- *     ktore kazdy taki typ implementuje we WLASNYM pliku, czytajac WLASNA
- *     pamiec dzielona (fpm_pool_supervisor.c, fpm_pool_cron.c). Ten plik nie
- *     zna wewnetrznej struktury tamtych stanow — dokladnie tak, jak wymaga
- *     kontrakt z docs/NOTES.md 3h.
- *   - typy bez .status i serves_requests = 0 (czyli "status" samo siebie) —
- *     pomijane w wyjsciu w ogole, bez specjalnego traktowania po nazwie.
+ * THE DATA SHAPE DIFFERS between pool types (this is the substance of the task,
+ * not a detail) — branch on fpm_pool_type_s.serves_requests:
+ *   - serves_requests = 1 (fcgi, http): idle/active workers, requests — read
+ *     directly from that pool's scoreboard (fpm_scoreboard_copy(), the same
+ *     mechanism existing fpm_status.c uses for its OWN pool — here we read
+ *     ANOTHER pool's scoreboard, from ANOTHER process, hence a copy instead of
+ *     direct reading under the lock).
+ *   - serves_requests = 0 (supervisor, cron): state/last_start/exit_code/
+ *     consecutive_failures (/next_run for cron) through fpm_pool_type_s.status(),
+ *     which each such type implements in its OWN file, reading its OWN shared
+ *     memory (fpm_pool_supervisor.c, fpm_pool_cron.c). This file does not know
+ *     the internal structure of those states — exactly as required by the
+ *     contract in docs/NOTES.md 3h.
+ *   - types without .status and with serves_requests = 0 (that is, "status"
+ *     itself) — omitted from output entirely, without special treatment by name.
  *
- * Etykieta metryk to nazwa poola — kardynalnosc ograniczona z natury (liczba
- * poolow w configu). Zadnych etykiet o nieograniczonej kardynalnosci (bez
- * request path, bez timestampu jako label, itp).
+ * The metric label is the pool name — cardinality is naturally bounded (the
+ * number of pools in the config). No labels with unbounded cardinality (no
+ * request path, no timestamp as a label, etc.).
  */
 
 #include "fpm_config.h"
@@ -49,16 +49,16 @@
 #include "php_fpmng_metrics.h"
 #include "zlog.h"
 
-/* Lista ODRZUCEN, nie dopuszczen — patrz fpm_pool_type_check_directives()
- * w fpm_pool_type.c. W odroznieniu od supervisor/cron, "listen"/"listen."
- * NIE sa tu odrzucane: status faktycznie nasluchuje, na wlasnym porcie.
- * Reszta to ten sam zestaw powodow co supervisor/cron: brak requestow
- * FastCGI (wiec brak sensu dla dyrektyw requestowych, ping., access.), brak
- * PHP (wiec pm.* generowane programowo, zawsze static+1 — nie ma tu
- * dyrektywy "ile procesow", jeden proces w zupelnosci wystarcza do obslugi
- * scrapow monitoringu), oraz dyrektywy DRUGICH typow poola. */
-/* Limit na recv()/send() dla pojedynczego polaczenia — patrz uzasadnienie
- * przy setsockopt() w fpm_pool_status_child_main(). */
+/* Rejected, not allowed, directives — see fpm_pool_type_check_directives()
+ * in fpm_pool_type.c. Unlike supervisor/cron, "listen"/"listen." are NOT
+ * rejected here: status really listens on its own port. The remaining reasons
+ * are the same as for supervisor/cron: no FastCGI requests (so request
+ * directives, ping., and access. make no sense), no PHP (so pm.* is generated
+ * programmatically, always static+1 — there is no "number of processes"
+ * directive; one process is entirely sufficient for monitoring scrapes), and
+ * directives belonging to the OTHER pool types. */
+/* Per-connection recv()/send() limit — see the rationale next to setsockopt()
+ * in fpm_pool_status_child_main(). */
 #define FPM_POOL_STATUS_IO_TIMEOUT_SEC 5
 
 const char *const fpm_pool_status_rejects[] = {
@@ -81,11 +81,12 @@ const char *const fpm_pool_status_rejects[] = {
 
 int fpm_pool_status_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	/* Jeden proces w zupelnosci wystarcza: to lekki, sekwencyjny serwer HTTP
-	 * dla scrapow monitoringu (Prometheus typowo co 15-60s), nie ruch
-	 * publiczny. Brak wlasnej dyrektywy "ile procesow" jest swiadome — gdyby
-	 * ktos kiedys potrzebowal wiecej, to bedzie decyzja projektowa (nowa
-	 * dyrektywa status.processes, wzorem supervisor.processes), nie domysl. */
+	/* One process is entirely sufficient: this is a lightweight, sequential HTTP
+	 * server for monitoring scrapes (Prometheus typically every 15-60s), not
+	 * public traffic. The absence of a "number of processes" directive is
+	 * deliberate — if more were ever needed, that would be a design decision (a
+	 * new status.processes directive, modeled on supervisor.processes), not a
+	 * default. */
 	wp->config->pm = PM_STYLE_STATIC;
 	wp->config->pm_max_children = 1;
 
@@ -93,8 +94,8 @@ int fpm_pool_status_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
-/* Bufor rosnacy — liczba poolow jest z natury mala (rozmiar configu), wiec
- * prostota (realloc x2) jest tu wazniejsza niz unikanie paru alokacji. */
+/* Growing buffer — the number of pools is naturally small (the config size),
+ * so simplicity (realloc x2) matters more here than avoiding a few allocations. */
 struct fpm_status_buf_s {
 	char *data;
 	size_t len;
@@ -159,11 +160,11 @@ static const char *fpm_pool_status_state_name(enum fpm_pool_state_e state) /* {{
 }
 /* }}} */
 
-/* Wspolne dla obu formatow: dla kazdego poola w mastrze, w kolejnosci
- * configu, zawola callback z gotowymi danymi — albo scoreboardowymi
- * (serves_requests), albo z fpm_pool_type_s.status() (reszta). Pool bez
- * .status i serves_requests = 0 (czyli "status" samo siebie) jest pomijany —
- * nie ma czego pokazac, i nie ma potrzeby specjalnego wykrywania po nazwie. */
+/* Shared by both formats: for every pool in the master, in config order, call
+ * the callback with ready data — either from the scoreboard (serves_requests) or
+ * from fpm_pool_type_s.status() (the rest). A pool without .status and with
+ * serves_requests = 0 (that is, "status" itself) is skipped — there is nothing
+ * to show, and no need for special detection by name. */
 struct fpm_pool_status_row_s {
 	const char *name;
 	const char *type_name;
@@ -206,8 +207,8 @@ static void fpm_pool_status_collect_and_render(struct fpm_status_buf_s *b, fpm_p
 		} else if (type->status) {
 			type->status(wp, &row.st);
 		} else {
-			/* Typ bez sensownego stanu do pokazania (dzisiaj: "status" samo
-			 * siebie) — pomijamy, zamiast zgadywac. */
+			/* Type without meaningful state to show (today: "status" itself) —
+			 * skip it instead of guessing. */
 			continue;
 		}
 
@@ -284,11 +285,11 @@ static void fpm_pool_status_render_prometheus(struct fpm_status_buf_s *b) /* {{{
 		"# TYPE fpmng_pool_backoff_seconds gauge\n");
 	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_prometheus);
 
-	/* Metryki aplikacyjne (NOTES 3k): agregacja tablic serii WSZYSTKICH
-	 * slotow workera w shm — czytamy cudza pamiec dzielona z tego
-	 * procesu, bez PHP i bez kontekstu requestu, dlatego render_text
-	 * nie dotyka ZEND_API. Brak serii (nikt nic nie zarejestrowal) =
-	 * brak dodatkowych linii, celowo bez komentarza-ocupera. */
+	/* Application metrics (NOTES 3k): aggregate the time-series tables from ALL
+	 * worker slots in shm — read another process's shared memory from this
+	 * process, without PHP or request context, so render_text does not touch
+	 * ZEND_API. No series (nobody registered anything) = no additional lines,
+	 * deliberately without an "occupier" comment. */
 	{
 		char *text = NULL;
 		size_t len = 0;
@@ -348,11 +349,10 @@ static void fpm_pool_status_render_json(struct fpm_status_buf_s *b) /* {{{ */
 }
 /* }}} */
 
-/* Surowy, minimalny serwer HTTP — celowo bez keep-alive, bez chunked, bez
- * parsowania naglowkow. To endpoint monitoringu (Prometheus scrape co
- * 15-60s), nie serwer WWW; kazde polaczenie to jeden request, jedna
- * odpowiedz, zamkniecie. Interesuje nas WYLACZNIE pierwsza linia
- * ("GET <path> HTTP/1.x"). */
+/* Raw, minimal HTTP server — deliberately without keep-alive, chunked encoding,
+ * or header parsing. This is a monitoring endpoint (Prometheus scrape every
+ * 15-60s), not a WWW server; each connection is one request, one response, then
+ * close. We care ONLY about the first line ("GET <path> HTTP/1.x"). */
 static void fpm_pool_status_handle_conn(int fd) /* {{{ */
 {
 	char req[4096];
@@ -366,10 +366,10 @@ static void fpm_pool_status_handle_conn(int fd) /* {{{ */
 	char header[256];
 	int header_len;
 
-	/* Jedno albo kilka recv(), az zobaczymy koniec pierwszej linii albo
-	 * zapelnimy bufor — wystarczy, "GET /metrics HTTP/1.1\r\n" miesci sie
-	 * z ogromnym zapasem. Reszta requestu (naglowki, ewentualne cialo) jest
-	 * ignorowana — i tak jej nie parsujemy. */
+	/* One or more recv() calls, until we see the end of the first line or fill
+	 * the buffer — sufficient; "GET /metrics HTTP/1.1\r\n" fits with ample room.
+	 * The rest of the request (headers and any body) is ignored — we do not parse
+	 * it anyway. */
 	while (total < sizeof(req) - 1) {
 		n = recv(fd, req + total, sizeof(req) - 1 - total, 0);
 		if (n <= 0) {
@@ -432,15 +432,14 @@ void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	int listen_fd = wp->listening_socket;
 
-	/* Brak wlasnej obslugi sygnalow, celowo: SIGTERM ma tu domyslna
-	 * dyspozycje (fpm_signals_child_init() ustawia ja dla dzieci przed
-	 * run_child:) — proces po prostu konczy sie natychmiast, co jest
-	 * poprawne, bo status nie ma zadnej "biezacej pracy" do dokonczenia
-	 * (kazde polaczenie jest obslugiwane w pelni w jednym accept()-cyklu,
-	 * nigdy nie trwa dluzej niz pojedynczy recv/send). Ewentualne opoznienie
-	 * przy SIGQUIT (graceful) do eskalacji SIGTERM przez mastera to znane,
-	 * zaakceptowane zachowanie tego samego rodzaju co dla supervisor/cron
-	 * bez wlasnego uchwytu na SIGQUIT — patrz docs/NOTES.md 3p, scenariusz 2. */
+	/* Deliberately no custom signal handling: SIGTERM has its default
+	 * disposition here (fpm_signals_child_init() sets it for children before
+	 * run_child:) — the process simply exits immediately, which is correct
+	 * because status has no "current work" to complete (each connection is fully
+	 * handled in one accept() cycle and never lasts longer than one recv/send).
+	 * Any delay after SIGQUIT (graceful) until the master escalates to SIGTERM is
+	 * known and accepted behavior, the same as for supervisor/cron without a
+	 * custom SIGQUIT handler — see docs/NOTES.md 3p, scenario 2. */
 
 	for (;;) {
 		int fd = accept(listen_fd, NULL, NULL);
@@ -450,17 +449,17 @@ void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			if (errno == EINTR) {
 				continue;
 			}
-			/* Bledy accept() na gniazdach TCP/UDS sa zwykle przejsciowe
-			 * (np. ECONNABORTED) — nie ma sensu konczyc caly proces
-			 * z powodu jednego nieudanego polaczenia. */
+			/* accept() errors on TCP/UDS sockets are usually transient (for
+			 * example, ECONNABORTED) — there is no reason to terminate the entire
+			 * process because of one failed connection. */
 			continue;
 		}
 
-		/* Klient, ktory otworzy polaczenie i nigdy nic nie wysle (albo nie
-		 * czyta odpowiedzi), zawiesilby JEDYNY proces tego poola na zawsze —
-		 * pm.max_children jest tu zawsze 1 (patrz validate()), wiec nie ma
-		 * innego workera, ktory by przejal ruch w tym czasie. Timeout na
-		 * recv() I send(), nie tylko na accept(). */
+		/* A client that opens a connection and never sends anything (or does not
+		 * read the response) would hang this pool's ONLY process forever —
+		 * pm.max_children is always 1 here (see validate()), so there is no other
+		 * worker to take over traffic meanwhile. Timeout both recv() AND send(),
+		 * not only accept(). */
 		tv.tv_sec = FPM_POOL_STATUS_IO_TIMEOUT_SEC;
 		tv.tv_usec = 0;
 		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));

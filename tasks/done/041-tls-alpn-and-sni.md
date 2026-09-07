@@ -35,7 +35,7 @@ with a throwaway certificate chosen per SNI name.
 Two separate questions; answer both, implement what the answers require.
 
 1. **ALPN.** Advertise `http/1.1` explicitly? The gateway speaks HTTP/1.1 and
-   nothing else (`docs/NOTES.md`, "Czego NIE robimy": no HTTP/2). This is small
+   nothing else (`docs/NOTES.md`, "What we do NOT do": no HTTP/2). This is small
    and mostly about being correct on the wire.
 2. **SNI.** Does one pool ever serve more than one certificate? Today
    `http.tls_cert` is a single pair. Multiple names on one VPS is a plausible

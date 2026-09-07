@@ -25,7 +25,7 @@ The worked example is `precision`. It lands in `core_globals` and is what
 their own `ini_get('precision')` correctly, while `var_dump()` in both uses
 whichever value was written last.
 
-This is recorded in `docs/frameworks.md` under "Znane ograniczenie naprawy 4"
+This is recorded in `docs/frameworks.md` under "Known limitation of fix 4"
 and was reported honestly by the implementer rather than discovered later.
 
 ## Problem

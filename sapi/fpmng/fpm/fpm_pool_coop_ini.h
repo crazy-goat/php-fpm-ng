@@ -1,6 +1,5 @@
-/* fpm-ng: izolacja WARTOSCI wpisow ini (ini_set/ini_get) per request na
- * executorze coop (fiber). Patrz fpm_pool_coop_ini.c po uzasadnienie,
- * zakres i ograniczenia.
+/* fpm-ng: isolate ini-entry VALUES (ini_set/ini_get) per request in the coop
+ * executor (Fiber). See fpm_pool_coop_ini.c for rationale, scope, and limits.
  */
 
 #ifndef FPM_POOL_COOP_INI_H
@@ -8,27 +7,26 @@
 
 struct fpm_coop_req_s;
 
-/* Wolac w fpm_coop_req_enter(), w bloku "if (ctx->live)": nakada z powrotem
- * WLASNA wartosc tego requestu na wpisy ini, ktore ten request zmienil przed
- * ostatnim zejsciem z procesora. Wolac PRZED wznowieniem/uruchomieniem
- * requestu. Tania sciezka: gdy ctx->ini_mods == NULL (request nigdy nie
- * ruszyl ini), nie robi NIC — ani jednej alokacji, ani przejscia po
- * jakiejkolwiek tablicy. */
+/* Call from fpm_coop_req_enter(), in the "if (ctx->live)" block: restore this
+ * request's OWN value into ini entries it changed before its last leave from
+ * the processor. Call BEFORE resuming/starting the request. Cheap path:
+ * ctx->ini_mods == NULL (request never changed ini) does NOTHING — no
+ * allocation and no table walk. */
 void fpm_coop_ini_req_enter(struct fpm_coop_req_s *ctx);
 
-/* Zwalnia to, co zostalo po requescie zniszczonym, gdy byl zdjety z procesora
- * (wpisy ini sa juz wtedy bazowe — przywrocil je fpm_coop_ini_req_leave). */
+/* Free what remains after a request was destroyed while off the processor (ini
+ * entries are already back to baseline; fpm_coop_ini_req_leave restored them). */
 void fpm_coop_ini_req_free(struct fpm_coop_req_s *ctx);
 
-/* Wolac w fpm_coop_req_leave(), w bloku "if (ctx->live)": zdejmuje z
- * EG(modified_ini_directives) wszystko, co TEN request zmienil od ostatniego
- * wejscia, chowa WLASNA wartosc requestu do ctx i przywraca kazdemu wpisowi
- * wartosc bazowa (ta, ktora widzialby kontener/inny request). Wolac PO
- * zejsciu requestu z procesora (zawieszenie — NIE koniec requestu, patrz
- * fpm_pool_coop.c: na koncu requestu ctx->live jest juz false, wiec ten
- * hook sie nie wola, a ostateczne odwikianie robi zend_ini_deactivate()).
- * Tania sciezka: gdy EG(modified_ini_directives) == NULL (request niczego
- * nie zmienil od ostatniego wejscia), nie robi NIC. */
+/* Call from fpm_coop_req_leave(), in the "if (ctx->live)" block: remove from
+ * EG(modified_ini_directives) everything THIS request changed since its last
+ * entry, hide the request's OWN value in ctx, and restore each entry's baseline
+ * value (what the container/another request would see). Call AFTER the request
+ * leaves the processor (suspension — NOT request end; see fpm_pool_coop.c: at
+ * request end ctx->live is already false, so this hook is not called and final
+ * restoration is done by zend_ini_deactivate()). Cheap path:
+ * EG(modified_ini_directives) == NULL (request changed nothing since its last
+ * entry) does NOTHING. */
 void fpm_coop_ini_req_leave(struct fpm_coop_req_s *ctx);
 
 #endif

@@ -22,7 +22,7 @@ fi
 
 {
     printf 'Laravel framework: '
-    grep -A1 '"name": "laravel/framework"' "$ROOT/composer.lock" | grep '"version"' | head -n 1
+    grep -A1 '"name": "laravel/framework"' "$ROOT/composer.lock" | grep -m1 '"version"'
     echo
     grep -rnoE '(public|protected|private)[[:space:]]+(static|static readonly)[[:space:]]+\$[A-Za-z_]+' \
         "$VENDOR" --include='*.php' \

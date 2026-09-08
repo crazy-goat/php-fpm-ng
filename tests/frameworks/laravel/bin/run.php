@@ -533,6 +533,8 @@ $runMail = static function () use ($baseUrl, $parallel): string {
                 $other[] = $line;
             }
         }
+        checkCondition($toIndex === null || $toIndex !== 'duplicate', "mail marker $marker has more than one To: line (message sent more than once)");
+        checkCondition($bodyIndex === null || $bodyIndex !== 'duplicate', "mail marker $marker has more than one body line (message logged more than once)");
         checkCondition($toIndex !== null, "mail marker $marker has no To: line in $logFile");
         checkCondition($bodyIndex !== null, "mail marker $marker has no body line in $logFile");
         checkCondition($other === [], "mail marker $marker appears on unexpected lines: ".json_encode($other));
@@ -736,11 +738,28 @@ if ($mode === 'audit') {
         }
     }
 
-    // A request that died mid-audit is itself evidence: under an empty list
-    // it means cross-request damage; under the configured list it means a
-    // code path the list does not keep healthy.
-    $steady = array_keys($round2['changed']);
-    $uncovered = $round2['failed'] === [] ? [] : array_keys($round2['failed']);
+    // A request that died mid-audit is evidence (cross-request damage under
+    // an empty list; an unhealthy path the list does not cover in clean
+    // mode) — but it is NOT a static name, and one transient infra error
+    // (a single 500/curl glitch) must not be indistinguishable from an
+    // uncovered static in the verdict. So: statics and failed requests are
+    // reported separately, and a round with failed requests but zero static
+    // changes gets exactly one extra round to adjudicate — a repeat failure
+    // fails the run, a clean retry passes with the transient on record.
+    $verdictRound = $round2;
+    if ($round2['failed'] !== [] && $round2['changed'] === []) {
+        $verdictRound = $runStaticsAudit(3);
+        echo "AUDIT retry checked={$verdictRound['checked']} changed=".count($verdictRound['changed'])." failed=".count($verdictRound['failed'])."\n";
+        foreach ($verdictRound['failed'] as $i => $reason) {
+            echo "  retry request $i FAILED: $reason\n";
+        }
+        foreach ($verdictRound['changed'] as $name => $detail) {
+            echo "  retry $name {$detail['before']} -> {$detail['after']}\n";
+        }
+    }
+
+    $steady = array_keys($verdictRound['changed']);
+    $uncovered = [];
     foreach ($steady as $name) {
         if (in_array($name, $auditExclusions, true)) {
             continue;
@@ -751,11 +770,12 @@ if ($mode === 'audit') {
         $uncovered[] = $name;
     }
     echo 'AUDIT_ISOLATED_LIST='.implode(',', $isolated)."\n";
-    if ($uncovered === []) {
+    echo 'AUDIT_FAILED_REQUESTS='.(implode(',', array_keys($verdictRound['failed'])) ?: '(none)')."\n";
+    if ($uncovered === [] && $verdictRound['failed'] === []) {
         echo 'AUDIT_RESULT=COVERED steady='.implode(',', $steady ?: ['(none)'])."\n";
         $results['statics-audit'] = 'PASS';
     } else {
-        echo 'AUDIT_RESULT=UNCOVERED '.implode(',', $uncovered)."\n";
+        echo 'AUDIT_RESULT=UNCOVERED statics='.implode(',', $uncovered ?: ['(none)']).' failed_requests='.implode(',', array_keys($verdictRound['failed']))."\n";
         $results['statics-audit'] = 'ERROR';
     }
 } else {

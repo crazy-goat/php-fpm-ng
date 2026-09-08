@@ -409,6 +409,10 @@ run_scenarios() {
 cleanup() {
     stop_pool configured || true
     stop_pool negative || true
+    # The audit pool is started inside run_scenarios like the others; without
+    # this line an interrupt between its start and stop would leave a
+    # daemonized php-fpm-ng alive on the (shared) test box.
+    stop_pool audit || true
     rm -f "$ROOT/.env"
     cleanup_services
 }

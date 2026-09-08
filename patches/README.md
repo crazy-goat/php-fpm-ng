@@ -34,6 +34,7 @@ patches/php-8.4/*.patch      only for that version; overrides the same-named pat
 | `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5.9, 8.6.0-dev |
 | `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | move the switch behind an API owned by `sapi/fpmng`, or propose it upstream | 8.5; older versions and master to verify |
 | `0007-fiber-tls-nonblocking-transports.patch` | `ext/openssl/xp_ssl.c`, `openssl.c` | nothing upstream — fpm-ng behavior, gated on `HAVE_FPMNG_FIBER_TLS` so upstream is the default; expires by redesign | 8.5.9, master |
+| `0008-fiber-stream-select.patch` | `ext/standard/streamsfuncs.c` | nothing upstream — fpm-ng behavior, gated on `HAVE_FPMNG_FIBER` so upstream is the default; expires by redesign | PHP-8.5 branch (67d1476d4d80, 8.5.11-dev) |
 
 The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the
 context around `accept()`), although they are independent in substance.

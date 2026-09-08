@@ -41,6 +41,28 @@ struct fpm_pool_status_s {
 	unsigned has_backoff_until:1;
 };
 
+/* One pool.executor value accepted by a pool type, and what it resolves to.
+ * The list a type carries is complete in every build: an executor behind a
+ * configure flag that is off keeps its entry, with .type NULL and .build_flag
+ * naming the flag, so the binary can still tell "not built" apart from
+ * "no such executor". */
+struct fpm_pool_executor_s {
+	const char *name;
+
+	/* Type variant this executor resolves to, or NULL when the executor is
+	 * known but absent from this build (then .build_flag is set). Ignored
+	 * when .resolves_to_base is set. */
+	const struct fpm_pool_type_s *type;
+
+	/* configure flag that would provide this executor; set only when .type is
+	 * NULL because the flag was off. */
+	const char *build_flag;
+
+	/* This executor is the type's own default behaviour, so it resolves to
+	 * the base type rather than to a variant. True for "classic". */
+	unsigned resolves_to_base:1;
+};
+
 struct fpm_pool_type_s {
 	const char *name;
 
@@ -67,17 +89,19 @@ struct fpm_pool_type_s {
 	 * and its children, so a child must not change this after fork. */
 	unsigned listening_socket_nonblocking:1;
 
-	/* A transport with its own child loop may expose only the classic executor. */
-	unsigned classic_executor_only:1;
+	/* Every pool.executor value this type accepts, and the type variant each
+	 * one resolves to. Terminated by an entry with .name == NULL. NULL = the
+	 * type accepts no pool.executor at all. Data, not a name comparison in
+	 * fpm_pool_type_resolve(): a type that ships an execution model declares
+	 * it here instead of teaching resolve() about another name. */
+	const struct fpm_pool_executor_s *executors;
 
-	/* One additional pool.executor value this type accepts, and the type
-	 * variant it resolves to. Data, not a name comparison in resolve(): a
-	 * transport that ships its own execution model declares it here instead of
-	 * teaching fpm_pool_type_resolve() about another type name. NULL = the
-	 * type accepts only the executors handled generically (see
-	 * fpm_pool_type_validate_executor()). */
-	const char *extra_executor;
-	const struct fpm_pool_type_s *extra_executor_type;
+	/* The executor list above is specific to this transport rather than the
+	 * general set every request-serving type offers. Diagnostics only: an
+	 * unaccepted executor is reported by enumerating the list ("supports only
+	 * pool.executor = classic or worker") instead of calling the name unknown,
+	 * because for such a type the name may well be valid elsewhere. */
+	unsigned executors_type_specific:1;
 
 	/* Directives unsupported by this type. NULL-terminated, may be NULL.
 	 * A REJECTION list, not an allow-list — a new directive is allowed everywhere

@@ -71,6 +71,47 @@ expectConfigFailure(
     ['pool.executor is not supported by pool.type = fastcgi']
 );
 
+/* pool.type = http-direct + pool.executor = worker (task 073). The worker
+ * script runs for the whole life of the child, so directives whose semantics
+ * assume "one request ends" must fail loudly rather than sit unenforced. */
+$workerRoot = sys_get_temp_dir() . '/fpmng-worker-reject-' . getmypid();
+@mkdir($workerRoot, 0700, true);
+file_put_contents("$workerRoot/worker.php", '<?php');
+$workerBase = str_replace('[pool]', '[wrk]', $base)
+    . "\npool.type = http-direct\npool.executor = worker"
+    . "\nchdir = $workerRoot\nhttp.front_controller = /worker.php"
+    . "\nhttp.read_timeout = 10000\nhttp.max_body = 1M";
+
+expectConfigFailure(
+    'direct-worker-request-terminate-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nrequest_terminate_timeout = 10",
+    ["'request_terminate_timeout' is not supported by pool.type = http-direct with pool.executor = worker"]
+);
+
+expectConfigFailure(
+    'direct-worker-max-execution-time',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 30",
+    ['pool.executor = worker: max_execution_time = 30 would apply to']
+);
+
+expectConfigFailure(
+    'direct-worker-missing-script',
+    str_replace('/worker.php', '/absent.php', $workerBase) . "\nphp_admin_value[max_execution_time] = 0",
+    ['[pool wrk]', 'the worker script must be a regular file inside chdir']
+);
+
+/* The new executor is accepted only by the type that declares it
+ * (fpm_pool_type_s.extra_executor); http-direct still refuses fiber. */
+expectConfigFailure(
+    'direct-worker-foreign-executor',
+    str_replace('pool.executor = worker', 'pool.executor = fiber', $workerBase)
+        . "\nphp_admin_value[max_execution_time] = 0",
+    ['pool.type = http-direct supports only pool.executor = classic or worker']
+);
+
+unlink("$workerRoot/worker.php");
+rmdir($workerRoot);
+
 expectConfigFailure(
     'async-disabled',
     $base . "\npool.type = http\npool.executor = async\nhttp.listen = {{ADDR[http]}}",
@@ -86,6 +127,10 @@ supervisor-listen: rejected
 cron-pm: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
+direct-worker-request-terminate-timeout: rejected
+direct-worker-max-execution-time: rejected
+direct-worker-missing-script: rejected
+direct-worker-foreign-executor: rejected
 async-disabled: rejected
 Done
 --CLEAN--

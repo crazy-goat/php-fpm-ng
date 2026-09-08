@@ -12,6 +12,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_http_direct.h"
+#include "fpm_http_direct_worker.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
 #include "fpm_pool_status.h"
@@ -65,6 +66,31 @@ static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
 /* Types visible in configuration. fastcgi-ng is the optimized FastCGI path;
  * http starts the built-in gateway. Both default to the classic executor, and
  * fpm_pool_type_resolve() selects their effective variant. */
+/* POC, task 073: pool.type = http-direct with pool.executor = worker. Same
+ * transport, same listener, same master-side bookkeeping; only the CHILD loop
+ * is inverted. Classic http-direct runs one script per request from inside an
+ * evhttp callback, so a userland event loop's driver would have to call
+ * event_base_loop() on a base that is already looping — libevent 2.1.12-stable
+ * returns -1 for that and warns "reentrant invocation". Under this executor
+ * the worker instead boots ONE script for its lifetime and that script drives
+ * the base itself through fpmng_worker_loop(), so Revolt (and therefore amphp)
+ * can suspend. See docs/http-direct-revolt-integration.md.
+ *
+ * An executor rather than a second pool.type for the same reason "fiber" is an
+ * executor (fpm_pool_http_fiber below): the transport is unchanged and only
+ * the child's execution model differs. .name stays "http-direct" so
+ * diagnostics keep naming the type the operator actually configured. */
+static const struct fpm_pool_type_s fpm_http_direct_worker = {
+	.name                         = "http-direct",
+	.requires_listen              = 1,
+	.requires_pm                  = 1,
+	.serves_requests              = 1,
+	.listening_socket_nonblocking = 1,
+	.rejects                      = fpm_http_direct_worker_rejects,
+	.validate                     = fpm_http_direct_worker_validate,
+	.child_main                   = fpm_http_direct_worker_child_main,
+};
+
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
@@ -96,6 +122,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests              = 1,
 		.listening_socket_nonblocking = 1,
 		.classic_executor_only        = 1,
+		.extra_executor               = "worker",
+		.extra_executor_type          = &fpm_http_direct_worker,
 		.rejects                      = fpm_http_direct_rejects,
 		.validate                     = fpm_http_direct_validate,
 		.child_main                   = fpm_http_direct_child_main,
@@ -193,10 +221,22 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
 	const char *const *reject;
+	char where[160];
 	int bad = 0;
 
 	if (!type->rejects || !wp->config->set_directives) {
 		return 0;
+	}
+	/* An executor variant carries the plain type name (fpm_http_direct_worker,
+	 * fpm_pool_http_fiber), so without this the message would read "not
+	 * supported by pool.type = http-direct" for a directive that the SAME type
+	 * accepts under pool.executor = classic. Name the combination that is
+	 * actually rejecting it. */
+	if (wp->config->executor && *wp->config->executor) {
+		snprintf(where, sizeof(where), "pool.type = %s with pool.executor = %s",
+			type->name, wp->config->executor);
+	} else {
+		snprintf(where, sizeof(where), "pool.type = %s", type->name);
 	}
 
 	for (reject = type->rejects; *reject; reject++) {
@@ -213,14 +253,14 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 			while ((p = strstr(p, needle)) != NULL) {
 				const char *end = strchr(p + 1, ';');
 
-				zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by pool.type = %s",
-					wp->config->name, end ? (int)(end - p - 1) : 0, p + 1, type->name);
+				zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
+					wp->config->name, end ? (int)(end - p - 1) : 0, p + 1, where);
 				bad = 1;
 				p = end ? end : p + strlen(p);
 			}
 		} else if (fpm_conf_directive_was_set(wp->config, *reject)) {
-			zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s",
-				wp->config->name, *reject, type->name);
+			zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by %s",
+				wp->config->name, *reject, where);
 			bad = 1;
 		}
 	}
@@ -281,7 +321,13 @@ const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp
 		return NULL;
 	}
 	if (type->classic_executor_only) {
-		return (!executor || !*executor || !strcmp(executor, "classic")) ? type : NULL;
+		if (!executor || !*executor || !strcmp(executor, "classic")) {
+			return type;
+		}
+		if (type->extra_executor && !strcmp(executor, type->extra_executor)) {
+			return type->extra_executor_type;
+		}
+		return NULL;
 	}
 
 	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
@@ -321,11 +367,17 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 		return 0;
 	}
 	if (type->classic_executor_only) {
-		if (!strcmp(executor, "classic")) {
+		if (!strcmp(executor, "classic") ||
+			(type->extra_executor && !strcmp(executor, type->extra_executor))) {
 			return 0;
 		}
-		zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic",
-			wp->config->name, type->name);
+		if (type->extra_executor) {
+			zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic or %s",
+				wp->config->name, type->name, type->extra_executor);
+		} else {
+			zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic",
+				wp->config->name, type->name);
+		}
 		return -1;
 	}
 	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {

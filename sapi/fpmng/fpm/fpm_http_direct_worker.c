@@ -989,6 +989,76 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE_END
 };
 
+/* task 076: zend_register_functions() unconditionally does
+ * `internal_function->module = EG(current_module)` (Zend/zend_API.c:2987),
+ * independent of the `type` argument we pass it. EG(current_module) is only
+ * ever non-NULL while a module's own MINIT is running; by the time this SAPI
+ * calls it -- in the forked worker child, long after every module's startup
+ * -- it is NULL. That NULL then reaches opcache: pass1 constant-folds
+ * function_exists()/is_callable() on a literal argument and dereferences
+ * func->module->type with no NULL check
+ * (Zend/Optimizer/zend_optimizer.c:114, PHP 8.5), so a worker script
+ * containing e.g. `function_exists('fpmng_worker_loop')` segfaulted at
+ * opcache compile time. Confirmed from a core dump on the test box:
+ * #0 zend_optimizer_eval_special_func_call (zend_optimizer.c:114)
+ * #1 zend_optimizer_pass1 (Zend/Optimizer/pass1.c:254)
+ * ... cache_script_in_shared_memory -> php_execute_script ->
+ * fpm_http_direct_worker_child_main, faulting instruction
+ * `cmpb $0x1,0x8c(%rax)` with rax = 0 (func->module; offset 0x8c is
+ * zend_module_entry.type, compared against 1 = MODULE_PERSISTENT).
+ *
+ * opcache reads only ->type (and, on Windows, ->handle) from this struct
+ * (zend_optimizer.c:113-118):
+ *
+ *     func->type == ZEND_INTERNAL_FUNCTION && func->module->type == MODULE_PERSISTENT
+ *
+ * -- and only *folds* function_exists()/is_callable() when that whole
+ * condition is true. That is deliberately NOT what we want here: opcache's
+ * SHM (and op_array cache) is shared across every pool and every executor in
+ * the process tree, keyed on script path, not on which pool compiled it
+ * first. If this anchor module claimed MODULE_PERSISTENT, a worker child
+ * that happens to compile a shared file first (a common front controller,
+ * or examples/http-direct-worker/FpmngDriver.php's own
+ * `function_exists('fpmng_worker_loop')` capability check) would bake
+ * `true` into that cache entry, and a later classic/fiber/fastcgi child
+ * hitting the same cached entry would take the worker branch and crash on
+ * an undefined `fpmng_worker_*` call -- nondeterministic across restarts,
+ * and durable across a master restart under opcache.file_cache.
+ *
+ * So this module_entry claims MODULE_TEMPORARY instead: `func->module` is
+ * still a valid, non-NULL pointer (fixing the crash), but
+ * `func->module->type != MODULE_PERSISTENT` makes the fold condition above
+ * false, so pass1 always returns FAILURE and function_exists()/is_callable()
+ * fall through to their normal runtime evaluation, per child, every time --
+ * which is what's actually correct for a function set that is registered
+ * conditionally per fork. It exists purely to be a non-NULL anchor -- never
+ * registered in module_registry, no MINIT/MSHUTDOWN, no globals. Registering
+ * it for real (zend_register_internal_module) was rejected: that runs at
+ * every module's startup with EG(current_module) already pointing at it,
+ * which is a much larger surface (module_registry entry, module_number,
+ * phpinfo listing) for a struct whose only job is to survive a pointer
+ * dereference without being foldable. */
+static zend_module_entry fpm_worker_module_entry = {
+	.size = sizeof(zend_module_entry),
+	.zend_api = ZEND_MODULE_API_NO,
+	.zend_debug = ZEND_DEBUG,
+	.zts = USING_ZTS,
+	.name = "fpmng_worker_builtins",
+	.type = MODULE_TEMPORARY,
+	.build_id = ZEND_MODULE_BUILD_ID,
+};
+
+static zend_result fpm_worker_register_functions(HashTable *function_table)
+{
+	zend_module_entry *saved_module = EG(current_module);
+	zend_result result;
+
+	EG(current_module) = &fpm_worker_module_entry;
+	result = zend_register_functions(NULL, fpm_worker_functions, function_table, MODULE_PERSISTENT);
+	EG(current_module) = saved_module;
+	return result;
+}
+
 static void fpm_worker_install_sapi(void)
 {
 	sapi_module.pre_request_init = NULL;
@@ -1127,7 +1197,7 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	sigaction(SIGTERM, &term_before, NULL);
-	if (zend_register_functions(NULL, fpm_worker_functions, CG(function_table), MODULE_PERSISTENT) == FAILURE) {
+	if (fpm_worker_register_functions(CG(function_table)) == FAILURE) {
 		zlog(ZLOG_ERROR, "[pool %s] http-direct worker: failed to register the fpmng_worker_* functions",
 			wp->config->name);
 		exit(FPM_EXIT_SOFTWARE);

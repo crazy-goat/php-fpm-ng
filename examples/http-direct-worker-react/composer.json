@@ -1,0 +1,13 @@
+{
+    "name": "php-fpm-ng/http-direct-worker-react-example",
+    "description": "Task 075 example: ReactPHP on an FPM worker that owns its event loop",
+    "require": {
+        "php": ">=8.2",
+        "react/event-loop": "^1.5",
+        "react/http": "^1.11",
+        "react/mysql": "^0.6",
+        "react/promise": "^3.2",
+        "react/socket": "^1.16",
+        "react/stream": "^1.4"
+    }
+}

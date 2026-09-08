@@ -29,7 +29,10 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends libevent-2.1-7 libssl3 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY ${APP_DIR}/php-fpm-ng /usr/local/bin/php-fpm-ng
-COPY ${APP_DIR}/app.php ${APP_DIR}/fpm.conf /app/app/
+# *.php rather than app.php: task 075's application ships its own classes
+# (an event loop and a request-queue bridge) next to app.php, and the
+# APP_DIR promise above was worth exactly as much as the file list under it.
+COPY ${APP_DIR}/*.php ${APP_DIR}/fpm.conf /app/app/
 COPY http-direct-worker/FpmngDriver.php http-direct-worker/FpmngServer.php /app/http-direct-worker/
 COPY --from=deps /build/vendor /app/app/vendor
 EXPOSE 8080

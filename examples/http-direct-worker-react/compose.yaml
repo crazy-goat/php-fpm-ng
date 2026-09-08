@@ -1,0 +1,80 @@
+# Its own Compose project with its own volume, so it never touches a shared
+# MySQL: `docker compose down --volumes` removes the database with the demo.
+name: fpmng-worker-react
+
+services:
+  mysql:
+    # Same pin as examples/http-direct-worker-mysql, so the /mysql numbers here
+    # are comparable with task 074's amphp measurement rather than with a
+    # different server.
+    image: mysql:8.4.6
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-fpmng-worker-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fpmng}
+      MYSQL_USER: ${MYSQL_USER:-fpmng}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fpmng}
+    command:
+      # react/mysql 0.6 sends a mysql_native_password scramble and nothing else
+      # (vendor/react/mysql/src/Commands/AuthenticateCommand.php:78-101); 8.4
+      # ships that plugin disabled, so without this flag every connection fails
+      # authentication before the event loop is involved at all. The user the
+      # entrypoint creates still gets the default caching_sha2_password, which
+      # is what initdb/01-native-password.sql fixes.
+      - "--mysql-native-password=ON"
+      # SELECT SLEEP(1) holds a server thread for the whole second, and this
+      # example opens a connection per request, so a large N needs more than
+      # 8.4's default of 151.
+      - "--max-connections=500"
+    healthcheck:
+      # CMD-SHELL, not CMD: under exec form nothing expands ${...}, and
+      # `mysqladmin ping` exits 0 even on ER_ACCESS_DENIED, so the credential
+      # half of the check would be dead (task 074).
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+
+  # The TLS origin for /tls. A separate service rather than MySQL over TLS,
+  # because react/mysql never upgrades the connection: CLIENT_SSL is defined
+  # and unused (vendor/react/mysql/src/Io/Constants.php:57).
+  origin:
+    build:
+      context: .
+      dockerfile: origin/Dockerfile
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null --no-check-certificate https://127.0.0.1/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build:
+      # examples/, and 074's Dockerfile: it was written to serve a second
+      # application by changing APP_DIR alone
+      # (http-direct-worker-mysql/Dockerfile:6-10).
+      context: ..
+      dockerfile: http-direct-worker-mysql/Dockerfile
+      args:
+        APP_DIR: http-direct-worker-react
+    depends_on:
+      mysql:
+        condition: service_healthy
+      origin:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fpmng}
+      MYSQL_USER: ${MYSQL_USER:-fpmng}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fpmng}
+      ORIGIN_URL: ${ORIGIN_URL:-https://origin/slow}
+      ORIGIN_BURST_URL: ${ORIGIN_BURST_URL:-https://origin/burst}
+      ORIGIN_SMALL_URL: ${ORIGIN_SMALL_URL:-https://origin/small}
+    ports:
+      - "${APP_PORT:-28068}:8080"
+
+volumes:
+  mysql-data:

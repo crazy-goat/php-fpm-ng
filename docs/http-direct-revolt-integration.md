@@ -177,3 +177,13 @@ documented wherever it is offered:
 
 Task 073 implements the POC described above. Amendments 1 and 2 are written into
 `tasks/070-*.md` and `tasks/072-*.md`; item 5 is not scheduled.
+
+Adjustment 1 above asserts "the API is not Revolt-specific; Revolt is the test".
+Task 075 tested that claim with a second, independent consumer and it held: a
+`React\EventLoop\LoopInterface` over the same primitives serves concurrent
+requests on promises rather than fibers, with no change to `sapi/fpmng/`
+(`examples/http-direct-worker-react/README.md`). The one method it cannot
+implement is `addSignal()`, which is deliberate — the FPM master owns the
+signals. `futureTick()` was the only part needing a primitive no Revolt driver
+ever calls for its own sake, `fpmng_worker_loop(false)`, and it was already
+there.

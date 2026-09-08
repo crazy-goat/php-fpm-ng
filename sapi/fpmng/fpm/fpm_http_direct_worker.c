@@ -75,6 +75,12 @@
  * a worker process, and this keeps a non-finite or absurd userland timeout out
  * of struct timeval. */
 #define FPM_WORKER_TIMEOUT_MAX 31536000.0
+/* How long child_main() keeps driving the base to get the final 503s of
+ * fpm_worker_finish_output() onto the wire. Bounded because a client that
+ * stopped reading must not keep the child alive: the master is already waiting
+ * on its own stop timeout at this point, and losing the reply is no worse than
+ * the silent close this whole path exists to prevent. */
+#define FPM_WORKER_FLUSH_BUDGET 1
 
 /* Watcher kinds accepted by fpmng_worker_event_create(). Mirrors what
  * Revolt's AbstractDriver activates (readable/writable streams and timers);
@@ -122,6 +128,9 @@ static struct {
 	unsigned ready_head;
 	unsigned ready_count;
 	unsigned answered;
+	/* Replies handed to libevent whose bytes are not on the socket yet. Only
+	 * the shutdown path reads it; see fpm_worker_finish_output(). */
+	unsigned unflushed;
 	bool running;
 } fw;
 
@@ -280,6 +289,71 @@ static void fpm_worker_watcher_dtor(zval *zv)
 	pefree(watcher, 1);
 }
 
+/* Every reply this file hands to libevent goes out through fpm_worker_send_*()
+ * so that exactly one place counts what is still unwritten. libevent only
+ * queues the bytes on the connection's bufferevent; they reach the socket in a
+ * later loop iteration, and evhttp_free() in child_main() frees that
+ * bufferevent. A reply produced by the last iteration a worker ever runs is
+ * therefore discarded — measured on the test box before this counter existed:
+ * with pm.max_requests = 1 the response that trips the limit is lost every
+ * time, "curl: (52) Empty reply from server", and the child exits 0 with
+ * nothing in the log. fpm_worker_finish_output() waits for these. */
+static void fpm_worker_reply_settled(struct evhttp_connection *connection)
+{
+	if (fw.unflushed) {
+		fw.unflushed--;
+	}
+	if (connection) {
+		/* Otherwise the close of a keep-alive connection whose replies all went
+		 * out would decrement a second time. */
+		evhttp_connection_set_closecb(connection, NULL, NULL);
+	}
+}
+
+static void fpm_worker_reply_done(struct evhttp_request *http, void *arg)
+{
+	(void) arg;
+	fpm_worker_reply_settled(evhttp_request_get_connection(http));
+}
+
+/* A client that aborts mid-write never reaches fpm_worker_reply_done():
+ * libevent frees the request from evhttp_connection_free(), which does not
+ * invoke on_complete_cb, while evhttp_send_done() does (libevent 2.1.12
+ * http.c:2773 vs the request loop in evhttp_connection_free()). Without this
+ * the counter would only ever grow, and from the first aborted request on,
+ * every shutdown would miss the "nothing unwritten" fast path, block the whole
+ * FPM_WORKER_FLUSH_BUDGET, and log a warning about responses that were in fact
+ * never owed to anybody. */
+static void fpm_worker_reply_aborted(struct evhttp_connection *connection, void *arg)
+{
+	(void) arg;
+	fpm_worker_reply_settled(connection);
+}
+
+/* The connection's closecb slot is free for exactly the window this counter
+ * covers: every caller clears it immediately before handing the reply over
+ * (see fpmng_worker_respond()), and libevent does not associate the next
+ * request on a keep-alive connection until on_complete_cb has run
+ * (evhttp_send_done()), so at most one counted reply exists per connection. */
+static void fpm_worker_count_reply(struct evhttp_request *http)
+{
+	evhttp_request_set_on_complete_cb(http, fpm_worker_reply_done, NULL);
+	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_worker_reply_aborted, NULL);
+	fw.unflushed++;
+}
+
+static void fpm_worker_send_error(struct evhttp_request *http, int status, const char *reason)
+{
+	fpm_worker_count_reply(http);
+	evhttp_send_error(http, status, reason);
+}
+
+static void fpm_worker_send_reply(struct evhttp_request *http, int status, struct evbuffer *body)
+{
+	fpm_worker_count_reply(http);
+	evhttp_send_reply(http, status, NULL, body);
+}
+
 static void fpm_worker_reap(struct fpm_worker_pending *p)
 {
 	zend_hash_index_del(&fw.pending, p->id);
@@ -304,8 +378,9 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	(void) arg;
 	if (fpm_worker_stopping || fw.ready_count >= FPM_WORKER_PENDING_MAX ||
 		zend_hash_num_elements(&fw.pending) >= FPM_WORKER_PENDING_MAX) {
-		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
-		evhttp_send_error(http, 503, "Worker unavailable");
+		/* No "Connection: close" of our own: evhttp_send_error() clears the
+		 * output headers and sets it itself. */
+		fpm_worker_send_error(http, 503, "Worker unavailable");
 		/* Saturation must not be permanent. A pending entry is removed only by
 		 * fpmng_worker_respond(), so a handler that returns without answering
 		 * burns its slot for the life of the worker; after
@@ -332,7 +407,7 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	if (!evhttp_request_get_uri(http) || evhttp_request_get_uri(http)[0] != '/' ||
 		!evhttp_request_get_evhttp_uri(http) ||
 		evhttp_uri_get_fragment(evhttp_request_get_evhttp_uri(http))) {
-		evhttp_send_error(http, 400, "Bad request");
+		fpm_worker_send_error(http, 400, "Bad request");
 		return;
 	}
 	p = pemalloc(sizeof(*p), 1);
@@ -345,6 +420,100 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	 * pending request per connection can be waiting for a close notice. */
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_worker_conn_closed, p);
 	fpm_worker_notify();
+}
+
+static bool fpm_worker_flush_expired;
+
+static void fpm_worker_flush_deadline(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	(void) arg;
+	fpm_worker_flush_expired = true;
+	event_base_loopbreak(fw.base);
+}
+
+/* The last thing child_main() does with the transport, and the only place that
+ * enforces the invariant every client is owed: an accepted connection is never
+ * closed without a response that actually reached the socket. Two distinct
+ * ways to break it meet here.
+ *
+ * One is a request nobody answered — a bridge that concluded it had drained
+ * from its own in-flight counter while the SAPI still had a queued request
+ * (task 080), a handler that threw, an exit() in the worker script. Those get
+ * a 503 here, in the SAPI, so third-party bridges are covered too.
+ *
+ * The other is a response that was answered but never written. libevent only
+ * queues a reply on the connection's bufferevent, and evhttp_free() below
+ * frees it: a reply produced in the last loop iteration a worker ever runs is
+ * discarded. Measured on the test box against this file before fw.unflushed
+ * existed, with pm.max_requests = 1 — both requests of a two-request run got
+ * "curl: (52) Empty reply from server", the child exited 0 and the log said
+ * only "child exited with code 0". Driving the base until the replies complete
+ * is what the classic transport does for the same reason, counting them in
+ * w->pending and refusing to break its loop until they are done
+ * (fpm_http_direct.c:118-130, :470).
+ *
+ * The wait is bounded: a client that stopped reading must not keep the child
+ * alive, and the master is already timing this shutdown. */
+static void fpm_worker_finish_output(void)
+{
+	struct fpm_worker_pending *p;
+	unsigned abandoned = 0;
+	struct event *deadline;
+	struct timeval budget = {FPM_WORKER_FLUSH_BUDGET, 0};
+
+	/* No new connection may join the set we are about to answer. A request
+	 * arriving on an already-open keep-alive connection still can, and
+	 * fpm_worker_accept() answers it 503 itself now that stopping is set. */
+	if (fw.listener) {
+		evhttp_del_accept_socket(fw.http, fw.listener);
+		fw.listener = NULL;
+	}
+	fpm_worker_stopping = 1;
+
+	ZEND_HASH_FOREACH_PTR(&fw.pending, p) {
+		if (!p->http) {
+			continue;	/* the client is already gone: fpm_worker_conn_closed() cleared it */
+		}
+		/* Same shape as the saturation 503 in fpm_worker_accept(), including
+		 * dropping the close callback first: libevent owns and frees the
+		 * request from here on, and a close notice must not reach a pending
+		 * entry we are abandoning. */
+		evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
+		/* No "Connection: close" of our own: evhttp_send_error() clears the
+		 * output headers (see fpmng_worker_respond()) and sets it itself. */
+		fpm_worker_send_error(p->http, 503, "Worker unavailable");
+		p->http = NULL;
+		abandoned++;
+	} ZEND_HASH_FOREACH_END();
+
+	if (abandoned) {
+		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u accepted "
+			"request(s) unanswered; answering 503 rather than closing the connection silently",
+			fw.wp->config->name, abandoned);
+	}
+	if (!fw.unflushed) {
+		return;
+	}
+	fpm_worker_flush_expired = false;
+	deadline = evtimer_new(fw.base, fpm_worker_flush_deadline, NULL);
+	if (deadline && evtimer_add(deadline, &budget) == 0) {
+		/* EVLOOP_ONCE blocks, so the deadline timer is what guarantees this
+		 * returns; a non-zero result means libevent has nothing left to wait
+		 * on, which for our purposes is also "done". */
+		while (fw.unflushed && !fpm_worker_flush_expired &&
+			event_base_loop(fw.base, EVLOOP_ONCE) == 0) {
+		}
+	}
+	if (deadline) {
+		event_free(deadline);
+	}
+	if (fw.unflushed) {
+		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u response(s) were still unwritten after %d s; "
+			"those connections are closed without a reply",
+			fw.wp->config->name, fw.unflushed, FPM_WORKER_FLUSH_BUDGET);
+	}
 }
 
 static void fpm_worker_watcher_fire(evutil_socket_t fd, short events, void *arg)
@@ -468,6 +637,35 @@ static ZEND_FUNCTION(fpmng_worker_stopping)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	RETURN_BOOL(fpm_worker_stopping);
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_may_exit, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+/* The question a bridge has to answer before it tears its loop down, and the
+ * one it cannot answer from its own bookkeeping. An in-flight counter sees
+ * only what fpmng_worker_next_request() already handed over; fw.ready holds
+ * requests fpm_worker_accept() queued behind it, and the read watcher that
+ * would collect them is not polled again until the next loop iteration. The
+ * window is one iteration wide and needs no signal at all, because
+ * fpmng_worker_respond() is itself what trips pm.max_requests: a request can
+ * be queued in the very iteration in which the last in-flight response sets
+ * fpm_worker_stopping, and a bridge that concludes "stopping and nothing in
+ * flight" then closes it with no response (task 080).
+ *
+ * fw.pending is the whole truth — every accepted request that has not been
+ * answered, queued or handed over — so this is the entire condition. A bridge
+ * built on it carries no counter and needs to know nothing about the queue.
+ *
+ * Deliberate caveat: a handler that never answers keeps this false for ever.
+ * That is the pending-table leak fpm_worker_accept() already describes,
+ * bounded by the master's stop timeout, and holding the worker open is the
+ * better failure — fpm_worker_finish_output() answers whatever is still
+ * unanswered on the way out. */
+static ZEND_FUNCTION(fpmng_worker_may_exit)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	RETURN_BOOL(fpm_worker_stopping && zend_hash_num_elements(&fw.pending) == 0);
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_next_request, 0, 0, IS_LONG, 1)
@@ -739,7 +937,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 		 * and the handler would never learn. evhttp_send_error() clears the
 		 * output headers it was about to emit. */
 		evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
-		evhttp_send_error(p->http, 500, NULL);
+		fpm_worker_send_error(p->http, 500, NULL);
 		fpm_worker_reap(p);
 		RETURN_FALSE;
 	}
@@ -762,7 +960,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 	 * and frees it from here on, and a later close on this connection must not
 	 * reach a reaped pending entry. */
 	evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
-	evhttp_send_reply(p->http, (int) status, NULL, out);
+	fpm_worker_send_reply(p->http, (int) status, out);
 	evbuffer_free(out);
 	fpm_worker_reap(p);
 
@@ -976,6 +1174,7 @@ static ZEND_FUNCTION(fpmng_worker_loop_break)
 static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_notify_stream, arginfo_fpmng_worker_notify_stream)
 	ZEND_FE(fpmng_worker_stopping, arginfo_fpmng_worker_stopping)
+	ZEND_FE(fpmng_worker_may_exit, arginfo_fpmng_worker_may_exit)
 	ZEND_FE(fpmng_worker_next_request, arginfo_fpmng_worker_next_request)
 	ZEND_FE(fpmng_worker_request_env, arginfo_fpmng_worker_request_env)
 	ZEND_FE(fpmng_worker_request_body, arginfo_fpmng_worker_request_body)
@@ -1237,6 +1436,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * callback allocated by this request, so releasing it once the request
 	 * arena is gone would be a use-after-free. Freeing the events here also
 	 * guarantees none outlives event_base_free() below. */
+	zend_hash_destroy(&fw.watchers);
+	/* After the watchers, never before: fpm_worker_finish_output() drives
+	 * the base itself, and a userland watcher still registered there would
+	 * call into PHP after the worker script has already returned. */
+	fpm_worker_finish_output();
 	/* Strictly before zend_hash_destroy(&fw.pending). evhttp_free() closes the
 	 * still-open server connections and *does* fire their close callbacks;
 	 * measured against libevent 2.1: "before evhttp_free, got_closecb=0" /
@@ -1247,7 +1451,6 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * requests still in flight — an escaping exception, exit(), or a handler
 	 * that never answered. */
 	evhttp_free(fw.http);
-	zend_hash_destroy(&fw.watchers);
 	zend_hash_destroy(&fw.pending);
 	php_request_shutdown(NULL);
 	sigaction(SIGTERM, &term_before, NULL);

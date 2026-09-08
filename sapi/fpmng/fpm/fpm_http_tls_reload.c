@@ -39,9 +39,13 @@
 
 #include "fpm_http_tls_reload.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 #include <openssl/evp.h>
 #include <openssl/crypto.h>
@@ -146,24 +150,52 @@ struct fpm_http_tls_reload_s {
  * I already acted on?" -- so a rollback to a previous pair is correctly a
  * change, while a rewrite of identical bytes is correctly nothing.
  *
- * Cost: two small files read per http.tls_reload_check seconds (default 5) in
- * the master only. Never in the request path, and never in a child -- children
- * do not open the key file, the property fpm_http_tls.h documents.
+ * Three things this does that stat() got for free and a read does not:
+ *
+ * - Only regular files. O_NONBLOCK on the open() so that a path that turned
+ *   into a FIFO cannot block the master's event loop inside open() waiting
+ *   for a writer -- the same loop fpm_pctl_heartbeat() runs on.
+ * - At most `max_bytes` are read. A cert path pointing at something huge (a
+ *   mistyped path, a log file) must not turn a tick into a bulk read every
+ *   http.tls_reload_check seconds; such a pair is over
+ *   FPM_HTTP_TLS_RELOAD_MAX_CERT/MAX_KEY and is unpublishable anyway.
+ * - st_size is mixed into the digest, so a change past that read cap is
+ *   still a change: an oversized file therefore still reaches the existing
+ *   "larger than the reload buffer" path in the tick, which logs it once.
+ *
+ * Cost for a real certificate: two small files read per http.tls_reload_check
+ * seconds (default 5) in the master only. Never in the request path, and
+ * never in a child -- children do not open the key file, the property
+ * fpm_http_tls.h documents.
  *
  * Returns 0 and fills `out` on success, -1 on any read or digest failure. The
  * digest is never logged; `out` is the only thing that leaves this function,
  * and the buffer that held key bytes is wiped before returning. */
-static int fpm_http_tls_reload_file_digest(const char *path, unsigned char out[FPM_HTTP_TLS_RELOAD_DIGEST_LEN]) /* {{{ */
+static int fpm_http_tls_reload_file_digest(const char *path, size_t max_bytes,
+	unsigned char out[FPM_HTTP_TLS_RELOAD_DIGEST_LEN]) /* {{{ */
 {
+	int fd;
+	struct stat st;
 	FILE *fp;
 	EVP_MD_CTX *ctx;
 	unsigned char buf[4096];
+	size_t left;
 	size_t n;
 	unsigned int len = 0;
 	int ok = 0;
+	uint64_t size_le;
 
-	fp = fopen(path, "rb");
+	fd = open(path, O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		return -1;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+		close(fd);
+		return -1;
+	}
+	fp = fdopen(fd, "rb");
 	if (!fp) {
+		close(fd);
 		return -1;
 	}
 	ctx = EVP_MD_CTX_new();
@@ -174,11 +206,25 @@ static int fpm_http_tls_reload_file_digest(const char *path, unsigned char out[F
 
 	if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1) {
 		ok = 1;
-		while ((n = fread(buf, 1, sizeof(buf), fp)) > 0) {
+		/* Byte order fixed on purpose: the digest is only ever compared
+		 * against another digest taken by this same process, but a
+		 * platform-independent encoding costs nothing and keeps the value
+		 * meaningful if it is ever published. */
+		size_le = (uint64_t) st.st_size;
+		for (n = 0; n < sizeof(size_le); n++) {
+			buf[n] = (unsigned char) ((size_le >> (8 * n)) & 0xff);
+		}
+		if (EVP_DigestUpdate(ctx, buf, sizeof(size_le)) != 1) {
+			ok = 0;
+		}
+
+		left = max_bytes;
+		while (ok && left > 0 && (n = fread(buf, 1, left < sizeof(buf) ? left : sizeof(buf), fp)) > 0) {
 			if (EVP_DigestUpdate(ctx, buf, n) != 1) {
 				ok = 0;
 				break;
 			}
+			left -= n;
 		}
 		if (ok && ferror(fp)) {
 			ok = 0;
@@ -210,8 +256,8 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	if (fpm_http_tls_reload_file_digest(r->cert_path, cert_digest) != 0 ||
-			fpm_http_tls_reload_file_digest(r->key_path, key_digest) != 0) {
+	if (fpm_http_tls_reload_file_digest(r->cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, cert_digest) != 0 ||
+			fpm_http_tls_reload_file_digest(r->key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, key_digest) != 0) {
 		/* Transient (mid write, or the volume is not there yet): not fatal,
 		 * skip this tick, the certificate already in use keeps serving. */
 		return;
@@ -339,10 +385,10 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	 * here leaves the digest all-zero, which no file matches, so the first
 	 * tick that can read the pair treats it as a change and reloads it --
 	 * one redundant load, never a missed one. */
-	if (fpm_http_tls_reload_file_digest(cert_path, r->cert_digest) != 0) {
+	if (fpm_http_tls_reload_file_digest(cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
 		memset(r->cert_digest, 0, sizeof(r->cert_digest));
 	}
-	if (fpm_http_tls_reload_file_digest(key_path, r->key_digest) != 0) {
+	if (fpm_http_tls_reload_file_digest(key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
 		memset(r->key_digest, 0, sizeof(r->key_digest));
 	}
 

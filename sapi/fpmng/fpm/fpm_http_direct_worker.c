@@ -87,6 +87,18 @@
  * signals are absent on purpose — the FPM master owns SIGQUIT/SIGUSR2 and a
  * userland signal watcher must not compete with it. A driver reports that as
  * an unsupported feature. */
+/* How many consecutive iterations a read watcher may be invoked for a userland
+ * buffer that never shrinks before we say so in the log. The re-cast loop in
+ * fpm_worker_activate_buffered() makes read watchers level-triggered, which
+ * trades a silent hang for a spin; 100% CPU with nothing in the log would be
+ * the worse of the two, so the spin is named. 100 iterations is short enough to
+ * appear immediately and long enough that no legitimate consumer reaches it:
+ * progress is measured as the buffer being smaller when we look at it than it
+ * was when we last handed it over, so a consumer that reads anything at all
+ * resets the count, and one that reads until the read comes up short empties
+ * the buffer entirely. */
+#define FPM_WORKER_SPIN_LIMIT 100
+
 #define FPM_WORKER_EV_READ 1
 #define FPM_WORKER_EV_WRITE 2
 #define FPM_WORKER_EV_TIMER 3
@@ -106,6 +118,15 @@ struct fpm_worker_watcher {
 	 * watcher starts firing for an unrelated descriptor. IS_UNDEF for
 	 * timers. */
 	zval stream;
+	/* Busy-spin detection for fpm_worker_activate_buffered(): how many
+	 * iterations in a row this watcher was activated for a buffer that did not
+	 * shrink, the size it was left holding last time, and whether the warning
+	 * already went out (once per spin, not once per iteration). Reset when the
+	 * watcher is disabled, since a disabled watcher stops being sampled and its
+	 * baseline goes stale. */
+	unsigned spin;
+	size_t buffered;
+	bool spin_warned;
 	zend_ulong id;
 };
 
@@ -516,6 +537,156 @@ static void fpm_worker_finish_output(void)
 	}
 }
 
+/* PHP's own stream_select() re-casts every stream on every call
+ * (ext/standard/streamsfuncs.c:673), and for an SSL stream that cast is not a
+ * passive lookup: while the read buffer is empty it pulls SSL_pending() bytes
+ * out of OpenSSL into it (ext/openssl/xp_ssl.c, case
+ * PHP_STREAM_AS_FD_FOR_SELECT). fpmng_worker_event_create() casts once and
+ * keeps the descriptor, so bytes that arrived inside a TLS record burst used to
+ * be invisible for ever — the descriptor is empty, no readability event will
+ * ever fire again, and the application waits on it with nothing logged. Task
+ * 075 measured it: over keep-alive TLS with one read per readable event, 769 of
+ * 8192 body bytes stranded at a 1 KiB read chunk, 3841 at 4 KiB, 7937 at 8 KiB.
+ * Matching PHP's default chunk_size does not help, because the stranded amount
+ * is whatever the peer happened to send. */
+static void fpm_worker_stream_refill(php_stream *stream)
+{
+	int fd = -1;	/* php_stream_cast() writes an int for PHP_STREAM_AS_FD_FOR_SELECT */
+
+	/* show_err = 0: a stream that cannot be cast is not an error on this path,
+	 * it simply has nothing we can look at. The returned descriptor is
+	 * deliberately dropped — fpmng_worker_event_create() owns the one libevent
+	 * watches, and this call is made for its side effect. */
+	(void) php_stream_cast(stream, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL,
+		(void *) &fd, 0);
+}
+
+/* Not stream->has_buffered_data (main/php_streams.h:215): despite the name it is
+ * cleared at the end of php_stream_read() (main/streams/streams.c:685), so from
+ * outside it says nothing. The buffer itself does. */
+static size_t fpm_worker_stream_peek_buffered(php_stream *stream)
+{
+	return stream->writepos > stream->readpos ? (size_t) (stream->writepos - stream->readpos) : 0;
+}
+
+static size_t fpm_worker_stream_buffered(php_stream *stream)
+{
+	if (!stream) {
+		return 0;
+	}
+	fpm_worker_stream_refill(stream);
+	return fpm_worker_stream_peek_buffered(stream);
+}
+
+/* Not php_stream_from_zval_no_verify(): that macro throws a TypeError for a
+ * resource whose type zend_resource_dtor() has already reset to -1, which is
+ * exactly the state of a stream userland fclose()d while its watcher was still
+ * registered (Zend/zend_list.c). Thrown from fpm_worker_activate_buffered() the
+ * exception would leave fpmng_worker_loop() through RETURN_THROWS() before
+ * event_base_loop() ever ran, and because the watcher stays registered and
+ * pending, every later call would throw again — the worker's loop dead for
+ * good, blaming an argument the caller never passed. Passing NULL for the
+ * resource type name makes zend_fetch_resource2_ex() return NULL quietly
+ * instead. */
+static php_stream *fpm_worker_watcher_stream(struct fpm_worker_watcher *watcher)
+{
+	if (Z_ISUNDEF(watcher->stream)) {
+		return NULL;
+	}
+	return (php_stream *) zend_fetch_resource2_ex(&watcher->stream, NULL,
+		php_file_le_stream(), php_file_le_pstream());
+}
+
+/* Runs once per fpmng_worker_loop() iteration, before libevent gets a chance to
+ * sleep. A read watcher whose stream holds userland-buffered bytes is activated
+ * by hand: libevent then dispatches it in this iteration and computes a zero
+ * timeout, so the $blocking argument stops being able to park the worker on a
+ * descriptor that will never be readable again.
+ *
+ * Written against ids rather than as a single hash walk because the refill is
+ * not guaranteed to be passive: for a user-space stream php_stream_cast() calls
+ * the userland stream_cast() method (main/streams/userspace.c,
+ * php_userstreamop_cast()), and such a stream reaches this loop whenever that
+ * method hands back a real socket. From there userland can call
+ * fpmng_worker_event_free() — freeing the very watcher a ZEND_HASH_FOREACH would
+ * still be holding — or fpmng_worker_event_create(), which can reallocate the
+ * table under the iterator. So: snapshot the ids, and look the watcher up again
+ * after every call that might have re-entered PHP. */
+static void fpm_worker_activate_buffered(void)
+{
+	zend_ulong *ids;
+	uint32_t count = 0, i;
+	zend_ulong id;
+
+	if (zend_hash_num_elements(&fw.watchers) == 0) {
+		return;
+	}
+	ids = safe_emalloc(zend_hash_num_elements(&fw.watchers), sizeof(zend_ulong), 0);
+	ZEND_HASH_FOREACH_NUM_KEY(&fw.watchers, id) {
+		ids[count++] = id;
+	} ZEND_HASH_FOREACH_END();
+
+	for (i = 0; i < count; i++) {
+		struct fpm_worker_watcher *watcher = zend_hash_index_find_ptr(&fw.watchers, ids[i]);
+		php_stream *stream;
+		size_t before, buffered;
+
+		/* Timers carry no stream; write watchers are a different question
+		 * (buffering on the write side is out of scope for task 079); an event
+		 * that is not pending was disabled by userland and must stay silent. */
+		if (!watcher || !(event_get_events(watcher->ev) & EV_READ) ||
+			!event_pending(watcher->ev, EV_READ, NULL)) {
+			continue;
+		}
+		stream = fpm_worker_watcher_stream(watcher);
+		if (!stream) {
+			continue;
+		}
+		/* Sampled before the refill, and that is the whole point of taking two
+		 * samples: it is the only place the consumer's own progress shows.
+		 * Comparing two post-refill sizes would call a perfectly behaved
+		 * consumer stuck, because on a stream with steady inbound TLS the
+		 * refill puts back what was just drained and the size never appears to
+		 * shrink (ext/openssl/xp_ssl.c refills exactly when the buffer is
+		 * empty). */
+		before = fpm_worker_stream_peek_buffered(stream);
+
+		fpm_worker_stream_refill(stream);
+
+		/* Re-looked-up, and the stream re-fetched from it: the refill above may
+		 * have run userland that freed either. */
+		watcher = zend_hash_index_find_ptr(&fw.watchers, ids[i]);
+		if (!watcher || !event_pending(watcher->ev, EV_READ, NULL)) {
+			continue;
+		}
+		stream = fpm_worker_watcher_stream(watcher);
+		if (!stream) {
+			continue;
+		}
+		buffered = fpm_worker_stream_peek_buffered(stream);
+		if (!buffered) {
+			/* Nothing to activate, so nothing to spin on either. */
+			watcher->spin = 0;
+			watcher->spin_warned = false;
+			watcher->buffered = 0;
+			continue;
+		}
+		if (before < watcher->buffered) {
+			watcher->spin = 0;
+			watcher->spin_warned = false;
+		} else if (++watcher->spin >= FPM_WORKER_SPIN_LIMIT && !watcher->spin_warned) {
+			watcher->spin_warned = true;
+			zlog(ZLOG_WARNING, "[pool %s] http-direct worker: a read watcher was invoked %d times in a row "
+				"with %zu byte(s) left in the stream's userland buffer and nothing consuming them, "
+				"so the loop cannot sleep. Read until the read comes up short, not once per readable event",
+				fw.wp->config->name, FPM_WORKER_SPIN_LIMIT, buffered);
+		}
+		watcher->buffered = buffered;
+		event_active(watcher->ev, EV_READ, 0);
+	}
+	efree(ids);
+}
+
 static void fpm_worker_watcher_fire(evutil_socket_t fd, short events, void *arg)
 {
 	struct fpm_worker_watcher *watcher = arg;
@@ -666,6 +837,38 @@ static ZEND_FUNCTION(fpmng_worker_may_exit)
 {
 	ZEND_PARSE_PARAMETERS_NONE();
 	RETURN_BOOL(fpm_worker_stopping && zend_hash_num_elements(&fw.pending) == 0);
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_stream_has_buffered, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_INFO(0, stream)
+ZEND_END_ARG_INFO()
+
+/* Companion to fpm_worker_activate_buffered(), for a driver that wants to make
+ * the decision itself rather than be told by an activated watcher: amphp's
+ * byte-stream does a direct read before arming a watcher, which is why it never
+ * hit the stranding this file otherwise produced, and this makes that trick
+ * writable generically instead of by knowing about TLS. Re-casting is a side
+ * effect on purpose — for an SSL stream the cast is what moves SSL_pending()
+ * bytes into the buffer, so a "false" from this function means the bytes are
+ * genuinely not there yet rather than merely not fetched. */
+static ZEND_FUNCTION(fpmng_worker_stream_has_buffered)
+{
+	zval *stream;
+	php_stream *php_stream_handle;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_RESOURCE(stream)
+	ZEND_PARSE_PARAMETERS_END();
+
+	/* Z_PARAM_RESOURCE accepts any resource, so this is the check that rejects
+	 * a curl handle or an already closed stream, and it throws rather than
+	 * returning false — returning a value with an exception pending is what
+	 * every other builtin in this file avoids. */
+	php_stream_from_zval_no_verify(php_stream_handle, stream);
+	if (!php_stream_handle) {
+		RETURN_THROWS();
+	}
+	RETURN_BOOL(fpm_worker_stream_buffered(php_stream_handle) > 0);
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_next_request, 0, 0, IS_LONG, 1)
@@ -1019,16 +1222,19 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 		if (!php_stream_handle ||
 			php_stream_cast(php_stream_handle, PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL,
 				(void *) &fd, 1) != SUCCESS || fd < 0) {
-			/* The trap the design note names: userland works on PHP streams,
-			 * libevent works on descriptors. A stream with buffered userland
-			 * data (filters, TLS) can hold bytes the descriptor will never
-			 * report as readable. */
+			/* Userland works on PHP streams, libevent on descriptors. A
+			 * stream with no usable descriptor cannot be watched at all; one
+			 * that buffers in userland (filters, TLS) can, because
+			 * fpm_worker_activate_buffered() re-casts it every iteration. */
 			zend_argument_type_error(2, "must be a stream with a usable file descriptor");
 			RETURN_THROWS();
 		}
 	}
 	watcher = pemalloc(sizeof(*watcher), 1);
 	watcher->id = fw.next_id++;
+	watcher->spin = 0;
+	watcher->buffered = 0;
+	watcher->spin_warned = false;
 	ZVAL_COPY(&watcher->callback, callback);
 	if (type == FPM_WORKER_EV_TIMER) {
 		ZVAL_UNDEF(&watcher->stream);
@@ -1107,7 +1313,15 @@ static ZEND_FUNCTION(fpmng_worker_event_disable)
 	ZEND_PARSE_PARAMETERS_END();
 
 	watcher = fpm_worker_watcher_get(id);
-	RETURN_BOOL(watcher && event_del(watcher->ev) == 0);
+	if (!watcher) {
+		RETURN_FALSE;
+	}
+	/* fpm_worker_activate_buffered() stops sampling a disabled watcher, so the
+	 * baseline it kept is stale by the time userland enables it again. */
+	watcher->spin = 0;
+	watcher->buffered = 0;
+	watcher->spin_warned = false;
+	RETURN_BOOL(event_del(watcher->ev) == 0);
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_event_free, 0, 1, _IS_BOOL, 0)
@@ -1153,7 +1367,17 @@ static ZEND_FUNCTION(fpmng_worker_loop)
 			"libevent allows only one event_base_loop() per base at a time");
 		RETURN_THROWS();
 	}
+	/* Before libevent, never after: it is what keeps a stream whose bytes sit
+	 * in a userland buffer from parking this iteration on an idle descriptor.
+	 * Inside fw.running, because its refill can call a user-space stream's
+	 * stream_cast() method, and that userland must hit the guard above rather
+	 * than reach a nested event_base_loop() on this base. */
 	fw.running = true;
+	fpm_worker_activate_buffered();
+	if (EG(exception)) {
+		fw.running = false;
+		RETURN_THROWS();
+	}
 	result = event_base_loop(fw.base, EVLOOP_ONCE | (blocking ? 0 : EVLOOP_NONBLOCK));
 	fw.running = false;
 	if (EG(exception)) {
@@ -1175,6 +1399,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_notify_stream, arginfo_fpmng_worker_notify_stream)
 	ZEND_FE(fpmng_worker_stopping, arginfo_fpmng_worker_stopping)
 	ZEND_FE(fpmng_worker_may_exit, arginfo_fpmng_worker_may_exit)
+	ZEND_FE(fpmng_worker_stream_has_buffered, arginfo_fpmng_worker_stream_has_buffered)
 	ZEND_FE(fpmng_worker_next_request, arginfo_fpmng_worker_next_request)
 	ZEND_FE(fpmng_worker_request_env, arginfo_fpmng_worker_request_env)
 	ZEND_FE(fpmng_worker_request_body, arginfo_fpmng_worker_request_body)

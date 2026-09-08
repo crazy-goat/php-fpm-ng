@@ -144,6 +144,71 @@ documented wherever it is offered:
   per worker; a worker serving 50 connections at once does not fit that shape.
   Related open work: tasks 064 and 066.
 
+## Buffered streams: read until the read comes up short
+
+**The rule for anyone writing a driver or a handler on these primitives: when a
+read watcher fires, read until the read comes up short, not once per event.**
+No fixed chunk size is safe.
+
+`fpmng_worker_event_create()` arms a libevent watcher on a *descriptor*, while
+userland works on a *PHP stream*. A stream that buffers above the descriptor —
+TLS above all — can hold decrypted bytes while the descriptor is genuinely
+empty, so no readability event will ever be produced for them. Task 075
+measured it over keep-alive TLS with an 8 KiB response and one read per readable
+event, changing nothing but the read chunk:
+
+| read chunk | result                                          |
+| ---------- | ----------------------------------------------- |
+| 512        | stranded, 257 of 8192 body bytes after 1 read   |
+| 1024       | stranded, 769 of 8192 body bytes after 1 read   |
+| 4096       | stranded, 3841 of 8192 body bytes after 1 read  |
+| 8192       | stranded, 7937 of 8192 body bytes after 1 read  |
+| 65536      | complete, 8447 bytes in 1 read                  |
+
+Matching PHP's default `chunk_size` of 8192 does not help: the stranded amount
+is whatever the peer happened to send. And the failure was silent — no log
+line, no error, the request simply never finished.
+
+Task 079 removed the trap rather than documenting it, by copying what PHP's own
+`stream_select()` does. `stream_select()` re-casts every stream on every call
+(`ext/standard/streamsfuncs.c:673`), and for an SSL stream that cast is not a
+passive lookup: while the read buffer is empty it moves `SSL_pending()` bytes
+into it (`ext/openssl/xp_ssl.c`, case `PHP_STREAM_AS_FD_FOR_SELECT`). We cast
+once at `event_create()` time and kept the descriptor, which is why the bytes
+became permanently invisible. `fpmng_worker_loop()` now walks its read watchers
+before letting libevent sleep, re-casts each stream, and calls `event_active()`
+on any whose buffer is non-empty.
+
+Three consequences an author should know:
+
+- **Read watchers are level-triggered.** A watcher whose stream still holds
+  buffered bytes fires again on the next iteration, and the loop will not sleep
+  while that is true. The rule above is therefore about CPU, not correctness:
+  a handler that reads one small chunk per event still finishes, it just makes
+  the loop spin until the buffer drains.
+- **A spin is named in the log.** After 100 consecutive iterations with a buffer
+  that has not shrunk, the pool logs
+  `a read watcher was invoked 100 times in a row with N byte(s) left in the
+  stream's userland buffer and nothing consuming them`. 100% CPU with nothing
+  in the log would have been a worse trade than the hang this replaced.
+- **`fpmng_worker_stream_has_buffered($stream)`** answers the question directly,
+  for a driver that would rather decide than be told. It re-casts as a side
+  effect, so `false` means the bytes are genuinely not there yet rather than
+  merely not fetched. `amphp/byte-stream` does the equivalent by reading
+  directly before arming a watcher, which is why it never hit the stranding;
+  this makes that trick writable without knowing about TLS.
+
+**Filters are covered by the same mechanism**, and it is worth saying so
+because `php_stream_cast()` looks at first glance as though it refuses them.
+The refusal is conditional: `main/streams/cast.c:307` reads
+`if (php_stream_is_filtered(stream) && castas != PHP_STREAM_AS_FD_FOR_SELECT)`,
+and `PHP_STREAM_AS_FD_FOR_SELECT` is exactly the cast both
+`fpmng_worker_event_create()` and the loop use. So a filtered socket stream is
+accepted by `event_create()`, and because a filter's output lands in the same
+`readbuf` the detector inspects, a filtered read watcher gets activated for its
+buffered bytes just like a TLS one. Any other cast of a filtered stream — to a
+`FILE*` or a plain fd — still fails, which is why the message exists.
+
 ## Roadmap adjustments
 
 1. **Amend task 072**: design the SAPI event API as libevent primitives

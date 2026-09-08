@@ -14,7 +14,7 @@ rest, which is the whole reason it exists:
 |---|---|---|
 | `/` | none (plain response) | Sanity: the worker booted and answers. |
 | `/mysql` | `FPMNG_WORKER_WRITE` then `FPMNG_WORKER_READ` **on a TCP socket** | An async `stream_socket_client()` first waits for writability — a primitive no other test registers. Then the MySQL protocol reads. Before this example, the only descriptor anything had watched was the notify pipe. |
-| `/mysql-tls` | the same, on a **TLS** stream | `fpmng_worker_event_create()` arms the watcher on the raw fd from `php_stream_cast()`. A stream that buffers above the descriptor — TLS, filters — can hold bytes the fd never reports as readable. Measured: it does not bite here — see below. |
+| `/mysql-tls` | the same, on a **TLS** stream | `fpmng_worker_event_create()` arms the watcher on the raw fd from `php_stream_cast()`. A stream that buffers above the descriptor — TLS, filters — can hold bytes the fd never reports as readable; task 079 made the loop re-check those buffers. Measured: it does not bite here — see below. |
 
 Both MySQL routes run `SELECT SLEEP(1)`. The sleep happens **on the server**,
 so it cannot be faked by a timer on our side: if N concurrent requests come
@@ -135,10 +135,11 @@ library says so in its own comment on line 186:
 ```
 
 So bytes sitting in the TLS buffer are consumed by the read itself, and the fd
-watcher is only ever used to wait for genuinely new data. The warning in
-`fpmng_worker_event_create()` is therefore still correct as written — it
-describes a real trap — but a client written this way sidesteps it. A client
-that waits for readability *first* and reads once per event would hang.
+watcher is only ever used to wait for genuinely new data. A client written this way sidesteps the buffered-stream trap entirely; a client
+that waits for readability *first* and reads once per event used to hang, which
+is what task 079 fixed in `fpmng_worker_loop()`. amphp's trick is now available
+generically as `fpmng_worker_stream_has_buffered()` — see
+`docs/http-direct-revolt-integration.md`, "Buffered streams".
 
 The connections really are encrypted, and that is checked on every run rather
 than trusted. It has to be: amphp asks for TLS by setting `CLIENT_SSL`, but if

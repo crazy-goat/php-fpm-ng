@@ -11,6 +11,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
+#include "fpm_http_direct.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
 #include "fpm_pool_status.h"
@@ -87,6 +88,17 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects         = fpm_pool_http_classic_rejects,
 		.validate        = fpm_http_validate_pool,
 		.init_main       = fpm_pool_type_http_init,
+	},
+	{
+		.name                         = "http-direct",
+		.requires_listen              = 1,
+		.requires_pm                  = 1,
+		.serves_requests              = 1,
+		.listening_socket_nonblocking = 1,
+		.classic_executor_only        = 1,
+		.rejects                      = fpm_http_direct_rejects,
+		.validate                     = fpm_http_direct_validate,
+		.child_main                   = fpm_http_direct_child_main,
 	},
 	{
 		.name            = "supervisor",
@@ -268,6 +280,9 @@ const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp
 	if (!type) {
 		return NULL;
 	}
+	if (type->classic_executor_only) {
+		return (!executor || !*executor || !strcmp(executor, "classic")) ? type : NULL;
+	}
 
 	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
 		return (!executor || !*executor) ? type : NULL;
@@ -304,6 +319,14 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 
 	if (!type || !executor || !*executor) {
 		return 0;
+	}
+	if (type->classic_executor_only) {
+		if (!strcmp(executor, "classic")) {
+			return 0;
+		}
+		zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic",
+			wp->config->name, type->name);
+		return -1;
 	}
 	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor is not supported by pool.type = %s",

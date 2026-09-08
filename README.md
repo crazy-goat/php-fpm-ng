@@ -55,6 +55,14 @@ The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md).
 
+## Experimental direct HTTP
+
+`pool.type = http-direct` runs HTTP and PHP in the same FPM child, without the
+FastCGI gateway hop. It supports **classic execution and `pm = static` only**.
+The FPM master still manages the workers. This is a buffered, front-controller-only
+POC, not a production frontend; configuration, limits, and benchmark methodology:
+[`docs/http-direct.md`](docs/http-direct.md).
+
 ## Framework support on `pool.executor = fiber`
 
 The `fiber` executor runs several requests concurrently in one worker process,

@@ -15,8 +15,9 @@
 #                     so nothing before this task tested it.
 #   strand            ReactPHP's own read path at a 1 KiB chunk, below one
 #                     16 KiB TLS record, against an unthrottled body: the
-#                     narrow case the warning is actually about, which a
-#                     throttled origin cannot reach.
+#                     narrow case task 079 fixed, which a throttled origin
+#                     cannot reach. The one gate here that fails if the loop
+#                     stops looking inside userland read buffers.
 #   tls               An HTTPS body far above ReactPHP's 64 KiB read chunk,
 #                     rate-limited to about a second by the origin. ReactPHP
 #                     reads once per readable event with no speculative read
@@ -281,25 +282,29 @@ case "$verdict" in
 	*) fail "futureTick(): ${verdict#ERROR }" ;;
 esac
 
-# TLS is a measurement, not a requirement: task 075 accepts either result as
-# long as it is recorded, and the plain-socket claim above is the acceptance
-# criterion.
+# Still a measurement rather than a requirement, but for a different reason
+# than in task 075: what made it unreliable then — TLS bytes stranded above the
+# descriptor — is gated by tls-strand below since task 079. All that can fail
+# here now is the concurrency budget on a loaded box.
 verdict=$(measure tls "$TLS_N" "$TLS_BUDGET" tls)
 case "$verdict" in
 	OK*) say "concurrent-tls: ok (${verdict#OK })" ;;
 	*) say "concurrent-tls: NOT WORKING (${verdict#ERROR })"
-	   say "  ^ recorded, not fatal: the watcher is armed on the raw fd from"
-	   say "    php_stream_cast(), and ReactPHP reads once per readable event"
-	   say "    with no speculative read, so a TLS stream can strand bytes above"
-	   say "    the descriptor. Consequence: this harness is not a regression"
-	   say "    gate for the TLS claim in tasks/done/075-*.md — read this line,"
-	   say "    do not read PASS." ;;
+	   say "  ^ recorded, not fatal, because the failure this route used to"
+	   say "    expose is now gated by tls-strand below: since task 079 the"
+	   say "    worker loop re-casts every watched stream before it sleeps, so"
+	   say "    TLS bytes cannot strand above the descriptor any more. What is"
+	   say "    left here is a concurrency budget, which a loaded box can miss"
+	   say "    without anything being wrong. Read tls-strand for the claim." ;;
 esac
 
-# The narrow case, and the only one that can confirm or retire the warning in
-# fpmng_worker_event_create(). One request: what matters is not concurrency but
-# whether a client that cannot drain a TLS record per readable event still
-# finishes the body. Recorded either way, like the route above.
+# The narrow case, and a hard gate since task 079. One request: what matters is
+# not concurrency but whether a client that cannot drain a TLS record per
+# readable event still finishes the body. Before 079 it could not, and this
+# probe only recorded that; fpm_worker_activate_buffered() now re-casts each
+# watched stream once per loop iteration and activates the watcher while PHP's
+# read buffer is non-empty, so stranding is a regression rather than a
+# known limitation.
 # Prints one verdict line and nothing else: its caller captures stdout, so a
 # progress message from in here would be read as the verdict.
 strand() {
@@ -331,24 +336,24 @@ else:
 '
 }
 
-# Both cases are recorded. The first cannot strand and is here to show why:
+# Both cases must pass. The first could never strand and is here to show why:
 # 1 MiB keeps the kernel receive buffer non-empty, so the descriptor stays
 # readable no matter how slowly the client reads. The second is the narrow case
-# the warning is actually about — 8 KiB on a connection the origin keeps open,
-# so there is neither more data nor a FIN to make the descriptor readable again.
+# task 079 fixed — 8 KiB on a connection the origin keeps open, so there is
+# neither more data nor a FIN to make the descriptor readable again, and the
+# only thing that can finish the body is the loop looking inside the stream's
+# userland buffer. Measured before the fix, at this 1 KiB chunk: 769 of 8192
+# body bytes after 1 read (tasks/done/075-*.md has the full table).
 for keep in 0 1; do
 	say "probing for a stranded TLS buffer at a ${CHUNK}-byte read chunk (keep-alive=$keep)"
 	verdict=$(strand "$keep")
 	case "$verdict" in
 		OK*) say "tls-strand(keep-alive=$keep): ok (${verdict#OK })" ;;
-		*) say "tls-strand(keep-alive=$keep): STRANDED (${verdict#ERROR })"
-		   say "  ^ recorded, not fatal, and the more interesting half of the TLS"
-		   say "    question: a stranded buffer means the warning in"
-		   say "    fpmng_worker_event_create() is real for TLS streams, and a"
-		   say "    ReactPHP application must read until the read comes up"
-		   say "    short, not once per event: no fixed chunk size is safe,"
-		   say "    because the stranded amount is whatever the peer sent."
-		   say "    See tasks/done/075-*.md." ;;
+		# The pre-079 symptom, so say what it means rather than only that it
+		# failed: the loop stopped looking inside userland read buffers, and
+		# every TLS consumer that reads once per readable event silently hangs
+		# on a body it will never finish.
+		*) fail "tls-strand(keep-alive=$keep): STRANDED (${verdict#ERROR }); task 079 regressed — the worker loop is no longer activating read watchers for bytes sitting in a stream's userland buffer" ;;
 	esac
 done
 

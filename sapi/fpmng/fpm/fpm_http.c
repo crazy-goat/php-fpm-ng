@@ -217,14 +217,20 @@ struct fpm_http_gateway_s {
 	/* http.tls_cert/http.tls_key; NULL = plain HTTP, exactly as today.
 	 * gw->tls is loaded INTO MEMORY in the master, BEFORE the first child forks
 	 * (fpm_http_tls_load()) — fork() copies it. gw->tls_ctx is per-process: each
-	 * child builds its OWN SSL_CTX from the same bytes
-	 * (fpm_http_tls_ctx_new(), called from fpm_http_gateway_run()), so the shared
-	 * ticket key in gw->tls supports session resumption across processes; see
-	 * fpm_http_tls.h. */
+	 * child builds its OWN SSL_CTX from bytes the master read, so the shared
+	 * ticket key supports session resumption across processes; see
+	 * fpm_http_tls.h. Which bytes: the generation gw->reload currently
+	 * publishes when there is one, otherwise gw->tls — see
+	 * fpm_http_gateway_run() and issue #91, a gateway respawned after a
+	 * reload must not start on gw->tls's startup certificate. */
 	struct fpm_http_tls_s *tls;			/* NULL in the child after a failed startup */
 	SSL_CTX *tls_ctx;				/* only in the child, NULL in the master */
-	/* NULL when http.tls_reload_check = 0 or shared-memory allocation failed —
-	 * the gateway then behaves exactly as it did before this task (task 040). */
+	/* NULL only when shared-memory allocation failed or the startup pair is
+	 * already bigger than the reload buffer (fpm_http_tls_reload_master_init());
+	 * the gateway then behaves exactly as it did before task 040.
+	 * http.tls_reload_check = 0 does NOT make this NULL — the struct is still
+	 * built, it just never arms a timer, so generation 0 stays published
+	 * forever and every child snapshots the startup bytes. */
 	struct fpm_http_tls_reload_s *reload;
 #endif
 
@@ -1902,9 +1908,23 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls) {
 		/* Own SSL_CTX per gateway process, built from cert/key bytes the
-		 * master already read and validated (fpm_http_tls_load()), never
-		 * from an SSL_CTX inherited through fork() -- see fpm_http_tls.h. */
-		gw->tls_ctx = fpm_http_tls_ctx_new(gw->pool, gw->tls);
+		 * master already read and validated, never from an SSL_CTX inherited
+		 * through fork() -- see fpm_http_tls.h.
+		 *
+		 * The bytes come from the reload machinery's currently published slot
+		 * whenever there is one, not from gw->tls: gw->tls is what the master
+		 * read once before the FIRST fork, so a gateway respawned after N
+		 * certificate reloads would otherwise start with -- and, believing it
+		 * was up to date, keep -- the startup certificate (issue #91). This is
+		 * the "builds its SSL_CTX from the currently published slot" branch of
+		 * that issue: the respawned process is correct from its first accepted
+		 * connection, with no adoption tick and no window in between. For a
+		 * gateway forked at startup the published slot is generation 0, i.e.
+		 * exactly gw->tls's bytes, so nothing about startup changes. */
+		gw->tls_ctx = fpm_http_tls_reload_child_ctx_new(gw->reload);
+		if (!gw->tls_ctx) {
+			gw->tls_ctx = fpm_http_tls_ctx_new(gw->pool, gw->tls);
+		}
 		if (!gw->tls_ctx) {
 			exit(FPM_EXIT_SOFTWARE);
 		}

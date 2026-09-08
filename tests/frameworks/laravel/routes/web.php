@@ -462,20 +462,20 @@ Route::get('/eloquent-statics', static function (Request $request) use ($common,
     $suspend($request);
 
     $item = Item::query()->find($id);
+    // phpredis returns the stored JSON as a string; decode once and assert
+    // on the decoded value.
     $observerRecord = Redis::get('laravel025:observer:'.$marker);
+    $decodedRecord = $observerRecord === null ? null : json_decode($observerRecord, true, 512, JSON_THROW_ON_ERROR);
     $dispatcher = Item::getEventDispatcher();
-    // Sub-conditions reported separately: one ok=false with no visible
-    // culprit has already been observed under concurrency, and the split
-    // makes the next measurement say WHICH term flipped instead of guessing.
     $okItem = $item?->label === 'item-'.$id;
-    $okRecord = is_array($observerRecord);
-    $okMarker = $okRecord && (($observerRecord['marker'] ?? null) === $marker);
+    $okRecord = is_array($decodedRecord);
+    $okMarker = $okRecord && (($decodedRecord['marker'] ?? null) === $marker);
 
     return $json([
         'id' => $id,
         'marker' => $marker,
         'item' => $item?->label,
-        'observer_record' => $observerRecord === null ? null : json_decode($observerRecord, true, 512, JSON_THROW_ON_ERROR),
+        'observer_record' => $decodedRecord,
         'dispatcher_oid' => $objectId($dispatcher),
         'ok_item' => $okItem,
         'ok_record' => $okRecord,

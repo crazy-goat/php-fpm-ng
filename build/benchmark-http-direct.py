@@ -135,12 +135,12 @@ http {{
     access_log off;
     client_body_temp_path {directory}/body;
     fastcgi_temp_path {directory}/fastcgi;
-    upstream php {{ server unix:{listen}; keepalive {args.workers}; }}
+    upstream php {{ server unix:{listen}; }}
     server {{
         listen 127.0.0.1:{port};
         location / {{
             fastcgi_pass php;
-            fastcgi_keep_conn on;
+            fastcgi_keep_conn off;
             fastcgi_param SCRIPT_FILENAME {root}/index.php;
             fastcgi_param SCRIPT_NAME /index.php;
             fastcgi_param REQUEST_METHOD $request_method;
@@ -193,15 +193,20 @@ http {{
                         after = usage(roots[name])
                         label = f"{work}-c{concurrency}-r{repeat + 1}-{name}"
                         (root / f"{label}.txt").write_text(output)
-                        if "Non-2xx or 3xx responses:" in output or "Socket errors:" in output:
-                            raise RuntimeError(f"wrk errors in {label}:\n{output}")
                         count = int(re.search(r"(\d+) requests in", output)[1])
+                        rejected = re.search(r"Non-2xx or 3xx responses:\s+(\d+)", output)
+                        rejected = int(rejected[1]) if rejected else 0
+                        socket_errors = re.search(r"Socket errors: (.+)", output)
+                        rps = float(re.search(r"Requests/sec:\s+([0-9.]+)", output)[1])
                         result = {
                             "backend": name, "work": work, "concurrency": concurrency, "round": repeat + 1,
-                            "rps": float(re.search(r"Requests/sec:\s+([0-9.]+)", output)[1]),
-                            "p50_ms": latency_ms(re.search(r"50%\s+(\S+)", output)[1]),
-                            "p99_ms": latency_ms(re.search(r"99%\s+(\S+)", output)[1]),
-                            "server_cpu_us_per_request": (after[0] - before[0]) * 1e6 / count,
+                            "rps": rps, "successful_rps": rps * (count - rejected) / count,
+                            "non_2xx_3xx": rejected,
+                            "socket_errors": socket_errors[1] if socket_errors else None,
+                            "p50_ms": latency_ms(re.search(r"^\s+50%\s+(\S+)", output, re.MULTILINE)[1]),
+                            "p99_ms": latency_ms(re.search(r"^\s+99%\s+(\S+)", output, re.MULTILINE)[1]),
+                            "server_cpu_us_per_response": (after[0] - before[0]) * 1e6 / count,
+                            "server_cpu_us_per_success": (after[0] - before[0]) * 1e6 / (count - rejected) if count > rejected else None,
                             "server_rss_bytes_end": after[1], "pids": after[2],
                             "elapsed": elapsed, "requests": count, "load": os.getloadavg(),
                         }

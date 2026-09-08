@@ -418,11 +418,18 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	zend_first_try {
 		if (fpm_php_limit_extensions(w->script)) {
 			SG(sapi_headers).http_response_code = 403;
-		} else if (php_fopen_primary_script(&file) == FAILURE) {
-			SG(sapi_headers).http_response_code = 404;
 		} else {
-			fpm_request_executing();
-			php_execute_script(&file);
+			/* php_fopen_primary_script applies doc_root/user_dir to the client
+			 * URI. Open our validated path instead: those INI settings must not
+			 * bypass the fixed controller or its extension restriction. */
+			zend_stream_init_filename(&file, w->script);
+			file.primary_script = true;
+			if (zend_stream_open(&file) == FAILURE) {
+				SG(sapi_headers).http_response_code = 404;
+			} else {
+				fpm_request_executing();
+				php_execute_script(&file);
+			}
 			if (!file.in_list) zend_destroy_file_handle(&file);
 		}
 	} zend_catch {
@@ -443,6 +450,12 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
 		evbuffer_add_printf(r.output, "http-direct: response exceeds POC limits\n");
 		r.status = 500;
+	}
+	/* libevent omits framing headers for 204/304 but still appends a supplied
+	 * body. Discard it here, including POC error bodies on HEAD, or the next
+	 * keep-alive response would start with these unframed bytes. */
+	if (evhttp_request_get_command(http) == EVHTTP_REQ_HEAD || r.status == 204 || r.status == 205 || r.status == 304) {
+		evbuffer_drain(r.output, evbuffer_get_length(r.output));
 	}
 	w->requests++;
 	if (w->wp->config->pm_max_requests && w->requests >= (unsigned) w->wp->config->pm_max_requests) {

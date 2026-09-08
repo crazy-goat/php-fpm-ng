@@ -98,8 +98,9 @@ python3 build/benchmark-http-direct.py /path/to/php-fpm-ng \
 The harness verifies a distinctive binary string and SHA-256, checks response
 bodies, then compares **nginx + FastCGI**, **HTTP gateway**, and **HTTP-direct**
 using the same PHP binary and scripts. Four static PHP children per backend;
-one nginx/gateway process; persistent Unix-socket FastCGI upstreams; HTTP
-keep-alive; `wrk` at concurrency 1 and 32; three rotated 10-second runs after
+one nginx/gateway process; Unix-socket FastCGI upstreams (nginx's default
+`fastcgi_keep_conn off`, gateway persistent upstreams); HTTP client keep-alive;
+`wrk` at concurrency 1 and 32; three rotated 10-second runs after
 2-second warmups. It retains raw output, throughput, p50/p99, server-process CPU
 per request, and sampled end-of-run RSS. CPU/RSS include each backend's master,
 PHP children, and nginx/gateway processes, but not the load generator.

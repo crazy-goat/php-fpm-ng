@@ -5,10 +5,12 @@
  * - The master owns the file reads, same property fpm_http_tls.h already
  *   documents for startup -- children never open the key file, here or
  *   anywhere else. A self-rearming timer in the master (fpm_events.c's own
- *   epoll-based loop, the same one fpm_pctl_heartbeat() uses) stat()s
- *   cert_path/key_path every http.tls_reload_check seconds. Never stat() in
- *   the request path.
- * - On an mtime change the master calls the existing, already-stateless
+ *   epoll-based loop, the same one fpm_pctl_heartbeat() uses) digests
+ *   cert_path/key_path every http.tls_reload_check seconds. Never in the
+ *   request path. That digest replaced a whole-second st_mtime comparison,
+ *   which could not see a pair replaced inside one second (issue #71) --
+ *   fpm_http_tls_reload_file_digest() carries the reasoning.
+ * - On a content change the master calls the existing, already-stateless
  *   fpm_http_tls_validate() against the candidate paths BEFORE publishing
  *   anything a child can see (torn-read backstop: a half-written pair fails
  *   validation and is simply skipped, logged, retried next tick). Only a
@@ -37,9 +39,16 @@
 
 #include "fpm_http_tls_reload.h"
 
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>
+
+#include <openssl/evp.h>
+#include <openssl/crypto.h>
 
 #include "fpm_events.h"
 #include "fpm_shm.h"
@@ -77,9 +86,15 @@ struct fpm_http_tls_reload_s {
 	char *min_version;
 	int check_interval_sec;
 
-	/* master-only: last mtimes this timer acted on, and the timer itself */
-	time_t cert_mtime;
-	time_t key_mtime;
+	/* master-only: SHA-256 of the cert/key bytes this timer last acted on
+	 * (published, or rejected -- see the tick), and the timer itself. The
+	 * identity is the CONTENT, not st_mtime: see
+	 * fpm_http_tls_reload_file_digest() below for why (issue #71). All-zero
+	 * until the first successful read, which is not a digest any real file
+	 * can produce, so a pair that could not be read at startup is picked up
+	 * by the first tick that can read it. */
+	unsigned char cert_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
+	unsigned char key_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
 	struct fpm_event_s master_timer;
 
 	/* shared across the master and every gateway child of this pool */
@@ -120,10 +135,118 @@ struct fpm_http_tls_reload_s {
 	char local_key_pem[FPM_HTTP_TLS_RELOAD_MAX_KEY];
 };
 
+/* SHA-256 of one file's bytes, issue #71. What this replaces is a comparison
+ * of st_mtime, which is a time_t -- WHOLE SECONDS -- so a certificate/key pair
+ * replaced inside the same wall-clock second as the pair before it was
+ * indistinguishable from "nothing changed" and was silently never adopted:
+ * measured as 2 of 5 failing runs of build/test-http-tls-reload.sh on the test
+ * box on 2026-09-08, and as CI build-matrix runs 34139815139, 34140641442,
+ * 34121726613, 34120910345 and 34120774897.
+ *
+ * st_mtim.tv_nsec was rejected: several filesystems and NFS mounts leave it
+ * zero or coarse, so it would turn the bug from "always" into "sometimes"
+ * rather than fix it. A content digest does not depend on the clock at all,
+ * and it answers the question this tick actually has -- "are these the bytes
+ * I already acted on?" -- so a rollback to a previous pair is correctly a
+ * change, while a rewrite of identical bytes is correctly nothing.
+ *
+ * Three things this does that stat() got for free and a read does not:
+ *
+ * - Only regular files. O_NONBLOCK on the open() so that a path that turned
+ *   into a FIFO cannot block the master's event loop inside open() waiting
+ *   for a writer -- the same loop fpm_pctl_heartbeat() runs on.
+ * - At most `max_bytes` are read. A cert path pointing at something huge (a
+ *   mistyped path, a log file) must not turn a tick into a bulk read every
+ *   http.tls_reload_check seconds; such a pair is over
+ *   FPM_HTTP_TLS_RELOAD_MAX_CERT/MAX_KEY and is unpublishable anyway.
+ * - st_size is mixed into the digest, so a change past that read cap is
+ *   still a change: an oversized file therefore still reaches the existing
+ *   "larger than the reload buffer" path in the tick, which logs it once.
+ *
+ * Cost for a real certificate: two small files read per http.tls_reload_check
+ * seconds (default 5) in the master only. Never in the request path, and
+ * never in a child -- children do not open the key file, the property
+ * fpm_http_tls.h documents.
+ *
+ * Returns 0 and fills `out` on success, -1 on any read or digest failure. The
+ * digest is never logged; `out` is the only thing that leaves this function,
+ * and the buffer that held key bytes is wiped before returning. */
+static int fpm_http_tls_reload_file_digest(const char *path, size_t max_bytes,
+	unsigned char out[FPM_HTTP_TLS_RELOAD_DIGEST_LEN]) /* {{{ */
+{
+	int fd;
+	struct stat st;
+	FILE *fp;
+	EVP_MD_CTX *ctx;
+	unsigned char buf[4096];
+	size_t left;
+	size_t n;
+	unsigned int len = 0;
+	int ok = 0;
+	uint64_t size_le;
+
+	fd = open(path, O_RDONLY | O_NONBLOCK);
+	if (fd < 0) {
+		return -1;
+	}
+	if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+		close(fd);
+		return -1;
+	}
+	fp = fdopen(fd, "rb");
+	if (!fp) {
+		close(fd);
+		return -1;
+	}
+	ctx = EVP_MD_CTX_new();
+	if (!ctx) {
+		fclose(fp);
+		return -1;
+	}
+
+	if (EVP_DigestInit_ex(ctx, EVP_sha256(), NULL) == 1) {
+		ok = 1;
+		/* Byte order fixed on purpose: the digest is only ever compared
+		 * against another digest taken by this same process, but a
+		 * platform-independent encoding costs nothing and keeps the value
+		 * meaningful if it is ever published. */
+		size_le = (uint64_t) st.st_size;
+		for (n = 0; n < sizeof(size_le); n++) {
+			buf[n] = (unsigned char) ((size_le >> (8 * n)) & 0xff);
+		}
+		if (EVP_DigestUpdate(ctx, buf, sizeof(size_le)) != 1) {
+			ok = 0;
+		}
+
+		left = max_bytes;
+		while (ok && left > 0 && (n = fread(buf, 1, left < sizeof(buf) ? left : sizeof(buf), fp)) > 0) {
+			if (EVP_DigestUpdate(ctx, buf, n) != 1) {
+				ok = 0;
+				break;
+			}
+			left -= n;
+		}
+		if (ok && ferror(fp)) {
+			ok = 0;
+		}
+		if (ok && EVP_DigestFinal_ex(ctx, out, &len) != 1) {
+			ok = 0;
+		}
+	}
+
+	OPENSSL_cleanse(buf, sizeof(buf));
+	EVP_MD_CTX_free(ctx);
+	fclose(fp);
+
+	return (ok && len == FPM_HTTP_TLS_RELOAD_DIGEST_LEN) ? 0 : -1;
+}
+/* }}} */
+
 static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
 {
 	struct fpm_http_tls_reload_s *r = arg;
-	struct stat cert_st, key_st;
+	unsigned char cert_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
+	unsigned char key_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
 	struct fpm_http_tls_s *fresh;
 	unsigned long gen;
 	unsigned target;
@@ -133,14 +256,23 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	if (stat(r->cert_path, &cert_st) != 0 || stat(r->key_path, &key_st) != 0) {
+	if (fpm_http_tls_reload_file_digest(r->cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, cert_digest) != 0 ||
+			fpm_http_tls_reload_file_digest(r->key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, key_digest) != 0) {
 		/* Transient (mid write, or the volume is not there yet): not fatal,
 		 * skip this tick, the certificate already in use keeps serving. */
 		return;
 	}
-	if (cert_st.st_mtime == r->cert_mtime && key_st.st_mtime == r->key_mtime) {
+	if (memcmp(cert_digest, r->cert_digest, sizeof(cert_digest)) == 0 &&
+			memcmp(key_digest, r->key_digest, sizeof(key_digest)) == 0) {
 		return;
 	}
+
+	/* The digests above were taken from a read that precedes the validate and
+	 * the load below, so a write landing between them is remembered as the
+	 * OLDER content while the NEWER content is what gets published. That
+	 * direction is the safe one: the next tick sees a mismatch and reloads
+	 * the same bytes once more (idempotent), rather than remembering content
+	 * it never published and skipping it forever. */
 
 	/* Torn reads, task 040 decision: enforced, not just documented. Reuses
 	 * the exact check config-validation already runs at startup -- never
@@ -152,11 +284,13 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	 * hot-reloaded, only the primary cert/key are. */
 	if (fpm_http_tls_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL) != 0) {
 		/* fpm_http_tls_validate() already logged what's wrong. Remember
-		 * these mtimes anyway so a persistently broken pair (operator
+		 * these digests anyway so a persistently broken pair (operator
 		 * hasn't fixed it yet) does not re-log every tick; the next actual
-		 * change re-triggers validation. */
-		r->cert_mtime = cert_st.st_mtime;
-		r->key_mtime = key_st.st_mtime;
+		 * change of the bytes re-triggers validation -- including a corrected
+		 * pair written in the same second as the broken one, which the old
+		 * mtime comparison could not see (issue #71). */
+		memcpy(r->cert_digest, cert_digest, sizeof(r->cert_digest));
+		memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
 		return;
 	}
 
@@ -164,7 +298,7 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	if (!fresh) {
 		/* fpm_http_tls_load() already logged (re-read failed between the
 		 * validate above and here, or RAND_bytes() failed) -- do not update
-		 * the mtimes, so this is retried next tick rather than skipped. */
+		 * the digests, so this is retried next tick rather than skipped. */
 		return;
 	}
 
@@ -172,8 +306,8 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_reload_check: new certificate/key is larger than the %u/%u byte reload buffer, keeping the certificate already in use",
 			r->pool, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_CERT, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_KEY);
 		fpm_http_tls_free(fresh);
-		r->cert_mtime = cert_st.st_mtime;
-		r->key_mtime = key_st.st_mtime;
+		memcpy(r->cert_digest, cert_digest, sizeof(r->cert_digest));
+		memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
 		return;
 	}
 
@@ -192,8 +326,8 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	 * atomic_cmp_set() idiom rather than a bare store. */
 	atomic_cmp_set(&r->shared->generation, gen, gen + 1);
 
-	r->cert_mtime = cert_st.st_mtime;
-	r->key_mtime = key_st.st_mtime;
+	memcpy(r->cert_digest, cert_digest, sizeof(r->cert_digest));
+	memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
 	fpm_http_tls_free(fresh);
 
 	zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate reloaded from disk (generation %lu); gateway processes adopt it within http.tls_reload_check seconds",
@@ -206,7 +340,6 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	struct fpm_http_tls_s *initial, int check_interval_sec) /* {{{ */
 {
 	struct fpm_http_tls_reload_s *r;
-	struct stat st;
 
 	if (initial->cert_len > FPM_HTTP_TLS_RELOAD_MAX_CERT || initial->key_len > FPM_HTTP_TLS_RELOAD_MAX_KEY) {
 		zlog(ZLOG_WARNING, "[pool %s] http.tls_reload_check: certificate/key is larger than the %u/%u byte reload buffer, disabling reload for this pool (a restart is needed to pick up a renewed certificate)",
@@ -248,11 +381,15 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	r->sni = initial->sni;
 	r->sni_count = initial->sni_count;
 
-	if (stat(cert_path, &st) == 0) {
-		r->cert_mtime = st.st_mtime;
+	/* Baseline: the bytes the gateway is about to start serving. A failure
+	 * here leaves the digest all-zero, which no file matches, so the first
+	 * tick that can read the pair treats it as a change and reloads it --
+	 * one redundant load, never a missed one. */
+	if (fpm_http_tls_reload_file_digest(cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
+		memset(r->cert_digest, 0, sizeof(r->cert_digest));
 	}
-	if (stat(key_path, &st) == 0) {
-		r->key_mtime = st.st_mtime;
+	if (fpm_http_tls_reload_file_digest(key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
+		memset(r->key_digest, 0, sizeof(r->key_digest));
 	}
 
 	if (check_interval_sec > 0) {

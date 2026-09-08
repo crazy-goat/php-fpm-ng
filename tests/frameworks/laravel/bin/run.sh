@@ -26,7 +26,13 @@ LARAVEL_REDIS_PORT=${LARAVEL_REDIS_PORT:-6379}
 LARAVEL_REDIS_DB=${LARAVEL_REDIS_DB:-3}
 REDIS_CLIENT=${REDIS_CLIENT:-phpredis}
 REDIS_EXTENSION=${REDIS_EXTENSION:-}
-STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver}
+# Laravel 13.30.1, verified by tests/frameworks/laravel. Entries 1-3 were
+# found by the session/auth scenarios (task 008), entry 4 by the Eloquent
+# probe, entries 5-6 by the task 025 observers/global-scopes scenario: with
+# only four entries, a per-request registered global scope from request A
+# silently filters request B's query (HTTP 200, item:null), and model events
+# dispatch through whichever request's event dispatcher was cached last.
+STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver,Illuminate\\Database\\Eloquent\\Model::dispatcher,Illuminate\\Database\\Eloquent\\Model::globalScopes}
 DOCKER_STARTED=0
 RUN_ID=${FPMNG_RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)_$$}
 COMPOSE=()

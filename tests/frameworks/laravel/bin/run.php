@@ -505,31 +505,36 @@ $runMail = static function () use ($baseUrl, $parallel): string {
     checkUnique($rows, 'log_root_oid');
     checkOwnIdentity($rows);
 
-    // The log transport writes to storage/logs/laravel.log. Attribution is
+    // The log transport writes each message as a two-line entry: a "To:"
+    // line followed by the body line, with no Monolog prefix. Attribution is
     // asserted on the file, not on the HTTP response: each marker must appear
-    // exactly once and on a line that carries no other request's marker (a
-    // mid-line interleave between two Monolog handlers would produce both).
+    // in exactly one such entry, the two lines must be adjacent (a mid-line
+    // interleave between two Monolog handlers would break that), and no line
+    // may carry two different requests' markers.
     $logFile = dirname(__DIR__).'/storage/logs/laravel.log';
     checkCondition(is_file($logFile), "mail log file is missing: $logFile");
     $lines = is_file($logFile) ? file($logFile, FILE_IGNORE_NEW_LINES) : [];
     checkCondition($lines !== false, "could not read $logFile");
-    foreach ($markers as $i => $marker) {
-        $carrying = [];
-        foreach ($lines as $line) {
+    foreach ($markers as $marker) {
+        $indices = [];
+        foreach ($lines as $index => $line) {
             if (str_contains($line, $marker)) {
-                $carrying[] = $line;
+                $indices[] = $index;
             }
         }
-        checkCondition(count($carrying) === 1, "mail marker $marker appears ".count($carrying).' times instead of once');
-        foreach ($carrying as $line) {
+        checkCondition(count($indices) === 2, "mail marker $marker appears ".count($indices).' times instead of exactly twice (To: + body)');
+        if (count($indices) === 2) {
+            checkCondition($indices[1] === $indices[0] + 1, "mail entry for $marker is not contiguous (interleaved write)");
+            checkCondition(str_starts_with($lines[$indices[0]], "To: $marker@"), "first line of $marker entry is not its To: header");
+            checkCondition(str_contains($lines[$indices[1]], "laravel025 mail body $marker"), "second line of $marker entry is not its body");
+        }
+        foreach ($indices as $index) {
             foreach ($markers as $otherMarker) {
                 if ($otherMarker !== $marker) {
-                    checkCondition(!str_contains($line, $otherMarker), "mail log line for $marker also carries $otherMarker (interleaved write)");
+                    checkCondition(!str_contains($lines[$index], $otherMarker), "mail log line for $marker also carries $otherMarker (interleaved write)");
                 }
             }
         }
-        $index = $i + 1;
-        checkCondition(str_contains($carrying[0] ?? '', 'laravel025 mail body'), "mail log line $index does not carry the message body");
     }
 
     return '8/8 log-transport mails attributed to one intact log line each';
@@ -558,7 +563,8 @@ $runBinding = static function () use ($baseUrl, $parallel): string {
     for ($userId = 1; $userId <= 2; $userId++) {
         $response = requestBatch([['url' => "$baseUrl/binding/$userId?sleep=0"]])[0];
         $row = getJson($response);
-        checkCondition(($row['bound_id'] ?? null) === $userId, "binding discovery for id $userId returned {$row['bound_id'] ?? null}");
+        $boundId = $row['bound_id'] ?? null;
+        checkCondition($boundId === $userId, "binding discovery for id $userId returned ".json_encode($boundId));
         $names[$userId] = (string) ($row['bound_name'] ?? '');
         checkCondition(in_array($names[$userId], ['alice', 'bob'], true), "binding discovery for id $userId returned an unknown user");
     }
@@ -609,17 +615,45 @@ $runStaticsAudit = static function (int $round): array {
     $responses = requestBatch($specs);
     $changed = [];
     $checked = 0;
+    $failed = [];
     foreach ($responses as $i => $response) {
-        $row = getJson($response);
-        checkCondition(is_array($row['changed'] ?? null), "audit request $i returned no changed map");
+        // Under an empty isolate list the audit route itself can be killed by
+        // cross-request damage (an HTTP 500 from a polluted subsystem is
+        // evidence, not a reason to abort the audit); the other responses
+        // still carry usable snapshots.
+        if ($response['error'] !== '' || $response['status'] !== 200) {
+            $failed[$i] = $response['status'] === 0 ? $response['error'] : 'HTTP '.$response['status'];
+            continue;
+        }
+        try {
+            $row = json_decode($response['body'], true, 512, JSON_THROW_ON_ERROR);
+        } catch (Throwable) {
+            $failed[$i] = 'invalid JSON';
+            continue;
+        }
+        if (!is_array($row['changed'] ?? null)) {
+            $failed[$i] = 'no changed map';
+            continue;
+        }
         $checked = max($checked, (int) ($row['checked'] ?? 0));
         foreach ($row['changed'] as $name => $detail) {
             $changed[$name] = $detail;
         }
     }
 
-    return ['checked' => $checked, 'changed' => $changed];
+    return ['checked' => $checked, 'changed' => $changed, 'failed' => $failed];
 };
+
+// Statics that legitimately change across a suspension even with isolation
+// active: process-shared caches of pure function objects, holding no request
+// data. Measured on Laravel 13.30.1: opis/closure's Native serializer caches
+// two static closures on first use and whichever request serializes a closure
+// last leaves its instance there. Excluding them requires a justification on
+// this list; anything not here that changes in a clean audit fails the run.
+$auditExclusions = [
+    'Laravel\SerializableClosure\Serializers\Native::transformUseVariables',
+    'Laravel\SerializableClosure\Serializers\Native::resolveUseVariables',
+];
 
 $configuredTests = [
     'session-rounds' => $runSession,
@@ -675,19 +709,27 @@ if ($mode === 'audit') {
 
     echo "AUDIT expect=$expect checked={$round2['checked']} round1_changed=".count($round1['changed'])." round2_changed=".count($round2['changed'])."\n";
     foreach (['round1' => $round1, 'round2' => $round2] as $label => $round) {
+        foreach ($round['failed'] as $i => $reason) {
+            echo "  $label request $i FAILED: $reason\n";
+        }
         foreach ($round['changed'] as $name => $detail) {
             echo "  $label $name {$detail['before']} -> {$detail['after']}\n";
         }
     }
 
+    // A request that died mid-audit is itself evidence: under an empty list
+    // it means cross-request damage; under the configured list it means a
+    // code path the list does not keep healthy.
     $steady = array_keys($round2['changed']);
-    if ($expect === 'clean') {
-        $uncovered = $steady;
-    } else {
-        $uncovered = array_values(array_filter(
-            $steady,
-            static fn (string $name): bool => !in_array($name, $isolated, true),
-        ));
+    $uncovered = $round2['failed'] === [] ? [] : array_keys($round2['failed']);
+    foreach ($steady as $name) {
+        if (in_array($name, $auditExclusions, true)) {
+            continue;
+        }
+        if ($expect !== 'clean' && in_array($name, $isolated, true)) {
+            continue;
+        }
+        $uncovered[] = $name;
     }
     echo 'AUDIT_ISOLATED_LIST='.implode(',', $isolated)."\n";
     if ($uncovered === []) {

@@ -208,6 +208,24 @@ jobs:
           name: fpmng-phpt-results
           path: fpmng-phpt-results
 
+  # Task 076 acceptance criterion ("the test is reachable from CI on at least
+  # one job that has opcache, or... gains one; say which was done"): NO new
+  # job was added. `ext/opcache/config.m4` calls
+  # `PHP_NEW_EXTENSION([opcache], ..., [yes])` unconditionally -- there is no
+  # `PHP_ARG_ENABLE([opcache])` guarding it at all in this php-src pin
+  # ($PHP_SRC_REF) -- so opcache is compiled into every fpmng build regardless
+  # of configure flags, `--enable-opcache`/`--disable-all` included, and
+  # `opcache.enable` defaults to On. Measured directly: a from-scratch tree
+  # configured with the exact `build` job's configure flags above (no opcache
+  # flag at all) reports `Zend OPcache` loaded and `opcache.enable => On` via
+  # `php -m`/`php -i`, and reproduces the task-076 SIGSEGV pre-fix. So the
+  # existing `build` + `fpmng-phpt` cell above already has opcache active and
+  # already runs every fpmng-*.phpt file, including the new
+  # fpmng-http-direct-worker-opcache.phpt -- a second, --enable-opcache cell
+  # would have built and run the identical thing. `static-musl` also has
+  # opcache in (build/static-full.sh) but only smoke-tests a scratch
+  # container, never the .phpt suite, so it doesn't cover this either way.
+
   # Task 013: clang-tidy over our C sources only (never a prepared php-src
   # tree's mixed upstream copies). Non-blocking on purpose — a red build on
   # day one for pre-existing findings teaches people to ignore the job.

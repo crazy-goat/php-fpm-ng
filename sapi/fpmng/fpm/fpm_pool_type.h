@@ -67,6 +67,9 @@ struct fpm_pool_type_s {
 	 * and its children, so a child must not change this after fork. */
 	unsigned listening_socket_nonblocking:1;
 
+	/* A transport with its own child loop may expose only the classic executor. */
+	unsigned classic_executor_only:1;
+
 	/* Directives unsupported by this type. NULL-terminated, may be NULL.
 	 * A REJECTION list, not an allow-list — a new directive is allowed everywhere
 	 * by default, so an omission does not break backward compatibility.

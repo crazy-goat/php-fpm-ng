@@ -56,12 +56,73 @@ not once per readable event** — belongs somewhere an application author will
 see it: `sapi/fpmng/README.md` or `docs/http-direct-revolt-integration.md`, not
 only in a C comment and a task Outcome.
 
+## Root cause, found after the task was filed
+
+We cast the stream to a descriptor **once**, in `fpmng_worker_event_create()`
+(`fpm_http_direct_worker.c:821-823`), and keep the `fd`. PHP's own
+`stream_select()` casts **on every call** (`ext/standard/streamsfuncs.c:673`) —
+with the same `PHP_STREAM_AS_FD_FOR_SELECT | PHP_STREAM_CAST_INTERNAL` flags we
+use. That matters because for an SSL stream the cast is not a passive lookup:
+it pulls `SSL_pending()` bytes out of OpenSSL into PHP's own read buffer
+(`ext/openssl/xp_ssl.c:3874-3886`).
+
+So PHP has exactly our problem and solves it by repeating the cast. We do it
+once and never again, which is why bytes that arrive inside a TLS record burst
+become permanently invisible. This is a much better starting point than
+"document the trap".
+
+## Options
+
+**A. Repeat what `stream_select()` does (recommended).** In
+`fpmng_worker_loop()`, before sleeping, walk the read watchers; for each, cast
+the stream again (draining `SSL_pending()` as a side effect) and check whether
+PHP's read buffer holds anything. If it does, call `event_active()` on that
+event — telling libevent the event just happened. Libevent then dispatches it
+in this iteration and does not sleep, so the `$blocking` argument stops being
+dangerous. The trap disappears rather than being documented, and the strategy
+is PHP's own rather than invented here.
+
+Two details that decide whether this works:
+
+- *The detector.* `stream->has_buffered_data` (`main/php_streams.h:215`) cannot
+  be used despite the name: it is cleared at the end of `php_stream_read()`
+  (`main/streams/streams.c:685`), so from outside it says nothing. Test the
+  buffer itself — `writepos > readpos`.
+- *Busy-spin risk.* The semantics become level-triggered: an application that
+  reads nothing would have its watcher fired every iteration and burn CPU. That
+  is a trade of a silent hang for a loud spin, which is the better trade, but it
+  needs a counter — if the buffer has not shrunk after N iterations, log a
+  warning naming the pool. 100% CPU with nothing in the log would be worse than
+  the hang.
+
+Cost is one cast plus one field read per read watcher per iteration, on a
+handful of watchers. Expected to be negligible; measure it rather than assume.
+
+**B. Warn or refuse at `event_create()` (rejected).** Refusing breaks
+`amphp/byte-stream`, which uses such streams *correctly* by reading directly
+before arming a watcher. And a warning at create time concerns a state that does
+not exist yet — the buffer is empty then. It cannot distinguish a correct
+consumer from a doomed one.
+
+**C. Expose `fpmng_worker_stream_has_buffered($stream)` (worth adding, not
+instead).** Lets a driver author do amphp's direct-read trick generically. Good
+as a companion to A, insufficient alone: it still requires knowing the trap
+exists.
+
+**D. Documentation only (rejected as the whole answer, required either way).**
+Cheapest, and both libraries already cope — but it leaves a class of bug whose
+symptom is "the request never finishes and nothing is logged". The application
+rule (**read until the read comes up short, not once per readable event**) must
+be documented regardless of which option is implemented.
+
 ## Acceptance criteria
 
-- The decision between (1) and (2) is written down with its reason, including
-  what it would break, before any code changes.
+- The decision between (1) and (2) — see Options above, where A is (2) and B is
+  (1) — is written down with its reason, including what it would break, before
+  any code changes.
 - A regression test that strands a buffered TLS stream and asserts the chosen
-  behaviour. `examples/http-direct-worker-react/`'s `/strand` route plus
+  behaviour, plus, if option A is taken, one that proves the busy-spin guard
+  fires rather than the worker spinning silently. `examples/http-direct-worker-react/`'s `/strand` route plus
   `build/test-http-direct-worker-react.sh` already reproduce it end to end and
   can be reduced to a `.phpt`, or driven as-is.
 - `amphp/byte-stream`'s direct-read pattern keeps working unchanged: task 074's

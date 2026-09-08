@@ -505,33 +505,45 @@ $runMail = static function () use ($baseUrl, $parallel): string {
     checkUnique($rows, 'log_root_oid');
     checkOwnIdentity($rows);
 
-    // The log transport writes each message as a two-line entry: a "To:"
-    // line followed by the body line, with no Monolog prefix. Attribution is
-    // asserted on the file, not on the HTTP response: each marker must appear
-    // in exactly one such entry, the two lines must be adjacent (a mid-line
-    // interleave between two Monolog handlers would break that), and no line
-    // may carry two different requests' markers.
+    // The log transport writes each message as a multi-line block: a "To:"
+    // line first, the body line a few lines later (full headers in between,
+    // none of which carry the marker). Attribution is asserted on the file,
+    // not on the HTTP response: each marker must appear exactly once as a
+    // "To:" line and once in a body line, the body must belong to the same
+    // block, and no line in that block may carry another request's marker
+    // (a mid-block interleave between two Monolog handlers would produce
+    // that).
     $logFile = dirname(__DIR__).'/storage/logs/laravel.log';
     checkCondition(is_file($logFile), "mail log file is missing: $logFile");
     $lines = is_file($logFile) ? file($logFile, FILE_IGNORE_NEW_LINES) : [];
     checkCondition($lines !== false, "could not read $logFile");
     foreach ($markers as $marker) {
-        $indices = [];
+        $toIndex = null;
+        $bodyIndex = null;
+        $other = [];
         foreach ($lines as $index => $line) {
-            if (str_contains($line, $marker)) {
-                $indices[] = $index;
+            if (!str_contains($line, $marker)) {
+                continue;
+            }
+            if (str_starts_with($line, "To: $marker@")) {
+                $toIndex = $toIndex === null ? $index : 'duplicate';
+            } elseif (str_contains($line, "laravel025 mail body $marker")) {
+                $bodyIndex = $bodyIndex === null ? $index : 'duplicate';
+            } else {
+                $other[] = $line;
             }
         }
-        checkCondition(count($indices) === 2, "mail marker $marker appears ".count($indices).' times instead of exactly twice (To: + body)');
-        if (count($indices) === 2) {
-            checkCondition($indices[1] === $indices[0] + 1, "mail entry for $marker is not contiguous (interleaved write)");
-            checkCondition(str_starts_with($lines[$indices[0]], "To: $marker@"), "first line of $marker entry is not its To: header");
-            checkCondition(str_contains($lines[$indices[1]], "laravel025 mail body $marker"), "second line of $marker entry is not its body");
-        }
-        foreach ($indices as $index) {
-            foreach ($markers as $otherMarker) {
-                if ($otherMarker !== $marker) {
-                    checkCondition(!str_contains($lines[$index], $otherMarker), "mail log line for $marker also carries $otherMarker (interleaved write)");
+        checkCondition($toIndex !== null, "mail marker $marker has no To: line in $logFile");
+        checkCondition($bodyIndex !== null, "mail marker $marker has no body line in $logFile");
+        checkCondition($other === [], "mail marker $marker appears on unexpected lines: ".json_encode($other));
+        if (is_int($toIndex) && is_int($bodyIndex)) {
+            checkCondition($bodyIndex > $toIndex, "mail body for $marker appears before its To: line");
+            checkCondition($bodyIndex - $toIndex <= 20, "mail body for $marker is not in the same log block as its To: line");
+            for ($index = $toIndex; $index <= $bodyIndex; $index++) {
+                foreach ($markers as $otherMarker) {
+                    if ($otherMarker !== $marker) {
+                        checkCondition(!str_contains($lines[$index], $otherMarker), "mail log block for $marker also carries $otherMarker (interleaved write)");
+                    }
                 }
             }
         }

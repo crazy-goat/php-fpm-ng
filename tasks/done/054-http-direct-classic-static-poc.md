@@ -1,6 +1,6 @@
 # 054 — Direct HTTP classic/static proof of concept
 
-Status: in progress
+Status: done
 
 ## Why
 
@@ -42,7 +42,32 @@ to work.
 - Relevant existing suites pass. Tests run in CI. Documentation states the
   limitations and measured/not-measured results.
 
-## Workflow checklist
+## Outcome
+
+Implemented `pool.type = http-direct` (POC): libevent HTTP parsing and classic
+PHP request execution inside each FPM child; `pm = static` and
+`pool.executor = classic` only, enforced by validation (fiber/async,
+dynamic/ondemand, and unsupported gateway options fail configuration testing).
+The FPM master keeps creating, supervising, recycling (`pm.max_requests`),
+replacing crashed children, and enforcing `request_terminate_timeout`; graceful
+reload/stop drain in-flight requests. Routing is a fixed, validated front
+controller inside `chdir`; client paths, `doc_root`, and `user_dir` cannot
+select another script (review finding). Responses are buffered (8 MiB body,
+64 KiB headers) and bodyless 204/205/304/HEAD responses are drained to keep
+keep-alive framing correct (review finding). Five new `.phpt` files cover
+protocol, config rejection, lifecycle, session/scoreboard, and routing/framing.
+
+Poligon (PHP 8.5.9, 4 static workers, median of 3 runs, see
+`docs/http-direct.md`): http-direct achieved the highest successful throughput
+and lowest CPU per response in all four scenarios — tiny-c1 8.4k vs 5.7k
+(nginx+FastCGI) and 7.1k (`http`) rps; cpu-c32 4.4k vs 3.7k and 2.2k rps; worst
+p99 at cpu-c32 (16 ms) consistent with the documented single-event-loop and
+accept-fairness limits. The `http` gateway's high raw request rate at
+concurrency 32 is mostly 503 rejections (714k/813k non-2xx). Full fpmng suite:
+14 PASS, 4 SKIP (fiber build flag), 0 FAIL.
+
+Left out: TLS, static files, streaming, `.user.ini` handling, total connection
+limit, HTTP/2, fairness improvements (task 055).
 
 - [x] Task read; acceptance criteria understood
 - [x] Isolated worktree and branch
@@ -50,6 +75,5 @@ to work.
 - [x] Poligon build/tests using own directory and ports
 - [x] Findings recorded if needed (task 055 fairness follow-up)
 - [x] Major-issues-only Bugbot review (2 P1 findings fixed, re-verified)
-- [ ] Outcome and move to tasks/done
 - [ ] PR, green CI, merge
 - [ ] Poligon/worktree cleanup; primary checkout updated

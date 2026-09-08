@@ -228,3 +228,18 @@ versions other than 13.30.1; `Model::$booted` stays off the list by design
 `json_decode('+OK')` Redis misattribution in a configured pool was observed
 once and is recorded in `findings.md` with a suggested task, not chased
 here. Octane comparison noted in the task body only, as it instructed.
+
+## Post-review fixes (2026-09-08, same day)
+
+An independent review of the branch found three major issues, all fixed and
+re-verified by the final full run (same numbers as above, run 6 on the test
+box): (1) `cleanup()` did not stop the audit pool, so an interrupt could leak
+a daemonized php-fpm-ng — the trap now stops it; (2) a single transient
+failed audit request was indistinguishable from an uncovered static in the
+verdict — statics and failed requests are now reported separately
+(`AUDIT_RESULT=... statics=... failed_requests=...`) and a round with failed
+requests but zero static changes gets exactly one retry round before
+failing; (3) a duplicated mail `To:`/body line passed silently instead of
+failing the "exactly once" invariant — it now fails. The review also
+confirmed both `findings.md` entries warrant task files; they are left as
+follow-up work, outside this PR.

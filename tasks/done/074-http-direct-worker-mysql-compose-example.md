@@ -243,11 +243,23 @@ cannot silently retarget it), `trap ... INT TERM` captured `$?` as 0 so Ctrl-C
 exited 0, and the `static-full.sh` comment credited `ext-filter` only to
 `league/uri-interfaces` when `amphp/dns` requires it directly too.
 
-The review's verdicts on `findings.md` are recorded there: three entries are
-task-worthy and new (`static-full.sh` has no extension guard; the `tls-reload`
-flake; the `fpmng-supervisor-restart.phpt` `restarts=0` flake, to be
-investigated before any timeout is touched), and three restate entries already
-confirmed under task 073 rather than warranting a second task file.
+The review's verdicts on `findings.md` are recorded there: two entries are
+task-worthy and new (`static-full.sh` has no extension guard; the
+`fpmng-supervisor-restart.phpt` `restarts=0` flake, to be investigated before
+any timeout is touched), and three restate entries already confirmed under task
+073 rather than warranting a second task file.
+
+The `tls-reload` entry needed neither a task nor the review's agreement: **task
+048 already covers it**, and my own note on it was wrong. I had recorded that
+the job "passes both stated acceptance criteria and then fails a later check",
+on a pre-existing keep-alive connection. Neither half holds.
+`build/test-http-tls-reload.sh:186` prints the `info` line for criterion 1
+*before* asserting it, so the `connection 0 served serial ...` failure **is**
+criterion 1 failing, not something after it; and `served_serial()` opens a
+fresh `openssl s_client` per sample (`:69`), so no connection survives the
+swap. What is left is exactly task 048's diagnosis: a gateway that had not
+ticked within the fixed `sleep 4` at `:180`. The `findings.md` entry is
+corrected to say so.
 
 ### Left out
 

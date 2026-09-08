@@ -488,17 +488,22 @@ if ! run_scenarios negative "" "${negative_scenarios[@]}"; then
     negative_status=1
 fi
 
-# Systematic statics audit (task 025). Two runs of the /statics-audit probe:
-# first against a pool with an EMPTY isolate list (every steady-state change
-# is a request-scoped static; anything missing from STATIC_LIST is reported
-# as UNCOVERED), then against the configured list (nothing may change across
-# a suspension at all). This is what replaces the hand-picked empirical list.
+# Systematic statics audit (task 025). ONE run of the /statics-audit probe
+# against a pool with the configured list: the probe touches every
+# state-keeping subsystem, so any static that still changes across a real
+# suspension is state the list does not cover — that is how the list is
+# verified systematically instead of by hand-picking.
+#
+# An empty-list audit run was tried and removed: with no isolation the probe
+# itself destabilizes the pool (17 of 64 audit requests came back 502, and
+# the MySQL client logged RSET_HEADER protocol corruption — traffic aimed at
+# the SHARED MySQL server on the test box, which the box rules ask us not to
+# abuse). The per-scenario negative controls already reproduce empty-list
+# damage on isolated routes; enumeration is what the clean audit is for.
+# LARAVEL_AUDIT_EXPECT=leak remains available in run.php for one-off
+# forensics on a private MySQL.
 audit_status=0
 export LARAVEL_ISOLATED_LIST="$STATIC_LIST"
-export LARAVEL_AUDIT_EXPECT=leak
-if ! run_scenarios audit "" statics-audit; then
-    audit_status=1
-fi
 export LARAVEL_AUDIT_EXPECT=clean
 if ! run_scenarios audit "$STATIC_LIST" statics-audit; then
     audit_status=1

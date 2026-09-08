@@ -20,7 +20,6 @@ use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\View;
-use App\Observers\ProbeItemObserver;
 
 $objectId = static function (mixed $value): ?int {
     return is_object($value) ? spl_object_id($value) : null;
@@ -296,6 +295,13 @@ $staticsAudit = static function (Request $request) use ($json): mixed {
     RateLimiter::hit("laravel025:audit:$marker");
     Mail::raw("laravel025 audit warm $marker", static fn ($message) => $message->to('audit025@example.test'));
     Auth::user();
+    // Eloquent's own statics ($dispatcher, $globalScopes) are only touched
+    // when a model event or scope is actually used, so exercise them here
+    // too — under an incomplete list, another request's registration shows
+    // up in the changed map below.
+    Item::retrieved(static fn (Item $model): bool => true);
+    Item::addGlobalScope('probe-'.$marker, static fn ($query): mixed => $query);
+    Item::query()->find(1);
 
     $signature = static function (mixed $value): string {
         if (is_object($value)) {
@@ -368,8 +374,9 @@ Route::get('/rate-limit', static function (Request $request) use ($common, $susp
     RateLimiter::hit($key, 60);
     $suspend($request);
     RateLimiter::hit($key, 60);
-    $attempts = RateLimiter::attempts($key);
-    $remaining = RateLimiter::remaining($key, 60);
+    // The cache store returns Redis strings, so cast before comparing.
+    $attempts = (int) RateLimiter::attempts($key);
+    $remaining = (int) RateLimiter::remaining($key, 60);
 
     return $json([
         'id' => $id,
@@ -426,14 +433,28 @@ Route::get('/binding/{user}', static function (Request $request, User $user) use
 
 // Model events, global scopes and the boot-once cache are the Eloquent
 // statics the four-entry list never covered. Each request registers its own
-// observer and scope, exactly as per-request boot code would, then suspends
+// listener and scope, exactly as per-request boot code would, then suspends
 // before using the model, so a static rooted in another request's container
 // or accumulated from earlier requests is what the assertions catch.
+// Model::observe() is deliberately NOT used here: Laravel container-resolves
+// the observer class on dispatch, which cannot carry per-request state; a
+// direct Item::retrieved() closure goes through the same Model::$dispatcher
+// static, which is what this scenario is probing.
 Route::get('/eloquent-statics', static function (Request $request) use ($common, $suspend, $json, $objectId): mixed {
     $id = max(1, min(8, (int) $request->query('id', 1)));
     $marker = 'eloquent-'.bin2hex(random_bytes(4));
 
-    Item::observe(new ProbeItemObserver($marker));
+    Item::retrieved(static function (Item $model) use ($marker): void {
+        Redis::setex(
+            'laravel025:observer:'.$marker,
+            60,
+            json_encode([
+                'marker' => $marker,
+                'item_id' => $model->id,
+                'pid' => getmypid(),
+            ], JSON_THROW_ON_ERROR),
+        );
+    });
     Item::addGlobalScope('probe-'.$marker, static function ($query) use ($id): void {
         $query->where('label', 'item-'.$id);
     });

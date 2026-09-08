@@ -696,14 +696,21 @@ if ($mode === 'audit') {
     // the steady-state verdict comes from round 2 — statics that still change
     // across a suspension there hold per-request state.
     //
-    // LARAVEL_AUDIT_EXPECT=leak (pool list EMPTY): every steady-state change
-    // is a request-scoped static; any of them missing from
-    // LARAVEL_ISOLATED_LIST is a missing isolation entry.
-    // LARAVEL_AUDIT_EXPECT=clean (pool list = configured): nothing should
-    // change across a suspension at all; any change is state the list does
-    // not cover.
+    // Default (and the only mode bin/run.sh uses): LARAVEL_AUDIT_EXPECT=clean
+    // with the configured isolate list active. The probe touches every
+    // state-keeping subsystem first, so a static another request overwrites
+    // during our suspension shows up here even though the pool stays healthy
+    // — safe enumeration. Anything in the steady-state change set that is
+    // neither on the list nor a documented benign exclusion is reported as
+    // UNCOVERED and fails the run.
+    //
+    // LARAVEL_AUDIT_EXPECT=leak (pool list empty) is a manual forensic mode:
+    // every request-scoped static changes, and the probe itself tends to die
+    // (cross-request damage: HTTP 500s, 502s, MySQL protocol corruption —
+    // dangerous against a SHARED MySQL server). Failed requests count as
+    // evidence, not as a reason to abort.
     $isolated = array_filter(array_map('trim', explode(',', (string) getenv('LARAVEL_ISOLATED_LIST'))));
-    $expect = getenv('LARAVEL_AUDIT_EXPECT') ?: 'leak';
+    $expect = getenv('LARAVEL_AUDIT_EXPECT') ?: 'clean';
     $round1 = $runStaticsAudit(1);
     $round2 = $runStaticsAudit(2);
 

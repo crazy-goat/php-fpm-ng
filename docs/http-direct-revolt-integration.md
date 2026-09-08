@@ -234,9 +234,10 @@ buffered bytes just like a TLS one. Any other cast of a filtered stream — to a
    because the fiber executor already gives up per-request isolation of the
    function table (see the comment in `fpmng-fiber-sleep-concurrency.phpt`). So
    task 073 ships `pool.type = http-direct` + `pool.executor = worker`. The
-   variant is declared as data on the type — `extra_executor` /
-   `extra_executor_type` in `fpm_pool_type_s` — so `resolve()` still never
-   compares a type name.
+   variant is declared as data on the type — an entry in the `executors` list
+   on `fpm_pool_type_s` (issue #76 generalised task 073's original
+   `extra_executor` pair into that list) — so `resolve()` still never compares
+   a type or executor name.
 
 ## Current state
 

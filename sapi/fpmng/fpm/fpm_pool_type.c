@@ -63,113 +63,14 @@ static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
 }
 #endif
 
-/* Types visible in configuration. fastcgi-ng is the optimized FastCGI path;
- * http starts the built-in gateway. Both default to the classic executor, and
- * fpm_pool_type_resolve() selects their effective variant. */
-/* POC, task 073: pool.type = http-direct with pool.executor = worker. Same
- * transport, same listener, same master-side bookkeeping; only the CHILD loop
- * is inverted. Classic http-direct runs one script per request from inside an
- * evhttp callback, so a userland event loop's driver would have to call
- * event_base_loop() on a base that is already looping — libevent 2.1.12-stable
- * returns -1 for that and warns "reentrant invocation". Under this executor
- * the worker instead boots ONE script for its lifetime and that script drives
- * the base itself through fpmng_worker_loop(), so Revolt (and therefore amphp)
- * can suspend. See docs/http-direct-revolt-integration.md.
- *
- * An executor rather than a second pool.type for the same reason "fiber" is an
- * executor (fpm_pool_http_fiber below): the transport is unchanged and only
- * the child's execution model differs. .name stays "http-direct" so
- * diagnostics keep naming the type the operator actually configured. */
-static const struct fpm_pool_type_s fpm_http_direct_worker = {
-	.name                         = "http-direct",
-	.requires_listen              = 1,
-	.requires_pm                  = 1,
-	.serves_requests              = 1,
-	.listening_socket_nonblocking = 1,
-	.rejects                      = fpm_http_direct_worker_rejects,
-	.validate                     = fpm_http_direct_worker_validate,
-	.child_main                   = fpm_http_direct_worker_child_main,
-};
-
-static const struct fpm_pool_type_s fpm_pool_types[] = {
-	{
-		.name            = "fastcgi",
-		.requires_listen = 1,
-		.requires_pm     = 1,
-		.serves_requests = 1,
-		.rejects         = fpm_pool_fastcgi_rejects,
-	},
-	{
-		.name            = "fastcgi-ng",
-		.requires_listen = 1,
-		.requires_pm     = 1,
-		.serves_requests = 1,
-		.rejects         = fpm_pool_fastcgi_rejects,
-	},
-	{
-		.name            = "http",
-		.requires_listen = 1,
-		.requires_pm     = 1,
-		.serves_requests = 1,
-		.rejects         = fpm_pool_http_classic_rejects,
-		.validate        = fpm_http_validate_pool,
-		.init_main       = fpm_pool_type_http_init,
-	},
-	{
-		.name                         = "http-direct",
-		.requires_listen              = 1,
-		.requires_pm                  = 1,
-		.serves_requests              = 1,
-		.listening_socket_nonblocking = 1,
-		.classic_executor_only        = 1,
-		.extra_executor               = "worker",
-		.extra_executor_type          = &fpm_http_direct_worker,
-		.rejects                      = fpm_http_direct_rejects,
-		.validate                     = fpm_http_direct_validate,
-		.child_main                   = fpm_http_direct_child_main,
-	},
-	{
-		.name            = "supervisor",
-		.requires_listen = 0,
-		.requires_pm     = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
-		.serves_requests = 0,
-		.rejects         = fpm_pool_supervisor_rejects,
-		.validate        = fpm_pool_supervisor_validate,
-		.init_main       = fpm_pool_supervisor_init_main,
-		.child_main      = fpm_pool_supervisor_child_main,
-		.status          = fpm_pool_supervisor_status,
-	},
-	{
-		.name            = "cron",
-		.requires_listen = 0,
-		.requires_pm     = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
-		.serves_requests = 0,
-		.rejects         = fpm_pool_cron_rejects,
-		.validate        = fpm_pool_cron_validate,
-		.init_main       = fpm_pool_cron_init_main,
-		.child_main      = fpm_pool_cron_child_main,
-		.status          = fpm_pool_cron_status,
-	},
-	{
-		.name                     = "status",
-		.requires_listen          = 1,	/* own HTTP port, directly */
-		.requires_pm              = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
-		.serves_requests          = 0,
-		.reads_foreign_scoreboards = 1,
-		.rejects                  = fpm_pool_status_rejects,
-		.validate                 = fpm_pool_status_validate,
-		.child_main               = fpm_pool_status_child_main,
-	},
-};
-
 /* Effective type/executor combinations. They are not separate pool.type
  * values and therefore do not appear in the type list in messages.
  *
  * Both groups below exist only in a binary built with the corresponding flag
  * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"). Without
  * the flag the sources are not compiled at all (see build/prepare.sh and
- * sapi/fpmng/config.m4), so these structures and their use below in
- * fpm_pool_type_resolve() are protected by the same #ifdef. */
+ * sapi/fpmng/config.m4), so these structures and the executor-list entries
+ * pointing at them are protected by the same #ifdef. */
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.name                         = "fastcgi-ng",
@@ -217,6 +118,162 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.child_main      = fpm_pool_async_child_main,
 };
 #endif /* HAVE_FPMNG_ASYNC */
+
+/* POC, task 073: pool.type = http-direct with pool.executor = worker. Same
+ * transport, same listener, same master-side bookkeeping; only the CHILD loop
+ * is inverted. Classic http-direct runs one script per request from inside an
+ * evhttp callback, so a userland event loop's driver would have to call
+ * event_base_loop() on a base that is already looping — libevent 2.1.12-stable
+ * returns -1 for that and warns "reentrant invocation". Under this executor
+ * the worker instead boots ONE script for its lifetime and that script drives
+ * the base itself through fpmng_worker_loop(), so Revolt (and therefore amphp)
+ * can suspend. See docs/http-direct-revolt-integration.md.
+ *
+ * An executor rather than a second pool.type for the same reason "fiber" is an
+ * executor (fpm_pool_http_fiber above): the transport is unchanged and only
+ * the child's execution model differs. .name stays "http-direct" so
+ * diagnostics keep naming the type the operator actually configured. */
+static const struct fpm_pool_type_s fpm_http_direct_worker = {
+	.name                         = "http-direct",
+	.requires_listen              = 1,
+	.requires_pm                  = 1,
+	.serves_requests              = 1,
+	.listening_socket_nonblocking = 1,
+	.rejects                      = fpm_http_direct_worker_rejects,
+	.validate                     = fpm_http_direct_worker_validate,
+	.child_main                   = fpm_http_direct_worker_child_main,
+};
+
+/* pool.executor values, as data. "classic" is spelled out here like any other
+ * executor so that fpm_pool_type_resolve() looks a name up instead of
+ * comparing against one; it resolves to the base type, hence .resolves_to_base.
+ *
+ * fiber and async each exist only in a binary built with the matching flag
+ * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"): without it
+ * the sources are not compiled at all (see build/prepare.sh and
+ * sapi/fpmng/config.m4). The entry stays in the list either way, so a
+ * configuration asking for one still gets told which flag it needs rather than
+ * that the executor does not exist. */
+static const struct fpm_pool_executor_s fpm_fastcgi_ng_executors[] = {
+	{ .name = "classic", .resolves_to_base = 1 },
+	{ .name = "fiber",
+#ifdef HAVE_FPMNG_FIBER
+	  .type = &fpm_pool_fastcgi_ng_fiber,
+#else
+	  .build_flag = "--enable-fpmng-fiber",
+#endif
+	},
+	{ .name = "async",
+#ifdef HAVE_FPMNG_ASYNC
+	  .type = &fpm_pool_fastcgi_ng_async,
+#else
+	  .build_flag = "--enable-fpmng-async",
+#endif
+	},
+	{ .name = NULL }
+};
+
+static const struct fpm_pool_executor_s fpm_http_executors[] = {
+	{ .name = "classic", .resolves_to_base = 1 },
+	{ .name = "fiber",
+#ifdef HAVE_FPMNG_FIBER
+	  .type = &fpm_pool_http_fiber,
+#else
+	  .build_flag = "--enable-fpmng-fiber",
+#endif
+	},
+	{ .name = "async",
+#ifdef HAVE_FPMNG_ASYNC
+	  .type = &fpm_pool_http_async,
+#else
+	  .build_flag = "--enable-fpmng-async",
+#endif
+	},
+	{ .name = NULL }
+};
+
+/* http-direct ships its own child loop, so it offers its own executor instead
+ * of the fiber/async pair — see the comment on fpm_http_direct_worker. */
+static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
+	{ .name = "classic", .resolves_to_base = 1 },
+	{ .name = "worker", .type = &fpm_http_direct_worker },
+	{ .name = NULL }
+};
+
+/* Types visible in configuration. fastcgi-ng is the optimized FastCGI path;
+ * http starts the built-in gateway. Both default to the classic executor, and
+ * fpm_pool_type_resolve() selects their effective variant. */
+static const struct fpm_pool_type_s fpm_pool_types[] = {
+	{
+		.name            = "fastcgi",
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.rejects         = fpm_pool_fastcgi_rejects,
+	},
+	{
+		.name            = "fastcgi-ng",
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.executors       = fpm_fastcgi_ng_executors,
+		.rejects         = fpm_pool_fastcgi_rejects,
+	},
+	{
+		.name            = "http",
+		.requires_listen = 1,
+		.requires_pm     = 1,
+		.serves_requests = 1,
+		.executors       = fpm_http_executors,
+		.rejects         = fpm_pool_http_classic_rejects,
+		.validate        = fpm_http_validate_pool,
+		.init_main       = fpm_pool_type_http_init,
+	},
+	{
+		.name                         = "http-direct",
+		.requires_listen              = 1,
+		.requires_pm                  = 1,
+		.serves_requests              = 1,
+		.listening_socket_nonblocking = 1,
+		.executors                    = fpm_http_direct_executors,
+		.executors_type_specific      = 1,
+		.rejects                      = fpm_http_direct_rejects,
+		.validate                     = fpm_http_direct_validate,
+		.child_main                   = fpm_http_direct_child_main,
+	},
+	{
+		.name            = "supervisor",
+		.requires_listen = 0,
+		.requires_pm     = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
+		.serves_requests = 0,
+		.rejects         = fpm_pool_supervisor_rejects,
+		.validate        = fpm_pool_supervisor_validate,
+		.init_main       = fpm_pool_supervisor_init_main,
+		.child_main      = fpm_pool_supervisor_child_main,
+		.status          = fpm_pool_supervisor_status,
+	},
+	{
+		.name            = "cron",
+		.requires_listen = 0,
+		.requires_pm     = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
+		.serves_requests = 0,
+		.rejects         = fpm_pool_cron_rejects,
+		.validate        = fpm_pool_cron_validate,
+		.init_main       = fpm_pool_cron_init_main,
+		.child_main      = fpm_pool_cron_child_main,
+		.status          = fpm_pool_cron_status,
+	},
+	{
+		.name                     = "status",
+		.requires_listen          = 1,	/* own HTTP port, directly */
+		.requires_pm              = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
+		.serves_requests          = 0,
+		.reads_foreign_scoreboards = 1,
+		.rejects                  = fpm_pool_status_rejects,
+		.validate                 = fpm_pool_status_validate,
+		.child_main               = fpm_pool_status_child_main,
+	},
+};
 
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
@@ -312,100 +369,112 @@ void fpm_pool_type_list(char *buf, size_t len)
 	}
 }
 
-const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp)
+static const struct fpm_pool_executor_s *fpm_pool_executor_find(
+	const struct fpm_pool_type_s *type, const char *name)
 {
-	const struct fpm_pool_type_s *type = fpm_pool_type_get(wp->config->type);
-	const char *executor = wp->config->executor;
+	const struct fpm_pool_executor_s *e;
 
-	if (!type) {
+	if (!type->executors) {
 		return NULL;
 	}
-	if (type->classic_executor_only) {
-		if (!executor || !*executor || !strcmp(executor, "classic")) {
-			return type;
+	for (e = type->executors; e->name; e++) {
+		if (!strcmp(e->name, name)) {
+			return e;
 		}
-		if (type->extra_executor && !strcmp(executor, type->extra_executor)) {
-			return type->extra_executor_type;
-		}
-		return NULL;
-	}
-
-	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
-		return (!executor || !*executor) ? type : NULL;
-	}
-
-	if (!executor || !*executor || !strcmp(executor, "classic")) {
-		return type;
-	}
-	if (!strcmp(executor, "fiber")) {
-#ifdef HAVE_FPMNG_FIBER
-		return !strcmp(type->name, "http") ? &fpm_pool_http_fiber : &fpm_pool_fastcgi_ng_fiber;
-#else
-		/* Unreachable in practice: fpm_pool_type_validate_executor() already
-		 * refuses this build/executor combination before resolve() is ever
-		 * called (see fpm_conf.c). Kept for defensive symmetry. */
-		return NULL;
-#endif
-	}
-	if (!strcmp(executor, "async")) {
-#ifdef HAVE_FPMNG_ASYNC
-		return !strcmp(type->name, "http") ? &fpm_pool_http_async : &fpm_pool_fastcgi_ng_async;
-#else
-		return NULL;
-#endif
 	}
 
 	return NULL;
 }
 
+/* "classic, fiber, async" for an error message. sep is ", " when the list is
+ * read as a set of known names and " or " when it is read as the only
+ * acceptable choices; see fpm_pool_type_s.executors_type_specific. */
+static void fpm_pool_executor_list(const struct fpm_pool_type_s *type,
+	const char *sep, char *buf, size_t len)
+{
+	const struct fpm_pool_executor_s *e;
+	size_t off = 0;
+
+	if (!len) {
+		return;
+	}
+	buf[0] = '\0';
+
+	for (e = type->executors; e && e->name && off + 1 < len; e++) {
+		int n = snprintf(buf + off, len - off, "%s%s", off ? sep : "", e->name);
+
+		if (n < 0 || (size_t)n >= len - off) {
+			break;
+		}
+		off += (size_t)n;
+	}
+}
+
+const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp)
+{
+	const struct fpm_pool_type_s *type = fpm_pool_type_get(wp->config->type);
+	const struct fpm_pool_executor_s *e;
+	const char *executor = wp->config->executor;
+
+	if (!type) {
+		return NULL;
+	}
+	if (!executor || !*executor) {
+		return type;
+	}
+
+	e = fpm_pool_executor_find(type, executor);
+	if (!e) {
+		return NULL;
+	}
+	if (e->resolves_to_base) {
+		return type;
+	}
+
+	/* e->type == NULL means the executor is not in this build. Unreachable in
+	 * practice: fpm_pool_type_validate_executor() already refuses that
+	 * combination before resolve() is ever called (see fpm_conf.c). Kept for
+	 * defensive symmetry. */
+	return e->type;
+}
+
 int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 {
 	const struct fpm_pool_type_s *type = fpm_pool_type_get(wp->config->type);
+	const struct fpm_pool_executor_s *e;
 	const char *executor = wp->config->executor;
+	char known[160];
 
 	if (!type || !executor || !*executor) {
 		return 0;
 	}
-	if (type->classic_executor_only) {
-		if (!strcmp(executor, "classic") ||
-			(type->extra_executor && !strcmp(executor, type->extra_executor))) {
-			return 0;
-		}
-		if (type->extra_executor) {
-			zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic or %s",
-				wp->config->name, type->name, type->extra_executor);
-		} else {
-			zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = classic",
-				wp->config->name, type->name);
-		}
-		return -1;
-	}
-	if (strcmp(type->name, "fastcgi-ng") != 0 && strcmp(type->name, "http") != 0) {
+	if (!type->executors) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.executor is not supported by pool.type = %s",
 			wp->config->name, type->name);
 		return -1;
 	}
-	if (strcmp(executor, "classic") != 0 && strcmp(executor, "fiber") != 0 && strcmp(executor, "async") != 0) {
-		zlog(ZLOG_ALERT, "[pool %s] unknown pool.executor '%s'; known executors: classic, fiber, async",
-			wp->config->name, executor);
+
+	e = fpm_pool_executor_find(type, executor);
+	if (!e) {
+		if (type->executors_type_specific) {
+			fpm_pool_executor_list(type, " or ", known, sizeof(known));
+			zlog(ZLOG_ALERT, "[pool %s] pool.type = %s supports only pool.executor = %s",
+				wp->config->name, type->name, known);
+		} else {
+			fpm_pool_executor_list(type, ", ", known, sizeof(known));
+			zlog(ZLOG_ALERT, "[pool %s] unknown pool.executor '%s'; known executors: %s",
+				wp->config->name, executor, known);
+		}
 		return -1;
 	}
-#ifndef HAVE_FPMNG_FIBER
-	if (!strcmp(executor, "fiber")) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = fiber: this binary was built without "
-			"--enable-fpmng-fiber; rebuild with that flag to use this executor",
-			wp->config->name);
+
+	if (!e->resolves_to_base && !e->type) {
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: this binary was built without "
+			"%s; rebuild with that flag to use this executor",
+			wp->config->name, e->name, e->build_flag);
 		return -1;
 	}
-#endif
-#ifndef HAVE_FPMNG_ASYNC
-	if (!strcmp(executor, "async")) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = async: this binary was built without "
-			"--enable-fpmng-async; rebuild with that flag to use this executor",
-			wp->config->name);
-		return -1;
-	}
-#endif
+
 	return 0;
 }
 

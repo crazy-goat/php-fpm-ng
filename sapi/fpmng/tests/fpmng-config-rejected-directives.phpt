@@ -101,7 +101,7 @@ expectConfigFailure(
 );
 
 /* The new executor is accepted only by the type that declares it
- * (fpm_pool_type_s.extra_executor); http-direct still refuses fiber. */
+ * (its entry in fpm_pool_type_s.executors); http-direct still refuses fiber. */
 expectConfigFailure(
     'direct-worker-foreign-executor',
     str_replace('pool.executor = worker', 'pool.executor = fiber', $workerBase)

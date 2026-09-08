@@ -273,7 +273,7 @@ wait "$LOAD_PID" || true
 [ -s "$DIR/load.errors" ] && { cat "$DIR/load.errors" >&2; fail "acceptance criterion 2: $(wc -l < "$DIR/load.errors") request(s) failed across the reload"; }
 info "acceptance criterion 2: 300 requests across the swap, zero failures"
 
-# One notice per gateway process (fpm_http_tls_reload.c:327), so 3 of them is
+# One notice per gateway process (fpm_http_tls_reload.c:509), so 3 of them is
 # every gateway of this pool having adopted the new generation.
 wait_for_log_count "adopted reloaded TLS certificate" 3 "post-reload"
 
@@ -292,6 +292,70 @@ while [ "$i" -lt 5 ]; do
     i=$((i + 1))
 done
 
+info "issue #91: a gateway killed after the reload is respawned onto the RELOADED certificate"
+# A gateway forked by the respawn path gets its SSL_CTX from the master's
+# gw->tls -- the bytes read once before the FIRST fork, generation 0 -- while
+# fpm_http_tls_reload_child_init() used to seed its watch state with the
+# CURRENT generation. Both halves are wrong for a respawn: the certificate is
+# the startup one and the counter says "already up to date", so the child tick
+# returned early forever. Measured before the fix, on this exact scenario: 7 of
+# 24 sampled connections served leaf1 -- one of the three gateways, permanently
+# (issue #91).
+#
+# This scenario has to run here, while leaf2 is live, and not after the
+# rollback to leaf1 further down: generation 0 IS leaf1, so a respawn there
+# serves the right serial for the wrong reason and the bug is invisible.
+gateway_pids() {
+    ps -A -o pid=,ppid=,args= 2>/dev/null | awk -v m="$MASTER_PID" '$2 == m && /http gateway/ { print $1 }'
+}
+
+GW_PIDS_BEFORE=$(gateway_pids)
+GW_COUNT_BEFORE=$(printf '%s\n' "$GW_PIDS_BEFORE" | grep -c '[0-9]' || true)
+[ "$GW_COUNT_BEFORE" = "3" ] ||
+    fail "issue #91: expected 3 gateway processes before the kill, found $GW_COUNT_BEFORE"
+VICTIM=$(printf '%s\n' "$GW_PIDS_BEFORE" | head -1)
+
+# Criterion 3 of the issue: the respawned gateway must NOT need an adoption
+# tick, so this count must not move. It is also what keeps issue #71's exact
+# "3 adoptions per reload" accounting (the 6 asserted after the rollback below)
+# from silently absorbing an extra notice.
+ADOPTIONS_BEFORE=$(grep -c "adopted reloaded TLS certificate" "$DIR/error.log" 2>/dev/null || true)
+
+# SIGKILL, not SIGTERM: this stands in for the crash of issue #90, an OOM kill
+# or an operator's kill -9 -- whatever kills a gateway, the respawn is the same
+# code path (fpm_http_gateway_on_exit()).
+kill -KILL "$VICTIM"
+wait_for_log_count "killed by signal 9, respawning" 1 "issue #91 respawn"
+
+i=0
+while [ "$i" -lt 200 ]; do
+    now=$(gateway_pids)
+    if [ "$(printf '%s\n' "$now" | grep -c '[0-9]' || true)" = "3" ] &&
+            ! printf '%s\n' "$now" | grep -qx "$VICTIM"; then
+        break
+    fi
+    kill -0 "$MASTER_PID" 2>/dev/null || fail "issue #91: the master exited during the respawn"
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$i" -lt 200 ] || fail "issue #91: gateway $VICTIM was not replaced within 20s"
+
+# The proctitle is set before the SO_REUSEPORT listener is bound, so the pid
+# being visible does not yet mean the new gateway can be reached. Without this
+# wait the 24 samples below could all land on the two survivors and pass
+# without ever touching the process under test.
+sleep 1
+
+ADOPTIONS_AFTER=$(grep -c "adopted reloaded TLS certificate" "$DIR/error.log" 2>/dev/null || true)
+[ "${ADOPTIONS_BEFORE:-0}" = "${ADOPTIONS_AFTER:-0}" ] ||
+    fail "issue #91: the respawned gateway logged an adoption notice (${ADOPTIONS_BEFORE:-0} -> ${ADOPTIONS_AFTER:-0}); it is supposed to be born on the published generation, not to adopt it on a tick"
+
+# 24 samples, the number the issue's acceptance criterion names. With three
+# SO_REUSEPORT listeners the chance of never hitting the respawned one is
+# (2/3)^24 = 2e-4.
+assert_all_serve "$HTTP_PORT" "$SERIAL2" 24 "issue #91 after respawn"
+info "issue #91: 24 of 24 connections served leaf2 after the respawn, no adoption notice"
+
 info "acceptance criterion 3: a certificate/key that do not match each other is rejected, old certificate keeps serving"
 REJECTIONS_BEFORE=$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" 2>/dev/null || true)
 # Only the key is rewritten, and at the same pinned mtime as before: the master
@@ -301,7 +365,7 @@ REJECTIONS_BEFORE=$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" 2>/de
 swap_key_in leaf1.key		# leaf2 cert on disk, leaf1 key: mismatch
 # Waiting for the rejection notice instead of sleeping is also strictly
 # stronger than the `sleep 4` it replaces: the master rejects the pair without
-# bumping the shared generation (fpm_http_tls_reload.c:155-161), so once this
+# bumping the shared generation (fpm_http_tls_reload.c:285-291), so once this
 # line exists there is nothing left for a gateway to adopt and the serials
 # below are settled -- whereas the fixed sleep asserted at an arbitrary point
 # that might have been before the tick ran at all.

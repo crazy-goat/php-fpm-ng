@@ -46,10 +46,10 @@ to work.
 
 - [x] Task read; acceptance criteria understood
 - [x] Isolated worktree and branch
-- [ ] Implementation and tests; English throughout
-- [ ] Poligon build/tests using own directory and ports
-- [ ] Findings recorded if needed
-- [ ] Major-issues-only Bugbot review
+- [x] Implementation and tests; English throughout
+- [x] Poligon build/tests using own directory and ports
+- [x] Findings recorded if needed (task 055 fairness follow-up)
+- [x] Major-issues-only Bugbot review (2 P1 findings fixed, re-verified)
 - [ ] Outcome and move to tasks/done
 - [ ] PR, green CI, merge
 - [ ] Poligon/worktree cleanup; primary checkout updated

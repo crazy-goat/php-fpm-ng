@@ -70,6 +70,15 @@ struct fpm_pool_type_s {
 	/* A transport with its own child loop may expose only the classic executor. */
 	unsigned classic_executor_only:1;
 
+	/* One additional pool.executor value this type accepts, and the type
+	 * variant it resolves to. Data, not a name comparison in resolve(): a
+	 * transport that ships its own execution model declares it here instead of
+	 * teaching fpm_pool_type_resolve() about another type name. NULL = the
+	 * type accepts only the executors handled generically (see
+	 * fpm_pool_type_validate_executor()). */
+	const char *extra_executor;
+	const struct fpm_pool_type_s *extra_executor_type;
+
 	/* Directives unsupported by this type. NULL-terminated, may be NULL.
 	 * A REJECTION list, not an allow-list — a new directive is allowed everywhere
 	 * by default, so an omission does not break backward compatibility.

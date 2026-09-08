@@ -318,13 +318,21 @@ info "issue #71: a corrected pair written at the same mtime as the rejected one 
 swap_in fullchain-leaf1.pem leaf1.key
 wait_for_log_count "adopted reloaded TLS certificate" 6 "corrected pair"
 assert_all_serve "$HTTP_PORT" "$SERIAL1" 12 "corrected pair"
-[ "$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log")" = "$((${REJECTIONS_BEFORE:-0} + 1))" ] ||
-    fail "corrected pair: the rejection was logged more than once"
+# The rejection count is deliberately NOT asserted to be exactly one here. `cp`
+# truncates and then writes, and the two files of a pair are written one after
+# the other, so a tick landing inside either window legitimately sees a
+# half-written or mismatched pair and logs a second rejection -- that is the
+# torn-read contract fpm_http_tls_reload.c documents, not a regression. The
+# property worth asserting is that a rejection does not repeat every tick, and
+# the idle scenario below asserts exactly that.
 
 info "issue #71: an idle pool does no reload work at all (12 ticks, http.tls_reload_check=1)"
 # The digest is recomputed every tick; what must not happen is a validate, a
 # load, a generation bump or a single line of reload output when the bytes on
-# disk are the ones already published.
+# disk are the ones already published. This is a guard on the new mechanism
+# (a digest that spuriously differs, or a rejection that repeats every tick),
+# not a reproduction of #71 -- the old mtime code passes it too. The scenarios
+# above are the ones that fail on it.
 #
 # Counted per reload-machinery pattern rather than as "error.log gained no
 # lines at all". The stricter form was written first and is flaky for a reason

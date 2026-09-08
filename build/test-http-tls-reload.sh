@@ -70,10 +70,54 @@ served_serial() {
         | openssl x509 -noout -serial 2>/dev/null | sed 's/^serial=//'
 }
 
+# GNU coreutils and BSD/macOS disagree on the flag; the script is otherwise
+# portable sh and is also run by hand on a dev machine, not only in CI.
+mtime_of() {
+    stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
+}
+
+# Replaces live-cert.pem/live-key.pem, and does not return until the new
+# live-cert.pem has an mtime the master can tell apart from the previous one.
+#
+# The master detects a renewal by comparing st_mtime in WHOLE SECONDS
+# (fpm_http_tls_reload.c:140-142). live-cert.pem was last written by another
+# `cp` in this same script, so a swap landing inside that same second changes
+# no mtime the master looks at, no tick ever validates the new pair, and the
+# reload simply never happens.
+#
+# This is not a hypothetical. Measured on the poligon 2026-09-08: this script
+# without swap_in() failed 2 of 5 runs, both with "post-reload: connection 0
+# served the OLD serial" and **zero** gateway adoption notices in the error
+# log. That is the same symptom as the CI failures in build-matrix.yml runs
+# 34139815139, 34140641442, 34121726613, 34120910345 and 34120774897, which had
+# been attributed to a gateway missing its 1s tick. An instrumented copy of the
+# version below showed 3 of 8 runs retrying here (the two copies are ~0.6s
+# apart, so a collision is close to a coin toss); the fixed script passed 16 of
+# 16. Whether a gateway can *also* be late is a separate, unmeasured question.
+#
+# Whole-second mtime comparison in the product is a real sharp edge (a
+# certificate renewed twice inside one second is not picked up), recorded as a
+# finding for its own task; changing the reload mechanism is out of scope here.
+swap_in() {
+    cert=$1 key=$2
+    was=$(mtime_of "$DIR/certs/live-cert.pem") ||
+        fail "swap: cannot stat $DIR/certs/live-cert.pem"
+    i=0
+    while [ "$i" -lt 50 ]; do
+        cp "$DIR/certs/$cert" "$DIR/certs/live-cert.pem"
+        cp "$DIR/certs/$key" "$DIR/certs/live-key.pem"
+        [ "$(mtime_of "$DIR/certs/live-cert.pem")" != "$was" ] && return 0
+        sleep 0.2
+        i=$((i + 1))
+    done
+    fail "swap: live-cert.pem kept mtime $was across $i copies, the master cannot see this swap"
+}
+
 # All N samples must equal $2 (the expected serial) -- with http.gateways=3
 # and SO_REUSEPORT, this is the only way to be sure every gateway process
 # adopted the reload, not just whichever one handled the first connection
 # (acceptance criterion 1).
+#
 assert_all_serve() {
     port=$1 want=$2 samples=$3 label=$4
     i=0
@@ -81,6 +125,47 @@ assert_all_serve() {
         got=$(served_serial "$port")
         [ "$got" = "$want" ] || fail "$label: connection $i served serial $got, want $want"
         i=$((i + 1))
+    done
+}
+
+# Deadline for a reload to have reached every gateway process. 30x
+# http.tls_reload_check=1 below, deliberately an order of magnitude above the
+# interval rather than a constant tuned to one machine: what the script can
+# know is that a healthy reload lands *eventually*, never that it lands within
+# any particular number of seconds.
+RELOAD_DEADLINE=${FPMNG_TLS_RELOAD_DEADLINE:-30}
+
+# Waits, bounded by RELOAD_DEADLINE, until the error log holds at least $2
+# lines matching $1. This is how the fixed `sleep 4`s were replaced, and the
+# readiness signal is deliberately the log rather than the wire.
+#
+# Retrying the wire assertion instead was tried first and is *wrong*: the
+# 12-sample burst above is a statistical assertion (3 gateways behind
+# SO_REUSEPORT, and the script cannot see which one served a connection), so
+# retrying it until it comes up clean inverts it. With one gateway permanently
+# stuck a single burst is red with probability 1-(2/3)^12 = 99.2%, but ~75
+# retries inside a 30s deadline find a clean burst about 44% of the time --
+# i.e. retrying would have quietly turned the exact regression this job exists
+# to catch into a coin toss.
+#
+# The log has no such problem: both notices below are emitted once per process
+# per event, so their COUNT is exact. A gateway that never adopts leaves the
+# count at 2 of 3 and fails here deterministically, with a message that names
+# the number seen -- and the wire assertion that follows is left as strict as
+# it was before this task.
+wait_for_log_count() {
+    pattern=$1 want=$2 label=$3
+    deadline=$(($(date +%s) + RELOAD_DEADLINE))
+    while :; do
+        now=$(grep -c "$pattern" "$DIR/error.log" 2>/dev/null || true)
+        if [ "${now:-0}" -ge "$want" ]; then
+            return 0
+        fi
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            fail "$label: waited ${RELOAD_DEADLINE}s for $want log line(s) matching '$pattern', saw ${now:-0}"
+        fi
+        kill -0 "$MASTER_PID" 2>/dev/null || fail "$label: the master exited while waiting"
+        sleep 0.2
     done
 }
 
@@ -170,17 +255,15 @@ LOAD_PID=$!
 
 sleep 0.3
 info "swapping in leaf2 ($SERIAL2) while the load loop is running"
-cp "$DIR/certs/fullchain-leaf2.pem" "$DIR/certs/live-cert.pem"
-cp "$DIR/certs/leaf2.key" "$DIR/certs/live-key.pem"
+swap_in fullchain-leaf2.pem leaf2.key
 
 wait "$LOAD_PID" || true
 [ -s "$DIR/load.errors" ] && { cat "$DIR/load.errors" >&2; fail "acceptance criterion 2: $(wc -l < "$DIR/load.errors") request(s) failed across the reload"; }
 info "acceptance criterion 2: 300 requests across the swap, zero failures"
 
-# http.tls_reload_check=1 (master) + each child's own 1s timer: 4s is a
-# generous margin for every one of the 3 gateway processes to have ticked
-# at least once since the swap above.
-sleep 4
+# One notice per gateway process (fpm_http_tls_reload.c:327), so 3 of them is
+# every gateway of this pool having adopted the new generation.
+wait_for_log_count "adopted reloaded TLS certificate" 3 "post-reload"
 
 info "acceptance criterion 1: every one of the 3 gateway processes now serves leaf2 ($SERIAL2)"
 assert_all_serve "$HTTP_PORT" "$SERIAL2" 12 "post-reload"
@@ -198,9 +281,15 @@ while [ "$i" -lt 5 ]; do
 done
 
 info "acceptance criterion 3: a certificate/key that do not match each other is rejected, old certificate keeps serving"
-cp "$DIR/certs/fullchain-leaf2.pem" "$DIR/certs/live-cert.pem"
-cp "$DIR/certs/leaf1.key" "$DIR/certs/live-key.pem"		# leaf2 cert, leaf1 key: mismatch
-sleep 4
+REJECTIONS_BEFORE=$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" 2>/dev/null || true)
+swap_in fullchain-leaf2.pem leaf1.key		# leaf2 cert, leaf1 key: mismatch
+# Waiting for the rejection notice instead of sleeping is also strictly
+# stronger than the `sleep 4` it replaces: the master rejects the pair without
+# bumping the shared generation (fpm_http_tls_reload.c:155-161), so once this
+# line exists there is nothing left for a gateway to adopt and the serials
+# below are settled -- whereas the fixed sleep asserted at an arbitrary point
+# that might have been before the tick ran at all.
+wait_for_log_count "http.tls_cert/http.tls_key:" "$((${REJECTIONS_BEFORE:-0} + 1))" "broken candidate"
 assert_all_serve "$HTTP_PORT" "$SERIAL2" 6 "after a broken candidate"
 grep -q "http.tls_cert/http.tls_key:" "$DIR/error.log" || fail "no error naming the broken candidate was logged"
 body=$(curl --silent --show-error --insecure --connect-timeout 2 --max-time 5 "https://127.0.0.1:$HTTP_PORT/")

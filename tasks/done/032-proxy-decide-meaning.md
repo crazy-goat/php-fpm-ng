@@ -3,8 +3,9 @@
 **Priority:** low until decided; the decision itself is cheap and unblocks
 nothing else, so there is no urgency pressure other than avoiding
 speculative code.
-**Status:** open. Decision task — no implementation should start against this
-file.
+**Status:** done (2026-09-07). Decision found already recorded by the project
+owner in `docs/NOTES.md` section 7, item 9 (dated 2026-09-05) — this file only
+had to be reconciled with it. Outcome below.
 
 ## Context
 
@@ -127,6 +128,57 @@ before any code gets written under that name.
 4. A legitimate, acceptable outcome of this task is "we don't build this."
    If that is the answer, record it here (or move this file to `done/` with
    that outcome) rather than leaving the question open indefinitely.
+
+## Outcome (2026-09-07)
+
+**Chosen: meaning B** — and it turns out the project owner had already chosen
+it. `docs/NOTES.md` section 7 ("Work order"), item 9, dated 2026-09-05, reads:
+
+> `pool.type = proxy` — DECISION (2026-09-05): build it, but **last**, after
+> TLS. The gateway holds :443, terminates TLS, handles ACME and static files
+> itself, and passes the rest over ordinary HTTP/1.1 on localhost to a
+> long-lived application process (amphp, ReactPHP, Octane, anything).
+
+This task's premise ("this requirement has not been given by the project
+owner") was wrong — the decision existed, but only in `docs/NOTES.md`, which
+this task file never referenced. The task existed precisely because of that
+disconnect; resolving it means recording the decision here, where anyone
+picking up `proxy` work will actually look.
+
+How the acceptance criteria map to the recorded decision:
+
+1. **One meaning, in writing, with rejections reasoned** — meaning B as quoted
+   above. The other candidates fall for the reasons already analysed in this
+   file: C (load balancing) duplicates the kernel accept-queue that classic
+   FPM and `http.reuseport` already use; D (FastCGI-to-FastCGI relay) adds a
+   hop with no protocol translation — a second `listen` socket does the same;
+   A (routing between this process's own pools) is convenience, not
+   capability — N pools on N addresses already work today.
+2. **Capability gap, concretely** — the decision text itself names the
+   currently-impossible scenario: "one binary holds the certificate and static
+   files" while "the application is a separate process". Today, running amphp
+   / ReactPHP / Octane behind the same TLS-terminating edge that serves PHP
+   requires bolting nginx (or Traefik/Caddy) in front purely for that one
+   route — exactly what the project thesis ("one binary plus application
+   code, no nginx") exists to avoid. The ordering clause matters too:
+   **without TLS and ACME this type adds nothing**, so implementation waits
+   until those land (tasks 020/040 lineage).
+3. **Reconciling `http.trusted_proxies`** — the two are opposite directions
+   of the same word and must stay visibly distinct in docs:
+   `http.trusted_proxies` configures an `http` pool to *trust* an external
+   proxy that sits **in front of** FPM-NG and already terminated the client
+   (we read its `X-Forwarded-*`); `pool.type = proxy` makes FPM-NG itself
+   **act as** the proxy for a backend **behind** it (we originate the
+   forwarded request). An operator can legitimately use both at once
+   (Cloudflare → FPM-NG proxy pool → Octane): the first is an ACL on inbound
+   headers, the second is a pool type, and the naming overlap is acknowledged
+   here so the implementation task chooses directive names that do not
+   collide (e.g. `proxy_pass`-style names rather than reusing `trusted_proxies`
+   vocabulary).
+4. Not the "don't build" outcome — the owner decided to build, **last**.
+
+No implementation follows from this file. The implementation task should be
+filed once TLS + ACME (the ordering constraint in the decision) are in.
 
 ## Explicitly out of scope
 

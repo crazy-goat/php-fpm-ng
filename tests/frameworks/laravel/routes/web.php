@@ -13,9 +13,14 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Facade;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Redis;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\View;
+use App\Observers\ProbeItemObserver;
 
 $objectId = static function (mixed $value): ?int {
     return is_object($value) ? spl_object_id($value) : null;
@@ -45,6 +50,10 @@ $common = static function (Request $request) use ($objectId): array {
         'ob_level' => ob_get_level(),
         'memory_mb' => round(memory_get_usage(true) / 1048576, 1),
         'laravel_start_defined' => defined('LARAVEL_START'),
+        // Constants are process-wide in this SAPI; recording the value per
+        // response documents that the first request's LARAVEL_START survives
+        // into every later request, instead of assuming it.
+        'laravel_start' => defined('LARAVEL_START') ? (string) constant('LARAVEL_START') : null,
     ];
 };
 
@@ -259,5 +268,190 @@ Route::get('/broadcast', static function (Request $request) use ($common, $suspe
         'marker' => $marker,
         'event_name' => 'laravel025.probe',
         'channel' => 'laravel025.probe.'.$marker,
+    ] + $common($request));
+});
+
+// Task 025: runtime statics audit. The request boots the app, touches every
+// subsystem that keeps state (so each one initializes whatever class statics
+// it owns in THIS request), snapshots every static property of every declared
+// class, blocks on a real MySQL suspension, then snapshots again. Any static
+// whose value changed across the suspension was overwritten by another
+// concurrent request: that static holds per-request state and needs to be on
+// the fiber.isolate_statics list. This is the systematic replacement for the
+// hand-picked empirical list ("the spike counted 237 static $ declarations
+// and hand-picked 12; only 3 were ever confirmed").
+$staticsAudit = static function (Request $request) use ($json): mixed {
+    $seconds = max(0.0, min(2.0, (float) $request->query('sleep', 0.4)));
+    $marker = (string) $request->query('marker', 'audit');
+
+    // Touch each subsystem before snapshotting so its statics are initialized
+    // by this request rather than appearing as "changed" only because another
+    // request initialized them first.
+    Cache::get("laravel025:audit:$marker");
+    Redis::get("laravel025:audit:$marker");
+    DB::selectOne('SELECT 1');
+    Log::info("laravel025 audit warm $marker");
+    view('probe', ['marker' => $marker])->render();
+    Event::dispatch(new ProbeBroadcast($marker));
+    RateLimiter::hit("laravel025:audit:$marker");
+    Mail::raw("laravel025 audit warm $marker", static fn ($message) => $message->to('audit025@example.test'));
+    Auth::user();
+
+    $signature = static function (mixed $value): string {
+        if (is_object($value)) {
+            return 'obj:'.spl_object_id($value);
+        }
+        try {
+            return 'val:'.md5(serialize($value));
+        } catch (Throwable) {
+            return 'unserializable';
+        }
+    };
+
+    $snapshot = static function () use ($signature): array {
+        $out = [];
+        foreach (get_declared_classes() as $class) {
+            foreach ((new ReflectionClass($class))->getProperties(ReflectionProperty::IS_STATIC) as $property) {
+                // Only the declaring class reports the property, so inherited
+                // statics are counted once under their canonical owner.
+                if ($property->getDeclaringClass()->getName() !== $class) {
+                    continue;
+                }
+                $name = $class.'::'.$property->getName();
+                try {
+                    if (!$property->isInitialized()) {
+                        $out[$name] = 'uninitialized';
+                        continue;
+                    }
+                    $out[$name] = $signature($property->getValue());
+                } catch (Throwable) {
+                    $out[$name] = 'error';
+                }
+            }
+        }
+
+        return $out;
+    };
+
+    $before = $snapshot();
+    DB::selectOne('SELECT SLEEP(?) AS slept', [$seconds]);
+    $after = $snapshot();
+
+    $changed = [];
+    foreach ($after as $name => $signatureAfter) {
+        $signatureBefore = $before[$name] ?? 'absent';
+        if ($signatureBefore !== $signatureAfter) {
+            $changed[$name] = ['before' => $signatureBefore, 'after' => $signatureAfter];
+        }
+    }
+    // A static that appeared initialized only after the suspension was
+    // initialized by another request (ours touched every subsystem already).
+    foreach ($before as $name => $signatureBefore) {
+        if (!array_key_exists($name, $after)) {
+            $changed[$name] = ['before' => $signatureBefore, 'after' => 'absent'];
+        }
+    }
+
+    return $json([
+        'marker' => $marker,
+        'checked' => count($after),
+        'changed' => $changed,
+        'pid' => getmypid(),
+    ]);
+};
+
+Route::get('/statics-audit', static fn (Request $request): mixed => $staticsAudit($request));
+
+Route::get('/rate-limit', static function (Request $request) use ($common, $suspend, $json): mixed {
+    $id = max(1, min(8, (int) $request->query('id', 1)));
+    $key = "laravel025:rate:$id:".bin2hex(random_bytes(4));
+    RateLimiter::hit($key, 60);
+    $suspend($request);
+    RateLimiter::hit($key, 60);
+    $attempts = RateLimiter::attempts($key);
+    $remaining = RateLimiter::remaining($key, 60);
+
+    return $json([
+        'id' => $id,
+        'attempts' => $attempts,
+        'remaining' => $remaining,
+        'rate_limiter_root_oid' => $objectId(RateLimiter::getFacadeRoot()),
+        // Two hits from this request on a unique key: anything other than 2
+        // means the limiter resolved through another request's cache root and
+        // counted someone else's key.
+        'ok' => $attempts === 2,
+    ] + $common($request));
+});
+
+Route::get('/mail', static function (Request $request) use ($common, $suspend, $json, $objectId): mixed {
+    $marker = 'mail-'.bin2hex(random_bytes(4));
+    $suspend($request);
+    Mail::raw("laravel025 mail body $marker", static fn ($message) => $message->to("$marker@example.test"));
+
+    return $json([
+        'marker' => $marker,
+        'mailer_root_oid' => $objectId(Mail::getFacadeRoot()),
+        'log_root_oid' => $objectId(Log::getFacadeRoot()),
+    ] + $common($request));
+});
+
+Route::get('/view', static function (Request $request) use ($common, $suspend, $json, $objectId): mixed {
+    $marker = 'view-'.bin2hex(random_bytes(4));
+    // Composer registered per request, the way an app's boot code would do
+    // it: under classic FPM it only ever applies to the registering request.
+    View::composer('probe', static function ($view) use ($marker): void {
+        $view->with('composer_marker', 'composer-'.$marker);
+    });
+    $suspend($request);
+    $html = view('probe', ['marker' => $marker])->render();
+
+    return $json([
+        'marker' => $marker,
+        'html' => $html,
+        'view_root_oid' => $objectId(View::getFacadeRoot()),
+        'ok' => str_contains($html, $marker) && str_contains($html, 'composer-'.$marker),
+    ] + $common($request));
+});
+
+Route::get('/binding/{user}', static function (Request $request, User $user) use ($common, $suspend, $json): mixed {
+    $id = $user->id;
+    $suspend($request);
+
+    return $json([
+        'bound_id' => $id,
+        'bound_name' => $user->name,
+        'ok' => in_array($user->name, ['alice', 'bob'], true),
+    ] + $common($request));
+});
+
+// Model events, global scopes and the boot-once cache are the Eloquent
+// statics the four-entry list never covered. Each request registers its own
+// observer and scope, exactly as per-request boot code would, then suspends
+// before using the model, so a static rooted in another request's container
+// or accumulated from earlier requests is what the assertions catch.
+Route::get('/eloquent-statics', static function (Request $request) use ($common, $suspend, $json, $objectId): mixed {
+    $id = max(1, min(8, (int) $request->query('id', 1)));
+    $marker = 'eloquent-'.bin2hex(random_bytes(4));
+
+    Item::observe(new ProbeItemObserver($marker));
+    Item::addGlobalScope('probe-'.$marker, static function ($query) use ($id): void {
+        $query->where('label', 'item-'.$id);
+    });
+
+    $suspend($request);
+
+    $item = Item::query()->find($id);
+    $observerRecord = Redis::get('laravel025:observer:'.$marker);
+    $dispatcher = Item::getEventDispatcher();
+
+    return $json([
+        'id' => $id,
+        'marker' => $marker,
+        'item' => $item?->label,
+        'observer_record' => $observerRecord === null ? null : json_decode($observerRecord, true, 512, JSON_THROW_ON_ERROR),
+        'dispatcher_oid' => $objectId($dispatcher),
+        'ok' => ($item?->label === 'item-'.$id)
+            && is_array($observerRecord)
+            && (($observerRecord['marker'] ?? null) === $marker),
     ] + $common($request));
 });

@@ -375,7 +375,7 @@ run_scenarios() {
             overall=2
             if [ "$mode" = configured ]; then
                 CONFIGURED_ERROR=$((CONFIGURED_ERROR + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_ERROR=$((NEGATIVE_ERROR + 1))
             fi
             continue
@@ -383,14 +383,14 @@ run_scenarios() {
         if run_suite "$mode" "$scenario"; then
             if [ "$mode" = configured ]; then
                 CONFIGURED_PASS=$((CONFIGURED_PASS + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_PASS=$((NEGATIVE_PASS + 1))
             fi
         else
             overall=1
             if [ "$mode" = configured ]; then
                 CONFIGURED_ERROR=$((CONFIGURED_ERROR + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_ERROR=$((NEGATIVE_ERROR + 1))
             fi
         fi
@@ -451,6 +451,11 @@ configured_scenarios=(
     validation-flash-session-isolation
     queue-sync-context
     broadcast-sync-context
+    rate-limiter
+    mail-attribution
+    view-blade-composer
+    route-model-binding
+    eloquent-observers-and-global-scopes
 )
 negative_scenarios=(
     negative-session-empty-static-list
@@ -463,6 +468,11 @@ negative_scenarios=(
     negative-validation-flash-session-isolation-empty-static-list
     negative-queue-sync-context-empty-static-list
     negative-broadcast-sync-context-empty-static-list
+    negative-rate-limiter-empty-static-list
+    negative-mail-attribution-empty-static-list
+    negative-view-blade-composer-empty-static-list
+    negative-route-model-binding-empty-static-list
+    negative-eloquent-observers-and-global-scopes-empty-static-list
 )
 
 if ! run_scenarios configured "$STATIC_LIST" "${configured_scenarios[@]}"; then
@@ -472,9 +482,26 @@ if ! run_scenarios negative "" "${negative_scenarios[@]}"; then
     negative_status=1
 fi
 
-printf 'RUN_STATUS configured=%s negative=%s\n' "$configured_status" "$negative_status"
-printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s not_measured=4\n' \
-    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR"
-if [ "$configured_status" -ne 0 ] || [ "$negative_status" -ne 0 ]; then
+# Systematic statics audit (task 025). Two runs of the /statics-audit probe:
+# first against a pool with an EMPTY isolate list (every steady-state change
+# is a request-scoped static; anything missing from STATIC_LIST is reported
+# as UNCOVERED), then against the configured list (nothing may change across
+# a suspension at all). This is what replaces the hand-picked empirical list.
+audit_status=0
+export LARAVEL_ISOLATED_LIST="$STATIC_LIST"
+export LARAVEL_AUDIT_EXPECT=leak
+if ! run_scenarios audit "" statics-audit; then
+    audit_status=1
+fi
+export LARAVEL_AUDIT_EXPECT=clean
+if ! run_scenarios audit "$STATIC_LIST" statics-audit; then
+    audit_status=1
+fi
+unset LARAVEL_AUDIT_EXPECT LARAVEL_ISOLATED_LIST
+
+printf 'RUN_STATUS configured=%s negative=%s audit=%s\n' "$configured_status" "$negative_status" "$audit_status"
+printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s not_measured=0 audit_status=%s\n' \
+    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR" "$audit_status"
+if [ "$configured_status" -ne 0 ] || [ "$negative_status" -ne 0 ] || [ "$audit_status" -ne 0 ]; then
     exit 1
 fi

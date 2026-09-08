@@ -63,7 +63,6 @@ $root = sys_get_temp_dir() . '/fpmng-direct-worker-' . getmypid();
 file_put_contents("$root/worker.php", <<<'PHP'
 <?php
 $notify = fpmng_worker_notify_stream();
-$inFlight = 0;
 
 /* Suspends the calling fiber on a one-shot libevent timer. This is, in
  * miniature, everything Revolt's delay() needs from the SAPI. */
@@ -106,17 +105,14 @@ function handle(int $id): void
     fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], 'hello world from pid ' . getmypid());
 }
 
-$serve = function (int $id) use (&$inFlight): void {
-    $inFlight++;
+$serve = function (int $id): void {
     /* One fiber per request: the concurrency is entirely userland, which is
      * the point — the SAPI never suspends anything itself. */
-    (new Fiber(function () use ($id, &$inFlight) {
+    (new Fiber(function () use ($id) {
         try {
             handle($id);
         } catch (Throwable $e) {
             fpmng_worker_respond($id, 500, [], 'handler failed');
-        } finally {
-            $inFlight--;
         }
     }))->start();
 };
@@ -133,7 +129,10 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
 });
 fpmng_worker_event_enable($watcher);
 
-while (!fpmng_worker_stopping() || $inFlight > 0) {
+/* fpmng_worker_may_exit(), not "stopping and nothing in flight": the bridge
+ * has no way to see the SAPI's own queue, and a request sitting in it when the
+ * loop is torn down is closed with no response (task 080). */
+while (!fpmng_worker_may_exit()) {
     fpmng_worker_loop(true);
 }
 PHP);

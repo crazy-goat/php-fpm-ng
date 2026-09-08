@@ -21,8 +21,6 @@ use function Amp\async;
 
 final class FpmngServer
 {
-    private int $inFlight = 0;
-
     private ?string $watcher = null;
 
     /**
@@ -59,8 +57,6 @@ final class FpmngServer
 
     private function serve(int $id): void
     {
-        $this->inFlight++;
-
         async(function () use ($id): void {
             try {
                 [$status, $headers, $body] = ($this->handler)(
@@ -79,19 +75,30 @@ final class FpmngServer
                 // README). Reachable when the handler returns a status or a
                 // body respond() itself rejects.
                 \fpmng_worker_respond($id, 500, [], "Internal Server Error\n");
-                $this->inFlight--;
                 $this->stopWhenDrained();
             }
         });
     }
 
     /**
-     * SIGQUIT and pm.max_requests both surface as fpmng_worker_stopping(); the
-     * transport has already stopped accepting by then, so draining is finite.
+     * SIGQUIT and pm.max_requests both surface as a stop request, and the
+     * transport refuses new requests from that moment on, so draining is
+     * finite.
+     *
+     * This asks the SAPI rather than counting requests itself, and that is the
+     * whole point: an in-flight counter only sees what
+     * fpmng_worker_next_request() already handed over, while the SAPI has a
+     * queue behind it. A request can land in that queue during the very loop
+     * iteration in which the last in-flight response trips pm.max_requests,
+     * and a bridge that trusts its own counter then tears the loop down and
+     * closes that connection with no response at all — an empty reply, no log
+     * line (task 080). fpmng_worker_may_exit() is true only when the stop was
+     * requested *and* nothing accepted is still unanswered, which is why this
+     * class keeps no counter.
      */
     private function stopWhenDrained(): void
     {
-        if (!\fpmng_worker_stopping() || $this->inFlight > 0) {
+        if (!\fpmng_worker_may_exit()) {
             return;
         }
 

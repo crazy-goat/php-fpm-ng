@@ -29,8 +29,6 @@ use function React\Promise\resolve;
 
 final class FpmngReactServer
 {
-    private int $inFlight = 0;
-
     /** @var resource|null */
     private $notify = null;
 
@@ -74,15 +72,12 @@ final class FpmngReactServer
 
     private function serve(int $id): void
     {
-        $this->inFlight++;
-
         $done = function () use ($id): void {
             // Idempotent safety net: respond() returns false for an id that was
             // already answered, while a request that is never answered holds
             // its pending slot for the life of the worker. Reachable when the
             // handler resolves with a status or body respond() itself rejects.
             \fpmng_worker_respond($id, 500, [], "Internal Server Error\n");
-            $this->inFlight--;
             $this->stopWhenDrained();
         };
 
@@ -129,30 +124,23 @@ final class FpmngReactServer
     }
 
     /**
-     * SIGQUIT and pm.max_requests both surface as fpmng_worker_stopping(); the
-     * transport has already stopped accepting by then, so draining is finite.
+     * SIGQUIT and pm.max_requests both surface as a stop request, and the
+     * transport refuses new requests from that moment on, so draining is
+     * finite.
+     *
+     * This asks the SAPI rather than counting requests itself. An in-flight
+     * counter sees only what fpmng_worker_next_request() already handed over,
+     * and the SAPI has a queue behind it (fw.ready): a request can land there
+     * during the very loop iteration in which the last in-flight response
+     * trips pm.max_requests, and the read listener will not be polled again
+     * before Loop::stop() takes effect. Task 075 worked around that by
+     * draining the queue once more here; fpmng_worker_may_exit() removes the
+     * need to know the queue exists at all — it is true only when the stop was
+     * requested *and* nothing accepted is still unanswered (task 080).
      */
     private function stopWhenDrained(): void
     {
-        if (!\fpmng_worker_stopping() || $this->inFlight > 0) {
-            return;
-        }
-
-        // $inFlight counts only what next_request() already handed over, and
-        // the SAPI has a queue behind it (fw.ready, fpm_http_direct_worker.c:
-        // 342-347). Requests can land in that queue during the very loop
-        // iteration in which the last in-flight response arrives, and
-        // respond() itself is what trips pm.max_requests
-        // (fpm_http_direct_worker.c:770-776) — so "stopping and nothing in
-        // flight" does not mean "nothing left to answer". Tearing down on
-        // $inFlight alone closes those connections with no response at all.
-        // The read watcher cannot save us: it will not be polled again before
-        // Loop::stop() takes effect.
-        while (($id = \fpmng_worker_next_request()) !== null) {
-            $this->serve($id);
-        }
-
-        if ($this->inFlight > 0) {
+        if (!\fpmng_worker_may_exit()) {
             return;
         }
 

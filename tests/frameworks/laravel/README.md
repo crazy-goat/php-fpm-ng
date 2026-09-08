@@ -30,19 +30,63 @@ The configured run checks response data and object identities for:
 - middleware request state and `terminate()` attribution through Redis;
 - CSRF tokens and cross-session rejection;
 - validation errors flashed into the correct session;
-- synchronous queue dispatch and synchronous broadcasting.
+- synchronous queue dispatch and synchronous broadcasting;
+- the cache-backed rate limiter (per-request keys, attempts asserted);
+- mail attribution through the log transport (asserted on `laravel.log`
+  lines, including no interleaved mid-line writes);
+- Blade rendering with a per-request view composer;
+- implicit route model binding;
+- Eloquent model observers and global scopes registered per request.
 
-The configured pool uses this versioned list for Laravel 13.30.1:
+## Statics audit (the systematic answer)
+
+The four-entry list below was found empirically, one scenario at a time. The
+audit replaces that with a measurement: the `/statics-audit` route touches
+every state-keeping subsystem, snapshots **every static property of every
+declared class**, blocks on a real MySQL suspension, and snapshots again.
+Any static whose value changed across the suspension was overwritten by
+another concurrent request — that static holds per-request state and belongs
+on the isolation list. `bin/run.sh` runs it twice after the scenario suites:
+
+- **clean audit** (`LARAVEL_AUDIT_EXPECT=clean`, pool list = configured, the
+  default and the only mode `bin/run.sh` runs): the probe touches every
+  state-keeping subsystem before snapshotting, so a static another request
+  overwrites during the suspension appears in the steady-state change set
+  even though the pool stays healthy. Anything in that set that is neither
+  on the configured list nor a documented benign exclusion is reported as
+  `AUDIT_RESULT=UNCOVERED` and fails the run. This is how the list is
+  verified — and re-verified after every Laravel version bump.
+- **leak audit** (`LARAVEL_AUDIT_EXPECT=leak`, pool list empty) is a manual
+  forensic mode, not part of the default run: with no isolation the probe
+  itself destabilizes the pool (measured: HTTP 500s, 502s, and MySQL client
+  RSET_HEADER protocol corruption — traffic aimed at the shared MySQL
+  server). The per-scenario negative controls reproduce empty-list damage
+  on isolated routes already.
+
+`bin/statics-scan.sh` is the enumeration half: it lists every static
+*property* declaration in the pinned `vendor/laravel/framework` tree, so the
+search space the audit discriminates against is on record.
+
+## Configuration snippet (Laravel 13.30.1)
+
+The configured pool uses this versioned list for Laravel 13.30.1 (the same
+list `bin/run.sh` passes to the pool; see `docs/frameworks.md`, section
+"Laravel: the versioned configuration snippet and how it is verified", for
+where each entry came from and the warning about incomplete lists):
 
 ```ini
-fiber.isolate_statics = Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver
+fiber.isolate_statics = Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver,Illuminate\\Database\\Eloquent\\Model::dispatcher,Illuminate\\Database\\Eloquent\\Model::globalScopes
 ```
 
 `Model::$resolver` was added by the repository-owned Eloquent probe: with only
 the three previously documented entries, concurrent Eloquent queries returned
 HTTP 500 with `Cannot execute queries while other unbuffered queries are
 active`; adding that fourth entry made the Eloquent and mixed DB/Cache/Redis
-scenarios pass. This is a measured configuration requirement, not Laravel code
+scenarios pass. `Model::$dispatcher` and `Model::$globalScopes` were added by
+the task 025 observers/global-scopes scenario: without them, a model-event
+listener registered by request A does not fire for A's own models, and a
+global scope registered by A silently filters B's query (HTTP 200,
+`item: null`). This is a measured configuration requirement, not Laravel code
 added to fpm-ng.
 
 The empty-list run repeats every implemented scenario, including `/session`,
@@ -56,8 +100,11 @@ HTTP 200 with another request's data, so
 this configuration must be re-verified after every Laravel minor-version
 upgrade.
 
-The remaining matrix items are printed as `NOT MEASURED` rather than being
-silently skipped or counted as passes.
+**Read the warning in `docs/frameworks.md` before deploying this.** The short
+version: when this list is incomplete for a code path your application uses,
+Laravel does not crash — it returns a correct-looking HTTP 200 with another
+request's data and logs nothing. The audit narrows that risk to measured
+subsystems; it cannot eliminate it for code the probe never executed.
 
 ## Service provisioning: SERVICE_MODE
 

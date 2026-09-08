@@ -8,7 +8,7 @@ cron, scheduler or proxy work, which is where the project is focused.
 
 **Priority:** high. It works, and the way it works carries a specific danger
 that needs to be either bounded or documented very plainly.
-**Status:** open.
+**Status:** done.
 
 ## Where it actually stands
 
@@ -166,3 +166,80 @@ Only Laravel **13.30.1** has been tested. The repository fixture locks
 `predis/predis` **3.6.0**; the measured test-box run used phpredis **6.3.0RC1**.
 A framework upgrade may add or move a static; the list must be re-verified per
 minor version, and that requirement belongs in the user-facing documentation.
+
+## Outcome (2026-09-08)
+
+**1. The systematic answer is a runtime audit, and it is in the suite.**
+`/statics-audit` (fixture route) touches every state-keeping subsystem,
+snapshots every static property of every declared class, blocks on a real
+MySQL suspension, snapshots again; any static that changed across the
+suspension was overwritten by another request and needs isolation.
+`bin/run.sh` runs it after the scenarios ("clean" mode, configured list:
+235 statics checked, round-2 steady-state changes zero, `AUDIT_RESULT=COVERED`).
+The enumeration half is `bin/statics-scan.sh`: 215 static property
+declarations in the pinned vendor tree, on record instead of remembered.
+A "leak" audit (empty list) was tried and **removed from the default run**:
+without isolation the probe itself destabilizes the pool (17 of 64 requests
+returned 502; MySQL client logged RSET_HEADER protocol corruption aimed at
+the shared MySQL server) — it stays in `bin/run.php` as a manual forensic
+mode. Two benign shared-by-design statics (SerializableClosure's closure
+caches) are documented exclusions, each with a written justification.
+
+**2. The audit plus the new scenarios found a fifth and sixth list entry.**
+`Model::$dispatcher` and `Model::$globalScopes` are now on the published list:
+without `globalScopes`, a per-request `addGlobalScope` from request A
+**silently** filters request B's query (HTTP 200, `item: null`); without
+`dispatcher`, a listener registered by A does not fire for A's own models.
+The versioned snippet for Laravel 13.30.1 (six entries) is published in
+`docs/frameworks.md` ("Laravel: the versioned configuration snippet and how
+it is verified"), in `tests/frameworks/laravel/README.md` and in the root
+`README.md`, with a per-entry provenance table.
+
+**3. New scenarios** (all measured, N=8, `pm.max_children = 1`, data
+assertions): rate limiter, mail attribution through the log transport
+(asserted on `laravel.log` message blocks — no interleaving), Blade with a
+per-request view composer, implicit route model binding, Eloquent model
+events + global scopes. Full suite 2026-09-08, PHP-FPM-NG 8.5.11-dev
+(built Sep 8 2026 05:30:28), SHA-256
+`71fe2574aa2d0df316fab05c9f51fdc1c7e9f96ff8b151e4ae9c69595c1eb0c9`,
+markers verified via `strings`:
+`configured_pass=15 configured_error=0 negative_pass=1 negative_error=14
+not_measured=0 audit_status=0`. Negative controls fail as designed (the CSRF
+control passes legitimately — it exercises none of the isolated statics).
+`run-all.sh` now treats `audit_status=1` as a Laravel ERROR.
+
+**4. The user-facing warning is in place** — root `README.md`, the fixture
+README and `docs/frameworks.md` all state plainly what an incomplete list
+does: correct-looking HTTP 200 with another request's data and nothing in
+the log; re-verify per Laravel minor version.
+
+**Fixture bugs found and fixed along the way** (each measured before
+fixing): `Model::observe()` container-resolves the observer class on
+dispatch and cannot carry per-request state — replaced with an
+`Item::retrieved()` closure through the same `Model::$dispatcher` static;
+phpredis returns stored JSON as a string (assert on the decoded value, and
+int-cast rate-limiter counters); the log transport writes each mail as a
+multi-line block, not a single line.
+
+**Not measured / left out:** `pm.max_children > 1`, `APP_ENV=prod`,
+`fiber.revalidate_freq` and long-run RSS for the Laravel fixture; Laravel
+versions other than 13.30.1; `Model::$booted` stays off the list by design
+(boot-once per process; watched by the audit). One transient
+`json_decode('+OK')` Redis misattribution in a configured pool was observed
+once and is recorded in `findings.md` with a suggested task, not chased
+here. Octane comparison noted in the task body only, as it instructed.
+
+## Post-review fixes (2026-09-08, same day)
+
+An independent review of the branch found three major issues, all fixed and
+re-verified by the final full run (same numbers as above, run 6 on the test
+box): (1) `cleanup()` did not stop the audit pool, so an interrupt could leak
+a daemonized php-fpm-ng — the trap now stops it; (2) a single transient
+failed audit request was indistinguishable from an uncovered static in the
+verdict — statics and failed requests are now reported separately
+(`AUDIT_RESULT=... statics=... failed_requests=...`) and a round with failed
+requests but zero static changes gets exactly one retry round before
+failing; (3) a duplicated mail `To:`/body line passed silently instead of
+failing the "exactly once" invariant — it now fails. The review also
+confirmed both `findings.md` entries warrant task files; they are left as
+follow-up work, outside this PR.

@@ -141,9 +141,16 @@ classify_laravel() {
     fi
     if (( configured_error > 0 )); then
         echo ERROR
-    else
-        echo PASS
+        return
     fi
+    # The statics audit (task 025) runs inside laravel/bin/run.sh; a
+    # UNCOVERED verdict there means the isolate list is provably incomplete,
+    # which is a failure of the whole Laravel claim, not just a scenario.
+    if [[ $line =~ audit_status=1 ]]; then
+        echo ERROR
+        return
+    fi
+    echo PASS
 }
 
 run_one() {

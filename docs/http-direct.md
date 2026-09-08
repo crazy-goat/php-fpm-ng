@@ -107,3 +107,38 @@ PHP children, and nginx/gateway processes, but not the load generator.
 
 Results will be recorded after the pre-PR poligon run. No performance claim is
 made from architecture alone.
+
+### Measured results (Intel i7-6700T, 8 threads, poligon, 2026-09-08)
+
+`php-8.5.9` dynamic build, `--disable-all --enable-fpmng --enable-session
+--with-openssl`, no OPcache. 4 static PHP children per backend, 1 nginx worker
+or 1 gateway process, `wrk` keep-alive, median of three rotated 10-second runs.
+"ok rps" counts only 2xx responses; "rej" is non-2xx/3xx plus socket errors
+over all three rounds. Latency is wrk's mixed-outcome percentile, not
+successful-only. CPU is measured server-process CPU per successful response
+(master + PHP children + nginx/gateway, not the load generator). Raw artifacts:
+`benchmark-artifacts/` in the task worktree (not committed).
+
+| scenario | backend | ok rps | rej | cpu/ok µs | p50 ms | p99 ms |
+|---|---|---:|---:|---:|---:|---:|
+| tiny-c1 | nginx-fastcgi | 5 703 | 0 | 169 | 0.167 | 0.3 |
+| tiny-c1 | http | 7 140 | 0 | 126 | 0.135 | 0.2 |
+| tiny-c1 | http-direct | **8 377** | 0 | 105 | 0.110 | 0.2 |
+| tiny-c32 | nginx-fastcgi | 17 616 | 0 | 163 | 1.82 | 2.1 |
+| tiny-c32 | http | 5 015 | 714 509 | 283 | 1.03 | 2.0 |
+| tiny-c32 | http-direct | **35 616** | 9 | 112 | 0.74 | 2.4 |
+| cpu-c1 | nginx-fastcgi | 1 041 | 0 | 917 | 0.92 | 2.0 |
+| cpu-c1 | http | 1 161 | 0 | 803 | 0.81 | 1.5 |
+| cpu-c1 | http-direct | **1 309** | 0 | 724 | 0.73 | 1.3 |
+| cpu-c32 | nginx-fastcgi | 3 721 | 0 | 1 130 | 8.6 | 10.3 |
+| cpu-c32 | http | 2 172 | 813 632 | 1 618 | 0.94 | 2.9 |
+| cpu-c32 | http-direct | **4 433** | 0 | 748 | 7.5 | 16.2 |
+
+Measured takeaways: HTTP-direct delivered the highest successful throughput and
+the lowest CPU per response in every scenario (roughly +19-102% over nginx+FastCGI
+and +19-610% over the `http` gateway on this box). The `http` gateway's high
+raw request rate at concurrency 32 consists mostly of 503 rejections; its
+successful-response counts are the lowest. HTTP-direct's p99 at cpu-c32 was the
+worst (16 ms), consistent with the documented single-event-loop-per-worker and
+accept-fairness limits (tasks 055). Single-box, no OPcache, tiny scripts:
+not a production forecast.

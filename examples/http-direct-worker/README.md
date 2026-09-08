@@ -85,6 +85,20 @@ leaving it silently unenforced.
   transport answers 503 and asks the worker to stop so the master respawns it —
   a burst of more than 256 genuinely concurrent requests recycles the worker
   the same way. `FpmngServer` answers from a `finally` for that reason.
+- **A bridge decides it may exit with `fpmng_worker_may_exit()`, never with an
+  in-flight counter of its own.** The counter only sees what
+  `fpmng_worker_next_request()` already handed over, and the SAPI has a queue
+  behind it. A request can land in that queue during the very loop iteration in
+  which the last in-flight response trips `pm.max_requests` — which
+  `fpmng_worker_respond()` does itself, so this needs no signal — and a bridge
+  that trusts its counter then tears the loop down and closes that connection
+  with no response (task 080). `fpmng_worker_may_exit()` is true only when the
+  stop was requested *and* nothing accepted is still unanswered, which is why
+  `FpmngServer` keeps no counter. `fpmng_worker_stopping()` remains the earlier,
+  different question — "is a shutdown under way", worth knowing when you want
+  to close pools or flush metrics — and it is *not* a licence to exit.
+  Not accepting is not the application's job either: the transport answers 503
+  itself from the moment the stop is requested.
 - **Response headers are validated.** A header name that is not an RFC 9110
   token, or a header set that exceeds 64 KB, makes `fpmng_worker_respond()`
   return `false` and sends a 500 — the header is never silently dropped.

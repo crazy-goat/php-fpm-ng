@@ -143,6 +143,16 @@ as written — a client that waits for readability first and reads once per
 event would still hang. No follow-up task is filed, because nothing is broken;
 the caveat is documented in the example README instead.
 
+**Corrected by task 075.** The sentence above states the wrong condition. A
+client that reads once per readable event drains a 1 MiB body in 1025 reads of
+1024 bytes without stalling: `Connection: close` makes the peer's FIN a readable
+event, and a body that large never lets the kernel buffer empty. The stall needs
+the peer to go quiet as well — over TLS keep-alive, one 1024-byte read per event
+strands 769 of 8192 body bytes for ever, and so does an 8192-byte read (7937 of
+8192), so matching `chunk_size` is no defence either. The warning itself stands;
+what an application must do is read until the read comes up short, not once per
+event. Measurements in `tasks/done/075-*.md`.
+
 The TLS route is genuinely encrypted, and this is asserted on every run rather
 than trusted once. It has to be: amphp sets `CLIENT_SSL`, but if the server
 does not advertise the capability the bit is masked off and the connection

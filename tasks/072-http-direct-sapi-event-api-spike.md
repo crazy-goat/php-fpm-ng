@@ -62,3 +62,38 @@ an extension with coroutines added later); the spike validates it on our SAPI.
 - Merging the SAPI event API or the extension; follow-up feature tasks are
   separate.
 - Changing the `http` or `fastcgi` pool types.
+
+## Amendment 2026-09-08 — design the API against Revolt, and do not write a driver in C
+
+Source: `docs/http-direct-revolt-integration.md` (revision 2026-09-08) and the
+POC in task 073.
+
+1. **The event API is the deliverable; the driver is userland.** Revolt's driver
+   contract is four abstract methods plus two overrides
+   (revolt/event-loop v1.0.9,
+   `src/EventLoop/Internal/AbstractDriver.php:399-444`), and a driver over
+   libevent already exists as a ~200-line PHP file (`Driver/EventDriver.php`,
+   backed by `ext-event`). So layer 1 of this spike must expose libevent
+   primitives — create/enable/disable/free an fd, timer or signal watcher, and
+   pump the loop once with and without blocking — and nothing Revolt-shaped in
+   C. Question 1 ("minimal SAPI surface") is answered by whichever primitive set
+   makes an unmodified `revolt/event-loop` run; that is a checkable target
+   rather than a matter of taste, and it keeps library-version risk out of the
+   binary.
+2. **Reentrancy is a hard constraint, not a performance note.** A driver cannot
+   pump the same event base from inside a callback of that base: measured on the
+   test box, libevent 2.1.12-stable returns -1 and warns
+   `event_base_loop: reentrant invocation`. Since PHP currently executes inside
+   the evhttp callback (`sapi/fpmng/fpm/fpm_http_direct.c:508`, `:518`,
+   `:412`, `:431`), any request whose PHP calls `await` would fail. Therefore
+   the spike must state which of the two ownership models it targets — the SAPI
+   pumping the loop with PHP as a callback (classic direct: no userland `await`
+   possible, watchers progress only between requests), or PHP pumping the loop
+   (worker mode, task 073). They are different products, and the API must say
+   which one it serves.
+3. **The name `ext/fpm` is not required.** Task 073 registers its functions from
+   the pool type's own child, so the POC needs no extension at all. Whether the
+   stable form is a bundled extension or SAPI-registered functions is now an
+   open question for this spike rather than a premise of it.
+
+Layer 2 (cross-worker wakeup, shared memory) is unaffected by this amendment.

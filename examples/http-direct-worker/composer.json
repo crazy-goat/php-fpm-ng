@@ -1,0 +1,9 @@
+{
+    "name": "php-fpm-ng/http-direct-worker-poc",
+    "description": "Task 073 POC: an amphp application served by an FPM worker that owns its event loop",
+    "require": {
+        "php": ">=8.2",
+        "amphp/amp": "^3.1",
+        "revolt/event-loop": "^1.0"
+    }
+}

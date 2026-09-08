@@ -48,13 +48,20 @@ Any static whose value changed across the suspension was overwritten by
 another concurrent request — that static holds per-request state and belongs
 on the isolation list. `bin/run.sh` runs it twice after the scenario suites:
 
-- **audit-empty** (`LARAVEL_AUDIT_EXPECT=leak`, pool list empty): round 2
-  runs in steady state, so everything that still changes there is
-  request-scoped; anything in that set missing from the configured list is
-  reported as `AUDIT_RESULT=UNCOVERED` and fails the run.
-- **audit-configured** (`LARAVEL_AUDIT_EXPECT=clean`, pool list = configured):
-  nothing at all may change across a suspension; any change is state the
-  list does not cover.
+- **clean audit** (`LARAVEL_AUDIT_EXPECT=clean`, pool list = configured, the
+  default and the only mode `bin/run.sh` runs): the probe touches every
+  state-keeping subsystem before snapshotting, so a static another request
+  overwrites during the suspension appears in the steady-state change set
+  even though the pool stays healthy. Anything in that set that is neither
+  on the configured list nor a documented benign exclusion is reported as
+  `AUDIT_RESULT=UNCOVERED` and fails the run. This is how the list is
+  verified — and re-verified after every Laravel version bump.
+- **leak audit** (`LARAVEL_AUDIT_EXPECT=leak`, pool list empty) is a manual
+  forensic mode, not part of the default run: with no isolation the probe
+  itself destabilizes the pool (measured: HTTP 500s, 502s, and MySQL client
+  RSET_HEADER protocol corruption — traffic aimed at the shared MySQL
+  server). The per-scenario negative controls reproduce empty-list damage
+  on isolated routes already.
 
 `bin/statics-scan.sh` is the enumeration half: it lists every static
 *property* declaration in the pinned `vendor/laravel/framework` tree, so the

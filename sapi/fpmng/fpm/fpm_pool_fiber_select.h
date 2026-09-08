@@ -6,7 +6,7 @@
  * (PHP_FUNCTION(stream_select)): php_select(...) becomes fpm_fiber_select(...).
  * Everything else in that function — parsing arguments, building the fd_sets
  * from the stream arrays, and reading them back afterwards — stays exactly as
- * upstream wrote it. See task 006 (tasks/nice-to-have/006-fiber-stream-select.md)
+ * upstream wrote it. See task 006 (task 006, done; see docs/task-archive.md)
  * for why the interception happens here and not at the transport layer, like
  * the rest of the fiber executor's socket handling. */
 

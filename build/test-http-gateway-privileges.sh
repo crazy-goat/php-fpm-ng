@@ -1,7 +1,7 @@
 #!/bin/sh
 # Verifies task 010: the HTTP gateway process drops root before it ever
 # accepts a connection, instead of running with the master's identity for its
-# whole life (see tasks/010-http-gateway-drop-privileges.md).
+# whole life (see task 010, done; see docs/task-archive.md).
 #
 # This inspects the *running* gateway process's uid/gid under /proc, not the
 # source -- acceptance criterion 6 of that task asks for exactly that. It must

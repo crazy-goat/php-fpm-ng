@@ -22,7 +22,7 @@ set -Eeuo pipefail
 #
 # Executor matrix: fiber-only. Every scenario here exercises
 # pool.executor = fiber, per the decision recorded in
-# tasks/done/027-framework-integration-test-harness.md. Default-executor
+# task 027 (done; see docs/task-archive.md). Default-executor
 # coverage is explicitly out of scope for this harness.
 #
 # Exit status is non-zero unless every framework's runner reports PASS; a

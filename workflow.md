@@ -11,7 +11,8 @@ its workers and crons.
 Decided 2026-09-06. English is the only language in this project:
 
 - code comments in our own files
-- `docs/`, `README.md`, `sapi/fpmng/README.md`, `tasks/`
+- `docs/`, `README.md`, `sapi/fpmng/README.md`
+- GitHub issues, issue comments and pull requests
 - commit messages
 - log messages, error messages and configuration documentation
 
@@ -25,7 +26,8 @@ Two exceptions, both about files we do not own:
   program.
 
 Existing Polish text is translated incrementally, file by file, one commit per
-file — see `tasks/012`. Do not bulk-translate.
+file — see task 012 in [`docs/task-archive.md`](docs/task-archive.md). Do not
+bulk-translate.
 
 ## Comments: what earns one
 
@@ -82,27 +84,58 @@ runs there concurrently.
 - `pgrep -f "<pattern>"` matches its own command line. Do not use it to wait for
   a job to finish.
 
-## Tasks
+## Work tracking
 
-Open work is one file per task in `tasks/`, finished work moves to
-`tasks/done/`. See `tasks/README.md`.
+Open work lives in **GitHub Issues** (`gh issue list`). There is no task
+directory in the tree any more; the file-based tracker that used to live in
+`tasks/` was migrated on 2026-09-08 and is indexed in
+[`docs/task-archive.md`](docs/task-archive.md), which is also how you turn an
+old `task NNN` reference in a comment or a commit message into something
+readable.
+
+What an issue must contain — the rules the file tracker had, unchanged, because
+they are what made those files worth reading:
+
+- **What** and **why**, never **how**. No patches, no prescribed function names.
+  Whoever picks it up decides the implementation.
+- Every claim about current behaviour is traceable: a `file:line`, a measured
+  number, or a named document. A guess is written as a guess.
+- Acceptance criteria checkable by someone who did not write the issue. "Works
+  correctly" is not a criterion; "8/8 concurrent requests return their own
+  session id" is.
+- What is explicitly **out of scope**, when the boundary is not obvious.
+
+Labels carry what the file headers used to:
+
+- type — `bug`, `enhancement`, `spike`, `refactor`, `decision`, `build`, `test`,
+  `measurement`, `documentation`, `epic`
+- area — `area:http-direct`, `area:http-gateway`, `area:worker`, `area:tls`,
+  `area:acme`, `area:fiber`, `area:ci`, `area:pool-types`, `area:test-harness`
+- `priority:high` / `priority:medium` / `priority:low`
+- `track:nice-to-have` — work that only applies to `pool.executor = fiber`,
+  which is behind a build flag that is **off by default**, so a stock binary
+  does not contain that code. Those priorities rank against **each other**, not
+  against the main line.
 
 Out-of-scope discoveries while coding go in `findings.md` at the repo root
-(gitignored).
+(gitignored) and are promoted to issues, not kept there — see step 3.
 
 ---
 
-# Task workflow
+# Issue workflow
 
-Step-by-step process for picking up a numbered task from `tasks/` and landing it
-on `main`.
+Step-by-step process for picking up an issue and landing it on `main`.
 
-## 1. Read the task
+## 1. Read the issue
 
-1. Open `tasks/<NNN>-*.md` (or `tasks/nice-to-have/<NNN>-*.md`).
+1. `gh issue view <N>` (`gh issue list --label area:http-direct` to find one).
 2. Confirm acceptance criteria are checkable and note what is explicitly out of
-   scope.
-3. Trace any `file:line` or document references before writing code.
+   scope. If they are not checkable, fix the issue first — a comment or an edit
+   — before writing code.
+3. Trace any `file:line` or document references before writing code. An issue
+   migrated from the old tracker may cite `task NNN`; resolve it through
+   [`docs/task-archive.md`](docs/task-archive.md).
+4. Assign yourself, so two worktrees do not start the same work.
 
 ## 2. Isolated worktree (always)
 
@@ -110,12 +143,13 @@ Never implement on a dirty `main`. Always branch in a dedicated worktree:
 
 ```sh
 git fetch origin main
-git worktree add ../php-fpm-ng-worktrees/task-<NNN>-<slug> -b task/<NNN>-<slug> origin/main
-cd ../php-fpm-ng-worktrees/task-<NNN>-<slug>
+git worktree add ../php-fpm-ng-worktrees/issue-<N>-<slug> -b issue/<N>-<slug> origin/main
+cd ../php-fpm-ng-worktrees/issue-<N>-<slug>
 ```
 
-Use a unique directory name (task number + short slug + date if needed). One task
-per worktree.
+Use a unique directory name (issue number + short slug + date if needed). One
+issue per worktree. Branches from before the migration are named
+`task/<NNN>-<slug>`; that prefix is retired for new work.
 
 ## 3. Implement
 
@@ -130,21 +164,25 @@ per worktree.
 ### Findings during coding
 
 While working, jot down follow-ups worth doing but out of scope for the current
-task in **`findings.md`** at the repo root (or in the worktree — same file
+issue in **`findings.md`** at the repo root (or in the worktree — same file
 name). This file is **gitignored**; it is a personal scratch pad, not part of
 the tree.
 
 Format (keep it short):
 
 ```markdown
-## YYYY-MM-DD — task NNN
+## YYYY-MM-DD — issue #N
 
 - **area:** one-line description
   **why:** what you saw (`file:line` or measurement)
-  **suggested task:** one sentence, no implementation
+  **suggested issue:** one sentence, no implementation
 ```
 
-Do not fix unrelated problems in the same PR unless the task explicitly asks for
+An entry that survives review (step 5) is opened as an issue and removed from
+`findings.md`. The file is a scratch pad between the observation and the issue,
+never a backlog of its own.
+
+Do not fix unrelated problems in the same PR unless the issue explicitly asks for
 it. Record them in `findings.md` instead.
 
 ## 4. Build and test
@@ -183,7 +221,7 @@ for full matrix coverage.
 
 ### Tests
 
-- Add regression tests that match the task (`.phpt`, shell harness under
+- Add regression tests that match the issue (`.phpt`, shell harness under
   `build/test-*.sh`, etc.) when the behaviour is checkable.
 - Run relevant suites before opening the PR (`build/run-fpmng-phpt.sh`,
   task-specific scripts, fast doc checks like `build/test-comment-content-rule.sh`).
@@ -202,27 +240,30 @@ Scope is deliberately narrow:
 Launch one `bugbot` subagent with:
 
 ```text
-Full Repository Path: <absolute path to the task worktree>
+Full Repository Path: <absolute path to the issue worktree>
 Diff: branch changes
 Custom Instructions: Review only added/changed code. Report major issues only
 (correctness, security, leaks, broken invariants). Skip style, formatting, and
 minor nits. Also read findings.md in the repo root: for each entry, say whether
-it warrants a new task file under tasks/ and why. Do not invent tasks for
-trivial or duplicate items.
+it warrants its own issue and why. Do not invent work for trivial or
+duplicate items.
 ```
 
 Act on review findings that are clearly valid before opening the PR. If Bugbot
-confirms a `findings.md` item is substantive, **create a task file** in
-`tasks/` (separate commit or follow-up — not bundled into the current task’s PR
-unless the user asks).
+confirms a `findings.md` item is substantive, **open an issue** for it
+(`gh issue create`, with labels) and drop the entry from `findings.md`. Do not
+bundle the follow-up into the current PR unless the user asks.
 
-## 6. Finish the task file
+## 6. Record the outcome on the issue
 
-In the **same commit** that completes the work:
+The `Outcome` section the old task files carried is not paperwork — it was the
+only record of what had actually been measured. It now lives as a comment on the
+issue, written when the PR is ready and not from memory a week later:
 
-1. Move `tasks/<NNN>-*.md` → `tasks/done/`.
-2. Set `Status: done` and append an **Outcome** section: what was done, what was
-   measured, what was left out.
+- what was done,
+- what was **measured** (a number, or "not measured" — that is a complete
+  answer),
+- what was deliberately left out, and whether it needs an issue of its own.
 
 ## 7. Pull request (always)
 
@@ -231,11 +272,14 @@ All changes land through a PR — never push directly to `main`.
 ```sh
 git add ...
 git commit -m "..."
-git push -u origin task/<NNN>-<slug>
-gh pr create --title "..." --body "..."
+git push -u origin issue/<N>-<slug>
+gh pr create --title "..." --body "Closes #<N>
+
+..."
 ```
 
-PR body: short summary, test plan checklist, note if anything was “not measured”.
+PR body: `Closes #<N>` first, so the merge closes the issue; then a short
+summary, a test plan checklist, and a note if anything was “not measured”.
 
 ## 8. CI and merge
 
@@ -251,23 +295,27 @@ Back on the primary checkout:
 ```sh
 cd /path/to/php-fpm-ng          # main worktree
 git pull origin main
-git worktree remove ../php-fpm-ng-worktrees/task-<NNN>-<slug>
-git branch -d task/<NNN>-<slug>   # if not deleted by merge
+git worktree remove ../php-fpm-ng-worktrees/issue-<N>-<slug>
+git branch -d issue/<N>-<slug>   # if not deleted by merge
 ```
+
+Confirm the issue actually closed (`gh issue view <N>`) — `Closes #<N>` only
+fires on merge into the default branch — and post the outcome comment from step
+6 if it is not there yet.
 
 If merge deleted the remote branch but the local worktree remains, remove the
 worktree directory manually. Leave `findings.md` in place locally (gitignored) —
-trim entries that became tasks or were rejected.
+trim entries that became issues or were rejected.
 
-## Checklist (copy for each task)
+## Checklist (copy for each issue)
 
-- [ ] Task read; acceptance criteria understood
-- [ ] Worktree + branch `task/<NNN>-<slug>`
+- [ ] Issue read and assigned; acceptance criteria understood
+- [ ] Worktree + branch `issue/<N>-<slug>`
 - [ ] Implementation + tests; English throughout
 - [ ] Build/test on poligon if available, else local
 - [ ] Poligon: own dirs/ports; cleaned up after
 - [ ] `findings.md` updated for out-of-scope discoveries
-- [ ] Bugbot review (major issues only); valid findings → task files
-- [ ] Task moved to `tasks/done/` with Outcome
-- [ ] PR opened; CI green
-- [ ] Merged; worktree removed; `main` pulled
+- [ ] Bugbot review (major issues only); valid findings → new issues
+- [ ] Outcome written up (done / measured / left out)
+- [ ] PR opened with `Closes #<N>`; CI green
+- [ ] Merged; issue closed; worktree removed; `main` pulled

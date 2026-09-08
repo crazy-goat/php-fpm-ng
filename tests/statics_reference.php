@@ -1,7 +1,7 @@
 <?php
 /* Reference test for fiber.isolate_statics (fpm_pool_coop_statics.c).
  *
- * The spike (tasks/008-laravel-class-statics.md) explicitly did not test
+ * The spike (task 008, done; see docs/task-archive.md) explicitly did not test
  * `$x = &Class::$static;` across a suspension point. This script does.
  *
  * Suspension point: a real blocking MySQL query (`SELECT SLEEP(?)`) through

@@ -62,7 +62,7 @@ startup notices. After removing that eager clear, three fresh full suites and
 five isolated repetitions passed the test; a clean upstream FPM control also
 passed five isolated repetitions. The detailed source and binary fingerprints,
 startup/RSS measurements and raw result directory are recorded in
-[`tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md`](../tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md).
+task 029 (done; see [`task-archive.md`](task-archive.md)).
 
 The `WARN` row is the upstream `XFAIL` test
 `log-bwd-multiple-msgs-stdout-stderr.phpt`: the test passed despite its
@@ -85,7 +85,7 @@ pass or hidden as a skip.
   startup exceed the PHPT harness's three-second startup-log timeout under
   full-suite pressure. The unchanged upstream test passed in the fixed binary
   in all three fresh full-suite runs and five isolated repetitions; see the
-  [completed task 029](../tasks/done/029-fpm-phpt-gh16432-intermittent-failure.md)
+  completed task 029 (see [`task-archive.md`](task-archive.md))
   for the exact verdict, commands and fingerprints.
 - `log-bwd-multiple-msgs-stdout-stderr.phpt` — **upstream expected-failure
   warning**. The test is marked `XFAIL` as intermittent and passed in this run;

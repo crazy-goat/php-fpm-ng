@@ -73,7 +73,8 @@ request. Full measurements, root causes and required configuration:
 - **Symfony — supported, with required configuration.** Verified only on
   **Symfony 8.1.6** (skeleton + orm-pack + security-bundle, Doctrine ORM,
   sessions and cache on Redis). Requires `env[FPMNG_SHARED_INCLUDES] = 1` and a
-  hand-written `public/index.php` without `symfony/runtime` (task 007); needs
+  hand-written `public/index.php` without `symfony/runtime`
+  ([#78](https://github.com/crazy-goat/php-fpm-ng/issues/78)); needs
   **no** `fiber.isolate_statics` entries. Covered by an automated probe
   (`tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
   Doctrine identity, Twig, form validation, synchronous Messenger dispatch,
@@ -149,6 +150,27 @@ Two flags without which this looks broken for no reason:
   configure test, because its dependencies are missing from the link line
 
 Alpine has no `oniguruma-static`, so mbstring is built with `--disable-mbregex`.
+
+## Contributing
+
+Work is tracked in **GitHub Issues**, not in the tree. `gh issue list` shows
+what is open; labels carry type (`bug`, `enhancement`, `spike`, `refactor`,
+`decision`, ...), area (`area:http-direct`, `area:tls`, `area:fiber`, ...) and
+priority. Everything under `track:nice-to-have` applies only to
+`pool.executor = fiber`, which is behind a build flag that is off by default.
+
+Before touching anything, read [`workflow.md`](workflow.md): the English-only
+rule, the architecture contract (new behaviour in new files under
+`sapi/fpmng/fpm/`, never `strcmp(type->name, ...)`), the evidence rule, the
+shared test box, and the step-by-step process from issue to merged PR. What a
+comment in this codebase is for — and which comments must never be deleted
+without re-establishing the fact first — is
+[`workflow.md`](workflow.md#comments-what-earns-one).
+
+Until 2026-09-08 work was tracked as one Markdown file per task under `tasks/`.
+That directory is gone; [`docs/task-archive.md`](docs/task-archive.md) maps
+every `task NNN` reference still in the comments and commit messages to either
+its issue or the git command that prints the original file.
 
 ## License
 

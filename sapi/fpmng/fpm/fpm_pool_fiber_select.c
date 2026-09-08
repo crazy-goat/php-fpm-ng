@@ -1,6 +1,6 @@
 /* fpm-ng: pool.executor = fiber — make stream_select() suspend the request
  * Fiber instead of blocking the process. See fpm_pool_fiber_select.h and
- * tasks/nice-to-have/006-fiber-stream-select.md.
+ * task 006 (done; see docs/task-archive.md).
  *
  * stream_select() takes SETS of descriptors from userland
  * (ext/standard/streamsfuncs.c: PHP_FUNCTION(stream_select)), unlike the

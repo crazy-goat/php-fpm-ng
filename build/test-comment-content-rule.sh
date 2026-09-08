@@ -5,11 +5,11 @@ set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 WORKFLOW="$REPO/workflow.md"
-TASKS_README="$REPO/tasks/README.md"
+ROOT_README="$REPO/README.md"
 FPMNG_README="$REPO/sapi/fpmng/README.md"
 
 test -f "$WORKFLOW"
-test -f "$TASKS_README"
+test -f "$ROOT_README"
 test -f "$FPMNG_README"
 
 grep -q '## Comments: what earns one' "$WORKFLOW"
@@ -19,5 +19,5 @@ grep -q '\*\*Never\*\*' "$WORKFLOW"
 grep -q 'no scheduled comment-cleanup pass' "$WORKFLOW"
 grep -q 'opportunistically' "$WORKFLOW"
 
-grep -q 'workflow.md#comments-what-earns-one' "$TASKS_README"
+grep -q 'workflow.md#comments-what-earns-one' "$ROOT_README"
 grep -q 'workflow.md#comments-what-earns-one' "$FPMNG_README"

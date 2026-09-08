@@ -2,7 +2,7 @@
 # Verifies task 040: the HTTP gateway's TLS certificate/key can be replaced
 # on disk and picked up by every gateway process without a restart, without
 # dropping connections, and without ever installing a broken candidate (see
-# tasks/040-tls-certificate-reload-without-restart.md).
+# task 040, done; see docs/task-archive.md).
 #
 # No root needed (unlike test-http-gateway-privileges.sh): this only reads
 # TCP ports and PEM files this script itself creates.

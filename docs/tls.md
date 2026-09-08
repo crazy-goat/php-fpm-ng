@@ -5,7 +5,7 @@ http`'s gateway: the directives that turn it on, and how a renewed
 certificate reaches every gateway process (task 040). For the internal
 design rationale, see the header comments in `sapi/fpmng/fpm/fpm_http_tls.c`
 and `sapi/fpmng/fpm/fpm_http_tls_reload.c`, and
-`tasks/040-tls-certificate-reload-without-restart.md` for why each choice
+task 040 (done; see [`task-archive.md`](task-archive.md)) for why each choice
 was made the way it was.
 
 ## Directives

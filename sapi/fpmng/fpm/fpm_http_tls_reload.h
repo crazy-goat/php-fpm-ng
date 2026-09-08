@@ -1,7 +1,7 @@
 /* fpm-ng: reload the HTTP gateway's TLS certificate/key without restarting
  * any gateway process (task 040). See fpm_http_tls_reload.c for the design
  * (master-side mtime timer + validate, double-buffered shared memory,
- * per-child adoption timer) and tasks/040-tls-certificate-reload-without-restart.md
+ * per-child adoption timer) and task 040 (done; see docs/task-archive.md)
  * for the reasoning behind each choice.
  *
  * Layered on top of fpm_http_tls.h, not a replacement for it: fpm_http_tls_s,
@@ -24,7 +24,7 @@
 
 /* http.tls_reload_check, when the directive is not set at all (as opposed to
  * set to 0, which means "off"). Matches the "default e.g. 5" left open by
- * tasks/040's Decision section: this is a config/perf choice, not a
+ * task 040's Decision section: this is a config/perf choice, not a
  * correctness one -- fast enough that a renewed certificate is picked up
  * quickly, slow enough that N gateway processes stat()ing two files does
  * not show up as load. */

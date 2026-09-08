@@ -241,7 +241,9 @@ buffered bytes just like a TLS one. Any other cast of a filtered stream — to a
 ## Current state
 
 Task 073 implements the POC described above. Amendments 1 and 2 are written into
-`tasks/070-*.md` and `tasks/072-*.md`; item 5 is not scheduled.
+[#68](https://github.com/crazy-goat/php-fpm-ng/issues/68) and
+[#70](https://github.com/crazy-goat/php-fpm-ng/issues/70); item 5 is not
+scheduled.
 
 Adjustment 1 above asserts "the API is not Revolt-specific; Revolt is the test".
 Task 075 tested that claim with a second, independent consumer and it held: a

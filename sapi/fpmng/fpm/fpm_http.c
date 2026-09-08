@@ -1882,7 +1882,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * root: binding http.reuseport's own listener, and holding the TLS
 	 * private key the master read before the first fork (fpm_http_tls.h).
 	 * Nothing below -- the access log, static files, TLS handshakes, proxying
-	 * to the pool -- needs it. See tasks/010-http-gateway-drop-privileges.md. */
+	 * to the pool -- needs it. See task 010 (done; see docs/task-archive.md). */
 	fpm_http_gateway_drop_privileges(gw);
 
 	/* one fd per gateway process, all appending to the same http.access_log

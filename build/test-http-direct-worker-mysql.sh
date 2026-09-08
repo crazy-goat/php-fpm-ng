@@ -214,7 +214,7 @@ case "$verdict" in
 	   say "  ^ recorded, not fatal: the watcher is armed on the raw fd from"
 	   say "    php_stream_cast(), so a TLS stream can buffer above it."
 	   say "    Consequence: this harness is not a regression gate for the TLS"
-	   say "    claim in tasks/done/074-*.md — read this line, do not read PASS." ;;
+	   say "    claim in task 074 (done; see docs/task-archive.md) — read this line, do not read PASS." ;;
 esac
 
 # A worker that wedged would still have answered above, so check the log for

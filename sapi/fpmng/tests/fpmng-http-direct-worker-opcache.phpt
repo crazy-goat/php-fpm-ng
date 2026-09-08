@@ -13,7 +13,11 @@ if (!extension_loaded('Zend OPcache')) {
  * reason that has nothing to do with the fix. Skip instead. Those assertions
  * stay, and still catch opcache being active in ini yet inactive in the
  * child. */
-if (!filter_var(ini_get('opcache.enable'), FILTER_VALIDATE_BOOLEAN)) {
+/* No filter_var()/FILTER_VALIDATE_BOOLEAN here: ext/filter is not built under
+ * --disable-all, which is exactly the canonical build this suite runs on, and
+ * calling it borked this test. Plain string comparison only. */
+$opcacheIni = strtolower(trim((string) ini_get('opcache.enable')));
+if ($opcacheIni === '' || $opcacheIni === '0' || $opcacheIni === 'off' || $opcacheIni === 'false') {
     die('skip requires opcache.enable=1 (compiled in but disabled by ini)');
 }
 ?>

@@ -1,0 +1,73 @@
+Fiber executor (fpm-ng): non-blocking stream_select()
+
+Everything below is compiled ONLY when HAVE_FPMNG_FIBER is defined —
+fpm-ng's configure sets it for --enable-fpmng-fiber (sapi/fpmng/config.m4).
+Without it this file is byte-for-byte upstream.
+
+What changes when it is defined: PHP_FUNCTION(stream_select) delegates the
+actual wait to fpm_fiber_select() (sapi/fpmng/fpm/fpm_pool_fiber_select.c)
+instead of calling php_select()/select() directly. Outside a request running
+on pool.executor = fiber — including CLI and every other pool type in the
+same binary — fpm_fiber_select() falls back to the real, process-blocking
+select() itself (fpm_pool_fiber_can_wait() is false there), so this patch
+changes nothing observable when the fiber executor is not in use.
+
+Weak declaration, not a header include: fpm_pool_fiber_select.c is linked
+only into sapi/fpmng/php-fpm-ng (build/prepare.sh's FIBER_PATTERN), while
+this file is compiled once into PHP_GLOBAL_OBJS and linked into every SAPI in
+the tree (cli, cgi, phpdbg, ...). An ordinary #include + call would leave
+those binaries with an undefined reference to fpm_fiber_select() the moment
+--enable-fpmng-fiber is on — exactly the problem patch 0007 already solved
+for ext/openssl the same way: a weak extern that resolves to NULL outside
+fpm-ng's own binary, checked at the call site.
+
+Why here and not at the transport layer, like the rest of the fiber
+executor's socket interception (fpm_pool_fiber_xport.c): stream_select()
+takes SETS of descriptors from userland — some wrapped by us, some not, some
+not sockets at all — which the per-stream transport wrapper has no way to
+see. See tasks/nice-to-have/006-fiber-stream-select.md for the analysis.
+
+What this does NOT change: the exceptfds set (efds) still falls back to the
+real select() call whenever it is non-empty — see fpm_fiber_select()'s
+comment for why. Neither Predis nor php-amqplib, the two consumers this task
+exists for, pass it.
+
+Waits on: nothing upstream — fpm-ng behavior, gated so upstream is the
+default. Expires by redesign (fiber executor dropped, or an upstream async
+I/O layer appears).
+Checked on: PHP-8.5 branch (67d1476d4d80, 8.5.11-dev).
+
+diff --git a/ext/standard/streamsfuncs.c b/ext/standard/streamsfuncs.c
+index 9b23600b..385c013c 100644
+--- a/ext/standard/streamsfuncs.c
++++ b/ext/standard/streamsfuncs.c
+@@ -28,6 +28,16 @@
+ #include <unistd.h>
+ #endif
+
++#ifdef HAVE_FPMNG_FIBER
++/* fpm-ng: pool.executor = fiber. fpm_pool_fiber_select.c is linked only into
++ * sapi/fpmng/php-fpm-ng (build/prepare.sh's FIBER_PATTERN), while this file is
++ * linked into every SAPI in the tree — the same problem patch 0007 solves for
++ * ext/openssl. A weak declaration keeps cli/cgi/phpdbg linkable: there the
++ * symbol resolves to NULL and the call below falls back to the real
++ * select(). */
++extern int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struct timeval *timeout) __attribute__((weak));
++#endif
++
+ #ifndef PHP_WIN32
+ #define php_select(m, r, w, e, t)	select(m, r, w, e, t)
+ typedef unsigned long long php_timeout_ull;
+@@ -823,7 +833,12 @@ PHP_FUNCTION(stream_select)
+ 		}
+ 	}
+
++#ifdef HAVE_FPMNG_FIBER
++	retval = fpm_fiber_select ? fpm_fiber_select(max_fd+1, &rfds, &wfds, &efds, tv_p)
++		: php_select(max_fd+1, &rfds, &wfds, &efds, tv_p);
++#else
+ 	retval = php_select(max_fd+1, &rfds, &wfds, &efds, tv_p);
++#endif
+
+ 	if (retval == -1) {
+ 		php_error_docref(NULL, E_WARNING, "Unable to select [%d]: %s (max_fd=" PHP_SOCKET_FMT ")",

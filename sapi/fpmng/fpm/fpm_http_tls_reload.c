@@ -1,6 +1,6 @@
 /* fpm-ng: reload the HTTP gateway's TLS certificate/key without restarting
  * any gateway process, see fpm_http_tls_reload.h. Design (task 040, full
- * reasoning in tasks/040-tls-certificate-reload-without-restart.md):
+ * reasoning in task 040, done; see docs/task-archive.md):
  *
  * - The master owns the file reads, same property fpm_http_tls.h already
  *   documents for startup -- children never open the key file, here or
@@ -142,7 +142,7 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	/* Torn reads, tasks/040 decision: enforced, not just documented. Reuses
+	/* Torn reads, task 040 decision: enforced, not just documented. Reuses
 	 * the exact check config-validation already runs at startup -- never
 	 * logs key material. */
 	/* sni_spec: NULL -- this tick only ever re-checks http.tls_cert/

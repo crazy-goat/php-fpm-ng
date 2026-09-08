@@ -797,7 +797,7 @@ http.plain_listen = 0.0.0.0:80
 http.tls_cert = /state/acme/example.com/fullchain.pem
 http.tls_key = /state/acme/example.com/privkey.pem
 ```
-renewed SNI certificate needs one. See `tasks/done/041-tls-alpn-and-sni.md`.
+renewed SNI certificate needs one. See task 041 (done; [`task-archive.md`](task-archive.md)).
 
 
 ## 3m. `fcgi-async` — research results and the REAL GOAL: an experimental async build

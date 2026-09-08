@@ -1,7 +1,7 @@
 /* fpm-ng: per-request isolation of a CONFIGURED list of class static
  * properties on the coop (fiber) executor.
  *
- * Problem (tasks/008-laravel-class-statics.md, measured on Laravel 13.30.1,
+ * Problem (task 008 (done; see docs/task-archive.md), measured on Laravel 13.30.1,
  * pool.executor = fiber, FPMNG_SHARED_INCLUDES=1, pm.max_children = 1,
  * 8 concurrent requests to /session): class static properties are, like
  * everything the coop model shares by default (see fpm_pool_coop.h), one

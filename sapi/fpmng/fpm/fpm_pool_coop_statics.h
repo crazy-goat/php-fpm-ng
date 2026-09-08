@@ -1,7 +1,7 @@
 /* fpm-ng: per-request isolation of a CONFIGURED list of class static
  * properties on the coop (fiber) executor. See fpm_pool_coop_statics.c for
  * the design, the memory-ownership argument, and the hazards it was checked
- * against (tasks/008-laravel-class-statics.md).
+ * against (task 008, done; see docs/task-archive.md).
  */
 
 #ifndef FPM_POOL_COOP_STATICS_H

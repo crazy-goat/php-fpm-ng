@@ -343,7 +343,7 @@ else:
 # neither more data nor a FIN to make the descriptor readable again, and the
 # only thing that can finish the body is the loop looking inside the stream's
 # userland buffer. Measured before the fix, at this 1 KiB chunk: 769 of 8192
-# body bytes after 1 read (tasks/done/075-*.md has the full table).
+# body bytes after 1 read (task 075, done, has the full table; see docs/task-archive.md).
 for keep in 0 1; do
 	say "probing for a stranded TLS buffer at a ${CHUNK}-byte read chunk (keep-alive=$keep)"
 	verdict=$(strand "$keep")

@@ -1,7 +1,7 @@
 name: build
 
 # Task 002: prove the tree still builds and our php-src patches still apply.
-# See tasks/done/002-ci-build-matrix.md. The dynamic build remains a single cell
+# See task 002 (done; docs/task-archive.md). The dynamic build remains a single cell
 # rather than the full ZTS x session x TLS matrix. The static musl build is
 # covered separately below.
 #
@@ -51,7 +51,7 @@ jobs:
         run: ./build/prepare.sh "$PWD/php-src"
 
   # Deliberately a single cell for now (non-ZTS, session static, TLS on),
-  # not the full ZTS x session x TLS matrix from tasks/002-ci-build-matrix.md.
+  # not the full ZTS x session x TLS matrix from task 002 (done; docs/task-archive.md).
   # That matrix remains release-time work — see the task file's acceptance
   # criteria 3-4. Re-add strategy.matrix (zts/session/tls) before the first
   # release.
@@ -325,7 +325,7 @@ jobs:
         with:
           name: fpmng-canonical-build
           path: build-out
-      - name: verify the gateway drops privileges (tasks/010)
+      - name: verify the gateway drops privileges (task 010)
         run: |
           chmod +x build-out/bin/php-fpm-ng
           sudo ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
@@ -349,7 +349,7 @@ jobs:
         with:
           name: fpmng-canonical-build
           path: build-out
-      - name: verify TLS certificate reload without restart (tasks/040)
+      - name: verify TLS certificate reload without restart (task 040)
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"

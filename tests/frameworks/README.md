@@ -36,7 +36,7 @@ Each framework's own runner remains independently invocable and documented;
 - **Executor matrix: fiber-only.** All three probes exercise
   `pool.executor = fiber` only. Default/classic-executor coverage is out of
   scope for this harness — see the Outcome section of
-  `tasks/done/027-framework-integration-test-harness.md`.
+  `task 027 (done; see [`docs/task-archive.md`](../../docs/task-archive.md)).
 - **Docker Compose by default.** Each framework directory owns a
   `compose.yaml` pinning the same MySQL/Redis versions (`mysql:8.4.6`,
   `redis:7.4.2-alpine`) so a framework-to-framework comparison is never

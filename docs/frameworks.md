@@ -279,6 +279,10 @@ properties** (task 008, `sapi/fpmng/fpm/fpm_pool_coop_statics.c`):
 
     fiber.isolate_statics = Illuminate\Container\Container::instance,Illuminate\Support\Facades\Facade::app,Illuminate\Support\Facades\Facade::resolvedInstance,Illuminate\Database\Eloquent\Model::resolver
 
+(Superseded — this was the four-entry list as of task 008. The current,
+versioned snippet for Laravel 13.30.1 is
+["Laravel: the versioned configuration snippet and how it is verified"](#laravel-the-versioned-configuration-snippet-and-how-it-is-verified)
+below.)
 Measured on the same `/session?user=X&sleep=0.3`, N=8, `pm.max_children = 1`:
 8/8 correct, distinct `sess_user`, distinct `app_oid` and
 `container_request_oid` per request. A negative control (same run, empty
@@ -589,3 +593,114 @@ The empty/default `fiber.isolate_statics` configuration is the measured Slim
 configuration. No separate non-empty static-isolation comparison was run because
 this probe has no request-scoped Slim static candidate to configure; that is not
 evidence for PHP-DI or other integrations.
+
+# UPDATE 2026-09-08 (task 025): Laravel — the statics list made systematic
+
+The four-entry list above was empirical: one entry per scenario that failed,
+found by hand. Task 025 replaced that with a measurement and, in the process,
+found two more entries the scenarios had never exercised.
+
+## Laravel: the versioned configuration snippet and how it is verified
+
+**Laravel 13.30.1** (phpredis 6.3.0RC1 as the Redis client, MySQL 8.4 via the
+test box, `SESSION_DRIVER=redis`, `CACHE_STORE=redis`, `pm.max_children = 1`,
+`pool.executor = fiber`, `FPMNG_SHARED_INCLUDES = 1`):
+
+```ini
+fiber.isolate_statics = Illuminate\Container\Container::instance,\
+Illuminate\Support\Facades\Facade::app,\
+Illuminate\Support\Facades\Facade::resolvedInstance,\
+Illuminate\Database\Eloquent\Model::resolver,\
+Illuminate\Database\Eloquent\Model::dispatcher,\
+Illuminate\Database\Eloquent\Model::globalScopes
+```
+
+(The line is comma-separated with no whitespace in the real directive; broken
+here only for readability. Copy it from `tests/frameworks/laravel/bin/run.sh`,
+which is the file the runner itself uses.)
+
+Where each entry came from:
+
+| Entry | Found by | Failure without it |
+|---|---|---|
+| `Container::instance` | task 008 `/session` | 5/8 requests served another user's session data |
+| `Facade::app`, `Facade::resolvedInstance` | task 008 authenticated `/me` | most requests got `user: null` (AuthManager resolved through another request's container) |
+| `Model::resolver` | task 025 Eloquent probe | HTTP 500 `Cannot execute queries while other unbuffered queries are active` (shared PDO connection) |
+| `Model::dispatcher` | task 025 observers scenario | model events dispatch through whichever request's event dispatcher was cached last — a listener registered by request A does not fire for A's own models |
+| `Model::globalScopes` | task 025 global-scopes scenario | **silent**: request A's `addGlobalScope` filters request B's query — HTTP 200 with `item: null` |
+
+**Warning — what an incomplete list does.** It does not crash. Every failure
+mode in the table above except the Eloquent-resolver one presented as a
+**correct-looking HTTP 200 with another request's data (or with missing
+data) and an empty `laravel.log`**. Anyone deploying this configuration must
+know that before, not after, an incident. The list is verified for the code
+paths the repository probe exercises (below); a code path nobody has
+exercised may still need an entry, and Laravel must be re-verified per minor
+version — a framework upgrade can add or move a static.
+
+## The audit: how the list is verified instead of hand-picked
+
+`tests/frameworks/laravel/bin/run.sh` ends with a statics audit. The
+`/statics-audit` route touches every state-keeping subsystem first (DB, cache,
+Redis, log, mail, view, events, rate limiter, auth, Eloquent model events and
+global scopes — so each one initializes whatever statics it owns in *this*
+request), snapshots **every static property of every declared class**, blocks
+on a real MySQL suspension, and snapshots again. A static whose value changed
+across the suspension was overwritten by another concurrent request: it holds
+per-request state and must be on the list. Round 1 is cold (concurrent boot
+itself flips boot-once statics), so the verdict comes from round 2.
+
+Measured 2026-09-08, PHP-FPM-NG 8.5.11-dev (built Sep 8 2026 05:30:28),
+SHA-256 `71fe2574aa2d0df316fab05c9f51fdc1c7e9f96ff8b151e4ae9c69595c1eb0c9`,
+feature markers verified via `strings` before the run, worktree branch
+`task/025-laravel-statics`:
+
+- audit against the six-entry pool: **235 static properties checked, round-2
+  steady-state changes: zero** (`AUDIT_RESULT=COVERED`). The only round-1
+  changes were `Laravel\SerializableClosure\Serializers\Native::transformUseVariables`
+  and `::resolveUseVariables` — a process-shared cache of pure closure
+  objects holding no request data; they are documented benign exclusions in
+  `bin/run.php`, each exclusion needing a written justification.
+- an audit against a pool with an **empty** list was tried and removed from
+  the default run: without isolation the probe itself destabilizes the pool
+  (17 of 64 audit requests returned 502, and the MySQL client logged
+  `RSET_HEADER packet additional data length is past 3 bytes` — protocol
+  corruption aimed at the *shared* MySQL server). The per-scenario negative
+  controls already reproduce empty-list damage on isolated routes;
+  `LARAVEL_AUDIT_EXPECT=leak` remains in `bin/run.php` as a manual forensic
+  mode for a private MySQL.
+
+`bin/statics-scan.sh` records the search space: **215 static property
+declarations** in `vendor/laravel/framework` 13.30.1 (the spike's "237"
+counted `static $` inside function bodies too — that is local state, not
+class state). The audit is what discriminates request-scoped statics out of
+that space; the hand-picking is gone.
+
+## Full suite result (2026-09-08, same binary)
+
+`configured_pass=15 configured_error=0 negative_pass=1 negative_error=14
+not_measured=0 audit_status=0` — all fifteen configured scenarios pass,
+including the five new since task 027: rate limiter (per-request keys, own
+hit counts), mail attribution through the log transport (asserted on
+`laravel.log` blocks — each marker in exactly one intact message block, no
+interleaving), Blade view composer (per-request registration, own render),
+implicit route model binding (own user), and Eloquent observers + global
+scopes (own listener fires, own scope applied, 8/8). The audit runs after
+them and passes.
+
+The negative suite (same scenarios, `fiber.isolate_statics` empty) fails 14
+of 15 as designed — the one pass (CSRF) does not exercise any of the
+isolated statics, which the runner documents rather than hiding.
+
+`Model::$booted` stays **off** the list deliberately: boot-once per process
+is a side effect of the coop model, and none of the measured scenarios
+depends on boot side effects being request-dependent. It is watched by the
+audit — if it ever flips in steady state, the run fails.
+
+## What is still not measured
+
+- `pm.max_children > 1`, `APP_ENV=prod`, `fiber.revalidate_freq` and
+  long-run RSS for the Laravel fixture (the Symfony probe covers these
+  patterns; the Laravel one does not yet).
+- Laravel versions other than 13.30.1. The snippet above is **versioned**:
+  re-run the suite and audit against a new minor before extending the claim.

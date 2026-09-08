@@ -69,17 +69,24 @@ search space the audit discriminates against is on record.
 
 ## Configuration snippet (Laravel 13.30.1)
 
-The configured pool uses this versioned list for Laravel 13.30.1:
+The configured pool uses this versioned list for Laravel 13.30.1 (the same
+list `bin/run.sh` passes to the pool; see `docs/frameworks.md`, section
+"Laravel: the versioned configuration snippet and how it is verified", for
+where each entry came from and the warning about incomplete lists):
 
 ```ini
-fiber.isolate_statics = Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver
+fiber.isolate_statics = Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver,Illuminate\\Database\\Eloquent\\Model::dispatcher,Illuminate\\Database\\Eloquent\\Model::globalScopes
 ```
 
 `Model::$resolver` was added by the repository-owned Eloquent probe: with only
 the three previously documented entries, concurrent Eloquent queries returned
 HTTP 500 with `Cannot execute queries while other unbuffered queries are
 active`; adding that fourth entry made the Eloquent and mixed DB/Cache/Redis
-scenarios pass. This is a measured configuration requirement, not Laravel code
+scenarios pass. `Model::$dispatcher` and `Model::$globalScopes` were added by
+the task 025 observers/global-scopes scenario: without them, a model-event
+listener registered by request A does not fire for A's own models, and a
+global scope registered by A silently filters B's query (HTTP 200,
+`item: null`). This is a measured configuration requirement, not Laravel code
 added to fpm-ng.
 
 The empty-list run repeats every implemented scenario, including `/session`,

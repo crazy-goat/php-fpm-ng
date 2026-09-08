@@ -3,6 +3,11 @@
 Task 073 POC. Not a supported feature — see
 `docs/http-direct-revolt-integration.md` for the design and its limits.
 
+There is a second example next door: `examples/http-direct-worker-mysql/`
+(task 074) runs the same driver but sleeps in MySQL over `amphp/mysql`, which
+is what actually exercises the fd watchers on a socket. This one only ever
+touches the timer primitive.
+
 ## What this shows
 
 `pool.type = http-direct` + `pool.executor = worker` boots **one** PHP script

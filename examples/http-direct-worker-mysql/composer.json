@@ -1,0 +1,10 @@
+{
+    "name": "php-fpm-ng/http-direct-worker-mysql-example",
+    "description": "Task 074 example: amphp/mysql on an FPM worker that owns its event loop",
+    "require": {
+        "php": ">=8.2",
+        "amphp/amp": "^3.1",
+        "amphp/mysql": "^3.0",
+        "revolt/event-loop": "^1.0"
+    }
+}

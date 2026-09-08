@@ -53,6 +53,48 @@ iteration, so it is rare and will present as an unexplained empty reply.
   `fw.ready` is non-empty), so that every future bridge does not have to
   rediscover it. A bridge author cannot be expected to know about `fw.ready`.
 
+## Options
+
+Worth noting first: userland does **not** need to stop accepting requests
+itself, because `fpm_worker_accept()` already answers 503 and refuses once
+`fpm_worker_stopping` is set (`fpm_http_direct_worker.c:305`). So the only real
+use a bridge has for `fpmng_worker_stopping()` is deciding *whether it may
+exit* — which is precisely the question it cannot currently answer.
+
+**A. Fix each bridge in userland.** Ask `fpmng_worker_next_request()` once more
+before concluding, which is what task 075 did for the ReactPHP bridge. This has
+to stay as the documented idiom, but it does not scale: every bridge author must
+know that `fw.ready` exists, i.e. must know our internals. A third bridge will
+make the same mistake.
+
+**B. A safety net in the SAPI (recommended).** On the way out, before
+`evhttp_free()`, walk `fw.pending` and send 503 with `Connection: close` to
+every request that was never answered, plus one log line with the count. The
+invariant becomes: *we never close an accepted connection without a response.*
+About twenty lines, in the spot that already carries the comment about
+`evhttp_free()` and close-callback ordering (`fpm_http_direct_worker.c:
+1240-1249`). No bridge can bypass it — it also covers third-party bridges, a
+handler that threw, and an `exit()`. It converts a silently dropped request into
+an honest 503 that appears in the log.
+
+**C. A builtin that answers the real question (recommended).** The SAPI already
+knows everything: `fw.pending` holds *all* unanswered requests — both those
+queued in `fw.ready` and those handed to a running handler. So
+`fpmng_worker_may_exit()` is `fpm_worker_stopping && pending is empty`. With it,
+a bridge can **delete its own in-flight counter** and needs to know nothing
+about the queue. Caveat: a handler that never answers would block the exit
+for ever — bounded in practice by the master's own stop timeout, and there is
+already separate handling for that leak (the 503 saturation path at `:305-328`).
+
+**D. Redefine `fpmng_worker_stopping()`** so it only returns true once the queue
+is empty (rejected). One name for two different questions: an application may
+legitimately want to know about the shutdown early, to close pools or flush
+metrics.
+
+**Recommendation: B then C.** B is cheap and catches the cases we have not
+thought of; C removes the reason the bug was possible at all. A stays as the
+documented idiom for as long as bridges carry their own counters.
+
 ## Acceptance criteria
 
 - A test that reproduces the drop before the fix: with `pm.max_requests` set

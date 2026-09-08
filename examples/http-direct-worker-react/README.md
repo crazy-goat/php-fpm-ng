@@ -98,8 +98,16 @@ byte totals and the strand numbers do not vary.
 
 ## The read-chunk trap on TLS streams
 
-`fpmng_worker_event_create()` carries a warning
-(`sapi/fpmng/fpm/fpm_http_direct_worker.c:824-827`): a stream with userland
+**Task 079 closed this trap in the SAPI; the measurements below are what
+motivated it, and the `/strand` route is now a regression gate —
+`build/test-http-direct-worker-react.sh` fails if it ever reports the stranding
+again.** `fpmng_worker_loop()` now
+re-casts every read watcher's stream before letting libevent sleep and
+activates the watcher itself when the stream's userland buffer is non-empty
+(see `docs/http-direct-revolt-integration.md`, "Buffered streams"). What
+follows is the state of the world before that.
+
+`fpmng_worker_event_create()` carried a warning: a stream with userland
 buffering — filters, TLS — can hold bytes the descriptor never reports as
 readable. Task 074 predicted that "a client that waits for readability first and
 reads once per event would still hang". The `/strand` route was built to settle
@@ -139,7 +147,9 @@ Note that matching PHP's default `chunk_size` of 8192 does not save you: at
 `chunk = 8192` the first read returns the head plus 7937 body bytes and strands
 the last 255. There is no chunk size that is safe in general, because the
 stranded amount depends on what the peer happened to send. The rule for an
-application is to read until the read comes up short, not once per event.
+application is to read until the read comes up short, not once per event —
+which after task 079 is about CPU rather than correctness, because the loop
+keeps invoking the watcher until the buffer drains.
 ReactPHP's own default happens to satisfy this for small responses —
 `ReadableResourceStream` uses a 65536-byte chunk (react/stream v1.4.0,
 `src/ReadableResourceStream.php:84`) — which is why `react/http` works here

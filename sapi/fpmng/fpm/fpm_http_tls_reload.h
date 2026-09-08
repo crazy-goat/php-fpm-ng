@@ -26,9 +26,16 @@
  * set to 0, which means "off"). Matches the "default e.g. 5" left open by
  * task 040's Decision section: this is a config/perf choice, not a
  * correctness one -- fast enough that a renewed certificate is picked up
- * quickly, slow enough that N gateway processes stat()ing two files does
- * not show up as load. */
+ * quickly, slow enough that the master reading and digesting two small files
+ * this often (issue #71 replaced the stat() with a content digest) does not
+ * show up as load. */
 #define FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT 5
+
+/* SHA-256, the digest the master identifies a cert/key pair by -- content,
+ * not st_mtime, because st_mtime cannot tell two writes inside one second
+ * apart (issue #71; the full reasoning is on
+ * fpm_http_tls_reload_file_digest() in fpm_http_tls_reload.c). */
+#define FPM_HTTP_TLS_RELOAD_DIGEST_LEN 32
 
 /* Bound on a single cert-chain or key PEM this mechanism will publish, sized
  * generously for a real fullchain.pem (leaf + a couple of intermediates,

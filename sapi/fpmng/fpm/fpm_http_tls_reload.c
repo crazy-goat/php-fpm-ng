@@ -401,11 +401,112 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 }
 /* }}} */
 
+/* Copies the slot currently published in shared memory into `tmp` and returns
+ * the generation it came from. `tmp`'s cert_pem/key_pem point at this child's
+ * own private local_*_pem buffers afterwards, so `tmp` is only usable while
+ * `r` is, and only by the one child that owns it.
+ *
+ * Copying out of shared memory before use, rather than pointing
+ * fpm_http_tls_ctx_new() at the shm slot directly, gives the caller a stable
+ * DESTINATION. It does not on its own give a stable SOURCE: there are only two
+ * slots, so a publish landing two generations ahead writes into the very slot
+ * being copied. Hence the generation is latched before the copy and re-read
+ * after it, and a copy that straddled a publish is redone.
+ *
+ * Bounded rather than unbounded: the master publishes at most once per
+ * http.tls_reload_check seconds (>= 1) while the copy is at most 80 KB, so
+ * even one retry is already unreachable in practice -- a spinning loop here
+ * would only be a way for a broken master to hang a gateway's event loop. On
+ * exhaustion this returns the generation it last latched and the copy may be
+ * torn, which is self-healing: a torn PEM fails fpm_http_tls_ctx_new(), so the
+ * caller either falls back to gw->tls (startup) or keeps the working SSL_CTX
+ * and retries on the next tick, in both cases leaving last_seen_generation
+ * alone. */
+#define FPM_HTTP_TLS_RELOAD_SNAPSHOT_TRIES 4
+
+static unsigned long fpm_http_tls_reload_snapshot(struct fpm_http_tls_reload_s *r,
+	struct fpm_http_tls_s *tmp) /* {{{ */
+{
+	unsigned long gen;
+	struct fpm_http_tls_reload_slot_s *slot;
+	int tries = FPM_HTTP_TLS_RELOAD_SNAPSHOT_TRIES;
+
+	memset(tmp, 0, sizeof(*tmp));
+	tmp->cert_pem = r->local_cert_pem;
+	tmp->key_pem = r->local_key_pem;
+
+	/* Every field is taken inside the loop, not re-read from the slot after
+	 * it: a length or a min_version read after the copy could describe a
+	 * different generation than the bytes that were copied. */
+	do {
+		gen = r->shared->generation;
+		slot = &r->shared->slot[gen % 2];
+		tmp->cert_len = slot->cert_len;
+		tmp->key_len = slot->key_len;
+		tmp->min_version = slot->min_version;
+		/* Clamped because these two lengths come out of shared memory and
+		 * drive a memcpy into fixed-size buffers. The master never publishes
+		 * more (both the startup pair and every candidate are checked against
+		 * MAX_CERT/MAX_KEY before they reach a slot), so this can only ever
+		 * fire on a corrupted region -- and then it truncates into a PEM that
+		 * fails to parse instead of overrunning local_cert_pem. */
+		if (tmp->cert_len > sizeof(r->local_cert_pem)) {
+			tmp->cert_len = sizeof(r->local_cert_pem);
+		}
+		if (tmp->key_len > sizeof(r->local_key_pem)) {
+			tmp->key_len = sizeof(r->local_key_pem);
+		}
+		memcpy(r->local_cert_pem, slot->cert_pem, tmp->cert_len);
+		memcpy(r->local_key_pem, slot->key_pem, tmp->key_len);
+		memcpy(tmp->ticket_key, slot->ticket_key, sizeof(tmp->ticket_key));
+	} while (gen != r->shared->generation && --tries > 0);
+
+	/* SNI certificates are not part of the reload/mtime-check machinery
+	 * (task 041 scope cut, see the fields' declaration above) -- borrow them
+	 * from the original, never-freed gw->tls so a hot-reload of the primary
+	 * cert does not silently rebuild the ctx with zero SNI certificates. */
+	tmp->sni = r->sni;
+	tmp->sni_count = r->sni_count;
+
+	return gen;
+}
+/* }}} */
+
+SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload) /* {{{ */
+{
+	struct fpm_http_tls_s tmp;
+	unsigned long gen;
+	SSL_CTX *ctx;
+
+	if (!reload) {
+		return NULL;
+	}
+
+	gen = fpm_http_tls_reload_snapshot(reload, &tmp);
+	ctx = fpm_http_tls_ctx_new(reload->pool, &tmp);
+	if (!ctx) {
+		/* fpm_http_tls_ctx_new() already logged. The caller falls back to
+		 * gw->tls, which is generation 0's bytes -- and last_seen_generation
+		 * is left at its calloc() zero, which is precisely the generation
+		 * that fallback ctx would then hold, so the first child tick adopts
+		 * whatever is published now. */
+		return NULL;
+	}
+
+	/* The ctx really was built from `gen`, so record it as adopted: this is
+	 * what keeps a gateway forked at startup from logging a spurious
+	 * adoption notice for the bytes it just started with, AND what makes a
+	 * gateway respawned after N reloads (issue #91) not claim generation N
+	 * while holding generation 0's certificate. */
+	reload->last_seen_generation = gen;
+	return ctx;
+}
+/* }}} */
+
 static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void *arg) /* {{{ */
 {
 	struct fpm_http_tls_reload_s *r = arg;
 	unsigned long gen = r->shared->generation;
-	struct fpm_http_tls_reload_slot_s *slot;
 	struct fpm_http_tls_s tmp;
 	SSL_CTX *new_ctx;
 
@@ -415,27 +516,7 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 		return;
 	}
 
-	slot = &r->shared->slot[gen % 2];
-	/* Copy out of shared memory before use, not a pointer straight into it:
-	 * the read is synchronous and single-shot, but copying first (rather
-	 * than pointing fpm_http_tls_ctx_new() at the shm slot directly) means
-	 * this can never observe a slot the master is mid-write on, no matter
-	 * how tight two publishes land back to back. */
-	memcpy(r->local_cert_pem, slot->cert_pem, slot->cert_len);
-	memcpy(r->local_key_pem, slot->key_pem, slot->key_len);
-	memset(&tmp, 0, sizeof(tmp));
-	tmp.cert_pem = r->local_cert_pem;
-	tmp.cert_len = slot->cert_len;
-	tmp.key_pem = r->local_key_pem;
-	tmp.key_len = slot->key_len;
-	tmp.min_version = slot->min_version;
-	memcpy(tmp.ticket_key, slot->ticket_key, sizeof(tmp.ticket_key));
-	/* SNI certificates are not part of the reload/mtime-check machinery
-	 * (task 041 scope cut, see the fields' declaration above) -- borrow them
-	 * from the original, never-freed gw->tls so a hot-reload of the primary
-	 * cert does not silently rebuild the ctx with zero SNI certificates. */
-	tmp.sni = r->sni;
-	tmp.sni_count = r->sni_count;
+	gen = fpm_http_tls_reload_snapshot(r, &tmp);
 
 	new_ctx = fpm_http_tls_ctx_new(r->pool, &tmp);
 	if (!new_ctx) {
@@ -478,10 +559,22 @@ void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 	reload->child_http = http;
 	reload->child_ctx_slot = ctx_slot;
 	reload->child_bevcb = bevcb;
-	reload->child_bevcb_arg = bevcb_arg;	/* Whatever generation *ctx_slot was JUST built from (fpm_http_tls_ctx_new(),
-	 * called right before this) -- not 0 -- so this does not immediately
-	 * "reload" itself against the exact bytes it just started with. */
-	reload->last_seen_generation = reload->shared->generation;
+	reload->child_bevcb_arg = bevcb_arg;
+
+	/* last_seen_generation is deliberately NOT set here. It must name the
+	 * generation *ctx_slot was actually built from, and only the code that
+	 * built it knows that: fpm_http_tls_reload_child_ctx_new() above sets it,
+	 * and a fallback build from gw->tls leaves it at calloc()'s zero, which is
+	 * generation 0 -- what gw->tls holds by definition.
+	 *
+	 * Seeding it from the CURRENT generation here, as this used to, was issue
+	 * #91: correct for a gateway forked at startup (nothing has been reloaded
+	 * yet, so the current generation IS the one it was born with), silently
+	 * wrong for one respawned after N reloads -- it claimed to have adopted
+	 * generation N while serving the startup certificate, so the tick below
+	 * returned early for the rest of that process's life. Measured before the
+	 * fix: 7 of 24 sampled connections served the previous certificate after
+	 * one gateway of three was killed. */
 
 	every.tv_sec = reload->check_interval_sec;
 	every.tv_usec = 0;

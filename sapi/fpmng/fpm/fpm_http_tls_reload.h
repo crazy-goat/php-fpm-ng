@@ -62,17 +62,42 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	const char *cert_path, const char *key_path, const char *min_version,
 	struct fpm_http_tls_s *initial, int check_interval_sec);
 
-/* Called once per gateway child, after fpm_http_tls_ctx_new() has built the
- * child's own SSL_CTX and evhttp_set_bevcb() has installed it
+/* Called once per gateway child, BEFORE fpm_http_tls_reload_child_init():
+ * builds this child's own SSL_CTX from the cert/key bytes currently published
+ * in shared memory, i.e. from the newest generation, and remembers that
+ * generation as the one this child has adopted.
+ *
+ * This is what a gateway respawned after a reload needs (issue #91). Building
+ * from `initial`/gw->tls instead -- the bytes the master read once before the
+ * first fork, generation 0 -- gave a respawned gateway the startup certificate
+ * for the rest of its life. For a gateway forked at startup the two are the
+ * same bytes: nothing has been reloaded yet, so the published slot IS
+ * generation 0.
+ *
+ * Returns NULL when `reload` is NULL (http.tls_reload_check setup failed or
+ * the pool has no reload state at all) or when the ctx could not be built; in
+ * both cases the caller must fall back to fpm_http_tls_ctx_new() on gw->tls,
+ * which is the pre-issue-#91 behaviour. Safe to call with a check interval of
+ * 0 (reload off): the slot then only ever holds generation 0. */
+SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload);
+
+/* Called once per gateway child, after fpm_http_tls_reload_child_ctx_new() (or
+ * fpm_http_tls_ctx_new()) has built the child's own SSL_CTX
  * (fpm_http_gateway_run()): arms this child's own generation-watch timer on
  * its own event_base. On a later generation change it rebuilds the SSL_CTX
  * from the newly published bytes, calls evhttp_set_bevcb() again on `http`
  * to point future connections at it, frees the old context, and writes the
  * new one through `ctx_slot` -- `*ctx_slot` must be the same pointer
- * (gw->tls_ctx) fpm_http_tls_ctx_new() originally filled in, since this is
- * also what fpm_http_tls_bevcb() was handed as its `arg`. A no-op when
- * `reload` is NULL or its check interval is 0 (http.tls_reload_check off,
- * or master-side setup failed). */
+ * (gw->tls_ctx) the ctx was originally built into, since this is also what
+ * fpm_http_tls_bevcb() was handed as its `arg`.
+ *
+ * `bevcb`/`bevcb_arg` are the listener's own bevcb wrapper, which
+ * fpm_http_gateway_run() installs with evhttp_set_bevcb() AFTER this call;
+ * they are only recorded here and are first used on a later generation
+ * change, so the order between the two does not matter.
+ *
+ * A no-op when `reload` is NULL or its check interval is 0
+ * (http.tls_reload_check off, or master-side setup failed). */
 void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
 	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg);

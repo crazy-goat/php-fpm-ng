@@ -697,6 +697,22 @@ is a side effect of the coop model, and none of the measured scenarios
 depends on boot side effects being request-dependent. It is watched by the
 audit — if it ever flips in steady state, the run fails.
 
+## Laravel gotcha: `Model::observe()` cannot carry per-request state
+
+Found while building the observers scenario (task 025): `Model::observe()`
+ignores the instance you pass for anything except its class name — on each
+model event, Laravel container-resolves the **observer class**, so an
+observer with a constructor parameter is unresolvable
+(`Unresolvable dependency resolving [Parameter #0 [ <required> string
+$marker ]]`), and an observer with a default constructor gets a fresh
+container-built instance per dispatch. Either way, per-request state cannot
+travel through `observe()` at all. This is upstream Laravel behaviour, not a
+fiber-executor bug — but anyone writing per-request model-event listeners on
+this SAPI should register closures directly (`Model::retrieved(fn ($model)
+=> ...)`, or `Model::$dispatcher`'s equivalent), which is what the fixture
+does. The dispatch still goes through the isolated `Model::$dispatcher`
+static, so isolation applies exactly as it does for any other listener.
+
 ## What is still not measured
 
 - `pm.max_children > 1`, `APP_ENV=prod`, `fiber.revalidate_freq` and

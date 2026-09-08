@@ -34,6 +34,12 @@ pool. Each gateway process then adopts it, independently, within another
 `http.tls_reload_check` seconds, without dropping any connection already in
 progress and without re-binding its listening socket.
 
+The change is detected from the **contents** of the two files, not their
+timestamps, so it does not matter how close in time the write lands to the
+one before it: a renewal, a rollback to the previous pair, or a correction
+written in the same second as the file it fixes are all picked up. Rewriting
+the same bytes is correctly seen as no change at all.
+
 No signal, no reload command, no operator action beyond the write. This
 matters most for a certificate that arrives on a mounted volume (an ACME
 client, or any external renewal process) with nothing running inside the

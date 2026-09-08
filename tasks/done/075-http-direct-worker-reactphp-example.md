@@ -1,6 +1,6 @@
 # 075 — Example: worker-mode HTTP-direct + ReactPHP, on the same primitives
 
-Status: todo
+Status: done
 Type: example + measurement
 Depends on: 073 (merged), 074 (merged)
 Related: `docs/http-direct-revolt-integration.md` (roadmap item 1)
@@ -49,7 +49,7 @@ So ReactPHP over TLS is the direct test of the warning written into
 `fpmng_worker_event_create()`: the watcher is armed on the raw descriptor from
 `php_stream_cast()`, so "a stream with buffered userland data (filters, TLS)
 can hold bytes the descriptor will never report as readable"
-(`sapi/fpmng/fpm/fpm_http_direct_worker.c:823-827`). For that to be a real
+(`sapi/fpmng/fpm/fpm_http_direct_worker.c:824-827`). For that to be a real
 test and not a nominal one, the TLS body has to be well above the 64 KiB read
 chunk and has to arrive as many records over time, so that a stranded buffer is
 reachable at all.
@@ -129,3 +129,88 @@ A third example under `examples/http-direct-worker-react/`:
   about the same primitives; neither is a verdict on a library.
 - Wiring the harness into CI: still the open Docker question from task 073.
 - Per-request isolation, output buffering, pool sizing.
+
+## Outcome
+
+Done. `examples/http-direct-worker-react/` is a second consumer of the worker's
+event primitives that shares no code with the first: `LoopInterface` and
+Revolt's `Driver` have no common interface, and nothing in this example
+suspends a fiber. The primitives needed no change — roadmap item 1's "the API
+is not Revolt-specific" held, and that verdict is now written into
+`docs/http-direct-revolt-integration.md` under "Current state".
+
+### What was done
+
+- `FpmngLoop.php` — all 12 `LoopInterface` methods over the SAPI builtins,
+  transposed from react/event-loop v1.6.0's `ExtEventLoop`. `addPeriodicTimer()`
+  re-arms the one-shot `FPMNG_WORKER_TIMER` itself, before the callback rather
+  than after, so the period does not drift by the callback's duration.
+  `addSignal()`/`removeSignal()` throw, as scoped.
+- `FpmngReactServer.php` — one promise per request off the notification stream,
+  with an idempotent 500 as the last link of every chain so a handler that
+  resolves with something `respond()` rejects cannot leave a request pending
+  for the life of the worker.
+- `app.php` — routes `/`, `/mysql`, `/tls`, `/ticks`, `/strand`; the compose
+  stack adds MySQL 8.4.6 and an nginx TLS origin.
+- `build/test-http-direct-worker-react.sh` — asserts all of it on port 28098,
+  its own compose project per run, SKIPs without Docker, and gates on `strings`
+  before measuring.
+
+### What was measured
+
+One worker (`pm.max_children = 1`), a `php-fpm-ng-full` static-pie build of
+php-8.5.9 on arm64, binary confirmed with `strings`. Full output is quoted in
+`examples/http-direct-worker-react/README.md`.
+
+- 8 concurrent `SELECT SLEEP(1)` in ~1 s on one pid; overlap 0.998 s of a 1 s
+  sleep, i.e. the last request started before the first finished. Concurrency
+  on promises, not fibers.
+- 5000 nested `futureTick()` callbacks drained in 1.8 ms **with a 10 s timer
+  armed and never fired**. `futureTick()` is asserted, not merely implemented:
+  a `run()` that blocked in libevent with a tick pending would have taken 10 s,
+  and the harness fails if the drain reaches half the blocker.
+- 4 concurrent 1 MiB HTTPS bodies complete, 21–32 reads each, overlap 0.988 s.
+
+### The TLS answer, which is not the one 074 predicted
+
+074 wrote that "a client that waits for readability first and reads once per
+event would still hang". Measured: reading once per event drains a whole 1 MiB
+body in 1025 reads of 1024 bytes in 0.006 s, no stall. The stall needs the peer
+to go quiet too. Over TLS keep-alive with an 8 KiB response:
+
+| read chunk | result                                         |
+| ---------- | ---------------------------------------------- |
+| 512        | stranded, 257 of 8192 body bytes after 1 read  |
+| 1024       | stranded, 769 of 8192 body bytes after 1 read  |
+| 4096       | stranded, 3841 of 8192 body bytes after 1 read |
+| 8191       | stranded, 7936 of 8192 body bytes after 1 read |
+| 8192       | stranded, 7937 of 8192 body bytes after 1 read |
+| 65536      | complete, 8447 bytes in 1 read                 |
+
+So the warning at `sapi/fpmng/fpm/fpm_http_direct_worker.c:824-827` is real, but
+its condition is *reading less than the TLS layer already decrypted into PHP's
+buffer, while the peer sends nothing further* — not "reading once per event".
+Matching PHP's `chunk_size` of 8192 does not save you; no chunk size is safe in
+general, because the stranded amount is whatever the peer happened to send. The
+rule for an application is to read until the read comes up short.
+`react/http` never shows this because `ReadableResourceStream` defaults to a
+65536-byte chunk (react/stream v1.4.0, `src/ReadableResourceStream.php:84`).
+
+The harness reports this case as `STRANDED`, recorded and non-fatal: it is the
+measurement, not a failure. Whether the SAPI should refuse such a stream, or
+treat a stream with buffered data as ready, is in `findings.md` — out of scope
+here, since 075 changes no C.
+
+### What was left out
+
+- No change to `sapi/fpmng/`, as scoped.
+- MySQL over TLS, which is how 074 tested this, is impossible with react/mysql
+  0.6: `CLIENT_SSL` is defined and never sent (`Io/Constants.php:57`). Hence an
+  nginx origin. The same library only speaks `mysql_native_password`
+  (`Commands/AuthenticateCommand.php:78-101`), which MySQL 8.4 ships disabled,
+  hence `--mysql-native-password=ON` plus an `ALTER USER` in `initdb/`.
+- 074's Dockerfile could **not** serve this app by changing `APP_DIR` alone: it
+  copied a hardcoded `${APP_DIR}/app.php`, and this app ships two classes. The
+  smallest fix restoring the promise was applied — `${APP_DIR}/*.php`.
+- `react/async`, an amphp-versus-React benchmark, and CI wiring: still out of
+  scope, still open.

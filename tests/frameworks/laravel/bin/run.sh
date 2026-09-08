@@ -26,7 +26,13 @@ LARAVEL_REDIS_PORT=${LARAVEL_REDIS_PORT:-6379}
 LARAVEL_REDIS_DB=${LARAVEL_REDIS_DB:-3}
 REDIS_CLIENT=${REDIS_CLIENT:-phpredis}
 REDIS_EXTENSION=${REDIS_EXTENSION:-}
-STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver}
+# Laravel 13.30.1, verified by tests/frameworks/laravel. Entries 1-3 were
+# found by the session/auth scenarios (task 008), entry 4 by the Eloquent
+# probe, entries 5-6 by the task 025 observers/global-scopes scenario: with
+# only four entries, a per-request registered global scope from request A
+# silently filters request B's query (HTTP 200, item:null), and model events
+# dispatch through whichever request's event dispatcher was cached last.
+STATIC_LIST=${STATIC_LIST:-Illuminate\\Container\\Container::instance,Illuminate\\Support\\Facades\\Facade::app,Illuminate\\Support\\Facades\\Facade::resolvedInstance,Illuminate\\Database\\Eloquent\\Model::resolver,Illuminate\\Database\\Eloquent\\Model::dispatcher,Illuminate\\Database\\Eloquent\\Model::globalScopes}
 DOCKER_STARTED=0
 RUN_ID=${FPMNG_RUN_ID:-$(date -u +%Y%m%dt%H%M%Sz)_$$}
 COMPOSE=()
@@ -375,7 +381,7 @@ run_scenarios() {
             overall=2
             if [ "$mode" = configured ]; then
                 CONFIGURED_ERROR=$((CONFIGURED_ERROR + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_ERROR=$((NEGATIVE_ERROR + 1))
             fi
             continue
@@ -383,14 +389,14 @@ run_scenarios() {
         if run_suite "$mode" "$scenario"; then
             if [ "$mode" = configured ]; then
                 CONFIGURED_PASS=$((CONFIGURED_PASS + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_PASS=$((NEGATIVE_PASS + 1))
             fi
         else
             overall=1
             if [ "$mode" = configured ]; then
                 CONFIGURED_ERROR=$((CONFIGURED_ERROR + 1))
-            else
+            elif [ "$mode" = negative ]; then
                 NEGATIVE_ERROR=$((NEGATIVE_ERROR + 1))
             fi
         fi
@@ -403,6 +409,10 @@ run_scenarios() {
 cleanup() {
     stop_pool configured || true
     stop_pool negative || true
+    # The audit pool is started inside run_scenarios like the others; without
+    # this line an interrupt between its start and stop would leave a
+    # daemonized php-fpm-ng alive on the (shared) test box.
+    stop_pool audit || true
     rm -f "$ROOT/.env"
     cleanup_services
 }
@@ -451,6 +461,11 @@ configured_scenarios=(
     validation-flash-session-isolation
     queue-sync-context
     broadcast-sync-context
+    rate-limiter
+    mail-attribution
+    view-blade-composer
+    route-model-binding
+    eloquent-observers-and-global-scopes
 )
 negative_scenarios=(
     negative-session-empty-static-list
@@ -463,6 +478,11 @@ negative_scenarios=(
     negative-validation-flash-session-isolation-empty-static-list
     negative-queue-sync-context-empty-static-list
     negative-broadcast-sync-context-empty-static-list
+    negative-rate-limiter-empty-static-list
+    negative-mail-attribution-empty-static-list
+    negative-view-blade-composer-empty-static-list
+    negative-route-model-binding-empty-static-list
+    negative-eloquent-observers-and-global-scopes-empty-static-list
 )
 
 if ! run_scenarios configured "$STATIC_LIST" "${configured_scenarios[@]}"; then
@@ -472,9 +492,31 @@ if ! run_scenarios negative "" "${negative_scenarios[@]}"; then
     negative_status=1
 fi
 
-printf 'RUN_STATUS configured=%s negative=%s\n' "$configured_status" "$negative_status"
-printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s not_measured=4\n' \
-    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR"
-if [ "$configured_status" -ne 0 ] || [ "$negative_status" -ne 0 ]; then
+# Systematic statics audit (task 025). ONE run of the /statics-audit probe
+# against a pool with the configured list: the probe touches every
+# state-keeping subsystem, so any static that still changes across a real
+# suspension is state the list does not cover — that is how the list is
+# verified systematically instead of by hand-picking.
+#
+# An empty-list audit run was tried and removed: with no isolation the probe
+# itself destabilizes the pool (17 of 64 audit requests came back 502, and
+# the MySQL client logged RSET_HEADER protocol corruption — traffic aimed at
+# the SHARED MySQL server on the test box, which the box rules ask us not to
+# abuse). The per-scenario negative controls already reproduce empty-list
+# damage on isolated routes; enumeration is what the clean audit is for.
+# LARAVEL_AUDIT_EXPECT=leak remains available in run.php for one-off
+# forensics on a private MySQL.
+audit_status=0
+export LARAVEL_ISOLATED_LIST="$STATIC_LIST"
+export LARAVEL_AUDIT_EXPECT=clean
+if ! run_scenarios audit "$STATIC_LIST" statics-audit; then
+    audit_status=1
+fi
+unset LARAVEL_AUDIT_EXPECT LARAVEL_ISOLATED_LIST
+
+printf 'RUN_STATUS configured=%s negative=%s audit=%s\n' "$configured_status" "$negative_status" "$audit_status"
+printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s not_measured=0 audit_status=%s\n' \
+    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR" "$audit_status"
+if [ "$configured_status" -ne 0 ] || [ "$negative_status" -ne 0 ] || [ "$audit_status" -ne 0 ]; then
     exit 1
 fi

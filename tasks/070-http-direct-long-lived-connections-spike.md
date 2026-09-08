@@ -43,3 +43,32 @@ a timer) depends on the same answer.
 
 - Implementing long-lived support as a supported feature.
 - Changing the fiber executor itself or its build gating.
+
+## Amendment 2026-09-08 — "fibers" is two questions, and only one of them is this task's
+
+Source: `docs/http-direct-revolt-integration.md` (revision 2026-09-08) and the
+POC in task 073.
+
+Concurrent requests per worker do not require a SAPI fiber executor when the
+worker script owns the event loop: they are N userland fibers on one Revolt
+loop, which amphp already implements. Task 073 demonstrates this. The SAPI
+schedules I/O in that mode, never PHP execution.
+
+Consequently:
+
+- This task's questions 1-3 remain valuable, but their scope is **classic
+  direct** (`pool.type = http-direct`, one script per request): quantify the
+  head-of-line cost, and establish what streaming (058) and `fpm_respond()`
+  (059) cover for applications that are *not* rewritten as worker-mode
+  applications. That is the real subject here.
+- Question 4 should be reframed. "Does a fiber executor conflict with this?" is
+  no longer the interesting question; the interesting one is **what a SAPI fiber
+  executor would add over worker mode**, given that worker mode already delivers
+  concurrency, SSE fan-out and push. The plausible answer is
+  request-transparent concurrency for unmodified applications, which worker mode
+  cannot offer (no per-request isolation, no async PDO) — but it must be argued
+  from that comparison rather than from the assumption that fibers are the only
+  route to concurrency.
+- SSE, long-polling and `fpm_push()` in worker mode belong to the worker-mode
+  track and should not be measured under this task without saying which mode
+  each number came from.

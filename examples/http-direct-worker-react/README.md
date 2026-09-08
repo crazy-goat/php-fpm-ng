@@ -54,8 +54,13 @@ waiting for a descriptor nobody is waiting on — `FpmngLoop::run()` passes
 `addSignal()` throws rather than returning quietly. The FPM master owns
 SIGQUIT/SIGUSR2 and the worker lifecycle; a userland watcher competing for them
 would break graceful reload. Shutdown reaches the application through
-`fpmng_worker_stopping()` and the notification stream instead
-(`FpmngReactServer::stopWhenDrained()`).
+`fpmng_worker_may_exit()` and the notification stream instead
+(`FpmngReactServer::stopWhenDrained()`). Task 075 drained the SAPI queue by
+hand there, because a request queued behind `fpmng_worker_next_request()` is
+invisible to an in-flight counter; task 080 replaced both with
+`fpmng_worker_may_exit()`, which is true only when the stop was requested and
+nothing accepted is still unanswered — see
+`../http-direct-worker/README.md`.
 
 ## What was measured
 

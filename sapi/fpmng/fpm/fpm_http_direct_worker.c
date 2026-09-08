@@ -990,7 +990,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 };
 
 /* task 076: zend_register_functions() unconditionally does
- * `internal_function->module = EG(current_module)` (Zend/zend_API.c:3060),
+ * `internal_function->module = EG(current_module)` (Zend/zend_API.c:2987),
  * independent of the `type` argument we pass it. EG(current_module) is only
  * ever non-NULL while a module's own MINIT is running; by the time this SAPI
  * calls it -- in the forked worker child, long after every module's startup
@@ -1008,7 +1008,7 @@ static const zend_function_entry fpm_worker_functions[] = {
  * zend_module_entry.type, compared against 1 = MODULE_PERSISTENT).
  *
  * opcache reads only ->type (and, on Windows, ->handle) from this struct
- * (zend_optimizer.c:106-109):
+ * (zend_optimizer.c:113-118):
  *
  *     func->type == ZEND_INTERNAL_FUNCTION && func->module->type == MODULE_PERSISTENT
  *

@@ -6,6 +6,16 @@ include "skipif.inc";
 if (!extension_loaded('Zend OPcache')) {
     die('skip requires the Zend OPcache extension to be compiled in');
 }
+/* Compiled in but switched off by ini is an environment this test cannot
+ * exercise, not a regression: php_admin_value[opcache.enable] = 1 in the pool
+ * config cannot turn it back on (OnEnable only ever reports success when it is
+ * already on), so the in-test opcacheEnabled assertions would fail for a
+ * reason that has nothing to do with the fix. Skip instead. Those assertions
+ * stay, and still catch opcache being active in ini yet inactive in the
+ * child. */
+if (!filter_var(ini_get('opcache.enable'), FILTER_VALIDATE_BOOLEAN)) {
+    die('skip requires opcache.enable=1 (compiled in but disabled by ini)');
+}
 ?>
 --FILE--
 <?php
@@ -33,7 +43,7 @@ $root = sys_get_temp_dir() . '/fpmng-direct-worker-opcache-' . getmypid();
  *
  * The load-bearing part of probe() is that both function_exists() calls use
  * LITERAL string arguments. opcache's pass1 constant-folds exactly that
- * shape at compile time (Zend/Optimizer/zend_optimizer.c:106-114) and used
+ * shape at compile time (Zend/Optimizer/zend_optimizer.c:113-118) and used
  * to dereference a NULL internal_function->module while doing it -- see
  * fpm_worker_register_functions() for the fix and the core-dump evidence
  * (task 076). A variable argument would defeat the folding and prove

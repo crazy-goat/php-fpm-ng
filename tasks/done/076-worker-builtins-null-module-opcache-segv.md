@@ -117,7 +117,8 @@ MINIT/MSHUTDOWN) for the duration of the `zend_register_functions()` call,
 then restores whatever `EG(current_module)` was before. `internal_function->module`
 is therefore always a valid pointer instead of NULL, which fixes the
 dereference in opcache's `pass1`
-(`Zend/Optimizer/zend_optimizer.c:106-114`). The anchor module deliberately
+(`Zend/Optimizer/zend_optimizer.c:113-118`, the NULL dereference on line
+114). The anchor module deliberately
 claims `MODULE_TEMPORARY`, not `MODULE_PERSISTENT`: a first version of this
 fix used `MODULE_PERSISTENT`, which fixed the crash but made
 `function_exists('fpmng_worker_...')` foldable again — and opcache's SHM

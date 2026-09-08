@@ -30,7 +30,37 @@ The configured run checks response data and object identities for:
 - middleware request state and `terminate()` attribution through Redis;
 - CSRF tokens and cross-session rejection;
 - validation errors flashed into the correct session;
-- synchronous queue dispatch and synchronous broadcasting.
+- synchronous queue dispatch and synchronous broadcasting;
+- the cache-backed rate limiter (per-request keys, attempts asserted);
+- mail attribution through the log transport (asserted on `laravel.log`
+  lines, including no interleaved mid-line writes);
+- Blade rendering with a per-request view composer;
+- implicit route model binding;
+- Eloquent model observers and global scopes registered per request.
+
+## Statics audit (the systematic answer)
+
+The four-entry list below was found empirically, one scenario at a time. The
+audit replaces that with a measurement: the `/statics-audit` route touches
+every state-keeping subsystem, snapshots **every static property of every
+declared class**, blocks on a real MySQL suspension, and snapshots again.
+Any static whose value changed across the suspension was overwritten by
+another concurrent request — that static holds per-request state and belongs
+on the isolation list. `bin/run.sh` runs it twice after the scenario suites:
+
+- **audit-empty** (`LARAVEL_AUDIT_EXPECT=leak`, pool list empty): round 2
+  runs in steady state, so everything that still changes there is
+  request-scoped; anything in that set missing from the configured list is
+  reported as `AUDIT_RESULT=UNCOVERED` and fails the run.
+- **audit-configured** (`LARAVEL_AUDIT_EXPECT=clean`, pool list = configured):
+  nothing at all may change across a suspension; any change is state the
+  list does not cover.
+
+`bin/statics-scan.sh` is the enumeration half: it lists every static
+*property* declaration in the pinned `vendor/laravel/framework` tree, so the
+search space the audit discriminates against is on record.
+
+## Configuration snippet (Laravel 13.30.1)
 
 The configured pool uses this versioned list for Laravel 13.30.1:
 
@@ -56,8 +86,11 @@ HTTP 200 with another request's data, so
 this configuration must be re-verified after every Laravel minor-version
 upgrade.
 
-The remaining matrix items are printed as `NOT MEASURED` rather than being
-silently skipped or counted as passes.
+**Read the warning in `docs/frameworks.md` before deploying this.** The short
+version: when this list is incomplete for a code path your application uses,
+Laravel does not crash — it returns a correct-looking HTTP 200 with another
+request's data and logs nothing. The audit narrows that risk to measured
+subsystems; it cannot eliminate it for code the probe never executed.
 
 ## Service provisioning: SERVICE_MODE
 

@@ -362,7 +362,7 @@ $staticsAudit = static function (Request $request) use ($json): mixed {
 
 Route::get('/statics-audit', static fn (Request $request): mixed => $staticsAudit($request));
 
-Route::get('/rate-limit', static function (Request $request) use ($common, $suspend, $json): mixed {
+Route::get('/rate-limit', static function (Request $request) use ($common, $suspend, $json, $objectId): mixed {
     $id = max(1, min(8, (int) $request->query('id', 1)));
     $key = "laravel025:rate:$id:".bin2hex(random_bytes(4));
     RateLimiter::hit($key, 60);

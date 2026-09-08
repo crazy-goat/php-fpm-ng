@@ -4,6 +4,11 @@
 # dropping connections, and without ever installing a broken candidate (see
 # task 040, done; see docs/task-archive.md).
 #
+# Every replacement here lands at an mtime identical to the one before it
+# (swap_in() below), which is issue #71: the master identifies a pair by the
+# digest of its contents, so a renewal, a rollback or a correction is seen
+# whatever the clock says.
+#
 # No root needed (unlike test-http-gateway-privileges.sh): this only reads
 # TCP ports and PEM files this script itself creates.
 #
@@ -76,41 +81,44 @@ mtime_of() {
     stat -c %Y "$1" 2>/dev/null || stat -f %m "$1"
 }
 
-# Replaces live-cert.pem/live-key.pem, and does not return until the new
-# live-cert.pem has an mtime the master can tell apart from the previous one.
+# Replaces live-cert.pem/live-key.pem and pins the mtime of BOTH files to
+# mtime-ref, so every swap in this script lands on the exact timestamp the
+# previous one had.
 #
-# The master detects a renewal by comparing st_mtime in WHOLE SECONDS
-# (fpm_http_tls_reload.c:140-142). live-cert.pem was last written by another
-# `cp` in this same script, so a swap landing inside that same second changes
-# no mtime the master looks at, no tick ever validates the new pair, and the
-# reload simply never happens.
-#
-# This is not a hypothetical. Measured on the poligon 2026-09-08: this script
-# without swap_in() failed 2 of 5 runs, both with "post-reload: connection 0
-# served the OLD serial" and **zero** gateway adoption notices in the error
-# log. That is the same symptom as the CI failures in build-matrix.yml runs
-# 34139815139, 34140641442, 34121726613, 34120910345 and 34120774897, which had
-# been attributed to a gateway missing its 1s tick. An instrumented copy of the
-# version below showed 3 of 8 runs retrying here (the two copies are ~0.6s
-# apart, so a collision is close to a coin toss); the fixed script passed 16 of
-# 16. Whether a gateway can *also* be late is a separate, unmeasured question.
-#
-# Whole-second mtime comparison in the product is a real sharp edge (a
-# certificate renewed twice inside one second is not picked up), recorded as a
-# finding for its own task; changing the reload mechanism is out of scope here.
+# That pin is the point, not a convenience. Until issue #71 the master decided
+# whether anything had changed by comparing st_mtime in whole seconds, so two
+# writes inside one second were indistinguishable from "nothing changed" and
+# the reload silently never happened. Measured on the poligon 2026-09-08:
+# without the workaround this script then carried, it failed 2 of 5 runs, both
+# with "post-reload: connection 0 served the OLD serial" and **zero** gateway
+# adoption notices in the error log -- the same symptom as CI build-matrix runs
+# 34139815139, 34140641442, 34121726613, 34120910345 and 34120774897. That
+# workaround (copy in a loop until the mtime moves) is gone: the master now
+# identifies the pair by a digest of its contents, so forcing a colliding mtime
+# is something the test can do on purpose, every time, instead of something it
+# has to dodge.
 swap_in() {
     cert=$1 key=$2
-    was=$(mtime_of "$DIR/certs/live-cert.pem") ||
-        fail "swap: cannot stat $DIR/certs/live-cert.pem"
-    i=0
-    while [ "$i" -lt 50 ]; do
-        cp "$DIR/certs/$cert" "$DIR/certs/live-cert.pem"
-        cp "$DIR/certs/$key" "$DIR/certs/live-key.pem"
-        [ "$(mtime_of "$DIR/certs/live-cert.pem")" != "$was" ] && return 0
-        sleep 0.2
-        i=$((i + 1))
+    cp "$DIR/certs/$cert" "$DIR/certs/live-cert.pem"
+    cp "$DIR/certs/$key" "$DIR/certs/live-key.pem"
+    pin_mtime "$DIR/certs/live-cert.pem" "$DIR/certs/live-key.pem"
+}
+
+# Replaces only the key, again at the pinned mtime: the cert file is not
+# written at all, so this is the "second half of the pair on its own" case.
+swap_key_in() {
+    key=$1
+    cp "$DIR/certs/$key" "$DIR/certs/live-key.pem"
+    pin_mtime "$DIR/certs/live-key.pem"
+}
+
+pin_mtime() {
+    ref=$(mtime_of "$DIR/certs/mtime-ref")
+    touch -r "$DIR/certs/mtime-ref" "$@"
+    for f in "$@"; do
+        [ "$(mtime_of "$f")" = "$ref" ] ||
+            fail "swap: touch -r left $f at mtime $(mtime_of "$f"), want $ref"
     done
-    fail "swap: live-cert.pem kept mtime $was across $i copies, the master cannot see this swap"
 }
 
 # All N samples must equal $2 (the expected serial) -- with http.gateways=3
@@ -195,6 +203,10 @@ SERIAL2=$(openssl x509 -in leaf2.crt -noout -serial | sed 's/^serial=//')
 
 cp fullchain-leaf1.pem live-cert.pem
 cp leaf1.key live-key.pem
+# Every write to the live pair from here on is pinned to this file's mtime,
+# including the first one above -- see swap_in().
+touch mtime-ref
+touch -r mtime-ref live-cert.pem live-key.pem
 
 cd "$DIR"
 cat > docroot/index.php <<'EOF'
@@ -282,7 +294,11 @@ done
 
 info "acceptance criterion 3: a certificate/key that do not match each other is rejected, old certificate keeps serving"
 REJECTIONS_BEFORE=$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" 2>/dev/null || true)
-swap_in fullchain-leaf2.pem leaf1.key		# leaf2 cert, leaf1 key: mismatch
+# Only the key is rewritten, and at the same pinned mtime as before: the master
+# has to notice a change it can see in neither file's timestamp nor the cert
+# file at all (issue #71). Rejecting the pair is then the existing task 040
+# behaviour.
+swap_key_in leaf1.key		# leaf2 cert on disk, leaf1 key: mismatch
 # Waiting for the rejection notice instead of sleeping is also strictly
 # stronger than the `sleep 4` it replaces: the master rejects the pair without
 # bumping the shared generation (fpm_http_tls_reload.c:155-161), so once this
@@ -294,6 +310,43 @@ assert_all_serve "$HTTP_PORT" "$SERIAL2" 6 "after a broken candidate"
 grep -q "http.tls_cert/http.tls_key:" "$DIR/error.log" || fail "no error naming the broken candidate was logged"
 body=$(curl --silent --show-error --insecure --connect-timeout 2 --max-time 5 "https://127.0.0.1:$HTTP_PORT/")
 [ "$body" = "ok" ] || fail "gateway stopped accepting after a broken candidate, got: $body"
+
+info "issue #71: a corrected pair written at the same mtime as the rejected one is adopted"
+# The rejected pair above is what the master now remembers, and the correction
+# lands on the identical timestamp. Going back to leaf1 rather than repairing
+# leaf2 makes the outcome visible on the wire as well as in the log.
+swap_in fullchain-leaf1.pem leaf1.key
+wait_for_log_count "adopted reloaded TLS certificate" 6 "corrected pair"
+assert_all_serve "$HTTP_PORT" "$SERIAL1" 12 "corrected pair"
+[ "$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log")" = "$((${REJECTIONS_BEFORE:-0} + 1))" ] ||
+    fail "corrected pair: the rejection was logged more than once"
+
+info "issue #71: an idle pool does no reload work at all (12 ticks, http.tls_reload_check=1)"
+# The digest is recomputed every tick; what must not happen is a validate, a
+# load, a generation bump or a single line of reload output when the bytes on
+# disk are the ones already published.
+#
+# Counted per reload-machinery pattern rather than as "error.log gained no
+# lines at all". The stricter form was written first and is flaky for a reason
+# that has nothing to do with this test: a gateway process dies of a
+# use-after-free in the read deadline (fpm_http_read_deadline_fire,
+# fpm_http.c:1700, calling bufferevent_set_timeouts() on a bufferevent evhttp
+# has already freed) in roughly a fifth of runs, which the master then logs as
+# "killed by signal 11, respawning". Measured on the poligon 2026-09-08 with a
+# gdb backtrace, and reproduced 1 of 10 times by main's own binary running
+# main's own version of this script with a 15s idle wait appended -- i.e. it
+# predates the reload change and is tracked separately (issue #90).
+reload_work_lines() {
+    { grep -c "TLS certificate reloaded from disk" "$DIR/error.log" || true; } | head -1
+    { grep -c "adopted reloaded TLS certificate" "$DIR/error.log" || true; } | head -1
+    { grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" || true; } | head -1
+}
+WORK_BEFORE=$(reload_work_lines | tr '\n' ' ')
+sleep 12
+WORK_AFTER=$(reload_work_lines | tr '\n' ' ')
+[ "$WORK_BEFORE" = "$WORK_AFTER" ] ||
+    fail "idle pool: reload work happened with nothing changed on disk -- publish/adopt/reject counts went from [$WORK_BEFORE] to [$WORK_AFTER]"
+assert_all_serve "$HTTP_PORT" "$SERIAL1" 6 "idle pool"
 
 info "acceptance criterion 4: no key material anywhere in the logs"
 if grep -l "BEGIN.*PRIVATE KEY" "$DIR/error.log" "$DIR/stdout.log" >/dev/null 2>&1; then

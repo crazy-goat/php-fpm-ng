@@ -38,6 +38,13 @@ The script is resolved inside `chdir`; client paths never select a script.
 `PATH_INFO` carries the parsed URL path. Headers map to `HTTP_*` (except Proxy,
 which is not imported as `HTTP_PROXY`); content type/length have CGI-compatible
 names. `getallheaders()` and `apache_request_headers()` read HTTP headers directly.
+A header name longer than 1024 bytes cannot become an `HTTP_*` key and the
+request is refused with 400 rather than served with the header missing.
+
+The same variables reach `fpmng_worker_request_env()` under
+`pool.executor = worker`: both executors derive the request through
+`sapi/fpmng/fpm/fpm_http_direct_request.c`, so what differs between them is
+who owns the event loop, not what a request looks like.
 
 Bodies (including chunked requests) are buffered by libevent and supplied through
 SAPI, supporting forms, raw `php://input`, and PHP's normal POST handling. PHP

@@ -3,12 +3,10 @@
  * gateway, this event loop cannot progress while PHP is executing. */
 #include "fpm_config.h"
 
-#include <ctype.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <event2/event.h>
@@ -26,19 +24,25 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
+#include "fpm_http_direct_request.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
-#define FPM_DIRECT_HEADERS_MAX (64 * 1024)
 #define FPM_DIRECT_RESPONSE_MAX (8 * 1024 * 1024)
 #define FPM_DIRECT_PENDING_MAX 16
 
-const char *const fpm_http_direct_rejects[] = {
-	"fiber.", "supervisor.", "cron.", "chroot", "listen.allowed_clients",
-	"pm.status_path", "pm.status_listen", "ping.path", "ping.response",
-	"access.log", "access.format", "access.suppress_path", NULL
+const char *const fpm_http_direct_rejects[] = { FPM_HTTP_DIRECT_REJECTS_COMMON, NULL };
+
+/* How this executor names itself in the startup errors of the shared
+ * validation (fpm_http_direct_request.c). */
+static const struct fpm_http_direct_labels fpm_direct_labels = {
+	.subject = "http-direct",
+	.chdir_note = "",
+	.type_label = "pool.type = http-direct",
+	.script_context = "http-direct",
+	.script_noun = "front controller",
 };
 
 struct fpm_direct_worker {
@@ -67,46 +71,7 @@ static volatile sig_atomic_t fpm_direct_stopping;
 
 int fpm_http_direct_validate(struct fpm_worker_pool_s *wp)
 {
-	struct fpm_worker_pool_config_s *c = wp->config;
-	const char *p = c->set_directives;
-	char root[PATH_MAX], script[PATH_MAX], candidate[PATH_MAX];
-	struct stat st;
-
-	if (c->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] http-direct requires pm = static", c->name);
-		return -1;
-	}
-	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller || c->http_front_controller[0] != '/' ||
-		strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')) {
-		zlog(ZLOG_ALERT, "[pool %s] http-direct requires an absolute chdir and a root-relative http.front_controller without '..' or backslashes", c->name);
-		return -1;
-	}
-	/* Gateway options must not silently appear to protect a direct worker.
-	 * Use an allow-list here so future http.* directives are rejected too. */
-	while (p && (p = strstr(p, ";http."))) {
-		const char *end = strchr(++p, ';');
-		size_t len = end ? (size_t) (end - p) : strlen(p);
-		if (!((len == sizeof("http.front_controller") - 1 && !strncmp(p, "http.front_controller", len)) ||
-			(len == sizeof("http.read_timeout") - 1 && !strncmp(p, "http.read_timeout", len)) ||
-			(len == sizeof("http.max_body") - 1 && !strncmp(p, "http.max_body", len)))) {
-			zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by pool.type = http-direct", c->name, (int) len, p);
-			return -1;
-		}
-	}
-	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
-		zlog(ZLOG_ALERT, "[pool %s] http-direct requires http.read_timeout > 0 and http.max_body between 1 and 32M", c->name);
-		return -1;
-	}
-	/* Catch a bad deployment path before FPM starts repeatedly respawning
-	 * children that cannot initialize their fixed front controller. */
-	if (!realpath(c->chdir, root) ||
-		snprintf(candidate, sizeof(candidate), "%s%s", root, c->http_front_controller) >= (int) sizeof(candidate) ||
-		!realpath(candidate, script) || stat(script, &st) < 0 || !S_ISREG(st.st_mode) ||
-		strncmp(script, root, strlen(root)) || (strcmp(root, "/") && script[strlen(root)] != '/')) {
-		zlog(ZLOG_ALERT, "[pool %s] http-direct: front controller must be a regular file inside chdir", c->name);
-		return -1;
-	}
-	return 0;
+	return fpm_http_direct_validate_common(wp, &fpm_direct_labels);
 }
 
 static void fpm_direct_stop(int signo)
@@ -195,7 +160,7 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			continue;
 		}
 		total += h->header_len;
-		if (total > FPM_DIRECT_HEADERS_MAX) {
+		if (total > FPM_HTTP_DIRECT_HEADERS_MAX) {
 			r->overflow = true;
 			break;
 		}
@@ -204,13 +169,9 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 		while (*value == ' ' || *value == '\t') {
 			value++;
 		}
-		/* This transport owns framing. An application-supplied length or
-		 * Transfer-Encoding must not desynchronize the next keep-alive request. */
 		if (!strcasecmp(name, "Status")) {
 			r->status = atoi(value);
-		} else if (strcasecmp(name, "Content-Length") && strcasecmp(name, "Transfer-Encoding") &&
-			strcasecmp(name, "Connection") && strcasecmp(name, "Keep-Alive") &&
-			strcasecmp(name, "Upgrade") && strcasecmp(name, "Trailer")) {
+		} else if (!fpm_http_direct_header_dropped(name)) {
 			if (evhttp_add_header(out, name, value) < 0) {
 				r->overflow = true;
 			}
@@ -268,84 +229,27 @@ static void fpm_direct_install_sapi(void)
 	}
 }
 
-static const char *fpm_direct_method(enum evhttp_cmd_type command)
+static int fpm_direct_emit_env(void *ctx, const char *key, const char *value)
 {
-	switch (command) {
-		case EVHTTP_REQ_GET: return "GET";
-		case EVHTTP_REQ_POST: return "POST";
-		case EVHTTP_REQ_HEAD: return "HEAD";
-		case EVHTTP_REQ_PUT: return "PUT";
-		case EVHTTP_REQ_DELETE: return "DELETE";
-		case EVHTTP_REQ_OPTIONS: return "OPTIONS";
-		case EVHTTP_REQ_PATCH: return "PATCH";
-		default: return NULL;
-	}
-}
-
-static int fpm_direct_env(struct fpm_direct_request *r, const char *name, const char *value)
-{
-	return evhttp_add_header(&r->env, name, value ? value : "");
+	struct fpm_direct_request *r = ctx;
+	return evhttp_add_header(&r->env, key, value);
 }
 
 static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_direct_request *r)
 {
-	const char *uri = evhttp_request_get_uri(r->http);
-	const struct evhttp_uri *parsed = evhttp_request_get_evhttp_uri(r->http);
-	const char *method = fpm_direct_method(evhttp_request_get_command(r->http));
-	struct evkeyvalq *headers = evhttp_request_get_input_headers(r->http);
-	struct evkeyval *kv;
-	char length[32], remote_port[16], protocol[32];
-	char *peer = NULL;
-	ev_uint16_t port;
+	const struct fpm_http_direct_env_source source = {
+		.script = w->script,
+		.root = w->root,
+		.front_controller = w->wp->config->http_front_controller,
+		.server_addr = w->server_addr,
+		.server_port = w->server_port,
+		.server_software = "php-fpm-ng/http-direct",
+	};
 
-	/* Origin-form only; the script is selected solely by configuration, never
-	 * by the URI, Host, PATH_INFO, or any client-supplied CGI-looking header. */
-	if (!uri || uri[0] != '/' || !parsed || !method || evhttp_uri_get_fragment(parsed)) {
+	if (!fpm_http_direct_request_acceptable(r->http)) {
 		return -1;
 	}
-	snprintf(length, sizeof(length), "%zu", evbuffer_get_length(evhttp_request_get_input_buffer(r->http)));
-	evhttp_connection_get_peer(evhttp_request_get_connection(r->http), &peer, &port);
-	snprintf(remote_port, sizeof(remote_port), "%u", (unsigned) port);
-	snprintf(protocol, sizeof(protocol), "HTTP/%d.%d", r->http->major, r->http->minor);
-#define ENV(key, value) do { if (fpm_direct_env(r, key, value) < 0) return -1; } while (0)
-	ENV("REQUEST_METHOD", method);
-	ENV("REQUEST_URI", uri);
-	ENV("QUERY_STRING", evhttp_uri_get_query(parsed));
-	ENV("SCRIPT_FILENAME", w->script);
-	ENV("SCRIPT_NAME", w->wp->config->http_front_controller);
-	ENV("PHP_SELF", w->wp->config->http_front_controller);
-	ENV("PATH_INFO", evhttp_uri_get_path(parsed));
-	ENV("DOCUMENT_ROOT", w->root);
-	ENV("SERVER_PROTOCOL", protocol);
-	ENV("SERVER_SOFTWARE", "php-fpm-ng/http-direct");
-	ENV("GATEWAY_INTERFACE", "CGI/1.1");
-	ENV("SERVER_ADDR", w->server_addr);
-	ENV("SERVER_PORT", w->server_port);
-	ENV("SERVER_NAME", evhttp_request_get_host(r->http));
-	ENV("REMOTE_ADDR", peer);
-	ENV("REMOTE_PORT", remote_port);
-	ENV("CONTENT_LENGTH", length);
-	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
-	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_DIRECT_HEADERS_MAX + 6];
-		size_t i, len = strlen(kv->key);
-		if (!strcasecmp(kv->key, "Content-Type") || !strcasecmp(kv->key, "Content-Length") ||
-			!strcasecmp(kv->key, "Proxy")) {
-			continue;
-		}
-		if (len > FPM_DIRECT_HEADERS_MAX) {
-			return -1;
-		}
-		memcpy(name, "HTTP_", 5);
-		for (i = 0; i < len; i++) {
-			unsigned char c = (unsigned char) kv->key[i];
-			name[5 + i] = c == '-' ? '_' : (char) toupper(c);
-		}
-		name[5 + len] = '\0';
-		ENV(name, kv->value);
-	}
-#undef ENV
-	return 0;
+	return fpm_http_direct_build_env(r->http, &source, fpm_direct_emit_env, r);
 }
 
 /* Successful completion clears the close callback; a disconnect takes only the
@@ -445,16 +349,16 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	fpm_stdio_flush_child();
 	evhttp_clear_headers(&r.env);
 
-	if (r.overflow || r.status < 200 || r.status > 599) {
+	if (r.overflow || !fpm_http_direct_status_final(r.status)) {
 		evbuffer_drain(r.output, evbuffer_get_length(r.output));
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
 		evbuffer_add_printf(r.output, "http-direct: response exceeds POC limits\n");
 		r.status = 500;
 	}
-	/* libevent omits framing headers for 204/304 but still appends a supplied
-	 * body. Discard it here, including POC error bodies on HEAD, or the next
-	 * keep-alive response would start with these unframed bytes. */
-	if (evhttp_request_get_command(http) == EVHTTP_REQ_HEAD || r.status == 204 || r.status == 205 || r.status == 304) {
+	/* Discards the POC error body above on a HEAD as well: what may carry a
+	 * body is a property of the request and the status, not of who produced
+	 * the bytes. */
+	if (fpm_http_direct_status_bodyless(http, r.status)) {
 		evbuffer_drain(r.output, evbuffer_get_length(r.output));
 	}
 	w->requests++;
@@ -480,17 +384,15 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	struct timeval interval = {0, 10000};
 	struct timeval timeout = {wp->config->http_read_timeout / 1000, (wp->config->http_read_timeout % 1000) * 1000};
 	struct sigaction action = {0};
-	struct stat st;
 	struct sockaddr_storage address;
 	socklen_t address_len = sizeof(address);
-	char candidate[PATH_MAX];
 
 	w.wp = wp;
-	if (!getcwd(w.root, sizeof(w.root)) ||
-		snprintf(candidate, sizeof(candidate), "%s%s", w.root, wp->config->http_front_controller) >= (int) sizeof(candidate) ||
-		!realpath(candidate, w.script) || stat(w.script, &st) < 0 || !S_ISREG(st.st_mode) ||
-		(strncmp(w.script, w.root, strlen(w.root)) || (strcmp(w.root, "/") && w.script[strlen(w.root)] != '/'))) {
-		zlog(ZLOG_ERROR, "[pool %s] http-direct: front controller must be a regular file inside chdir", wp->config->name);
+	/* Against the directory the child actually chdir'd into, not against the
+	 * configured one the master already checked. */
+	if (fpm_http_direct_resolve_script(NULL, wp->config->http_front_controller, w.root, w.script) < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] %s: %s must be a regular file inside chdir", wp->config->name,
+			fpm_direct_labels.script_context, fpm_direct_labels.script_noun);
 		exit(FPM_EXIT_CONFIG);
 	}
 	if (getsockname(wp->listening_socket, (struct sockaddr *) &address, &address_len) == 0) {
@@ -500,7 +402,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	w.base = event_base_new();
 	w.http = w.base ? evhttp_new(w.base) : NULL;
 	if (!w.http) exit(FPM_EXIT_SOFTWARE);
-	evhttp_set_max_headers_size(w.http, FPM_DIRECT_HEADERS_MAX);
+	evhttp_set_max_headers_size(w.http, FPM_HTTP_DIRECT_HEADERS_MAX);
 	evhttp_set_max_body_size(w.http, wp->config->http_max_body);
 	evhttp_set_timeout_tv(w.http, &timeout);
 	evhttp_set_allowed_methods(w.http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD |

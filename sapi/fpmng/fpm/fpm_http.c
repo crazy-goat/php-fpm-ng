@@ -355,6 +355,15 @@ struct _fpm_http_upstream {
 	/* FastCGI record stream from the pool */
 	unsigned char rec_hdr[8];
 	int rec_hdr_len, rec_type, rec_len, rec_pad;
+
+	/* A child that died and a child that refused the request head are the same
+	 * event on this socket: the connection goes away and no reply arrives. The
+	 * two facts that do separate them are known here and were not kept
+	 * anywhere (issue #118): whether the request went out complete, and
+	 * whether one byte ever came back. See fpm_http_upstream_fail(). */
+	int req_written;					/* the whole request reached the socket */
+	int reply_seen;						/* at least one byte arrived from the pool for `current` */
+	struct timeval req_written_at;		/* loop time when the request was fully written */
 };
 
 static void fpm_http_pump(struct fpm_http_gateway_s *gw);
@@ -935,8 +944,11 @@ static void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 	}
 }
 
-/* The pool is done with the request (END_REQUEST seen or the connection failed). */
-static void fpm_http_finish(fpm_http_conn *c, int upstream_ok)
+/* The pool is done with the request (END_REQUEST seen or the connection failed).
+ * `explained` says the reason is already in the log -- a clean EOF needs no
+ * line at all, and fpm_http_upstream_fail() writes its own for the case it can
+ * name (issue #118) -- so only the unexplained loss is reported from here. */
+static void fpm_http_finish(fpm_http_conn *c, int explained)
 {
 	if (c->headers_sent) {
 		evhttp_send_reply_end(c->req);
@@ -944,7 +956,7 @@ static void fpm_http_finish(fpm_http_conn *c, int upstream_ok)
 		fpm_http_start_reply(c, 0, 0); /* partial header block, ship what we have */
 		evhttp_send_reply_end(c->req);
 	} else {
-		if (!upstream_ok) {
+		if (!explained) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);
 		}
 		c->status = FPM_HTTP_BAD_GATEWAY;
@@ -979,13 +991,46 @@ static void fpm_http_upstream_drop(fpm_http_upstream *up)
 static void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 {
 	struct fpm_http_gateway_s *gw = up->gw;
+	/* Saved before anything else runs: both branches below report this errno,
+	 * and event_base_gettimeofday_cached() may fall through to a real
+	 * gettimeofday(), which is free to overwrite it. */
+	int err = errno;
+	/* The gateway wrote a complete request and got nothing at all back. Issue
+	 * #117 arrived in the log as "Connection reset by peer" + "no answer",
+	 * which is also what an OOM-killed child produces, and root-causing it
+	 * needed instrumentation in main/fastcgi.c because the log named no
+	 * suspect. It is the same event on the wire either way, so the line below
+	 * names both causes and the one place where they differ: a child that died
+	 * is reported by the master, a child that refused the head keeps running
+	 * and the master stays quiet.
+	 *
+	 * "Written" means the bytes left this process, not that the worker read
+	 * them: a request small enough to fit the socket buffer is fully written
+	 * even towards a worker that never read one byte. That is why the line
+	 * below still names the child death first and does not claim the worker
+	 * parsed anything. */
+	int mute = up->busy && up->req_written && !up->reply_seen;
 
-	if (!clean_eof) {
-		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s': %s", gw->pool, gw->listen_address, strerror(errno));
+	if (mute) {
+		struct timeval now;
+		double ms;
+
+		/* the cached loop time: no syscall, and the close is a later loop
+		 * iteration than the write, so the two values do differ */
+		event_base_gettimeofday_cached(gw->base, &now);
+		ms = (now.tv_sec - up->req_written_at.tv_sec) * 1000.0
+			+ (now.tv_usec - up->req_written_at.tv_usec) / 1000.0;
+		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' closed %.1f ms after the complete request was "
+			"written to it, without one byte of a reply (%s): the worker died, or it refused the request "
+			"head and closed without answering -- if the master reports no child exit for this pool, the "
+			"request head is the remaining suspect",
+			gw->pool, gw->listen_address, ms, clean_eof ? "EOF" : strerror(err));
+	} else if (!clean_eof) {
+		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s': %s", gw->pool, gw->listen_address, strerror(err));
 	}
 	/* EOF is normal after pm.max_requests or a worker restart; a request in flight is lost though */
 	if (up->current) {
-		fpm_http_finish(up->current, clean_eof);
+		fpm_http_finish(up->current, clean_eof || mute);
 		up->current = NULL;
 	}
 	fpm_http_upstream_drop(up);
@@ -1000,6 +1045,7 @@ static void fpm_http_request_done(fpm_http_upstream *up)
 		up->current = NULL;
 	}
 	up->busy = 0;
+	up->req_written = up->reply_seen = 0;
 	memset(up->rec_hdr, 0, sizeof(up->rec_hdr));
 	up->rec_hdr_len = up->rec_type = up->rec_len = up->rec_pad = 0;
 	if (up->gw->idle_ms > 0) {
@@ -1011,6 +1057,9 @@ static void fpm_http_request_done(fpm_http_upstream *up)
 /* Feeds bytes from the pool into the record parser. */
 static void fpm_http_upstream_data(fpm_http_upstream *up, const char *buf, size_t len)
 {
+	if (len > 0) {
+		up->reply_seen = 1;
+	}
 	while (len > 0) {
 		size_t take;
 
@@ -1096,6 +1145,10 @@ static void fpm_http_upstream_flush(fpm_http_upstream *up)
 	}
 	smart_str_free(&up->pending);
 	up->pending_off = 0;
+	if (up->busy && !up->req_written) {
+		up->req_written = 1;
+		event_base_gettimeofday_cached(up->gw->base, &up->req_written_at);
+	}
 }
 
 static void fpm_http_upstream_writecb(evutil_socket_t fd, short what, void *arg)
@@ -1242,6 +1295,7 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		c->queued = 0;
 		c->upstream = idle;
 		idle->busy = 1;
+		idle->req_written = idle->reply_seen = 0;
 		idle->current = c;
 		if (gw->idle_ms > 0 && !idle->connecting) {
 			event_add(idle->ev_read, NULL);		/* drop the idle deadline for the duration of the request */

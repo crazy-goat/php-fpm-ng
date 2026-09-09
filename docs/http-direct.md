@@ -81,7 +81,7 @@ HTTP/1.x keep-alive.
   idle/incomplete connections are not preserved across retirement.
 
 `pm.max_requests`, request stage/idle/busy counters, and the master's execution
-timeout are exercised by `sapi/fpmng/tests/fpmng-http-direct*.phpt`. These files
+timeout are exercised by `sapi/fpmng/tests/fpmng-http-*.phpt`. These files
 are automatically included by `build/run-fpmng-phpt.sh` and the CI `fpmng-phpt`
 job. Production hardening, full framework compatibility, and a total memory bound
 are **not measured/implemented**.

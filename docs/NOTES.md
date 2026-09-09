@@ -774,7 +774,7 @@ way as the primary pair; the per-servername `SSL_CTX*` switch table is built
 in `fpm_http_tls_ctx_new()`, per gateway process, exactly as this decision
 requires — never a new field of `struct fpm_http_tls_s` (that struct only
 carries the raw PEM bytes, read once in the master, the same way it already
-did for the primary pair). Test: `sapi/fpmng/tests/http-tls-alpn-sni.phpt`.
+did for the primary pair). Test: `sapi/fpmng/tests/fpmng-http-tls-alpn-sni.phpt`.
 Scope cut, not covered by this task: SNI certificates are validated once at
 startup but are NOT part of task 040's hot-reload mtime check — only the
 primary `http.tls_cert`/`http.tls_key` pair reloads without a restart; a
@@ -3630,7 +3630,7 @@ new failure mode.
 a certificate's key are created once, on first use, and loaded thereafter —
 `loadOrRegisterAccount()` takes the actual registration call as a callback and
 never invokes it a second time once `account.json` exists. Verified in
-`sapi/fpmng/tests/acme-state.phpt` by simulating two process "boots" against
+`sapi/fpmng/tests/fpmng-acme-state.phpt` by simulating two process "boots" against
 the same directory and asserting the registration callback runs exactly once
 and both the account key bytes and the account URL are identical across the
 two.

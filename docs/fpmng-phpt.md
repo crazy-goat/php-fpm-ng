@@ -1,7 +1,9 @@
 # php-fpm-ng PHPT tests
 
 Regression tests owned by this repository live under `sapi/fpmng/tests/` as
-`fpmng-*.phpt` files. They use the upstream FPM harness copied by
+`fpmng-*.phpt` files. Every `.phpt` file in that directory is ours; the prefix
+is how the runner finds them, and `run-fpmng-phpt.sh` fails when a file this
+repo owns is not reached by it (issue #95). They use the upstream FPM harness copied by
 `build/prepare.sh` (`tester.inc`, `skipif.inc`, FastCGI client helpers) and
 assert behaviour that upstream's 150-test suite does not cover: `pool.type`,
 `pool.executor`, the HTTP gateway, cron, supervisor, and the status pool.
@@ -43,9 +45,19 @@ Identical layout to the upstream runner (`discovered.tsv`, `results.tsv`,
 `summary.txt`, `metadata.txt`, logs). Categories are the same strict mapping
 documented in `fpm-phpt.md`.
 
+## Excluding a test from the runner
+
+`sapi/fpmng/tests/not-run-in-ci.list` holds, one per line, a test file name
+followed by the reason it cannot run where the runner runs. The runner drops
+those from the run and rejects a name with no reason, a name with no file, and
+a name without the `fpmng-` prefix — an excluded test keeps the prefix, because
+`run-fpm-phpt.sh` reads "not named `fpmng-*`" as "upstream's" and would run it
+in the other job. The list is empty today. It is not an escape hatch for a
+failing test — that gets fixed or gets an issue.
+
 ## CI
 
 The `fpmng-phpt` job in `.github/workflows/build-matrix.yml` downloads the
-canonical build artifact and runs this runner. The full upstream suite in the
-`phpt` job also executes these files because they live in the copied test
-directory, but the dedicated job is the gate for task 003 acceptance.
+canonical build artifact and runs this runner. It is the only job that runs
+these tests: before issue #95 the `phpt` job ran them a second time, because
+that runner swept the whole copied test directory.

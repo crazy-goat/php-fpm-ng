@@ -71,6 +71,17 @@ HTTP/1.x keep-alive.
   forwarded headers. Overflow produces HTTP 500 instead of a partial response.
   `flush()` freezes PHP headers but **does not stream to the client**.
   `fastcgi_finish_request()` is unavailable, not a misleading no-op.
+- A response header name must be an RFC 9110 token, on both executors and from
+  the same check (`fpm_http_direct_header_name_ok()`). `header()` itself rejects
+  only CR, LF and NUL in the line, so a name containing a space or a tab, or an
+  empty name (`header(': v')`), reaches the transport; the answer is 500, rather
+  than a malformed header line on the wire or a header the application asked
+  for silently missing. How the 500 is reported does differ: `pool.type =
+  http-direct` names the cause in the response body and logs the offending
+  header as a `WARNING`, which needs `catch_workers_output = yes` to reach the
+  error log at all (issue #73), while under `pool.executor = worker`
+  `fpmng_worker_respond()` returns `false` — the handler is the one that
+  learns — and the client gets libevent's bare 500 page.
 - There are at most 16 pending PHP response writes per worker; further ready
   requests get 503. This is **not a total connection/memory bound**: partially
   read requests and idle connections also use memory.

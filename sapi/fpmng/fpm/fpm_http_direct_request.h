@@ -65,6 +65,11 @@ bool fpm_http_direct_request_acceptable(struct evhttp_request *http);
 int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http_direct_env_source *source,
 	fpm_http_direct_env_cb emit, void *ctx);
 bool fpm_http_direct_header_dropped(const char *name);
+bool fpm_http_direct_header_name_ok(const char *name);
+/* Writes `name` into `out` (size bytes, always NUL-terminated) with every byte
+ * outside printable US-ASCII escaped as \xNN, truncating rather than growing.
+ * Returns `out`, so it can be used inline in a log call. */
+const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size);
 bool fpm_http_direct_status_final(long status);
 bool fpm_http_direct_status_bodyless(struct evhttp_request *http, int status);
 

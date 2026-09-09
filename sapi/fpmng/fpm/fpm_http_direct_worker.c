@@ -31,7 +31,6 @@
  */
 #include "fpm_config.h"
 
-#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -945,30 +944,12 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_respond, 0, 4, _IS_
 	ZEND_ARG_TYPE_INFO(0, body, IS_STRING, 0)
 ZEND_END_ARG_INFO()
 
-/* A header name is an RFC 9110 token. libevent 2.1 already rejects CR and LF
- * in both key and value — measured: evhttp_add_header() returns -1 for
- * "X-A\r\nInjected" and for a value containing CRLF — so there is no
- * response-splitting vector here, but it stores a key containing a space or a
- * colon verbatim and emits a malformed header line. Reject those ourselves. */
-static bool fpm_worker_header_name_ok(const char *name)
-{
-	const char *c;
-
-	if (!*name) {
-		return false;
-	}
-	for (c = name; *c; c++) {
-		if (!strchr("!#$%&'*+-.^_`|~", *c) && !isalnum((unsigned char) *c)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 /* Returns false when a header could not be emitted, which the caller turns
  * into a 500 rather than a response missing a header the application asked
- * for — the same contract as the classic transport, which raises r->overflow
- * on a rejected header (fpm_http_direct.c:214-216). */
+ * for — the same contract as the classic transport, which refuses the whole
+ * response on a rejected header (fpm_http_direct.c:199-214). The name check
+ * itself is shared with that transport (issue #102): it used to live here
+ * only, so the classic path wrote malformed header lines to the wire. */
 static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval *value, size_t *total)
 {
 	zend_string *str;
@@ -986,7 +967,7 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
 	if (fpm_http_direct_header_dropped(name)) {
 		return true;
 	}
-	if (!fpm_worker_header_name_ok(name)) {
+	if (!fpm_http_direct_header_name_ok(name)) {
 		return false;
 	}
 	str = zval_try_get_string(value);

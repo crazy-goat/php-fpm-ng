@@ -90,7 +90,14 @@ struct fpm_pool_type_s {
 	 * takes the error_log away — see fpm_child_log.h. Setting this gives the
 	 * type's children a log channel back to the master; every zlog() in such a
 	 * child then lands in error_log at its own level. Costs one socketpair per
-	 * pool of this type, and nothing at all for any other pool. */
+	 * pool of this type, and nothing at all for any other pool.
+	 *
+	 * The same flag routes PHP's OWN diagnostics — errors, warnings, uncaught
+	 * exceptions, error_log() from the script — into that channel instead of
+	 * leaving them on a stdout nobody reads (issue #124,
+	 * fpm_child_php_log.h): a child of such a type serves no request, so it has
+	 * neither a response nor a front end's FastCGI stderr to put them in, which
+	 * is the same premise as the log channel itself. */
 	unsigned child_logs_via_master:1;
 
 	/* Status flags are established on the master-side listening socket before

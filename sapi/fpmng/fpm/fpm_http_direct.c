@@ -445,7 +445,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	w.base = event_base_new();
 	w.http = w.base ? evhttp_new(w.base) : NULL;
 	if (!w.http) exit(FPM_EXIT_SOFTWARE);
-	evhttp_set_max_headers_size(w.http, FPM_HTTP_DIRECT_HEADERS_MAX);
+	evhttp_set_max_headers_size(w.http, FPM_HTTP_HEADERS_MAX);
 	evhttp_set_max_body_size(w.http, wp->config->http_max_body);
 	evhttp_set_timeout_tv(w.http, &timeout);
 	evhttp_set_allowed_methods(w.http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD |

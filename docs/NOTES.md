@@ -2602,7 +2602,7 @@ the client, instead of using two client addresses).
 
 ### Hardening
 
-- ~~hard-coded limits: 32 MB body, 64 KB CGI headers~~ — `http.max_body` (task 031) makes the body cap a directive; CGI headers remain a compile-time 64 KB;
+- ~~hard-coded limits: 32 MB body, 64 KB CGI headers~~ — `http.max_body` (task 031) makes the body cap a directive; CGI headers remain a compile-time 64 KB. The gateway's *request* header block was a third case, unbounded (libevent's `EV_SIZE_MAX` default) until issue #117 gave it the same compile-time 64 KiB both HTTP-direct executors use; over it, libevent answers 400 and closes;
 - ~~no client-side timeouts (slow loris)~~ — `http.read_timeout` (task 031) bounds one whole client read (headers + body);
 - ~~a full pool returns 502; it should return 503 with `Retry-After`~~ — done (task 031);
 - no backpressure while sending the body — a large upload lands in gateway memory. Decision (task 031): stays; bounded by `http.max_body`, consequence documented in `docs/node_server_gaps.md`.

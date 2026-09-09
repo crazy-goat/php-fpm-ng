@@ -200,7 +200,18 @@ jobs:
       - name: install runtime dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev locales
+      # Issue #105: the locale leg of fpmng-http-direct-request-parity.phpt is
+      # only discriminating under a Turkish locale -- toupper('i') returns 'i'
+      # there, which is what used to corrupt the HTTP_* CGI keys. The runner
+      # image carries C, C.utf8 and POSIX only, where even the pre-fix mapping
+      # is correct, so without this the check would pass on a reverted fix. The
+      # test names the locale it actually got on its own output line, so a run
+      # where this step stopped working does not look the same as a real one.
+      - name: generate tr_TR.UTF-8 (issue #105)
+        run: |
+          sudo locale-gen tr_TR.UTF-8
+          locale -a | grep -i tr_TR
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build

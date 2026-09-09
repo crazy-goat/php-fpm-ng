@@ -165,14 +165,20 @@ try {
      * HTTP_IF_MODiFiED_SiNCE, because the Turkish capital of 'i' is U+0130 and
      * does not fit the single-byte toupper() table.
      *
-     * Both legs are checked, but only the worker leg can catch a regression,
-     * and only where a Turkish locale exists: on the classic executor
-     * ext/standard puts LC_ALL back to "C" at request shutdown
-     * (basic_functions.c:448) and the next request's environment is built
-     * before its script runs, and the CI images and 192.168.8.50 itself carry
-     * only C, C.utf8 and POSIX, where the mapping is already correct. The
-     * check is therefore unconditional and merely degenerate when setlocale()
-     * failed; X_TEST_LOCALE records what the run actually exercised. */
+     * Both legs are checked, but only the worker leg can catch a regression:
+     * on the classic executor ext/standard puts LC_ALL back to "C" at request
+     * shutdown (basic_functions.c:448) and the next request's environment is
+     * built before its script runs, so a corrupt key never becomes
+     * observable there.
+     *
+     * And it can only catch it where a Turkish locale exists. The fpmng-phpt
+     * CI job generates tr_TR.UTF-8 for exactly this test
+     * (.github/workflows/build-matrix.yml); a machine without it -- including
+     * 192.168.8.50, which carries C, C.utf8 and POSIX only -- runs the checks
+     * against a locale where the pre-fix mapping was already correct, so they
+     * pass either way. That is why the locale actually obtained is printed:
+     * a green run that exercised nothing does not read the same as a real
+     * one. */
     foreach (['classic' => $classic, 'worker' => $worker] as $name => $env) {
         check(($env['HTTP_IF_MODIFIED_SINCE'] ?? null) === 'yesterday',
             "$name lost HTTP_IF_MODIFIED_SINCE under locale "
@@ -185,7 +191,9 @@ try {
                     . var_export($env['X_TEST_LOCALE'], true) . ": $key");
         }
     }
-    echo "locale-independent-cgi-keys: ok\n";
+    echo 'locale-independent-cgi-keys: ok (worker locale: '
+        . ($worker['X_TEST_LOCALE'] !== '' ? $worker['X_TEST_LOCALE'] : 'unavailable, check degenerate')
+        . ")\n";
 
     /* The transport owns framing in both: an application-supplied
      * Content-Length and Connection never reach the wire, and a header that
@@ -224,9 +232,9 @@ try {
 }
 echo "Done\n";
 ?>
---EXPECT--
+--EXPECTF--
 env-parity: ok
-locale-independent-cgi-keys: ok
+locale-independent-cgi-keys: ok (worker locale: %s)
 framing-parity: ok
 header-name-limit: ok
 Done

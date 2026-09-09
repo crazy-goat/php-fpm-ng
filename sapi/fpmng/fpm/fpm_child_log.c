@@ -54,8 +54,12 @@
  * keeps writing is a callback during which no child is reaped and no log is
  * reopened. Draining a bounded batch and returning costs one more trip through
  * the loop — the fd stays readable, the event is level-triggered — and cannot
- * starve anything. 64 is arbitrary but far above the handful of records a
- * script run produces. */
+ * starve anything. 64 is arbitrary; it was far above the handful of records a
+ * script run produced when only the pool's own policy sent them, and issue #124
+ * added the script's own PHP errors to the same channel, so the rate is now the
+ * script author's to choose. The bound is what makes that safe for the master:
+ * a chatty child gets backpressure (the write end is blocking on purpose, see
+ * fpm_child_log_prepare()), never a stalled event loop. */
 #define FPM_CHILD_LOG_BATCH 64
 
 struct fpm_child_log_channel_s {
@@ -150,8 +154,11 @@ static void fpm_child_log_said(struct fpm_event_s *ev, short which, void *arg) /
 		 * A record below the master's log_level is formatted by the child and
 		 * dropped here, because zlog() calls an external logger BEFORE applying
 		 * that filter (zlog.c, vzlog()). That wastes a datagram per filtered
-		 * DEBUG line; in a supervisor/cron child, which serves no requests,
-		 * the whole traffic is a handful of records per script run. */
+		 * DEBUG line. It stays acceptable for the pool's own policy messages,
+		 * which are a handful per script run; the one sender whose volume the
+		 * pool type does not control — PHP's own errors, issue #124 — applies
+		 * the same filter itself before calling zlog()
+		 * (fpm_child_php_log_message()). */
 		zlog(level, "%s (child %d)", buf + FPM_CHILD_LOG_HDR, (int) pid);
 	}
 }

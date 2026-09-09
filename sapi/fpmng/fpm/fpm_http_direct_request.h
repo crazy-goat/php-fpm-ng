@@ -12,21 +12,28 @@
 
 struct fpm_worker_pool_s;
 
-/* evhttp's limit on the whole header block (evhttp_set_max_headers_size), and
- * therefore the ceiling on a response header block as well. */
-#define FPM_HTTP_DIRECT_HEADERS_MAX (64 * 1024)
+/* evhttp's limit on the whole request header block
+ * (evhttp_set_max_headers_size), and therefore the ceiling on a response
+ * header block as well. 64 KiB is the number HTTP-direct has always used;
+ * the HTTP gateway adopted it rather than picking its own, so a request that
+ * one transport refuses is refused by the other (issue #117). It is already
+ * generous next to what the servers this replaces accept: Apache's
+ * LimitRequestFieldSize is 8190 bytes per line with LimitRequestFields 100,
+ * nginx' large_client_header_buffers is 4 x 8k.
+ *
+ * Not DIRECT_: both transports set it (fpm_http_direct.c,
+ * fpm_http_direct_worker.c, fpm_http.c). */
+#define FPM_HTTP_HEADERS_MAX (64 * 1024)
 /* Longest header name turned into an HTTP_* CGI key, and the reason the key
- * buffer is a few hundred bytes instead of FPM_HTTP_DIRECT_HEADERS_MAX + 6:
- * that constant bounds the header *block*, so sizing a per-iteration stack
- * array from it cost 64 KB of stack per header. A name this long is already
+ * buffer is a few hundred bytes instead of FPM_HTTP_HEADERS_MAX + 6: that
+ * constant bounds the header *block*, so sizing a per-iteration stack array
+ * from it cost 64 KB of stack per header. A name this long is already
  * pathological — Apache rejects a whole header line above 8190 bytes — and a
  * request carrying one is refused, not served with the header dropped.
  *
- * Not DIRECT_: the HTTP gateway (fpm_http.c) enforces the same bound the same
- * way, so a request header name means one thing on both transports (issue
- * #115). The gateway does not share FPM_HTTP_DIRECT_HEADERS_MAX above — it
- * never calls evhttp_set_max_headers_size() — which is why only this one lost
- * the prefix. */
+ * Not DIRECT_ either: the HTTP gateway (fpm_http.c) enforces the same bound
+ * the same way, so a request header name means one thing on both transports
+ * (issue #115). */
 #define FPM_HTTP_HEADER_NAME_MAX 1024
 
 /* Wording the two executors do not share. The checks below are identical; the
@@ -76,7 +83,7 @@ bool fpm_http_direct_header_name_ok(const char *name);
  * outside printable US-ASCII escaped as \xNN, truncating rather than growing.
  * Returns `out`, so it can be used inline in a log call. */
 const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size);
-/* Charges one emitted response header line against FPM_HTTP_DIRECT_HEADERS_MAX
+/* Charges one emitted response header line against FPM_HTTP_HEADERS_MAX
  * and returns false when it does not fit, leaving *total unchanged. */
 bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len);
 bool fpm_http_direct_status_final(long status);

@@ -325,9 +325,9 @@ bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value
 	 * a 32-bit size_t. */
 	size_t line = strlen(name) + 4;
 
-	if (line > FPM_HTTP_DIRECT_HEADERS_MAX ||
-		value_len > FPM_HTTP_DIRECT_HEADERS_MAX - line ||
-		line + value_len > FPM_HTTP_DIRECT_HEADERS_MAX - *total) {
+	if (line > FPM_HTTP_HEADERS_MAX ||
+		value_len > FPM_HTTP_HEADERS_MAX - line ||
+		line + value_len > FPM_HTTP_HEADERS_MAX - *total) {
 		return false;
 	}
 	*total += line + value_len;

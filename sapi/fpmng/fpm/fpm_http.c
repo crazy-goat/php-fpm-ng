@@ -133,8 +133,9 @@ struct {								\
 #include "fpm_http_forwarded.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
-/* Only for FPM_HTTP_HEADER_NAME_MAX: the bound on a request header name is the
- * same on both transports (issue #115), so it has one definition. */
+/* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
+ * request header name (issue #115) and on the whole request header block
+ * (issue #117) is the same on both transports, so each has one definition. */
 #include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
 #include "fpm_http_tls.h"
@@ -151,7 +152,18 @@ struct {								\
 #define FPM_HTTP_RESPAWN_WINDOW_SEC 10
 #define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)	/* http.max_body default; the gateway buffers a whole request body in memory (task 031) */
 #define FPM_HTTP_MAX_CGI_HEADERS (64 * 1024)
-#define FCGI_MAX_RECORD_LEN      0xffff
+/* Largest content length we put in a FastCGI record. The protocol allows
+ * 0xffff, but every record we emit is padded to an 8-byte boundary
+ * (fpm_http_fcgi_record()) and php-src rejects a PARAMS record whose
+ * contentLength + paddingLength exceeds 0xffff
+ * (main/fastcgi.c, `if (len + padding > FCGI_MAX_LENGTH) return 0;` in
+ * fcgi_read_request()) -- the worker then closes the connection with no reply
+ * and the gateway answers 502. Measured on 192.168.8.50, 2026-09-09: a request
+ * header block of 64560 bytes produced a 65533-byte PARAMS record, padding 3,
+ * and a 502. nginx never hit this because it emits padding 0. The largest
+ * multiple of 8 below 0xffff needs no padding at all and leaves every shorter
+ * record's padding inside the limit. Issue #117. */
+#define FCGI_MAX_RECORD_LEN      65528
 #define FPM_HTTP_BAD_GATEWAY     502 /* libevent has no constant for it */
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
 #define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
@@ -310,6 +322,7 @@ struct _fpm_http_conn {
 
 	smart_str params;					/* FCGI_PARAMS payload being assembled */
 	smart_str out;						/* records ready to go upstream */
+	int params_oversize;				/* one name/value pair did not fit a record -- see fpm_http_param() */
 
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
@@ -480,6 +493,20 @@ static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value
 	size_t name_len = strlen(name), value_len = strlen(value);
 	size_t pair_len = (name_len < 0x80 ? 1 : 4) + (value_len < 0x80 ? 1 : 4) + name_len + value_len;
 
+	/* A pair may not straddle records (see above), so one that cannot fit an
+	 * empty record cannot be sent at all: the request is refused rather than
+	 * mangled. Without this the length silently wrapped in the record header
+	 * -- fpm_http_fcgi_record() writes contentLength as two bytes, so 65539
+	 * became 3 -- and the worker parsed request bytes as record headers.
+	 * Reachable inside the 64 KiB block bound this commit sets, measured on
+	 * 192.168.8.50, 2026-09-09: `GET / HTTP/1.0` plus one 65520-byte header
+	 * line gives a 65533-byte pair, and a 65523-byte `.php` URI gives a
+	 * 65539-byte REQUEST_URI; both answered 502 before this check. The caller
+	 * turns the flag into a 400 and throws the connection away. */
+	if (pair_len > FCGI_MAX_RECORD_LEN) {
+		c->params_oversize = 1;
+		return;
+	}
 	if (c->params.s && ZSTR_LEN(c->params.s) + pair_len > FCGI_MAX_RECORD_LEN) {
 		fpm_http_fcgi_record(&c->out, FCGI_PARAMS, ZSTR_VAL(c->params.s), ZSTR_LEN(c->params.s));
 		smart_str_free(&c->params);
@@ -621,6 +648,24 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		}
 	}
 
+	/* BEGIN_REQUEST goes out before the first parameter, not after the last
+	 * one: fpm_http_param() flushes a full PARAMS record straight into c->out
+	 * as soon as one fills up, so writing BEGIN_REQUEST at the end put it
+	 * *after* those records on the wire. The worker read PARAMS as the first
+	 * record of a request, fell through fcgi_read_request()'s BEGIN_REQUEST
+	 * check and closed -- 502 for every request whose parameters did not fit
+	 * one record. Latent until issue #117 made a 64 KiB header block a
+	 * supported input; measured on 192.168.8.50, 2026-09-09: a 65000-byte
+	 * block produced PARAMS(65083), PARAMS(898), PARAMS(0) with BEGIN_REQUEST
+	 * in the middle. The one thing that can still fail after this point is the
+	 * oversized-pair check below, and that path frees the connection with
+	 * c->out unsent (fpm_http_request() -> fpm_http_conn_free()), so a
+	 * half-built buffer never reaches a worker.
+	 *
+	 * The PARAMS records themselves are still assembled in c->params and
+	 * appended below, because the last one is only complete at the end. */
+	fpm_http_fcgi_record(&c->out, FCGI_BEGIN_REQUEST, begin_request, sizeof(begin_request));
+
 	snprintf(buf, sizeof(buf), "HTTP/%d.%d", req->major, req->minor);
 	fpm_http_param(c, "REQUEST_METHOD", method);
 	fpm_http_param(c, "SERVER_PROTOCOL", buf);
@@ -759,8 +804,13 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		smart_str_free(&name);
 	}
 
-	/* BEGIN_REQUEST, PARAMS (possibly several records), empty PARAMS, STDIN, empty STDIN */
-	fpm_http_fcgi_record(&c->out, FCGI_BEGIN_REQUEST, begin_request, sizeof(begin_request));
+	if (c->params_oversize) {
+		return HTTP_BADREQUEST;
+	}
+
+	/* BEGIN_REQUEST (written above), PARAMS (possibly several records, the
+	 * earlier ones already flushed by fpm_http_param()), empty PARAMS, STDIN,
+	 * empty STDIN */
 	if (c->params.s) {
 		fpm_http_fcgi_record(&c->out, FCGI_PARAMS, ZSTR_VAL(c->params.s), ZSTR_LEN(c->params.s));
 	}
@@ -2082,6 +2132,20 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 		EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_max_body_size(gw->http, gw->max_body);
+	/* Without this the block limit is libevent's default EV_SIZE_MAX (libevent
+	 * 2.1.12-stable, http.c:3678 in evhttp_new_object()): a client could send
+	 * headers until the process died, and unlike a direct-transport worker
+	 * this one process serves every connection of the pool, so that memory is
+	 * charged against every in-flight request here. #115 bounded a header
+	 * *name*, which does nothing about their number. The refusal is
+	 * libevent's, not ours: over the limit it fails the connection with
+	 * EVREQ_HTTP_INVALID_HEADER (http.c:2303 evhttp_read_header()), which for
+	 * an incoming connection answers 400 and closes (http.c:664
+	 * evhttp_connection_incoming_fail()) -- the same status our own
+	 * over-long-name check returns. The request line is charged against the
+	 * same budget (http.c:2041), so a pathological URI is bounded too.
+	 * Issue #117. */
+	evhttp_set_max_headers_size(gw->http, FPM_HTTP_HEADERS_MAX);
 	evhttp_set_gencb(gw->http, fpm_http_request, gw);
 	evutil_make_socket_nonblocking(gw->listen_fd);
 	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
@@ -2096,6 +2160,10 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		}
 		evhttp_set_allowed_methods(plain, EVHTTP_REQ_GET | EVHTTP_REQ_HEAD);
 		evhttp_set_max_body_size(plain, 0);
+		/* Same bound on http.plain_listen: it is the same process and the same
+		 * unauthenticated listener, and it answers before TLS, so leaving it
+		 * at EV_SIZE_MAX would leave the hole open on the easier port. */
+		evhttp_set_max_headers_size(plain, FPM_HTTP_HEADERS_MAX);
 		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
 		evutil_make_socket_nonblocking(gw->plain_listen_fd);
 		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {

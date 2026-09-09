@@ -7,6 +7,27 @@ fpm-ng: rejected directives and illegal executors fail at configuration validati
 
 require_once "tester.inc";
 
+/* Which optional executors this binary was built with. The configure line in
+ * `php-fpm-ng -i` is the only thing that reports it: the flags decide whether
+ * the sources are compiled at all (build/prepare.sh, sapi/fpmng/config.m4), and
+ * the same query is what the fiber tests' SKIPIF sections use. */
+function fpmngBuildHasFlag(string $flag): bool
+{
+    static $info = null;
+
+    if ($info === null) {
+        $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
+        exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
+        if ($status !== 0) {
+            echo "FAIL: cannot query the build flags of $binary\n";
+            exit(1);
+        }
+        $info = implode("\n", $output);
+    }
+
+    return str_contains($info, $flag);
+}
+
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
     $tester = new FPM\Tester($cfg, '<?php echo "ok";');
@@ -112,10 +133,21 @@ expectConfigFailure(
 unlink("$workerRoot/worker.php");
 rmdir($workerRoot);
 
+/* pool.executor = async is rejected in both builds, but by two different code
+ * paths, so the case has to say which build it is looking at instead of
+ * inheriting one (issue #87). Without --enable-fpmng-async the executor entry
+ * has no .type and fpm_pool_type_resolve() names the flag that is missing
+ * (sapi/fpmng/fpm/fpm_pool_type.c:472); with the flag the resolve succeeds and
+ * fpm_pool_async_validate() rejects the pool as a matter of policy
+ * (sapi/fpmng/fpm/fpm_pool_async.c:73). Asserting only the first needle made
+ * this case fail in any --enable-fpmng-async build. */
+$asyncBuiltIn = fpmngBuildHasFlag('--enable-fpmng-async');
 expectConfigFailure(
     'async-disabled',
     $base . "\npool.type = http\npool.executor = async\nhttp.listen = {{ADDR[http]}}",
-    ['--enable-fpmng-async']
+    $asyncBuiltIn
+        ? ['pool.executor = async is disabled', 'pool.executor = classic or fiber']
+        : ['--enable-fpmng-async']
 );
 
 ?>

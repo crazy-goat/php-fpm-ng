@@ -20,6 +20,13 @@ $dir = __DIR__;
 function exercise(string $label, string $extraConfig, bool $http = false): void
 {
     global $dir;
+    /* max_execution_time is pinned in the pool, not inherited: fpm_pool_coop.c:263
+     * refuses a fiber pool unless it is 0 (one setitimer()/SIGPROF timer per
+     * process cannot represent N concurrent deadlines), and php-fpm-ng is
+     * started with -n by tester.inc, so the value comes from PHP's compiled-in
+     * default of 30 rather than from any php.ini. Without the pin the pool never
+     * starts and the test fails on its first expected NOTICE, which reads as an
+     * unrelated startup failure (issue #87). */
     $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -30,6 +37,7 @@ chdir = $dir
 pm = static
 pm.max_children = 1
 php_admin_value[opcache.enable] = 0
+php_admin_value[max_execution_time] = 0
 $extraConfig
 EOT;
 
@@ -56,7 +64,11 @@ EOT;
 }
 
 exercise('fastcgi-ng-fiber', "pool.type = fastcgi-ng\npool.executor = fiber");
-exercise('http-fiber', "pool.type = http\nhttp.listen = {{ADDR[http]}}", http: true);
+/* pool.executor = fiber spelled out: without it this case is pool.type = http
+ * on the classic executor, i.e. character for character what
+ * fpmng-pool-type-classic-matrix.phpt's http-classic case already covers, in a
+ * file that only runs in an --enable-fpmng-fiber build (issue #87). */
+exercise('http-fiber', "pool.type = http\npool.executor = fiber\nhttp.listen = {{ADDR[http]}}", http: true);
 
 ?>
 Done

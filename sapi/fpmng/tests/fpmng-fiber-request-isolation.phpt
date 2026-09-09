@@ -61,6 +61,11 @@ echo json_encode([
 PHP;
 file_put_contents("$docRoot/probe.php", $probe);
 
+/* max_execution_time is pinned in the pool below, not inherited: fpm_pool_coop.c:263
+ * refuses a fiber pool unless it is 0, and tester.inc starts php-fpm-ng with -n,
+ * so an unset value is PHP's compiled-in default of 30 rather than anything from
+ * a php.ini. Without the pin the pool never starts and the failure surfaces as a
+ * missing startup NOTICE (issue #87). */
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -74,6 +79,7 @@ pool.type = http
 pool.executor = fiber
 http.listen = {{ADDR[http]}}
 php_admin_value[opcache.enable] = 0
+php_admin_value[max_execution_time] = 0
 php_admin_value[session.save_path] = $docRoot/sessions
 EOT;
 

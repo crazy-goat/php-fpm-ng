@@ -8,7 +8,15 @@
 #
 # The prepared tree must contain sapi/fpmng/tests/ with tester.inc from
 # build/prepare.sh. Only files matching fpmng-*.phpt are executed — upstream's
-# copied suite is intentionally excluded.
+# copied suite is intentionally excluded and is run by build/run-fpm-phpt.sh.
+#
+# The glob is not the definition of ownership, only its naming convention. Every
+# .phpt file in this repo's sapi/fpmng/tests/ is ours, and the run is checked
+# against that directory: a file this repo owns that the glob does not reach
+# fails the run instead of quietly not being tested (issue #95, where nine
+# non-prefixed files were reachable only because build/run-fpm-phpt.sh sweeps
+# the whole directory). A test that must not run in CI goes into
+# sapi/fpmng/tests/not-run-in-ci.list with a reason.
 set -eu
 
 usage() {
@@ -35,6 +43,11 @@ fail() {
 PHPSRC_INPUT=$1
 RESULTS_INPUT=$2
 TEST_DIR=sapi/fpmng/tests
+REPO=$(cd "$(dirname "$0")/.." && pwd)
+OWNED_DIR=$REPO/$TEST_DIR
+EXCLUDE_LIST=$OWNED_DIR/not-run-in-ci.list
+OWNED_COUNT=unknown
+EXCLUDED_COUNT=0
 
 CLI_BIN_INPUT=${TEST_PHP_EXECUTABLE-}
 FPM_BIN_INPUT=${TEST_PHP_FPM_EXECUTABLE-}
@@ -111,6 +124,75 @@ fi
 TEST_COUNT=$(awk 'END {print NR + 0}' "$DISCOVERED")
 [ "$TEST_COUNT" -gt 0 ] || fail "no fpmng-*.phpt tests were discovered"
 
+# Coverage check: what this repo owns against what the glob reached. Skipped,
+# with owned_tests=unknown in the summary, when the script runs detached from a
+# checkout (only then is the owned set genuinely unknowable — the prepared tree
+# mixes our tests with upstream's copied ones and nothing in a .phpt says which
+# is which).
+if [ -d "$OWNED_DIR" ]; then
+    OWNED_ALL=$RESULTS_DIR/owned.all.txt
+    OWNED_EXCLUDED=$RESULTS_DIR/owned.excluded.txt
+    OWNED_EXPECTED=$RESULTS_DIR/owned.expected.txt
+    DISCOVERED_NAMES=$RESULTS_DIR/discovered.names.txt
+
+    (cd "$OWNED_DIR" && find . -maxdepth 1 -type f -name '*.phpt' -exec basename {} \; ) \
+        | LC_ALL=C sort > "$OWNED_ALL"
+
+    : > "$OWNED_EXCLUDED"
+    if [ -f "$EXCLUDE_LIST" ]; then
+        # "<name>.phpt <reason>" — a name with no reason is rejected, so an
+        # exclusion cannot outlive the sentence that justified it.
+        #
+        # `|| [ -n "$line" ]`: read returns non-zero on a last line with no
+        # newline after it, and the loop body would never see that entry. An
+        # exclusion that silently does not apply is the failure mode this whole
+        # check exists to remove.
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ''|'#'*) continue ;;
+            esac
+            name=${line%% *}
+            reason=${line#"$name"}
+            reason=$(printf '%s' "$reason" | sed 's/^[[:space:]]*//')
+            [ -n "$reason" ] || fail "$EXCLUDE_LIST: no reason given for $name"
+            [ -f "$OWNED_DIR/$name" ] || fail "$EXCLUDE_LIST: no such test: $name"
+            # An excluded test still has to carry the prefix: build/run-fpm-phpt.sh
+            # takes "not named fpmng-*" to mean "upstream's", so a non-prefixed
+            # file would be skipped here and then run by that job instead, its
+            # failure filed under upstream's suite.
+            case "$name" in
+                fpmng-*.phpt) ;;
+                *) fail "$EXCLUDE_LIST: $name must still be named fpmng-*.phpt to be excluded" ;;
+            esac
+            printf '%s\n' "$name" >> "$OWNED_EXCLUDED"
+        done < "$EXCLUDE_LIST"
+    fi
+    LC_ALL=C sort -o "$OWNED_EXCLUDED" "$OWNED_EXCLUDED"
+    LC_ALL=C comm -23 "$OWNED_ALL" "$OWNED_EXCLUDED" > "$OWNED_EXPECTED"
+
+    # An excluded test keeps its fpmng- prefix, so the glob still finds it; drop
+    # it here rather than asking anyone to rename a file to stop running it.
+    if [ -s "$OWNED_EXCLUDED" ]; then
+        awk 'NR == FNR { excluded[$0] = 1; next }
+             { name = $0; sub(/.*\//, "", name); if (!(name in excluded)) print }' \
+            "$OWNED_EXCLUDED" "$DISCOVERED" > "$DISCOVERED.filtered"
+        mv "$DISCOVERED.filtered" "$DISCOVERED"
+        TEST_COUNT=$(awk 'END {print NR + 0}' "$DISCOVERED")
+    fi
+
+    sed 's|.*/||' "$DISCOVERED" | LC_ALL=C sort > "$DISCOVERED_NAMES"
+    MISSING=$(LC_ALL=C comm -23 "$OWNED_EXPECTED" "$DISCOVERED_NAMES" | tr '\n' ' ')
+    if [ -n "$MISSING" ]; then
+        fail "these tests are owned by this repo but were not discovered: ${MISSING}(rename them to fpmng-*.phpt; a test that must not run in CI keeps the prefix and goes into $EXCLUDE_LIST with a reason)"
+    fi
+    OWNED_COUNT=$(awk 'END {print NR + 0}' "$OWNED_ALL")
+    EXCLUDED_COUNT=$(awk 'END {print NR + 0}' "$OWNED_EXCLUDED")
+    EXPECTED_COUNT=$(awk 'END {print NR + 0}' "$OWNED_EXPECTED")
+    # Not implied by the check above: the prepared tree can also be missing a
+    # test that the repo has, or hold a stale fpmng-*.phpt from an older copy.
+    [ "$TEST_COUNT" -eq "$EXPECTED_COUNT" ] || fail "discovered $TEST_COUNT tests in $PHPSRC/$TEST_DIR but this repo owns $EXPECTED_COUNT runnable ones; re-run build/prepare.sh against a clean tree"
+fi
+
 if [ -e "$PHPSRC/.git" ] && command -v git >/dev/null 2>&1; then
     SOURCE_COMMIT=$(git -C "$PHPSRC" rev-parse HEAD 2>/dev/null || printf '%s' unknown)
 fi
@@ -122,6 +204,8 @@ write_metadata() {
         printf '%s\n' "php_src_commit=$SOURCE_COMMIT"
         printf '%s\n' "test_directory=$TEST_DIR"
         printf '%s\n' "discovered_tests=$TEST_COUNT"
+        printf '%s\n' "owned_tests=$OWNED_COUNT"
+        printf '%s\n' "excluded_tests=$EXCLUDED_COUNT"
         printf '%s\n' "requested_php_cli=${CLI_BIN_INPUT:-not-supplied}"
         printf '%s\n' "php_cli=$CLI_BIN"
         printf '%s\n' "php_cli_sha256=$CLI_SHA"

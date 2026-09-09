@@ -240,3 +240,60 @@ bool fpm_http_direct_status_bodyless(struct evhttp_request *http, int status)
 	return evhttp_request_get_command(http) == EVHTTP_REQ_HEAD ||
 		status == 204 || status == 205 || status == 304;
 }
+
+/* A response header name is an RFC 9110 token. libevent 2.1 already rejects
+ * CR and LF in both key and value — measured: evhttp_add_header() returns -1
+ * for "X-A\r\nInjected" and for a value containing CRLF — so there is no
+ * response-splitting vector here, but it stores a key containing a space or a
+ * colon verbatim and emits a malformed header line. Reject those ourselves.
+ *
+ * Both executors need it, and neither gets it for free. `header()` rejects
+ * only CR, LF and NUL in the whole line (main/SAPI.c:758-773 in php-8.5), so
+ * "X Y: v", "X\tY: v" and ": v" all reach sapi_module.send_headers and, before
+ * issue #102, the wire; the worker executor takes its names from a userland
+ * array, which additionally admits an embedded colon. Measured on
+ * 192.168.8.50 with php-8.5.9, 2026-09-09. */
+bool fpm_http_direct_header_name_ok(const char *name)
+{
+	const char *c;
+
+	if (!*name) {
+		return false;
+	}
+	for (c = name; *c; c++) {
+		/* Explicit ranges, not isalnum(): LC_CTYPE belongs to the application
+		 * here, and setlocale(LC_ALL, 'de_DE.ISO-8859-1') makes isalnum(0xE9)
+		 * true, so header("X-Caf\xE9: v") would pass a check whose whole
+		 * purpose is to enforce a US-ASCII token. */
+		if ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9')) {
+			continue;
+		}
+		if (!strchr("!#$%&'*+-.^_`|~", *c)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* The rejected name is by construction not a token and header() filters only
+ * CR, LF and NUL, so an application that builds a header name out of request
+ * input (header($_GET['h'] . ': v') — the case that reaches the check at all)
+ * can put terminal escapes into whatever reads the error log. Escaped, not
+ * dropped: the operator still has to be able to recognise the name. SP is
+ * escaped along with the control bytes on purpose — a leading or trailing
+ * space is one of the reachable causes and is invisible inside the quotes. */
+const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size)
+{
+	size_t o = 0;
+	const char *c;
+
+	for (c = name; *c && o + 5 < size; c++) {
+		if (*c >= 0x21 && *c <= 0x7e && *c != '\\') {
+			out[o++] = *c;
+		} else {
+			o += (size_t) snprintf(out + o, size - o, "\\x%02x", (unsigned char) *c);
+		}
+	}
+	out[o] = '\0';
+	return out;
+}

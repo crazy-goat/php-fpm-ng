@@ -71,6 +71,13 @@ HTTP/1.x keep-alive.
   forwarded headers. Overflow produces HTTP 500 instead of a partial response.
   `flush()` freezes PHP headers but **does not stream to the client**.
   `fastcgi_finish_request()` is unavailable, not a misleading no-op.
+- The 64 KiB header cap counts the bytes that reach the wire, not the bytes the
+  application set: `name: value\r\n` per emitted header, and nothing for a
+  dropped framing header or for `Status:`, neither of which is written. Both
+  executors charge it through one function
+  (`fpm_http_direct_header_charge()`), so the same response is served or
+  refused whichever one runs it (issue #104). Headers the transport itself adds
+  (`Date`, `Server`, `Content-Length`) are outside the cap.
 - A response header name must be an RFC 9110 token, on both executors and from
   the same check (`fpm_http_direct_header_name_ok()`). `header()` itself rejects
   only CR, LF and NUL in the line, so a name containing a space or a tab, or an

@@ -354,6 +354,29 @@ jobs:
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
 
+  # Issue #90: the per-connection read deadline (task 031) used to fire into a
+  # bufferevent evhttp had already freed, killing the whole gateway process
+  # with SIGSEGV. Same shape as tls-reload above -- real gateway processes,
+  # real TLS, no root -- and its own job so a crash here is not read as a
+  # reload failure.
+  read-deadline:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify a gateway survives its own read deadline (issue #90)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
+
   plain-http-listener:
     needs: build
     runs-on: ubuntu-latest

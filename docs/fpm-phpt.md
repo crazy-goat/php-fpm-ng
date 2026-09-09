@@ -5,6 +5,10 @@ only the files owned by this repository. The copied `sapi/fpmng/tests/` director
 is deliberately retained. The tests remain upstream files; do not copy them into
 this repository or edit their expected output.
 
+`run-fpm-phpt.sh` runs the upstream tests only. Our own `fpmng-*.phpt` land in
+the same directory and are excluded by name; they are run by
+[`run-fpmng-phpt.sh`](fpmng-phpt.md).
+
 ## Prerequisites
 
 - A PHP source checkout with `sapi/fpm/` and `run-tests.php`.

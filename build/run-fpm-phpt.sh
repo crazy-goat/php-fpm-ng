@@ -10,6 +10,12 @@
 # tester.inc derives the FPM path from TEST_PHP_FPM_EXECUTABLE and expects the
 # upstream build layout. The temporary compatibility links are kept below the
 # results directory, so an external build tree is never modified.
+#
+# Upstream's tests only: build/prepare.sh copies our own fpmng-*.phpt into the
+# same directory, and until issue #95 this runner swept the whole directory and
+# ran them too — every fpmng test ran twice per PR, and nine of our tests were
+# covered only by that accident. They belong to build/run-fpmng-phpt.sh, which
+# checks its own coverage against the repo.
 set -eu
 
 usage() {
@@ -106,7 +112,7 @@ rm -f "$DISCOVERED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" 
 
 if ! (
     cd "$PHPSRC"
-    find "$TEST_DIR" -type f -name '*.phpt' -print | LC_ALL=C sort
+    find "$TEST_DIR" -type f -name '*.phpt' ! -name 'fpmng-*.phpt' -print | LC_ALL=C sort
 ) > "$DISCOVERED"; then
     fail "cannot enumerate upstream FPM tests"
 fi
@@ -244,6 +250,11 @@ esac
 printf '%s\n' "Running $TEST_COUNT upstream FPM tests" >&2
 printf '%s\n' "Binary: $FPM_BIN" >&2
 
+# The discovered list, not the directory: run-tests.php would rediscover
+# sapi/fpmng/tests from scratch and pull our fpmng-*.phpt back in.
+# shellcheck disable=SC2046
+TEST_FILES=$(tr '\n' ' ' < "$DISCOVERED")
+
 set +e
 (
     cd "$PHPSRC" || exit 1
@@ -256,7 +267,7 @@ set +e
         -W "$STATUS_RAW" \
         -w "$FAILED" \
         -s "$OUTPUT_LOG" \
-        "$TEST_DIR"
+        $TEST_FILES
 ) > "$RUN_LOG" 2>&1
 RUN_STATUS=$?
 set -e

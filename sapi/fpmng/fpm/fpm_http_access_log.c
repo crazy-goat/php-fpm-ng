@@ -90,7 +90,11 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	char line[4096];
 	char uri_esc[1024], referer_esc[512], ua_esc[512];
 	char addr_esc[128], user_esc[256];
-	char status_buf[8];
+	/* 12, not 8: the format is "%d" and `status` is an int, so gcc's
+	 * -Wformat-truncation counts up to 11 characters plus the NUL. Real
+	 * statuses are three digits and the negative case takes the "-" branch
+	 * below, but the buffer has to hold what the format can write. */
+	char status_buf[12];
 	char timebuf[64];
 	time_t now;
 	struct tm tmv;

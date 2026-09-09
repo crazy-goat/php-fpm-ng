@@ -84,6 +84,15 @@ struct fpm_pool_type_s {
 	 * in the configuration. See docs/NOTES.md 3u. */
 	unsigned reads_foreign_scoreboards:1;
 
+	/* This type's own policy runs in the CHILD (supervisor backoff, restart_max,
+	 * cron timeouts, "cannot open script"), so the messages an operator needs
+	 * are emitted where upstream FPM assumes nothing worth logging happens and
+	 * takes the error_log away — see fpm_child_log.h. Setting this gives the
+	 * type's children a log channel back to the master; every zlog() in such a
+	 * child then lands in error_log at its own level. Costs one socketpair per
+	 * pool of this type, and nothing at all for any other pool. */
+	unsigned child_logs_via_master:1;
+
 	/* Status flags are established on the master-side listening socket before
 	 * children are forked. The open file description is shared by the master
 	 * and its children, so a child must not change this after fork. */

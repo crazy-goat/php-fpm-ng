@@ -60,10 +60,17 @@ struct fpm_direct_worker {
 
 struct fpm_direct_request {
 	struct evhttp_request *http;
+	/* The pool this request belongs to. Only the log prefix needs it, and
+	 * fpm_direct_send_headers() reaches the request through fpm_direct_current
+	 * without a worker in scope. */
+	const char *pool;
 	struct evkeyvalq env;
 	struct evbuffer *output;
 	int status;
-	bool overflow;
+	/* Non-NULL once the response cannot go out as the application built it.
+	 * Every cause ends the same way — 500, this text as the body — but an
+	 * operator reading the wire has to be able to tell them apart. */
+	const char *rejected;
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -134,9 +141,9 @@ static size_t fpm_direct_write(const char *str, size_t len)
 	if (!r) {
 		return 0;
 	}
-	if (!r->overflow && (len > FPM_DIRECT_RESPONSE_MAX - evbuffer_get_length(r->output) ||
+	if (!r->rejected && (len > FPM_DIRECT_RESPONSE_MAX - evbuffer_get_length(r->output) ||
 		evbuffer_add(r->output, str, len) < 0)) {
-		r->overflow = true;
+		r->rejected = "response body exceeds POC limits";
 	}
 	/* Do not bail out from a shutdown callback. The bounded buffer is discarded
 	 * and converted to 500 after the complete PHP shutdown sequence. */
@@ -161,7 +168,12 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 		}
 		total += h->header_len;
 		if (total > FPM_HTTP_DIRECT_HEADERS_MAX) {
-			r->overflow = true;
+			/* First cause wins, as in fpm_direct_write(): the 500 body and the
+			 * WARNING below have to name the same trigger, or an operator
+			 * chases a limit that was not the one that fired. */
+			if (!r->rejected) {
+				r->rejected = "response headers exceed POC limits";
+			}
 			break;
 		}
 		name = estrndup(h->header, colon - h->header);
@@ -172,8 +184,33 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 		if (!strcasecmp(name, "Status")) {
 			r->status = atoi(value);
 		} else if (!fpm_http_direct_header_dropped(name)) {
-			if (evhttp_add_header(out, name, value) < 0) {
-				r->overflow = true;
+			/* Same check as the worker executor, same reason (issue #102):
+			 * evhttp_add_header() stores a non-token name verbatim and writes
+			 * a malformed header line. header() lets one through — measured on
+			 * php-8.5.9: `header(" Lead: ws")` reached the wire as
+			 * " Lead: ws", which a proxy may read as a continuation of the
+			 * line above, and `header(": novalue")` as ": novalue". Splitting
+			 * at the first colon makes an embedded colon unreachable here, but
+			 * a space, a tab and an empty name are all reachable.
+			 *
+			 * A dropped header the application asked for is worse than an
+			 * error status — the worker's contract, and the reason this is a
+			 * 500 rather than a header quietly missing. */
+			if (!fpm_http_direct_header_name_ok(name)) {
+				char escaped[256];
+				/* The child's zlog fd is closed in fpm_stdio_init_child(), so
+				 * this reaches the error log only under
+				 * catch_workers_output = yes (issue #73). Still worth writing:
+				 * the 500 body deliberately does not echo the name back to
+				 * the client, so this is the only place it is recorded. */
+				zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
+					"an HTTP token, answering 500: '%s'", r->pool,
+					fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
+				if (!r->rejected) {
+					r->rejected = "malformed response header name";
+				}
+			} else if (evhttp_add_header(out, name, value) < 0 && !r->rejected) {
+				r->rejected = "response header refused by the transport";
 			}
 		}
 		efree(name);
@@ -284,6 +321,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		return;
 	}
 	r.http = http;
+	r.pool = w->wp->config->name;
 	r.status = 200;
 	r.env.tqh_last = &r.env.tqh_first;
 	r.output = evbuffer_new();
@@ -349,10 +387,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	fpm_stdio_flush_child();
 	evhttp_clear_headers(&r.env);
 
-	if (r.overflow || !fpm_http_direct_status_final(r.status)) {
+	if (r.rejected || !fpm_http_direct_status_final(r.status)) {
+		const char *why = r.rejected ? r.rejected : "response status is not a final status";
 		evbuffer_drain(r.output, evbuffer_get_length(r.output));
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
-		evbuffer_add_printf(r.output, "http-direct: response exceeds POC limits\n");
+		evbuffer_add_printf(r.output, "http-direct: %s\n", why);
 		r.status = 500;
 	}
 	/* Discards the POC error body above on a HEAD as well: what may carry a

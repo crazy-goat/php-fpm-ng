@@ -349,6 +349,70 @@ static void fpm_pool_status_render_json(struct fpm_status_buf_s *b) /* {{{ */
 }
 /* }}} */
 
+/* One response, written in full but under a bounded total time. write() is
+ * warn_unused_result in glibc and a (void) cast does not satisfy that (task
+ * 013's lint job reported both call sites below), so the result is used for
+ * something worth doing anyway: the fd is a blocking socket (nothing here or
+ * in fpm_sockets.c sets O_NONBLOCK, and accept() does not inherit it on
+ * Linux), so a short write means a signal arrived mid-write, and returning
+ * there would have truncated a /metrics response. Unlike the access log
+ * (fpm_http_access_log.c:146-153), nothing here depends on the payload
+ * reaching the fd in a single write() -- one connection carries exactly one
+ * response and is then closed.
+ *
+ * The deadline is why this is not a plain retry loop. SO_SNDTIMEO
+ * (FPM_POOL_STATUS_IO_TIMEOUT_SEC, set per connection at :500) is per
+ * write() call, not per response, and this pool's pm.max_children is always
+ * 1 (validate()), so a client that reads one byte every 4 seconds would make
+ * partial progress on every call, restart the 5s timer each time, and pin the
+ * only process for as long as it cares to trickle -- exactly the hang the
+ * setsockopt() block was added to prevent. A single write() used to bound
+ * that implicitly; retrying has to bound it explicitly. Budget is one
+ * SO_SNDTIMEO's worth for the whole response, measured on CLOCK_MONOTONIC so
+ * a clock step cannot extend it.
+ *
+ * A peer that hung up, or ran out the budget, is not logged: this endpoint is
+ * scraped every 15-60s and a scraper that gives up mid-response would
+ * otherwise fill the error log. */
+static void fpm_pool_status_write_all(int fd, const char *data, size_t len) /* {{{ */
+{
+	struct timespec deadline;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0) {
+		/* No clock, no bound we can honour -- one write() and be done, which
+		 * is the behaviour this function replaced. */
+		if (write(fd, data, len) < 0) {
+			return;
+		}
+		return;
+	}
+	deadline.tv_sec += FPM_POOL_STATUS_IO_TIMEOUT_SEC;
+
+	while (len) {
+		struct timespec now;
+		ssize_t n = write(fd, data, len);
+
+		if (n < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			return;
+		}
+		if (n == 0) {
+			return;
+		}
+		data += n;
+		len -= (size_t) n;
+
+		if (len && clock_gettime(CLOCK_MONOTONIC, &now) == 0
+			&& (now.tv_sec > deadline.tv_sec
+				|| (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec))) {
+			return;
+		}
+	}
+}
+/* }}} */
+
 /* Raw, minimal HTTP server — deliberately without keep-alive, chunked encoding,
  * or header parsing. This is a monitoring endpoint (Prometheus scrape every
  * 15-60s), not a WWW server; each connection is one request, one response, then
@@ -418,10 +482,10 @@ static void fpm_pool_status_handle_conn(int fd) /* {{{ */
 		status_code, status_text, content_type, body.len);
 
 	if (header_len > 0) {
-		(void) write(fd, header, (size_t) header_len);
+		fpm_pool_status_write_all(fd, header, (size_t) header_len);
 	}
 	if (body.data && body.len) {
-		(void) write(fd, body.data, body.len);
+		fpm_pool_status_write_all(fd, body.data, body.len);
 	}
 
 	fpm_status_buf_free(&body);

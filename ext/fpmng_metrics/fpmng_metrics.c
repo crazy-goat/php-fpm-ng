@@ -102,7 +102,7 @@ size_t fpmng_metrics_shm_size(uint32_t slots, uint32_t limit)
 	if (!slots || !limit) {
 		return 0;
 	}
-	return (sizeof(struct fpmng_metrics_shm_s) + 7u & ~(size_t) 7u)
+	return ((sizeof(struct fpmng_metrics_shm_s) + 7u) & ~(size_t) 7u)
 		+ (size_t) slots * slot_size(limit);
 }
 
@@ -857,8 +857,8 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 
 			if (a->type == FPMNG_METRIC_HISTOGRAM) {
 				uint16_t m, n;
-				/* sorted bucket boundaries */
-				double le[FPMNG_METRICS_BUCKETS_MAX];
+				/* bucket boundaries, sorted indirectly through idx[] --
+				 * a->buckets[] itself is shared memory and is not reordered */
 				uint16_t idx[FPMNG_METRICS_BUCKETS_MAX];
 
 				for (m = 0; m < a->nbuckets; m++) {

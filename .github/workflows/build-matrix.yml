@@ -117,6 +117,25 @@ jobs:
         working-directory: php-src
         run: make -j"$(nproc)" fpmng cli 2>&1 | tee ../make.log
 
+      # Issue #111: the build is warning-free in the files we ship, and stays
+      # that way. -Werror is not available here -- this compiles all of
+      # php-src, and upstream's warnings (Zend/zend_ini_scanner.l,
+      # ext/json/json_scanner.re: 7 of the 13 seen on 2026-09-09) are not ours
+      # to fix. The gate therefore filters the log by `git ls-files` on this
+      # repo rather than by path: build/prepare.sh copies all of upstream's
+      # sapi/fpm/ into sapi/fpmng/ before overlaying ours, so 20 of the 57 .c
+      # files under sapi/fpmng/fpm/ in a prepared tree are upstream's and a
+      # path prefix would claim them. See build/check-owned-warnings.sh.
+      #
+      # $PWD is the workspace root here (no working-directory), which is where
+      # the build step's `tee ../make.log` lands. The script exits 2 -- not 0
+      # -- if that log turns out to contain no compile of an owned file, so
+      # moving either path cannot silently reduce this gate to a no-op.
+      - name: no compiler warnings in our own sources (issue #111)
+        run: |
+          chmod +x build/check-owned-warnings.sh
+          ./build/check-owned-warnings.sh "$PWD/make.log"
+
       - name: verify the binary that got built
         working-directory: php-src
         run: |
@@ -248,13 +267,23 @@ jobs:
   # container, never the .phpt suite, so it doesn't cover this either way.
 
   # Task 013: clang-tidy over our C sources only (never a prepared php-src
-  # tree's mixed upstream copies). Non-blocking on purpose — a red build on
-  # day one for pre-existing findings teaches people to ignore the job.
-  # Turning any check into a hard failure is a separate, later decision.
-  # See docs/c-style.md for the enabled/disabled check contract.
+  # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
+  # build on day one for pre-existing findings teaches people to ignore the
+  # job. That backlog is now empty: issue #107 fixed the one real finding
+  # (clang-analyzer-unix.Malloc in fpm_http.c) and issue #111 the remaining
+  # two nits, so on 2026-09-09 `continue-on-error` was dropped and this job
+  # became a required check. See docs/c-style.md for the enabled/disabled
+  # check contract.
+  #
+  # Caveat, accepted knowingly: clang-tidy is whatever version
+  # ubuntu-latest's `apt-get install clang-tidy` gives today, so a runner
+  # image bump can introduce a new check and turn this job red without any
+  # change of ours. The fix then is a decision about that check -- silence it
+  # in .clang-tidy with a reason, or fix the code -- not restoring
+  # continue-on-error. Pinning the LLVM version was rejected because it trades
+  # a rare, loud break for a permanently stale checker.
   lint:
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
 

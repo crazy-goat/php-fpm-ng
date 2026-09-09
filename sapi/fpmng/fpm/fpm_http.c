@@ -1775,7 +1775,12 @@ static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg
 		bufferevent_getcb(dl->bev, &readcb, NULL, NULL, NULL);
 		if (readcb) {
 			n = recv(dl->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
-			if (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+			/* fpm_http_would_block(), not "EAGAIN || EWOULDBLOCK": the two
+			 * are the same value on Linux, which gcc reports as
+			 * -Wlogical-op, and that helper already carries the
+			 * #if EWOULDBLOCK != EAGAIN dance for the systems where they
+			 * differ. */
+			if (n > 0 || (n < 0 && fpm_http_would_block(errno))) {
 				return; /* data available or transient: still alive */
 			}
 		}

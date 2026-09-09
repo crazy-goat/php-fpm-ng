@@ -43,8 +43,12 @@ function request(int $port, string $raw): array
 $root = sys_get_temp_dir() . '/fpmng-direct-parity-' . getmypid();
 @mkdir($root, 0700, true);
 
+/* The locale is set by the application, on purpose: issue #105. Whatever
+ * LC_CTYPE the front controller (or, under the worker executor, the boot
+ * script) chose must not change which HTTP_* key a header lands under. */
 file_put_contents("$root/front.php", <<<'PHP'
 <?php
+$locale = setlocale(LC_ALL, 'tr_TR.UTF-8', 'tr_TR.utf8', 'tr_TR', 'az_AZ.UTF-8');
 if (($_SERVER['PATH_INFO'] ?? '') === '/drop') {
     header('Content-Length: 999999');
     header('Connection: upgrade');
@@ -52,6 +56,7 @@ if (($_SERVER['PATH_INFO'] ?? '') === '/drop') {
     echo 'body';
     return;
 }
+$_SERVER['X_TEST_LOCALE'] = (string) $locale;
 echo json_encode($_SERVER);
 PHP);
 
@@ -59,8 +64,9 @@ PHP);
  * not about concurrency, so the handler answers inside the notify callback. */
 file_put_contents("$root/worker.php", <<<'PHP'
 <?php
+$locale = (string) setlocale(LC_ALL, 'tr_TR.UTF-8', 'tr_TR.utf8', 'tr_TR', 'az_AZ.UTF-8');
 $notify = fpmng_worker_notify_stream();
-$watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use ($notify): void {
+$watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use ($notify, $locale): void {
     fread($notify, 65536);
     while (($id = fpmng_worker_next_request()) !== null) {
         $env = fpmng_worker_request_env($id);
@@ -72,6 +78,7 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
             ], 'body');
             continue;
         }
+        $env['X_TEST_LOCALE'] = $locale;
         fpmng_worker_respond($id, 200, ['Content-Type' => 'application/json'], json_encode($env));
     }
 });
@@ -119,7 +126,8 @@ try {
 
     /* One request, byte for byte, to both pools. */
     $get = "GET /probe?q=1&r=2 HTTP/1.1\r\nHost: parity.test\r\n"
-        . "X-Probe: custom\r\nProxy: attacker\r\nConnection: close\r\n\r\n";
+        . "X-Probe: custom\r\nProxy: attacker\r\nIf-Modified-Since: yesterday\r\n"
+        . "Connection: close\r\n\r\n";
     $classic = json_decode(request($classicPort, $get)[2], true, flags: JSON_THROW_ON_ERROR);
     $worker = json_decode(request($workerPort, $get)[2], true, flags: JSON_THROW_ON_ERROR);
 
@@ -130,6 +138,7 @@ try {
         'REQUEST_METHOD', 'REQUEST_URI', 'QUERY_STRING', 'PATH_INFO',
         'DOCUMENT_ROOT', 'SERVER_PROTOCOL', 'GATEWAY_INTERFACE', 'SERVER_ADDR', 'SERVER_NAME',
         'CONTENT_LENGTH', 'CONTENT_TYPE', 'REMOTE_ADDR', 'HTTP_HOST', 'HTTP_X_PROBE',
+        'HTTP_IF_MODIFIED_SINCE',
     ];
     foreach ($shared as $key) {
         check(array_key_exists($key, $classic), "classic is missing $key");
@@ -148,6 +157,43 @@ try {
     check($worker['SERVER_SOFTWARE'] === 'php-fpm-ng/http-direct-worker'
         && $classic['SERVER_SOFTWARE'] === 'php-fpm-ng/http-direct', 'SERVER_SOFTWARE');
     echo "env-parity: ok\n";
+
+    /* Issue #105: the HTTP_* key is derived with an explicit ASCII range, not
+     * toupper(). Reproduced on 192.168.8.50 (glibc 2.43, php-8.5.9,
+     * 2026-09-09) with the pre-fix binary on the WORKER leg below, whose boot
+     * script sets the locale once: "If-Modified-Since" arrived as
+     * HTTP_IF_MODiFiED_SiNCE, because the Turkish capital of 'i' is U+0130 and
+     * does not fit the single-byte toupper() table.
+     *
+     * Both legs are checked, but only the worker leg can catch a regression:
+     * on the classic executor ext/standard puts LC_ALL back to "C" at request
+     * shutdown (basic_functions.c:448) and the next request's environment is
+     * built before its script runs, so a corrupt key never becomes
+     * observable there.
+     *
+     * And it can only catch it where a Turkish locale exists. The fpmng-phpt
+     * CI job generates tr_TR.UTF-8 for exactly this test
+     * (.github/workflows/build-matrix.yml); a machine without it -- including
+     * 192.168.8.50, which carries C, C.utf8 and POSIX only -- runs the checks
+     * against a locale where the pre-fix mapping was already correct, so they
+     * pass either way. That is why the locale actually obtained is printed:
+     * a green run that exercised nothing does not read the same as a real
+     * one. */
+    foreach (['classic' => $classic, 'worker' => $worker] as $name => $env) {
+        check(($env['HTTP_IF_MODIFIED_SINCE'] ?? null) === 'yesterday',
+            "$name lost HTTP_IF_MODIFIED_SINCE under locale "
+                . var_export($env['X_TEST_LOCALE'], true) . ': '
+                . json_encode(array_keys(array_filter($env,
+                    fn ($k) => str_starts_with($k, 'HTTP_'), ARRAY_FILTER_USE_KEY))));
+        foreach (array_keys($env) as $key) {
+            check(!preg_match('/^HTTP_.*[a-z]/', $key),
+                "$name derived a non-uppercase CGI key under locale "
+                    . var_export($env['X_TEST_LOCALE'], true) . ": $key");
+        }
+    }
+    echo 'locale-independent-cgi-keys: ok (worker locale: '
+        . ($worker['X_TEST_LOCALE'] !== '' ? $worker['X_TEST_LOCALE'] : 'unavailable, check degenerate')
+        . ")\n";
 
     /* The transport owns framing in both: an application-supplied
      * Content-Length and Connection never reach the wire, and a header that
@@ -186,8 +232,9 @@ try {
 }
 echo "Done\n";
 ?>
---EXPECT--
+--EXPECTF--
 env-parity: ok
+locale-independent-cgi-keys: ok (worker locale: %s)
 framing-parity: ok
 header-name-limit: ok
 Done

@@ -15,7 +15,6 @@
  */
 #include "fpm_config.h"
 
-#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -200,10 +199,36 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 		if (len > FPM_HTTP_DIRECT_HEADER_NAME_MAX) {
 			return -1;
 		}
+		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in
+		 * this child, and the locale changes this mapping for plain US-ASCII
+		 * input. In tr_TR.UTF-8 and az_AZ.UTF-8 toupper('i') returns 'i' -- the
+		 * Turkish capital of 'i' is U+0130, which does not fit the single-byte
+		 * table -- so "If-Modified-Since" became HTTP_IF_MODiFiED_SiNCE and
+		 * nothing reading $_SERVER['HTTP_IF_MODIFIED_SINCE'] found it. Served and
+		 * measured on 192.168.8.50, glibc 2.43, php-8.5.9, 2026-09-09, with the
+		 * pre-fix binary. de_DE.ISO-8859-1 remaps 30 bytes above 0x7F on top of
+		 * that.
+		 *
+		 * Reachable through pool.executor = worker, where the boot script calls
+		 * setlocale() once and every later request's environment is derived
+		 * inside that same PHP request. Not reproducible on the classic executor
+		 * with today's php-src: ext/standard's request shutdown puts LC_ALL back
+		 * to "C" when setlocale() was called (ext/standard/basic_functions.c:448
+		 * in php-8.5.9), and request N+1's environment is built before its script
+		 * runs. That is upstream's bookkeeping, not a property of this transport,
+		 * so it is not what the mapping relies on: the CGI key a header lands
+		 * under is a security boundary -- the Proxy and Content-* exclusions
+		 * above are enforced by name -- and must not depend on process state the
+		 * application chose. Issue #105; same class as #102 on the response side. */
 		memcpy(name, "HTTP_", 5);
 		for (i = 0; i < len; i++) {
 			unsigned char c = (unsigned char) kv->key[i];
-			name[5 + i] = c == '-' ? '_' : (char) toupper(c);
+
+			if (c >= 'a' && c <= 'z') {
+				name[5 + i] = (char) (c - ('a' - 'A'));
+			} else {
+				name[5 + i] = c == '-' ? '_' : (char) c;
+			}
 		}
 		name[5 + len] = '\0';
 		ENV(name, kv->value);

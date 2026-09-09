@@ -79,6 +79,32 @@ same as any other log file this project writes. Failures are also logged at
 warning level regardless of `cron.log`, which is loud enough to notice on a
 single-instance deployment.
 
+## Script output: `STDOUT`, `STDERR` and `STDIN`
+
+The script runs with the three standard stream constants defined, exactly as
+under the `php` CLI binary — `fwrite(STDERR, "...")` works and is not a fatal
+error. Where they lead is a property of FPM, not of the script:
+
+- **`STDOUT` and `STDERR`** go to the master only when the pool sets
+  `catch_workers_output = yes`, and each line then appears in `error_log` as
+  `WARNING: [pool <name>] child <pid> said into stdout: "..."`. Without that
+  directive both descriptors are `/dev/null` and everything written to them is
+  discarded — that is upstream FPM's default for a worker's stdout and this
+  pool type does not change it.
+- **`STDIN`** is `/dev/null`: a valid handle whose first read returns an empty
+  string and sets EOF, rather than blocking or raising an error. A script that
+  needs real input has to get it from a file, the environment, or the network
+  — there is no way to feed a cron pool's script on stdin.
+
+For output you actually want kept, use **`error_log()`**: in a `cron` or
+`supervisor` pool it reaches FPM's `error_log` with the pool name in the line
+and needs no `catch_workers_output` (issue #124). `catch_workers_output` is
+worth its cost mainly when the script's output is not yours to change — a
+third-party command-line tool run as a cron job, for example. Note the price:
+it carries every line the child writes, and for a `supervisor` pool restarting
+a short script in a loop that is a large amount of log (measured: 52 MB in
+15 s, see the comment in `sapi/fpmng/tests/fpmng-supervisor-restart.phpt`).
+
 ## Shutdown and `docker stop`
 
 When the master receives `SIGTERM` (e.g. `docker stop`), a cron child that is

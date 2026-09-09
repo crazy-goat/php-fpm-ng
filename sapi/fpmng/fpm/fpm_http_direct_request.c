@@ -121,7 +121,7 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command)
 /* Origin-form only: the script is selected solely by configuration, never by
  * the URI, the Host, PATH_INFO, or any client-supplied CGI-looking header.
  * Header names are bounded here, once, so that everything downstream may
- * assume FPM_HTTP_DIRECT_HEADER_NAME_MAX. */
+ * assume FPM_HTTP_HEADER_NAME_MAX. */
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http)
 {
 	const char *uri = evhttp_request_get_uri(http);
@@ -133,7 +133,7 @@ bool fpm_http_direct_request_acceptable(struct evhttp_request *http)
 		return false;
 	}
 	for (kv = evhttp_request_get_input_headers(http)->tqh_first; kv; kv = kv->next.tqe_next) {
-		if (strlen(kv->key) > FPM_HTTP_DIRECT_HEADER_NAME_MAX) {
+		if (strlen(kv->key) > FPM_HTTP_HEADER_NAME_MAX) {
 			return false;
 		}
 	}
@@ -186,7 +186,7 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("CONTENT_LENGTH", length);
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_HTTP_DIRECT_HEADER_NAME_MAX + sizeof("HTTP_")];
+		char name[FPM_HTTP_HEADER_NAME_MAX + sizeof("HTTP_")];
 		size_t i, len = strlen(kv->key);
 
 		/* Content-* are already above under their CGI names; "Proxy" has no
@@ -196,7 +196,7 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 			!strcasecmp(kv->key, "Proxy")) {
 			continue;
 		}
-		if (len > FPM_HTTP_DIRECT_HEADER_NAME_MAX) {
+		if (len > FPM_HTTP_HEADER_NAME_MAX) {
 			return -1;
 		}
 		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in

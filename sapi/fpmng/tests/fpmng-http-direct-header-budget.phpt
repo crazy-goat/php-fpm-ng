@@ -199,7 +199,7 @@ try {
     $tester->start();
     $tester->expectLogStartNotices();
 
-    /* Exactly FPM_HTTP_DIRECT_HEADERS_MAX (64 KiB) of header bytes is served,
+    /* Exactly FPM_HTTP_HEADERS_MAX (64 KiB) of header bytes is served,
      * and every header the application set is on the wire. */
     foreach ($pools as $name => $port) {
         [$status, $headers] = request($port, '/?bytes=65536');

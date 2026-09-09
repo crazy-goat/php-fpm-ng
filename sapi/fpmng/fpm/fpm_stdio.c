@@ -18,6 +18,7 @@
 #include "fpm_events.h"
 #include "fpm_sockets.h"
 #include "fpm_stdio.h"
+#include "fpm_child_log.h"
 #include "zlog.h"
 
 static int fd_stderr_original = -1;
@@ -159,6 +160,12 @@ int fpm_stdio_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
 	fpm_globals.error_log_fd = -1;
 	zlog_set_fd(-1, 0);
 
+	/* fpm-ng: for a pool type whose policy runs in the child, hand that child a
+	 * way back to the master's log instead of leaving it shouting into the
+	 * /dev/null the two lines above amount to (issue #121, fpm_child_log.h).
+	 * After zlog_set_fd(), which it overrides. */
+	fpm_child_log_init_child(wp);
+
 	return 0;
 }
 /* }}} */
@@ -294,6 +301,10 @@ stdio_read:
 
 int fpm_stdio_prepare_pipes(struct fpm_child_s *child) /* {{{ */
 {
+	/* fpm-ng: independent of catch_workers_output — the child log channel
+	 * carries the POOL's own messages, not the script's output (fpm_child_log.h). */
+	fpm_child_log_prepare(child);
+
 	if (0 == child->wp->config->catch_workers_output) { /* not required */
 		return 0;
 	}
@@ -324,6 +335,8 @@ int fpm_stdio_prepare_pipes(struct fpm_child_s *child) /* {{{ */
 
 int fpm_stdio_parent_use_pipes(struct fpm_child_s *child) /* {{{ */
 {
+	fpm_child_log_parent_use(child);	/* fpm-ng, see fpm_child_log.h */
+
 	if (0 == child->wp->config->catch_workers_output) { /* not required */
 		return 0;
 	}
@@ -360,6 +373,8 @@ int fpm_stdio_discard_pipes(struct fpm_child_s *child) /* {{{ */
 
 void fpm_stdio_child_use_pipes(struct fpm_child_s *child) /* {{{ */
 {
+	fpm_child_log_child_use(child);	/* fpm-ng, see fpm_child_log.h */
+
 	if (child->wp->config->catch_workers_output) {
 		dup2(fd_stdout[1], STDOUT_FILENO);
 		dup2(fd_stderr[1], STDERR_FILENO);

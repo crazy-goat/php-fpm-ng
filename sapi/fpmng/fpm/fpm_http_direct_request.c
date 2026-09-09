@@ -275,6 +275,40 @@ bool fpm_http_direct_header_name_ok(const char *name)
 	return true;
 }
 
+/* One response-header budget, spent on the same bytes by whoever serves the
+ * response. The two executors used to keep their own arithmetic and disagreed
+ * twice over (issue #104): the classic transport charged the whole raw
+ * header() line before it knew whether the header would be dropped, so bytes
+ * that never reached the wire counted; the worker executor charged
+ * name + value and neither the colon, the space, nor the CRLF. A response near
+ * the cap could therefore be served by one executor and answered 500 by the
+ * other.
+ *
+ * What is counted is what the transport writes: `name: value\r\n`, and only
+ * for a header that is actually emitted. A dropped framing header
+ * (fpm_http_direct_header_dropped()) and the `Status:` pseudo-header are free
+ * because neither appears on the wire. Called once per emitted header, so it
+ * charges rather than re-totals, and the caller keeps the running total.
+ *
+ * Refusing without charging keeps the total below the cap on the way out; the
+ * caller answers 500 on false, since a response with a header silently
+ * dropped is worse than an error status. */
+bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len)
+{
+	/* ": " + CRLF. Overflow-safe by subtraction: value_len comes from a
+	 * zend_string an application controls and name + value + 4 could wrap on
+	 * a 32-bit size_t. */
+	size_t line = strlen(name) + 4;
+
+	if (line > FPM_HTTP_DIRECT_HEADERS_MAX ||
+		value_len > FPM_HTTP_DIRECT_HEADERS_MAX - line ||
+		line + value_len > FPM_HTTP_DIRECT_HEADERS_MAX - *total) {
+		return false;
+	}
+	*total += line + value_len;
+	return true;
+}
+
 /* The rejected name is by construction not a token and header() filters only
  * CR, LF and NUL, so an application that builds a header name out of request
  * input (header($_GET['h'] . ': v') — the case that reaches the check at all)

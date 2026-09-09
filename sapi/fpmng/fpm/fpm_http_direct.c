@@ -166,16 +166,6 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 		if (!colon) {
 			continue;
 		}
-		total += h->header_len;
-		if (total > FPM_HTTP_DIRECT_HEADERS_MAX) {
-			/* First cause wins, as in fpm_direct_write(): the 500 body and the
-			 * WARNING below have to name the same trigger, or an operator
-			 * chases a limit that was not the one that fired. */
-			if (!r->rejected) {
-				r->rejected = "response headers exceed POC limits";
-			}
-			break;
-		}
 		name = estrndup(h->header, colon - h->header);
 		value = colon + 1;
 		while (*value == ' ' || *value == '\t') {
@@ -209,6 +199,20 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 				if (!r->rejected) {
 					r->rejected = "malformed response header name";
 				}
+			} else if (!fpm_http_direct_header_charge(&total, name, strlen(value))) {
+				/* First cause wins, as in fpm_direct_write(): the 500 body and
+				 * the WARNING above have to name the same trigger, or an
+				 * operator chases a limit that was not the one that fired.
+				 * Charged here rather than at the top of the loop (issue
+				 * #104): a header that is dropped or is the Status:
+				 * pseudo-header never reaches the wire, and the worker
+				 * executor spends the same budget on the same bytes through
+				 * the same call. */
+				if (!r->rejected) {
+					r->rejected = "response headers exceed POC limits";
+				}
+				efree(name);
+				break;
 			} else if (evhttp_add_header(out, name, value) < 0 && !r->rejected) {
 				r->rejected = "response header refused by the transport";
 			}

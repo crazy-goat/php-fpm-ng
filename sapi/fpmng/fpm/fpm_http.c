@@ -286,6 +286,23 @@ struct _fpm_http_conn {
 	struct evhttp_request *req;
 	struct evhttp_connection *evcon;
 	fpm_http_upstream *upstream;		/* while in flight */
+	/* 1 exactly while this connection is linked into gw->waiting, so
+	 * fpm_http_conn_free() knows whether it still has to unlink it.
+	 *
+	 * Three sites, and all three are needed -- the flag is not dead weight:
+	 *   - set at the only insert, TAILQ_INSERT_TAIL in fpm_http_request();
+	 *   - cleared at the two removals that keep the connection alive
+	 *     afterwards: the dispatch in fpm_http_pump() and its 503 drain loop;
+	 *   - read (not cleared -- it frees c) by the third removal, the one in
+	 *     fpm_http_conn_free() itself. That is the path a client takes when it
+	 *     disconnects while still queued: fpm_http_client_closed() ->
+	 *     fpm_http_conn_free() with queued == 1. It is the reason the flag
+	 *     exists, and it is why clearing the flag at the two explicit removals
+	 *     does not make it removable.
+	 *
+	 * Nothing else touches the list or the flag -- keep it that way, or
+	 * fpm_http_conn_free() either double-removes or leaks a dangling list
+	 * entry (issue #107). */
 	int queued;
 	TAILQ_ENTRY(_fpm_http_conn) link;
 
@@ -1073,10 +1090,27 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 			 * evhttp_send_error() cannot be used here: it CLEARS the output
 			 * headers (libevent's evhttp_send_page_), which would strip the
 			 * Retry-After this answer exists to send.
-			 * fpm_http_conn_free() removes c from gw->waiting itself
-			 * (queued=1). */
+			 *
+			 * The entry is unlinked before it is answered, not left for
+			 * fpm_http_conn_free() to unlink on the way out (issue #107).
+			 * Both orders are correct today, but this one is correct for a
+			 * reason visible in the loop: a loop that frees the element it
+			 * just read from the list and then re-reads TAILQ_FIRST() is only
+			 * safe as long as `queued` is set on every entry in `waiting`,
+			 * which is maintained at the declaration's distance from here.
+			 * clang-tidy (clang-analyzer-unix.Malloc) reported this drain
+			 * loop as a use-after-free and it was right about the shape,
+			 * wrong about the flag.
+			 *
+			 * Unlinking first is also the safer order under re-entry:
+			 * evhttp_send_reply() below can drive the connection close
+			 * callback, and fpm_http_client_closed() -> fpm_http_conn_free()
+			 * would otherwise remove and free an entry this loop still holds
+			 * a pointer to. */
 			while (!TAILQ_EMPTY(&gw->waiting)) {
 				c = TAILQ_FIRST(&gw->waiting);
+				TAILQ_REMOVE(&gw->waiting, c, link);
+				c->queued = 0;
 				c->status = FPM_HTTP_SERVICE_UNAVAIL;
 				if (c->evcon) {
 					struct evbuffer *body = evbuffer_new();

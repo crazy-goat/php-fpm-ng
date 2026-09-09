@@ -228,7 +228,6 @@
 
 #include "fpm_config.h"
 
-#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -259,13 +258,24 @@ struct fpm_coop_static_item {
 static struct fpm_coop_static_item fpm_coop_statics_items[FPM_COOP_STATICS_MAX];
 static int fpm_coop_statics_count = 0;
 
+/* Explicit range, not tolower(): the result is compared against a class name
+ * Zend lowercased with its own ASCII-only mapping (zend_string_tolower()), so
+ * any locale-dependent mapping is the wrong function here regardless of when
+ * it runs. Measured on 192.168.8.50, glibc 2.43, 2026-09-09: tolower('I')
+ * returns 'I' in tr_TR.UTF-8 and az_AZ.UTF-8, which would make a configured
+ * `Illuminate\Foo::$bar` stop matching and degrade to the existing "not found"
+ * warning. The table is built at container start (container_start below),
+ * before any request has run, so no application setlocale() reaches it today.
+ * Issue #109. */
 static char *fpm_coop_statics_strdup_lower(const char *s, size_t len) /* {{{ */
 {
 	char *out = malloc(len + 1);
 	size_t i;
 
 	for (i = 0; i < len; i++) {
-		out[i] = (char) tolower((unsigned char) s[i]);
+		unsigned char c = (unsigned char) s[i];
+
+		out[i] = (c >= 'A' && c <= 'Z') ? (char) (c + ('a' - 'A')) : (char) c;
 	}
 	out[len] = '\0';
 	return out;

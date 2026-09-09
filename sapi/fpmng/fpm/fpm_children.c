@@ -27,6 +27,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
 #include "fpm_children_extra.h"
+#include "fpm_child_php_log.h"
 #include "fpm_log.h"
 
 #include "zlog.h"
@@ -191,6 +192,17 @@ static void fpm_child_init(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	fpm_globals.max_requests = wp->config->pm_max_requests;
 	fpm_globals.listening_socket = dup(wp->listening_socket);
+
+	/* fpm-ng: PHP's own errors have nowhere to go in a pool whose policy runs
+	 * in the child — no response, no front end to hand a FastCGI stderr stream
+	 * to (issue #124, fpm_child_php_log.h). Before fpm_php_init_child(), which
+	 * applies the pool's php_value/php_admin_value: what this installs are
+	 * defaults, and the pool's own section must still win over them (php.ini
+	 * does not — see fpm_child_php_log.h).
+	 * Before fpm_stdio_init_child() too, which is what makes its own failure
+	 * reportable: zlog() still writes to the master's error_log fd, inherited
+	 * across the fork and not yet closed. */
+	fpm_child_php_log_init_child(wp);
 
 	if (0 > fpm_stdio_init_child(wp)  ||
 	    0 > fpm_log_init_child(wp)    ||

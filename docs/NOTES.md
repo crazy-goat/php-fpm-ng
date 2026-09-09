@@ -1149,6 +1149,27 @@ directive still does, and all it now does for these pools, is carry what the
 **script itself** writes to stdout/stderr — including PHP's own error output,
 which does not go through `zlog()` and therefore still needs it.
 
+**Amended 2026-09-09 (issue #124).** The last clause above no longer holds
+either: PHP's own error output now goes through `zlog()` as well for these two
+types. A child with `child_logs_via_master` starts with `log_errors = 1`,
+`display_errors = 0` and `html_errors = 0` — applied before
+`fpm_php_init_child()`, so the pool's own `php_value` / `php_admin_value` still
+override them, while `php.ini` does not: the call that applies them writes the
+ini entry's master value and cannot tell a compiled-in default from something
+`php.ini` set (`fpm_child_php_log.h` records why that trade is the right one for
+a pool type with no response to display an error in) —
+and `sapi_module.log_message` is replaced so that the message reaches `zlog()`
+at a level derived from the error's severity instead of upstream's fixed
+`ZLOG_NOTICE` (`sapi/fpmng/fpm/fpm_child_php_log.c`). Measured on the test box
+with no `catch_workers_output` anywhere: a supervisor script calling an
+undefined function, which used to log **nothing at all**, now produces one
+entry, `ERROR: [pool fatal] PHP message: PHP Fatal error:  Uncaught Error: Call
+to undefined function no_such_function_here() in /.../fatal.php:2` plus its
+stack trace, and a `trigger_error(..., E_USER_WARNING)` arrives as `WARNING`.
+`catch_workers_output` is now only about what the script writes to
+stdout/stderr on purpose; `php_admin_value[error_log]` still wins over all of
+this, because `php_log_err()` then never calls the SAPI.
+
 ### Monkey-patching `sapi_module` for the process lifetime — safe because the process does not return
 
 `child_main` overwrites several global `sapi_module` fields (`ub_write`,

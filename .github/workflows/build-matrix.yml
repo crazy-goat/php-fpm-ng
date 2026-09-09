@@ -34,6 +34,16 @@ jobs:
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
 
+  # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the tests
+  # this repo owns, so a new test file cannot be silently unreachable. Hermetic
+  # -- no build, no binary; the runner stops at its own preflight.
+  fpmng-phpt-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: verify fpmng .phpt coverage check (issue #95)
+        run: ./build/test-fpmng-phpt-coverage.sh
+
   # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
   # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
@@ -95,7 +105,7 @@ jobs:
           # --with-openssl: the C-level HAVE_FPM_HTTP_TLS (gateway TLS termination)
           # comes from libssl-dev alone, but the CLI php built here also needs
           # ext/openssl itself -- our own .phpt tests for TLS features (task 039's
-          # http-tls-chain.phpt, and more to come for 040/041/042) drive the
+          # fpmng-http-tls-chain.phpt, and more to come for 040/041/042) drive the
           # gateway over a real TLS handshake via PHP's ssl:// stream wrapper and
           # openssl_x509_parse(), both of which live in ext/openssl, not in core.
           # Without this flag those tests silently SKIP ("requires the openssl
@@ -127,7 +137,7 @@ jobs:
           cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
           cp php-src/sapi/cli/php stage/bin/
           cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
-          # acme-state.phpt (task 044) requires ../acme/state.php relative to
+          # fpmng-acme-state.phpt (task 044) requires ../acme/state.php relative to
           # the test itself -- stage that source alongside tests/, the same
           # way tests/ itself is staged, or the require fails on this job's
           # copy even though it works from a full build/prepare.sh tree.

@@ -70,6 +70,9 @@ bool fpm_http_direct_header_name_ok(const char *name);
  * outside printable US-ASCII escaped as \xNN, truncating rather than growing.
  * Returns `out`, so it can be used inline in a log call. */
 const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size);
+/* Charges one emitted response header line against FPM_HTTP_DIRECT_HEADERS_MAX
+ * and returns false when it does not fit, leaving *total unchanged. */
+bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len);
 bool fpm_http_direct_status_final(long status);
 bool fpm_http_direct_status_bodyless(struct evhttp_request *http, int status);
 

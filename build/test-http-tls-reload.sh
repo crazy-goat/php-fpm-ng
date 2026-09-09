@@ -398,26 +398,23 @@ info "issue #71: an idle pool does no reload work at all (12 ticks, http.tls_rel
 # not a reproduction of #71 -- the old mtime code passes it too. The scenarios
 # above are the ones that fail on it.
 #
-# Counted per reload-machinery pattern rather than as "error.log gained no
-# lines at all". The stricter form was written first and is flaky for a reason
-# that has nothing to do with this test: a gateway process dies of a
-# use-after-free in the read deadline (fpm_http_read_deadline_fire,
-# fpm_http.c:1700, calling bufferevent_set_timeouts() on a bufferevent evhttp
-# has already freed) in roughly a fifth of runs, which the master then logs as
-# "killed by signal 11, respawning". Measured on the poligon 2026-09-08 with a
-# gdb backtrace, and reproduced 1 of 10 times by main's own binary running
-# main's own version of this script with a 15s idle wait appended -- i.e. it
-# predates the reload change and is tracked separately (issue #90).
-reload_work_lines() {
-    { grep -c "TLS certificate reloaded from disk" "$DIR/error.log" || true; } | head -1
-    { grep -c "adopted reloaded TLS certificate" "$DIR/error.log" || true; } | head -1
-    { grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" || true; } | head -1
-}
-WORK_BEFORE=$(reload_work_lines | tr '\n' ' ')
+# Counted as "error.log gained no lines at all", which is the strictest form
+# available and the one this check was written with. It spent the length of
+# issue #90 counting only the three reload-machinery patterns instead,
+# because a gateway process died of a use-after-free in the read deadline in
+# roughly a fifth of runs and the master logged that as "killed by signal 11,
+# respawning" -- a line about something else entirely, in the middle of this
+# window. That crash is fixed (fpm_http_read_deadline_arm() now holds a
+# reference to the bufferevent) and covered by
+# build/test-http-read-deadline.sh, so an idle pool that logs ANYTHING here is
+# a regression again, whether or not the reload machinery wrote it.
+LOG_LINES_BEFORE=$(wc -l < "$DIR/error.log")
 sleep 12
-WORK_AFTER=$(reload_work_lines | tr '\n' ' ')
-[ "$WORK_BEFORE" = "$WORK_AFTER" ] ||
-    fail "idle pool: reload work happened with nothing changed on disk -- publish/adopt/reject counts went from [$WORK_BEFORE] to [$WORK_AFTER]"
+LOG_LINES_AFTER=$(wc -l < "$DIR/error.log")
+[ "$LOG_LINES_BEFORE" = "$LOG_LINES_AFTER" ] || {
+    sed -n "$((LOG_LINES_BEFORE + 1)),\$p" "$DIR/error.log" >&2
+    fail "idle pool: the error log gained $((LOG_LINES_AFTER - LOG_LINES_BEFORE)) line(s) with nothing changed on disk (listed above)"
+}
 assert_all_serve "$HTTP_PORT" "$SERIAL1" 6 "idle pool"
 
 info "acceptance criterion 4: no key material anywhere in the logs"

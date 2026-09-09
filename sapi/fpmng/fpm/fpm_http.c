@@ -271,7 +271,7 @@ struct fpm_http_gateway_s {
  * request, so n stays small. */
 struct fpm_http_read_deadline_s {
 	struct fpm_http_gateway_s *gw;
-	struct bufferevent *bev;
+	struct bufferevent *bev;		/* the connection's bufferevent; one reference of ours is held for the node's whole lifetime, see arm() */
 	evutil_socket_t fd;			/* the connection's fd, for the EOF watcher; -1 until known */
 	struct event *ev;			/* the one-shot deadline timer */
 	struct event *ev_eof;			/* first a zero timer (fd pickup), then the persistent EOF watcher */
@@ -1693,10 +1693,19 @@ static void fpm_http_gateway_drop_privileges(struct fpm_http_gateway_s *gw) /* {
  * is not currently armed keeps existing, which is benign: it is either idle
  * keep-alive (harmless) or about to arm read again.
  *
- * The bev pointer is safe to touch here: a peer that went away meanwhile has
- * already made our EV_EOF watcher (fpm_http_read_deadline_eof) disarm and
- * free this node, so a fired deadline always refers to a connection evhttp
- * still owns. */
+ * dl->bev is valid here because arm() holds a reference of its own, NOT
+ * because the connection is still one evhttp owns -- it may well not be. The
+ * comment that used to stand here claimed the opposite ("a fired deadline
+ * always refers to a connection evhttp still owns", on the grounds that the
+ * EOF watcher below would have disarmed the node otherwise) and that claim
+ * was measurably false: when evhttp frees the bufferevent it closes the fd,
+ * epoll drops the watcher's registration without telling libevent, the
+ * watcher never fires again, and this call reached into freed memory --
+ * SIGSEGV inside bufferevent_set_timeouts(), roughly http.read_timeout after
+ * a burst of aborted TLS connections (issue #90, backtrace on the poligon
+ * 2026-09-08). With the reference held, a deadline that fires on a
+ * connection evhttp has already dropped merely re-arms a timeout nobody is
+ * listening to, and the decref in forget() then closes the socket. */
 static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_read_deadline_s *dl = arg;
@@ -1707,22 +1716,34 @@ static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *ar
 	fpm_http_read_deadline_forget(dl);
 }
 /* The peer closed the connection before its first request completed
- * (EV_EOF), or libevent reports the fd as dead: evhttp will free the
- * bufferevent, so the deadline must forget it NOW -- a timer that later
- * fires into a freed bufferevent was the second use-after-free found on the
- * test box. The watcher also sees EV_READ whenever a trickle byte arrives;
+ * (EV_EOF), or libevent reports the fd as dead. Since issue #90 nothing here
+ * is load-bearing for safety -- the reference taken in arm() is -- but the
+ * connection is over, so forgetting the node now releases that reference,
+ * and with it the fd, instead of holding both for whatever is left of the
+ * deadline. The watcher also sees EV_READ whenever a trickle byte arrives;
  * only EOF (a zero-length peek) disarms. */
 static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_read_deadline_s *dl = arg;
+	bufferevent_data_cb readcb = NULL;
 	char c;
 	ssize_t n;
 
 	(void) fd;
 	if (what & EV_READ) {
-		n = recv(dl->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
-		if (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
-			return; /* data available or transient: still alive */
+		/* bufferevent_free() clears the callbacks (libevent-2.1.12
+		 * bufferevent.c:809) and our reference keeps the object and its fd
+		 * alive past that point, so "no read callback" means evhttp is done
+		 * with this connection and nobody will consume what is still in the
+		 * socket buffer. Checked BEFORE the peek: unread bytes look exactly
+		 * like a live peer to it, and on a level-triggered EV_READ that
+		 * would spin the event loop for the rest of the deadline. */
+		bufferevent_getcb(dl->bev, &readcb, NULL, NULL, NULL);
+		if (readcb) {
+			n = recv(dl->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+			if (n > 0 || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))) {
+				return; /* data available or transient: still alive */
+			}
 		}
 	}
 	fpm_http_read_deadline_forget(dl);
@@ -1747,6 +1768,11 @@ static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl)
 	if (dl->ev_eof) {
 		event_free(dl->ev_eof);
 	}
+	/* The reference arm() took. Last, and after both events are gone: when
+	 * evhttp has already let go of this connection, this is the call that
+	 * frees the bufferevent and closes its fd (BEV_OPT_CLOSE_ON_FREE), and
+	 * the EOF watcher must not be registered on that fd when it goes. */
+	bufferevent_decref(dl->bev);
 	free(dl);
 }
 
@@ -1764,6 +1790,18 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	dl->gw = gw;
 	dl->bev = bev;
 	dl->fd = -1;
+	/* A reference of our own, released in forget(). evhttp frees this
+	 * bufferevent as soon as the connection ends, which is routinely BEFORE
+	 * the deadline fires; with a reference outstanding, bufferevent_free()
+	 * only clears the callbacks and cancels pending operations
+	 * (libevent-2.1.12 bufferevent.c:805-812), leaving the object, its
+	 * events and its fd valid until the last reference goes. Every dl->bev
+	 * and dl->fd use below rests on that, and nothing else -- see
+	 * fpm_http_read_deadline_fire() for what happened without it (issue
+	 * #90). Cost: a connection that dies before its first request keeps its
+	 * fd until the deadline expires, unless the EOF watcher below gets to it
+	 * first. */
+	bufferevent_incref(bev);
 	dl->ev = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_read_deadline_fire, dl);
 	dl->ev_eof = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_read_deadline_arm_eof, dl);
 	if (!dl->ev || !dl->ev_eof) {
@@ -1780,7 +1818,11 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 }
 
 /* Second pass of arming: evhttp has called bufferevent_setfd() by now, so
- * dl->fd is knowable. Turns ev_eof into the persistent EOF watcher. */
+ * dl->fd is knowable. Turns ev_eof into the persistent EOF watcher. The
+ * bufferevent may already be gone from evhttp's point of view when this runs
+ * -- a connection that fails in the same loop iteration it was accepted in
+ * gets there first -- so reading its fd is safe only because of the
+ * reference arm() holds. */
 static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_read_deadline_s *dl = arg;

@@ -133,6 +133,9 @@ struct {								\
 #include "fpm_http_forwarded.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
+/* Only for FPM_HTTP_HEADER_NAME_MAX: the bound on a request header name is the
+ * same on both transports (issue #115), so it has one definition. */
+#include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
 #include "fpm_http_tls.h"
 #include "fpm_http_tls_reload.h"
@@ -531,6 +534,23 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		return HTTP_BADREQUEST;
 	}
 
+	/* Header names are bounded here, once, before anything is derived from
+	 * them -- the same bound and the same 400, up front, as
+	 * fpm_http_direct_request_acceptable() applies for HTTP-direct. The
+	 * gateway used to append a name of any length into an unbounded smart_str
+	 * and rely on whatever libevent happened to allow: it never calls
+	 * evhttp_set_max_headers_size(), and libevent's default for it is
+	 * EV_SIZE_MAX (libevent 2.1.12-stable, http.c:3678 in
+	 * evhttp_new_object()), so there was no bound to state. "Once" is once per
+	 * request that becomes FastCGI: a static file answered by
+	 * fpm_http_try_local() never gets here, and derives no HTTP_* key either.
+	 * Issue #115. */
+	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next) {
+		if (strlen(header->key) > FPM_HTTP_HEADER_NAME_MAX) {
+			return HTTP_BADREQUEST;
+		}
+	}
+
 	/* SCRIPT_NAME is the decoded path, SCRIPT_FILENAME puts it under the document root */
 	decoded = evhttp_uridecode(path, 0, &decoded_len);
 	if (!decoded) {
@@ -689,7 +709,25 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		smart_str name = {0};
 		const char *k = header->key;
 
-		if (strcasecmp(k, "Content-Length") == 0) {
+		/* Content-Length is already above under its CGI name; "Proxy" has no
+		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
+		 * several client libraries (httpoxy, CVE-2016-5385), which is why
+		 * fpm_http_direct_build_env() refuses it too. Core deletes the key
+		 * from $_SERVER again -- or, when the process itself has an HTTP_PROXY
+		 * environment variable, overwrites it with that value
+		 * (check_http_proxy(), main/php_variables.c:861-874 in php-8.5.9) --
+		 * so the gateway was not exploitable through $_SERVER before this
+		 * line: measured on 192.168.8.50, 2026-09-09, `Proxy: attacker`
+		 * produced no HTTP_PROXY on either pool type. It still reached the
+		 * worker as a FastCGI parameter though, and getallheaders() reads
+		 * those directly, not $_SERVER (sapi/fpm/fpm_main.c
+		 * PHP_FUNCTION(apache_request_headers) -> fcgi_loadenv): same box, a
+		 * gateway built without this exclusion answered
+		 * {"proxy":"attacker", ...} with $_SERVER['HTTP_PROXY'] absent. The
+		 * exclusion is here so that a header this transport's sibling refuses
+		 * by name does not arrive because someone else's mitigation happens to
+		 * cover one of the ways to read it. Issue #115. */
+		if (strcasecmp(k, "Content-Length") == 0 || strcasecmp(k, "Proxy") == 0) {
 			continue;
 		}
 		if (strcasecmp(k, "Content-Type") != 0) {

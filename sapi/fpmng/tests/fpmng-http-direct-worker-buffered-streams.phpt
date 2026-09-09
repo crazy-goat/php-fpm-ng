@@ -36,6 +36,13 @@ const READ_CHUNK = 1024;
 $root = sys_get_temp_dir() . '/fpmng-direct-worker-buffered-' . getmypid();
 @mkdir($root, 0700, true);
 
+$descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+$origin = null;
+$originPipes = [];
+$tester = null;
+
+try {
+
 $certFile = "$root/server.crt";
 $keyFile = "$root/server.key";
 $privkey = openssl_pkey_new(['private_key_bits' => 2048, 'private_key_type' => OPENSSL_KEYTYPE_RSA]);
@@ -59,10 +66,23 @@ if (!$server) {
     exit(1);
 }
 echo stream_socket_get_name($server, false), "\n";
+/* STDIN is the pipe from the harness and nothing is ever written to it, so it
+ * becomes readable only at EOF — that is, once the harness is gone. The
+ * harness kills this process in its teardown, but a run that is interrupted
+ * (Ctrl-C, CI timeout, SIGKILL) never reaches that teardown, and this process
+ * would then hold a TLS listener on a shared box for ever (issue #89). Hence
+ * the short accept timeout: it is the poll interval for that check, nothing
+ * more. */
+$stdin = fopen('php://stdin', 'r');
 $open = [];
 while (true) {
-    $conn = @stream_socket_accept($server, 30);
+    $conn = @stream_socket_accept($server, 1);
     if ($conn === false) {
+        $readable = [$stdin];
+        $writable = $except = [];
+        if (@stream_select($readable, $writable, $except, 0) > 0 && fgets($stdin) === false) {
+            exit(0);
+        }
         continue;
     }
     fgets($conn);
@@ -222,10 +242,15 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+/* The array form runs the binary directly. With a command string PHP goes
+ * through `/bin/sh -c`, and on a box where /bin/sh is dash the shell does not
+ * exec its argument: proc_terminate() then signals the shell and leaves the
+ * origin orphaned. Measured 2026-09-09 on 192.168.8.50 (dash 0.5.12): the
+ * string form left the CLI running with ppid 1 after proc_terminate() plus
+ * proc_close(), the array form left nothing — which is one leaked TLS
+ * listener per suite run (issue #89). */
 $origin = proc_open(
-    PHP_BINARY . ' -n ' . escapeshellarg("$root/origin.php") . ' ' .
-        escapeshellarg($certFile) . ' ' . escapeshellarg($keyFile) . ' ' . PAYLOAD,
+    [PHP_BINARY, '-n', "$root/origin.php", $certFile, $keyFile, (string) PAYLOAD],
     $descriptors, $originPipes);
 check(is_resource($origin), 'could not start the TLS origin');
 $addr = trim((string) fgets($originPipes[1]));
@@ -261,7 +286,6 @@ php_admin_value[display_errors] = 0
 CFG;
 
 $tester = new FPM\Tester($cfg, '<?php');
-try {
     $tester->start();
     $tester->expectLogStartNotices();
 
@@ -300,8 +324,14 @@ try {
     check($again === $hello, "worker was replaced: $again vs $hello");
     echo "worker-persists: ok\n";
 } finally {
-    $tester->terminate();
-    $tester->close();
+    /* The whole body runs under this one finally, origin included: a failure
+     * while starting the origin or reading its address used to happen outside
+     * any teardown and left both the process and $root behind (issue #89).
+     * Everything here has to tolerate a partially built fixture. */
+    if ($tester !== null) {
+        $tester->terminate();
+        $tester->close();
+    }
     if (is_resource($origin)) {
         proc_terminate($origin);
         foreach ($originPipes as $pipe) {
@@ -309,8 +339,10 @@ try {
         }
         proc_close($origin);
     }
-    foreach (['worker.php', 'origin.php', 'tls.addr', 'server.crt', 'server.key'] as $file) {
-        @unlink("$root/$file");
+    /* Not a fixed file list: rmdir() fails on anything the fixture happened to
+     * leave behind, and then the directory survives the run too. */
+    foreach (glob("$root/*") ?: [] as $file) {
+        @unlink($file);
     }
     @rmdir($root);
 }

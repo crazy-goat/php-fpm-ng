@@ -974,8 +974,10 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
 	if (!str) {
 		return false;
 	}
-	*total += strlen(name) + ZSTR_LEN(str);
-	ok = *total <= FPM_HTTP_DIRECT_HEADERS_MAX && evhttp_add_header(out, name, ZSTR_VAL(str)) == 0;
+	/* Shared with the classic transport (issue #104), which used to charge the
+	 * whole raw header() line including headers it went on to drop. */
+	ok = fpm_http_direct_header_charge(total, name, ZSTR_LEN(str)) &&
+		evhttp_add_header(out, name, ZSTR_VAL(str)) == 0;
 	zend_string_release(str);
 	return ok;
 }

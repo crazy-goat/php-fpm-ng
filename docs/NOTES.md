@@ -1170,6 +1170,28 @@ stack trace, and a `trigger_error(..., E_USER_WARNING)` arrives as `WARNING`.
 stdout/stderr on purpose; `php_admin_value[error_log]` still wins over all of
 this, because `php_log_err()` then never calls the SAPI.
 
+**Amended 2026-09-09 (issue #126).** The other half of "the script writes on
+purpose": `STDIN`, `STDOUT` and `STDERR` are registered for every run of a
+script-running pool type, so the first thing an author reaches for —
+`fwrite(STDERR, ...)` — is no longer `Uncaught Error: Undefined constant`. They
+are the CLI SAPI's constants, and nothing else in an FPM process registers
+them. Where they point is entirely decided by FPM and not by this change:
+stdin is the `/dev/null` `fpm_stdio_init_main()` installs, so `STDIN` reads EOF
+at once, and stdout/stderr are the master's pipes under
+`catch_workers_output` or that same `/dev/null` without it.
+
+Not a copy of CLI's `cli_register_file_handles()`: CLI keeps the handles past
+request shutdown (`PHP_STREAM_FLAG_NO_RSCR_DTOR_CLOSE`) for extensions that
+write to stderr during `MSHUTDOWN`, which it can afford because it runs one
+request per process. A supervisor process runs one per iteration, and outside
+CLI `php://std*` **dup()s** the descriptor
+(`ext/standard/php_fopen_wrapper.c`), so preserving the handle would leak three
+descriptors per run — at the 12086 runs/s of issue #122, the fd limit in under
+a second. The streams are therefore ordinary request-scoped ones and the
+constants are re-registered per run. Measured on the test box over 100
+consecutive runs of one supervisor process: 16–17 open descriptors, no trend
+(`sapi/fpmng/tests/fpmng-supervisor-std-streams.phpt` asserts the band).
+
 ### Monkey-patching `sapi_module` for the process lifetime — safe because the process does not return
 
 `child_main` overwrites several global `sapi_module` fields (`ub_write`,

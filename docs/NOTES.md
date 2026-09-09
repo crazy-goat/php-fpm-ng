@@ -1135,6 +1135,20 @@ critical for this type (the only way to see anything from the script) — recomm
 `pool.type = supervisor` in user documentation (not enforced in code, to avoid
 adding another validation rule without a clear need).
 
+**Superseded 2026-09-09 (issue #121).** The paragraph above stays because it
+records what the type did for most of its life, but the recommendation no longer
+holds: a pool type that sets `fpm_pool_type_s.child_logs_via_master` (supervisor
+and cron) now gets one `AF_UNIX SOCK_DGRAM` socketpair per pool, and the child's
+`zlog()` is relayed through it and re-emitted by the master at its own level
+(`sapi/fpmng/fpm/fpm_child_log.c`, `fpm_child_log.h` for the why). Measured on
+the test box with no `catch_workers_output` anywhere: a supervisor whose script
+exits 3 logs `NOTICE: [pool sup] supervisor: script exited (code 3) after 0s,
+restarting in 30s (failure 1/unlimited)`, and `restart_max` /
+`supervisor.fatal` / `cannot open script` arrive as ALERT/ALERT/ERROR. What the
+directive still does, and all it now does for these pools, is carry what the
+**script itself** writes to stdout/stderr — including PHP's own error output,
+which does not go through `zlog()` and therefore still needs it.
+
 ### Monkey-patching `sapi_module` for the process lifetime — safe because the process does not return
 
 `child_main` overwrites several global `sapi_module` fields (`ub_write`,

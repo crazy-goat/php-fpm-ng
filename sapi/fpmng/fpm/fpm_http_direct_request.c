@@ -54,7 +54,7 @@ int fpm_http_direct_resolve_script(const char *base, const char *front_controlle
 	}
 	/* The '/' test is what keeps /var/wwwroot out of a /var/www root; the
 	 * strcmp guards the one root for which it would reject everything. */
-	if (strncmp(script, root, strlen(root)) || (strcmp(root, "/") && script[strlen(root)] != '/')) {
+	if (strncmp(script, root, strlen(root)) != 0 || (strcmp(root, "/") != 0 && script[strlen(root)] != '/')) {
 		return -1;
 	}
 	return 0;

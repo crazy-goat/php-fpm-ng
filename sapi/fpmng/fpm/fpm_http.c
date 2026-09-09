@@ -32,7 +32,6 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -696,8 +695,26 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		if (strcasecmp(k, "Content-Type") != 0) {
 			smart_str_appendl(&name, "HTTP_", sizeof("HTTP_") - 1);
 		}
+		/* Explicit range, not toupper(): the CGI key a header lands under is a
+		 * security boundary -- the Content-Length exclusion above is enforced by
+		 * name -- so the mapping must not depend on LC_CTYPE. Measured on
+		 * 192.168.8.50, glibc 2.43, 2026-09-09: in tr_TR.UTF-8 and az_AZ.UTF-8
+		 * toupper('i') returns 'i' (the Turkish capital of 'i' is U+0130, which
+		 * does not fit the single-byte table), so "If-Modified-Since" would
+		 * become HTTP_IF_MODiFiED_SiNCE; de_DE.ISO-8859-1 remaps 30 bytes above
+		 * 0x7F. Nothing calls setlocale() in the gateway process today -- it
+		 * translates HTTP to FastCGI and never executes application PHP -- but
+		 * that is an argument about when this code runs, not about what it
+		 * computes. Same mapping as fpm_http_direct_build_env(), issue #109;
+		 * #105 replaced the identical construct there. */
 		for (; *k; k++) {
-			smart_str_appendc(&name, *k == '-' ? '_' : toupper((unsigned char)*k));
+			unsigned char ch = (unsigned char) *k;	/* not `c`: that is this connection */
+
+			if (ch >= 'a' && ch <= 'z') {
+				smart_str_appendc(&name, (char) (ch - ('a' - 'A')));
+			} else {
+				smart_str_appendc(&name, ch == '-' ? '_' : (char) ch);
+			}
 		}
 		smart_str_0(&name);
 		fpm_http_param(c, ZSTR_VAL(name.s), header->value);

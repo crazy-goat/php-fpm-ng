@@ -38,7 +38,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/stat.h>
 #include <sys/socket.h>
 #include <netdb.h>
 #include <event2/event.h>
@@ -60,12 +59,12 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_worker.h"
+#include "fpm_http_direct_request.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
-#define FPM_WORKER_HEADERS_MAX (64 * 1024)
 #define FPM_WORKER_BODY_MAX (8 * 1024 * 1024)
 /* Bounds the memory a client burst can pin in accepted-but-unanswered
  * requests. Beyond it the transport answers 503 itself, as the gateway does
@@ -162,15 +161,23 @@ static volatile sig_atomic_t fpm_worker_stopping;
 /* Configuration ---------------------------------------------------------- */
 
 const char *const fpm_http_direct_worker_rejects[] = {
-	"fiber.", "supervisor.", "cron.", "chroot", "listen.allowed_clients",
-	"pm.status_path", "pm.status_listen", "ping.path", "ping.response",
-	"access.log", "access.format", "access.suppress_path",
+	FPM_HTTP_DIRECT_REJECTS_COMMON,
 	/* The worker script never "ends a request", so the child stays in one
 	 * stage for its whole life and these master-side deadlines would either
 	 * never fire or kill a healthy worker. Rejected instead of silently
 	 * unenforced. */
 	"request_terminate_timeout", "request_slowlog_timeout", "slowlog",
 	NULL
+};
+
+/* How this executor names itself in the startup errors of the shared
+ * validation (fpm_http_direct_request.c). */
+static const struct fpm_http_direct_labels fpm_worker_labels = {
+	.subject = "pool.executor = worker",
+	.chdir_note = " (here: the worker script)",
+	.type_label = "pool.type = http-direct with pool.executor = worker",
+	.script_context = "http-direct worker",
+	.script_noun = "the worker script",
 };
 
 /* INI value set in the pool, or NULL when only php.ini applies. Same shape and
@@ -197,38 +204,10 @@ static const char *fpm_worker_pool_ini(struct fpm_worker_pool_s *wp, const char 
 int fpm_http_direct_worker_validate(struct fpm_worker_pool_s *wp)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
-	const char *p = c->set_directives;
 	const char *timeout_ini;
 	zend_long timeout;
-	char root[PATH_MAX], script[PATH_MAX], candidate[PATH_MAX];
-	struct stat st;
 
-	if (c->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = worker requires pm = static", c->name);
-		return -1;
-	}
-	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller || c->http_front_controller[0] != '/' ||
-		strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = worker requires an absolute chdir and a root-relative "
-			"http.front_controller (here: the worker script) without '..' or backslashes", c->name);
-		return -1;
-	}
-	/* Same allow-list as http-direct (fpm_http_direct.c:86-95): a gateway
-	 * option must never silently appear to protect a direct worker. */
-	while (p && (p = strstr(p, ";http."))) {
-		const char *end = strchr(++p, ';');
-		size_t len = end ? (size_t) (end - p) : strlen(p);
-		if (!((len == sizeof("http.front_controller") - 1 && !strncmp(p, "http.front_controller", len)) ||
-			(len == sizeof("http.read_timeout") - 1 && !strncmp(p, "http.read_timeout", len)) ||
-			(len == sizeof("http.max_body") - 1 && !strncmp(p, "http.max_body", len)))) {
-			zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by pool.type = http-direct with pool.executor = worker",
-				c->name, (int) len, p);
-			return -1;
-		}
-	}
-	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = worker requires http.read_timeout > 0 and "
-			"http.max_body between 1 and 32M", c->name);
+	if (fpm_http_direct_validate_common(wp, &fpm_worker_labels) < 0) {
 		return -1;
 	}
 	/* The Zend timeout is armed once by php_request_startup(), and here that
@@ -244,16 +223,6 @@ int fpm_http_direct_worker_validate(struct fpm_worker_pool_s *wp)
 			"the worker script, which runs for the lifetime of the worker, not to one HTTP request; "
 			"set php_admin_value[max_execution_time] = 0 in this pool or max_execution_time = 0 in php.ini",
 			c->name, timeout);
-		return -1;
-	}
-	/* Catch a bad deployment path in the master, before FPM starts respawning
-	 * children that cannot open their worker script. */
-	if (!realpath(c->chdir, root) ||
-		snprintf(candidate, sizeof(candidate), "%s%s", root, c->http_front_controller) >= (int) sizeof(candidate) ||
-		!realpath(candidate, script) || stat(script, &st) < 0 || !S_ISREG(st.st_mode) ||
-		strncmp(script, root, strlen(root)) || (strcmp(root, "/") && script[strlen(root)] != '/')) {
-		zlog(ZLOG_ALERT, "[pool %s] http-direct worker: the worker script must be a regular file inside chdir",
-			c->name);
 		return -1;
 	}
 	return 0;
@@ -422,12 +391,7 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 		}
 		return;
 	}
-	/* Origin-form only, exactly as the classic direct transport requires
-	 * (fpm_http_direct.c:303): the worker script is chosen by configuration,
-	 * never by the URI. */
-	if (!evhttp_request_get_uri(http) || evhttp_request_get_uri(http)[0] != '/' ||
-		!evhttp_request_get_evhttp_uri(http) ||
-		evhttp_uri_get_fragment(evhttp_request_get_evhttp_uri(http))) {
+	if (!fpm_http_direct_request_acceptable(http)) {
 		fpm_worker_send_error(http, 400, "Bad request");
 		return;
 	}
@@ -901,20 +865,28 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_request_env, 0, 1, 
 	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* CGI-shaped request metadata, built on demand from the live evhttp request.
- * Same variable set and the same exclusions as the classic direct transport
- * (fpm_http_direct.c:311-346), including dropping "Proxy" (httpoxy). */
+static int fpm_worker_emit_env(void *ctx, const char *key, const char *value)
+{
+	add_assoc_string((zval *) ctx, key, value);
+	return 0;
+}
+
+/* CGI-shaped request metadata, built on demand from the live evhttp request by
+ * the shared builder — the same variables, the same exclusions and the same
+ * refusal of an over-long header name as the classic transport. An empty array
+ * means the id is unknown, its client is gone, or the request was refused. */
 static ZEND_FUNCTION(fpmng_worker_request_env)
 {
 	zend_long id;
 	struct fpm_worker_pending *p;
-	const struct evhttp_uri *uri;
-	struct evkeyvalq *headers;
-	struct evkeyval *kv;
-	const char *method;
-	char *peer = NULL;
-	char buf[64];
-	ev_uint16_t port = 0;
+	const struct fpm_http_direct_env_source source = {
+		.script = fw.script,
+		.root = fw.root,
+		.front_controller = fw.wp->config->http_front_controller,
+		.server_addr = fw.server_addr,
+		.server_port = fw.server_port,
+		.server_software = "php-fpm-ng/http-direct-worker",
+	};
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
 		Z_PARAM_LONG(id)
@@ -924,63 +896,11 @@ static ZEND_FUNCTION(fpmng_worker_request_env)
 	if (!p || !p->http) {
 		RETURN_EMPTY_ARRAY();
 	}
-	uri = evhttp_request_get_evhttp_uri(p->http);
-	headers = evhttp_request_get_input_headers(p->http);
-	switch (evhttp_request_get_command(p->http)) {
-		case EVHTTP_REQ_GET: method = "GET"; break;
-		case EVHTTP_REQ_POST: method = "POST"; break;
-		case EVHTTP_REQ_HEAD: method = "HEAD"; break;
-		case EVHTTP_REQ_PUT: method = "PUT"; break;
-		case EVHTTP_REQ_DELETE: method = "DELETE"; break;
-		case EVHTTP_REQ_OPTIONS: method = "OPTIONS"; break;
-		case EVHTTP_REQ_PATCH: method = "PATCH"; break;
-		default: method = "GET"; break;
-	}
 	array_init(return_value);
-/* Split in two on purpose: gcc -Waddress rejects a NULL test on an array or a
- * string literal ("the address of 'buf' will always evaluate as true"), and
- * only the libevent getters below can actually return NULL. */
-#define ENV_STR(key, value) add_assoc_string(return_value, key, (value) ? (value) : "")
-#define ENV_FIXED(key, value) add_assoc_string(return_value, key, value)
-	ENV_STR("REQUEST_METHOD", method);
-	ENV_STR("REQUEST_URI", evhttp_request_get_uri(p->http));
-	ENV_STR("QUERY_STRING", evhttp_uri_get_query(uri));
-	ENV_STR("PATH_INFO", evhttp_uri_get_path(uri));
-	ENV_FIXED("SCRIPT_FILENAME", fw.script);
-	ENV_STR("SCRIPT_NAME", fw.wp->config->http_front_controller);
-	ENV_FIXED("DOCUMENT_ROOT", fw.root);
-	ENV_FIXED("SERVER_SOFTWARE", "php-fpm-ng/http-direct-worker");
-	ENV_FIXED("GATEWAY_INTERFACE", "CGI/1.1");
-	ENV_FIXED("SERVER_ADDR", fw.server_addr);
-	ENV_FIXED("SERVER_PORT", fw.server_port);
-	ENV_STR("SERVER_NAME", evhttp_request_get_host(p->http));
-	snprintf(buf, sizeof(buf), "HTTP/%d.%d", p->http->major, p->http->minor);
-	ENV_FIXED("SERVER_PROTOCOL", buf);
-	evhttp_connection_get_peer(evhttp_request_get_connection(p->http), &peer, &port);
-	ENV_STR("REMOTE_ADDR", peer);
-	snprintf(buf, sizeof(buf), "%u", (unsigned) port);
-	ENV_FIXED("REMOTE_PORT", buf);
-	snprintf(buf, sizeof(buf), "%zu", evbuffer_get_length(evhttp_request_get_input_buffer(p->http)));
-	ENV_FIXED("CONTENT_LENGTH", buf);
-	ENV_STR("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
-	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_WORKER_HEADERS_MAX + 6];
-		size_t i, len = strlen(kv->key);
-
-		if (!strcasecmp(kv->key, "Content-Type") || !strcasecmp(kv->key, "Content-Length") ||
-			!strcasecmp(kv->key, "Proxy") || len > FPM_WORKER_HEADERS_MAX) {
-			continue;
-		}
-		memcpy(name, "HTTP_", 5);
-		for (i = 0; i < len; i++) {
-			unsigned char ch = (unsigned char) kv->key[i];
-			name[5 + i] = ch == '-' ? '_' : (char) toupper(ch);
-		}
-		name[5 + len] = '\0';
-		ENV_STR(name, kv->value);
+	if (fpm_http_direct_build_env(p->http, &source, fpm_worker_emit_env, return_value) < 0) {
+		zend_array_destroy(Z_ARR_P(return_value));
+		RETURN_EMPTY_ARRAY();
 	}
-#undef ENV_STR
-#undef ENV_FIXED
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_request_body, 0, 1, IS_STRING, 0)
@@ -1063,12 +983,7 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
 		} ZEND_HASH_FOREACH_END();
 		return ok;
 	}
-	/* This transport owns framing exactly as the classic one does
-	 * (fpm_http_direct.c:207-213): an application-supplied length or
-	 * Transfer-Encoding must not desynchronize the next keep-alive request. */
-	if (!strcasecmp(name, "Content-Length") || !strcasecmp(name, "Transfer-Encoding") ||
-		!strcasecmp(name, "Connection") || !strcasecmp(name, "Keep-Alive") ||
-		!strcasecmp(name, "Upgrade") || !strcasecmp(name, "Trailer")) {
+	if (fpm_http_direct_header_dropped(name)) {
 		return true;
 	}
 	if (!fpm_worker_header_name_ok(name)) {
@@ -1079,7 +994,7 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
 		return false;
 	}
 	*total += strlen(name) + ZSTR_LEN(str);
-	ok = *total <= FPM_WORKER_HEADERS_MAX && evhttp_add_header(out, name, ZSTR_VAL(str)) == 0;
+	ok = *total <= FPM_HTTP_DIRECT_HEADERS_MAX && evhttp_add_header(out, name, ZSTR_VAL(str)) == 0;
 	zend_string_release(str);
 	return ok;
 }
@@ -1107,12 +1022,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 		Z_PARAM_STR(body)
 	ZEND_PARSE_PARAMETERS_END();
 
-	/* Final statuses only, exactly the range the classic transport clamps to
-	 * (fpm_http_direct.c:454-459). evhttp_send_reply() would happily emit a
-	 * 1xx status line as if it were the response and still frame and append
-	 * the body, leaving the next keep-alive response behind bytes the client
-	 * never read as one. */
-	if (status < 200 || status > 599) {
+	if (!fpm_http_direct_status_final(status)) {
 		zend_argument_value_error(2, "must be a final HTTP status between 200 and 599");
 		RETURN_THROWS();
 	}
@@ -1149,11 +1059,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 	if (!out) {
 		RETURN_FALSE;
 	}
-	/* libevent omits framing headers for 204/304 but still appends a supplied
-	 * body, which would leave unframed bytes in front of the next keep-alive
-	 * response (fpm_http_direct.c:454-459). */
-	if (evhttp_request_get_command(p->http) != EVHTTP_REQ_HEAD && status != 204 && status != 205 &&
-		status != 304 && ZSTR_LEN(body)) {
+	if (ZSTR_LEN(body) && !fpm_http_direct_status_bodyless(p->http, (int) status)) {
 		evbuffer_add(out, ZSTR_VAL(body), ZSTR_LEN(body));
 	}
 	if (fpm_worker_stopping) {
@@ -1552,18 +1458,14 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	struct sockaddr_storage address;
 	socklen_t address_len = sizeof(address);
 	zend_file_handle file;
-	struct stat st;
-	char candidate[PATH_MAX];
 
 	fw.wp = wp;
 	fw.next_id = 1;
-	if (!getcwd(fw.root, sizeof(fw.root)) ||
-		snprintf(candidate, sizeof(candidate), "%s%s", fw.root, wp->config->http_front_controller) >= (int) sizeof(candidate) ||
-		!realpath(candidate, fw.script) || stat(fw.script, &st) < 0 || !S_ISREG(st.st_mode) ||
-		strncmp(fw.script, fw.root, strlen(fw.root)) ||
-		(strcmp(fw.root, "/") && fw.script[strlen(fw.root)] != '/')) {
-		zlog(ZLOG_ERROR, "[pool %s] http-direct worker: the worker script must be a regular file inside chdir",
-			wp->config->name);
+	/* Against the directory the child actually chdir'd into, not against the
+	 * configured one the master already checked. */
+	if (fpm_http_direct_resolve_script(NULL, wp->config->http_front_controller, fw.root, fw.script) < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] %s: %s must be a regular file inside chdir", wp->config->name,
+			fpm_worker_labels.script_context, fpm_worker_labels.script_noun);
 		exit(FPM_EXIT_CONFIG);
 	}
 	if (getsockname(wp->listening_socket, (struct sockaddr *) &address, &address_len) == 0) {
@@ -1575,7 +1477,7 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	if (!fw.http) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
-	evhttp_set_max_headers_size(fw.http, FPM_WORKER_HEADERS_MAX);
+	evhttp_set_max_headers_size(fw.http, FPM_HTTP_DIRECT_HEADERS_MAX);
 	evhttp_set_max_body_size(fw.http, wp->config->http_max_body);
 	evhttp_set_timeout_tv(fw.http, &timeout);
 	evhttp_set_allowed_methods(fw.http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD |

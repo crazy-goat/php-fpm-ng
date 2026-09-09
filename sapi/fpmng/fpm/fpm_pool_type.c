@@ -242,26 +242,28 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.child_main                   = fpm_http_direct_child_main,
 	},
 	{
-		.name            = "supervisor",
-		.requires_listen = 0,
-		.requires_pm     = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
-		.serves_requests = 0,
-		.rejects         = fpm_pool_supervisor_rejects,
-		.validate        = fpm_pool_supervisor_validate,
-		.init_main       = fpm_pool_supervisor_init_main,
-		.child_main      = fpm_pool_supervisor_child_main,
-		.status          = fpm_pool_supervisor_status,
+		.name                    = "supervisor",
+		.requires_listen         = 0,
+		.requires_pm             = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
+		.serves_requests         = 0,
+		.child_logs_via_master   = 1,	/* the whole policy runs in the child; see fpm_child_log.h */
+		.rejects                 = fpm_pool_supervisor_rejects,
+		.validate                = fpm_pool_supervisor_validate,
+		.init_main               = fpm_pool_supervisor_init_main,
+		.child_main              = fpm_pool_supervisor_child_main,
+		.status                  = fpm_pool_supervisor_status,
 	},
 	{
-		.name            = "cron",
-		.requires_listen = 0,
-		.requires_pm     = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
-		.serves_requests = 0,
-		.rejects         = fpm_pool_cron_rejects,
-		.validate        = fpm_pool_cron_validate,
-		.init_main       = fpm_pool_cron_init_main,
-		.child_main      = fpm_pool_cron_child_main,
-		.status          = fpm_pool_cron_status,
+		.name                    = "cron",
+		.requires_listen         = 0,
+		.requires_pm             = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
+		.serves_requests         = 0,
+		.child_logs_via_master   = 1,	/* same as supervisor: fpm_pool_cron_child_main() is where the policy lives */
+		.rejects                 = fpm_pool_cron_rejects,
+		.validate                = fpm_pool_cron_validate,
+		.init_main               = fpm_pool_cron_init_main,
+		.child_main              = fpm_pool_cron_child_main,
+		.status                  = fpm_pool_cron_status,
 	},
 	{
 		.name                     = "status",

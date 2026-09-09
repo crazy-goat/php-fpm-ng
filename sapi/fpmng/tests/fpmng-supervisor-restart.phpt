@@ -37,12 +37,16 @@ $cleanup = function () use ($work, $runsFile) {
  * every read of it yields at least one whole line: a torn read can only
  * under-count by the last, partial line, never report zero. */
 /* error_reporting(0) and @: a failed write must degrade into "restarts=0" plus
- * the diagnostics below, not into log-matcher noise. With
- * catch_workers_output = yes anything this script writes to stderr comes back
- * as a master-side WARNING "child N said into stderr: ..." (fpm_stdio.c:202),
- * and LogTool::error() only forgives lines containing DEBUG, so one PHP warning
- * landing between "Terminating ..." and "exiting, bye-bye!" would fail
- * expectLogTerminatingNotices() with an opaque matcher diff instead. */
+ * the diagnostics below, not into log-matcher noise. This test used to set
+ * catch_workers_output = yes (see the config below), and with it anything this
+ * script wrote to stderr came back as a master-side WARNING "child N said into
+ * stderr: ..." (fpm_stdio.c:202); LogTool::error() only forgives lines
+ * containing DEBUG, so one PHP warning landing between "Terminating ..." and
+ * "exiting, bye-bye!" failed expectLogTerminatingNotices() with an opaque
+ * matcher diff. The directive is gone, so this script's stderr now goes where
+ * upstream FPM sends a child's stderr by default -- fpm_stdio_init_main()'s
+ * /dev/null -- but the silencing stays: a diagnosable "restarts=0" is still
+ * worth more than a PHP warning nobody reads. */
 $script = <<<PHP
 <?php
 error_reporting(0);
@@ -61,30 +65,24 @@ pid = {{FILE:PID}}
 ; child through fpm_children_make(..., is_debug = 1) (fpm_children.c), and
 ; fpm_pool_supervisor_child_main() then re-runs the script inside that one child
 ; (the for (;;) at fpm_pool_supervisor.c:394), so there is no per-iteration
-; spawn line at any level. The cost of the level is paid in noise, not in
-; signal: measured on the test box, 15 s of a pool restarting a script that
-; writes nothing wrote 50,288,958 bytes of log, of which 463,822 lines were
-; fpm_event_loop() "event module triggered 1 events" -- one per flush marker
-; that catch_workers_output makes the child write after every run -- and 6 lines
-; were the startup notices plus "[pool sup] child N started". The dump below
-; therefore filters and caps instead of printing the file.
+; spawn line at any level.
+;
+; This pool used to need catch_workers_output = yes as well, because its own
+; account of what it did with the child -- "script finished (exit code N)", the
+; backoff notices, the restart_max ALERT -- is emitted in the CHILD, whose
+; error_log upstream FPM takes away (fpm_stdio_init_child()). Issue #121 gave
+; such a pool a log channel back to the master (fpm_child_log.h), so the
+; directive is gone, and with it the log flood it caused: measured on the test
+; box, 15 s of this pool restarting a script that writes nothing wrote
+; 52,109,076 bytes with catch_workers_output = yes, of which 473,694 lines were
+; fpm_event_loop() "event module triggered 1 events" -- one per flush marker the
+; child writes after every run -- against 2,956 bytes in 23 lines without it.
+; The dump below still filters and caps rather than printing the file: log_level
+; = debug at a different pool size or on a slower box is not a promise of 23
+; lines, and this output is read as a phpt diff.
 log_level = debug
 [sup]
 pool.type = supervisor
-; Without this the pool's own account of what it did with the child --
-; "script finished (exit code N)", the backoff notices, the restart_max ALERT
-; -- is written to the child's stderr, which fpm_stdio_child_use_pipes()
-; (sapi/fpmng/fpm/fpm_stdio.c) points at the master's stdout, and
-; fpm_stdio_init_main() has already pointed that at /dev/null. Measured on the
-; test box: with catch_workers_output = no a supervisor whose script exits 3
-; logs nothing at all about it; with it on, the same run logs
-; `WARNING: [pool sup] child N said into stderr: "NOTICE:
-; fpm_pool_supervisor_apply_policy(), line 352: [pool sup] supervisor: script
-; exited (code 3) after 0s, restarting in 1s (failure 1/unlimited)"`. The
-; failure path below dumps this log and that line is the whole point of dumping
-; it, so the test asks for it explicitly. That a test has to ask at all is
-; issue #121; when that is fixed this directive can go.
-catch_workers_output = yes
 supervisor.script = $work/loop.php
 supervisor.processes = 1
 supervisor.restart = always
@@ -166,12 +164,13 @@ if ($runs < 2) {
 
     /* What is worth printing out of this log: everything that is not DEBUG
      * (the startup notices, the pool's own backoff/give-up messages, which
-     * arrive as "child N said into stderr: ..." WARNINGs, and any child death),
-     * plus the DEBUG lines about the child, which are the fork evidence. What
-     * is not: the fpm_event_loop() flood measured above, which is why this
-     * filters instead of tailing — a raw tail of the 50 MB case is 8 KB of
-     * "event module triggered 1 events" and answers nothing. Bounded to the
-     * last 40 kept lines because this text is read as a phpt diff. */
+     * since issue #121 arrive at their own level as ordinary "[pool sup]
+     * supervisor: ..." lines, and any child death), plus the DEBUG lines about
+     * the child, which are the fork evidence. What is not: the fpm_event_loop()
+     * flood measured in the config comment above, which is why this filters
+     * instead of tailing — a raw tail of the 52 MB case is 8 KB of "event
+     * module triggered 1 events" and answers nothing. Bounded to the last 40
+     * kept lines because this text is read as a phpt diff. */
     $keepLast = 40;
     $errorLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
     echo "--- error log ($errorLog):\n";

@@ -215,7 +215,7 @@ try {
 
     /* A header name too long to become an HTTP_* key is refused by both, and
      * refused as a bad request rather than served with the header missing —
-     * FPM_HTTP_DIRECT_HEADER_NAME_MAX is 1024. */
+     * FPM_HTTP_HEADER_NAME_MAX is 1024. */
     $long = "GET / HTTP/1.1\r\nHost: parity.test\r\nX-" . str_repeat('a', 1100)
         . ": v\r\nConnection: close\r\n\r\n";
     foreach (['classic' => $classicPort, 'worker' => $workerPort] as $name => $port) {

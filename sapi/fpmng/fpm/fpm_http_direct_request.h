@@ -20,8 +20,14 @@ struct fpm_worker_pool_s;
  * that constant bounds the header *block*, so sizing a per-iteration stack
  * array from it cost 64 KB of stack per header. A name this long is already
  * pathological — Apache rejects a whole header line above 8190 bytes — and a
- * request carrying one is refused, not served with the header dropped. */
-#define FPM_HTTP_DIRECT_HEADER_NAME_MAX 1024
+ * request carrying one is refused, not served with the header dropped.
+ *
+ * Not DIRECT_: the HTTP gateway (fpm_http.c) enforces the same bound the same
+ * way, so a request header name means one thing on both transports (issue
+ * #115). The gateway does not share FPM_HTTP_DIRECT_HEADERS_MAX above — it
+ * never calls evhttp_set_max_headers_size() — which is why only this one lost
+ * the prefix. */
+#define FPM_HTTP_HEADER_NAME_MAX 1024
 
 /* Wording the two executors do not share. The checks below are identical; the
  * text an operator reads must still name the mode they configured, and the

@@ -156,8 +156,14 @@ $addrLines = '';
 foreach ($ids as $id) {
     $addr = $tester->getAddr('ipv4', "[tcp-$id]");
     $addrLines .= "$id $addr\n";
+    /* The array form runs the binary directly. A command string goes through
+     * `/bin/sh -c`, and where /bin/sh is dash the shell does not exec its
+     * argument: the pid returned is the shell's, so the proc_terminate() in
+     * the teardown below signals the shell and leaves this server behind
+     * (measured 2026-09-09 on 192.168.8.50, dash 0.5.12 — issue #101, same
+     * mechanism as #89). */
     $srvProcs[$id] = proc_open(
-        PHP_BINARY . ' -n ' . escapeshellarg("$docRoot/server.php") . ' ' . escapeshellarg($addr),
+        [PHP_BINARY, '-n', "$docRoot/server.php", $addr],
         $srvDesc, $srvPipes[$id]);
     fclose($srvPipes[$id][0]);
     stream_set_timeout($srvPipes[$id][1], 10);

@@ -22,6 +22,9 @@ PHP_FPM_FILES="
 "
 EOF
 touch "$TMP/php-src/sapi/fpm/fpm/upstream.c"
+# prepare.sh keeps this php-src's zlog.h as sapi/fpmng/fpm/zlog_upstream.h
+# for our own zlog.h to include (issue #130), so the fake tree needs one.
+touch "$TMP/php-src/sapi/fpm/fpm/zlog.h"
 cat > "$TMP/repo/sapi/fpmng/config.m4" <<'EOF'
 PHP_FPMNG_FILES="
 @FPMNG_SOURCES@

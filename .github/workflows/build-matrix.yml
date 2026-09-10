@@ -380,6 +380,17 @@ jobs:
   static-musl:
     runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
     steps:
+      # The Alpine build below writes into the workspace as root, and the
+      # runner user cannot unlink that afterwards -- the next job on this
+      # instance would die in actions/checkout with EACCES. Reclaim first,
+      # from a container, since chowning a root-owned file is exactly what
+      # the unprivileged runner cannot do. Same step as in ci-image.yml,
+      # which shares this instance.
+      - name: reclaim the workspace from root-owned build output
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /w
+
       - uses: actions/checkout@v7
       - name: clone pinned php-src
         run: |

@@ -18,10 +18,20 @@
  * Layout follows the one existing cross-process publication idiom in this
  * SAPI, fpm_http_tls_reload.c: two fixed-size slots plus one generation
  * counter, the writer always filling the slot that is NOT published and
- * bumping the counter afterwards. There is exactly one writer by
- * construction (the dedicated ACME process; issue #47 is what keeps it
- * exactly one), so the counter only has to be visible across processes, not
- * arbitrated between concurrent writers.
+ * bumping the counter afterwards. Readers are lock-free: they retry against
+ * a generation that did not move while they copied.
+ *
+ * Unlike fpm_http_tls_reload.c, the writer here is not the master process,
+ * and "one writer" is a property of a configuration rather than of the code:
+ * supervisor.processes may be greater than one, and nothing stops a second
+ * pool.type = cron pool from carrying the same flag. Two of them editing the
+ * same unpublished slot would publish a mixture of both -- in the worst case
+ * one challenge's token next to another's key authorization. Writers
+ * therefore serialise on a spinlock in the shared region; a writer that
+ * cannot take it, or whose publication loses its compare-and-swap, reports
+ * failure rather than pretending the token is live. Issue #47 is what will
+ * make a single ACME renewer the normal case; correctness here does not
+ * depend on it.
  *
  * The region is allocated once in the master before the first fork, whether
  * or not anything in the configuration uses ACME: it costs a couple of
@@ -33,6 +43,7 @@
 #define FPM_ACME_CHALLENGE_H 1
 
 #include <stddef.h>
+#include <sys/types.h>	/* ssize_t */
 
 /* An HTTP-01 token is base64url of at least 128 bits of entropy (RFC 8555
  * section 8.3); a key authorization is that token, a dot, and the base64url

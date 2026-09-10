@@ -28,8 +28,22 @@ struct fpm_acme_challenge_slot_s {
 struct fpm_acme_challenge_shared_s {
 	/* index = generation % 2 is the slot currently in effect; see the header. */
 	atomic_t generation;
+	/* Held for the whole draft-edit-publish sequence below. Readers never
+	 * touch it: they are lock-free on the generation counter. The lock exists
+	 * because "one writer" is a property of a configuration, not of the code
+	 * -- supervisor.processes may be greater than one and more than one
+	 * pool.type = cron pool may carry the flag -- and two writers editing the
+	 * same unpublished slot would publish a mixture of both. */
+	atomic_t writer_lock;
 	struct fpm_acme_challenge_slot_s slot[2];
 };
+
+/* Publishing happens a handful of times per certificate lifetime and the
+ * critical section is two memcpy()s, so contention is a bug or a stuck
+ * process, not normal load. Give up rather than spin forever: the caller
+ * reports the failure to the ACME client, which can retry, whereas a
+ * deadlocked cron process would never finish a renewal again. */
+#define FPM_ACME_CHALLENGE_LOCK_RETRIES 10000
 
 static struct fpm_acme_challenge_shared_s *fpm_acme_challenge_shared = NULL;
 
@@ -117,12 +131,34 @@ static struct fpm_acme_challenge_slot_s *fpm_acme_challenge_draft(unsigned long 
 	return draft;
 }
 
-static void fpm_acme_challenge_publish(unsigned long gen)
+static int fpm_acme_challenge_publish(unsigned long gen)
 {
-	/* One writer by construction, so this cannot fail for contention; the
-	 * atomic form is used to match the one other cross-process publication
-	 * in this SAPI rather than to invent a second idiom. */
-	atomic_cmp_set(&fpm_acme_challenge_shared->generation, gen, gen + 1);
+	/* Under the writer lock, so the counter cannot have moved since
+	 * fpm_acme_challenge_draft() read it; the compare-and-swap is what makes
+	 * the new slot visible to readers as one step, and its failure would mean
+	 * the state is not what this process believes. Refusing to report success
+	 * then matters: a caller told the token is live tells the CA to validate
+	 * it. */
+	if (!atomic_cmp_set(&fpm_acme_challenge_shared->generation, gen, gen + 1)) {
+		zlog(ZLOG_ERROR, "acme: the shared challenge state changed under the writer lock");
+		return -1;
+	}
+	return 0;
+}
+
+static int fpm_acme_challenge_lock(void)
+{
+	if (!fpm_spinlock_with_max_retries(&fpm_acme_challenge_shared->writer_lock,
+			FPM_ACME_CHALLENGE_LOCK_RETRIES)) {
+		zlog(ZLOG_ERROR, "acme: another process is holding the challenge writer lock");
+		return -1;
+	}
+	return 0;
+}
+
+static void fpm_acme_challenge_unlock(void)
+{
+	fpm_unlock(fpm_acme_challenge_shared->writer_lock);
 }
 
 int fpm_acme_challenge_set(const char *token, const char *keyauth)
@@ -130,6 +166,7 @@ int fpm_acme_challenge_set(const char *token, const char *keyauth)
 	struct fpm_acme_challenge_slot_s *draft;
 	unsigned long gen;
 	size_t token_len, keyauth_len, i;
+	int published;
 
 	if (!fpm_acme_challenge_shared) {
 		zlog(ZLOG_ERROR, "acme: the shared challenge state is not available");
@@ -159,6 +196,9 @@ int fpm_acme_challenge_set(const char *token, const char *keyauth)
 		return -1;
 	}
 
+	if (0 > fpm_acme_challenge_lock()) {
+		return -1;
+	}
 	draft = fpm_acme_challenge_draft(&gen);
 	for (i = 0; i < draft->count; i++) {
 		if (!strcmp(draft->entry[i].token, token)) {
@@ -169,6 +209,7 @@ int fpm_acme_challenge_set(const char *token, const char *keyauth)
 		if (draft->count == FPM_ACME_CHALLENGE_MAX) {
 			zlog(ZLOG_ERROR, "acme: at most %d challenges may be active at once",
 				FPM_ACME_CHALLENGE_MAX);
+			fpm_acme_challenge_unlock();
 			return -1;
 		}
 		draft->count++;
@@ -178,8 +219,9 @@ int fpm_acme_challenge_set(const char *token, const char *keyauth)
 	memcpy(draft->entry[i].keyauth, keyauth, keyauth_len + 1);
 	draft->entry[i].keyauth_len = keyauth_len;
 
-	fpm_acme_challenge_publish(gen);
-	return 0;
+	published = fpm_acme_challenge_publish(gen);
+	fpm_acme_challenge_unlock();
+	return published;
 }
 
 int fpm_acme_challenge_clear(const char *token)
@@ -187,12 +229,16 @@ int fpm_acme_challenge_clear(const char *token)
 	struct fpm_acme_challenge_slot_s *draft;
 	unsigned long gen;
 	size_t i;
+	int published;
 
 	if (!fpm_acme_challenge_shared) {
 		zlog(ZLOG_ERROR, "acme: the shared challenge state is not available");
 		return -1;
 	}
 	if (!token || !*token) {
+		return -1;
+	}
+	if (0 > fpm_acme_challenge_lock()) {
 		return -1;
 	}
 	draft = fpm_acme_challenge_draft(&gen);
@@ -208,28 +254,42 @@ int fpm_acme_challenge_clear(const char *token)
 		draft->count--;
 		break;
 	}
-	fpm_acme_challenge_publish(gen);
-	return 0;
+	published = fpm_acme_challenge_publish(gen);
+	fpm_acme_challenge_unlock();
+	return published;
 }
 
 size_t fpm_acme_challenge_tokens(char (*out)[FPM_ACME_CHALLENGE_TOKEN_MAX], size_t max)
 {
 	struct fpm_acme_challenge_shared_s *sh = fpm_acme_challenge_shared;
-	const struct fpm_acme_challenge_slot_s *slot;
-	unsigned long gen;
-	size_t i, count;
+	int attempt;
 
 	if (!sh || !out || !max) {
 		return 0;
 	}
-	gen = (unsigned long) sh->generation;
-	slot = &sh->slot[gen % 2];
-	count = slot->count > max ? max : slot->count;
-	for (i = 0; i < count; i++) {
-		memcpy(out[i], slot->entry[i].token, FPM_ACME_CHALLENGE_TOKEN_MAX);
-		out[i][FPM_ACME_CHALLENGE_TOKEN_MAX - 1] = '\0';
+	/* Same stability rule as fpm_acme_challenge_lookup(): copy, then confirm
+	 * the generation did not move, so the caller never sees half of one
+	 * publication and half of the next. */
+	for (attempt = 0; attempt < 4; attempt++) {
+		unsigned long gen = (unsigned long) sh->generation;
+		const struct fpm_acme_challenge_slot_s *slot = &sh->slot[gen % 2];
+		size_t i, count = slot->count;
+
+		if (count > FPM_ACME_CHALLENGE_MAX) {
+			continue;			/* torn read of count itself */
+		}
+		if (count > max) {
+			count = max;
+		}
+		for (i = 0; i < count; i++) {
+			memcpy(out[i], slot->entry[i].token, FPM_ACME_CHALLENGE_TOKEN_MAX);
+			out[i][FPM_ACME_CHALLENGE_TOKEN_MAX - 1] = '\0';
+		}
+		if ((unsigned long) sh->generation == gen) {
+			return count;
+		}
 	}
-	return count;
+	return 0;
 }
 
 /* PHP-callable surface ---------------------------------------------------- */
@@ -276,6 +336,13 @@ static ZEND_FUNCTION(fpmng_acme_challenge_clear)
 		Z_PARAM_STR(token)
 	ZEND_PARSE_PARAMETERS_END();
 
+	/* Rejected for the same reason as in set(), and one more: the store
+	 * compares NUL-terminated strings, so a token with an embedded NUL would
+	 * clear whatever matches its prefix -- a different challenge. */
+	if (ZSTR_LEN(token) != strlen(ZSTR_VAL(token))) {
+		zlog(ZLOG_ERROR, "acme: a challenge token contains a NUL byte");
+		RETURN_FALSE;
+	}
 	RETURN_BOOL(fpm_acme_challenge_clear(ZSTR_VAL(token)) == 0);
 }
 

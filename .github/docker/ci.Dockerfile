@@ -33,6 +33,24 @@ RUN locale-gen tr_TR.UTF-8
 # repository present is the one the job just checked out.
 RUN git config --system --add safe.directory '*'
 
+# ubuntu-latest ran jobs as an unprivileged user, and the suite depends on
+# that: php-fpm refuses to start as root, so as root 47 of 48 fpmng tests
+# report SKIP "Refusing to run as root" and the job goes green on PASS=0.
+# fpmng-acme-state.phpt fails outright, because root ignores directory
+# permissions (CAP_DAC_OVERRIDE) and its read-only-directory case never
+# throws.
+#
+# uid 1001 matches both the gh-runner account on the self-hosted machine and
+# the `runner` user on GitHub-hosted images, so the workspace bind mount is
+# owned by the container user either way. Jobs opt in with
+# `options: --user 1001:1001`; gateway-privileges deliberately does not,
+# since it tests dropping root.
+RUN useradd -m -u 1001 -s /bin/bash ci
+
 # Shared with the host across runs; see the ccache volume in build-matrix.yml.
 ENV CCACHE_DIR=/ccache \
     CCACHE_MAXSIZE=5G
+
+# The volume is mounted from the host, but create it owned by the job user so
+# a run with no volume (a GitHub-hosted fallback) still has a writable cache.
+RUN install -d -o 1001 -g 1001 /ccache

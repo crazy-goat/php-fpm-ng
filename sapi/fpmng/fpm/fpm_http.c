@@ -2225,14 +2225,27 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	return bev;
 }
 
-/* The gateway end of the error_log follow channel: readable means the master
- * has reopened the log and sent the new file over. See
- * fpm_error_log_follow.h — the adoption itself is not gateway-specific, only
- * the event loop it happens in is. */
+/* The gateway end of the log follow channel: readable means the master has
+ * reopened its logs (SIGUSR1). Two things follow from that and they are
+ * independent of each other:
+ *
+ * - the error_log descriptor the master sent has to be adopted, because this
+ *   process cannot open that file itself (issue #134), and
+ * - this process's own http.access_log has to be reopened by path, because
+ *   this process is the only one that has it open at all (issue #137).
+ *
+ * Both live here, in the gateway, rather than in either module: this is where
+ * the wakeup lands, and neither fpm_error_log_follow.c nor
+ * fpm_http_access_log.c has to learn about the other. */
 static void fpm_http_log_follow_readable(evutil_socket_t fd, short what, void *arg)
 {
-	(void) fd; (void) what; (void) arg;
-	fpm_error_log_follow_child_adopt();
+	struct fpm_http_gateway_s *gw = arg;
+
+	(void) fd; (void) what;
+
+	if (fpm_error_log_follow_child_adopt() > 0) {
+		gw->access_log = fpm_http_access_log_reopen(gw->access_log, gw->pool, gw->access_log_path);
+	}
 }
 
 /* Gateway process, once it has its own event_base. The event is never freed:
@@ -2244,13 +2257,17 @@ static void fpm_http_log_follow_init(struct fpm_http_gateway_s *gw)
 	struct event *ev;
 
 	if (fd < 0) {
-		return;			/* error_log = syslog, or a foreground run with no log file */
+		/* Only when the master could not create the channel — it creates one
+		 * for every gateway now, error_log = syslog included, because the
+		 * notification is also this process's http.access_log wakeup
+		 * (fpm_error_log_follow.h). The master has already logged why. */
+		return;
 	}
 
-	ev = event_new(gw->base, fd, EV_READ | EV_PERSIST, fpm_http_log_follow_readable, NULL);
+	ev = event_new(gw->base, fd, EV_READ | EV_PERSIST, fpm_http_log_follow_readable, gw);
 	if (!ev || event_add(ev, NULL) != 0) {
-		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch the error_log follow channel; "
-			"this process will keep writing into the pre-rotation error_log", gw->pool);
+		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch the log follow channel; this process "
+			"will keep writing into the pre-rotation error_log and http.access_log", gw->pool);
 	}
 }
 
@@ -2267,9 +2284,10 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * master's error_log itself (issue #130, fpm_child_error_log.h). */
 	fpm_child_error_log_use();
 	/* ... and, because it writes them itself, it is also the process that has
-	 * to be told when the master reopens that file — issue #134. Keeps this
-	 * slot's channel and drops the ones belonging to gateways forked before
-	 * it. */
+	 * to be told when the master reopens that file — issue #134, and the same
+	 * notification is what tells it to reopen its own http.access_log, issue
+	 * #137. Keeps this slot's channel and drops the ones belonging to gateways
+	 * forked before it. */
 	fpm_error_log_follow_child(gw->slots[index]->log_follow);
 
 	/* plain defaults: the master terminates us with a signal, nothing to clean up */
@@ -2319,7 +2337,9 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	/* one fd per gateway process, all appending to the same http.access_log
 	 * path -- see fpm_http_access_log.h for why that does not interleave.
-	 * Opened after the drop so the file is created by the dropped-to identity. */
+	 * Opened after the drop so the file is created by the dropped-to identity,
+	 * which is also what lets this process reopen it after a logrotate on its
+	 * own (issue #137, fpm_http_log_follow_readable()). */
 	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
 
 	if (fpm_http_resolve_upstream(gw) != 0) {

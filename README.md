@@ -55,6 +55,12 @@ The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md).
 
+The gateway answers the ACME HTTP-01 challenge itself, on both `http.listen`
+and the plain `http.plain_listen` companion, from state a `cron` or
+`supervisor` pool publishes with `fpmng_acme_challenge_set()` — see
+[`docs/acme-challenge.md`](docs/acme-challenge.md). Obtaining and renewing
+certificates is not implemented yet.
+
 ## Experimental direct HTTP
 
 `pool.type = http-direct` runs HTTP and PHP in the same FPM child, without the

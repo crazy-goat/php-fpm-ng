@@ -263,6 +263,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm             = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
 		.serves_requests         = 0,
 		.child_logs_via_master   = 1,	/* the whole policy runs in the child; see fpm_child_log.h */
+		.publishes_acme_challenges = 1,	/* see the same flag on "cron" below */
 		.rejects                 = fpm_pool_supervisor_rejects,
 		.validate                = fpm_pool_supervisor_validate,
 		.init_main               = fpm_pool_supervisor_init_main,
@@ -275,6 +276,14 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm             = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
 		.serves_requests         = 0,
 		.child_logs_via_master   = 1,	/* same as supervisor: fpm_pool_cron_child_main() is where the policy lives */
+		/* docs/NOTES.md section 3l puts the dedicated ACME process in a cron
+		 * pool, and "supervisor" above carries the same flag: both are
+		 * script-running types that serve no request, which is the property
+		 * that matters -- the builtins publish into shared memory and a
+		 * publisher must not be a process that also answers requests (issue
+		 * #48, criterion 7). Whether the client is scheduled or long-running
+		 * is issue #49's decision, and this flag does not prejudge it. */
+		.publishes_acme_challenges = 1,
 		.rejects                 = fpm_pool_cron_rejects,
 		.validate                = fpm_pool_cron_validate,
 		.init_main               = fpm_pool_cron_init_main,

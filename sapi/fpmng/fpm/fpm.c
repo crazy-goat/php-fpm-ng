@@ -23,6 +23,7 @@
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fpm_metrics.h"
+#include "fpm_acme_challenge.h"
 #include "fastcgi.h"
 #include "zend_signal.h"
 #include "zlog.h"
@@ -102,6 +103,16 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 int fpm_run(int *max_requests) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
+
+	/* The shared HTTP-01 challenge state is global to the process tree, not
+	 * a property of any one pool: the process that publishes a token (a
+	 * pool.type = cron ACME process) is never the process that answers the
+	 * CA (a gateway child of an http pool). Allocated here, unconditionally
+	 * and before the first fork, for the reason fpm_acme_challenge.h gives. */
+	if (0 > fpm_acme_challenge_init_main()) {
+		fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+		fpm_event_loop(1);
+	}
 
 	/* Initialize pool types before child fork — HTTP gateways then inherit the
 	 * same final stdio state as workers. */

@@ -140,6 +140,7 @@ struct {								\
 #include "fpm_children_extra.h"
 #include "fpm_http_tls.h"
 #include "fpm_http_tls_reload.h"
+#include "fpm_child_error_log.h"
 #include "zlog.h"
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
@@ -2226,6 +2227,11 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	char title[128];
 
 	fpm_globals.is_child = 1;
+
+	/* ... which is what stops zlog() from timestamping this process's lines,
+	 * and this process — unlike an upstream FPM child — writes them into the
+	 * master's error_log itself (issue #130, fpm_child_error_log.h). */
+	fpm_child_error_log_use();
 
 	/* plain defaults: the master terminates us with a signal, nothing to clean up */
 	memset(&act, 0, sizeof(act));

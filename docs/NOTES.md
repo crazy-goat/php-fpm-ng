@@ -3707,3 +3707,64 @@ visible under its final name with the wrong permissions.
 defines and manages the on-disk layout. `installCertificateChain()` exists as
 the write path 047 will call after a successful order; it is exercised in the
 test with a placeholder PEM string, not a real certificate.
+
+## 3z. A gateway process's own log lines are decorated like the master's (issue #130, 2026-09-10)
+
+`zlog_buf_prefix()` (`zlog.c`) writes the timestamp only when
+`fpm_globals.is_child` is clear, because an upstream FPM child logs through a
+pipe the master decorates. An fpmng HTTP gateway process is forked outside that
+path (`fpm_http_gateway_run()`), keeps the inherited `error_log` fd and writes
+into it directly — so its lines landed in the shared file with no time of their
+own, next to the master's:
+
+```
+WARNING: [pool web] http: upstream '127.0.0.1:9008' closed 2.0 ms after the complete request was written to it, ...
+[09-Sep-2026 21:00:49] WARNING: [pool web] child 2763991 exited on signal 9 (SIGKILL) after 0.042689 seconds from start
+```
+
+The pair of lines issue #118 asks an operator to compare was therefore
+correlatable only by its order inside one file, which several gateway processes
+and the master writing concurrently do not guarantee.
+
+**The fix is a prefix decision, not a second formatter.** `fpmng_zlog_ex()`
+(`sapi/fpmng/fpm/fpm_child_error_log.c`) clears `fpm_globals.is_child` for the
+duration of the `vzlog()` call and restores it immediately, so upstream
+produces exactly the line the master would have. Reformatting the message in
+our own code instead would have meant reimplementing `vzlog()`'s level filter,
+its truncation and its `": %s (%d)"` errno suffix — the last of which the child
+log relay does lose, as `fpm_child_log.h` warns, because `zlog()` calls the
+external logger before appending it and masks `ZLOG_HAVE_ERRNO` out of the
+flags it passes. Here `ZLOG_SYSERROR` keeps its reason.
+
+Coverage comes from the `zlog()` macro: `sapi/fpmng/fpm/zlog.h` is ours and
+reroutes it, so an upstream file that logs inside a gateway process
+(`fpm_unix.c` during the privilege drop, say) is decorated too, with no
+per-file include to remember. That header does **not** copy upstream —
+`build/prepare.sh` keeps this php-src's own `zlog.h` next to it as
+`zlog_upstream.h` and ours includes it. Copying would have frozen the
+declarations: `struct zlog_stream` gained two bit-fields in 8.5, so a header
+taken from one branch and compiled against another describes a different
+object without saying so. `zlog_msg()` and the `zlog_stream` API are left
+alone; they are the master's paths for captured child output and the access
+log.
+
+Opting in is explicit — `fpm_child_error_log_use()`, called by
+`fpm_http_gateway_run()` — and is a no-op unless the process actually holds an
+`error_log` file (`fpm_globals.error_log_fd > 0`). An ordinary pool child, whose
+log was closed by `fpm_stdio_init_child()`, writes to `STDERR_FILENO`, which the
+master decorates itself when it captures it; decorating there would produce two
+timestamps in one line. Under `error_log = syslog` there is nothing to restore,
+because `zlog_buf_prefix()` never consults `is_child` on that path.
+
+Measured on 192.168.8.50 (php-8.5.11, 2026-09-10), one gateway pool whose worker
+`kill -9`s itself:
+
+```
+[10-Sep-2026 08:27:38] WARNING: [pool web] http: upstream '127.0.0.1:9130' closed 2.0 ms after the complete request was written to it, without one byte of a reply (EOF): the worker died, or it refused the request head and closed without answering -- if the master reports no child exit for this pool, the request head is the remaining suspect
+[10-Sep-2026 08:27:38] WARNING: [pool web] child 2782431 exited on signal 9 (SIGKILL) after 1.014005 seconds from start
+```
+
+`sapi/fpmng/tests/fpmng-http-gateway-log-decoration.phpt` asserts both shapes.
+Negative control: with the one call in `fpm_http_gateway_run()` commented out
+and nothing else changed, that test fails on the gateway line and the other 45
+still pass.

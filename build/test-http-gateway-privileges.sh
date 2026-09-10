@@ -58,7 +58,9 @@ NOBODY_GROUP=$(id -gn nobody)
 #
 # Raising this alone does nothing: fpm_http.c:2902 clamps the gateway count to
 # MIN(http.gateways, pm.max_children), measured 2026-09-10 -- "http.gateways =
-# 2" with "pm.max_children = 1" logs "1 gateway(s)". Bump both or neither.
+# 2" with "pm.max_children = 1" logs "1 gateway(s)". Bump both or neither --
+# EXPECTED_GATEWAYS=2 with pm.max_children=4 was run on 2026-09-10 and all
+# three scenarios pass, so the assertions do not depend on the count being 1.
 EXPECTED_GATEWAYS=1
 
 RUN_ROOT=$(mktemp -d)
@@ -92,6 +94,19 @@ assert_id_line() {
         got=$(printf '%s' "$line" | awk -v c="$col" '{print $c}')
         [ "$got" = "$want" ] || fail "$file: pid $pid $label column $col is $got, want $want ($line)"
     done
+}
+
+# dump_logs DIR -- the scenario's error.log and stdout.log on stderr, for the
+# failure paths below.
+#
+# Two traps, both hit in practice (measured 2026-09-10 with a stub binary that
+# writes to stderr and exits): `cat a b 2>/dev/null >&2` sends *both* streams
+# to /dev/null, because >&2 dups the already-redirected fd 2, so the logs the
+# failure path exists to show were silently dropped; and a missing error.log
+# made cat exit non-zero, which under set -e killed the script inside the
+# `|| { ... }` block before fail() could print why.
+dump_logs() {
+    cat "$1/error.log" "$1/stdout.log" >&2 2>/dev/null || true
 }
 
 wait_for_port() {
@@ -169,6 +184,45 @@ wait_for_gateways() {
     return 1
 }
 
+# wait_for_drop PID WANT_UID -- true once pid's real uid is WANT_UID.
+#
+# A gateway is matchable by title as soon as fpm_env_setproctitle() runs
+# (fpm_http.c:2311) but drops privileges only later (fpm_http.c:2336), so a pid
+# found by title can legitimately still be root for a moment. Asserting
+# straight away would fail a correct binary intermittently -- the same class of
+# false negative as issue #136, from the other end. Waiting cannot hide a
+# binary that never drops: the loop times out and the caller fails.
+wait_for_drop() {
+    pid=$1 want=$2
+    i=0
+    while [ "$i" -lt 50 ]; do
+        got=$(awk '/^Uid:/ { print $2 }' "/proc/$pid/status" 2>/dev/null || true)
+        if [ "$got" = "$want" ]; then
+            return 0
+        fi
+        kill -0 "$pid" 2>/dev/null || return 1
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# wait_for_log FILE PATTERN -- true once PATTERN appears in FILE. Same race as
+# wait_for_drop(): the gateway logs why it stays root at the point it would
+# otherwise have dropped, which can be after the title is set.
+wait_for_log() {
+    file=$1 pattern=$2
+    i=0
+    while [ "$i" -lt 50 ]; do
+        if grep -q "$pattern" "$file" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
 run_scenario() {
     name=$1 reuseport=$2 pool_has_user=$3
     dir="$RUN_ROOT/$name"
@@ -218,7 +272,7 @@ EOF
     MASTER_PIDS="$MASTER_PIDS $master_pid"
 
     wait_for_port "$http_port" "$master_pid" || {
-        cat "$dir/error.log" "$dir/stdout.log" 2>/dev/null >&2
+        dump_logs "$dir"
         fail "[$name] gateway never accepted a connection on 127.0.0.1:$http_port"
     }
 
@@ -229,20 +283,22 @@ EOF
     assert_id_line "$master_pid" 0 Uid "$name"
 
     gw_pids=$(wait_for_gateways "$master_pid" www "$EXPECTED_GATEWAYS") || {
-        cat "$dir/error.log" "$dir/stdout.log" 2>/dev/null >&2
+        dump_logs "$dir"
         fail "[$name] expected $EXPECTED_GATEWAYS 'http gateway www [...]' process(es) under master $master_pid"
     }
 
     for gw_pid in $gw_pids; do
         if [ "$pool_has_user" = "yes" ]; then
+            wait_for_drop "$gw_pid" "$NOBODY_UID" \
+                || fail "[$name] gateway pid $gw_pid never reached uid $NOBODY_UID"
             assert_id_line "$gw_pid" "$NOBODY_UID" Uid "$name"
             assert_id_line "$gw_pid" "$NOBODY_GID" Gid "$name"
         else
             # root-pool scenario: nothing to drop to, gateway stays root --
             # and says so, per acceptance criterion 5 (never silent).
-            assert_id_line "$gw_pid" 0 Uid "$name"
-            grep -q "gateway keeps running as root" "$dir/error.log" \
+            wait_for_log "$dir/error.log" "gateway keeps running as root" \
                 || fail "[$name] gateway stayed root without logging why"
+            assert_id_line "$gw_pid" 0 Uid "$name"
         fi
     done
 
@@ -251,7 +307,7 @@ EOF
     # not just exist with the right uid. front_controller runs index.php.
     body=$(curl --silent --show-error --connect-timeout 2 --max-time 5 "http://127.0.0.1:$http_port/")
     if [ "$body" != "ok" ]; then
-        cat "$dir/error.log" "$dir/stdout.log" 2>/dev/null >&2
+        dump_logs "$dir"
         fail "[$name] expected body 'ok', got: $body"
     fi
 

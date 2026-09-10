@@ -65,6 +65,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: verify comment-content rule links (task 014)
@@ -82,6 +87,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: verify fpmng .phpt coverage check (issue #95)
@@ -100,6 +110,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: clone pinned php-src
@@ -125,6 +140,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
 
@@ -233,6 +253,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -264,6 +289,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       # Issue #105: the locale leg of fpmng-http-direct-request-parity.phpt is
@@ -343,6 +373,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
 
@@ -434,6 +469,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # No --user here, unlike every other job: this one asserts the gateway
+      # drops root before accepting a connection, so it has to start with it.
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -461,6 +498,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -487,6 +529,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -515,6 +562,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -536,6 +588,11 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8

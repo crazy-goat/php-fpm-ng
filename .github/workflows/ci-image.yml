@@ -1,11 +1,16 @@
 name: ci-image
 
-# Builds the image that build-matrix.yml runs its jobs in. Kept separate and
-# on a GitHub-hosted runner on purpose: the self-hosted runner consumes this
-# image, so building it there would be a chicken-and-egg on a cold machine.
+# Builds the image that build-matrix.yml runs its jobs in.
 #
-# Only fires when the Dockerfile actually changes, so a normal PR does not pay
-# for an image build.
+# Runs on the self-hosted runner, not ubuntu-latest: GitHub-hosted minutes for
+# this org are gated behind billing, which is what pushed CI onto poligon in
+# the first place. Building the image there too means the whole pipeline stops
+# depending on that.
+#
+# poligon-host is the bare instance (no container:) -- this job needs the
+# host's docker daemon, and it must not run inside the image it is building.
+#
+# Only fires when the Dockerfile changes, so a normal PR does not rebuild it.
 on:
   push:
     branches: [main]
@@ -24,31 +29,37 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v7
 
-      - uses: docker/setup-buildx-action@v3
-
-      - name: log in to ghcr.io
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # Plain docker build rather than buildx: poligon runs the legacy builder,
+      # and this image is a single apt-get layer that gains nothing from
+      # BuildKit's parallelism.
+      - name: build
+        run: |
+          docker build \
+            -t ghcr.io/crazy-goat/php-fpm-ng-ci:latest \
+            -t ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }} \
+            -f .github/docker/ci.Dockerfile \
+            .github/docker
 
       # On a pull_request the image is built but not pushed: a PR from a fork
       # has a read-only GITHUB_TOKEN, and a PR that breaks the Dockerfile
-      # should fail here rather than after publishing a broken :latest.
-      - name: build and push
-        uses: docker/build-push-action@v6
-        with:
-          context: .github/docker
-          file: .github/docker/ci.Dockerfile
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      # should fail at build rather than after publishing a broken :latest.
+      - name: log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }}
+
+      - name: log out
+        if: always() && github.event_name != 'pull_request'
+        run: docker logout ghcr.io

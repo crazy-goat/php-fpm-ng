@@ -52,6 +52,15 @@ NOBODY_UID=$(id -u nobody) || fail "no 'nobody' user on this system"
 NOBODY_GID=$(id -g nobody)
 NOBODY_GROUP=$(id -gn nobody)
 
+# One gateway per scenario: the assertions are about the identity a gateway
+# runs with, which does not vary with their number, and a fixed count is what
+# lets wait_for_gateways() fail loudly instead of inspecting a subset.
+#
+# Raising this alone does nothing: fpm_http.c:2902 clamps the gateway count to
+# MIN(http.gateways, pm.max_children), measured 2026-09-10 -- "http.gateways =
+# 2" with "pm.max_children = 1" logs "1 gateway(s)". Bump both or neither.
+EXPECTED_GATEWAYS=1
+
 RUN_ROOT=$(mktemp -d)
 # mktemp -d defaults to 0700: the dropped-to worker (running as $NOBODY_UID,
 # unrelated to this task -- that drop already existed) needs to traverse this
@@ -102,11 +111,62 @@ wait_for_port() {
     return 1
 }
 
-# find_gateway_pids POOL -- one pid per "http gateway POOL [N]" process,
-# newline-separated. Matches fpm_env_setproctitle()'s title in fpm_http.c.
+# list_children PID -- direct children of PID, one per line.
+#
+# /proc/<pid>/task/*/children is the cheap path but needs CONFIG_PROC_CHILDREN,
+# so ps is kept as a fallback; both are read fresh on every call because the
+# master forks gateways and workers concurrently with this script.
+list_children() {
+    parent=$1
+    kids=$(cat /proc/"$parent"/task/*/children 2>/dev/null || true)
+    if [ -n "$kids" ]; then
+        printf '%s\n' $kids
+        return 0
+    fi
+    ps -A -o pid=,ppid= 2>/dev/null | awk -v p="$parent" '$2 == p { print $1 }'
+}
+
+# find_gateway_pids MASTER_PID POOL -- one pid per "http gateway POOL [N]"
+# process forked by MASTER_PID, newline-separated. Matches
+# fpm_env_setproctitle()'s title in fpm_http.c.
+#
+# Scoped to this master's children on purpose: the test box is shared, and a
+# global `pgrep -f "http gateway www ["` matches any leftover gateway of a pool
+# named www. Issue #136 measured that both ways round -- a stale foreign pid
+# failed the first assertion against a correct binary, and the same pattern can
+# just as easily make the script pass while the binary under test is broken,
+# because nothing establishes which master forked the pid being read.
 find_gateway_pids() {
-    pool=$1
-    pgrep -f "http gateway $pool \[" || true
+    master=$1 pool=$2
+    for child in $(list_children "$master"); do
+        # setproctitle() rewrites argv, so the title shows up in cmdline;
+        # a child that exited between listing and reading is simply skipped.
+        title=$(tr '\0' ' ' < "/proc/$child/cmdline" 2>/dev/null) || continue
+        case $title in
+            *"http gateway $pool ["*) printf '%s\n' "$child" ;;
+        esac
+    done
+}
+
+# wait_for_gateways MASTER_PID POOL COUNT -- the pids, once exactly COUNT of
+# them exist. The port being up does not guarantee every gateway has been
+# forked and titled yet, and an assertion loop over "whatever was found first"
+# is exactly what issue #136 is about.
+wait_for_gateways() {
+    master=$1 pool=$2 want=$3
+    i=0
+    while [ "$i" -lt 50 ]; do
+        pids=$(find_gateway_pids "$master" "$pool")
+        got=$(printf '%s' "$pids" | grep -c '[0-9]' || true)
+        if [ "$got" -eq "$want" ]; then
+            printf '%s\n' "$pids"
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    printf 'found %s gateway process(es) under master %s, want %s\n' "$got" "$master" "$want" >&2
+    return 1
 }
 
 run_scenario() {
@@ -142,7 +202,7 @@ EOF
         echo "pm = static"
         echo "pm.max_children = 1"
         echo "pool.type = http"
-        echo "http.gateways = 1"
+        echo "http.gateways = $EXPECTED_GATEWAYS"
         echo "http.reuseport = $reuseport"
         echo "http.listen = 127.0.0.1:$http_port"
         echo "http.front_controller = /index.php"
@@ -168,8 +228,10 @@ EOF
     # gateway assertions below meaningless.
     assert_id_line "$master_pid" 0 Uid "$name"
 
-    gw_pids=$(find_gateway_pids www)
-    [ -n "$gw_pids" ] || fail "[$name] no 'http gateway www [...]' process found"
+    gw_pids=$(wait_for_gateways "$master_pid" www "$EXPECTED_GATEWAYS") || {
+        cat "$dir/error.log" "$dir/stdout.log" 2>/dev/null >&2
+        fail "[$name] expected $EXPECTED_GATEWAYS 'http gateway www [...]' process(es) under master $master_pid"
+    }
 
     for gw_pid in $gw_pids; do
         if [ "$pool_has_user" = "yes" ]; then

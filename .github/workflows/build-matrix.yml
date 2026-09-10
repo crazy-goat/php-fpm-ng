@@ -15,6 +15,35 @@ on:
         description: "php-src commit/tag to build against (overrides the pinned default)"
         required: false
         default: ""
+      runner:
+        description: "where to run: the self-hosted poligon runners, or GitHub-hosted as a fallback when poligon is offline"
+        required: false
+        type: choice
+        default: self-hosted
+        options:
+          - self-hosted
+          - ubuntu-latest
+
+# Every push to a PR branch restarts the whole 13-job matrix; without this the
+# superseded run keeps burning minutes to completion.
+#
+# Every job below except static-musl runs in ghcr.io/crazy-goat/php-fpm-ng-ci
+# (built by ci-image.yml from .github/docker/ci.Dockerfile), which is why none
+# of them apt-get anything any more. The repeated container: block is
+# unavoidable -- GitHub Actions does not expand YAML anchors. Its /ccache
+# volume is the self-hosted runner's own disk, so the compiler cache survives
+# between runs without being tarred to GitHub's cache service; on a
+# GitHub-hosted fallback run that path is empty and ccache starts cold, which
+# is what the hosted runner did anyway.
+#
+# static-musl is the exception: it drives `docker run` with host bind mounts,
+# and -v paths are resolved by the host daemon, so a containerised copy of it
+# would mount empty directories. It runs on poligon-host, a runner instance
+# with its own _work -- kept away from the root-owned workspaces the container
+# jobs leave behind.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinned by
@@ -28,7 +57,19 @@ jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
   # contributor entry points. Fast — checkout only.
   comment-content-rule:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: verify comment-content rule links (task 014)
@@ -38,7 +79,19 @@ jobs:
   # this repo owns, so a new test file cannot be silently unreachable. Hermetic
   # -- no build, no binary; the runner stops at its own preflight.
   fpmng-phpt-coverage:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: verify fpmng .phpt coverage check (issue #95)
@@ -49,7 +102,19 @@ jobs:
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: clone pinned php-src
@@ -67,21 +132,21 @@ jobs:
   # release.
   build:
     needs: patches
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-
-      - name: install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential autoconf automake libtool bison re2c pkg-config \
-            libevent-dev libssl-dev zlib1g-dev ccache
-
-      - name: ccache
-        uses: hendrikmuhs/ccache-action@v1.2.24
-        with:
-          key: build-canonical
 
       - name: clone pinned php-src
         run: |
@@ -180,18 +245,21 @@ jobs:
   # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
   phpt:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        # This runner never ran the build job's dependency install step, but
-        # php-fpm-ng and php are dynamically linked against libevent/openssl —
-        # without this, php-fpm-ng -v fails silently (missing shared library),
-        # which run-fpm-phpt.sh reports as "NOT MEASURED: ... failed to
-        # report its version".
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -213,13 +281,21 @@ jobs:
   # off by default); cron may take up to one minute.
   fpmng-phpt:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev locales
       # Issue #105: the locale leg of fpmng-http-direct-request-parity.phpt is
       # only discriminating under a Turkish locale -- toupper('i') returns 'i'
       # there, which is what used to corrupt the HTTP_* CGI keys. The runner
@@ -227,10 +303,10 @@ jobs:
       # is correct, so without this the check would pass on a reverted fix. The
       # test names the locale it actually got on its own output line, so a run
       # where this step stopped working does not look the same as a real one.
-      - name: generate tr_TR.UTF-8 (issue #105)
-        run: |
-          sudo locale-gen tr_TR.UTF-8
-          locale -a | grep -i tr_TR
+      # The locale is generated in .github/docker/ci.Dockerfile; this step is
+      # the assertion that the image still carries it.
+      - name: assert tr_TR.UTF-8 is present (issue #105)
+        run: locale -a | grep -i tr_TR
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -275,25 +351,35 @@ jobs:
   # became a required check. See docs/c-style.md for the enabled/disabled
   # check contract.
   #
-  # Caveat, accepted knowingly: clang-tidy is whatever version
-  # ubuntu-latest's `apt-get install clang-tidy` gives today, so a runner
-  # image bump can introduce a new check and turn this job red without any
-  # change of ours. The fix then is a decision about that check -- silence it
-  # in .clang-tidy with a reason, or fix the code -- not restoring
-  # continue-on-error. Pinning the LLVM version was rejected because it trades
-  # a rare, loud break for a permanently stale checker.
+  # Caveat, accepted knowingly, and narrowed since this job moved into
+  # .github/docker/ci.Dockerfile: clang-tidy is whatever version that image's
+  # base gives (LLVM 18.1.3 on ubuntu 24.04 today), so a new check can still
+  # turn this job red without any change to our C sources. The fix then is a
+  # decision about that check -- silence it in .clang-tidy with a reason, or
+  # fix the code -- not restoring continue-on-error.
+  #
+  # Pinning the LLVM version was originally rejected as trading a rare, loud
+  # break for a permanently stale checker. Pinning the base image is the same
+  # trade only in part: the checker does go stale, but it moves on a reviewed
+  # Dockerfile diff instead of on GitHub's runner-image schedule, so the break
+  # lands in a PR that is already about the toolchain rather than on an
+  # unrelated one.
   lint:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-
-      - name: install clang-tidy and configure deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            clang-tidy \
-            build-essential autoconf automake libtool bison re2c pkg-config \
-            libevent-dev libssl-dev zlib1g-dev
 
       - name: clone pinned php-src
         run: |
@@ -327,8 +413,19 @@ jobs:
   # links statically on musl and serves HTTP when it is the only executable in
   # a scratch image.
   static-musl:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
     steps:
+      # The Alpine build below writes into the workspace as root, and the
+      # runner user cannot unlink that afterwards -- the next job on this
+      # instance would die in actions/checkout with EACCES. Reclaim first,
+      # from a container, since chowning a root-owned file is exactly what
+      # the unprivileged runner cannot do. Same step as in ci-image.yml,
+      # which shares this instance.
+      - name: reclaim the workspace from root-owned build output
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /w
+
       - uses: actions/checkout@v7
       - name: clone pinned php-src
         run: |
@@ -364,13 +461,18 @@ jobs:
   # folded into phpt.
   gateway-privileges:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # No --user here, unlike every other job: this one asserts the gateway
+      # drops root before accepting a connection, so it has to start with it.
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -378,7 +480,15 @@ jobs:
       - name: verify the gateway drops privileges (task 010)
         run: |
           chmod +x build-out/bin/php-fpm-ng
-          sudo ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
+          ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # This is the only job that writes to a self-hosted workspace as root.
+      # Whichever job the runner picks up next checks out as uid 1001 and
+      # cannot delete what root left behind, so actions/checkout fails before
+      # its first step. Hand the workspace back on the way out.
+      - name: hand the workspace back to the runner account
+        if: always()
+        run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
 
   # Task 040: a renewed TLS certificate must take effect in every gateway
   # process without a restart. Needs multiple real gateway processes under
@@ -388,13 +498,21 @@ jobs:
   # privileges), so it stays out of the phpt job rather than needing sudo.
   tls-reload:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -411,13 +529,21 @@ jobs:
   # reload failure.
   read-deadline:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -436,13 +562,21 @@ jobs:
   # failure here means one specific thing.
   gateway-write-failure:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev valgrind
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build
@@ -454,13 +588,21 @@ jobs:
 
   plain-http-listener:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
+      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
+      # 47 skips and still looks green. uid 1001 is gh-runner here and the
+      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: install runtime dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev
       - uses: actions/download-artifact@v8
         with:
           name: fpmng-canonical-build

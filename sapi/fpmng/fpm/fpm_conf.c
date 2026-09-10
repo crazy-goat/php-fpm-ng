@@ -178,6 +178,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
+	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
 	{ "http.max_body",             &fpm_conf_set_bytes,       WPO(http_max_body) },

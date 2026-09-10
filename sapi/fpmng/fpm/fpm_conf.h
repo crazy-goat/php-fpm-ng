@@ -125,6 +125,9 @@ struct fpm_worker_pool_config_s {
 	int http_gateways;			/* number of gateway processes, default 2 */
 	int http_reuseport;			/* each gateway gets its own SO_REUSEPORT socket */
 	int http_static;			/* serving static files without PHP, enabled by default */
+	int http_fault_upstream_write;		/* test-only fault injection: fail the Nth write towards the pool with ECONNRESET;
+						 * 0 = off, the default. See fpm_http_upstream_write_must_fail() for why this is a
+						 * directive and not an environment variable. */
 	int http_idle_timeout;			/* ms, releases an attached connection after this many idle ms; 0 = never */
 	int http_read_timeout;			/* ms, one budget for the whole client-side read (headers + body); 0 = no client read timeout */
 	size_t http_max_body;			/* bytes, hard cap on a request body the gateway buffers whole; see fpm_http.c */

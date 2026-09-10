@@ -482,6 +482,14 @@ jobs:
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
 
+      # This is the only job that writes to a self-hosted workspace as root.
+      # Whichever job the runner picks up next checks out as uid 1001 and
+      # cannot delete what root left behind, so actions/checkout fails before
+      # its first step. Hand the workspace back on the way out.
+      - name: hand the workspace back to the runner account
+        if: always()
+        run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
+
   # Task 040: a renewed TLS certificate must take effect in every gateway
   # process without a restart. Needs multiple real gateway processes under
   # SO_REUSEPORT, a load generator running across the file swap, and a

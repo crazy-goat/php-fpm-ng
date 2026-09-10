@@ -18,9 +18,9 @@ void fpm_pool_script_install_sapi_overrides(void);
  * filled in from FastCGI. pool_name is used only for log messages.
  *
  * Registers STDIN, STDOUT and STDERR for the script before running it, as the
- * CLI SAPI does — see the comment on fpm_pool_script_register_std_constants()
- * for where those three descriptors point in such a child, and why the streams
- * are request-scoped here and process-scoped in CLI.
+ * CLI SAPI does — see fpm_std_streams_register() for where those three
+ * descriptors point in such a child, and why the streams are request-scoped
+ * here and process-scoped in CLI.
  *
  * Returns EG(exit_status) of the script (0 = normal end / exit(0), != 0 =
  * exit($n) or a fatal error) — this is the script's own exit status, not a

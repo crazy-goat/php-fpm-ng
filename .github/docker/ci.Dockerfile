@@ -25,6 +25,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # no step needs root at runtime.
 RUN locale-gen tr_TR.UTF-8
 
+# The runner checks the workspace out as its own unprivileged user, but a
+# container job runs as root, so git refuses every command with "detected
+# dubious ownership" -- and build/check-owned-warnings.sh sends git's stderr
+# to /dev/null, so it surfaces as an empty file list and a bare exit 2 rather
+# than as a permissions error. Scoped to this CI image, where the only
+# repository present is the one the job just checked out.
+RUN git config --system --add safe.directory '*'
+
 # Shared with the host across runs; see the ccache volume in build-matrix.yml.
 ENV CCACHE_DIR=/ccache \
     CCACHE_MAXSIZE=5G

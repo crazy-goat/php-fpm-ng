@@ -64,6 +64,10 @@ struct fpm_http_direct_env_source {
 	const char *server_addr;
 	const char *server_port;
 	const char *server_software;
+	/* issue #55: the pool terminates TLS, so REQUEST_SCHEME is https and
+	 * HTTPS is on for every request it serves. A pool-wide property, not a
+	 * per-connection one: a direct pool has no second plain listener. */
+	bool tls;
 };
 
 /* Non-zero from the callback aborts the walk; fpm_http_direct_build_env()

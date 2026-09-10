@@ -26,7 +26,14 @@ $cases = [
     'fiber' => [$base . "\npool.executor = fiber", 'supports only pool.executor = classic'],
     'async' => [$base . "\npool.executor = async", 'supports only pool.executor = classic'],
     'gateway-listen' => [$base . "\nhttp.listen = 127.0.0.1:1", "'http.listen' is not supported"],
-    'gateway-tls' => [$base . "\nhttp.tls_cert = /missing.pem", "'http.tls_cert' is not supported"],
+    /* http.tls_cert IS supported since issue #55 -- what stays rejected is a
+     * half-configured pair, and the second listener a direct pool has nowhere
+     * to put. A cert alone must not silently start a pool serving plain HTTP
+     * on a port its configuration says is HTTPS. */
+    'tls-cert-without-key' => [$base . "\nhttp.tls_cert = /missing.pem", 'http.tls_cert requires http.tls_key'],
+    'tls-key-without-cert' => [$base . "\nhttp.tls_key = /missing.pem", 'nothing to attach the key to'],
+    'tls-tuning-without-cert' => [$base . "\nhttp.tls_min_version = TLSv1.2", 'require http.tls_cert'],
+    'gateway-plain-listen' => [$base . "\nhttp.plain_listen = 127.0.0.1:1", "'http.plain_listen' is not supported"],
     'gateway-static' => [$base . "\nhttp.static = 0", "'http.static' is not supported"],
     'gateway-acl' => [$base . "\nhttp.allowed_clients = 127.0.0.1", "'http.allowed_clients' is not supported"],
     'fastcgi-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1", "'listen.allowed_clients' is not supported"],
@@ -56,7 +63,10 @@ ondemand: rejected
 fiber: rejected
 async: rejected
 gateway-listen: rejected
-gateway-tls: rejected
+tls-cert-without-key: rejected
+tls-key-without-cert: rejected
+tls-tuning-without-cert: rejected
+gateway-plain-listen: rejected
 gateway-static: rejected
 gateway-acl: rejected
 fastcgi-acl: rejected

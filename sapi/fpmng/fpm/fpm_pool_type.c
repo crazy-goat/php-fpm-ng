@@ -12,6 +12,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_http.h"
 #include "fpm_http_direct.h"
+#include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
@@ -40,6 +41,14 @@ static const char *const fpm_pool_http_classic_rejects[] = {
 static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 {
 	return fpm_http_init_pool(wp);
+}
+
+/* Both http-direct executors share it: the certificate is read and the reload
+ * machinery armed once per pool in the master, before any child forks, and
+ * whichever executor the pool resolves to inherits the result (issue #55). */
+static int fpm_pool_type_http_direct_init(struct fpm_worker_pool_s *wp)
+{
+	return fpm_http_direct_tls_init_main(wp);
 }
 
 #ifdef HAVE_FPMNG_FIBER
@@ -141,6 +150,12 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.listening_socket_nonblocking = 1,
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.validate                     = fpm_http_direct_worker_validate,
+	/* Same master-side TLS setup as the base type above. An executor variant
+	 * replaces the whole type struct rather than overriding fields of it, so
+	 * anything the master must do before the first fork has to be repeated
+	 * here -- leaving it out made a TLS worker pool fork children that found
+	 * no certificate loaded, exit, and be respawned forever (issue #55). */
+	.init_main                    = fpm_pool_type_http_direct_init,
 	.child_main                   = fpm_http_direct_worker_child_main,
 };
 
@@ -239,6 +254,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.executors_type_specific      = 1,
 		.rejects                      = fpm_http_direct_rejects,
 		.validate                     = fpm_http_direct_validate,
+		.init_main                    = fpm_pool_type_http_direct_init,
 		.child_main                   = fpm_http_direct_child_main,
 	},
 	{

@@ -59,6 +59,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_direct_tls.h"
 #include "fpm_std_streams.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -886,6 +887,7 @@ static ZEND_FUNCTION(fpmng_worker_request_env)
 		.server_addr = fw.server_addr,
 		.server_port = fw.server_port,
 		.server_software = "php-fpm-ng/http-direct-worker",
+		.tls = fpm_http_direct_tls_enabled(fw.wp),
 	};
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -1467,6 +1469,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	evhttp_set_allowed_methods(fw.http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD |
 		EVHTTP_REQ_PUT | EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_gencb(fw.http, fpm_worker_accept, NULL);
+	/* See the same call in fpm_http_direct.c: before the listener, so no
+	 * connection is ever accepted in the plain. */
+	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http) < 0) {
+		exit(FPM_EXIT_SOFTWARE);
+	}
 	fw.listener = evhttp_accept_socket_with_handle(fw.http, wp->listening_socket);
 	if (!fw.listener) {
 		exit(FPM_EXIT_SOFTWARE);

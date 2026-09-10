@@ -260,6 +260,20 @@ struct fpm_http_gateway_s {
 	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
 	unsigned nupstreams;
 	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
+	/* http.fault_upstream_write, see fpm_http_upstream_write_must_fail().
+	 * 0 = off, which is the value every real deployment has. The counter is
+	 * per gateway process: fork() copies a zero into each one. */
+	int fault_write_at;
+	int fault_writes;
+	/* fpm_http_pump() is on the stack. Handing a request to an upstream can
+	 * fail synchronously, and the failure path ends in fpm_http_pump() again
+	 * (fpm_http_upstream_fail()); with one queued request per failure that
+	 * recursion is as deep as gw->waiting is long. A nested call therefore
+	 * asks the running one for another round instead of dispatching itself,
+	 * which also keeps "who may free a connection" answerable: only the
+	 * outermost loop walks gw->waiting. Issue #129. */
+	int pumping;
+	int pump_again;
 	struct fpm_http_read_deadline_s *deadlines;	/* armed read deadlines, one per connection still reading its first request */
 };
 
@@ -351,6 +365,16 @@ struct _fpm_http_upstream {
 	int busy;							/* a request is in flight, even if its client is gone */
 	fpm_http_conn *current;				/* NULL when idle or when the client went away */
 	TAILQ_ENTRY(_fpm_http_upstream) link;
+
+	/* `active` is non-zero while a caller still dereferences this upstream
+	 * after a callback may have decided to free it -- today only
+	 * fpm_http_upstream_data()'s record loop, which can reach
+	 * fpm_http_request_done() -> fpm_http_pump() -> a synchronous write
+	 * failure on this very connection. fpm_http_upstream_drop() then detaches
+	 * the upstream, sets `dead` and returns; the caller does the free() on its
+	 * way out. Issue #129. */
+	int active;
+	int dead;
 
 	/* FastCGI record stream from the pool */
 	unsigned char rec_hdr[8];
@@ -969,22 +993,59 @@ static void fpm_http_finish(fpm_http_conn *c, int explained)
 
 /* ---------------------------------------------------------------- upstream connections */
 
-static void fpm_http_upstream_drop(fpm_http_upstream *up)
+/* Unlinks the upstream and releases everything it holds except the struct
+ * itself. Separate from the free() below because the free can be deferred (see
+ * fpm_http_upstream_drop()) while none of this may be: the shared connection
+ * slot is the load-bearing one. fpm_http_pump() runs inside that deferred
+ * window, and a slot still held by a connection that is already gone makes
+ * fpm_http_budget_take() fail, which sends the whole gw->waiting queue a 503
+ * "the pool is full" for a pool that has just freed a slot. */
+static void fpm_http_upstream_detach(fpm_http_upstream *up)
 {
 	struct fpm_http_gateway_s *gw = up->gw;
 
 	TAILQ_REMOVE(&gw->upstreams, up, link);
 	gw->nupstreams--;
+	/* Deregistered here, freed with the struct. When the free is deferred that
+	 * incidentally keeps event_free() out of the callback of the event being
+	 * freed -- but only then: every other drop still frees from the callback,
+	 * which is the open question of issue #132. */
+	if (up->ev_read) {
+		event_del(up->ev_read);
+	}
+	if (up->ev_write) {
+		event_del(up->ev_write);
+	}
+	close(up->fd);
+	up->fd = -1;
+	smart_str_free(&up->pending);
+	fpm_http_budget_give_back(gw);
+}
+
+static void fpm_http_upstream_free(fpm_http_upstream *up)
+{
 	if (up->ev_read) {
 		event_free(up->ev_read);
 	}
 	if (up->ev_write) {
 		event_free(up->ev_write);
 	}
-	close(up->fd);
-	smart_str_free(&up->pending);
 	free(up);
-	fpm_http_budget_give_back(gw);
+}
+
+static void fpm_http_upstream_drop(fpm_http_upstream *up)
+{
+	fpm_http_upstream_detach(up);
+	if (up->active) {
+		/* A caller up the stack still reads this struct, so the free() waits
+		 * for it: it checks `dead` and calls fpm_http_upstream_free() on its
+		 * way out. The upstream is already off gw->upstreams, so
+		 * fpm_http_pump() cannot hand a request to a connection that is
+		 * gone. Issue #129. */
+		up->dead = 1;
+		return;
+	}
+	fpm_http_upstream_free(up);
 }
 
 /* the pool went away mid-request or while idle */
@@ -1060,6 +1121,11 @@ static void fpm_http_upstream_data(fpm_http_upstream *up, const char *buf, size_
 	if (len > 0) {
 		up->reply_seen = 1;
 	}
+	/* The loop below dereferences `up` after every fpm_http_request_done(),
+	 * which can reach fpm_http_upstream_drop() on this same upstream through
+	 * fpm_http_pump(). Announce the caller so the drop is deferred, and check
+	 * for it after each such call. Issue #129. */
+	up->active++;
 	while (len > 0) {
 		size_t take;
 
@@ -1078,6 +1144,9 @@ static void fpm_http_upstream_data(fpm_http_upstream *up, const char *buf, size_
 			up->rec_pad = up->rec_hdr[6];
 			if (up->rec_len == 0 && up->rec_pad == 0 && up->rec_type == FCGI_END_REQUEST) {
 				fpm_http_request_done(up);
+				if (up->dead) {
+					break;
+				}
 			}
 			continue;
 		}
@@ -1097,7 +1166,17 @@ static void fpm_http_upstream_data(fpm_http_upstream *up, const char *buf, size_
 		len -= take;
 		if (up->rec_len == 0 && up->rec_pad == 0 && up->rec_type == FCGI_END_REQUEST) {
 			fpm_http_request_done(up);
+			if (up->dead) {
+				break;
+			}
 		}
+	}
+	up->active--;
+	if (up->dead && !up->active) {
+		/* Only the free() was deferred; the connection slot went back to the
+		 * pool at detach time and whoever dropped this upstream has already
+		 * pumped, so there is nothing to dispatch from here. Issue #129. */
+		fpm_http_upstream_free(up);
 	}
 }
 
@@ -1125,11 +1204,44 @@ static void fpm_http_upstream_readcb(evutil_socket_t fd, short what, void *arg)
 	}
 }
 
+/* Test-only fault injection: makes the Nth write() towards the pool fail with
+ * ECONNRESET, in this gateway process, without touching the socket.
+ *
+ * It exists because the bug of issue #129 lives in a window nothing outside
+ * the process can time: a *synchronous* hard write error on the first write of
+ * a request, which frees the connection and the upstream underneath their
+ * caller. From the outside one can arrange a dead worker, but not that the
+ * error surfaces on write() rather than one loop iteration later on read().
+ *
+ * It is a pool directive (http.fault_upstream_write) and deliberately NOT an
+ * environment variable, unlike the other knobs of this file: a knob that
+ * fabricates request failures must not be reachable by exporting a name into
+ * the master's environment, where an operator would see a 502 and a
+ * "Connection reset by peer" line with nothing in the configuration to explain
+ * them. The two env knobs it would otherwise resemble are no precedent --
+ * FPM_HTTP_MAX_UPSTREAMS is read only for a capacity_override pool and
+ * FPMNG_FLOCK_POLL_ATTEMPTS lives in fiber code, so neither is in a stock
+ * binary's default path. Unset costs one comparison against 0 per write. */
+static int fpm_http_upstream_write_must_fail(struct fpm_http_gateway_s *gw)
+{
+	if (gw->fault_write_at <= 0) {
+		return 0;
+	}
+	return ++gw->fault_writes == gw->fault_write_at;
+}
+
 /* Writes whatever is pending; registers the write event only when the socket is full. */
 static void fpm_http_upstream_flush(fpm_http_upstream *up)
 {
 	while (up->pending.s && up->pending_off < ZSTR_LEN(up->pending.s)) {
-		ssize_t n = write(up->fd, ZSTR_VAL(up->pending.s) + up->pending_off, ZSTR_LEN(up->pending.s) - up->pending_off);
+		ssize_t n;
+
+		if (fpm_http_upstream_write_must_fail(up->gw)) {
+			n = -1;
+			errno = ECONNRESET;
+		} else {
+			n = write(up->fd, ZSTR_VAL(up->pending.s) + up->pending_off, ZSTR_LEN(up->pending.s) - up->pending_off);
+		}
 
 		if (n > 0) {
 			up->pending_off += n;
@@ -1221,12 +1333,14 @@ static fpm_http_upstream *fpm_http_upstream_new(struct fpm_http_gateway_s *gw)
 	return up;
 }
 
-/* Hands waiting requests to free connections, opening new ones up to this process' share. */
-static void fpm_http_pump(struct fpm_http_gateway_s *gw)
+/* One dispatch round. Never called directly -- fpm_http_pump() below owns the
+ * re-entrancy rules. */
+static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 {
 	while (!TAILQ_EMPTY(&gw->waiting)) {
 		fpm_http_upstream *up, *idle = NULL;
 		fpm_http_conn *c;
+		smart_str out;
 
 		TAILQ_FOREACH(up, &gw->upstreams, link) {
 			if (!up->busy) {
@@ -1300,9 +1414,36 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		if (gw->idle_ms > 0 && !idle->connecting) {
 			event_add(idle->ev_read, NULL);		/* drop the idle deadline for the duration of the request */
 		}
-		fpm_http_upstream_write(idle, ZSTR_VAL(c->out.s), ZSTR_LEN(c->out.s));
-		smart_str_free(&c->out);
+		/* The buffer is moved out of `c` BEFORE the write, and neither `c` nor
+		 * `idle` is touched after it. fpm_http_upstream_write() can fail
+		 * synchronously -- fpm_http_upstream_flush() on a hard write error
+		 * calls fpm_http_upstream_fail() -> fpm_http_finish(up->current) ->
+		 * fpm_http_conn_free(c), which frees c->out and c itself, and
+		 * fpm_http_upstream_drop() frees `idle`. Freeing a detached local is
+		 * the only order that survives that; the previous one released
+		 * c->out.s twice and read freed memory to do it. Issue #129. */
+		out = c->out;
+		memset(&c->out, 0, sizeof(c->out));
+		fpm_http_upstream_write(idle, ZSTR_VAL(out.s), ZSTR_LEN(out.s));
+		smart_str_free(&out);
 	}
+}
+
+/* Hands waiting requests to free connections, opening new ones up to this
+ * process' share. Re-entrant: the dispatch can fail synchronously and the
+ * failure path calls back in here, see gw->pumping. */
+static void fpm_http_pump(struct fpm_http_gateway_s *gw)
+{
+	if (gw->pumping) {
+		gw->pump_again = 1;
+		return;
+	}
+	gw->pumping = 1;
+	do {
+		gw->pump_again = 0;
+		fpm_http_pump_once(gw);
+	} while (gw->pump_again);
+	gw->pumping = 0;
 }
 
 /* the client went away: stop writing to it, but let the pool finish so the connection stays usable */
@@ -2442,6 +2583,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		*reuseport_out = env && atoi(env) > 0;
 	}
 	gw->reuseport = *reuseport_out;
+
+	/* No environment fallback, on purpose -- see
+	 * fpm_http_upstream_write_must_fail(). */
+	gw->fault_write_at = wp->config->http_fault_upstream_write > 0
+		? wp->config->http_fault_upstream_write : 0;
 
 	if (fpm_conf_directive_was_set(wp->config, "http.static")) {
 		gw->static_files = wp->config->http_static;

@@ -427,6 +427,31 @@ jobs:
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
 
+  # Issue #129: a synchronous hard write error while handing a request to an
+  # upstream freed the connection and the upstream underneath their caller.
+  # Nothing observable from outside the process changes -- the gateway answers
+  # 502 and keeps serving on a corrupted heap -- so this cell runs the gateway
+  # under valgrind and fails on any invalid access inside fpm_http.c. Own job
+  # for the same reason as read-deadline above: memcheck makes it slow, and a
+  # failure here means one specific thing.
+  gateway-write-failure:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: install runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libevent-dev libssl-dev zlib1g-dev valgrind
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify a synchronous upstream write failure corrupts nothing (issue #129)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-gateway-write-failure.sh "$PWD/build-out/bin/php-fpm-ng"
+
   plain-http-listener:
     needs: build
     runs-on: ubuntu-latest

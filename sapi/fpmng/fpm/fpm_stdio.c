@@ -19,6 +19,7 @@
 #include "fpm_sockets.h"
 #include "fpm_stdio.h"
 #include "fpm_child_log.h"
+#include "fpm_error_log_follow.h"
 #include "zlog.h"
 
 static int fd_stderr_original = -1;
@@ -374,6 +375,11 @@ int fpm_stdio_discard_pipes(struct fpm_child_s *child) /* {{{ */
 void fpm_stdio_child_use_pipes(struct fpm_child_s *child) /* {{{ */
 {
 	fpm_child_log_child_use(child);	/* fpm-ng, see fpm_child_log.h */
+	/* fpm-ng: a worker inherited the master end of every follow channel a
+	 * gateway process was forked with (issue #134). It follows nothing itself
+	 * — fpm_stdio_init_child() takes its error_log away entirely — so passing
+	 * NULL just drops them all. */
+	fpm_error_log_follow_child(NULL);
 
 	if (child->wp->config->catch_workers_output) {
 		dup2(fd_stdout[1], STDOUT_FILENO);
@@ -414,6 +420,14 @@ int fpm_stdio_open_error_log(int reopen) /* {{{ */
 		dup2(fd, fpm_globals.error_log_fd);
 		close(fd);
 		fd = fpm_globals.error_log_fd; /* for FD_CLOSEXEC to work */
+		/* fpm-ng: dup2() reaches this process's descriptor table and no other
+		 * one, and only the master ever runs a reopen (SIGUSR1 is handled in
+		 * its event loop). A process forked with its own copy of the log —
+		 * today an HTTP gateway, issue #130 — has to be handed the new file
+		 * explicitly, or it keeps appending to the rotated one (issue #134).
+		 * A no-op with no such process, which is every stock FastCGI-only
+		 * configuration. */
+		fpm_error_log_follow_publish();
 	} else {
 		fpm_globals.error_log_fd = fd;
 		if (fpm_use_error_log()) {

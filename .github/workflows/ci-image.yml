@@ -34,6 +34,17 @@ jobs:
       contents: read
       packages: write
     steps:
+      # static-musl shares this runner instance and builds through an Alpine
+      # container that writes into the workspace as root. The runner user
+      # cannot delete those files afterwards, so actions/checkout dies with
+      # EACCES before any step of the next job runs. Reclaiming has to happen
+      # from a container too -- chown of a root-owned file is not something
+      # the unprivileged runner can do itself.
+      - name: reclaim the workspace from root-owned build output
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /w
+
       - uses: actions/checkout@v7
 
       # Plain docker build rather than buildx: poligon runs the legacy builder,

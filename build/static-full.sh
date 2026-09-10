@@ -12,7 +12,7 @@ apk add --no-cache build-base autoconf bison re2c pkgconf linux-headers \
   sqlite-dev sqlite-static xz-static brotli-static nghttp2-static nghttp3-static \
   ngtcp2-static zstd-static libidn2-static libpsl-static libunistring-static \
   file \
-  >/tmp/apk.log 2>&1 || { echo "=== MISSING PACKAGES ==="; tail -5 /tmp/apk.log; exit 1; }
+  >/tmp/apk.log 2>&1 || { echo "=== MISSING PACKAGES ==="; tail -40 /tmp/apk.log; exit 1; }
 cd /src
 [ -f configure ] || ./buildconf --force
 cd /build

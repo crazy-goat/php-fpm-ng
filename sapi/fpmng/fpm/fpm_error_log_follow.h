@@ -1,5 +1,5 @@
-/* fpm-ng: let a forked process follow error_log across a SIGUSR1 reopen —
- * issue #134.
+/* fpm-ng: tell a forked process that the master has reopened its logs, and
+ * hand it the new error_log — issues #134 and #137.
  *
  * The problem. `fpm_stdio_open_error_log(1)` re-points the log in place with
  * dup2(fd, fpm_globals.error_log_fd) (fpm_stdio.c), and only the master ever
@@ -46,10 +46,33 @@
  *   one event-loop turn wide and is not worth a synchronous handshake — the
  *   rotated file is still on disk at that point (logrotate copytruncate or
  *   rename), so nothing is lost, it is only in the previous file.
- * - Nothing here is armed when the process has no error_log FILE to follow:
- *   error_log = syslog (fpm_globals.error_log_fd == ZLOG_SYSLOG) and the
- *   ordinary child that has had its descriptor closed both get a NULL channel
- *   and every call below becomes a no-op.
+ * The datagram is also a wakeup, not only a descriptor (issue #137). The
+ * gateway's http.access_log has the same rotation problem and the opposite
+ * ownership: the gateway opens that file itself, after dropping privileges,
+ * so it can reopen it by path — what it lacks is any way to learn that a
+ * rotation happened, because SIGUSR1 is the master's signal and a gateway
+ * sets SIGUSR1 to SIG_DFL (fpm_http.c), i.e. signalling the gateway directly
+ * would kill it rather than rotate anything. So a notification on this
+ * channel means "the master reopened its logs"; what the receiver does with
+ * that beyond adopting the descriptor is the receiver's business
+ * (fpm_http_log_follow_readable()).
+ *
+ * That is why the channel is created even when there is no error_log
+ * descriptor to hand over — error_log = syslog, where
+ * fpm_globals.error_log_fd is ZLOG_SYSLOG. Such a datagram carries no
+ * SCM_RIGHTS and the receiving side treats the absence as normal. The
+ * rejected alternative was to keep the #134 gate and let http.access_log go
+ * unrotated whenever error_log = syslog: a silent gap in the exact
+ * configuration where the access log is the only file an operator has.
+ *
+ * A process that follows nothing and is notified about nothing — the ordinary
+ * worker, whose error_log descriptor fpm_stdio_child_use_pipes() takes away —
+ * still gets a NULL channel, and every call below is then a no-op.
+ *
+ * Naming: the module kept its #134 name after #137 widened it, deliberately.
+ * A rename to something like fpm_log_reopen.c would describe today's contract
+ * better, at the price of detaching every call site, comment and commit that
+ * refers to the error_log follow channel from its history.
  */
 
 #ifndef FPM_ERROR_LOG_FOLLOW_H
@@ -58,9 +81,9 @@
 struct fpm_error_log_follow_s;
 
 /* Master, immediately before fork(): a channel for the process about to be
- * forked. NULL when there is nothing to follow, or when the channel could not
- * be created — that is not a reason to refuse to fork the process, it only
- * means this one will not follow a reopen. Logs why in the failing case. */
+ * forked. NULL when the channel could not be created — that is not a reason
+ * to refuse to fork the process, it only means this one will not hear about a
+ * reopen. Logs why in that case. */
 struct fpm_error_log_follow_s *fpm_error_log_follow_new(void);
 
 /* Master, in the parent after fork(): drop the end that belongs to the child.
@@ -78,13 +101,18 @@ void fpm_error_log_follow_child(struct fpm_error_log_follow_s *ch);
  * something to do. */
 int fpm_error_log_follow_child_fd(void);
 
-/* Child, from its own event loop: adopt every error_log descriptor waiting on
- * the channel. Cannot fail in a way the caller can act on; logs what went
- * wrong. */
-void fpm_error_log_follow_child_adopt(void);
+/* Child, from its own event loop: consume every notification waiting on the
+ * channel, adopting the error_log descriptor each one carries. Returns how
+ * many notifications were consumed — a positive count means the master has
+ * reopened its logs and whatever else this process opened for itself is due a
+ * reopen too (issue #137). Cannot fail in a way the caller can act on; logs
+ * what went wrong. */
+int fpm_error_log_follow_child_adopt(void);
 
-/* Master, right after fpm_globals.error_log_fd was re-pointed at a new file:
- * hand that file to every follower. Cheap and a no-op with no followers. */
+/* Master, on SIGUSR1, right after fpm_globals.error_log_fd was re-pointed at
+ * a new file: hand that file to every follower. Called for error_log = syslog
+ * as well, where there is no descriptor and the datagram is a bare wakeup.
+ * Cheap and a no-op with no followers. */
 void fpm_error_log_follow_publish(void);
 
 /* Master: the process behind `ch` is gone (reaped, or about to be killed

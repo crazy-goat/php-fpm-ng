@@ -405,6 +405,14 @@ int fpm_stdio_open_error_log(int reopen) /* {{{ */
 		if (fpm_use_error_log()) {
 			zlog_set_fd(fpm_globals.error_log_fd, 0);
 		}
+		if (reopen) {
+			/* fpm-ng: syslog has no descriptor to hand over, but this call is
+			 * also the only signal a forked process gets that a rotation
+			 * happened, and an HTTP gateway has an http.access_log of its own
+			 * to reopen (issue #137). Publishing a bare wakeup here is what
+			 * keeps that file rotating when error_log = syslog. */
+			fpm_error_log_follow_publish();
+		}
 		return 0;
 	}
 #endif
@@ -426,7 +434,8 @@ int fpm_stdio_open_error_log(int reopen) /* {{{ */
 		 * today an HTTP gateway, issue #130 — has to be handed the new file
 		 * explicitly, or it keeps appending to the rotated one (issue #134).
 		 * A no-op with no such process, which is every stock FastCGI-only
-		 * configuration. */
+		 * configuration. The same datagram doubles as the gateway's wakeup to
+		 * reopen its own http.access_log (issue #137). */
 		fpm_error_log_follow_publish();
 	} else {
 		fpm_globals.error_log_fd = fd;

@@ -3839,9 +3839,66 @@ reads.
 `sapi/fpmng/tests/fpmng-http-gateway-log-reopen.phpt` asserts both directions:
 the gateway line is in the reopened file and is not in the rotated one.
 
-**Still open (issue #137):** `http.access_log` has the same rotation problem and a different
-fix — each gateway opens it *after* the privilege drop, so that file belongs to
-the dropped-to identity and the gateway can reopen it by path itself. The
-follow channel is the natural carrier for the "reopen now" wakeup, because
-SIGUSR1 reaches only the master and a gateway sets `SIGUSR1` to `SIG_DFL`
-(`fpm_http.c`), i.e. signalling the gateway directly would kill it.
+`http.access_log` had the same symptom and a different fix — section 3ab.
+
+## 3ab. A gateway reopens `http.access_log` on the same notification (issue #137, 2026-09-10)
+
+The symptom of 3aa, on the other log a gateway process owns: each gateway opens
+`http.access_log` itself (`fpm_http_access_log_open()`, from
+`fpm_http_gateway_run()`), nothing reopened it, and after a logrotate every
+gateway kept appending to the renamed file while the file an operator reads
+stayed empty.
+
+**The ownership is the opposite of the error_log's, and that decides the fix.**
+A gateway opens the access log *after* `fpm_http_gateway_drop_privileges()`, so
+the file belongs to the dropped-to identity and this process can `open()` it
+again by path — no descriptor has to be handed over, and 3aa's `SCM_RIGHTS`
+machinery would be pure ceremony here. What the gateway cannot do is *notice*
+the rotation: SIGUSR1 is handled in the master's event loop, and a gateway sets
+`SIGUSR1` to `SIG_DFL` (`fpm_http_gateway_run()`), so signalling the process
+group would kill the gateways instead of rotating anything. Installing a
+libevent signal handler in the gateway instead was rejected: it leaves a window
+between `fork()` and `event_add()` in which the default disposition is still
+in force, i.e. a logrotate that lands while a gateway is respawning kills it.
+
+**So the 3aa channel became the wakeup carrier.** A datagram on it now means
+"the master reopened its logs", and the descriptor it carries is a payload
+rather than the message. `fpm_error_log_follow_child_adopt()` returns how many
+notifications it consumed, and `fpm_http_log_follow_readable()` turns a
+positive count into `fpm_http_access_log_reopen()`. The two concerns meet in
+the gateway, where the wakeup lands; neither `fpm_error_log_follow.c` nor
+`fpm_http_access_log.c` learns about the other.
+
+Two consequences of "the datagram is a wakeup", both in
+`fpm_error_log_follow.c`:
+
+- the channel is created even when there is no `error_log` descriptor to hand
+  over (`error_log = syslog`), and `fpm_stdio_open_error_log(1)` publishes from
+  the syslog branch too. Keeping 3aa's `fpm_globals.error_log_fd <= 0` gate
+  would have left `http.access_log` unrotated in exactly the configuration
+  where it is the only file an operator has;
+- such a datagram carries no `SCM_RIGHTS`, and the receiver treats its absence
+  as normal rather than warning about it.
+
+`fpm_http_access_log_reopen()` opens the new file before letting go of the old
+descriptor, so a failed reopen leaves the process appending to the rotated file
+— lines in the previous file, not a log switched off. It also revives a handle
+that was NULL because the open at startup had failed: a rotation is the one
+moment retrying is worth it.
+
+The module kept its `fpm_error_log_follow` name after this widened it. A rename
+to something like `fpm_log_reopen.c` would describe today's contract better, at
+the price of detaching every call site, comment and commit that speaks of the
+error_log follow channel from its history.
+
+Measured on 192.168.8.50 (php-8.5.11, 2026-09-10), whole fpmng suite:
+**PASS=38, FAIL=0, SKIP=10** of 48. Negative control — the one gateway-side
+call commented out (`fpm_http_access_log_reopen()` in
+`fpm_http_log_follow_readable()`), nothing else changed — is a FAIL of the new
+test, and the failure is the bug itself: the reopened `http.access_log` is
+empty and both the pre- and the post-rotation line are in the rotated copy.
+
+`sapi/fpmng/tests/fpmng-http-gateway-access-log-reopen.phpt` asserts both
+directions: the post-rotation line is in the reopened `http.access_log` and is
+not in the rotated copy, with a pre-rotation line first so that a failure
+cannot be read as "the access log never worked".

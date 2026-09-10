@@ -46,6 +46,17 @@ The same variables reach `fpmng_worker_request_env()` under
 `sapi/fpmng/fpm/fpm_http_direct_request.c`, so what differs between them is
 who owns the event loop, not what a request looks like.
 
+Under `pool.executor = worker` the script also gets `STDIN`, `STDOUT` and
+`STDERR` (issue #73), the same three the script-running pool types get (issue
+#126) and for the same reason: nothing else in an FPM process registers them,
+so `fwrite(STDERR, ...)` — what a bridge reaches for to report a failed
+handler — used to be a fatal `Undefined constant`. They go where the child's
+descriptors already go: the master's pipes under `catch_workers_output = yes`,
+`/dev/null` without it, with stdin the master's `/dev/null` and therefore an
+immediate EOF. `echo` has always taken that same route in a worker. A line
+that must reach the error log regardless of `catch_workers_output`, and with a
+severity, still belongs in `error_log()` (issue #124).
+
 Bodies (including chunked requests) are buffered by libevent and supplied through
 SAPI, supporting forms, raw `php://input`, and PHP's normal POST handling. PHP
 supplies response status, headers (including repeated Set-Cookie), and body through

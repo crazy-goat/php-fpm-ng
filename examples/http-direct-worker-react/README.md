@@ -162,6 +162,15 @@ speaks `mysql_native_password` (`Commands/AuthenticateCommand.php:78-101`),
 which MySQL 8.4 ships disabled — hence `--mysql-native-password=ON` and the
 `ALTER USER` in `initdb/`.
 
+## Logging from the worker
+
+`FpmngReactServer::fail()` reports a rejected handler with
+`fwrite(\STDERR, ...)`. `STDIN`, `STDOUT` and `STDERR` exist in this executor
+since issue #73; see
+[`../http-direct-worker/README.md`](../http-direct-worker/README.md#logging-from-a-worker)
+for where the descriptors point and why `error_log()` is the alternative that
+does not need `catch_workers_output`.
+
 ## Files
 
 | file                        | what it is                                              |

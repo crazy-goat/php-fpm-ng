@@ -68,6 +68,35 @@ apply to the *worker's lifetime*, not to one HTTP request: it would kill a
 healthy worker mid-service. The master refuses any other value rather than
 leaving it silently unenforced.
 
+## Logging from a worker
+
+`STDIN`, `STDOUT` and `STDERR` are registered for the worker script (issue
+#73), as they are for `pool.type = supervisor` and `pool.type = cron` (issue
+#126). They are the CLI SAPI's constants and nothing else in an FPM process
+registers them, so before that they did not exist here and
+`fwrite(STDERR, ...)` was `Uncaught Error: Undefined constant "STDERR"` — which
+mattered most in the one place it appears in `FpmngServer.php`, the
+`catch (\Throwable)` inside `Amp\async()`: the `Error` escaped the fiber into
+Revolt's uncaught-throwable handler and one failing request killed the worker
+instead of logging a line.
+
+Where the three descriptors point is decided by FPM, not by the worker: stdin
+is the `/dev/null` the master installs, so `STDIN` reads EOF at once, and
+stdout and stderr are the pipes to the master under `catch_workers_output =
+yes` and `/dev/null` without it. `echo` takes the same route as `STDERR` — the
+SAPI writes worker output straight to the process's stderr, because one
+`php_request_startup()` covers the whole worker and there is no per-request
+output buffer to route it into.
+
+They are registered once per worker rather than once per request, which is the
+same rule the script-running pools follow rather than an exception to it: a
+worker has exactly one PHP request, spanning its whole life.
+
+For a line that carries a severity and reaches the error log with no
+`catch_workers_output` at all, use `error_log()` — in this SAPI it goes through
+the pool's own log channel with the severity derived from the error level
+(issue #124).
+
 ## Limits you will hit immediately
 
 - **No per-request isolation.** One PHP request context per worker, so

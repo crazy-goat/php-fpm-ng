@@ -38,6 +38,16 @@ cp -r "$PHPSRC/sapi/fpm" "$PHPSRC/sapi/fpmng"
 # Keep the upstream tests in the copied SAPI. The runner supplies the binary path
 # through TEST_PHP_FPM_EXECUTABLE, so the tests do not need to be forked here.
 
+# zlog.h is the one upstream header we EXTEND rather than replace (issue #130:
+# sapi/fpmng/fpm/zlog.h routes zlog() through fpmng_zlog_ex()). Keeping a copy
+# under a second name lets our zlog.h include it, so the struct definitions and
+# the prototypes still come from THIS php-src. Owning the header outright would
+# freeze them: struct zlog_stream gained two bit-fields in 8.5, so a copy taken
+# from one branch and compiled against another silently describes a different
+# object. The copy is made BEFORE our files land on top, because ours overwrites
+# the original name.
+cp "$PHPSRC/sapi/fpm/fpm/zlog.h" "$PHPSRC/sapi/fpmng/fpm/zlog_upstream.h"
+
 # Our files override upstream.
 cp -r "$REPO/sapi/fpmng/." "$PHPSRC/sapi/fpmng/"
 

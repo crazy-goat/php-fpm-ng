@@ -51,9 +51,9 @@ function handle(int $id): void
     if (str_starts_with($uri, '/constants')) {
         fwrite(STDOUT, "worker wrote to stdout\n");
         fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], sprintf(
-            "in=%d out=%d err=%d read=%s eof=%d",
+            "in=%d out=%d err=%d read=%s eof=%d pid=%d",
             (int) defined('STDIN'), (int) defined('STDOUT'), (int) defined('STDERR'),
-            var_export(fread(STDIN, 8), true), (int) feof(STDIN)));
+            var_export(fread(STDIN, 8), true), (int) feof(STDIN), getmypid()));
         return;
     }
     if (str_starts_with($uri, '/throw')) {
@@ -112,7 +112,9 @@ try {
      * handle on the /dev/null fpm_stdio_init_main() installs, so an immediate
      * EOF rather than a fatal or a blocking read. */
     $constants = httpGetRetry("http://127.0.0.1:$port/constants");
-    check($constants === "in=1 out=1 err=1 read='' eof=1", 'constants: ' . var_export($constants, true));
+    check((bool) preg_match("/^in=1 out=1 err=1 read='' eof=1 pid=(\\d+)$/", $constants, $m),
+        'constants: ' . var_export($constants, true));
+    $pid = $m[1];
     echo "constants-exist: ok\n";
 
     $tester->expectLogPattern('/WARNING: .*\[pool work\] child \d+ said into stdout: "worker wrote to stdout"/', true, 10);
@@ -134,7 +136,12 @@ try {
      * fiber into the libevent callback, so this is the assertion that would
      * have gone red: same pid, no respawn, the worker never noticed. */
     $alive = httpGetRetry("http://127.0.0.1:$port/");
-    check(str_starts_with($alive, 'alive pid '), 'the worker did not survive a failing handler: ' . var_export($alive, true));
+    /* The same pid, not merely a well-formed reply: pm.max_children = 1 and
+     * httpGetRetry() retries for 5 s, so a worker that died on the failing
+     * handler and was respawned by the master would also answer here. */
+    check($alive === "alive pid $pid",
+        'the worker did not survive a failing handler: ' . var_export($alive, true)
+        . ' (expected the pid ' . $pid . ' that served /constants)');
     echo "worker-survives: ok\n";
 
     $tester->expectNoLogPattern('/Undefined constant "STD(IN|OUT|ERR)"/', true);

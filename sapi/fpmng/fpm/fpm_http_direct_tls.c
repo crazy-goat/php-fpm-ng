@@ -142,6 +142,7 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 		 * is the point: validation passed a moment ago, so a failure here is
 		 * the file changing underneath us, and starting anyway would mean
 		 * accepting on a port configured as HTTPS with no certificate. */
+		fpm_http_tls_free(st->tls);
 		free(st->pool);
 		free(st);
 		return -1;

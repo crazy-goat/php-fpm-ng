@@ -39,11 +39,46 @@ TEST_FPM_TIMEOUT=120 \
 `TEST_FPM_TIMEOUT` defaults to **120** seconds in this runner because
 `fpmng-cron-schedule.phpt` waits for the next minute boundary.
 
+## Run one test, or a few
+
+Any argument after the results directory is a filter (issue #141):
+
+```sh
+# one test, by name
+"$REPO/build/run-fpmng-phpt.sh" /path/to/php-src /path/to/results \
+    fpmng-cron-schedule.phpt
+
+# a substring, and a glob — this selects both, once each
+"$REPO/build/run-fpmng-phpt.sh" /path/to/php-src /path/to/results \
+    cron-schedule 'fpmng-supervisor-*.phpt'
+```
+
+A filter is matched against the test's file name, as a shell glob and as a
+plain substring, and every filter given must match at least one discovered
+test — a typo stops the run instead of quietly reporting a green suite of
+whatever else matched.
+
+Go through the runner even for a single test rather than invoking
+`run-tests.php` yourself: `FPM\Tester::findExecutable()`
+(`sapi/fpmng/tests/tester.inc`, copied from php-src) never reads
+`TEST_PHP_FPM_EXECUTABLE`. It looks for a binary named `php-fpm` two levels
+above `TEST_PHP_EXECUTABLE`, so a direct invocation SKIPs with
+`php-fpm binary not found` until the symlink harness the runner builds is
+recreated by hand.
+
+Filtering does not relax the ownership check: discovery and the coverage check
+of issue #95 still see the whole owned suite, and an owned test the glob cannot
+reach fails the run whatever the filter says. `metadata.txt` records both
+counts, `discovered_tests` and `selected_tests`, plus the `filter` itself, so a
+partial result directory cannot be mistaken for a full run.
+
 ## Result files
 
 Identical layout to the upstream runner (`discovered.tsv`, `results.tsv`,
-`summary.txt`, `metadata.txt`, logs). Categories are the same strict mapping
-documented in `fpm-phpt.md`.
+`summary.txt`, `metadata.txt`, logs), plus `selected.tsv` — the subset of
+`discovered.tsv` that was actually handed to `run-tests.php`, equal to it when
+no filter is given. `results.tsv` covers exactly the selected tests.
+Categories are the same strict mapping documented in `fpm-phpt.md`.
 
 ## Excluding a test from the runner
 

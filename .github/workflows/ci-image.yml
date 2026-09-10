@@ -1,0 +1,65 @@
+name: ci-image
+
+# Builds the image that build-matrix.yml runs its jobs in.
+#
+# Runs on the self-hosted runner, not ubuntu-latest: GitHub-hosted minutes for
+# this org are gated behind billing, which is what pushed CI onto poligon in
+# the first place. Building the image there too means the whole pipeline stops
+# depending on that.
+#
+# poligon-host is the bare instance (no container:) -- this job needs the
+# host's docker daemon, and it must not run inside the image it is building.
+#
+# Only fires when the Dockerfile changes, so a normal PR does not rebuild it.
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/docker/ci.Dockerfile
+      - .github/workflows/ci-image.yml
+  pull_request:
+    paths:
+      - .github/docker/ci.Dockerfile
+      - .github/workflows/ci-image.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Plain docker build rather than buildx: poligon runs the legacy builder,
+      # and this image is a single apt-get layer that gains nothing from
+      # BuildKit's parallelism.
+      - name: build
+        run: |
+          docker build \
+            -t ghcr.io/crazy-goat/php-fpm-ng-ci:latest \
+            -t ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }} \
+            -f .github/docker/ci.Dockerfile \
+            .github/docker
+
+      # On a pull_request the image is built but not pushed: a PR from a fork
+      # has a read-only GITHUB_TOKEN, and a PR that breaks the Dockerfile
+      # should fail at build rather than after publishing a broken :latest.
+      - name: log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: push
+        if: github.event_name != 'pull_request'
+        run: |
+          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }}
+
+      - name: log out
+        if: always() && github.event_name != 'pull_request'
+        run: docker logout ghcr.io

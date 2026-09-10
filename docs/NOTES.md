@@ -3768,3 +3768,80 @@ Measured on 192.168.8.50 (php-8.5.11, 2026-09-10), one gateway pool whose worker
 Negative control: with the one call in `fpm_http_gateway_run()` commented out
 and nothing else changed, that test fails on the gateway line and the other 45
 still pass.
+
+## 3aa. A gateway process follows `error_log` across a SIGUSR1 reopen (issue #134, 2026-09-10)
+
+`fpm_stdio_open_error_log(1)` re-points the log **in place** with
+`dup2(fd, fpm_globals.error_log_fd)` (`fpm_stdio.c`), and only the master runs
+it — SIGUSR1 is handled in the master's event loop. `dup2()` touches one
+process's descriptor table, so a process forked earlier keeps its own copy
+pointing at the renamed file. Upstream never hit this because an ordinary child
+has no `error_log` fd at all: `fpm_stdio_init_child()` closes it, with the
+comment "child cannot use master error_log because not aware when being
+reopen". Section 3z made an HTTP gateway process keep that descriptor **on
+purpose** so its lines carry the master's decoration — which is exactly what
+turns rotation into missing lines: after a logrotate the master writes into the
+new file while every gateway keeps appending to the old one.
+
+**Why a descriptor is handed over instead of a "reopen now" signal.** The
+obvious fix — SIGUSR1 to every gateway plus `fpm_stdio_open_error_log(1)` there
+— cannot work in the deployment that matters. A gateway drops privileges to the
+pool user before it serves anything (`fpm_http_gateway_drop_privileges()`, task
+010) and a distribution `error_log` is root-owned (Debian:
+`/var/log/php8.3-fpm.log`, `root:adm 0640`). Measured on 192.168.8.50 with a
+file of exactly those permissions:
+
+```
+$ sudo -u nobody cat /tmp/fpmng-134-rootlog
+cat: /tmp/fpmng-134-rootlog: Permission denied
+```
+
+`open()` in the gateway would fail with `EACCES`, and the diagnostic about it
+would go into the old file. So the master owns the file and children never open
+it — the rule `fpm_http_tls_reload.c` already states for the TLS private key.
+
+**The mechanism** (`sapi/fpmng/fpm/fpm_error_log_follow.{c,h}`, which carries
+the full reasoning): one `AF_UNIX SOCK_DGRAM` socketpair per followed process,
+created in the master immediately before `fork()`; after the reopen the master
+sends its already re-pointed `fpm_globals.error_log_fd` over every channel as
+`SCM_RIGHTS`, and the receiver `dup2()`s it onto its own
+`fpm_globals.error_log_fd` — the number `zlog.c`'s static `zlog_fd` holds — from
+its libevent loop. A pair per process, because a datagram reaches exactly one
+reader. Both ends non-blocking: neither the master's nor the gateway's event
+loop may block. The send end is `shutdown(SHUT_RD)` and the receive end
+`shutdown(SHUT_WR)`, so a de-privileged gateway cannot push datagrams (or
+descriptors) back into a buffer the master never drains.
+
+Lines a follower writes between the master's reopen and its own adoption still
+land in the old file. That window is one event-loop turn wide and is not worth
+a synchronous handshake: the rotated file is still on disk, so nothing is lost,
+it is only in the previous file.
+
+`fpm_stdio_child_use_pipes()` calls `fpm_error_log_follow_child(NULL)` so an
+ordinary worker drops every channel it inherited — it follows nothing, its
+`error_log` is taken away entirely a moment later.
+
+Measured on 192.168.8.50 (php-8.5.11, 2026-09-10), whole fpmng suite:
+**PASS=37, FAIL=0, SKIP=10** of 47. Negative control — the one call to
+`fpm_error_log_follow_publish()` in `fpm_stdio.c` commented out, nothing else
+changed — is **PASS=36, FAIL=1**, and the failure is the bug itself: the
+gateway's line is in the rotated file and absent from the one the operator
+reads.
+
+```
+--- reopened ---
+[10-Sep-2026 09:43:20] NOTICE: error log file re-opened
+[10-Sep-2026 09:43:21] WARNING: [pool web] child 2387827 exited on signal 9 (SIGKILL) after 0.343640 seconds from start
+--- rotated ---
+[10-Sep-2026 09:43:21] WARNING: [pool web] http: upstream '127.0.0.1:9008' closed 1.0 ms after the complete request was written to it, without one byte of a reply (EOF): ...
+```
+
+`sapi/fpmng/tests/fpmng-http-gateway-log-reopen.phpt` asserts both directions:
+the gateway line is in the reopened file and is not in the rotated one.
+
+**Still open (issue #137):** `http.access_log` has the same rotation problem and a different
+fix — each gateway opens it *after* the privilege drop, so that file belongs to
+the dropped-to identity and the gateway can reopen it by path itself. The
+follow channel is the natural carrier for the "reopen now" wakeup, because
+SIGUSR1 reaches only the master and a gateway sets `SIGUSR1` to `SIG_DFL`
+(`fpm_http.c`), i.e. signalling the gateway directly would kill it.

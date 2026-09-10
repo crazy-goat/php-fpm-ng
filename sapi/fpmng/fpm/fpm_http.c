@@ -141,6 +141,7 @@ struct {								\
 #include "fpm_http_tls.h"
 #include "fpm_http_tls_reload.h"
 #include "fpm_child_error_log.h"
+#include "fpm_error_log_follow.h"
 #include "zlog.h"
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
@@ -186,6 +187,10 @@ struct fpm_http_gw_slot_s {
 		unsigned count;
 		int gave_up;
 	} respawn;
+	/* This process's error_log follow channel, created before its fork and
+	 * replaced with the process (issue #134, fpm_error_log_follow.h). NULL
+	 * when there is no file error_log to follow. */
+	struct fpm_error_log_follow_s *log_follow;
 };
 
 /* one gateway family per pool */
@@ -2220,6 +2225,35 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	return bev;
 }
 
+/* The gateway end of the error_log follow channel: readable means the master
+ * has reopened the log and sent the new file over. See
+ * fpm_error_log_follow.h — the adoption itself is not gateway-specific, only
+ * the event loop it happens in is. */
+static void fpm_http_log_follow_readable(evutil_socket_t fd, short what, void *arg)
+{
+	(void) fd; (void) what; (void) arg;
+	fpm_error_log_follow_child_adopt();
+}
+
+/* Gateway process, once it has its own event_base. The event is never freed:
+ * this process only ever leaves through exit(), the same lifetime gw->base
+ * itself has. */
+static void fpm_http_log_follow_init(struct fpm_http_gateway_s *gw)
+{
+	int fd = fpm_error_log_follow_child_fd();
+	struct event *ev;
+
+	if (fd < 0) {
+		return;			/* error_log = syslog, or a foreground run with no log file */
+	}
+
+	ev = event_new(gw->base, fd, EV_READ | EV_PERSIST, fpm_http_log_follow_readable, NULL);
+	if (!ev || event_add(ev, NULL) != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch the error_log follow channel; "
+			"this process will keep writing into the pre-rotation error_log", gw->pool);
+	}
+}
+
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -2232,6 +2266,11 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * and this process — unlike an upstream FPM child — writes them into the
 	 * master's error_log itself (issue #130, fpm_child_error_log.h). */
 	fpm_child_error_log_use();
+	/* ... and, because it writes them itself, it is also the process that has
+	 * to be told when the master reopens that file — issue #134. Keeps this
+	 * slot's channel and drops the ones belonging to gateways forked before
+	 * it. */
+	fpm_error_log_follow_child(gw->slots[index]->log_follow);
 
 	/* plain defaults: the master terminates us with a signal, nothing to clean up */
 	memset(&act, 0, sizeof(act));
@@ -2292,6 +2331,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	gw->base = event_base_new();
 	gw->http = evhttp_new(gw->base);
+	fpm_http_log_follow_init(gw);
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls) {
 		/* Own SSL_CTX per gateway process, built from cert/key bytes the
@@ -2444,14 +2484,24 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status);
 
 static void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
+	struct fpm_http_gw_slot_s *slot = gw->slots[index];
+
+	/* Before the fork, so the child inherits its receiving end (issue #134).
+	 * A slot that already had one is a slot whose process is gone. */
+	fpm_error_log_follow_free(slot->log_follow);
+	slot->log_follow = fpm_error_log_follow_new();
+
 	gw->pids[index] = fork();
 	if (gw->pids[index] < 0) {
 		zlog(ZLOG_SYSERROR, "[pool %s] http: fork() failed", gw->pool);
+		fpm_error_log_follow_free(slot->log_follow);
+		slot->log_follow = NULL;
 	} else if (gw->pids[index] == 0) {
 		fpm_http_gateway_run(gw, index);
 		/* not reached */
 	} else {
-		fpm_children_extra_watch(gw->pids[index], fpm_http_gateway_on_exit, gw->slots[index]);
+		fpm_error_log_follow_parent(slot->log_follow);
+		fpm_children_extra_watch(gw->pids[index], fpm_http_gateway_on_exit, slot);
 	}
 }
 /* }}} */
@@ -2466,6 +2516,12 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 	struct fpm_http_gw_slot_s *slot = arg;
 	struct fpm_http_gateway_s *gw = slot->gw;
 	time_t now = time(NULL);
+
+	/* The process behind it is reaped; a slot that is respawned below gets a
+	 * fresh channel in fpm_http_gateway_spawn(), and one that is not must not
+	 * leave the master holding an end nobody reads (issue #134). */
+	fpm_error_log_follow_free(slot->log_follow);
+	slot->log_follow = NULL;
 
 	if (slot->respawn.gave_up) {
 		return; /* already logged once below, do not spam on every further death */
@@ -2541,6 +2597,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		}
 #endif
 		for (i = 0; i < gw->nproc; i++) {
+			fpm_error_log_follow_free(gw->slots[i]->log_follow);
 			free(gw->slots[i]);
 		}
 		free(gw->slots);

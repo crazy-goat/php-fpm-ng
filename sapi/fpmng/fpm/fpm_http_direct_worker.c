@@ -59,6 +59,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_std_streams.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
 #include "fpm_stdio.h"
@@ -1516,6 +1517,18 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 			wp->config->name);
 		exit(FPM_EXIT_SOFTWARE);
 	}
+	/* Issue #73. Both example bridges report a failed handler with
+	 * fwrite(STDERR, ...) from inside their catch, and until this call
+	 * existed that threw "Undefined constant" from the one path whose job is
+	 * to swallow the failure: in the amphp bridge the Error escaped the fiber
+	 * into Revolt's uncaught-throwable handler, so one failing request killed
+	 * the worker instead of logging a line. Registered once and not per
+	 * request because one php_request_startup() covers the whole worker
+	 * (fpm_worker_ub_write), which is also what makes the three dup()s a
+	 * one-off rather than the per-run leak fpm_std_streams_register()
+	 * describes. Same route as echo: fw's ub_write already writes to
+	 * STDERR_FILENO, and the master collects it under catch_workers_output. */
+	fpm_std_streams_register(wp->config->name);
 	REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_READ", FPM_WORKER_EV_READ, CONST_PERSISTENT);
 	REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_WRITE", FPM_WORKER_EV_WRITE, CONST_PERSISTENT);
 	REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_TIMER", FPM_WORKER_EV_TIMER, CONST_PERSISTENT);

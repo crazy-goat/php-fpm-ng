@@ -94,10 +94,7 @@ function handle(int $id, bool &$quit): void
          * true inside this handler while /sleep is still pending. That is
          * exactly the state an in-flight counter cannot describe. */
         fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], 'probed');
-        /* A file rather than stderr: STDERR is not defined in this executor
-         * (the CLI SAPI is what defines it), so fwrite(STDERR, ...) throws and
-         * the handler's catch would swallow the evidence. */
-        file_put_contents(__DIR__ . '/probe.txt', sprintf("stopping=%s may_exit=%s\n",
+        fwrite(STDERR, sprintf("probe: stopping=%s may_exit=%s\n",
             var_export(fpmng_worker_stopping(), true), var_export(fpmng_worker_may_exit(), true)));
         return;
     }
@@ -196,12 +193,14 @@ try {
     check($slowBody === 'slept', '/sleep lost its response after pm.max_requests tripped: ' . var_export($slowBody, true));
     echo "both-answered-while-recycling: ok\n";
 
-    /* The state an in-flight counter cannot describe, recorded from inside the
+    /* The state an in-flight counter cannot describe, reported from inside the
      * handler that created it: the stop is requested and a request accepted
-     * earlier is still unanswered. */
-    $probe = @file_get_contents("$root/probe.txt");
-    check(trim((string) $probe) === 'stopping=true may_exit=false',
-        'may_exit while another request is pending: ' . var_export($probe, true));
+     * earlier is still unanswered. Written with the STDERR constant of issue
+     * #73 — this route used to need a file, because the constant did not exist
+     * in this executor and the handler's catch would have swallowed the
+     * resulting Error. */
+    $tester->expectLogPattern('/WARNING: .*\[pool probe\] child \d+ said into stderr: '
+        . '"probe: stopping=true may_exit=false"/', true, 10);
     echo "may-exit-false-while-pending: ok\n";
 
     /* Nothing was left unanswered, so the safety net had nothing to do. */
@@ -215,7 +214,6 @@ try {
     $tester->terminate();
     $tester->close();
     @unlink("$root/worker.php");
-    @unlink("$root/probe.txt");
     @rmdir($root);
 }
 echo "Done\n";

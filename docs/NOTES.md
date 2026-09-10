@@ -1192,6 +1192,35 @@ constants are re-registered per run. Measured on the test box over 100
 consecutive runs of one supervisor process: 16–17 open descriptors, no trend
 (`sapi/fpmng/tests/fpmng-supervisor-std-streams.phpt` asserts the band).
 
+**Amended 2026-09-10 (issue #73).** The same three constants now exist for
+`pool.executor = worker`, and the registration itself moved to
+`sapi/fpmng/fpm/fpm_std_streams.c` so there is one definition of "what CLI
+gives a script" rather than a copy per process type. A worker is the second
+place in this SAPI where a PHP script owns the process instead of a request,
+and it had the same hole with a sharper edge: both example bridges report a
+failed handler with `fwrite(STDERR, ...)` from *inside* their `catch`, so the
+`Undefined constant` fired on the one path whose job is to swallow the
+failure. In `examples/http-direct-worker/FpmngServer.php` that `Error` escaped
+the `Amp\async()` fiber into Revolt's uncaught-throwable handler, which
+rethrows out of `EventLoop::run()`: one failing request handler killed the
+worker instead of logging a line.
+
+The route was already there and only the constant was missing —
+`fpm_worker_ub_write()` has always written worker output to `STDERR_FILENO`,
+which is why `echo` in a worker already reached the log. A dedicated
+`fpmng_worker_log()` builtin going straight to `zlog()` was the alternative
+and was rejected: it would have needed edits to both bridges and left every
+third-party bridge written against the documented `STDERR` idiom still broken,
+while the two things it would have added — a severity, and independence from
+`catch_workers_output` — are what `error_log()` already gives in this SAPI
+(issue #124). The decision is recorded in full on issue #73.
+
+Registered once per worker, not per request, and that is the *same* rule as
+above rather than an exception to it: the fd-leak argument that forces
+request-scoped streams exists because a script-running pool starts a request
+per iteration, and a worker has exactly one request spanning its whole life,
+so it dups three descriptors once.
+
 ### Monkey-patching `sapi_module` for the process lifetime — safe because the process does not return
 
 `child_main` overwrites several global `sapi_module` fields (`ub_write`,

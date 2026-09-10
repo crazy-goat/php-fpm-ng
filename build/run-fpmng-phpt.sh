@@ -4,7 +4,14 @@
 # Usage:
 #   TEST_PHP_EXECUTABLE=/path/to/php \
 #   TEST_PHP_FPM_EXECUTABLE=/path/to/php-fpm-ng \
-#   build/run-fpmng-phpt.sh /path/to/prepared-php-src /path/to/results
+#   build/run-fpmng-phpt.sh /path/to/prepared-php-src /path/to/results [filter...]
+#
+# A filter selects a subset of the discovered tests for the run, so a single
+# test can be debugged through this runner instead of by hand. It must be this
+# runner: FPM\Tester::findExecutable() ignores TEST_PHP_FPM_EXECUTABLE and
+# looks for a binary named php-fpm two levels above TEST_PHP_EXECUTABLE, so a
+# run-tests.php invoked directly on one .phpt SKIPs with "php-fpm binary not
+# found" until something builds the symlink harness below (issue #141).
 #
 # The prepared tree must contain sapi/fpmng/tests/ with tester.inc from
 # build/prepare.sh. Only files matching fpmng-*.phpt are executed — upstream's
@@ -23,7 +30,12 @@ usage() {
     cat >&2 <<'EOF'
 Usage: TEST_PHP_EXECUTABLE=/path/to/php \
        TEST_PHP_FPM_EXECUTABLE=/path/to/php-fpm-ng \
-       build/run-fpmng-phpt.sh /path/to/prepared-php-src /path/to/results
+       build/run-fpmng-phpt.sh /path/to/prepared-php-src /path/to/results [filter...]
+
+Each optional filter selects tests to run out of the discovered set: a shell
+glob or a plain substring, matched against the test file name. Every filter
+must match at least one discovered test. With no filter the whole owned suite
+runs.
 
 Both executable paths are required. The prepared source tree must contain
 sapi/fpmng/tests/tester.inc from build/prepare.sh. TEST_FPM_EXTENSION_DIR and
@@ -38,16 +50,20 @@ fail() {
     exit 1
 }
 
-[ "$#" -eq 2 ] || usage
+[ "$#" -ge 2 ] || usage
 
 PHPSRC_INPUT=$1
 RESULTS_INPUT=$2
+shift 2
 TEST_DIR=sapi/fpmng/tests
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 OWNED_DIR=$REPO/$TEST_DIR
 EXCLUDE_LIST=$OWNED_DIR/not-run-in-ci.list
 OWNED_COUNT=unknown
 EXCLUDED_COUNT=0
+SELECTED_COUNT=0
+FILTERED=no
+FILTER_DESC=none
 
 CLI_BIN_INPUT=${TEST_PHP_EXECUTABLE-}
 FPM_BIN_INPUT=${TEST_PHP_FPM_EXECUTABLE-}
@@ -105,6 +121,7 @@ mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INP
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
 
 DISCOVERED=$RESULTS_DIR/discovered.tsv
+SELECTED=$RESULTS_DIR/selected.tsv
 STATUS_RAW=$RESULTS_DIR/statuses.raw.tsv
 RESULTS=$RESULTS_DIR/results.tsv
 FAILED=$RESULTS_DIR/failed.raw.txt
@@ -113,7 +130,7 @@ OUTPUT_LOG=$RESULTS_DIR/test-output.log
 METADATA=$RESULTS_DIR/metadata.txt
 SUMMARY=$RESULTS_DIR/summary.txt
 
-rm -f "$DISCOVERED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY"
+rm -f "$DISCOVERED" "$SELECTED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY"
 
 if ! (
     cd "$PHPSRC"
@@ -193,6 +210,46 @@ if [ -d "$OWNED_DIR" ]; then
     [ "$TEST_COUNT" -eq "$EXPECTED_COUNT" ] || fail "discovered $TEST_COUNT tests in $PHPSRC/$TEST_DIR but this repo owns $EXPECTED_COUNT runnable ones; re-run build/prepare.sh against a clean tree"
 fi
 
+# The filter narrows what runs, never what is owned: it is applied after the
+# coverage check above, so `run-fpmng-phpt.sh <src> <results> cron` still fails
+# a repo whose glob misses an owned test (issue #95). The other half of that
+# separation is that a filter cannot select an excluded test -- by this point
+# not-run-in-ci.list has already been subtracted from $DISCOVERED.
+if [ "$#" -gt 0 ]; then
+    FILTERED=yes
+    FILTER_DESC=$*
+    : > "$SELECTED"
+    for pattern in "$@"; do
+        [ -n "$pattern" ] || fail 'an empty filter selects nothing; drop it or pass "*"'
+        matched=0
+        while IFS= read -r discovered_test; do
+            discovered_name=${discovered_test##*/}
+            # Unquoted on the left so a glob stays a glob; quoted on the right
+            # so a plain word is a substring. "cron", "fpmng-cron-*.phpt" and
+            # the full file name therefore all work, and none of them needs
+            # quoting against the caller's own shell.
+            # shellcheck disable=SC2254
+            case "$discovered_name" in
+                $pattern|*"$pattern"*)
+                    matched=1
+                    printf '%s\n' "$discovered_test" >> "$SELECTED"
+                    ;;
+            esac
+        done < "$DISCOVERED"
+        # A filter that matches nothing is a typo, and running the remaining
+        # patterns instead would report a green suite for tests nobody asked
+        # for.
+        [ "$matched" -eq 1 ] || fail "filter matched none of the $TEST_COUNT discovered tests: $pattern (names are in $DISCOVERED)"
+    done
+    # Two filters may reach the same test; run-tests.php would run it twice and
+    # the second status would overwrite the first in $STATUS_RAW.
+    LC_ALL=C sort -u -o "$SELECTED" "$SELECTED"
+else
+    cp "$DISCOVERED" "$SELECTED"
+fi
+SELECTED_COUNT=$(awk 'END {print NR + 0}' "$SELECTED")
+[ "$SELECTED_COUNT" -gt 0 ] || fail 'no test was selected to run'
+
 if [ -e "$PHPSRC/.git" ] && command -v git >/dev/null 2>&1; then
     SOURCE_COMMIT=$(git -C "$PHPSRC" rev-parse HEAD 2>/dev/null || printf '%s' unknown)
 fi
@@ -206,6 +263,8 @@ write_metadata() {
         printf '%s\n' "discovered_tests=$TEST_COUNT"
         printf '%s\n' "owned_tests=$OWNED_COUNT"
         printf '%s\n' "excluded_tests=$EXCLUDED_COUNT"
+        printf '%s\n' "filter=$FILTER_DESC"
+        printf '%s\n' "selected_tests=$SELECTED_COUNT"
         printf '%s\n' "requested_php_cli=${CLI_BIN_INPUT:-not-supplied}"
         printf '%s\n' "php_cli=$CLI_BIN"
         printf '%s\n' "php_cli_sha256=$CLI_SHA"
@@ -253,7 +312,7 @@ write_not_measured() {
         printf 'test\tcategory\traw_status\n'
         while IFS= read -r test; do
             printf '%s\tNOT MEASURED\tNOT_MEASURED\n' "$test"
-        done < "$DISCOVERED"
+        done < "$SELECTED"
     } > "$RESULTS"
     {
         printf '%s\n' 'measurement_status=NOT MEASURED'
@@ -323,11 +382,19 @@ case "$TIMEOUT" in
     0) preflight_fail 'TEST_FPM_TIMEOUT must be greater than zero' ;;
 esac
 
-printf '%s\n' "Running $TEST_COUNT fpmng-owned tests" >&2
+# On $FILTERED, not on "$FILTER_DESC" = none: "none" is a legal filter word, and
+# a filtered run must never describe itself as a full one. (It would die at the
+# no-match check above today, since no test name contains "none" -- but that is
+# a property of the current test names, not something to depend on.)
+if [ "$FILTERED" = no ]; then
+    printf '%s\n' "Running $SELECTED_COUNT fpmng-owned tests" >&2
+else
+    printf '%s\n' "Running $SELECTED_COUNT of $TEST_COUNT fpmng-owned tests (filter: $FILTER_DESC)" >&2
+fi
 printf '%s\n' "Binary: $FPM_BIN" >&2
 
 # shellcheck disable=SC2046
-TEST_FILES=$(tr '\n' ' ' < "$DISCOVERED")
+TEST_FILES=$(tr '\n' ' ' < "$SELECTED")
 
 set +e
 (
@@ -383,13 +450,13 @@ set -e
             }
             printf "%s\t%s\t%s\n", $0, category, raw
         }
-    ' "$STATUS_RAW" "$DISCOVERED"
+    ' "$STATUS_RAW" "$SELECTED"
 } > "$RESULTS"
 
 NOT_MEASURED_COUNT=$(awk -F '\t' 'NR > 1 && $2 == "NOT MEASURED" {count++} END {print count + 0}' "$RESULTS")
 if [ "$NOT_MEASURED_COUNT" -gt 0 ]; then
     MEASUREMENT_STATUS=PARTIAL
-    BLOCKER='run-tests.php did not emit a status for every discovered test; see run.log'
+    BLOCKER='run-tests.php did not emit a status for every selected test; see run.log'
 else
     MEASUREMENT_STATUS=MEASURED
     BLOCKER=none

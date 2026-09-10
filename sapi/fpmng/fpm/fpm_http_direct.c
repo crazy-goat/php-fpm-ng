@@ -24,6 +24,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
+#include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -285,6 +286,7 @@ static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_di
 		.server_addr = w->server_addr,
 		.server_port = w->server_port,
 		.server_software = "php-fpm-ng/http-direct",
+		.tls = fpm_http_direct_tls_enabled(w->wp),
 	};
 
 	if (!fpm_http_direct_request_acceptable(r->http)) {
@@ -451,6 +453,10 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	evhttp_set_allowed_methods(w.http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD |
 		EVHTTP_REQ_PUT | EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_gencb(w.http, fpm_direct_handle, &w);
+	/* Before the listener is attached, so the first connection this child
+	 * accepts is already on this process's own SSL_CTX. A no-op on a pool
+	 * without http.tls_cert. */
+	if (fpm_http_direct_tls_child_attach(wp, w.base, w.http) < 0) exit(FPM_EXIT_SOFTWARE);
 	w.listener = evhttp_accept_socket_with_handle(w.http, wp->listening_socket);
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
 	action.sa_handler = fpm_direct_stop;

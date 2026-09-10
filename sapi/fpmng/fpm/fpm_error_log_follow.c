@@ -84,16 +84,14 @@ struct fpm_error_log_follow_s *fpm_error_log_follow_new(void) /* {{{ */
 	struct fpm_error_log_follow_s *ch;
 	int fds[2];
 
-	/* Nothing to follow: error_log = syslog (ZLOG_SYSLOG, negative) or a
-	 * process without an error_log FILE. Same gate as
-	 * fpm_child_error_log_use(), and for the same reason — see its comment. */
-	if (fpm_globals.error_log_fd <= 0) {
-		return NULL;
-	}
-
+	/* No gate on fpm_globals.error_log_fd here: with error_log = syslog there
+	 * is no descriptor to hand over, but the notification itself is still the
+	 * only way a gateway learns that it has to reopen its own http.access_log
+	 * (issue #137). fpm_error_log_follow_publish() sends a bare wakeup in that
+	 * case. */
 	if (0 > socketpair(AF_UNIX, SOCK_DGRAM, 0, fds)) {
 		zlog(ZLOG_SYSERROR, "failed to create the error_log follow channel; "
-			"this process will keep writing into the pre-rotation error_log");
+			"this process will keep writing into the pre-rotation log files");
 		return NULL;
 	}
 
@@ -182,12 +180,12 @@ int fpm_error_log_follow_child_fd(void) /* {{{ */
 }
 /* }}} */
 
-void fpm_error_log_follow_child_adopt(void) /* {{{ */
+int fpm_error_log_follow_child_adopt(void) /* {{{ */
 {
 	int adopted = 0;
 
 	if (fpm_error_log_follow_fd < 0) {
-		return;
+		return 0;
 	}
 
 	while (adopted < FPM_ERROR_LOG_FOLLOW_BATCH) {
@@ -223,10 +221,10 @@ void fpm_error_log_follow_child_adopt(void) /* {{{ */
 			if (!fpm_error_log_follow_would_block(errno)) {
 				zlog(ZLOG_SYSERROR, "error_log follow channel: recvmsg() failed");
 			}
-			return;			/* nothing (more) waiting */
+			return adopted;			/* nothing (more) waiting */
 		}
 		if (got == 0) {
-			return;			/* the master is gone; this process is next */
+			return adopted;			/* the master is gone; this process is next */
 		}
 		adopted++;
 
@@ -234,9 +232,14 @@ void fpm_error_log_follow_child_adopt(void) /* {{{ */
 		if (!cmsg || cmsg->cmsg_len != CMSG_LEN(sizeof(int)) ||
 				cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) {
 			/* MSG_CTRUNC lands here too: without a descriptor there is
-			 * nothing to adopt and nothing to leak. */
-			zlog(ZLOG_WARNING, "error_log follow channel: a notification carried no descriptor, "
-				"still writing into the pre-rotation error_log");
+			 * nothing to adopt and nothing to leak. Expected, not an
+			 * anomaly, when this process has no error_log FILE to follow: the
+			 * master sends the wakeup regardless, because the receiver has
+			 * its own logs to reopen (issue #137). */
+			if (fpm_globals.error_log_fd > 0) {
+				zlog(ZLOG_WARNING, "error_log follow channel: a notification carried no descriptor, "
+					"still writing into the pre-rotation error_log");
+			}
 			continue;
 		}
 
@@ -270,16 +273,15 @@ void fpm_error_log_follow_child_adopt(void) /* {{{ */
 			zlog(ZLOG_WARNING, "failed to change attribute of error_log");
 		}
 	}
+
+	return adopted;
 }
 /* }}} */
 
 void fpm_error_log_follow_publish(void) /* {{{ */
 {
 	struct fpm_error_log_follow_s *ch;
-
-	if (fpm_globals.error_log_fd <= 0) {
-		return;
-	}
+	int fd = fpm_globals.error_log_fd;
 
 	for (ch = followers; ch; ch = ch->next) {
 		union {
@@ -289,7 +291,6 @@ void fpm_error_log_follow_publish(void) /* {{{ */
 		struct msghdr msg;
 		struct iovec iov;
 		struct cmsghdr *cmsg;
-		int fd = fpm_globals.error_log_fd;
 		ssize_t sent;
 
 		memset(&msg, 0, sizeof(msg));
@@ -298,14 +299,20 @@ void fpm_error_log_follow_publish(void) /* {{{ */
 		iov.iov_len = sizeof(fpm_error_log_follow_byte);
 		msg.msg_iov = &iov;
 		msg.msg_iovlen = 1;
-		msg.msg_control = control.buf;
-		msg.msg_controllen = CMSG_SPACE(sizeof(int));
 
-		cmsg = CMSG_FIRSTHDR(&msg);
-		cmsg->cmsg_level = SOL_SOCKET;
-		cmsg->cmsg_type = SCM_RIGHTS;
-		cmsg->cmsg_len = CMSG_LEN(sizeof(int));
-		memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+		/* error_log = syslog (ZLOG_SYSLOG, negative) leaves the ancillary
+		 * data out entirely: there is no file to pass, and the datagram is
+		 * then a bare "the master reopened its logs" wakeup — issue #137. */
+		if (fd > 0) {
+			msg.msg_control = control.buf;
+			msg.msg_controllen = CMSG_SPACE(sizeof(int));
+
+			cmsg = CMSG_FIRSTHDR(&msg);
+			cmsg->cmsg_level = SOL_SOCKET;
+			cmsg->cmsg_type = SCM_RIGHTS;
+			cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+			memcpy(CMSG_DATA(cmsg), &fd, sizeof(fd));
+		}
 
 		do {
 			sent = sendmsg(ch->fd_master, &msg, 0);
@@ -313,10 +320,11 @@ void fpm_error_log_follow_publish(void) /* {{{ */
 
 		if (sent < 0) {
 			/* Reported, not retried: the follower keeps writing into the
-			 * previous file, which is a missing-lines problem, not a
-			 * correctness one, and the master must not spin here. */
-			zlog(ZLOG_SYSERROR, "failed to hand the reopened error_log to a forked process; "
-				"it will keep writing into the previous file");
+			 * previous file — its error_log and its own http.access_log
+			 * alike — which is a missing-lines problem, not a correctness
+			 * one, and the master must not spin here. */
+			zlog(ZLOG_SYSERROR, "failed to notify a forked process that the logs were reopened; "
+				"it will keep writing into the previous files");
 		}
 	}
 }

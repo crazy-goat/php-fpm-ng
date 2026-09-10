@@ -17,6 +17,21 @@ struct fpm_http_access_log_s {
 	int fd;
 };
 
+/* The flags live in one place so that open and reopen cannot drift apart:
+ * O_APPEND is the no-interleaving guarantee the header describes, and losing
+ * it on the reopen path would break that guarantee after the first logrotate.
+ * `verb` only shapes the diagnostic. */
+static int fpm_http_access_log_open_fd(const char *pool, const char *path, const char *verb) /* {{{ */
+{
+	int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+
+	if (fd < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.access_log: cannot %s '%s': %s", pool, verb, path, strerror(errno));
+	}
+	return fd;
+}
+/* }}} */
+
 struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const char *path) /* {{{ */
 {
 	struct fpm_http_access_log_s *log;
@@ -26,9 +41,8 @@ struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const c
 		return NULL;
 	}
 
-	fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+	fd = fpm_http_access_log_open_fd(pool, path, "open");
 	if (fd < 0) {
-		zlog(ZLOG_ERROR, "[pool %s] http.access_log: cannot open '%s': %s", pool, path, strerror(errno));
 		return NULL;
 	}
 
@@ -49,6 +63,36 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log) /* {{{ */
 	}
 	close(log->fd);
 	free(log);
+}
+/* }}} */
+
+struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_log_s *log, /* {{{ */
+		const char *pool, const char *path)
+{
+	int fd;
+
+	if (!path || !*path) {
+		return log;			/* logging disabled: `log` is NULL and stays NULL */
+	}
+	if (!log) {
+		return fpm_http_access_log_open(pool, path);
+	}
+
+	/* Open the new file BEFORE giving up the old one: on failure this process
+	 * keeps appending to the rotated file, which is a lines-in-the-previous-file
+	 * problem, not a lost log. */
+	fd = fpm_http_access_log_open_fd(pool, path, "reopen");
+	if (fd < 0) {
+		return log;
+	}
+
+	/* Replacing the number is enough here — nothing outside this struct holds
+	 * it. That is what makes this simpler than the error_log, whose number
+	 * zlog.c captured into a static and which therefore has to be dup2()ed
+	 * back onto that same number (fpm_error_log_follow.c). */
+	close(log->fd);
+	log->fd = fd;
+	return log;
 }
 /* }}} */
 

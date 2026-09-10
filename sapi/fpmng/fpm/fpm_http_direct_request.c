@@ -31,6 +31,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_direct_tls.h"
 #include "zlog.h"
 
 /* Resolves the front controller (the worker script, under the worker
@@ -78,21 +79,36 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	}
 	/* Gateway options must not silently appear to protect a direct worker.
 	 * Use an allow-list here so future http.* directives are rejected too. */
+#define FPM_HTTP_DIRECT_DIRECTIVE(p, len, name) \
+	((len) == sizeof(name) - 1 && !strncmp((p), (name), (len)))
 	while (p && (p = strstr(p, ";http."))) {
 		const char *end = strchr(++p, ';');
 		size_t len = end ? (size_t) (end - p) : strlen(p);
-		if (!((len == sizeof("http.front_controller") - 1 && !strncmp(p, "http.front_controller", len)) ||
-			(len == sizeof("http.read_timeout") - 1 && !strncmp(p, "http.read_timeout", len)) ||
-			(len == sizeof("http.max_body") - 1 && !strncmp(p, "http.max_body", len)))) {
+		if (!(FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.front_controller") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.read_timeout") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.max_body") ||
+			/* issue #55. http.plain_listen is deliberately NOT here: a direct
+			 * pool accepts on one socket, so there is nowhere to put a second
+			 * listener, and accepting the directive would read as if there
+			 * were. */
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_cert") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_key") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_min_version") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_sni_cert") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_reload_check"))) {
 			zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
 				c->name, (int) len, p, labels->type_label);
 			return -1;
 		}
 	}
+#undef FPM_HTTP_DIRECT_DIRECTIVE
 	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires http.read_timeout > 0 and http.max_body between 1 and 32M",
 			c->name, labels->subject);
 		return -1;
+	}
+	if (fpm_http_direct_tls_validate(wp) < 0) {
+		return -1; /* logged there, with the pool name and what is wrong */
 	}
 	if (fpm_http_direct_resolve_script(c->chdir, c->http_front_controller, root, script) < 0) {
 		zlog(ZLOG_ALERT, "[pool %s] %s: %s must be a regular file inside chdir",
@@ -183,6 +199,15 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("SERVER_NAME", evhttp_request_get_host(http));
 	ENV("REMOTE_ADDR", peer);
 	ENV("REMOTE_PORT", remote_port);
+	/* Not "off" when there is no TLS: CGI has no negative form for HTTPS and
+	 * PHP treats any non-empty value as on, so the variable is simply absent
+	 * on a plain pool -- which is what $_SERVER['HTTPS'] tests expect and what
+	 * the gateway already does (fpm_http.c). REQUEST_SCHEME is always set:
+	 * unlike HTTPS it has a meaningful "http". */
+	ENV("REQUEST_SCHEME", source->tls ? "https" : "http");
+	if (source->tls) {
+		ENV("HTTPS", "on");
+	}
 	ENV("CONTENT_LENGTH", length);
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {

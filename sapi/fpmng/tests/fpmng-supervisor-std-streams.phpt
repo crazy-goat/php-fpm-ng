@@ -33,7 +33,7 @@ PHP);
 /* One appended line per run with this process's open descriptor count. The
  * constants are re-registered for every iteration and outside CLI php://std*
  * dup()s the descriptor, so a stream that survives its request would show up
- * here as three more fds per run — see fpm_pool_script_register_std_constants().
+ * here as three more fds per run — see fpm_std_streams_register().
  * The usleep keeps this pool at ~10 runs/s: with supervisor.restart = always
  * and a script that exits at once the supervisor starts the next iteration
  * with no delay at all (12086 runs/s measured, issue #122). */

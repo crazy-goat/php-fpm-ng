@@ -131,6 +131,7 @@ struct {								\
 #include "fpm_process_ctl.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_forwarded.h"
+#include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 /* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
@@ -1744,6 +1745,91 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	return 1;
 }
 
+static const char fpm_http_acme_prefix[] = "/.well-known/acme-challenge/";
+
+/* HTTP-01, answered from the shared challenge state (fpm_acme_challenge.h).
+ * Returns 1 when this request has been answered, 0 when `path` is not in the
+ * challenge namespace at all.
+ *
+ * The whole namespace is answered here: an unknown token is a 404 from this
+ * function and never reaches a worker or the disk. That is what makes
+ * criterion 3 of issue #48 hold -- a file physically present under the
+ * document root at this path cannot shadow the answer or leak into it,
+ * because fpm_http_serve_static() is never consulted for these paths -- and
+ * it is why this does not depend on http.static (criterion 4): a key
+ * authorization is not a file.
+ *
+ * The token is whatever follows the prefix, taken as one flat opaque
+ * segment. A '/' in it means the CA asked for something that is not a token,
+ * so it is a 404 rather than a lookup; nothing here is ever turned into a
+ * path, which is criterion 5 with no filesystem involved to get wrong. */
+static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *path, size_t path_len, const char *remote_addr)
+{
+	static const size_t prefix_len = sizeof(fpm_http_acme_prefix) - 1;
+	char keyauth[FPM_ACME_CHALLENGE_KEYAUTH_MAX];
+	struct evkeyvalq *out;
+	const char *token;
+	ssize_t len;
+	int cmd;
+
+	if (path_len < prefix_len || memcmp(path, fpm_http_acme_prefix, prefix_len)) {
+		return 0;
+	}
+	token = path + prefix_len;
+
+	cmd = evhttp_request_get_command(req);
+	if (cmd != EVHTTP_REQ_GET && cmd != EVHTTP_REQ_HEAD) {
+		/* Still answered locally: this namespace belongs to ACME whatever the
+		 * method, and forwarding a POST here to the application would expose
+		 * a path the application never routes. */
+		fpm_http_log_response(gw, req, remote_addr, NULL, 405, 0);
+		evhttp_send_error(req, 405, "Method Not Allowed");
+		return 1;
+	}
+
+	len = *token && !strchr(token, '/')
+		? fpm_acme_challenge_lookup(token, keyauth, sizeof(keyauth))
+		: -1;
+	if (len < 0) {
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
+		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
+		return 1;
+	}
+
+	out = evhttp_request_get_output_headers(req);
+	/* RFC 8555 section 8.3: the response body is the key authorization and
+	 * nothing else -- no trailing newline, and text/plain rather than the
+	 * charset-qualified type used for static .txt files, because the CA
+	 * compares bytes. */
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	if (cmd == EVHTTP_REQ_HEAD) {
+		char content_length[32];
+
+		snprintf(content_length, sizeof(content_length), "%zd", len);
+		evhttp_add_header(out, "Content-Length", content_length);
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, 0);
+		evhttp_send_reply(req, HTTP_OK, "OK", NULL);
+		return 1;
+	}
+	{
+		struct evbuffer *body = evbuffer_new();
+
+		if (!body || evbuffer_add(body, keyauth, (size_t) len) < 0) {
+			if (body) {
+				evbuffer_free(body);
+			}
+			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
+			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+			return 1;
+		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) len);
+		evhttp_send_reply(req, HTTP_OK, "OK", body);
+		evbuffer_free(body);
+	}
+	return 1;
+}
+
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
@@ -1756,7 +1842,10 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	size_t path_len;
 	int answered = 0;
 
-	if (!gw->static_files || !uri) {
+	/* Not gated on gw->static_files: the ACME challenge below is not a
+	 * static file, and http.static = 0 must not switch it off (issue #48,
+	 * criterion 4). The static branch keeps its own check further down. */
+	if (!uri) {
 		return 0;
 	}
 
@@ -1776,22 +1865,51 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 		return 0;			/* let fpm_http_build_request produce the 400 */
 	}
 
-	/* Order will matter once ACME and /status arrive: fixed-path things
-	 * first, files from disk only at the end. */
-	answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr, script_missing);
+	/* Fixed-path things first, files from disk only at the end -- the order
+	 * docs/NOTES.md section 3l reserved for this hook, now that ACME uses it. */
+	answered = fpm_http_serve_acme_challenge(gw, req, path, path_len, remote_addr);
+	if (!answered && gw->static_files) {
+		answered = fpm_http_serve_static(gw, req, path, path_len, remote_addr, script_missing);
+	}
 
 	free(path);
 
 	return answered;
 }
 
-static int fpm_http_is_acme_challenge(struct evhttp_request *req)
-{
-	const struct evhttp_uri *uri = evhttp_request_get_evhttp_uri(req);
-	const char *path = uri ? evhttp_uri_get_path(uri) : NULL;
-	static const char prefix[] = "/.well-known/acme-challenge/";
 
-	return path && !strncmp(path, prefix, sizeof(prefix) - 1);
+/* The plain redirect companion's share of the local-answer hook. Decodes the
+ * path the same way fpm_http_try_local() does -- a percent-encoded prefix must
+ * not slip past the namespace check -- and hands it to the one responder. */
+static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	const struct evhttp_uri *decoded_uri = evhttp_request_get_evhttp_uri(req);
+	const char *raw_path = decoded_uri ? evhttp_uri_get_path(decoded_uri) : NULL;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	char *peer_addr = NULL;
+	ev_uint16_t peer_port = 0;
+	size_t path_len;
+	char *path;
+	int answered;
+
+	if (!gw || !raw_path || !*raw_path) {
+		return 0;
+	}
+	path = evhttp_uridecode(raw_path, 0, &path_len);
+	if (!path) {
+		return 0;
+	}
+	if (path_len != strlen(path) || path[0] != '/') {
+		free(path);
+		return 0;
+	}
+	if (evcon) {
+		evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
+	}
+	answered = fpm_http_serve_acme_challenge(gw, req, path, path_len, peer_addr);
+	free(path);
+	return answered;
 }
 
 static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
@@ -1803,9 +1921,13 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	char *redirect_host = NULL;
 	size_t len;
 
-	(void)arg;
-	if (fpm_http_is_acme_challenge(req)) {
-		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
+	/* HTTP-01 before anything else, including the redirect: the CA speaks
+	 * plain HTTP on purpose and must not be sent to :443 for a certificate
+	 * that does not exist yet (docs/NOTES.md section 3l, the NO_CERT state).
+	 * This companion has no document root and no worker, so the challenge is
+	 * the only thing it can answer -- and, with the redirect skipped, the
+	 * only thing in this namespace it ever answers, provisioned or not. */
+	if (fpm_http_plain_try_acme(req, arg)) {
 		return;
 	}
 	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {

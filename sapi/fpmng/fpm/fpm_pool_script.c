@@ -19,6 +19,9 @@
 
 #include "fpm_pool_script.h"
 #include "fpm_std_streams.h"
+#include "fpm_acme_challenge.h"
+#include "fpm_pool_type.h"
+#include "fpm_worker_pool.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
@@ -89,6 +92,36 @@ void fpm_pool_script_install_sapi_overrides(void) /* {{{ */
 }
 /* }}} */
 
+/* The fpmng_acme_challenge_* builtins, for a pool type that declares it may
+ * publish challenge answers (fpm_pool_type_s.publishes_acme_challenges). Once
+ * per process, not per run: CG(function_table) outlives a request, and a
+ * supervisor pool runs its script many times in the same process.
+ *
+ * A type flag rather than a name comparison, so adding a second publishing
+ * type never touches this file -- and so a request-serving type cannot
+ * acquire the builtins by accident, which is what keeps the ACME client out
+ * of every gateway (issue #48, criterion 7). */
+static void fpm_pool_script_register_acme_builtins(const char *pool_name)
+{
+	static int done = 0;
+	struct fpm_worker_pool_s *wp;
+	const struct fpm_pool_type_s *type;
+
+	if (done) {
+		return;
+	}
+	done = 1;
+	wp = fpm_pool_type_current_pool();
+	type = wp ? fpm_pool_type_of(wp) : NULL;
+	if (!type || !type->publishes_acme_challenges) {
+		return;
+	}
+	if (0 > fpm_acme_challenge_register_functions()) {
+		zlog(ZLOG_ERROR, "[pool %s] cannot register the fpmng_acme_challenge_* functions",
+			pool_name);
+	}
+}
+
 int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ */
 {
 	zend_file_handle file_handle;
@@ -148,6 +181,7 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 		 * first code in the function that runs PHP (a stream wrapper, a
 		 * constant registration), so it is the first that can bail out. */
 		fpm_std_streams_register(pool_name);
+		fpm_pool_script_register_acme_builtins(pool_name);
 
 		if (php_fopen_primary_script(&file_handle) == FAILURE) {
 			zlog(ZLOG_ERROR, "[pool %s] cannot open script '%s'", pool_name, script_path);

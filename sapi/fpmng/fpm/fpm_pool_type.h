@@ -100,6 +100,15 @@ struct fpm_pool_type_s {
 	 * is the same premise as the log channel itself. */
 	unsigned child_logs_via_master:1;
 
+	/* A child of this type may publish HTTP-01 challenge answers, so it gets
+	 * the fpmng_acme_challenge_* builtins (fpm_acme_challenge.h). Set for the
+	 * script-running types that serve no request ("cron", where docs/NOTES.md
+	 * section 3l puts the dedicated ACME process, and "supervisor"). Data
+	 * rather than a name comparison in fpm_pool_script.c, and
+	 * deliberately not set for request-serving types: a gateway must never
+	 * execute the ACME client (issue #48, criterion 7). */
+	unsigned publishes_acme_challenges:1;
+
 	/* Status flags are established on the master-side listening socket before
 	 * children are forked. The open file description is shared by the master
 	 * and its children, so a child must not change this after fork. */

@@ -20,10 +20,12 @@
  * render an already-accepted one.
  *
  * The descriptor is wp->log_fd, opened by the master in fpm_log_open() before
- * any fork and re-opened in place on SIGUSR1 (fpm_log_open(1) dup2()s the new
- * file over the same descriptor and SIGQUITs the children). So rotation works
- * for a direct pool exactly as it does for a fastcgi one, and this file has
- * nothing to do about it.
+ * any fork. On SIGUSR1 the master dup2()s the new file over that descriptor in
+ * ITS table -- an already-forked child keeps writing to the old file -- and
+ * then fpm_pctl_kill_all(SIGQUIT)s the children, so the replacements inherit
+ * the rotated one. Rotation therefore works for a direct pool exactly as it
+ * does for a fastcgi one, and this file has nothing to do about it; what it
+ * must not do is cache or re-open the descriptor itself.
  *
  * One write() per line on an O_APPEND descriptor is atomic against the other
  * children of the pool (POSIX), which is why no lock is taken -- the same
@@ -61,9 +63,12 @@ struct fpm_http_direct_access_entry {
 	size_t memory;			/* PHP peak for this request, 0 when no PHP ran */
 	/* CGI variables for %e{...}; NULL when no PHP request was built. */
 	const struct evkeyvalq *env;
-	/* Response headers for %o{...}, read while the request is still alive --
-	 * hence the contract that a caller logs before or during the send, never
-	 * from a completion callback. */
+	/* Response headers for %o{...}. The caller must either pass NULL or hold a
+	 * request libevent has not freed yet. Logging after evhttp_send_reply() is
+	 * only safe while the event loop cannot have run in between (the buffered
+	 * ending logs there, with PHP still on the stack); a caller reached FROM a
+	 * libevent callback must clear this field first, as the streaming endings
+	 * do. */
 	struct evhttp_request *http;
 };
 

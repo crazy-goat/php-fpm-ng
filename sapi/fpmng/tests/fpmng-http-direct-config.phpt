@@ -63,6 +63,9 @@ $cases = [
     /* issue #56. The streaming writer reaches past the bufferevent to the
      * descriptor, which on a TLS connection would send plaintext. */
     'stream-with-tls' => [$base . "\nhttp.stream = yes\nhttp.tls_cert = /missing.pem\nhttp.tls_key = /missing.pem", 'http.stream cannot be combined with http.tls_cert'],
+    /* Parsed in the master so a typo stops -t. Left to the child it would be
+     * a fork loop: the child can only exit, and the master replaces it. */
+    'bad-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1, not-an-ip", "listen.allowed_clients: 'not-an-ip' is not a valid IP address"],
     'missing-script' => [$base . "\nhttp.front_controller = /missing-direct-script.php", 'front controller must be a regular file inside chdir'],
 ];
 foreach ($cases as $label => [$config, $needle]) {
@@ -110,6 +113,7 @@ unbounded-body: rejected
 unbounded-timeout: rejected
 stream-without-timeout: rejected
 stream-with-tls: rejected
+bad-acl: rejected
 missing-script: rejected
 classic: accepted
 --CLEAN--

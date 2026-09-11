@@ -32,6 +32,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_acl.h"
 #include "zlog.h"
 
 /* Resolves the front controller (the worker script, under the worker
@@ -109,6 +110,18 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 		zlog(ZLOG_ALERT, "[pool %s] %s requires an absolute chdir and a root-relative http.front_controller%s "
 			"without '..' or backslashes", c->name, labels->subject, labels->chdir_note);
 		return -1;
+	}
+	if (c->listen_allowed_clients && *c->listen_allowed_clients) {
+		struct fpm_http_acl_s *tmp = NULL;
+
+		/* Parsed here, in the master, and thrown away: the child parses it
+		 * again for real, but a child that finds it malformed can only exit,
+		 * and the master would fork a replacement immediately -- the pool
+		 * would spin instead of failing. A bad address must stop `-t`. */
+		if (fpm_http_acl_parse(c->name, "listen.allowed_clients", c->listen_allowed_clients, &tmp) != 0) {
+			return -1; /* fpm_http_acl_parse() already logged which address is bad */
+		}
+		fpm_http_acl_free(tmp);
 	}
 	/* Gateway options must not silently appear to protect a direct worker.
 	 * Use an allow-list here so future http.* directives are rejected too. */

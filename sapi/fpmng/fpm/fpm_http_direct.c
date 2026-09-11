@@ -1547,8 +1547,10 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	fpm_direct_install_sapi();
 	/* Both of these are per-child: the ACL and the endpoint paths are parsed
 	 * once here rather than on every request, and the access log takes the
-	 * descriptor the master opened before the fork, so a SIGUSR1 rotation in
-	 * the master reaches this child through the same fd. */
+	 * descriptor the master opened before the fork. A SIGUSR1 rotation does
+	 * not reach this fd -- the master's dup2() happens in its own descriptor
+	 * table -- but the master SIGQUITs the children right after, so the
+	 * replacement child inherits the rotated file. */
 	w.ops = fpm_http_direct_ops_init_child(wp);
 	if (!w.ops) {
 		/* A pool whose listen.allowed_clients could not be parsed must not

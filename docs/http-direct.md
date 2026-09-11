@@ -597,6 +597,12 @@ Two deviations from the fastcgi status page, both deliberate:
   already installs cannot be shared with a permanent one. A monotonic count of
   accepts plus an in-flight request gauge is what can be reported truthfully.
 
+`accepted conn`, `non-php requests` and `refused requests` belong to the pool,
+not to a child: a child recycled by `pm.max_requests` inherits the counters of
+the slot it takes over, so the totals never go backwards mid-series. Only
+`active requests` is cleared when a child starts, because that is exactly what
+a child killed mid-request would otherwise leak.
+
 `pm.status_listen` stays rejected on both executors: it asks for a second
 listening socket served by a second process, and a direct child owns exactly
 one listener — the pool's.
@@ -650,8 +656,10 @@ It is enforced in the request callback, not at accept: libevent's
 is therefore accepted and the request answered `403`, which is also what the
 `http` gateway does. A refused request reaches neither the static file server,
 nor the status page, nor PHP, and is counted as `refused requests`. A
-malformed address in the list is fatal at child start-up: a list meant to keep
-someone out must never end up keeping nobody out.
+malformed address in the list is rejected by `php-fpm -t` and at start-up,
+before any child forks; it is fatal again in the child, which would otherwise
+be the only place it was noticed. A list meant to keep someone out must never
+end up keeping nobody out.
 
 Both executors enforce it.
 

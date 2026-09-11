@@ -255,6 +255,36 @@ struct fpm_http_gateway_s {
 	struct fpm_http_tls_reload_s *reload;
 #endif
 
+	/* Both of these are plain ints and both are read from code that is NOT
+	 * inside #ifdef HAVE_FPM_HTTP_TLS -- fpm_http_plain_request(), the
+	 * listener bind, fpm_http_gateway_open_tls_listener() -- so they live
+	 * outside it. A build without libevent_openssl (sapi/fpmng/config.m4)
+	 * simply never leaves the defaults below.
+	 *
+	 * http.tls_wait_for_cert, issue #172: this pool is allowed to start
+	 * before its certificate exists. Cleared by fpm_http_gateway_settings()
+	 * once it is established that the certificate is in fact already there,
+	 * or that nothing could ever open the listener -- after that point the
+	 * ordinary fail-closed behaviour applies unchanged. */
+	int tls_wait_for_cert;
+	/* Child only: has THIS gateway process opened its TLS listener yet?
+	 * 0 is NO_CERT, 1 is READY. Defaults to 1, i.e. the pre-#172 behaviour,
+	 * and is only ever lowered inside the opt-in branch.
+	 *
+	 * Derived from gw->tls_ctx and from nothing else -- see the comment where
+	 * it is assigned. Sampling the shared reload state separately from the
+	 * context build would let the two disagree when the master publishes a
+	 * generation between the two reads, and one of those disagreements puts
+	 * a listening socket in front of a NULL SSL_CTX, which fpm_http_bevcb()
+	 * serves as cleartext.
+	 *
+	 * One-way by construction -- nothing ever sets it back to 0, which is
+	 * issue #172 criterion 5: a certificate file deleted under a serving pool
+	 * must not take TLS down. The operator sees the deletion as the master's
+	 * ordinary "skip this tick" silence plus an expiring certificate, not as
+	 * an outage we caused. */
+	int tls_ready;
+
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
 	atomic_t *upstreams_used;		/* shared between the gateway processes */
@@ -442,7 +472,7 @@ static inline int fpm_http_would_block(int err)
 #endif
 	return 0;
 }
-static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport);
+static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 
 /* Local (server-side) address and port of one HTTP connection, for SERVER_ADDR/SERVER_PORT.
  * Unlike the pool's listen address (which may be a wildcard "*"), this is the real address
@@ -1930,6 +1960,23 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (fpm_http_plain_try_acme(req, arg)) {
 		return;
 	}
+	{
+		struct fpm_http_gateway_s *gw = arg;
+
+		/* NO_CERT (issue #172 criterion 2): redirecting to https:// would
+		 * send the client to a port that is refusing connections, which
+		 * reads to a browser as "the site is broken" rather than "the site
+		 * is not provisioned yet". 503 says the second, and Retry-After
+		 * gives a well-behaved client something to act on. Nothing else is
+		 * served here either -- this companion has no document root and no
+		 * worker -- so the challenge answered above remains the only thing
+		 * this listener ever returns before the certificate exists. */
+		if (gw && !gw->tls_ready) {
+			evhttp_add_header(headers, "Retry-After", "60");
+			evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+			return;
+		}
+	}
 	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
 		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
 		return;
@@ -2393,6 +2440,57 @@ static void fpm_http_log_follow_init(struct fpm_http_gateway_s *gw)
 	}
 }
 
+/* Opens this gateway process's TLS listener: puts the bound socket into
+ * LISTEN and hands it to evhttp. Called either at child startup (the ordinary
+ * case, and every case without http.tls_wait_for_cert) or from the
+ * generation-watch timer at the NO_CERT -> READY transition (issue #172).
+ * Returns 0 on success, -1 with the reason logged otherwise.
+ *
+ * listen() unconditionally, including on the startup path where
+ * fpm_http_listen() already called it: listen() on a socket that is already
+ * listening succeeds and only updates the backlog, so the one call covers
+ * both entry points without either having to know which one it is.
+ *
+ * The return value of listen() is checked because it can genuinely fail here.
+ * Measured on the test box, 2026-09-11: while our socket was bound but not
+ * listening, another process bound AND listened on the same port, and our
+ * later listen() then failed with EADDRINUSE. Binding early does not reserve
+ * the port -- SO_REUSEADDR permits a second bind as long as nobody is in
+ * LISTEN -- so a NO_CERT pool has a window in which its port can be taken.
+ * Reporting that is issue #172 criterion 6: the alternative is a pool that
+ * stays dark with nothing in the log to say why. */
+static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* {{{ */
+{
+	if (listen(gw->listen_fd, gw->backlog) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot open the TLS listener: listen() failed: %s -- the certificate is installed but this gateway is not serving it",
+			gw->pool, strerror(errno));
+		return -1;
+	}
+	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
+		return -1;
+	}
+	gw->tls_ready = 1;
+	return 0;
+}
+/* }}} */
+
+#ifdef HAVE_FPM_HTTP_TLS
+/* The above, as the void(void *) the generation-watch timer calls. A failure
+ * is logged and this gateway stays in NO_CERT rather than exiting: exiting
+ * would spend one of the crash-loop budget's five restarts per
+ * FPM_HTTP_RESPAWN_WINDOW_SEC on a condition a restart cannot fix (the port
+ * is held by someone else), and a gateway still answering HTTP-01 challenges
+ * on http.plain_listen is strictly more useful than one that is gone. The
+ * hook has already been cleared by the time this runs, so there is no retry:
+ * the log line is the whole signal. */
+static void fpm_http_gateway_tls_listener_hook(void *arg) /* {{{ */
+{
+	(void) fpm_http_gateway_open_tls_listener((struct fpm_http_gateway_s *) arg);
+}
+/* }}} */
+#endif
+
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -2433,17 +2531,25 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	snprintf(title, sizeof(title), "http gateway %s [%u]", gw->pool, index);
 	fpm_env_setproctitle(title);
 
+	/* Where this process starts on the issue #172 state machine. Provisional
+	 * on purpose, and used below for one thing only: whether the reuseport
+	 * bind should listen() immediately. The authoritative value is assigned
+	 * after the SSL_CTX is built, from the context itself; the late listen()
+	 * in fpm_http_gateway_open_tls_listener() is idempotent, so a socket that
+	 * this leaves unlistened costs nothing but the call. */
+	gw->tls_ready = !gw->tls_wait_for_cert;
+
 	if (gw->reuseport) {
 		/* own listening socket in the SO_REUSEPORT group, the kernel spreads connections by hash;
 		 * the last thing that can need root, so the privilege drop below waits for it */
 		close(gw->listen_fd);
-		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, 1);
+		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, 1, gw->tls_ready);
 		if (gw->listen_fd < 0) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
 		if (gw->plain_listen_address) {
 			close(gw->plain_listen_fd);
-			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, 1);
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, 1, 1);
 			if (gw->plain_listen_fd < 0) {
 				exit(FPM_EXIT_SOFTWARE);
 			}
@@ -2475,7 +2581,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	gw->http = evhttp_new(gw->base);
 	fpm_http_log_follow_init(gw);
 #ifdef HAVE_FPM_HTTP_TLS
-	if (gw->tls) {
+	if (gw->tls || gw->tls_wait_for_cert) {
 		/* Own SSL_CTX per gateway process, built from cert/key bytes the
 		 * master already read and validated, never from an SSL_CTX inherited
 		 * through fork() -- see fpm_http_tls.h.
@@ -2491,11 +2597,37 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		 * gateway forked at startup the published slot is generation 0, i.e.
 		 * exactly gw->tls's bytes, so nothing about startup changes. */
 		gw->tls_ctx = fpm_http_tls_reload_child_ctx_new(gw->reload);
-		if (!gw->tls_ctx) {
+		if (!gw->tls_ctx && gw->tls) {
 			gw->tls_ctx = fpm_http_tls_ctx_new(gw->pool, gw->tls);
 		}
-		if (!gw->tls_ctx) {
+		if (!gw->tls_ctx && !gw->tls_wait_for_cert) {
 			exit(FPM_EXIT_SOFTWARE);
+		}
+		/* THE decision, taken once, from the context this process actually
+		 * holds. An earlier version sampled fpm_http_tls_reload_has_cert()
+		 * before the fork-time work above and treated that as the state; the
+		 * master can publish a generation in between, and then a gateway
+		 * respawned near the transition (issue #91) could reach
+		 * fpm_http_gateway_open_tls_listener() with gw->tls_ctx == NULL --
+		 * fpm_http_bevcb() has no context to wrap the connection in and falls
+		 * through to a plain bufferevent, i.e. cleartext HTTP served on the
+		 * TLS port. The mirror case lost the transition instead: the timer had
+		 * already latched the generation, so the hook never fired and that
+		 * gateway stayed dark for good.
+		 *
+		 * Deriving both the flag and the hook from gw->tls_ctx makes all three
+		 * states impossible: a context means listening, no context means
+		 * NO_CERT plus exactly one armed hook. */
+		if (gw->tls_wait_for_cert) {
+			gw->tls_ready = gw->tls_ctx != NULL;
+		}
+		if (!gw->tls_ready) {
+			/* NO_CERT (issue #172): no context, and therefore nothing to
+			 * accept a TLS connection with. The hook below is what turns
+			 * this process READY, and it runs on this child's own
+			 * generation-watch timer, so every gateway makes the transition
+			 * independently -- criterion 4. */
+			fpm_http_tls_reload_child_on_first_cert(gw->reload, fpm_http_gateway_tls_listener_hook, gw);
 		}
 
 		/* Own generation-watch timer, on this child's own base -- see
@@ -2531,8 +2663,14 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	evhttp_set_max_headers_size(gw->http, FPM_HTTP_HEADERS_MAX);
 	evhttp_set_gencb(gw->http, fpm_http_request, gw);
 	evutil_make_socket_nonblocking(gw->listen_fd);
-	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
-		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
+	/* In NO_CERT the fd is bound but was never listen()ed, and
+	 * evhttp_accept_socket() would not fix that: it reaches
+	 * evconnlistener_new() with a backlog of 0, which skips listen()
+	 * entirely (libevent 2.1.12-stable, listener.c). Accepting here would
+	 * therefore silently produce a listener that never fires. The pair of
+	 * calls belongs together, and it belongs in one place --
+	 * fpm_http_gateway_open_tls_listener(), which the transition also uses. */
+	if (gw->tls_ready && fpm_http_gateway_open_tls_listener(gw) != 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	if (gw->plain_listen_fd >= 0) {
@@ -2561,8 +2699,26 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 /* }}} */
 
 /* Listens on http_address when given, otherwise on the FastCGI address with the port bumped by
- * one. Returns -1 when that is not possible. */
-static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport) /* {{{ */
+ * one. Returns -1 when that is not possible.
+ *
+ * do_listen = 0 binds the socket and stops there, for http.tls_wait_for_cert's
+ * NO_CERT state (issue #172). Measured on the test box, 2026-09-11: a socket
+ * bound but never listen()ed answers a connect with RST -- curl reports
+ * "Failed to connect ... Could not connect to server" -- and does not appear
+ * in `ss -lnt`. That is exactly the "connection refused, not a handshake
+ * failure and not a plain-HTTP answer" criterion 3 asks for.
+ *
+ * Why bind here rather than defer the whole socket to the transition: every
+ * gateway accepts on ONE inherited fd, so the fd has to exist before the
+ * first fork. Deferring the bind would leave each child binding its own, which
+ * fails with EADDRINUSE unless http.reuseport is on.
+ *
+ * What binding early does NOT buy, measured in the same run and contrary to
+ * what this code was first written assuming: it does not reserve the port. A
+ * second process with SO_REUSEADDR bound and listened on the same port while
+ * ours was bound-but-not-listening. Hence fpm_http_gateway_open_tls_listener()
+ * checks its late listen() and reports EADDRINUSE rather than assuming it. */
+static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen) /* {{{ */
 {
 	char *dup_address = strdup(http_address ? http_address : listen_address), *host = NULL, *port_str = strrchr(dup_address, ':');
 	char port[sizeof("65535")];
@@ -2608,7 +2764,7 @@ static int fpm_http_listen(const char *pool, const char *listen_address, const c
 			setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
 		}
 #endif
-		if (bind(fd, p->ai_addr, p->ai_addrlen) != 0 || listen(fd, backlog) != 0) {
+		if (bind(fd, p->ai_addr, p->ai_addrlen) != 0 || (do_listen && listen(fd, backlog) != 0)) {
 			zlog(ZLOG_WARNING, "[pool %s] no HTTP listener: unable to listen on %s:%s: %s", pool, host ? host : "*", port, strerror(errno));
 			close(fd);
 			fd = -1;
@@ -2861,12 +3017,35 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	/* fpm_http_validate_pool() already refused a bad/mismatched cert+key at
 	 * config-validation time; this is the real load, in the master, BEFORE
 	 * fpm_http_gateway_spawn() forks the first child -- see fpm_http_tls.h. */
-	if (wp->config->http_tls_cert && *wp->config->http_tls_cert) {
+	gw->tls_wait_for_cert = wp->config->http_tls_wait_for_cert;
+	/* Skipped entirely in NO_CERT rather than attempted and allowed to fail:
+	 * fpm_http_tls_load() logs "cannot re-read TLS certificate/key at
+	 * startup" at ERROR level, and under http.tls_wait_for_cert a
+	 * not-yet-issued certificate is the configured state, not a fault. An
+	 * ERROR on every first boot would train an operator to ignore the one
+	 * line that does mean something. The same access() pair that
+	 * fpm_http_validate_pool() used to decide whether to skip the validate
+	 * decides here, so the two cannot disagree. */
+	if (wp->config->http_tls_cert && *wp->config->http_tls_cert &&
+			!(gw->tls_wait_for_cert &&
+				(access(wp->config->http_tls_cert, R_OK) != 0 ||
+				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0))) {
 		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version,
 			wp->config->http_tls_sni_cert);
 	}
+	/* The certificate was there all along, so there is nothing to wait for:
+	 * drop the opt-in and let every gate below behave exactly as it does for
+	 * a pool that never set it. Without this the pool stays flagged as
+	 * waiting, and if fpm_http_tls_reload_master_init() then fails -- a chain
+	 * over FPM_HTTP_TLS_RELOAD_MAX_CERT, or no shared memory -- the master
+	 * binds :443 without listening while no child ever registers a hook to
+	 * open it, and a pool holding a perfectly good certificate refuses every
+	 * connection for the life of the master. */
 	if (gw->tls) {
+		gw->tls_wait_for_cert = 0;
+	}
+	if (gw->tls || gw->tls_wait_for_cert) {
 		/* http.tls_reload_check: unset -> a sensible non-zero default (task
 		 * 040 exists precisely so a renewed certificate needs no operator
 		 * action beyond the write); explicitly 0 -> off. Same
@@ -2878,8 +3057,27 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		if (interval < 0) {
 			interval = 0;
 		}
+		/* gw->tls is NULL here exactly when http.tls_wait_for_cert put this
+		 * pool in NO_CERT (issue #172); fpm_http_validate_pool() has already
+		 * refused the combination with http.tls_reload_check = 0, so the
+		 * timer below is guaranteed to be armed and the state is guaranteed
+		 * to be escapable. */
 		gw->reload = fpm_http_tls_reload_master_init(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version, gw->tls, interval);
+		if (gw->tls_wait_for_cert && !gw->tls) {
+			if (!gw->reload) {
+				/* Without the reload machinery there is no mechanism that can
+				 * ever open the TLS listener, so the pool would sit in NO_CERT
+				 * for the life of the master with :443 refusing every
+				 * connection. Dropping the opt-in turns that into the ordinary
+				 * fail-closed startup error the operator can act on. */
+				zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert: the certificate-watch machinery could not be set up, so nothing would ever open the TLS listener", gw->pool);
+				gw->tls_wait_for_cert = 0;
+			} else {
+				zlog(ZLOG_NOTICE, "[pool %s] http: NO_CERT -- no certificate at '%s' yet; the TLS listener stays closed and http.plain_listen answers ACME HTTP-01 challenges only, re-checking every %d second(s)",
+					gw->pool, wp->config->http_tls_cert, interval);
+			}
+		}
 	}
 #endif
 }
@@ -2925,8 +3123,16 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 
 #ifdef HAVE_FPM_HTTP_TLS
 		/* fpm_http_tls_load() already logged what went wrong; http.tls_cert
-		 * was set, so falling back to plain HTTP would be a silent surprise. */
-		if (wp->config->http_tls_cert && *wp->config->http_tls_cert && !gw->tls) {
+		 * was set, so falling back to plain HTTP would be a silent surprise.
+		 *
+		 * http.tls_wait_for_cert (issue #172) is the one way past this, and
+		 * it is not a downgrade: the pool does not fall back to plain HTTP,
+		 * it declines to serve :443 at all until the certificate exists. The
+		 * check above is on gw->tls_wait_for_cert rather than on the config
+		 * field because fpm_http_gateway_settings() clears it when the
+		 * certificate-watch machinery failed to start, and then this gate
+		 * must fire exactly as it always did. */
+		if (wp->config->http_tls_cert && *wp->config->http_tls_cert && !gw->tls && !gw->tls_wait_for_cert) {
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
 			free(gw->access_log_path);
@@ -2984,7 +3190,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return -1;
 		}
 
-		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport);
+		gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert);
 		if (gw->listen_fd < 0) {
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
@@ -3001,7 +3207,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return 0;
 		}
 		if (gw->plain_listen_address) {
-			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport);
+			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1);
 			if (gw->plain_listen_fd < 0) {
 				close(gw->listen_fd);
 				fpm_http_acl_free(gw->acl);
@@ -3136,6 +3342,42 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1;
 		}
 	}
+	if (wp->config->http_tls_wait_for_cert) {
+#ifdef HAVE_FPM_HTTP_TLS
+		/* The paths must still be configured -- they are what the master
+		 * watches. "Wait for a certificate" without being told where it will
+		 * appear has no meaning, and silently accepting it would leave a pool
+		 * in NO_CERT forever. */
+		if (!wp->config->http_tls_cert || !*wp->config->http_tls_cert) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert needs http.tls_cert: it relaxes when the certificate has to exist, not whether a path is configured", wp->config->name);
+			return -1;
+		}
+		/* http.tls_sni_cert is validated and loaded only as part of the
+		 * startup pair, and is explicitly not part of the reload poll (see
+		 * docs/acme-renewal.md). A pool that starts in NO_CERT skips that
+		 * load entirely, so after the transition it would serve the primary
+		 * certificate for every SNI name -- wrong, and silent, because the
+		 * validation that would have complained was skipped too. Refuse the
+		 * combination rather than ship the wrong certificate. */
+		if (wp->config->http_tls_sni_cert && *wp->config->http_tls_sni_cert) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert cannot be combined with http.tls_sni_cert: SNI certificates are loaded once at startup and are not part of the certificate-watch poll, so a pool that started without them would never pick them up", wp->config->name);
+			return -1;
+		}
+		/* http.tls_reload_check is the only mechanism that notices the
+		 * certificate appearing, so turning it off turns NO_CERT into a
+		 * permanent state. Refusing the combination is better than a pool
+		 * that starts cleanly and never serves. */
+		if (fpm_conf_directive_was_set(wp->config, "http.tls_reload_check") &&
+				wp->config->http_tls_reload_check <= 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert requires http.tls_reload_check to be on: with it at 0 nothing would ever notice the certificate appearing and the TLS listener would stay closed for the life of the master", wp->config->name);
+			return -1;
+		}
+#else
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert requires the HTTP gateway to be built with TLS support "
+			"(libevent_openssl and/or OpenSSL were not found at build time)", wp->config->name);
+		return -1;
+#endif
+	}
 	if (wp->config->http_plain_listen && *wp->config->http_plain_listen &&
 			(!wp->config->http_tls_cert || !*wp->config->http_tls_cert)) {
 		zlog(ZLOG_ERROR, "[pool %s] http.plain_listen requires http.tls_cert", wp->config->name);
@@ -3150,8 +3392,26 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		/* Reads cert+key from disk into a throwaway SSL_CTX and checks they
 		 * parse and match -- a bad path or a mismatched key must fail here,
 		 * before fpm_http_init_pool_ex() forks a single gateway child, not
-		 * as a crash or a silent plain-HTTP fallback at request time. */
-		if (fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
+		 * as a crash or a silent plain-HTTP fallback at request time.
+		 *
+		 * Under http.tls_wait_for_cert the check is skipped only when the
+		 * certificate is NOT THERE (issue #172). A file that exists and does
+		 * not parse, or a key that does not match its certificate, still
+		 * fails startup exactly as before: that is an operator error, and
+		 * treating it as "not issued yet" would turn every typo into a pool
+		 * that quietly refuses connections on :443 forever. The distinction
+		 * is made by access(), not by the validate's return value, precisely
+		 * so that the two failure modes cannot be confused.
+		 *
+		 * The key is checked too, not just the certificate: a half-finished
+		 * install with only one of the two on disk is "not issued yet", not
+		 * a broken configuration. Our own installer writes the key first and
+		 * the chain second (sapi/fpmng/acme/state.php,
+		 * installCertificate()), so the window is real but narrow. */
+		if (!(wp->config->http_tls_wait_for_cert &&
+				(access(wp->config->http_tls_cert, R_OK) != 0 ||
+				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0)) &&
+				fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
 				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert) != 0) {
 			return -1; /* fpm_http_tls_validate() already logged what is wrong */
 		}

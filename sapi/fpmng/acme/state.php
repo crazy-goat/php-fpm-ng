@@ -33,6 +33,23 @@ final class StateError extends \RuntimeException
 {
 }
 
+/**
+ * "Is this setting on?" -- for an env[] value or an ini setting.
+ *
+ * Not filter_var(..., FILTER_VALIDATE_BOOL): the canonical build configures
+ * --disable-all (.github/workflows/build-matrix.yml:178), which leaves out
+ * ext/filter, so both the function and the constant are missing there. A
+ * client that only works in a build with ext/filter is a client this
+ * project's own CI cannot run.
+ */
+function enabled(bool|int|string|null $value): bool
+{
+    if (is_bool($value)) {
+        return $value;
+    }
+    return in_array(strtolower(trim((string) $value)), ['1', 'on', 'yes', 'true'], true);
+}
+
 final class State
 {
     public readonly string $baseDir;
@@ -201,6 +218,40 @@ final class State
     {
         $this->ensureDomainDir($domain);
         $this->writePublic($this->certChainPath($domain), $fullchainPem);
+    }
+
+    /**
+     * The renewal bookkeeping for a certificate: when it was last obtained,
+     * how many attempts have failed since, and when the next one is allowed
+     * (issue #49 criteria 3 and 5). Missing or unreadable reads as "nothing
+     * is known", which is the same decision an empty state directory
+     * produces -- the renewer then judges by the certificate on disk, so a
+     * lost meta file costs at most one extra order, never a missed renewal.
+     *
+     * @return array<string,mixed>
+     */
+    public function readRenewalMeta(string $domain): array
+    {
+        $raw = @file_get_contents($this->renewalMetaPath($domain));
+        if ($raw === false) {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /** @param array<string,mixed> $meta */
+    public function writeRenewalMeta(string $domain, array $meta): void
+    {
+        $this->ensureDomainDir($domain);
+        $encoded = json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if ($encoded === false) {
+            throw new StateError("cannot encode the renewal record for '$domain'");
+        }
+        /* 0600 like the rest of the per-domain state: it names the CA, the
+         * domains and the last error, which is not key material but is not
+         * something to leave world-readable beside keys that are. */
+        $this->writeRestricted($this->renewalMetaPath($domain), $encoded . "\n");
     }
 
     /**

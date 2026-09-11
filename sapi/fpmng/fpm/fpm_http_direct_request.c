@@ -133,6 +133,9 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 		if (!(FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.front_controller") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.read_timeout") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.max_body") ||
+			/* issue #61 */
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.max_connections") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.max_connections_per_client") ||
 			/* issue #55. http.plain_listen is deliberately NOT here: a direct
 			 * pool accepts on one socket, so there is nowhere to put a second
 			 * listener, and accepting the directive would read as if there
@@ -168,6 +171,38 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires http.read_timeout > 0 and http.max_body between 1 and 32M",
 			c->name, labels->subject);
+		return -1;
+	}
+	/* issue #61. The upper bound is not a resource limit -- it is there so a
+	 * typo like 100000000 is a configuration error rather than a worker that
+	 * tracks a list it can never fill. Both are per worker, and a per-client
+	 * limit above the total one can never bite, which is a mistake worth
+	 * naming rather than silently accepting. */
+	if (c->http_max_connections < 0 || c->http_max_connections > 1000000 ||
+		c->http_max_connections_per_client < 0 ||
+		c->http_max_connections_per_client > 1000000) {
+		zlog(ZLOG_ALERT, "[pool %s] %s requires http.max_connections and "
+			"http.max_connections_per_client between 0 (unlimited) and 1000000",
+			c->name, labels->subject);
+		return -1;
+	}
+	/* The per-client cap is enforced by walking this worker's connection list
+	 * once per accepted connection, so the list has to be bounded by something
+	 * -- and the only thing that bounds it is the total cap. Without it a
+	 * flood from many distinct addresses would make the accept path O(n) in
+	 * the connections already held, which is the amplifier the directive is
+	 * there to prevent. Required rather than implied: a default this file
+	 * invented would be a number nobody measured. */
+	if (c->http_max_connections_per_client > 0 && c->http_max_connections <= 0) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.max_connections_per_client requires "
+			"http.max_connections, which is what bounds the list it is counted against",
+			c->name, labels->subject);
+		return -1;
+	}
+	if (c->http_max_connections > 0 && c->http_max_connections_per_client > c->http_max_connections) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.max_connections_per_client (%d) is above "
+			"http.max_connections (%d), so it can never apply",
+			c->name, labels->subject, c->http_max_connections_per_client, c->http_max_connections);
 		return -1;
 	}
 	if (fpm_http_direct_tls_validate(wp) < 0) {

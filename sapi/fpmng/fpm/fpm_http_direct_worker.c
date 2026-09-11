@@ -28,9 +28,9 @@
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
  * streaming (fpmng_worker_respond() takes one complete body); no per-request
- * scoreboard accounting (fpm_request_accepting(false) once at :1508). TLS is
+ * scoreboard accounting (fpm_request_accepting(false) once at :1512). TLS is
  * NOT a limit here: this executor terminates it like the classic one since
- * issue #55, see the fpm_http_direct_tls_child_attach() call at :1479.
+ * issue #55, see the fpm_http_direct_tls_child_attach() call at :1483.
  */
 #include "fpm_config.h"
 
@@ -385,7 +385,11 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 		 * the child exits, the master respawns it. A genuine burst of more
 		 * than FPM_WORKER_PENDING_MAX concurrent requests therefore recycles
 		 * the worker as well; that is the same drain pm.max_requests performs,
-		 * and the pool is already answering 503 at that point. */
+		 * and the pool is already answering 503 at that point. The cost of
+		 * that choice -- 256 deliberately held long-polls are lost with the
+		 * worker -- is the documented contract of this mode, not an accident:
+		 * see "Held requests under pool.executor = worker" in
+		 * docs/http-direct.md (issue #184). */
 		if (!fpm_worker_stopping) {
 			zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %d requests accepted but unanswered; "
 				"answering 503 and asking the worker script to stop so the master can respawn it",

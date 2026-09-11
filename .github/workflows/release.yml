@@ -97,17 +97,13 @@ jobs:
           retention-days: 14
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
+      #
+      # curl, not `gh`: this runs on poligon-host, a self-hosted runner that has
+      # no gh CLI on it, and a release workflow that depends on a tool somebody
+      # installed by hand on one machine is a release workflow that breaks the
+      # day that machine is rebuilt. curl and python3 are both already there.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release create "$GITHUB_REF_NAME" assets/* \
-            --title "$GITHUB_REF_NAME" \
-            --notes "php-fpm-ng ${GITHUB_REF_NAME}. The packages carry no PHP: they depend on
-          the distribution's embed package for the libphp they were linked against, which is
-          named in the file name and in the dependency. Install them by path --
-          \`sudo apt install ./php-fpm-ng_*.deb\` or
-          \`sudo apk add --allow-untrusted ./php-fpm-ng-*.apk\` -- and check them against
-          SHA256SUMS first; they are unsigned by the decision recorded on issue #223.
-          See docs/install.md for what the packaged build supports and what it does not."
+        run: ./build/gh-release-create.sh "$GITHUB_REF_NAME" assets

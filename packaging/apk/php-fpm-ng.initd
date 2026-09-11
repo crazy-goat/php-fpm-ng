@@ -1,0 +1,33 @@
+#!/sbin/openrc-run
+
+name="php-fpm-ng"
+description="FPM process manager with HTTP-direct pools, on the distribution PHP"
+
+command="/usr/sbin/php-fpm-ng"
+command_args="--nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf"
+# supervise-daemon, not start-stop-daemon: the master runs in the foreground
+# (daemonize = no), because a package that has OpenRC background it keeps the
+# supervision and the restart policy in one place.
+supervisor="supervise-daemon"
+
+# SIGQUIT is FPM's graceful stop -- children finish the request they are on.
+# The default SIGTERM cuts them off mid-request.
+retry="QUIT/30/KILL/5"
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --mode 0755 /run/php-fpm-ng
+	checkpath --directory --owner root:root --mode 0750 /var/log/php-fpm-ng
+}
+
+reload() {
+	# SIGUSR2 is FPM's reload: the master re-reads the configuration and
+	# replaces its children.
+	ebegin "Reloading $name"
+	supervise-daemon "$name" --signal USR2
+	eend $?
+}

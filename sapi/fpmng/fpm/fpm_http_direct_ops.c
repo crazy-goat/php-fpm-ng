@@ -137,7 +137,14 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 
 		if (index < ops->shared->nslots) {
 			ops->slot = &ops->shared->slots[index];
-			memset(ops->slot, 0, sizeof(*ops->slot));
+			/* Only the gauge is cleared. The three totals belong to the pool,
+			 * not to whichever child happens to hold this slot now: a child
+			 * recycled by pm.max_requests gets the index the dead one
+			 * released, and zeroing here would make the pool's accepted
+			 * connections go backwards in the middle of a monitoring series.
+			 * The gauge, on the other hand, is exactly what a child killed
+			 * mid-request leaks, so it starts at zero. */
+			ops->slot->requests_active = 0;
 		}
 	}
 

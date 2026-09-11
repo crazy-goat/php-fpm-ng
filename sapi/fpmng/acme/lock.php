@@ -133,6 +133,13 @@ final class RenewalLock
      * is free. Diagnostics for an operator asking "why did this tick do
      * nothing"; never used to decide whether the lock may be taken.
      *
+     * Call it from a process that is not itself renewing. A lock is owned by
+     * an open file description, so on a platform where flock() is emulated
+     * with POSIX record locks -- per process rather than per description --
+     * probing from inside run()'s callback would release the order's own
+     * lock. That platform is already out of scope (see the caveat above),
+     * but the rule costs nothing to follow.
+     *
      * @return array{pid?: int, host?: string, started?: string}|null
      */
     public function holder(): ?array
@@ -142,10 +149,13 @@ final class RenewalLock
         if ($fd === false) {
             return null;
         }
-        // Taking the lock is the only reliable way to ask whether it is
-        // free. Releasing it immediately is safe: this reports a moment in
-        // the past either way, and the caller is told so.
-        if (flock($fd, LOCK_EX | LOCK_NB)) {
+        // A shared lock, deliberately, not the exclusive one run() takes. It
+        // still conflicts with a holder's LOCK_EX, so it answers the question
+        // -- but two diagnostic calls do not exclude each other, and more
+        // importantly a diagnostic call cannot make a renewer ticking at the
+        // same moment see the certificate as busy and skip it. Asking must
+        // never change the answer.
+        if (flock($fd, LOCK_SH | LOCK_NB)) {
             flock($fd, LOCK_UN);
             fclose($fd);
             return null;

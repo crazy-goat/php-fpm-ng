@@ -197,10 +197,22 @@ check(orderCount($orders) === $before + 1, 'orders after the recovery: ' . order
 check($elapsed < 5.0, sprintf('recovery took %.2fs, which is a timeout rather than an immediate release', $elapsed));
 echo "kill-recovers-immediately: ok\n";
 
-/* 5. The record a killed process left behind is diagnostics, not a lock. */
-$lockFile = $state->renewalLockPath('kill.test');
+/* 5. The record a killed process left behind is diagnostics, not a lock.
+ *    This needs its own domain: on kill.test the recovering renewer has
+ *    since truncated the file, so holder() there would return null even for
+ *    an implementation that answered from the file contents alone -- which
+ *    is exactly the implementation this step exists to rule out. Here the
+ *    record is still on disk, unreleased and never overwritten. */
+$leftover = start('leftover.test', "$root/ready-6", "$root/release-6");
+check(waitFor("$root/ready-6"), 'the leftover renewer never took the lock');
+proc_terminate($leftover[0], 9);
+finish($leftover);
+
+$lockFile = $state->renewalLockPath('leftover.test');
 check(is_file($lockFile), "the lock file $lockFile does not exist");
-check((new RenewalLock($state, 'kill.test'))->holder() === null,
+check(trim((string) file_get_contents($lockFile)) !== '',
+    'the killed renewer left no record, so this step proves nothing');
+check((new RenewalLock($state, 'leftover.test'))->holder() === null,
     'a leftover record is being reported as a live holder');
 echo "leftover-record-is-not-a-lock: ok\n";
 
@@ -210,7 +222,20 @@ check(sprintf('%o', fileperms($lockFile) & 0777) === '600',
     'lock file mode: ' . sprintf('%o', fileperms($lockFile) & 0777));
 echo "lock-file-is-private: ok\n";
 
-/* 7. run() is not swallowing failures: an order that throws releases the
+/* 7. A spelling of the same certificate is the same lock. DNS is
+ *    case-insensitive and the trailing root dot is not part of the name, so
+ *    'Example.test.' and 'example.test' are one certificate to the CA; if
+ *    they took two locks, two pools spelling one domain differently would
+ *    both run an order -- the very configuration this lock exists for. */
+$spelled = start('Example.test.', "$root/ready-7", "$root/release-7");
+check(waitFor("$root/ready-7"), 'the renewer for the spelled domain never took the lock');
+$rival = start('example.test', "$root/ready-8", "$root/release-8", 1.0);
+check(finish($rival) === 'busy', 'a different spelling of one domain took a second lock');
+touch("$root/release-7");
+check(finish($spelled) === 'ran', 'the renewer for the spelled domain did not finish');
+echo "spelling-is-not-a-second-certificate: ok\n";
+
+/* 8. run() is not swallowing failures: an order that throws releases the
  *    lock and lets the exception through, so a failed renewal is loud and
  *    the next tick can retry. */
 $lock = new RenewalLock($state, 'throw.test');
@@ -247,5 +272,6 @@ lock-is-released: ok
 kill-recovers-immediately: ok
 leftover-record-is-not-a-lock: ok
 lock-file-is-private: ok
+spelling-is-not-a-second-certificate: ok
 failure-releases-the-lock: ok
 Done

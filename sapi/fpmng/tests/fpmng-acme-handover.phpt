@@ -218,8 +218,14 @@ $tester->expectLogTerminatingNotices();
  * here). */
 $log = (string) @file_get_contents($tester->getPrefixedFile('log'));
 $key = (string) file_get_contents("$dir/privkey.pem");
-$keyBody = trim(str_replace(['-----BEGIN PRIVATE KEY-----', '-----END PRIVATE KEY-----'], '', $key));
-check(!str_contains($log, substr($keyBody, 0, 40)), 'the private key appeared in error_log');
+/* Strip whatever PEM label this OpenSSL wrote -- 1.1.1 emits "BEGIN RSA
+ * PRIVATE KEY", 3.x emits "BEGIN PRIVATE KEY". Matching only one of them
+ * would leave the header in $keyBody, and a needle that starts with a
+ * header line can never appear in a log, so the assertion would pass
+ * whether or not key bytes leaked. */
+$keyBody = trim(preg_replace('/-----(?:BEGIN|END)[^-]*-----|\s+/', '', $key));
+check(strlen($keyBody) > 200, 'could not extract the key body to search for: ' . strlen($keyBody));
+check(!str_contains($log, substr($keyBody, 40, 60)), 'the private key appeared in error_log');
 echo "no-key-material-in-the-log: ok\n";
 
 $tester->close();

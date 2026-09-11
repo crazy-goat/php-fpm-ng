@@ -43,7 +43,17 @@ try {
 
 `RenewalLock::holder()` answers "why did this tick do nothing" with the
 holder's pid, host and start time. It is diagnostics: it is never consulted
-to decide whether the lock may be taken.
+to decide whether the lock may be taken, and it probes with a *shared* lock
+so that asking the question cannot make a renewer ticking at that instant
+see the certificate as busy. Call it from a process that is not itself
+inside `run()`.
+
+Because the lock is named after the certificate's directory, the domain is
+canonicalised first (`State::canonicalDomain()`): lowercased, with the
+trailing root dot removed, and rejected outright if it is not a hostname.
+`Example.com`, `example.com.` and `example.com` are one certificate to a CA,
+so they must be one lock — two pools spelling one name differently would
+otherwise both run an order.
 
 ### Why flock() and not the shared memory the challenge store uses
 

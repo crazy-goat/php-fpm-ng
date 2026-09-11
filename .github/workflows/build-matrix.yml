@@ -48,6 +48,14 @@ on:
 # would mount empty directories. It runs on poligon-host, a runner instance
 # with its own _work -- kept away from the root-owned workspaces the container
 # jobs leave behind.
+# actions: write is only for build/ci-cancel-run.sh (issue #209), the
+# if: failure() step every job ends with: cancelling a run is an Actions API
+# write. contents: read is spelled out because naming any permission drops the
+# rest to none, and every job checks the repository out.
+permissions:
+  contents: read
+  actions: write
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -98,6 +106,16 @@ jobs:
       - uses: actions/checkout@v7
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
+      # Issue #209: 15 separate jobs, so GitHub's matrix `fail-fast` does not
+      # apply. One red job otherwise leaves the other fourteen compiling on a
+      # box that has four runner instances and eight threads, for a result
+      # nobody will read. The run ends as "cancelled" rather than "failed";
+      # build/ci-cancel-run.sh says why that is the price and what it costs.
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the tests
   # this repo owns, so a new test file cannot be silently unreachable. Hermetic
@@ -120,6 +138,11 @@ jobs:
       - uses: actions/checkout@v7
       - name: verify fpmng .phpt coverage check (issue #95)
         run: ./build/test-fpmng-phpt-coverage.sh
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Fast, cheap: proves patches/*.patch still apply to the pinned php-src
   # revision. build/prepare.sh already exits 1 and prints "ERROR: patch does
@@ -148,6 +171,11 @@ jobs:
           git -C php-src checkout FETCH_HEAD
       - name: apply patches (build/prepare.sh)
         run: ./build/prepare.sh "$PWD/php-src"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Deliberately a single cell for now (non-ZTS, session static, TLS on),
   # not the full ZTS x session x TLS matrix from task 002 (done; docs/task-archive.md).
@@ -297,6 +325,11 @@ jobs:
           name: fpmng-canonical-build
           path: stage
           retention-days: 3
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 001 landed the copied upstream FPM .phpt suite and its runner
   # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
@@ -332,6 +365,11 @@ jobs:
         with:
           name: phpt-results
           path: phpt-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 003: regression tests for pool.type, pool.executor, and request-less
   # pool types. Fiber cases skip on the canonical build (--enable-fpmng-fiber is
@@ -380,6 +418,11 @@ jobs:
         with:
           name: fpmng-phpt-results
           path: fpmng-phpt-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Issue #97: ten of the .phpt tests this repo owns are gated on
   # --enable-fpmng-fiber, and no cell built with it -- so they could only ever
@@ -518,6 +561,11 @@ jobs:
         with:
           name: fpmng-phpt-fiber-results
           path: fpmng-phpt-fiber-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 076 acceptance criterion ("the test is reachable from CI on at least
   # one job that has opcache, or... gains one; say which was done"): NO new
@@ -635,6 +683,11 @@ jobs:
           name: lint-c-report
           path: lint-c-report.txt
           retention-days: 14
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 004: prove that the shipped SAPI, not the historical php-src HTTP POC,
   # links statically on musl and serves HTTP when it is the only executable in
@@ -710,6 +763,11 @@ jobs:
             out-static/configure-full.log
             out-static/make-full.log
           retention-days: 14
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 010: the HTTP gateway must drop root before it ever accepts a
   # connection, instead of holding the master's identity (and the TLS private
@@ -746,6 +804,11 @@ jobs:
       - name: hand the workspace back to the runner account
         if: always()
         run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Task 040: a renewed TLS certificate must take effect in every gateway
   # process without a restart. Needs multiple real gateway processes under
@@ -778,6 +841,11 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Issue #172: a pool with http.tls_wait_for_cert must start without its
   # certificate, refuse TLS connections rather than answer them badly, and
@@ -810,6 +878,11 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-wait-for-cert.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Issue #90: the per-connection read deadline (task 031) used to fire into a
   # bufferevent evhttp had already freed, killing the whole gateway process
@@ -841,6 +914,11 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   # Issue #129: a synchronous hard write error while handing a request to an
   # upstream freed the connection and the upstream underneath their caller.
@@ -874,6 +952,11 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-gateway-write-failure.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
 
   plain-http-listener:
     needs: build
@@ -900,3 +983,8 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh

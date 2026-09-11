@@ -50,10 +50,18 @@ on:
 # jobs leave behind.
 # actions: write is only for build/ci-cancel-run.sh (issue #209), the
 # if: failure() step every job ends with: cancelling a run is an Actions API
-# write. contents: read is spelled out because naming any permission drops the
-# rest to none, and every job checks the repository out.
+# write.
+#
+# The other two are not decoration. Naming any permission drops every
+# unnamed one to none, and this workflow needs both of them: contents: read
+# because every job checks the repository out, and packages: read because
+# every job except static-musl pulls ghcr.io/crazy-goat/php-fpm-ng-ci with
+# secrets.GITHUB_TOKEN as the registry credential. Measured the hard way on
+# this issue's first run: with only contents+actions, `Initialize containers`
+# died with `403 Forbidden` from ghcr before any step ran.
 permissions:
   contents: read
+  packages: read
   actions: write
 
 concurrency:

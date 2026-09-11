@@ -207,6 +207,13 @@ for f in $(sources); do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # build rather than of the SAPI. The zend_signal_init() stand-in is NOT here:
 # it lives in sapi/fpmng/fpm/fpm_libphp_compat.c and arrives through the source
 # list above, gated on -DFPMNG_LIBPHP_BUILD (issue #213).
+#
+# ext/fpmng_metrics is compiled here but NOT registered here: on this path there
+# is no configure to put it in main/internal_functions.c, and the static module
+# list belongs to the distribution's libphp. The same FPMNG_LIBPHP_BUILD file
+# registers it at runtime from fpm_init(), so the userland fpm_metric_*()
+# functions exist in a worker on both builds (issue #216). What differs is
+# `php-fpm-ng -m`, which never reaches fpm_init().
 for f in "$SRC/sapi/fpmng/fpm/fpm_trace.c" "$SRC/sapi/fpmng/fpm/fpm_trace_pread.c" \
          "$SRC/main/fastcgi.c" "$SRC/ext/fpmng_metrics/fpmng_metrics.c" \
          "$REPO/build/libphp/libphp_abi_check.c"; do

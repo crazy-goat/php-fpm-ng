@@ -28,6 +28,19 @@ FLAGS="$*"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
+# FPMNG_TREE_SKIP_CONFIGURE=yes stops after the checkout, the overlay and the
+# patch stack. The static musl build (build/static-full.sh, issue #197) needs
+# exactly that much: it configures out of tree, inside Alpine, with a musl
+# toolchain this host does not have, and keeps its own key next to its object
+# directory. The tree is then complete when `configure.ac` is there rather
+# than when a Makefile is.
+SKIP_CONFIGURE="${FPMNG_TREE_SKIP_CONFIGURE:-no}"
+if [ "$SKIP_CONFIGURE" = yes ]; then
+	SENTINEL="configure.ac"
+else
+	SENTINEL="Makefile"
+fi
+
 # --- the key ----------------------------------------------------------------
 #
 # php-src ref and configure flags are obvious. The rest are the ways a reused
@@ -83,7 +96,7 @@ DIRTY="$TREE/.fpmng-ci-dirty"
 
 # --- reuse or start over ----------------------------------------------------
 REUSED=no
-if [ -f "$KEYFILE" ] && [ "$(cat "$KEYFILE")" = "$KEY" ] && [ -f "$TREE/Makefile" ] &&
+if [ -f "$KEYFILE" ] && [ "$(cat "$KEYFILE")" = "$KEY" ] && [ -f "$TREE/$SENTINEL" ] &&
    [ ! -f "$DIRTY" ]; then
 	REUSED=yes
 else
@@ -114,7 +127,7 @@ touch "$DIRTY"
 # is worse than no assertion.
 CONFIGURE_LOG="$TREE/.fpmng-ci-configure.log"
 
-if [ "$REUSED" = no ]; then
+if [ "$REUSED" = no ] && [ "$SKIP_CONFIGURE" = no ]; then
 	if ! ( cd "$TREE" && ./buildconf --force ) > "$TREE/.fpmng-ci-buildconf.log" 2>&1; then
 		echo "=== BUILDCONF FAILED ==="
 		tail -20 "$TREE/.fpmng-ci-buildconf.log"
@@ -127,6 +140,9 @@ if [ "$REUSED" = no ]; then
 		tail -20 "$CONFIGURE_LOG"
 		exit 1
 	fi
+	echo "$KEY" > "$KEYFILE"
+fi
+if [ "$SKIP_CONFIGURE" = yes ]; then
 	echo "$KEY" > "$KEYFILE"
 fi
 rm -f "$DIRTY"
@@ -154,4 +170,8 @@ find "$ROOT" -mindepth 3 -maxdepth 3 -name .fpmng-ci-key -mtime +14 2>/dev/null 
 	done
 
 echo "ci-build-tree: tree $TREE reused=$REUSED key=$KEY"
-echo "ci-build-tree: configure log $CONFIGURE_LOG"
+if [ "$SKIP_CONFIGURE" = yes ]; then
+	echo "ci-build-tree: not configured here (FPMNG_TREE_SKIP_CONFIGURE=yes)"
+else
+	echo "ci-build-tree: configure log $CONFIGURE_LOG"
+fi

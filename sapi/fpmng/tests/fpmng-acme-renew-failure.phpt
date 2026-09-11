@@ -2,7 +2,8 @@
 fpm-ng: a failed renewal is loud, leaves the installed certificate serving, and backs off instead of hammering the CA (issue #49)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 if (!extension_loaded('openssl')) {
     die('skip requires the openssl extension');
 }

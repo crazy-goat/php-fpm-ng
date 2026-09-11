@@ -2,7 +2,8 @@
 fpm-ng: fiber executor keeps exceptions per request, including a suspension while one is in flight (docs/fiber_errors.md)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);

@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: the HTTP gateway refuses "Proxy" and bounds a request header name like HTTP-direct (issue #115)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 require_once "tester.inc";

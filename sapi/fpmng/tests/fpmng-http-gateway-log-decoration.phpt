@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: a gateway child's own line is decorated like a master line in the same error_log (issue #130)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

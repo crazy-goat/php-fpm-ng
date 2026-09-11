@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: HTTP gateway serves static files without PHP, runs scripts, and routes front_controller / PATH_INFO (docs/NOTES.md §6, task 018)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

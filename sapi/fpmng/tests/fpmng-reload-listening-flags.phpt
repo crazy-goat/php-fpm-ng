@@ -2,7 +2,8 @@
 fpm-ng: normalize fiber listening-socket flags across reloads
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
 
 if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
     die('skip requires Linux /proc socket metadata');

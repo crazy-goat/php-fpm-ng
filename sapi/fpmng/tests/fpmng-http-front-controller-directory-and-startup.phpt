@@ -2,7 +2,8 @@
 FPM http gateway: front-controller fallback for a directory, and its containment check runs at startup (task 018)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 ?>
 --FILE--
 <?php

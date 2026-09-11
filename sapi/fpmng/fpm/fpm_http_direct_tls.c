@@ -75,7 +75,7 @@ struct fpm_http_direct_tls_s {
 	 * gateway. */
 	SSL_CTX *ctx;
 	/* Child-only, like ctx: the caller's accept gate, see the header. */
-	void (*on_accept)(void *);
+	void (*on_accept)(void *, struct bufferevent *);
 	void *on_accept_arg;
 	struct fpm_http_direct_tls_s *next;
 };
@@ -101,11 +101,15 @@ static struct fpm_http_direct_tls_s *fpm_http_direct_tls_find(const char *pool)
 static struct bufferevent *fpm_http_direct_tls_bevcb(struct event_base *base, void *arg)
 {
 	struct fpm_http_direct_tls_s *st = arg;
+	/* After the bufferevent, not before: the hook is given it, and on this
+	 * path it is an SSL bufferevent whose descriptor evhttp attaches next --
+	 * the same point in the connection's life as on a plain pool. */
+	struct bufferevent *bev = fpm_http_tls_bevcb(base, st->ctx);
 
 	if (st->on_accept) {
-		st->on_accept(st->on_accept_arg);
+		st->on_accept(st->on_accept_arg, bev);
 	}
-	return fpm_http_tls_bevcb(base, st->ctx);
+	return bev;
 }
 
 int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
@@ -170,7 +174,7 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 }
 
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http, void (*on_accept)(void *), void *on_accept_arg)
+	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg)
 {
 	struct fpm_http_direct_tls_s *st;
 
@@ -234,7 +238,7 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 }
 
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http, void (*on_accept)(void *), void *on_accept_arg)
+	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg)
 {
 	(void) wp; (void) base; (void) http; (void) on_accept; (void) on_accept_arg;
 	return 0;

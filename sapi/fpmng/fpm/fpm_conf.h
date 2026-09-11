@@ -131,6 +131,8 @@ struct fpm_worker_pool_config_s {
 	int http_idle_timeout;			/* ms, releases an attached connection after this many idle ms; 0 = never */
 	int http_read_timeout;			/* ms, one budget for the whole client-side read (headers + body); 0 = no client read timeout */
 	size_t http_max_body;			/* bytes, hard cap on a request body the gateway buffers whole; see fpm_http.c */
+	int http_max_connections;		/* http-direct: connections one worker will hold at a time; 0 = unlimited. See fpm_http_direct_conn.h */
+	int http_max_connections_per_client;	/* http-direct: connections one peer address may hold on one worker; 0 = unlimited */
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */

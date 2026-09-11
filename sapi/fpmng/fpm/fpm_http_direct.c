@@ -32,6 +32,7 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_static.h"
+#include "fpm_http_direct_conn.h"
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
@@ -100,6 +101,9 @@ struct fpm_direct_worker {
 	struct fpm_http_direct_ops *ops;
 	/* access.log; NULL when the pool sets none. */
 	struct fpm_http_direct_access_log_s *access_log;
+	/* issue #61: the first-request deadline and the connection limits. NULL
+	 * only on OOM at start-up, which is fatal there. */
+	struct fpm_http_direct_conns *conns;
 };
 
 struct fpm_direct_request {
@@ -206,7 +210,16 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 	 * the child that accepted a connection and was then told nothing -- no
 	 * request, so no end of one -- which would otherwise sit out of accept until
 	 * the read timeout closed the silent connection. */
-	if (!w->in_request) {
+	/* Releases connections evhttp has finished with. The gate below sweeps for
+	 * itself, so this call is for the descriptors, not for the count: a child
+	 * that is accepting freely still has to let go of the fds of connections
+	 * that ended, and nothing else would ask it to. */
+	fpm_http_direct_conns_sweep(w->conns);
+	/* http.max_connections is a reason to stay out of accept, exactly like
+	 * being inside a request: the listening socket belongs to the whole pool,
+	 * so a connection this child does not take is one a sibling can take, and
+	 * one it refuses with a response is one nobody can. */
+	if (!w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
 		fpm_direct_accept_enable(w, 1);
 	}
 }
@@ -882,7 +895,7 @@ static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on)
 
 /* Shared by the plain bevcb below and, through
  * fpm_http_direct_tls_child_attach(), by the TLS one. */
-static void fpm_direct_accept_close_gate(void *arg)
+static void fpm_direct_accept_close_gate(void *arg, struct bufferevent *bev)
 {
 	struct fpm_direct_worker *w = arg;
 
@@ -893,12 +906,18 @@ static void fpm_direct_accept_close_gate(void *arg)
 	 * callback instead, exactly as the gateway does (fpm_http.c). */
 	fpm_http_direct_ops_accepted(w->ops);
 	fpm_direct_accept_enable(w, 0);
+	/* The same reason issue #61 has to start here: the bufferevent is the only
+	 * handle on the connection that exists this early, and it is the one thing
+	 * that stays valid for the connection's whole life. */
+	fpm_http_direct_conns_accepted(w->conns, bev);
 }
 
 static struct bufferevent *fpm_direct_accept_bevcb(struct event_base *base, void *arg)
 {
-	fpm_direct_accept_close_gate(arg);
-	return bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+	struct bufferevent *bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+
+	fpm_direct_accept_close_gate(arg, bev);
+	return bev;
 }
 
 /* Best effort, non-blocking: write what the socket will take right now and
@@ -1338,10 +1357,35 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	time_t started_epoch = time(NULL);
 	int local_status = 0;
 	size_t local_bytes = 0;
+	int over_client_cap = 0;
 
 	gettimeofday(&started, NULL);
 	if (evcon) {
 		evhttp_connection_get_peer(evcon, &peer, &peer_port);
+		/* The first request on this connection has fully arrived -- evhttp
+		 * does not call back before it has -- so whatever budget issue #61
+		 * gave it for arriving is spent. It is also where
+		 * http.max_connections_per_client lands when the request beat the
+		 * pickup pass to the loop, which is what -1 means. The refusal is a
+		 * 503 and not the silent close the pickup pass performs, because a
+		 * connection evhttp is holding for a request it has already parsed
+		 * does not read again: EV_READ is off for the duration of this
+		 * callback, so the read timeout the pickup pass uses to drop a
+		 * connection from outside has nothing to fire on and the client would
+		 * sit there until the idle timeout instead. Sending an error is the
+		 * one close evhttp offers from inside a request callback --
+		 * evhttp_send_error() sets Connection: close itself. Two shapes for
+		 * one directive, and the difference is exactly whether the client got
+		 * a request in before it was judged; both end with the connection
+		 * closed and both are counted as refusals.
+		 *
+		 * Disarming the deadline cannot wait for the ACL below -- it belongs
+		 * to the connection, not to whether this client may be served -- but
+		 * the ANSWER can and must: a client listen.allowed_clients excludes
+		 * has to get the same 403 whatever else is true of it, or the pool's
+		 * per-client cap becomes something an excluded address can probe. */
+		over_client_cap = fpm_http_direct_conns_request(w->conns,
+			evhttp_connection_get_bufferevent(evcon)) < 0;
 	}
 
 	/* listen.allowed_clients, issue #59. Before anything else this function
@@ -1355,6 +1399,12 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 403, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 403, "Forbidden");
+		return;
+	}
+	if (over_client_cap) {
+		fpm_http_direct_ops_refused(w->ops);
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 503, 0);
+		evhttp_send_error(http, 503, "Too many connections");
 		return;
 	}
 	if (fpm_direct_stopping || w->pending >= FPM_DIRECT_PENDING_MAX) {
@@ -1504,6 +1554,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	struct timeval interval = {0, 10000};
 	struct timeval timeout = {wp->config->http_read_timeout / 1000, (wp->config->http_read_timeout % 1000) * 1000};
 	struct sigaction action = {0};
+	struct fpm_http_direct_conns_limits limits = {0};
 	struct sockaddr_storage address;
 	socklen_t address_len = sizeof(address);
 
@@ -1522,6 +1573,14 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	w.base = event_base_new();
 	w.http = w.base ? evhttp_new(w.base) : NULL;
 	if (!w.http) exit(FPM_EXIT_SOFTWARE);
+	/* Before the bevcb is installed, because the first connection this child
+	 * accepts already goes through it. */
+	limits.pool = wp->config->name;
+	limits.read_timeout_ms = wp->config->http_read_timeout;
+	limits.max_connections = wp->config->http_max_connections;
+	limits.max_per_client = wp->config->http_max_connections_per_client;
+	w.conns = fpm_http_direct_conns_new(w.base, &limits);
+	if (!w.conns) exit(FPM_EXIT_SOFTWARE);
 	evhttp_set_max_headers_size(w.http, FPM_HTTP_HEADERS_MAX);
 	evhttp_set_max_body_size(w.http, wp->config->http_max_body);
 	evhttp_set_timeout_tv(w.http, &timeout);
@@ -1568,6 +1627,10 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	if (!tick || event_add(tick, &interval) < 0) exit(FPM_EXIT_SOFTWARE);
 	event_base_dispatch(w.base);
 	event_free(tick);
+	/* Before evhttp_free() and event_base_free(): every tracked connection
+	 * holds an event on this base and a reference to a bufferevent evhttp is
+	 * about to drop. */
+	fpm_http_direct_conns_free(w.conns);
 	evhttp_free(w.http);
 	event_base_free(w.base);
 	fpm_http_direct_access_log_free(w.access_log);

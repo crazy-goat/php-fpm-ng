@@ -172,8 +172,6 @@ jobs:
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
-      - name: TEMPORARY (issue #209 demonstration) fail immediately
-        run: exit 1
       - name: clone pinned php-src
         run: |
           git init php-src

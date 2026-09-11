@@ -150,15 +150,25 @@ What changes:
   unwritten, the script blocks in the SAPI write until the client has taken
   enough of it. This worker serves nobody else meanwhile — that is the same
   property the buffered path already has, applied to a slower phase.
-- Nothing streams that cannot: a non-final status (`1xx`), a bodyless response
-  (HEAD, 204, 205, 304), or a response already doomed by the header caps stays
-  on the buffered path, so the existing framing and error behaviour is unchanged.
-  The task 054 tests measure the default and are unmodified.
+- Nothing streams that cannot: an **HTTP/1.0 client** (there is no chunked
+  framing to use, and a `Content-Length: 0` followed by a body would let a
+  keep-alive client read that body as the next response), a non-final status
+  (`1xx`), a bodyless response (HEAD, 204, 205, 304), or a response already
+  doomed by the header caps. All of these stay on the buffered path, so the
+  existing framing and error behaviour is unchanged. The task 054 tests measure
+  the default and are unmodified.
+- `pm.max_requests` and a pending shutdown add `Connection: close` before the
+  headers go out. A SIGQUIT that arrives *after* that point cannot: the header
+  is already on the wire, so a client on that one connection learns the child
+  is retiring from the close rather than from the header. The buffered path,
+  which decides with the whole response in hand, is not affected.
 
-**Failure mode when the client stalls.** A client that stops reading is given
-`http.stream_write_timeout` milliseconds. On expiry — or on any write error, or
-if the peer closes — the worker logs a `WARNING`
-(`the client stopped reading the response`), drops the buffered remainder and
+**Failure mode when the client stalls.** `http.stream_write_timeout` is the
+total time the worker may spend *blocked* on the client across one response —
+not a per-write budget, which a client taking one byte before each deadline
+would renew forever. A client keeping up with the response never spends any of
+it. On expiry — or on any write error, or if the peer closes — the worker logs
+a `WARNING` (`the client stopped reading the response`), drops the remainder and
 shuts the socket down **without the terminating chunk**. The client therefore
 sees an unterminated chunked message and can tell the response is incomplete; it
 never sees a silently short 200. The worker's memory does not grow after the
@@ -184,12 +194,12 @@ is in flight. Raw data: `metadata.json` / `results.json` in the scratch folder.
 
 | response | pool | status | TTFB | total | peak RSS |
 | --- | --- | --- | --- | --- | --- |
-| 4 MiB | buffered | 200 | 2.68 ms | 4.71 ms | 29.6 MiB |
-| 4 MiB | streamed | 200 | **0.23 ms** | 1.95 ms | **25.7 MiB** |
-| 16 MiB | buffered | 500 (over the 8 MiB cap) | 5.78 ms | 5.78 ms | 33.4 MiB |
-| 16 MiB | streamed | 200 | **0.18 ms** | 8.23 ms | **25.7 MiB** |
+| 4 MiB | buffered | 200 | 4.83 ms | 8.28 ms | 29.7 MiB |
+| 4 MiB | streamed | 200 | **0.27 ms** | 2.13 ms | **25.3 MiB** |
+| 16 MiB | buffered | 500 (over the 8 MiB cap) | 5.94 ms | 5.94 ms | 33.6 MiB |
+| 16 MiB | streamed | 200 | **0.22 ms** | 5.68 ms | **25.3 MiB** |
 
-Time to first byte is ~12x lower at 4 MiB and does not grow with the response,
+Time to first byte is ~18x lower at 4 MiB and does not grow with the response,
 which is the point: it is the time to the first chunk, not to the last. Peak RSS
 is flat across both sizes for the streamed pool and grows with the response for
 the buffered one; at 16 MiB the buffered pool has no answer at all. The

@@ -106,6 +106,7 @@ struct fpm_direct_request {
 	int streaming;		/* the status line and the headers are already on the wire */
 	int stream_declined;	/* this response will not stream: decided once, not per write */
 	int may_stream;		/* set only around php_execute_script(), see fpm_direct_flush() */
+	long stream_waited_ms;	/* http.stream_write_timeout is spent across the whole response */
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -224,14 +225,33 @@ static size_t fpm_direct_write(const char *str, size_t len)
 		fpm_direct_stream_begin(r);
 	}
 	if (r->streaming) {
-		/* r->http == NULL means the client is already gone: the bytes go
-		 * nowhere, but PHP must still reach its own shutdown, so the buffer
-		 * is simply not grown. */
-		if (r->http && evbuffer_add(r->output, str, len) < 0) {
-			fpm_direct_stream_abort(r, "out of memory while buffering a chunk");
-		}
-		if (evbuffer_get_length(r->output) >= FPM_DIRECT_STREAM_CHUNK) {
-			fpm_direct_stream_push(r);
+		size_t done = 0;
+
+		/* One chunk at a time, not one SAPI write at a time. `len` is whatever
+		 * the script handed to echo -- with output_buffering = 0 a single
+		 * `echo file_get_contents($big)` is one write -- and buffering all of
+		 * it before the first push would make the peak the size of that write
+		 * rather than FPM_DIRECT_STREAM_HIGHWATER. */
+		while (done < len) {
+			size_t take = len - done;
+
+			/* r->http == NULL means the client is already gone: the bytes go
+			 * nowhere, but PHP must still reach its own shutdown, so the
+			 * buffer is simply not grown. */
+			if (!r->http) {
+				break;
+			}
+			if (take > FPM_DIRECT_STREAM_CHUNK - evbuffer_get_length(r->output)) {
+				take = FPM_DIRECT_STREAM_CHUNK - evbuffer_get_length(r->output);
+			}
+			if (evbuffer_add(r->output, str + done, take) < 0) {
+				fpm_direct_stream_abort(r, "out of memory while buffering a chunk");
+				break;
+			}
+			done += take;
+			if (evbuffer_get_length(r->output) >= FPM_DIRECT_STREAM_CHUNK) {
+				fpm_direct_stream_push(r);
+			}
 		}
 		return len;
 	}
@@ -470,7 +490,15 @@ static void fpm_direct_stream_closed(struct evhttp_connection *connection, void 
 /* Whether this response is the last one this child will serve, decided before
  * the headers go out because a streamed response cannot gain a Connection
  * header afterwards. Mirrors the two triggers the buffered tail applies after
- * w->requests++. */
+ * w->requests++.
+ *
+ * The known gap: a SIGQUIT that arrives while the script is still producing
+ * output sets fpm_direct_stopping too late to be answered with
+ * Connection: close, so a client on that one connection learns the child is
+ * gone from the close rather than from the header. The buffered path has the
+ * whole response in hand when it decides and does not. Documented in
+ * docs/http-direct.md rather than papered over: the header cannot be recalled
+ * once it is on the wire. */
 static bool fpm_direct_last_request(const struct fpm_direct_worker *w)
 {
 	int max = w->wp->config->pm_max_requests;
@@ -493,8 +521,14 @@ static void fpm_direct_stream_begin(struct fpm_direct_request *r)
 	 *  - the status is not one evhttp_send_reply() would frame, which the
 	 *    buffered tail also refuses to send;
 	 *  - HEAD/204/205/304 carry no body, so there is nothing to stream and the
-	 *    buffered path already drops the bytes. */
+	 *    buffered path already drops the bytes;
+	 *  - the client speaks HTTP/1.0, which has no chunked framing: libevent
+	 *    would answer Content-Length: 0 (the buffer is empty when the headers
+	 *    go out) and then write the body after it, so a keep-alive client
+	 *    would read the body as the start of the next response.
+	 */
 	if (!w->wp->config->http_stream || !r->http || r->rejected ||
+		r->http->major != 1 || r->http->minor < 1 ||
 		!fpm_http_direct_status_final(r->status) ||
 		fpm_http_direct_status_bodyless(r->http, r->status)) {
 		r->stream_declined = 1;
@@ -546,17 +580,16 @@ static void fpm_direct_stream_abort(struct fpm_direct_request *r, const char *wh
 	}
 }
 
-/* Milliseconds left of `budget` since `start`, never negative. */
-static int fpm_direct_stream_left(const struct timespec *start, int budget)
+/* Milliseconds since `start`, or -1 if the clock is unreadable -- in which case
+ * the caller must not wait at all rather than wait unbounded. */
+static long fpm_direct_stream_elapsed(const struct timespec *start)
 {
 	struct timespec now;
-	long elapsed;
 
 	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
-		return 0;	/* no clock, no bounded wait: give up rather than block forever */
+		return -1;
 	}
-	elapsed = (long) (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
-	return elapsed >= budget ? 0 : (int) (budget - elapsed);
+	return (long) (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
 }
 
 /* Writes as much of the response as the socket will take right now, and then
@@ -571,26 +604,32 @@ static int fpm_direct_stream_left(const struct timespec *start, int budget)
  *
  * The wait is bounded by http.stream_write_timeout, because there is exactly
  * one request in flight per child here: a client that stops reading must not
- * take the worker with it. */
+ * take the worker with it. The budget is spent across the whole response
+ * (r->stream_waited_ms), not restarted per call: a client that takes one byte
+ * every timeout-minus-one milliseconds makes progress every time and would
+ * otherwise hold the worker for as long as it cared to. Only time the script
+ * spends *blocked* counts, so a client keeping up pays nothing. */
 static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
 {
 	struct bufferevent *bev;
 	struct evbuffer *out;
 	evutil_socket_t fd;
-	struct timespec start;
 	int budget = r->w->wp->config->http_stream_write_timeout;
+	int idle_writes = 0;
 
 	if (!r->http) {
 		return;
 	}
 	bev = evhttp_connection_get_bufferevent(evhttp_request_get_connection(r->http));
 	fd = bev ? bufferevent_getfd(bev) : -1;
-	if (!bev || fd < 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+	if (!bev || fd < 0) {
 		return;
 	}
 	out = bufferevent_get_output(bev);
 	while (evbuffer_get_length(out) > 0) {
 		struct pollfd pfd = { fd, POLLOUT, 0 };
+		struct timespec before;
+		long waited;
 		int left, ready, written;
 
 		/* Exactly what bufferevent_writecb() does with this buffer and this
@@ -607,10 +646,19 @@ static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
 		written = evbuffer_write(out, fd);
 		evbuffer_freeze(out, 1);
 		if (written > 0) {
+			idle_writes = 0;
 			continue;
 		}
 		if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
 			fpm_direct_stream_abort(r, "writing the response to the client failed");
+			return;
+		}
+		/* A zero-length write on a non-empty buffer means neither progress nor
+		 * an error to act on. Once in a row is tolerated; twice, with poll()
+		 * still calling the descriptor writable in between, would be a loop
+		 * spinning at full CPU until the budget ran out. */
+		if (written == 0 && ++idle_writes > 1) {
+			fpm_direct_stream_abort(r, "the client connection accepted no data");
 			return;
 		}
 		/* The socket is full. Below the mark that is fine: the rest goes out
@@ -618,12 +666,16 @@ static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
 		if (evbuffer_get_length(out) <= limit) {
 			return;
 		}
-		left = fpm_direct_stream_left(&start, budget);
-		if (left == 0) {
+		left = (int) (budget - r->stream_waited_ms);
+		if (left <= 0 || clock_gettime(CLOCK_MONOTONIC, &before) != 0) {
+			/* No budget, or no clock to bound the next wait with. Either way
+			 * blocking again is what must not happen. */
 			fpm_direct_stream_abort(r, "the client stopped reading the response");
 			return;
 		}
 		ready = poll(&pfd, 1, left);
+		waited = fpm_direct_stream_elapsed(&before);
+		r->stream_waited_ms += waited < 0 ? left : waited;
 		if (ready < 0 && errno != EINTR) {
 			fpm_direct_stream_abort(r, "poll() on the client connection failed");
 			return;

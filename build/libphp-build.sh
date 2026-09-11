@@ -15,7 +15,7 @@
 # those pool types at startup; that is issue #214, not this script.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
-# 53 sources out of config.m4 plus 5, and the owned .phpt suite reports
+# 53 sources out of config.m4 plus 6, and the owned .phpt suite reports
 # PASS=48 FAIL=1 SKIP=10 of 59 against this binary. The one failure is
 # fpmng-config-rejected-directives.phpt, which reads `Configure Command` out of
 # -i to decide what the build is; a distribution PHP prints no such line. That
@@ -161,7 +161,10 @@ SHIM
 INC="-I$OUT/fcgi-inc $CORE_INC -I$SRC/sapi/fpmng -I$SRC/sapi/fpmng/fpm -I$SRC/ext/fpmng_metrics -I$REPO/build/libphp -I$OUT/compat -include $REPO/build/libphp/libphp_compat.h"
 # -D_GNU_SOURCE is required, not stylistic: Zend/zend_operators.h:235 uses
 # memrchr(), which glibc hides behind it.
-CFLAGS="-D_GNU_SOURCE -O2 -g -fno-strict-aliasing -Wno-deprecated-declarations"
+# EXTRA_CFLAGS exists for the version-guard demonstration in
+# build/libphp/libphp_abi_check.c, which cannot be triggered with packages that
+# exist; see the comment there.
+CFLAGS="-D_GNU_SOURCE -O2 -g -fno-strict-aliasing -Wno-deprecated-declarations ${EXTRA_CFLAGS:-}"
 DEFS=$(echo "$SUPPLIED" | tr '\n' ' ')
 
 # --- sources -------------------------------------------------------------------
@@ -189,16 +192,42 @@ for f in $(sources); do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # patched fastcgi.c belongs to main/, and the compat unit below is ours.
 for f in "$SRC/sapi/fpmng/fpm/fpm_trace.c" "$SRC/sapi/fpmng/fpm/fpm_trace_pread.c" \
          "$SRC/main/fastcgi.c" "$SRC/ext/fpmng_metrics/fpmng_metrics.c" \
-         "$REPO/build/libphp/libphp_compat.c"; do
+         "$REPO/build/libphp/libphp_compat.c" \
+         "$REPO/build/libphp/libphp_abi_check.c"; do
   compile "$f"
 done
 
 # --- link ----------------------------------------------------------------------
-LIBPHP=-lphp$(echo "$PHP_VER" | cut -d. -f1,2)
+# Where libphp lives and what it is called is a distribution decision, so it is
+# searched for rather than assumed: Ubuntu ships /usr/lib/libphp8.5.so, Alpine
+# ships /usr/lib/php85/libphp.so. Hard-coding either one produces "cannot find
+# -lphp8.5" on the other.
+PHP_MM=$(echo "$PHP_VER" | cut -d. -f1,2)
+LIBPHP_DIR= LIBPHP_NAME=
+for dir in "$(dirname "$("$PHP_CONFIG" --extension-dir)")" "$("$PHP_CONFIG" --prefix)/lib" /usr/lib /usr/lib64; do
+  for name in "php$PHP_MM" php; do
+    if [ -e "$dir/lib$name.so" ]; then LIBPHP_DIR=$dir; LIBPHP_NAME=$name; break 2; fi
+  done
+done
+[ -n "$LIBPHP_NAME" ] || fail "no libphp shared object found for $PHP_CONFIG; install the embed package (libphp${PHP_MM}-embed, or php$(echo "$PHP_MM" | tr -d .)-embed on Alpine)"
+echo "libphp-build.sh: linking $LIBPHP_DIR/lib$LIBPHP_NAME.so"
+
+# musl folds dl, rt and pthread into libc and ships no separate archives, so
+# naming them is a link error there rather than a no-op. Probe instead of
+# branching on the libc, which would be one more thing to get wrong per distro.
+OPT_LIBS=
+for l in dl rt pthread; do
+  echo 'int main(void){return 0;}' | ${CC:-gcc} -x c - "-l$l" -o /dev/null 2>/dev/null &&
+    OPT_LIBS="$OPT_LIBS -l$l"
+done
+
 BIN="$OUT/php-fpm-ng"
 # shellcheck disable=SC2086
-${CC:-gcc} -o "$BIN" $OBJS $LIBPHP $ACL_LIBS \
-  -levent -levent_openssl -lssl -lcrypto -lm -ldl -lpthread -lrt -Wl,-E \
+# -rpath: Alpine puts libphp.so in a version-namespaced directory that is not
+# on the default search path, so without it the binary links and then cannot
+# start. On Ubuntu the directory is already default and the flag is inert.
+${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_NAME" $ACL_LIBS \
+  -levent -levent_openssl -lssl -lcrypto -lm $OPT_LIBS -Wl,-E \
   >"$OUT/link.log" 2>&1 || {
   echo "=== LINK FAILED ==="
   grep "undefined reference" "$OUT/link.log" | sed 's/.*undefined reference to //' | sort -u | head -20
@@ -221,4 +250,4 @@ assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a r
 ldd "$BIN" | grep -qi "libphp" || fail "the binary does not link a distribution libphp; this is not the build this script is for"
 echo "libphp-build.sh: $(ldd "$BIN" | grep -i libphp | tr -s ' ')"
 "$BIN" -v | head -1
-echo "libphp-build.sh: PASS ($src_count sources + 5, -> $BIN)"
+echo "libphp-build.sh: PASS ($src_count sources from config.m4 + $(echo $OBJS | wc -w | tr -d " ") objects total, -> $BIN)"

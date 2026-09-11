@@ -47,6 +47,7 @@
 #include <event2/http_struct.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/buffer.h>
+#include <event2/bufferevent.h>
 
 #include "php.h"
 #include "php_main.h"
@@ -63,6 +64,7 @@
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_direct_conn.h"
 #include "fpm_http_acl.h"
 #include "fpm_std_streams.h"
 #include "fpm_php.h"
@@ -139,6 +141,9 @@ static struct {
 	struct event_base *base;
 	struct evhttp *http;
 	struct evhttp_bound_socket *listener;
+	/* issue #61: the first-request deadline. The connection limits are not
+	 * here -- this executor rejects them, see fpm_http_direct_worker_rejects. */
+	struct fpm_http_direct_conns *conns;
 	char root[PATH_MAX];
 	char script[PATH_MAX];
 	char server_addr[NI_MAXHOST];
@@ -184,6 +189,16 @@ const char *const fpm_http_direct_worker_rejects[] = {
 	 * executor supports all of these. */
 	"pm.status_path", "ping.path", "ping.response",
 	"access.log", "access.format", "access.suppress_path",
+	/* issue #61. http.max_connections is enforced by keeping the listener
+	 * disabled while the worker is at its limit, which is the accept gate of
+	 * issue #53 -- deliberately absent from this executor (see the
+	 * fpm_http_direct_tls_child_attach() call in child_main). Without it the
+	 * only way to honour a limit here is to answer a refusal, and a refused
+	 * connection is one no sibling child can pick up: the directive would
+	 * mean something different on each executor. http.max_connections_per_client
+	 * follows it rather than being half a policy on its own. The first-request
+	 * deadline of the same issue IS enforced here -- it needs no gate. */
+	"http.max_connections", "http.max_connections_per_client",
 	NULL
 };
 
@@ -378,6 +393,25 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	fpm_worker_notify();
 }
 
+/* evhttp's only per-accepted-connection hook, and therefore the only place
+ * the first-request deadline of issue #61 can be armed. Shared by the plain
+ * bevcb below and, through fpm_http_direct_tls_child_attach(), by the TLS one.
+ * This executor's hook counts nothing and gates nothing: it hands the
+ * bufferevent to the tracker and returns. */
+static void fpm_worker_accept_hook(void *arg, struct bufferevent *bev)
+{
+	(void) arg;
+	fpm_http_direct_conns_accepted(fw.conns, bev);
+}
+
+static struct bufferevent *fpm_worker_bevcb(struct event_base *base, void *arg)
+{
+	struct bufferevent *bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+
+	fpm_worker_accept_hook(arg, bev);
+	return bev;
+}
+
 static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 {
 	struct fpm_worker_pending *p;
@@ -385,6 +419,13 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	ev_uint16_t peer_port = 0;
 
 	(void) arg;
+	/* The request arrived, so its deadline is spent -- before the ACL and the
+	 * saturation check below, because both of those end the request and the
+	 * connection they end must not still be holding an armed timer. The return
+	 * value cannot be anything but 0 here: it reports
+	 * http.max_connections_per_client, which this executor rejects. */
+	(void) fpm_http_direct_conns_request(fw.conns,
+		evhttp_connection_get_bufferevent(evhttp_request_get_connection(http)));
 	/* Before the saturation check below: a client that may not be here learns
 	 * nothing about how busy the worker is. */
 	if (fw.acl) {
@@ -1476,6 +1517,7 @@ static int fpm_worker_wrap_notify_stream(void)
 void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 {
 	struct timeval timeout = {wp->config->http_read_timeout / 1000, (wp->config->http_read_timeout % 1000) * 1000};
+	struct fpm_http_direct_conns_limits limits = {0};
 	struct sigaction action = {0}, term_before;
 	struct sockaddr_storage address;
 	socklen_t address_len = sizeof(address);
@@ -1506,6 +1548,17 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	if (!fw.http) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
+	/* Before the bevcb is installed, because the first connection this child
+	 * accepts already goes through it. Both limits are zero by design: this
+	 * executor rejects them, so only the deadline is tracked here and no
+	 * connection is ever kept past its first request -- which is why this
+	 * executor needs no sweep and therefore no periodic tick. */
+	limits.pool = wp->config->name;
+	limits.read_timeout_ms = wp->config->http_read_timeout;
+	fw.conns = fpm_http_direct_conns_new(fw.base, &limits);
+	if (!fw.conns) {
+		exit(FPM_EXIT_SOFTWARE);
+	}
 	evhttp_set_max_headers_size(fw.http, FPM_HTTP_HEADERS_MAX);
 	evhttp_set_max_body_size(fw.http, wp->config->http_max_body);
 	evhttp_set_timeout_tv(fw.http, &timeout);
@@ -1513,13 +1566,20 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		EVHTTP_REQ_PUT | EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_gencb(fw.http, fpm_worker_accept, NULL);
 	/* See the same call in fpm_http_direct.c: before the listener, so no
-	 * connection is ever accepted in the plain. No on-accept hook: the accept
-	 * gate of issue #53 is the classic executor's, where the loop is blocked for
-	 * the whole of every request. Here the loop is driven by userland, which can
-	 * hold several requests in flight, so the same gate would be a throughput
-	 * cost against a different -- and unmeasured -- fairness problem. */
-	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http, NULL, NULL) < 0) {
+	 * connection is ever accepted in the plain. The on-accept hook here is not
+	 * the accept gate of issue #53 -- that gate is the classic executor's, where
+	 * the loop is blocked for the whole of every request; here the loop is
+	 * driven by userland, which can hold several requests in flight, so the same
+	 * gate would be a throughput cost against a different -- and unmeasured --
+	 * fairness problem. It arms the first-request deadline of issue #61 and
+	 * nothing else. */
+	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http, fpm_worker_accept_hook, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
+	}
+	/* On a TLS pool the hook above is already installed on the TLS bevcb,
+	 * which fpm_http_direct_tls.c reinstalls on every certificate reload. */
+	if (!fpm_http_direct_tls_enabled(wp)) {
+		evhttp_set_bevcb(fw.http, fpm_worker_bevcb, NULL);
 	}
 	fw.listener = evhttp_accept_socket_with_handle(fw.http, wp->listening_socket);
 	if (!fw.listener) {
@@ -1652,6 +1712,10 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * write into freed memory. Reachable whenever the worker script stops with
 	 * requests still in flight — an escaping exception, exit(), or a handler
 	 * that never answered. */
+	/* Before evhttp_free() and event_base_free(): a tracked connection holds an
+	 * event on this base and a reference to a bufferevent evhttp is about to
+	 * drop. */
+	fpm_http_direct_conns_free(fw.conns);
 	evhttp_free(fw.http);
 	zend_hash_destroy(&fw.pending);
 	php_request_shutdown(NULL);

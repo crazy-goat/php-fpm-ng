@@ -153,7 +153,8 @@ above come from one sitting on one toolchain for that reason.
   [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
   `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`,
-  `http.stream_write_timeout` and `http.static` from the gateway's `http.*`
+  `http.stream_write_timeout`, `http.static`, `http.max_connections` and
+  `http.max_connections_per_client` from the gateway's `http.*`
   directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
@@ -190,11 +191,17 @@ above come from one sitting on one toolchain for that reason.
   learns — and the client gets libevent's bare 500 page.
 - There are at most 16 pending PHP response writes per worker; further ready
   requests get 503. This is **not a total connection/memory bound**: partially
-  read requests and idle connections also use memory.
-- `http.read_timeout` must be positive. In this POC it is libevent's **inactivity**
-  timeout for reads/writes, not the gateway's absolute whole-request deadline.
-  PHP execution blocks this worker's event loop, including its timers. A trickling
-  client can evade the inactivity timer; this is not slowloris protection.
+  read requests and idle connections also use memory. Since issue #61 the
+  number of connections a worker holds can be capped — see
+  [Connection limits](#connection-limits-httpmax_connections) — but that is a
+  connection count, still not a memory bound.
+- `http.read_timeout` must be positive. It is libevent's **inactivity** timeout
+  for reads/writes, plus — since issue #61 — an absolute deadline on the
+  **first** request of a connection, see
+  [Connection limits](#connection-limits-httpmax_connections). A trickling
+  client can still evade the inactivity timer on the second and later requests
+  of a keep-alive connection. PHP execution blocks this worker's event loop,
+  including its timers.
 - A worker can hold many HTTP connections but execute only one PHP request at a
   time. The shared listener can batch accepts unevenly, and keep-alive connections
   remain attached to their accepting worker. There is no gateway queue that can
@@ -259,6 +266,115 @@ If a supported long-polling shape ever needs more than 256 held requests per
 worker, or needs them to survive the ceiling, that is a design change: it has
 to come with a bound of its own, and it belongs to #68 and its follow-ups, not
 to this limit.
+
+## Connection limits (`http.max_connections`)
+
+Three policies, added by issue #61, all of them **per worker**. A pool with
+`pm.max_children = 4` and `http.max_connections = 64` allows up to 256
+connections; there is no counter shared between the children, and there is not
+meant to be one — a shared counter would need shared memory on the accept path,
+and a child is what owns the fds.
+
+```ini
+http.read_timeout = 5000              ; ms — also the first-request deadline
+http.max_connections = 64             ; per worker, 0 = unlimited (default)
+http.max_connections_per_client = 8   ; per peer address, per worker, 0 = unlimited
+```
+
+Both limits are validated at startup (`php-fpm-ng -t`). Each must be between 0
+and 1000000; a per-client cap above `http.max_connections` is refused because it
+could never be reached; and a per-client cap **requires** `http.max_connections`.
+The last one is not tidiness: the per-client count is a walk of the connections
+this worker already holds, done once per accepted connection, so without a total
+cap the accept path would grow with the flood the directive exists to survive.
+
+### The first-request deadline
+
+`http.read_timeout` is documented as one budget for the whole client-side read.
+On the http gateway it is exactly that; on a direct pool it used to be only
+libevent's idle timeout, which every arriving byte resets.
+
+Measured on the poligon, 2026-09-11, against a direct pool with
+`http.read_timeout = 3000`:
+
+| client | before issue #61 |
+| --- | --- |
+| sends nothing at all | dropped at 3.0 s |
+| sends one byte of the request line every 2 s | held the connection **56 s**, then was served normally |
+
+So only the trickle was unbounded — which is the shape of slowloris. Since
+issue #61 a connection whose **first** request has not fully arrived within
+`http.read_timeout` is closed, whatever it has been dripping. The deadline is
+armed on accept and disarmed the moment the first request is complete; libevent
+2.1.12 offers no request-start hook, so later requests on the same keep-alive
+connection are covered by the idle timeout only. The first time a child actually drops a
+connection this way it says so once, at `NOTICE`; there is no line while nothing
+is being dropped, and the line needs `catch_workers_output = yes` to reach the
+error log at all (issue #73). `http.max_connections_per_client` announces itself
+the same way, once per child, the first time it refuses somebody.
+
+### The two limits, and the two shapes of refusal
+
+A worker at `http.max_connections` **stops accepting** instead of refusing: the
+listening socket is shared by every child of the pool, so a connection left in
+the queue is one a sibling can take, while a connection refused with a response
+is one nobody can. This reuses the accept gate from issue #53. The worker
+resumes accepting as soon as one of its connections goes away.
+
+`http.max_connections_per_client` cannot work that way — whether a connection
+is over the cap depends on who it is from, which is not known until it has been
+accepted. That one is enforced per connection, and takes either of two shapes,
+both of which a client must be prepared for:
+
+- the connection is **closed without a response**, when the cap is passed
+  before evhttp has handed us a request;
+- the request is answered **`503 Too many connections`**, when it is passed
+  inside the request callback. (Forcing a drop from there is not possible:
+  `EV_READ` is disabled on the bufferevent for the duration of the callback, so
+  the zero-timeout trick that drops a connection from outside does nothing.)
+
+The 503 is counted and logged exactly like the pool's other refusals — it
+increments the `pm.status` refusal counter and produces an `access.log` line —
+and it is emitted **after** `listen.allowed_clients`, so an address the ACL
+excludes still gets a plain `403 Forbidden` and learns nothing about the cap.
+
+The suite (`sapi/fpmng/tests/fpmng-http-direct-connection-limits.phpt`) accepts
+either shape for exactly this reason.
+
+### Under `pool.executor = worker`
+
+The deadline applies. The two limits are **rejected by `-t`**, not silently
+ignored: enforcing a total limit means not accepting, and the accept gate is
+part of the classic executor's loop, which this executor deliberately does not
+have (it drives the loop from userland with several requests in flight). What
+bounds a worker-executor child instead is the 256 held requests described in
+[Held requests](#held-requests-under-poolexecutor--worker-decision-2026-09-11).
+
+### What this is not: a throughput defence (measured, 2026-09-11)
+
+The limits are a **resource ceiling**, not a way to keep a worker fast under
+connection pressure. Measured on the poligon (4 children, 32 legit source
+addresses, against 200 idle connection hoarders):
+
+| configuration | 0 hoarders | 200 hoarders |
+| --- | --- | --- |
+| no limit | 5859.5 rps | 5837.4 rps |
+| `http.max_connections = 64` | 5723.1 rps | 5710.4 rps |
+| `http.max_connections_per_client = 5` | 5741.8 rps | 5653.0 rps |
+
+(The per-client row was measured before the total cap became mandatory
+alongside it; the per-client walk it times is the same one.)
+
+Idle connections cost this worker nothing measurable, so capping them buys
+nothing measurable either — and the tracking costs nothing measurable in
+return. The spread above is within the run-to-run noise of the harness.
+
+An earlier run of the same harness appeared to show a limit costing 1738 → 372
+rps. It was an artefact: the control that runs the configurations in the
+reverse order reproduced the collapse on the *unlimited* pool, and the cause
+was TIME_WAIT / ephemeral-port exhaustion on the loopback client, not anything
+in the pool. It is recorded here so the number is not measured again and
+believed.
 
 ## Streaming responses (`http.stream`)
 

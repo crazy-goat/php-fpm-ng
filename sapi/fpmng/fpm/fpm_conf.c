@@ -182,6 +182,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
 	{ "http.max_body",             &fpm_conf_set_bytes,       WPO(http_max_body) },
+	{ "http.max_connections",      &fpm_conf_set_integer,     WPO(http_max_connections) },
+	{ "http.max_connections_per_client", &fpm_conf_set_integer, WPO(http_max_connections_per_client) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },

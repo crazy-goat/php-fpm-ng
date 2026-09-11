@@ -27,6 +27,7 @@
 struct fpm_worker_pool_s;
 struct event_base;
 struct evhttp;
+struct bufferevent;
 
 /* Config validation, in the master, before anything forks. Refuses a
  * half-configured pair, refuses TLS at all in a build without OpenSSL or
@@ -51,13 +52,15 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp);
  * pool without http.tls_cert. Returns 0 or -1; on -1 the caller must not
  * start accepting.
  *
- * `on_accept` is called with `on_accept_arg` for each accepted connection,
- * before the bufferevent is built. It exists because evhttp offers exactly one
- * per-connection hook and on a TLS pool this module owns it: the caller's
- * accept gate (issue #53) has to travel with the bevcb so that a certificate
- * reload, which reinstalls the pair, does not silently drop it. May be NULL. */
+ * `on_accept` is called with `on_accept_arg` and the connection's freshly
+ * built bufferevent (NULL if it could not be built) for each accepted
+ * connection. It exists because evhttp offers exactly one per-connection hook
+ * and on a TLS pool this module owns it: the caller's accept gate (issue #53)
+ * and its connection tracking (issue #61) have to travel with the bevcb so
+ * that a certificate reload, which reinstalls the pair, does not silently drop
+ * them. May be NULL. */
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http, void (*on_accept)(void *), void *on_accept_arg);
+	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg);
 
 /* Whether this pool terminates TLS, i.e. whether REQUEST_SCHEME is https and
  * HTTPS is on for every request it serves. Answers from configuration, so it

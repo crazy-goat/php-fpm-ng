@@ -770,6 +770,16 @@ keep-alive burst while the others sat idle — needed an external harness to see
 a pool-wide sum cannot show it at all. Two children whose `accepted conn` reads
 1000 and 4 is the same measurement, from the page an operator already has open.
 
+Measured on the poligon 2026-09-11 (4 children, 64 keep-alive connections x 20
+requests, then one `?full` read), the accept distribution came off the page as
+`accepted conn` 19 / 22 / 22 / 2 across the four slots -- the same observation
+issue #53 needed a separate harness to make.
+
+That same read is a worked example of the staleness above: it reported `live
+connections: 57` a moment after the client had closed all 64, because the
+children had not ticked yet. Three seconds later the same page read `0`, and
+the children's open descriptors were back to 10 each. The gauge is a gauge.
+
 Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
 method, the duration). That part is still absent: the scoreboard's per-process
 slots describe a FastCGI request, and a direct child's request is not one.

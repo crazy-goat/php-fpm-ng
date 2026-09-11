@@ -52,7 +52,9 @@
 #ifdef FPMNG_LIBPHP_BUILD
 
 #include "php.h"
+#include "zend_API.h"
 #include "zend_signal.h"
+#include "php_fpmng_metrics.h"
 
 #ifdef ZTS
 # error "the libphp build substitutes zend_signal_init() with zend_signal_startup(), which is not idempotent under ZTS; build against an NTS libphp or build from source"
@@ -63,11 +65,45 @@ void zend_signal_init(void)
 	zend_signal_startup();
 }
 
+/* ext/fpmng_metrics on the libphp path (issue #216).
+ *
+ * The C side of the extension is linked into this binary either way -- fpm_metrics.c
+ * calls into it, so `pool.type = status` renders /metrics on both builds. What the
+ * libphp build does not get for free is the PHP MODULE: in a from-source build
+ * configure puts the extension in the static module list main/internal_functions.c
+ * writes, and php_module_startup() walks that list. Here the list belongs to the
+ * distribution's libphp, which has never heard of us, so fpm_metric_register() and
+ * the other four userland functions would simply not exist -- and nothing would say
+ * so. A "fast check" binary with fewer PHP-visible functions than the real one is
+ * the kind of difference that makes people stop trusting the fast check.
+ *
+ * Registering after php_module_startup() is the documented way in: it is what dl()
+ * does. zend_startup_module() registers the entry and runs its MINIT, and the call
+ * happens in the master before any child is forked, so every child inherits it.
+ *
+ * This does NOT make the module appear in `php-fpm-ng -m`: that path prints the
+ * registry and exits without ever reaching fpm_init(). The probe that matters is a
+ * request -- sapi/fpmng/tests/fpmng-metrics-userland-functions.phpt asks a running
+ * pool whether the functions are there, which is the question a user actually has.
+ */
+void fpmng_libphp_register_bundled_modules(void)
+{
+	if (zend_hash_str_exists(&module_registry, "fpmng_metrics", sizeof("fpmng_metrics") - 1)) {
+		return;
+	}
+
+	zend_startup_module(&fpmng_metrics_module_entry);
+}
+
 #else
 
-/* The from-source build links the real zend_signal_init() and needs nothing
- * from here. ISO C forbids an empty translation unit, and -pedantic would say
- * so, hence the declaration. */
-typedef int fpmng_libphp_compat_not_needed_here;
+/* The from-source build links the real zend_signal_init(), and configure has
+ * already put ext/fpmng_metrics in the static module list, so both jobs of this
+ * file are done elsewhere. The no-op keeps the call site in fpm_init() free of
+ * an #ifdef -- the caller asks the same question in both builds and one of the
+ * two answers is "nothing to do". */
+void fpmng_libphp_register_bundled_modules(void)
+{
+}
 
 #endif

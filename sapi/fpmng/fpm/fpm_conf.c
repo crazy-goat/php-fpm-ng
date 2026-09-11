@@ -191,6 +191,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
 	{ "http.tls_sni_cert",         &fpm_conf_set_string,      WPO(http_tls_sni_cert) },
 	{ "http.tls_reload_check",     &fpm_conf_set_time,        WPO(http_tls_reload_check) },
+	{ "http.tls_wait_for_cert",    &fpm_conf_set_boolean,     WPO(http_tls_wait_for_cert) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 #ifdef HAVE_APPARMOR

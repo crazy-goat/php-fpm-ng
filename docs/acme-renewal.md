@@ -115,6 +115,28 @@ Two practical consequences for a renewer:
   managed by ACME. Zero means "never poll", which turns a successful
   renewal into a certificate nobody picks up until a restart.
 
+## The first issuance: there is no certificate yet
+
+Everything above describes a renewal, where a working certificate already
+exists. The first boot of a fresh container is the one case where it does
+not, and it is circular: the ACME server validates the challenge over the
+same pool that cannot start because its certificate has not been issued.
+
+`http.tls_wait_for_cert = yes` breaks that circle — the pool starts with the
+TLS port bound but not listening, `http.plain_listen` answers the HTTP-01
+challenge, and each gateway begins serving TLS on its own once the renewer
+has written `fullchain.pem`. The state machine, what an operator polls, and
+why the default is off are in [`tls.md`](tls.md).
+
+Two things carry over from this document unchanged, and are enforced at
+configuration time when the opt-in is on:
+
+- `http.tls_cert` must still be **configured**. The opt-in says "not yet",
+  not "maybe never" — the path is where the renewer is expected to write.
+- `http.tls_reload_check` must not be `0`. With no poll the certificate is
+  never noticed and the pool stays in NO_CERT forever. The same reasoning as
+  for renewals, with a harder failure mode.
+
 SNI certificates (`http.tls_sni_cert`) are validated at startup but are not
 part of the reload poll — only the primary `http.tls_cert` /
 `http.tls_key` pair reloads without a restart. A pool serving several ACME

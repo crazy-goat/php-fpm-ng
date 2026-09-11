@@ -57,10 +57,32 @@ struct fpm_http_tls_reload_s;
  * cert_path/key_path. Returns NULL (logged) on shm allocation failure or
  * when `initial` is already bigger than the reload buffer; either way the
  * pool keeps working exactly as it did before this task, just without the
- * ability to reload without a restart. */
+ * ability to reload without a restart.
+ *
+ * `initial` may be NULL, and only under http.tls_wait_for_cert (issue #172):
+ * that publishes an EMPTY generation 0 -- cert_len 0, key_len 0 -- which is
+ * the NO_CERT state. The master timer is the same one; it already treats an
+ * unreadable cert/key pair as "skip this tick" and a readable one as a
+ * change, so the certificate appearing on disk for the first time publishes
+ * generation 1 through exactly the path a renewal takes. Nothing else in
+ * this file distinguishes the two cases.
+ *
+ * With a NULL `initial` the baseline digests are left all-zero on purpose, so
+ * the first tick that can read the pair sees a change. That is not merely an
+ * optimisation here: it is what makes a certificate written between this call
+ * and the first tick get published rather than silently adopted as the
+ * baseline and never announced. */
 struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	const char *cert_path, const char *key_path, const char *min_version,
 	struct fpm_http_tls_s *initial, int check_interval_sec);
+
+/* Is there a usable certificate in the currently published generation?
+ * False only in the NO_CERT state (issue #172): a reload state created with
+ * a NULL `initial` publishes an empty generation 0 and keeps publishing
+ * nothing until the certificate appears. Returns false for a NULL `reload`,
+ * which is "there is no reload machinery", not "there is no certificate" --
+ * callers that care about the difference check `reload` themselves. */
+int fpm_http_tls_reload_has_cert(struct fpm_http_tls_reload_s *reload);
 
 /* Called once per gateway child, BEFORE fpm_http_tls_reload_child_init():
  * builds this child's own SSL_CTX from the cert/key bytes currently published
@@ -101,6 +123,24 @@ SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload)
 void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
 	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg);
+
+/* Called by a gateway child that started in NO_CERT (issue #172), before
+ * fpm_http_tls_reload_child_init(): registers a callback the generation-watch
+ * timer invokes ONCE, in this child, immediately after it has built the first
+ * SSL_CTX this process ever had -- i.e. at the NO_CERT -> READY transition.
+ *
+ * Per child, on each child's own timer, deliberately: the transition involves
+ * a listen() and an evhttp_accept_socket() on this process's own event base,
+ * neither of which the master can do on a child's behalf once it has forked.
+ * It also means a mechanism that only reached the first-forked gateway would
+ * leave the others dark rather than appear to work, which is what issue #172
+ * criterion 4 asks for.
+ *
+ * Fires only on the 0 -> first-certificate edge. Ordinary renewals afterwards
+ * go through the normal adoption path and do not call it again: `cb` runs at
+ * most once per process. */
+void fpm_http_tls_reload_child_on_first_cert(struct fpm_http_tls_reload_s *reload,
+	void (*cb)(void *), void *arg);
 
 /* Master-only: releases the shared-memory double buffer and the struct
  * itself. Never called by a gateway child -- children exit() rather than

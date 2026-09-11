@@ -522,6 +522,38 @@ jobs:
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
 
+  # Issue #172: a pool with http.tls_wait_for_cert must start without its
+  # certificate, refuse TLS connections rather than answer them badly, and
+  # have every gateway process pick up the certificate once it appears. The
+  # load-bearing part is a socket that is bound but not listening, which no
+  # phpt can observe -- it shows up only as the difference between curl exit
+  # 7 (refused) and 35 (handshake failed). Same shape and same non-root
+  # requirement as tls-reload above, its own job so a failure here is not
+  # read as a reload failure.
+  tls-wait-for-cert:
+    needs: build
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # As root php-fpm refuses to start and the suite would report success
+      # without having tested anything. See the same note on tls-reload.
+      options: --user 1001:1001
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify the NO_CERT -> READY transition (issue #172)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-tls-wait-for-cert.sh "$PWD/build-out/bin/php-fpm-ng"
+
   # Issue #90: the per-connection read deadline (task 031) used to fire into a
   # bufferevent evhttp had already freed, killing the whole gateway process
   # with SIGSEGV. Same shape as tls-reload above -- real gateway processes,

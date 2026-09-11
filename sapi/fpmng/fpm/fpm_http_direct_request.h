@@ -46,6 +46,10 @@ struct fpm_http_direct_labels {
 	const char *type_label;		/* what an unsupported http.* is not supported by */
 	const char *script_context;	/* log prefix of the script-resolution error */
 	const char *script_noun;	/* "front controller" | "the worker script" */
+	/* NULL-terminated list of http.* directives this executor accepts on top
+	 * of the shared allow-list below, or NULL for none. Kept as data rather
+	 * than a branch on the executor so the allow-list stays one loop. */
+	const char *const *extra_directives;
 };
 
 /* Pool directives neither executor can honour. Shared as a macro rather than

@@ -192,6 +192,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_sni_cert",         &fpm_conf_set_string,      WPO(http_tls_sni_cert) },
 	{ "http.tls_reload_check",     &fpm_conf_set_time,        WPO(http_tls_reload_check) },
 	{ "http.tls_wait_for_cert",    &fpm_conf_set_boolean,     WPO(http_tls_wait_for_cert) },
+	{ "http.stream",               &fpm_conf_set_boolean,     WPO(http_stream) },
+	{ "http.stream_write_timeout", &fpm_conf_set_integer,     WPO(http_stream_write_timeout) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 #ifdef HAVE_APPARMOR
@@ -733,6 +735,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_max_body = 32 * 1024 * 1024;	/* fpm-ng: FPM_HTTP_MAX_BODY in fpm_http.c */
 	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: see the field comment in fpm_conf.h */
+	wp->config->http_stream_write_timeout = 10000;	/* fpm-ng: ten seconds, see http.stream in docs/http-direct.md */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif

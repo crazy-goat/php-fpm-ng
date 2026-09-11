@@ -18,7 +18,7 @@
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
 # 54 sources out of config.m4 plus 5, and the owned .phpt suite reports
-# PASS=28 FAIL=0 SKIP=32 of 60 against this binary. The 32 skips are the tests
+# PASS=30 FAIL=0 SKIP=31 of 61 against this binary. The 31 skips are the tests
 # whose pool needs one of the two types refused above; they ask the binary and
 # skip rather than fail (issue #230), which is what makes this suite usable as
 # a gate for the package.

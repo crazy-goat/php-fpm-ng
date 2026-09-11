@@ -8,11 +8,17 @@
 # four runner instances that share one 8-thread box, for a result nobody will
 # read: the PR is already unmergeable.
 #
-# The cost, so nobody has to rediscover it: the run's conclusion becomes
-# "cancelled" rather than "failed". The failing job itself stays red -- that is
-# where the cause is -- but the run badge no longer says which kind of bad it
-# is. A cancelled run is still not a passing check, so nothing can be merged by
-# accident.
+# The cost, measured rather than assumed (issue #209, run 34600498146): the
+# run's conclusion becomes "cancelled", and so does the conclusion of the job
+# that failed -- the cancel arrives while this very step is running, so the
+# job never gets to report "failure". Every job in the run therefore looks
+# identical from the outside, and "which one broke" is only visible one level
+# down, in the red step inside it.
+#
+# That is why this script writes the failing job's name into the run summary
+# before cancelling: the summary is the first thing the run page shows, so the
+# answer is there without opening fifteen jobs. A cancelled run is still not a
+# passing check, so nothing can be merged by accident.
 #
 # A job killed mid-compile leaves a half-written build tree behind. That is
 # already handled and is not a new hazard: build/ci-build-tree.sh and
@@ -38,6 +44,16 @@ set -eu
 
 url="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/cancel"
 echo "ci-cancel-run.sh: this job failed; cancelling run $GITHUB_RUN_ID"
+# The run page shows this above the job list, which is the only place the
+# culprit is legible once every job reports "cancelled".
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  {
+    echo "### fail-fast: \`${GITHUB_JOB:-this job}\` failed"
+    echo
+    echo "The rest of run \`$GITHUB_RUN_ID\` was cancelled by build/ci-cancel-run.sh (issue #209)."
+    echo "Every other job reports **cancelled**; the failure is in this one."
+  } >> "$GITHUB_STEP_SUMMARY"
+fi
 # 202 Accepted is the success case; 409 means the run is already finishing or
 # already cancelled, which is the outcome we wanted anyway. Never fail the
 # step: the job is red for its own reason and must stay red for that reason.

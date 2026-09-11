@@ -1,8 +1,8 @@
 /* fpm-ng: worker-mode HTTP-direct — experimental POC, task 073.
  *
  * pool.type = http-direct (fpm_http_direct.c) runs one script per request from
- * inside an evhttp callback: evhttp_set_gencb (fpm_http_direct.c:508) fires
- * under event_base_dispatch (:518) and php_execute_script runs there (:431).
+ * inside an evhttp callback: evhttp_set_gencb (fpm_http_direct.c:893) fires
+ * under event_base_dispatch (:907) and php_execute_script runs there (:801).
  * pool.executor = worker inverts that ownership on the same transport: the
  * worker boots ONE script for its whole lifetime and that script pumps the
  * libevent base itself through fpmng_worker_loop(). It is an executor rather
@@ -26,8 +26,11 @@
  *
  * POC limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
- * worker (it goes to stderr) and a handler returns its body instead; no TLS;
- * no streaming; no per-request scoreboard accounting.
+ * worker (it goes to stderr) and a handler returns its body instead; no
+ * streaming (fpmng_worker_respond() takes one complete body); no per-request
+ * scoreboard accounting (fpm_request_accepting(false) once at :1508). TLS is
+ * NOT a limit here: this executor terminates it like the classic one since
+ * issue #55, see the fpm_http_direct_tls_child_attach() call at :1479.
  */
 #include "fpm_config.h"
 
@@ -438,7 +441,8 @@ static void fpm_worker_flush_deadline(evutil_socket_t fd, short events, void *ar
  * only "child exited with code 0". Driving the base until the replies complete
  * is what the classic transport does for the same reason, counting them in
  * w->pending and refusing to break its loop until they are done
- * (fpm_http_direct.c:118-130, :470).
+ * (fpm_http_direct.c:543 counts one in, :437 refuses the loopbreak until the
+ * count is back to zero).
  *
  * The wait is bounded: a client that stopped reading must not keep the child
  * alive, and the master is already timing this shutdown. */
@@ -950,7 +954,8 @@ ZEND_END_ARG_INFO()
 /* Returns false when a header could not be emitted, which the caller turns
  * into a 500 rather than a response missing a header the application asked
  * for — the same contract as the classic transport, which refuses the whole
- * response on a rejected header (fpm_http_direct.c:199-214). The name check
+ * response on a rejected header (fpm_http_direct.c:316-320 records why,
+ * :834-835 refuses the response). The name check
  * itself is shared with that transport (issue #102): it used to live here
  * only, so the classic path wrote malformed header lines to the wire. */
 static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval *value, size_t *total)

@@ -145,12 +145,13 @@ above come from one sitting on one toolchain for that reason.
 
 ## Deliberate limits
 
-- No static files, trusted-proxy handling, gateway ACLs, gateway access log,
-  HTTP/2, WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below.
+- No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2,
+  WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below. Static
+  files are too, opt-in and on the classic executor only — see below as well.
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
-  `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`
-  and `http.stream_write_timeout` from the gateway's `http.*` directives are
-  accepted. Other
+  `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`,
+  `http.stream_write_timeout` and `http.static` from the gateway's `http.*`
+  directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
 - `chdir` must be absolute; chroot and `listen.allowed_clients` are rejected.
@@ -395,6 +396,144 @@ Measured on the test box (`sapi/fpmng/tests/fpmng-http-direct-respond.phpt`,
 script sleeping 1500 ms after the call): the client has the whole response in
 well under 700 ms on both a buffered and a streaming pool. Without the direct
 write the same test measures 1501 ms — the full length of the sleep.
+
+## Static files (`http.static`)
+
+A direct pool can answer `GET` and `HEAD` for files under its document root
+itself, without starting a PHP request at all:
+
+```ini
+[app]
+pool.type = http-direct
+chdir = /srv/app/public
+http.front_controller = /index.php
+http.static = yes
+```
+
+The document root is `chdir` — the same directory `DOCUMENT_ROOT` reports to
+the script. There is no separate root directive: a direct pool already has
+exactly one, validated at startup together with the front controller, and a
+second one would only be a second thing to get out of step.
+
+`http.static` is **off by default on a direct pool**, and this is the one place
+it differs from the `http` gateway, where the same directive defaults to on.
+The gateway's document root is a document root because someone chose it as one.
+A direct pool's is wherever the application lives, next to `vendor/`, config
+and whatever else the framework keeps beside its front controller — so a pool
+that never asked for a file server must not get one on upgrade.
+
+### What is served
+
+| | |
+|---|---|
+| Methods | `GET` and `HEAD`. Everything else goes to PHP. |
+| Files | Regular files with an extension the built-in table has a type for. |
+| Headers | `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`. |
+| Conditional | `If-None-Match` and `If-Modified-Since` (exact IMF-fixdate match) answer `304`. |
+| Delivery | `evbuffer_add_file()`, i.e. `sendfile()`/`mmap` where the platform has it: the bytes never pass through the process. |
+
+Anything else is handed to the front controller exactly as it would have been
+with `http.static = no`: a directory, a path ending in `.php` or containing
+`.php/`, a file that is not there, and — deliberately — a file whose extension
+the table has no type for. On the gateway an unknown extension is served as
+`application/octet-stream`; on a direct pool it is left alone, because there the
+root is an application directory and "I do not know what this is" is a reason
+not to hand the file over.
+
+### What is refused
+
+Refused with a `404`, never handed on:
+
+- any path with a dot-segment in it (`/.env.css`, `/assets/.hidden/app.css`) —
+  this is the default here, not a rule an operator has to write;
+- anything that resolves, through `realpath()`, outside the document root —
+  including by symlink, which a textual `..` filter does not catch. The refusal
+  is logged at `NOTICE` with the pool name and the requested path.
+
+A refusal is a plain `404` that leaves the connection open. The next request on
+it is as valid as this one was, and one probe for `/.env.css` must not tear down
+the connection carrying the rest of a page's assets.
+
+Percent-encoded traversal (`/%2e%2e/%2e%2e/etc/passwd`) never reaches the
+filesystem: the path is decoded first and then checked, so `%2e%2e` is `..` by
+the time the rule looks at it.
+
+The dot-segment rule applies where this module would otherwise have **served**
+the file. `/.env` has no known extension, so it is still the application's to
+route — it was before `http.static` was turned on, and enabling a file server
+must not make a URL disappear. `/.env.css` would have been served, so it is
+refused. Either way no file whose path contains a dot-segment ever leaves the
+static path.
+
+### What it deliberately does not do
+
+- **No compression.** No gzip, no brotli, no `Accept-Encoding` negotiation.
+- **No range requests.** No `Accept-Ranges`, no `206`; a `Range` header is
+  ignored and the whole file is sent.
+- **No cache policy.** No `Cache-Control`, no `Expires`, no `max-age`. The
+  validators above are all the caching this offers; an origin that wants a
+  policy puts a CDN or a reverse proxy in front, or serves the asset from PHP.
+- **No index file.** A directory is not "the directory's `index.html`", it is
+  a request for the front controller to route.
+- **No directory listing**, in any configuration.
+- **Only on the classic executor.** `pool.type = http-direct` with
+  `pool.executor = worker` rejects `http.static` at startup rather than
+  accepting a directive nothing there would honour.
+
+### Measured results (Intel i7-6700T, 8 threads, poligon, 2026-09-11)
+
+`build/benchmark-http-direct-static.py`, three rounds per cell in rotated order,
+2 s of warm-up and 8 s measured. Three backends serve a byte-identical file at
+the same URL: this path, the same pool with `http.static = no` and a front
+controller `readfile()`ing the file, and nginx 1.28.3 from disk. Server CPU is
+read from `/proc` for our own process trees only, so the comparison is of
+servers and not of the machine. Medians of three.
+
+| bytes | conc | backend | rps | CPU µs/response | CPU ns/byte | p99 ms |
+| --- | --- | --- | --- | --- | --- | --- |
+| 4096 | 1 | `direct-static` | 14 398 | 65.3 | 15.93 | 0.12 |
+| 4096 | 1 | `direct-php` | 6 080 | 140.6 | 34.33 | 0.26 |
+| 4096 | 1 | nginx | 22 869 | 34.1 | 8.32 | 0.08 |
+| 4096 | 32 | `direct-static` | 67 259 | 59.4 | 14.50 | 0.85 |
+| 4096 | 32 | `direct-php` | 29 099 | 137.4 | 33.54 | 2.11 |
+| 4096 | 32 | nginx | 115 150 | 34.4 | 8.40 | 0.44 |
+| 262 144 | 1 | `direct-static` | 4 252 | 234.5 | 0.89 | 0.36 |
+| 262 144 | 1 | `direct-php` | 2 892 | 326.2 | 1.24 | 0.50 |
+| 262 144 | 1 | nginx | 5 182 | 65.2 | 0.25 | 0.31 |
+| 262 144 | 32 | `direct-static` | 13 560 | 273.8 | 1.04 | 3.21 |
+| 262 144 | 32 | `direct-php` | 7 413 | 519.7 | 1.98 | 6.18 |
+| 262 144 | 32 | nginx | 13 862 | 62.9 | 0.24 | 2.87 |
+
+Against the front controller, which is where these bytes go today: 2.2x to 2.3x
+less CPU per byte at 4 KiB and 1.4x to 1.9x at 256 KiB. Against nginx: 1.7x to
+1.9x more at 4 KiB and 3.6x to 4.4x at 256 KiB, though on throughput at 256 KiB
+and concurrency 32 the two are within 2 % of each other, because there the run
+is bounded by the loopback and not by either server.
+
+The small file is the honest case for the per-request overhead and the large one
+for the delivery: at 4 KiB almost all of the 65 µs is libevent's request
+handling, and the file itself is one `evbuffer_add_file()` the kernel satisfies
+without the bytes passing through this process. That is the whole reason the
+per-byte figure falls from 15.93 to 0.89 ns as the file grows sixty-four fold.
+
+The first run of this benchmark measured something else entirely. At 256 KiB
+every direct arm reported 31 rps with a p99 of 43 ms, which is not a server but
+the peer's delayed-ACK timer -- the pool's listening socket did not have
+`TCP_NODELAY` (issue #244). The numbers above were taken after that was fixed;
+the ones in #244 are the two sides of it.
+
+### Accounting
+
+A static hit costs no PHP request, and is not counted as one: it does not
+advance `pm.max_requests`, and it does not move the scoreboard. It does hold a
+slot in the pool's in-flight count until the client has taken the response or
+gone away, which is what stops a child exiting with a reply still on the wire.
+
+The implementation is shared with the `http` gateway
+(`sapi/fpmng/fpm/fpm_http_static.c`) rather than copied: the containment check,
+the dot-segment rule and the conditional handling are the parts that have to be
+right, and a second copy of them is a second place to get them wrong. The
+gateway gained `Last-Modified` and `If-Modified-Since` from the same change.
 
 ## TLS
 

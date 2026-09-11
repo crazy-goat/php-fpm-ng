@@ -31,6 +31,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_static.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -58,7 +59,13 @@ const char *const fpm_http_direct_rejects[] = { FPM_HTTP_DIRECT_REJECTS_COMMON, 
  * it drives itself, so there is no per-request SAPI write for a stream to
  * hook. */
 static const char *const fpm_direct_extra_directives[] = {
-	"http.stream", "http.stream_write_timeout", NULL
+	"http.stream", "http.stream_write_timeout",
+	/* issue #58. Only this executor as well: serving a file happens in the
+	 * gencb below, before any PHP runs, and the worker executor's request
+	 * never passes through here. Accepting the directive there would read as
+	 * if files were being served when nothing would serve them. */
+	"http.static",
+	NULL
 };
 
 static const struct fpm_http_direct_labels fpm_direct_labels = {
@@ -1092,6 +1099,65 @@ static void fpm_direct_register_functions(const char *pool)
 	}
 }
 
+/* Files from the document root, answered here and never by PHP -- issue #58.
+ *
+ * Sits in front of everything the request callback does: no php_request_startup(),
+ * no environment, no fpm_direct_retire(), so a static hit neither advances
+ * pm.max_requests nor moves the scoreboard, which is how the issue asks for it
+ * to be verifiable from the outside.
+ *
+ * The root is the one the pool already resolved for its front controller, i.e.
+ * chdir -- the same directory DOCUMENT_ROOT reports to the script. A direct
+ * pool has no access log to write (access.log is in
+ * FPM_HTTP_DIRECT_REJECTS_COMMON), so no log hook is installed.
+ */
+static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_request *http)
+{
+	struct fpm_http_static st;
+	size_t path_len;
+	char *path;
+	int answered;
+
+	if (!w->wp->config->http_static) {
+		return 0;
+	}
+	path = fpm_http_static_decode_path(http, &path_len);
+	if (!path) {
+		return 0;	/* no usable path: the 400 is fpm_direct_prepare_request()'s to give */
+	}
+	memset(&st, 0, sizeof(st));
+	st.pool = w->wp->config->name;
+	st.root = w->root;
+	/* Extensions the module has a type for, and nothing else. The gateway
+	 * serves unknown ones as application/octet-stream; a direct pool's root is
+	 * an application directory, so there "I do not know what this is" is a
+	 * reason to leave the file alone, not to hand it over. */
+	st.known_types_only = 1;
+	/* Counted and hooked up before the reply, not after it: from the moment
+	 * libevent has the response the connection may complete or die, and
+	 * w->pending is what the shutdown path waits on. Both callbacks are the
+	 * ones the PHP paths install, so a static reply drains identically.
+	 *
+	 * No Connection: close for a retiring child here, unlike the buffered path:
+	 * this function is reached only past fpm_direct_handle()'s gate, which has
+	 * already answered 503 if this child is stopping. A draining worker serves
+	 * no files either. */
+	w->pending++;
+	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
+	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
+	answered = fpm_http_static_serve(&st, http, path, path_len, NULL);
+	if (!answered) {
+		/* Not ours after all. Undo the bookkeeping exactly, so the request
+		 * reaches PHP in the state it would have been in had this never run. */
+		evhttp_request_set_on_complete_cb(http, NULL, NULL);
+		evhttp_connection_set_closecb(evhttp_request_get_connection(http), NULL, NULL);
+		w->pending--;
+	}
+	free(path);
+
+	return answered;
+}
+
 static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 {
 	struct fpm_direct_worker *w = arg;
@@ -1103,6 +1169,9 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	if (fpm_direct_stopping || w->pending >= FPM_DIRECT_PENDING_MAX) {
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 503, "Worker unavailable");
+		return;
+	}
+	if (fpm_direct_try_static(w, http)) {
 		return;
 	}
 	r.http = http;

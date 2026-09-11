@@ -20,6 +20,13 @@
 # only on success, so the next run discards the tree instead of linking objects
 # from two configurations.
 #
+# Limit, by design: this runs from the job's checkout, so a job that dies
+# before actions/checkout -- a registry 403 on the container image, a checkout
+# failure -- cannot cancel anything and the run proceeds as it did before.
+# Making it independent of the checkout would mean inlining the API call into
+# fifteen copies of a shell one-liner, which is the thing this script exists
+# to avoid.
+#
 # curl, not gh: the CI image has curl and no gh, and static-musl runs
 # uncontainerised on the host where gh is likewise not guaranteed.
 set -eu

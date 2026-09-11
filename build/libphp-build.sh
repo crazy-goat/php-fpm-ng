@@ -17,11 +17,11 @@
 # run produced.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
-# 53 sources out of config.m4 plus 6, and the owned .phpt suite reports
-# PASS=49 FAIL=1 SKIP=10 of 60 against this binary. The one failure is
-# fpmng-config-rejected-directives.phpt, which reads `Configure Command` out of
-# -i to decide what the build is; a distribution PHP prints no such line. That
-# is issue #215, not a defect in what this script produces.
+# 54 sources out of config.m4 plus 5, and the owned .phpt suite reports
+# PASS=28 FAIL=0 SKIP=32 of 60 against this binary. The 32 skips are the tests
+# whose pool needs one of the two types refused above; they ask the binary and
+# skip rather than fail (issue #230), which is what makes this suite usable as
+# a gate for the package.
 #
 # Usage: build/libphp-build.sh [php-src-tree] [outdir]
 #   php-src-tree  a tree with our overlay applied (build/prepare.sh), default ./php-src

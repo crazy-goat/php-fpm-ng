@@ -659,6 +659,19 @@ jobs:
           docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
             chown -R "$(id -u):$(id -g)" /w
 
+      # Same reason, one directory further (issue #206): build/static-full.sh
+      # runs ./buildconf as root in the bind-mounted /src, so `configure` and
+      # autom4te.cache/ end up root-owned. ci-build-tree.sh below deletes the
+      # tree whenever its key moved -- which is nearly every PR, the key covers
+      # the overlay -- and the unprivileged runner cannot unlink those. Only
+      # /src: /build, /ccache and the apk cache stay root-owned on purpose,
+      # nothing outside a container touches them.
+      - name: reclaim the reused php-src tree from root-owned build output
+        run: |
+          mkdir -p "$MUSL_CACHE/src"
+          docker run --rm -v "$MUSL_CACHE/src:/s" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /s
+
       - uses: actions/checkout@v7
 
       # Issue #197: the same reused tree as the container jobs get from

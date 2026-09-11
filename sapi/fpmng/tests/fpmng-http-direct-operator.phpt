@@ -8,6 +8,7 @@ require_once "tester.inc";
 $root = sys_get_temp_dir() . '/fpmng-operator-' . getmypid();
 @mkdir($root);
 $access = $root . '/access.log';
+$refusedLog = $root . '/refused.log';
 file_put_contents($root . '/front.php', <<<'PHP'
 <?php
 header('X-Marker: mark');
@@ -46,6 +47,8 @@ pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
 listen.allowed_clients = 192.0.2.1
+access.log = $refusedLog
+access.format = "%R %m %r %s %l"
 CFG;
 
 /* One framed message per call, so a keep-alive connection stays usable. */
@@ -171,7 +174,7 @@ try {
     }
     /* ping is in access.suppress_path, so it must not be here at all; /app is
      * a PHP request and /statuses another; the 403 belongs to the other pool,
-     * which has no access.log. */
+     * which has its own. */
     foreach ($lines as $line) {
         if (str_contains($line, '/ping')) {
             throw new RuntimeException("suppressed path logged: $line");
@@ -189,12 +192,23 @@ try {
     }
     echo "access log: ok\n";
 
+    /* A refusal is a response too, and the pool that refused it is the only
+     * one that can record it: it never reached PHP. */
+    $refusedLines = [];
+    for ($i = 0; $i < 50 && $refusedLines === []; $i++) {
+        usleep(100000);
+        $refusedLines = array_values(array_filter(explode("\n", (string) @file_get_contents($refusedLog))));
+    }
+    expect('refusal line', $refusedLines[0] ?? '', '127.0.0.1 GET /app 403 0');
+    echo "refusal logged: ok\n";
+
     echo "Done\n";
 } finally {
     $tester->terminate();
     $tester->close();
     @unlink($root . '/front.php');
     @unlink($access);
+    @unlink($refusedLog);
     @rmdir($root);
 }
 ?>
@@ -206,6 +220,7 @@ status json: ok
 whole path: ok
 allowed_clients: ok
 access log: ok
+refusal logged: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

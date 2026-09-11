@@ -165,7 +165,7 @@ jobs:
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
     env:
-      BUILDTREE: /buildtree/${{ runner.name }}/dynamic
+      BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
@@ -174,14 +174,18 @@ jobs:
       # Docker creates the mount point root-owned and this job, running as
       # 1001, cannot write into it. There is nothing to reuse on a fresh
       # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` because
-      # a job-level value would override what GITHUB_ENV writes.
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
       - name: choose the build tree location
         run: |
-          if mkdir -p "$BUILDTREE" 2>/dev/null; then
-            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
           else
-            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
             echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
           fi
 
@@ -402,7 +406,7 @@ jobs:
       # A directory of its own: --enable-fpmng-fiber is a different configure,
       # so it cannot share objects with the default build. Sharing one
       # directory would make the two jobs wipe each other's tree on every run.
-      BUILDTREE: /buildtree/${{ runner.name }}/fiber
+      BUILDTREE_CONFIG: fiber
     steps:
       - uses: actions/checkout@v7
 
@@ -411,14 +415,18 @@ jobs:
       # Docker creates the mount point root-owned and this job, running as
       # 1001, cannot write into it. There is nothing to reuse on a fresh
       # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` because
-      # a job-level value would override what GITHUB_ENV writes.
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
       - name: choose the build tree location
         run: |
-          if mkdir -p "$BUILDTREE" 2>/dev/null; then
-            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
           else
-            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
             echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
           fi
       # fpmng-http-direct-request-parity.phpt needs this locale to be
@@ -549,7 +557,7 @@ jobs:
     env:
       # The same configure line as `build`, so on a runner that has already run
       # `build` this job finds the tree ready and skips configure entirely.
-      BUILDTREE: /buildtree/${{ runner.name }}/dynamic
+      BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
@@ -558,14 +566,18 @@ jobs:
       # Docker creates the mount point root-owned and this job, running as
       # 1001, cannot write into it. There is nothing to reuse on a fresh
       # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` because
-      # a job-level value would override what GITHUB_ENV writes.
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
       - name: choose the build tree location
         run: |
-          if mkdir -p "$BUILDTREE" 2>/dev/null; then
-            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
           else
-            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
             echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
           fi
 

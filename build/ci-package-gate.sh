@@ -70,8 +70,8 @@ EXPECT_TOTAL=60
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=28
-    EXPECT_SKIP=32
+    EXPECT_PASS=29
+    EXPECT_SKIP=31
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
@@ -95,8 +95,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=26
-    EXPECT_SKIP=34
+    EXPECT_PASS=27
+    EXPECT_SKIP=33
     # openssl-dev is named explicitly: on Ubuntu php8.5-dev drags libssl-dev
     # in, on Alpine php85-dev does not, and without it fpm_http_tls.h stops the
     # build at openssl/ssl.h rather than quietly producing a smaller binary.

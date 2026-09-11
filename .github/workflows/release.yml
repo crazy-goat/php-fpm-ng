@@ -1,0 +1,113 @@
+name: release
+
+# Issue #223: a tag produces a Release carrying the .deb, the .apk and
+# SHA256SUMS, built by CI and by nothing else.
+#
+# The packages are built by build/ci-package-gate.sh -- the same script the
+# build matrix gates every pull request with (issue #224). That is deliberate
+# and is the whole reason this workflow is short: the file that gets attached
+# here is the file that was just installed into a container with no compiler in
+# it and scored the expected PASS/FAIL/SKIP counts. A separate "release build"
+# would be a second artefact nobody tested.
+#
+# UNSIGNED, ON PURPOSE. The decision is recorded on issue #223: assets on a
+# Release, installed by path (`apt install ./file.deb`,
+# `apk add --allow-untrusted ./file.apk`), with SHA256SUMS alongside. What
+# cannot be unsigned is a hosted apt/apk repository, which asks a machine to
+# trust a host for every future upgrade -- that is out of scope until there is
+# a signing key with a distribution, rotation and revocation story behind it.
+on:
+  push:
+    tags:
+      - "v*"
+  # Rehearsable without cutting a tag. The assets are built and uploaded as a
+  # workflow artifact, and no Release is created.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PHP_SRC_REPO: https://github.com/php/php-src.git
+  PHP_SRC_REF: php-8.5.9
+
+jobs:
+  packages:
+    # poligon-host, like static-musl and package-gate: the script drives
+    # `docker run` with host bind mounts, and -v paths are resolved by the host
+    # daemon, so a containerised copy would mount empty directories.
+    runs-on: poligon-host
+    env:
+      PACKAGE_CACHE: /opt/gh-runner/cache/buildtree-package
+    steps:
+      - name: reclaim the workspace from root-owned build output
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /w
+      - name: reclaim the prepared tree from root-owned build output
+        run: |
+          mkdir -p "$PACKAGE_CACHE/src"
+          docker run --rm -v "$PACKAGE_CACHE/src:/s" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /s
+
+      - uses: actions/checkout@v7
+
+      - name: php-src tree for the package build (reused between runs)
+        env:
+          FPMNG_TREE_SKIP_CONFIGURE: "yes"
+        run: ./build/ci-build-tree.sh "$PACKAGE_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF"
+
+      # The version the packages call themselves. On a tag it is the tag; on a
+      # manual rehearsal it is the commit, so a rehearsal artefact can never be
+      # mistaken for a release one.
+      - name: name this build
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "FPMNG_RELEASE=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "FPMNG_RELEASE=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+          fi
+
+      - name: build, install and test the .deb
+        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb"
+      - name: build, install and test the .apk
+        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk"
+
+      # The asset names carry both halves: our release and the PHP minor the
+      # binary is a SAPI for. A user with 8.4 and 8.5 installed has to be able
+      # to tell two of these apart before installing either, and the file name
+      # is what they see first -- the Depends line is one `dpkg -I` later.
+      - name: collect the assets
+        run: |
+          mkdir -p assets
+          deb=$(find out-package-deb -maxdepth 1 -name 'php-fpm-ng_*.deb' ! -name 'wrong-minor*' | head -1)
+          apk=$(find out-package-apk/repo -name 'php-fpm-ng-*.apk' | head -1)
+          [ -n "$deb" ] && [ -n "$apk" ] || { echo "an expected package is missing" >&2; exit 1; }
+          php_deb=$(dpkg-deb -f "$deb" Depends | sed -n 's/.*libphp\([0-9.]*\)-embed.*/\1/p')
+          php_apk=$(basename "$apk" | sed -n 's/^php-fpm-ng-\([0-9]*\.[0-9]*\)\..*/\1/p')
+          cp "$deb" "assets/php-fpm-ng_${FPMNG_RELEASE}_php${php_deb}_$(dpkg --print-architecture).deb"
+          cp "$apk" "assets/php-fpm-ng-${FPMNG_RELEASE}-php${php_apk}-$(uname -m).apk"
+          ( cd assets && sha256sum ./*.deb ./*.apk > SHA256SUMS )
+          cat assets/SHA256SUMS
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-assets
+          path: assets
+          retention-days: 14
+
+      # Only a tag publishes. The rehearsal above stops at the artifact.
+      - name: publish the release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes "php-fpm-ng ${GITHUB_REF_NAME}. The packages carry no PHP: they depend on
+          the distribution's embed package for the libphp they were linked against, which is
+          named in the file name and in the dependency. Install them by path --
+          \`sudo apt install ./php-fpm-ng_*.deb\` or
+          \`sudo apk add --allow-untrusted ./php-fpm-ng-*.apk\` -- and check them against
+          SHA256SUMS first; they are unsigned by the decision recorded on issue #223.
+          See docs/install.md for what the packaged build supports and what it does not."

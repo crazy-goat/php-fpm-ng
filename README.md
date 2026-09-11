@@ -36,6 +36,15 @@ Verified 2026-09-07 against `sapi/fpmng`:
   the same hardening; limitations are described in `docs/async_errors.md` and
   `docs/NOTES.md`, sections 3t-3u
 
+## Installing
+
+There is a `.deb` and an `.apk` that contain no PHP: they depend on the
+distribution's `libphp` (`libphp8.5-embed`, `php85-embed`), so a machine needs
+no compiler and no php-src to run `pool.type = fastcgi` or
+`pool.type = http-direct`. The other pool types need patches that apply inside
+`libphp` and still need a build from source. Commands, the supported matrix and
+what happens on a version mismatch: [`docs/install.md`](docs/install.md).
+
 ## Plan
 
 Eventually a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src —

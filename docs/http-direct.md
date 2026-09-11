@@ -129,21 +129,21 @@ are **not measured/implemented**.
 ### Held requests under `pool.executor = worker` (decision, 2026-09-11)
 
 A worker may hold **at most 256 accepted-but-unanswered requests at a time**
-(`FPM_WORKER_PENDING_MAX`, `sapi/fpmng/fpm/fpm_http_direct_worker.c:73`). That
+(`FPM_WORKER_PENDING_MAX`, `sapi/fpmng/fpm/fpm_http_direct_worker.c:76`). That
 is the concurrency limit of deferred replies, and it is a hard one: reaching it
 does not merely throttle, it retires the worker.
 
 The transport cannot tell a request held on purpose — the long-poll that
 `fpmng_worker_respond()` exists to answer later — from one leaked by a handler
 that returned without answering, because a pending entry is removed only by
-`fpmng_worker_respond()` (`fpm_worker_reap()`, `:348-351`). **This decision
+`fpmng_worker_respond()` (`fpm_worker_reap()`, `:351-354`). **This decision
 resolves that ambiguity against the deliberate case, on purpose**: on the
-257th concurrent request `fpm_worker_accept()` (`:365-398`)
+257th concurrent request `fpm_worker_accept()` (`:368-401`)
 
 - answers that request `503 Worker unavailable`,
 - logs `WARNING … 256 requests accepted but unanswered`,
 - sets the stop flag, so the worker script is asked to stop and the master
-  respawns the child — and `fpm_worker_finish_output()` (`:449-485`) then
+  respawns the child — and `fpm_worker_finish_output()` (`:453-489`) then
   answers **every one of the 256 held requests** `503` as well, logging how
   many it abandoned.
 
@@ -152,7 +152,7 @@ alternative — a way for the script to mark a request as held on purpose — is
 not implemented, because nothing else in the process would then bound it: the
 master-side deadlines that would normally catch a stuck request
 (`request_terminate_timeout`, `request_slowlog_timeout`, `slowlog`) are
-*rejected* at startup by this executor (`:164-172`), since the worker script
+*rejected* at startup by this executor (`:167-175`), since the worker script
 never ends a request and the child never leaves its stage. A leak that the
 transport did not catch would therefore be caught by nothing at all, for the
 life of the worker. Given a POC whose long-lived-connection story is still
@@ -162,11 +162,11 @@ over an unbounded false negative for leaks.
 Two consequences follow from the same "the child never ends a request"
 property and are **not** bugs in the above, but they are easy to trip over:
 
-- `pm.max_requests` counts only *answered* requests (`:1066-1073`), so a worker
+- `pm.max_requests` counts only *answered* requests (`:1071-1078`), so a worker
   that holds requests forever never recycles on that trigger. The pending
   ceiling is the only thing that eventually retires it.
 - The child reports `ACCEPTING` for its whole life (`fpm_request_accepting(false)`
-  is called once, `:1507`), so `fpm_request_is_idle()`
+  is called once, `:1512`), so `fpm_request_is_idle()`
   (`sapi/fpmng/fpm/fpm_request.c:306-316`) — and therefore `pm = ondemand`
   bookkeeping and the scoreboard — see a worker holding 200 long-polls as idle.
   Per-request accounting for this executor is #64.

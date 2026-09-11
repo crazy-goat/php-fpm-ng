@@ -28,9 +28,9 @@
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
  * streaming (fpmng_worker_respond() takes one complete body); no per-request
- * scoreboard accounting (fpm_request_accepting(false) once at :1508). TLS is
+ * scoreboard accounting (fpm_request_accepting(false) once at :1512). TLS is
  * NOT a limit here: this executor terminates it like the classic one since
- * issue #55, see the fpm_http_direct_tls_child_attach() call at :1479.
+ * issue #55, see the fpm_http_direct_tls_child_attach() call at :1483.
  */
 #include "fpm_config.h"
 

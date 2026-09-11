@@ -756,12 +756,15 @@ would count its predecessor's drops once itself and once again from the dead
 one, then overwrite them downwards on its first tick. They are therefore
 per-child totals summed across the live children, not pool lifetime totals.
 
-A reload does **not** reset the totals. The segment is allocated once per pool
-and the next generation keeps reading the same one
-(`fpm_http_direct_ops_init_main()`, `fpm_http_direct_ops.c:88`), so a series
-across a reload is continuous; only the gauges dip, as each new child zeroes
-its own slot on the way in. Restarting the master is what starts the numbers
-again.
+A reload (`SIGUSR2`) starts every number here again, the scoreboard's own
+`requests` included: the master re-executes, so the shared segment is a new
+one. Measured on the poligon 2026-09-11 -- `accepted conn` 9 and `requests` 24
+before, `accepted conn` 1 (the status request itself) and `requests` 0 after.
+The re-entrancy guard in `fpm_http_direct_ops_init_main()`
+(`fpm_http_direct_ops.c:88`) is about the per-pool init being re-run inside one
+master process, not about surviving a reload. A monitoring series therefore has
+to treat a reload as a counter reset, which is what tooling already does for
+upstream's `accepted conn`.
 
 #### `?full`: the per-child rows
 

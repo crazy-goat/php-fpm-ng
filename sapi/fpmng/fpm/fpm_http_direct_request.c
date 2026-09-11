@@ -61,6 +61,21 @@ int fpm_http_direct_resolve_script(const char *base, const char *front_controlle
 	return 0;
 }
 
+/* labels->extra_directives, compared the same way as the shared entries: the
+ * directive list is a ';'-separated run of names, not NUL-terminated ones. */
+static bool fpm_http_direct_directive_extra(const struct fpm_http_direct_labels *labels,
+	const char *p, size_t len)
+{
+	const char *const *extra;
+
+	for (extra = labels->extra_directives; extra && *extra; extra++) {
+		if (strlen(*extra) == len && !strncmp(p, *extra, len)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct fpm_http_direct_labels *labels)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -95,7 +110,8 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_key") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_min_version") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_sni_cert") ||
-			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_reload_check"))) {
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_reload_check") ||
+			fpm_http_direct_directive_extra(labels, p, len))) {
 			zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
 				c->name, (int) len, p, labels->type_label);
 			return -1;

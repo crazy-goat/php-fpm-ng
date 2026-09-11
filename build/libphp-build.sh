@@ -61,6 +61,18 @@ PHP_CONFIG_H="$INC_DIR/main/php_config.h"
 [ -f "$PHP_CONFIG_H" ] || fail "$PHP_CONFIG points at $INC_DIR, which has no main/php_config.h"
 echo "libphp-build.sh: $PHP_CONFIG -> PHP $PHP_VER, headers in $INC_DIR"
 
+# ZTS (issue #213). sapi/fpmng/fpm/fpm_libphp_compat.c substitutes the
+# unexported zend_signal_init() with zend_signal_startup(), which is idempotent
+# for a freshly forked NTS child and is NOT under ZTS: there it reaches
+# ts_allocate_fast_id() a second time and the engine ends up with two copies of
+# the signal globals. Refused here rather than compiled: the miscompile would
+# link, start and serve, and only lose signals.
+if grep -q '^#define ZTS 1' "$PHP_CONFIG_H"; then
+  fail "$PHP_CONFIG is a ZTS (thread-safe) build of PHP. This path substitutes zend_signal_init()
+  with zend_signal_startup() (sapi/fpmng/fpm/fpm_libphp_compat.c), which is only
+  equivalent under NTS. Install the NTS embed package, or build from source."
+fi
+
 # --- the defines a configure run would have made -------------------------------
 # There is no configure on this path, so every AC_DEFINE has to be supplied by
 # hand -- and a missing one is not a build error, it is a silently smaller
@@ -85,6 +97,7 @@ SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_CLOCK_GETTIME=1
 -DHAVE_FPM_HTTP=1
 -DHAVE_FPM_HTTP_TLS=1
+-DFPMNG_LIBPHP_BUILD=1
 -DPROC_MEM_FILE="mem"'
 
 # Deliberately off, with the reason. These are not oversights, and anyone
@@ -190,10 +203,12 @@ compile() {
 }
 for f in $(sources); do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # Not in PHP_FPMNG_FILES: config.m4 adds the trace backend conditionally, our
-# patched fastcgi.c belongs to main/, and the compat unit below is ours.
+# patched fastcgi.c belongs to main/, and the ABI guard is a property of this
+# build rather than of the SAPI. The zend_signal_init() stand-in is NOT here:
+# it lives in sapi/fpmng/fpm/fpm_libphp_compat.c and arrives through the source
+# list above, gated on -DFPMNG_LIBPHP_BUILD (issue #213).
 for f in "$SRC/sapi/fpmng/fpm/fpm_trace.c" "$SRC/sapi/fpmng/fpm/fpm_trace_pread.c" \
          "$SRC/main/fastcgi.c" "$SRC/ext/fpmng_metrics/fpmng_metrics.c" \
-         "$REPO/build/libphp/libphp_compat.c" \
          "$REPO/build/libphp/libphp_abi_check.c"; do
   compile "$f"
 done

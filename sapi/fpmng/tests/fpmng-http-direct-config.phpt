@@ -66,6 +66,12 @@ $cases = [
     /* Parsed in the master so a typo stops -t. Left to the child it would be
      * a fork loop: the child can only exit, and the master replaces it. */
     'bad-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1, not-an-ip", "listen.allowed_clients: 'not-an-ip' is not a valid IP address"],
+    /* issue #61. The bounds exist so that a typo is a startup error rather
+     * than a pool that silently never accepts, or one whose per-client cap
+     * can never be reached because it sits above the total. */
+    'negative-max-connections' => [$base . "\nhttp.max_connections = -1", 'http.max_connections_per_client between 0 (unlimited) and 1000000'],
+    'per-client-above-total' => [$base . "\nhttp.max_connections = 4\nhttp.max_connections_per_client = 8", 'http.max_connections_per_client (8) is above http.max_connections (4)'],
+    'per-client-without-total' => [$base . "\nhttp.max_connections_per_client = 4", 'http.max_connections_per_client requires http.max_connections'],
     'missing-script' => [$base . "\nhttp.front_controller = /missing-direct-script.php", 'front controller must be a regular file inside chdir'],
 ];
 foreach ($cases as $label => [$config, $needle]) {
@@ -114,6 +120,9 @@ unbounded-timeout: rejected
 stream-without-timeout: rejected
 stream-with-tls: rejected
 bad-acl: rejected
+negative-max-connections: rejected
+per-client-above-total: rejected
+per-client-without-total: rejected
 missing-script: rejected
 classic: accepted
 --CLEAN--

@@ -39,6 +39,12 @@ mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 
 [ -f "$SRC/sapi/fpmng/config.m4" ] || fail "$SRC has no sapi/fpmng: run build/prepare.sh first"
+
+# What the packages call themselves. Resolved here, on the host, because the
+# containers below mount the repository read-only and have no git in them -- so
+# the package scripts' own fallback would land on "unknown" every single run.
+# The release workflow (issue #223) passes a tag in; otherwise it is the commit.
+RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
 # The expected score, per distribution. 32 of the 60 owned tests skip on either
@@ -125,6 +131,8 @@ esac
 echo "ci-package-gate.sh: stage 1 -- build the binary and the $FLAVOUR package"
 cat > "$OUT/stage1-payload.sh" <<EOF
 set -eu
+FPMNG_RELEASE=$RELEASE
+export FPMNG_RELEASE
 /repo/build/libphp-build.sh /src /out
 $PACKAGE_CMD
 $NEGATIVE_CONTROL

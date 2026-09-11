@@ -44,7 +44,11 @@ PHP_PKG=php$(echo "$PHP_FULL" | sed 's/^\([0-9]*\)\.\([0-9]*\).*/\1\2/')
 readelf -d "$BIN" 2>/dev/null | grep -q 'libphp\.so' \
     || fail "$BIN does not link libphp.so; this package is only for the build/libphp-build.sh output"
 
+# See build/package-deb.sh on FPMNG_RELEASE. apk's pkgver has to stay the PHP
+# version and pkgrel an integer, so ours goes into pkgdesc, which `apk info -d`
+# prints -- the one field a user reads before installing.
 COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+RELEASE=${FPMNG_RELEASE:-$COMMIT}
 
 WORK=$OUT/abuild
 rm -rf "$WORK"
@@ -58,7 +62,7 @@ cat > "$WORK/APKBUILD" <<EOT
 pkgname=php-fpm-ng
 pkgver=$PHP_FULL
 pkgrel=1
-pkgdesc="FPM process manager with HTTP-direct pools, on the distribution PHP ($COMMIT)"
+pkgdesc="FPM process manager with HTTP-direct pools, on the distribution PHP ($RELEASE)"
 url="https://github.com/crazy-goat/php-fpm-ng"
 arch="$(abuild -A 2>/dev/null || echo x86_64)"
 license="PHP-3.01"

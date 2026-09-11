@@ -754,8 +754,14 @@ too, and the header says so: they are republished every tick from counters that
 live in the child's own address space, so a new child inheriting the old values
 would count its predecessor's drops once itself and once again from the dead
 one, then overwrite them downwards on its first tick. They are therefore
-per-child totals summed across the live children, not pool lifetime totals. A
-reload replaces the shared segment, and every number here starts again.
+per-child totals summed across the live children, not pool lifetime totals.
+
+A reload does **not** reset the totals. The segment is allocated once per pool
+and the next generation keeps reading the same one
+(`fpm_http_direct_ops_init_main()`, `fpm_http_direct_ops.c:88`), so a series
+across a reload is continuous; only the gauges dip, as each new child zeroes
+its own slot on the way in. Restarting the master is what starts the numbers
+again.
 
 #### `?full`: the per-child rows
 

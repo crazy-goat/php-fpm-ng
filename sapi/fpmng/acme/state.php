@@ -15,6 +15,7 @@
  *   $base/<domain>/privkey.pem    certificate private key, 0600
  *   $base/<domain>/fullchain.pem  leaf + intermediate, 0644 (public)
  *   $base/<domain>/renewal.json   renewal metadata, 0600
+ *   $base/<domain>/renewal.lock   the single-renewer lock, 0600 (lock.php)
  *
  * One base directory, one subdirectory per domain -- a pool serving several
  * certificates over SNI (task 041) needs several subdirectories, not several
@@ -108,6 +109,16 @@ final class State
         return $this->domainDir($domain) . '/renewal.json';
     }
 
+    /**
+     * The advisory lock that makes one process the only renewer of this
+     * certificate (issue #47; see lock.php for why it lives here rather
+     * than in the master's shared memory).
+     */
+    public function renewalLockPath(string $domain): string
+    {
+        return $this->domainDir($domain) . '/renewal.lock';
+    }
+
     /** Load the account key, generating it once if absent. */
     public function loadOrCreateAccountKey(): \OpenSSLAsymmetricKey
     {
@@ -156,7 +167,12 @@ final class State
         $this->writePublic($this->certChainPath($domain), $fullchainPem);
     }
 
-    private function ensureDomainDir(string $domain): void
+    /**
+     * Public because RenewalLock has to create the directory before there is
+     * any certificate in it: on a fresh bootstrap the first thing that
+     * happens under $base/<domain>/ is taking the renewal lock.
+     */
+    public function ensureDomainDir(string $domain): void
     {
         $dir = $this->domainDir($domain);
         if (is_dir($dir)) {

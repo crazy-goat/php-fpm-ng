@@ -996,3 +996,74 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
+
+  # Issue #224: gate the artefact a user installs, not the tree it was built
+  # from. Every other cell here runs a binary out of a build directory; this one
+  # builds the .deb and the .apk, throws the build host away, installs each
+  # package into a container with no compiler in it, and runs the owned suite
+  # against the installed binary. The file layout, the conffiles, the dependency
+  # on the distribution's embed package and issue #220's refusal to run against
+  # another minor's libphp have no other coverage.
+  #
+  # Gating, not informational (which is where #217 left it): once this build is
+  # what users install, a regression that only CI could have caught would
+  # otherwise ship and be found by a user.
+  #
+  # On poligon-host, like static-musl and for the same reason: the script drives
+  # `docker run` with host bind mounts, and -v paths are resolved by the host
+  # daemon, so a containerised copy of it would mount empty directories.
+  #
+  # Both flavours in one job rather than two: poligon-host is a single runner
+  # instance and runs one job at a time, so splitting them would queue rather
+  # than parallelise, and they share the prepared tree set up below.
+  package-gate:
+    needs: patches
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    env:
+      PACKAGE_CACHE: /opt/gh-runner/cache/buildtree-package
+    steps:
+      # Same reclaim steps as static-musl, which shares this instance: the
+      # containers below write as root into paths the unprivileged runner has
+      # to be able to unlink afterwards. Chowning a root-owned file is exactly
+      # what it cannot do, so a container does it.
+      - name: reclaim the workspace from root-owned build output
+        run: |
+          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /w
+      - name: reclaim the prepared tree from root-owned build output
+        run: |
+          mkdir -p "$PACKAGE_CACHE/src"
+          docker run --rm -v "$PACKAGE_CACHE/src:/s" alpine:3.22 \
+            chown -R "$(id -u):$(id -g)" /s
+
+      - uses: actions/checkout@v7
+
+      # The tree is needed for its sources and its tests, never for a build
+      # product: build/libphp-build.sh compiles the 54 sources config.m4 names
+      # against the distribution's headers, inside the container. Hence
+      # FPMNG_TREE_SKIP_CONFIGURE -- there is no configure on this path at all.
+      - name: php-src tree for the package build (reused between runs)
+        env:
+          FPMNG_TREE_SKIP_CONFIGURE: "yes"
+        run: |
+          ( set +e; ./build/ci-build-tree.sh "$PACKAGE_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF" 2>&1; echo "$?" > tree-package.rc ) | tee tree-package.log
+          exit "$(cat tree-package.rc)"
+
+      - name: the .deb, installed on a machine with no compiler
+        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb"
+      - name: the .apk, installed on a machine with no compiler
+        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: package-gate-results
+          path: |
+            out-package-deb/results
+            out-package-apk/results
+          retention-days: 14
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh

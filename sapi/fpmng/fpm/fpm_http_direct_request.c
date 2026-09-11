@@ -76,6 +76,24 @@ static bool fpm_http_direct_directive_extra(const struct fpm_http_direct_labels 
 	return false;
 }
 
+/* Whether the pool file itself set this directive, as opposed to it holding
+ * whatever fpm_conf.c's global default left there. set_directives is a
+ * ';'-separated run of names, ';' both before and after each one. */
+static bool fpm_http_direct_declared(const char *set_directives, const char *name)
+{
+	const char *p = set_directives;
+	size_t len = strlen(name);
+
+	while (p && (p = strstr(p, name))) {
+		if (p > set_directives && p[-1] == ';' && (p[len] == ';' || p[len] == '\0')) {
+			return true;
+		}
+		p += len;
+	}
+
+	return false;
+}
+
 int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct fpm_http_direct_labels *labels)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -118,6 +136,22 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 		}
 	}
 #undef FPM_HTTP_DIRECT_DIRECTIVE
+	/* http.static defaults to on for the http gateway, where a document root
+	 * and a web server are the whole point. A direct pool's root is its chdir,
+	 * which is chosen to hold the application -- vendor/, .env-adjacent config,
+	 * whatever the framework keeps next to its front controller -- so inheriting
+	 * that default would start serving those files to the internet on upgrade,
+	 * from pools whose owner never asked for a file server. Hence: off unless
+	 * the pool says otherwise, and the asymmetry is documented in
+	 * docs/http-direct.md rather than left to be discovered.
+	 *
+	 * Here rather than in the executor that implements it, because the default
+	 * has to be off for the executor that does not: the loop above rejects
+	 * http.static unless the executor listed it, and a pool that cannot say
+	 * "yes" must not have "yes" assumed for it. */
+	if (!fpm_http_direct_declared(c->set_directives, "http.static")) {
+		c->http_static = 0;
+	}
 	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires http.read_timeout > 0 and http.max_body between 1 and 32M",
 			c->name, labels->subject);

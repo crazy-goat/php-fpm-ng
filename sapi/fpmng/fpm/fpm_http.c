@@ -144,6 +144,7 @@ struct {								\
 #include "fpm_children_extra.h"
 #include "fpm_http_tls.h"
 #include "fpm_http_tls_reload.h"
+#include "fpm_http_static.h"
 #include "fpm_child_error_log.h"
 #include "fpm_error_log_follow.h"
 #include "zlog.h"
@@ -1509,73 +1510,6 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
  * root, and respond without FastCGI.
  * ------------------------------------------------------------------------ */
 
-static const struct {
-	const char *ext;
-	const char *type;
-} fpm_http_mime[] = {
-	{ "html", "text/html; charset=UTF-8" },
-	{ "htm",  "text/html; charset=UTF-8" },
-	{ "css",  "text/css; charset=UTF-8" },
-	{ "js",   "text/javascript; charset=UTF-8" },
-	{ "mjs",  "text/javascript; charset=UTF-8" },
-	{ "json", "application/json" },
-	{ "map",  "application/json" },
-	{ "xml",  "application/xml" },
-	{ "txt",  "text/plain; charset=UTF-8" },
-	{ "svg",  "image/svg+xml" },
-	{ "png",  "image/png" },
-	{ "jpg",  "image/jpeg" },
-	{ "jpeg", "image/jpeg" },
-	{ "gif",  "image/gif" },
-	{ "webp", "image/webp" },
-	{ "avif", "image/avif" },
-	{ "ico",  "image/x-icon" },
-	{ "woff", "font/woff" },
-	{ "woff2","font/woff2" },
-	{ "ttf",  "font/ttf" },
-	{ "otf",  "font/otf" },
-	{ "pdf",  "application/pdf" },
-	{ "wasm", "application/wasm" },
-	{ "mp4",  "video/mp4" },
-	{ "webm", "video/webm" },
-	{ NULL, NULL }
-};
-
-static const char *fpm_http_content_type(const char *path)
-{
-	const char *dot = strrchr(path, '.');
-	unsigned i;
-
-	if (!dot || strchr(dot, '/')) {
-		return "application/octet-stream";
-	}
-	dot++;
-	for (i = 0; fpm_http_mime[i].ext; i++) {
-		if (!strcasecmp(dot, fpm_http_mime[i].ext)) {
-			return fpm_http_mime[i].type;
-		}
-	}
-
-	return "application/octet-stream";
-}
-
-/* Any path segment starting with a dot is refused: .env, .git, .htaccess and
- * friends must never be served just because they sit under the document root.
- * nginx needs an explicit rule for this; we make it the default. */
-static int fpm_http_path_has_dotfile(const char *path)
-{
-	const char *p = path;
-
-	while ((p = strchr(p, '/')) != NULL) {
-		if (p[1] == '.') {
-			return 1;
-		}
-		p++;
-	}
-
-	return 0;
-}
-
 /* Resolved document root, once per gateway process. */
 static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
 {
@@ -1647,135 +1581,32 @@ static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
  * can skip its own stat() for the one case this function already paid for.
  * -1 (unchanged from the caller's initial value) means this function never
  * reached that check -- the caller still doesn't know. */
+struct fpm_http_static_log_ctx {
+	struct fpm_http_gateway_s *gw;
+	struct evhttp_request *req;
+	const char *remote_addr;
+};
+
+static void fpm_http_static_log_response(void *ctx, int status, size_t bytes)
+{
+	struct fpm_http_static_log_ctx *c = ctx;
+
+	fpm_http_log_response(c->gw, c->req, c->remote_addr, NULL, status, bytes);
+}
+
 static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *path, size_t path_len, const char *remote_addr, int *script_missing)
 {
-	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], etag[64];
-	const char *root, *inm;
-	struct evkeyvalq *out;
-	struct stat st;
-	size_t root_len;
-	int fd, cmd;
+	struct fpm_http_static_log_ctx ctx = { gw, req, remote_addr };
+	struct fpm_http_static st;
 
-	cmd = evhttp_request_get_command(req);
-	if (cmd != EVHTTP_REQ_GET && cmd != EVHTTP_REQ_HEAD) {
-		return 0;
-	}
-	/* Anything that is a PHP script, or has PATH_INFO behind one, is the
-	 * worker's business. A directory falls through to index.php too. */
-	if (!path_len || path[path_len - 1] == '/' || strstr(path, ".php/")) {
-		return 0;
-	}
-	if (path_len >= 4 && !strcasecmp(path + path_len - 4, ".php")) {
-		return 0;
-	}
-	if (fpm_http_path_has_dotfile(path)) {
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
-		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
-		return 1;
-	}
+	memset(&st, 0, sizeof(st));
+	st.pool = gw->pool;
+	st.root = fpm_http_docroot_real(gw);	/* NULL when it does not resolve: nothing is served */
+	st.log = fpm_http_static_log_response;
+	st.log_ctx = &ctx;
 
-	root = fpm_http_docroot_real(gw);
-	if (!root) {
-		return 0;
-	}
-	root_len = strlen(root);
-
-	if ((size_t)snprintf(candidate, sizeof(candidate), "%s%s", root, path) >= sizeof(candidate)) {
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
-		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
-		return 1;
-	}
-	/* realpath() is the only honest containment check: the textual /../ filter
-	 * in fpm_http_build_request does not catch a symlink pointing outside the
-	 * document root. One extra syscall, but a static hit costs no worker at
-	 * all, so the trade is easy. */
-	if (!realpath(candidate, resolved)) {
-		if (script_missing) {
-			*script_missing = 1;	/* http.front_controller reuses this instead of stat()-ing again */
-		}
-		return 0;			/* no such file: let the worker produce the 404 */
-	}
-	if (script_missing) {
-		*script_missing = 0;	/* file is there, whatever open()/fstat() below turn out to say about it */
-	}
-	if (strncmp(resolved, root, root_len) != 0 || (resolved[root_len] && resolved[root_len] != '/')) {
-		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", gw->pool, path);
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
-		evhttp_send_error(req, HTTP_NOTFOUND, NULL);
-		return 1;
-	}
-
-	fd = open(resolved, O_RDONLY | O_CLOEXEC);
-	if (fd < 0) {
-		return 0;
-	}
-	if (fstat(fd, &st) < 0) {
-		close(fd);
-		return 0;
-	}
-	if (!S_ISREG(st.st_mode)) {
-		close(fd);
-		/* A directory with no index.php is "nothing to serve" the same way a
-		 * missing file is: reuse this fstat() -- already paid for -- to tell
-		 * fpm_http_build_request() so, instead of it needing a stat() of its
-		 * own. Other non-regular types (sockets, devices, ...) are left as
-		 * before: the worker's business, not the front controller's. */
-		if (script_missing && S_ISDIR(st.st_mode)) {
-			*script_missing = 1;
-		}
-		return 0;
-	}
-
-	snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
-		(unsigned long long)st.st_mtime, (unsigned long long)st.st_size);
-
-	out = evhttp_request_get_output_headers(req);
-	inm = evhttp_find_header(evhttp_request_get_input_headers(req), "If-None-Match");
-	if (inm && !strcmp(inm, etag)) {
-		close(fd);
-		evhttp_add_header(out, "ETag", etag);
-		fpm_http_log_response(gw, req, remote_addr, NULL, 304, 0);
-		evhttp_send_reply(req, 304, "Not Modified", NULL);
-		return 1;
-	}
-
-	evhttp_add_header(out, "Content-Type", fpm_http_content_type(resolved));
-	evhttp_add_header(out, "ETag", etag);
-
-	if (cmd == EVHTTP_REQ_HEAD) {
-		char len[32];
-
-		close(fd);
-		snprintf(len, sizeof(len), "%llu", (unsigned long long)st.st_size);
-		evhttp_add_header(out, "Content-Length", len);
-		/* HEAD sends no body, log 0 bytes like nginx' $body_bytes_sent would */
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, 0);
-		evhttp_send_reply(req, HTTP_OK, "OK", NULL);
-		return 1;
-	}
-
-	/* evbuffer_add_file takes ownership of fd and uses sendfile/mmap where it
-	 * can, so the bytes never pass through our address space. */
-	{
-		struct evbuffer *body = evbuffer_new();
-
-		if (!body || evbuffer_add_file(body, fd, 0, st.st_size) < 0) {
-			if (body) {
-				evbuffer_free(body);
-			} else {
-				close(fd);
-			}
-			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
-			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
-			return 1;
-		}
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) st.st_size);
-		evhttp_send_reply(req, HTTP_OK, "OK", body);
-		evbuffer_free(body);
-	}
-
-	return 1;
+	return fpm_http_static_serve(&st, req, path, path_len, script_missing);
 }
 
 static const char fpm_http_acme_prefix[] = "/.well-known/acme-challenge/";
@@ -1868,9 +1699,6 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
 static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr, int *script_missing)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const struct evhttp_uri *decoded_uri;
-	const char *raw_path;
 	char *path;
 	size_t path_len;
 	int answered = 0;
@@ -1878,23 +1706,8 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	/* Not gated on gw->static_files: the ACME challenge below is not a
 	 * static file, and http.static = 0 must not switch it off (issue #48,
 	 * criterion 4). The static branch keeps its own check further down. */
-	if (!uri) {
-		return 0;
-	}
-
-	decoded_uri = evhttp_request_get_evhttp_uri(req);
-	raw_path = decoded_uri ? evhttp_uri_get_path(decoded_uri) : NULL;
-	if (!raw_path || !*raw_path) {
-		return 0;
-	}
-
-	path = evhttp_uridecode(raw_path, 0, &path_len);
+	path = fpm_http_static_decode_path(req, &path_len);
 	if (!path) {
-		return 0;
-	}
-	if (path_len != strlen(path) || path[0] != '/' || strstr(path, "/../") ||
-	    (path_len >= 3 && !memcmp(path + path_len - 3, "/..", 3))) {
-		free(path);
 		return 0;			/* let fpm_http_build_request produce the 400 */
 	}
 

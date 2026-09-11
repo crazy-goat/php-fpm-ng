@@ -181,7 +181,7 @@ run_child: /* only workers reach this point */
 		/* Assign the metrics slot BEFORE cleanup — afterwards the pool list and
 		 * earlier pools' pm.max_children disappear (see fpm_metrics.c). */
 		fpm_metrics_child_init();
-		if (type && (!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http"))) {
+		if (type && type->reuses_request_runtime) {
 			fcgi_set_optimized_transport(true);
 			zend_signal_use_persistent_handlers(true);
 		}

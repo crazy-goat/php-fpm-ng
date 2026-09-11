@@ -64,20 +64,23 @@ $state1->assertUsable();
 $accountKey1 = $state1->loadOrCreateAccountKey();
 openssl_pkey_export($accountKey1, $accountKeyPem1);
 
-$certKey1 = $state1->loadOrCreateCertKey('example.test');
+[$certKey1, $certKeyIsNew] = $state1->loadOrMakeCertKey('example.test');
 openssl_pkey_export($certKey1, $certKeyPem1);
+// The key is not on disk yet: it is persisted by installCertificate(), with
+// the chain that matches it, so a failed order cannot leave the two apart.
+echo 'cert privkey before install: ' . (is_file($state1->certKeyPath('example.test')) ? 'present' : 'absent') . "\n";
 
 $account1 = $state1->loadOrRegisterAccount($register);
 
 echo 'account.key perms: ' . perms($state1->accountKeyPath()) . "\n";
-echo 'cert privkey perms: ' . perms($state1->certKeyPath('example.test')) . "\n";
 echo 'account.json perms: ' . perms($state1->accountMetaPath()) . "\n";
 echo 'register calls after first boot: ' . $registerCalls . "\n";
 echo 'account url after first boot: ' . $account1['url'] . "\n";
 
-// 4. Certificate chain install: public permissions, readable content.
-$state1->installCertificateChain('example.test', "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n");
+// 4. Certificate install: key 0600, chain public, both written together.
+$state1->installCertificate('example.test', "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n", $certKeyIsNew ? $certKey1 : null);
 echo 'fullchain perms: ' . perms($state1->certChainPath('example.test')) . "\n";
+echo 'cert privkey perms: ' . perms($state1->certKeyPath('example.test')) . "\n";
 
 // 5. "Restart": a brand new State instance over the same directory must
 //    reuse the existing account key, cert key and account record -- no new
@@ -88,8 +91,9 @@ $state2->assertUsable();
 $accountKey2 = $state2->loadOrCreateAccountKey();
 openssl_pkey_export($accountKey2, $accountKeyPem2);
 
-$certKey2 = $state2->loadOrCreateCertKey('example.test');
+[$certKey2, $certKey2IsNew] = $state2->loadOrMakeCertKey('example.test');
 openssl_pkey_export($certKey2, $certKeyPem2);
+echo 'cert key regenerated after restart: ' . ($certKey2IsNew ? 'yes' : 'no') . "\n";
 
 $register2 = function () use (&$registerCalls): array {
     $registerCalls++;
@@ -133,12 +137,14 @@ rrmdir($root);
 --EXPECT--
 missing-dir: named the path
 readonly-dir: named the path
+cert privkey before install: absent
 account.key perms: 600
-cert privkey perms: 600
 account.json perms: 600
 register calls after first boot: 1
 account url after first boot: https://acme.example.invalid/acct/1
 fullchain perms: 644
+cert privkey perms: 600
+cert key regenerated after restart: no
 account key reused: yes
 cert key reused: yes
 register calls after restart: 1

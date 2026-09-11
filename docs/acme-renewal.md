@@ -4,7 +4,8 @@ This document covers the two halves of issue #47: making sure only one
 process renews a given certificate, and getting the result into every
 gateway process. Serving the HTTP-01 challenge is
 [`docs/acme-challenge.md`](acme-challenge.md); obtaining and renewing a
-certificate against a CA is issues #47's successor, #49.
+certificate against a CA is [`docs/acme-client.md`](acme-client.md)
+(issue #49).
 
 ## The unit of exclusion is a certificate, not a pool
 
@@ -90,7 +91,7 @@ serves the new certificate, and explicitly forbids growing a second
 mechanism for it. There is none. The path is:
 
 1. The renewer writes `fullchain.pem` into the state directory with
-   `State::installCertificateChain()`, which writes a temporary file in the
+   `State::installCertificate()`, which writes a temporary file in the
    same directory and `rename()`s it, so a reader never sees a partial file.
 2. `http.tls_cert` and `http.tls_key` point straight at those files.
 3. The master's reload timer (task 040, `fpm_http_tls_reload.c`) digests

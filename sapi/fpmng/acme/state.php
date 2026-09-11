@@ -33,6 +33,23 @@ final class StateError extends \RuntimeException
 {
 }
 
+/**
+ * "Is this setting on?" -- for an env[] value or an ini setting.
+ *
+ * Not filter_var(..., FILTER_VALIDATE_BOOL): the canonical build configures
+ * --disable-all (.github/workflows/build-matrix.yml:178), which leaves out
+ * ext/filter, so both the function and the constant are missing there. A
+ * client that only works in a build with ext/filter is a client this
+ * project's own CI cannot run.
+ */
+function enabled(bool|int|string|null $value): bool
+{
+    if (is_bool($value)) {
+        return $value;
+    }
+    return in_array(strtolower(trim((string) $value)), ['1', 'on', 'yes', 'true'], true);
+}
+
 final class State
 {
     public readonly string $baseDir;
@@ -161,11 +178,40 @@ final class State
         return $this->loadOrCreateKey($this->accountKeyPath());
     }
 
-    /** Load a certificate's private key, generating it once if absent. */
-    public function loadOrCreateCertKey(string $domain): \OpenSSLAsymmetricKey
+    /**
+     * A certificate's private key: the persisted one if there is one, a fresh
+     * unpersisted one otherwise. The second element says which.
+     *
+     * Deliberately not "load or create and write": a key written when the CSR
+     * is built is a key already on disk if the order then fails at finalize,
+     * leaving privkey.pem describing a certificate that was never issued
+     * while fullchain.pem still holds the old, valid one. That mismatch takes
+     * TLS down on the next reload -- the exact outcome issue #49 criterion 5
+     * exists to prevent. The key is persisted by installCertificate(), once
+     * the chain that matches it is in hand.
+     *
+     * @return array{0: \OpenSSLAsymmetricKey, 1: bool} the key, and whether it is new
+     */
+    public function loadOrMakeCertKey(string $domain): array
     {
-        $this->ensureDomainDir($domain);
-        return $this->loadOrCreateKey($this->certKeyPath($domain));
+        $path = $this->certKeyPath($domain);
+        if (is_file($path)) {
+            $pem = file_get_contents($path);
+            $key = $pem === false ? false : openssl_pkey_get_private($pem);
+            if ($key === false) {
+                // Never include $pem in the message -- task 044 acceptance criterion 3.
+                throw new StateError("'$path' does not contain a usable private key");
+            }
+            return [$key, false];
+        }
+        $key = openssl_pkey_new([
+            'private_key_type' => OPENSSL_KEYTYPE_EC,
+            'curve_name' => 'prime256v1',
+        ]);
+        if ($key === false) {
+            throw new StateError("cannot generate a private key for '$path'");
+        }
+        return [$key, true];
     }
 
     /**
@@ -196,11 +242,58 @@ final class State
         return $meta;
     }
 
-    /** Install a freshly issued certificate chain -- public, 0644 (readers other than the owner never need the key). */
-    public function installCertificateChain(string $domain, string $fullchainPem): void
+    /**
+     * Install a freshly issued certificate: the key 0600, the chain 0644
+     * (readers other than the owner never need the key).
+     *
+     * Both in one call, key first, and only ever called once the chain is in
+     * hand -- see loadOrMakeCertKey(). $newKey is null when the persisted key
+     * was reused, which is the common case on renewal.
+     */
+    public function installCertificate(string $domain, string $fullchainPem, ?\OpenSSLAsymmetricKey $newKey): void
     {
         $this->ensureDomainDir($domain);
+        if ($newKey !== null) {
+            if (!openssl_pkey_export($newKey, $pem)) {
+                throw new StateError("cannot export the generated private key for '$domain'");
+            }
+            $this->writeRestricted($this->certKeyPath($domain), $pem);
+        }
         $this->writePublic($this->certChainPath($domain), $fullchainPem);
+    }
+
+    /**
+     * The renewal bookkeeping for a certificate: when it was last obtained,
+     * how many attempts have failed since, and when the next one is allowed
+     * (issue #49 criteria 3 and 5). Missing or unreadable reads as "nothing
+     * is known", which is the same decision an empty state directory
+     * produces -- the renewer then judges by the certificate on disk, so a
+     * lost meta file costs at most one extra order, never a missed renewal.
+     *
+     * @return array<string,mixed>
+     */
+    public function readRenewalMeta(string $domain): array
+    {
+        $raw = @file_get_contents($this->renewalMetaPath($domain));
+        if ($raw === false) {
+            return [];
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : [];
+    }
+
+    /** @param array<string,mixed> $meta */
+    public function writeRenewalMeta(string $domain, array $meta): void
+    {
+        $this->ensureDomainDir($domain);
+        $encoded = json_encode($meta, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if ($encoded === false) {
+            throw new StateError("cannot encode the renewal record for '$domain'");
+        }
+        /* 0600 like the rest of the per-domain state: it names the CA, the
+         * domains and the last error, which is not key material but is not
+         * something to leave world-readable beside keys that are. */
+        $this->writeRestricted($this->renewalMetaPath($domain), $encoded . "\n");
     }
 
     /**

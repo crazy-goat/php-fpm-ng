@@ -123,6 +123,28 @@ apk)
     fail "unknown package flavour: $FLAVOUR (expected deb or apk)" ;;
 esac
 
+# The warm images (issue #240). BUILD_SETUP and the stage 2 install lines below
+# are unchanged and still name every package they need: against these images
+# they find it already unpacked and return in seconds, against the bare base
+# image they install it, exactly as this script always did. So a machine that
+# has never pulled them is slower, never different -- and the package list stays
+# written down here rather than drifting into a Dockerfile.
+#
+# Measured on the poligon box: 232 of the deb flavour's 328 seconds were
+# `apt-get` unpacking the distribution's PHP. See .github/docker/package-gate.Dockerfile.
+GATE_IMAGE_PREFIX=${FPMNG_GATE_IMAGE_PREFIX:-ghcr.io/crazy-goat/php-fpm-ng-package-gate}
+warm_image() {
+    _want="$GATE_IMAGE_PREFIX:$1"
+    if docker image inspect "$_want" >/dev/null 2>&1 || docker pull -q "$_want" >/dev/null 2>&1; then
+        echo "$_want"
+    else
+        echo "$IMAGE"
+    fi
+}
+BUILD_IMAGE=$(warm_image "$FLAVOUR-build")
+TEST_IMAGE=$(warm_image "$FLAVOUR-test")
+echo "ci-package-gate.sh: build stage in $BUILD_IMAGE, install stage in $TEST_IMAGE"
+
 # ---------------------------------------------------------------------------
 # Stage 1: the build host. It has the compiler and the headers; nothing it
 # leaves behind is used by stage 2 except the package itself and the test
@@ -156,20 +178,20 @@ $RUN_PAYLOAD
 EOF
 docker run --rm \
     -v "$SRC:/src:ro" -v "$REPO:/repo:ro" -v "$OUT:/out" \
-    "$IMAGE" sh /out/stage1.sh
+    "$BUILD_IMAGE" sh /out/stage1.sh
 
 # Stage 1 ran as root, so everything under $OUT is root-owned and the
 # unprivileged CI user could not clean it up on the next run. Reclaim it from
 # a container, since chowning a root-owned file is what an unprivileged user
 # cannot do.
-docker run --rm -v "$OUT:/out" "$IMAGE" chown -R "$(id -u):$(id -g)" /out
+docker run --rm -v "$OUT:/out" "$BUILD_IMAGE" chown -R "$(id -u):$(id -g)" /out
 
 # ---------------------------------------------------------------------------
 # Stage 2: a machine that only installs. No compiler, no php-src, no build
 # tree -- if the package needs any of those, it fails here, which is the whole
 # point of the cell.
 # ---------------------------------------------------------------------------
-echo "ci-package-gate.sh: stage 2 -- install into a clean $IMAGE and run the owned suite"
+echo "ci-package-gate.sh: stage 2 -- install into a clean $TEST_IMAGE and run the owned suite"
 cat > "$OUT/stage2.sh" <<'EOF'
 set -eu
 
@@ -276,8 +298,8 @@ EOF
 
 docker run --rm \
     -v "$REPO:/repo:ro" -v "$OUT:/out" \
-    "$IMAGE" sh /out/stage2.sh
-docker run --rm -v "$OUT:/out" "$IMAGE" chown -R "$(id -u):$(id -g)" /out
+    "$TEST_IMAGE" sh /out/stage2.sh
+docker run --rm -v "$OUT:/out" "$TEST_IMAGE" chown -R "$(id -u):$(id -g)" /out
 
 # ---------------------------------------------------------------------------
 # The assertion. Read on the host, out of the file the runner wrote, so that a

@@ -1030,6 +1030,16 @@ jobs:
   # Both flavours in one job rather than two: poligon-host is a single runner
   # instance and runs one job at a time, so splitting them would queue rather
   # than parallelise, and they share the prepared tree set up below.
+  #
+  # WHERE THE TIME GOES (issue #240). Timed on the box, the deb flavour was 328
+  # seconds, of which 232 were `apt-get` unpacking the distribution's PHP -- our
+  # own build and package step was 16 and the 61-test suite was 72. Not the
+  # network: downloading those packages took 6 seconds and dpkg took 66. So
+  # build/ci-package-gate.sh now runs its two stages in images ci-image.yml
+  # pre-installs that set into, and does the unpacking nightly instead of four
+  # times per pull request. The images are a cache, not a contract: the stages
+  # still name every package they need, and against a bare base image they
+  # install it exactly as before.
   package-gate:
     needs: patches
     runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}

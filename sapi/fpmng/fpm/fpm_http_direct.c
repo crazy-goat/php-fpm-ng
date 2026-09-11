@@ -18,6 +18,7 @@
 #include <event2/keyvalq_struct.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
+#include <event2/listener.h>
 
 #include "php.h"
 #include "php_main.h"
@@ -79,6 +80,9 @@ struct fpm_direct_worker {
 	char server_port[NI_MAXSERV];
 	unsigned requests;
 	unsigned pending;
+	/* Whether this child is inside a request, i.e. whether its event loop is
+	 * blocked. Drives the accept gate, see fpm_direct_accept_enable(). */
+	int in_request;
 };
 
 struct fpm_direct_request {
@@ -110,6 +114,7 @@ struct fpm_direct_request {
 };
 
 static struct fpm_direct_request *fpm_direct_current;
+static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on);
 static volatile sig_atomic_t fpm_direct_stopping;
 
 /* http.stream. Defined below, next to the response-completion callbacks they
@@ -165,6 +170,16 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 		if (!w->pending) {
 			event_base_loopbreak(w->base);
 		}
+		return;
+	}
+	/* The safety net for the accept gate, not its normal path: the end of a
+	 * request re-opens accepting itself, through the call to this function that
+	 * fpm_direct_handle() makes before it returns. What is left for the timer is
+	 * the child that accepted a connection and was then told nothing -- no
+	 * request, so no end of one -- which would otherwise sit out of accept until
+	 * the read timeout closed the silent connection. */
+	if (!w->in_request) {
+		fpm_direct_accept_enable(w, 1);
 	}
 }
 
@@ -731,6 +746,61 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r)
 	evhttp_send_reply_end(r->http);
 }
 
+/* THE ACCEPT GATE (issue #53)
+ *
+ * Every child calls evhttp_accept_socket_with_handle() on the one listening
+ * socket the master opened, so which child serves a connection is decided by
+ * whichever one the kernel wakes. That much would be fair. What is not fair is
+ * libevent's accept loop: listener_read_cb() accept()s until the queue is
+ * empty, so a child that wakes first scoops an entire burst into its own
+ * connection list and then serves it one request at a time -- with the event
+ * loop blocked for the whole of each -- while its siblings sit idle. Measured
+ * on a 4-worker pool before this gate: a keep-alive run put every connection on
+ * one child, and one slow request made the seven fast ones queued behind it
+ * cost 1005 ms each instead of ~10 ms.
+ *
+ * The fix is to stop the drain after one connection. listener_read_cb()
+ * re-checks lev->enabled after each callback, so a callback that disables the
+ * listener ends the loop there and leaves the rest of the queue for whichever
+ * child wakes next. evhttp's only per-accepted-connection hook is the
+ * bufferevent callback, which is why the gate rides on evhttp_set_bevcb().
+ *
+ * An earlier attempt that closed the gate only while PHP ran measured as noise,
+ * for a reason the numbers made obvious: in a burst every child is idle, so the
+ * accept storm is over before any PHP starts and the window it closed was never
+ * open.
+ *
+ * On a TLS pool the bevcb belongs to fpm_http_direct_tls.c, which owns the
+ * SSL_CTX and reinstalls the pair whenever the certificate is reloaded. There
+ * the gate is handed to it as an on-accept hook rather than registered here, so
+ * that a reload cannot quietly drop it. */
+static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on)
+{
+	struct evconnlistener *l = w->listener ? evhttp_bound_socket_get_listener(w->listener) : NULL;
+
+	if (!l) {
+		return;
+	}
+	if (on) {
+		evconnlistener_enable(l);
+	} else {
+		evconnlistener_disable(l);
+	}
+}
+
+/* Shared by the plain bevcb below and, through
+ * fpm_http_direct_tls_child_attach(), by the TLS one. */
+static void fpm_direct_accept_close_gate(void *arg)
+{
+	fpm_direct_accept_enable(arg, 0);
+}
+
+static struct bufferevent *fpm_direct_accept_bevcb(struct event_base *base, void *arg)
+{
+	fpm_direct_accept_close_gate(arg);
+	return bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+}
+
 static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 {
 	struct fpm_direct_worker *w = arg;
@@ -757,6 +827,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		return;
 	}
 
+	w->in_request = 1;
 	fpm_direct_current = &r;
 	fpm_request_reading_headers(false);
 	memset(&SG(request_info), 0, sizeof(SG(request_info)));
@@ -827,6 +898,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		}
 		fpm_direct_stream_finish(&r);
 		evbuffer_free(r.output);
+		w->in_request = 0;
 		fpm_direct_tick(-1, 0, w);
 		fpm_request_accepting(true);
 		return;
@@ -852,6 +924,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 	}
 	w->pending++;
+	w->in_request = 0;
 	fpm_direct_tick(-1, 0, w);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
 	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
@@ -894,7 +967,14 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	/* Before the listener is attached, so the first connection this child
 	 * accepts is already on this process's own SSL_CTX. A no-op on a pool
 	 * without http.tls_cert. */
-	if (fpm_http_direct_tls_child_attach(wp, w.base, w.http) < 0) exit(FPM_EXIT_SOFTWARE);
+	if (fpm_http_direct_tls_child_attach(wp, w.base, w.http, fpm_direct_accept_close_gate, &w) < 0) {
+		exit(FPM_EXIT_SOFTWARE);
+	}
+	/* The accept gate. On a TLS pool it went in as the hook above, because there
+	 * the bevcb is the TLS one. */
+	if (!fpm_http_direct_tls_enabled(wp)) {
+		evhttp_set_bevcb(w.http, fpm_direct_accept_bevcb, &w);
+	}
 	w.listener = evhttp_accept_socket_with_handle(w.http, wp->listening_socket);
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
 	action.sa_handler = fpm_direct_stop;

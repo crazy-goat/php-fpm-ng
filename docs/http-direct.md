@@ -63,6 +63,69 @@ supplies response status, headers (including repeated Set-Cookie), and body thro
 SAPI. The transport owns Content-Length/Transfer-Encoding and supports HEAD and
 HTTP/1.x keep-alive.
 
+## Sharing a burst across workers
+
+Every child accepts on the one listening socket the master opened, so the kernel
+decides which child serves a connection. libevent's listener, though, accepts in
+a loop until the queue is empty: the child that wakes first used to take an
+entire burst into its own connection list and then serve it one request at a
+time, with its event loop blocked for the whole of each, while its siblings sat
+idle. On `pool.executor = classic` a single slow request therefore delayed every
+connection that happened to land on the same child, by as long as that request
+took.
+
+Since issue #53 each child stops accepting as soon as it has accepted one
+connection, and starts again when that connection's request ends. libevent
+re-checks the listener's enabled flag after each accept callback, so the drain
+stops there and the rest of the queue is left for whichever child wakes next.
+The hook is `evhttp_set_bevcb()`, the only per-connection hook evhttp exposes;
+on a TLS pool it is `fpm_http_direct_tls.c` that owns the bevcb and the gate
+travels with it, so a certificate reload cannot drop it. A 10 ms timer re-opens
+accepting for a child that accepted a connection and was then told nothing, so a
+silent peer cannot wedge a child out of accept until the read timeout.
+
+The gate is not a scheduler and makes no guarantee about the distribution. A
+child whose request completes in microseconds re-opens accepting and can take a
+second connection out of the same burst, including a slow one; what it removes
+is the case where one child takes *everything*. `pool.executor = worker` does
+not use it: there the event loop is driven by userland and can hold several
+requests in flight, so the same gate would be a throughput cost against a
+different, and so far unmeasured, problem.
+
+### Measured results (Intel i7-6700T, 8 threads, poligon, 2026-09-11)
+
+`build/benchmark-http-direct-fairness.py`, 8 connections, three repeats per
+cell, both binaries built by `build/libphp-build.sh` against the same
+distribution libphp and run back to back. Three workloads: a burst released by a
+barrier, 10 s of keep-alive traffic, and one 1000 ms request among seven fast
+ones.
+
+| workers | metric | before | after |
+| --- | --- | --- | --- |
+| 4 | burst, workers used | 3/4, 2/4, 2/4 | 4/4, 4/4, 4/4 |
+| 4 | keep-alive, busiest worker's share | 0.373, 0.624, 0.875 | 0.377, 0.374, 0.375 |
+| 4 | slow peer, fast requests served off the sleeper | 7/7, 2/7, 7/7 | 7/7, 7/7, 6/7 |
+| 4 | slow peer, slowest fast request | 1.21, 1003, 1.04 ms | 1.17, 1.38, 1001 ms |
+| 2 | keep-alive, busiest worker's share | 0.623, 0.500, 0.744 | 0.625, 0.623, 0.745 |
+| 2 | slow peer, fast requests served off the sleeper | 6/7, 3/7, 1/7 | 7/7, 7/7, 7/7 |
+| 2 | slow peer, slowest fast request | 1001, 1003, 1005 ms | 1.38, 1.53, 1.46 ms |
+
+The cost, from the same runs, as the median of three keep-alive repeats: 34773
+to 34929 requests at one worker (+0.4%), 34316 to 34191 at two (-0.4%), 33205 to
+32559 at four (**-1.9%**). Interrupting the accept drain is not free, and at four
+workers it is outside the run-to-run spread.
+
+Two things the table does not show, recorded because they cost time to learn.
+An earlier attempt closed the gate only while PHP ran and measured as noise: in a
+burst every child is idle, so the accept storm is over before any PHP starts and
+the window it closed was never open. And a first comparison against a
+separately-built baseline reported a 3-5% throughput cost that turned out to be
+the two binaries, not the change -- at one worker, where the gate cannot affect
+anything, that baseline differed from the gated binary by 70%. Both numbers
+above come from one sitting on one toolchain for that reason.
+
+`sapi/fpmng/tests/fpmng-http-direct-accept-fairness.phpt` guards the behaviour.
+
 ## Deliberate limits
 
 - No static files, trusted-proxy handling, gateway ACLs, gateway access log,

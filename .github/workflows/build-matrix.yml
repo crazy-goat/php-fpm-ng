@@ -163,6 +163,8 @@ jobs:
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
     steps:
+      - name: TEMPORARY (issue #209 demonstration) fail immediately
+        run: exit 1
       - uses: actions/checkout@v7
       - name: clone pinned php-src
         run: |

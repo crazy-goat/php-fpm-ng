@@ -52,6 +52,23 @@ env:
   # requires.
   PHP_SRC_REPO: https://github.com/php/php-src.git
   PHP_SRC_REF: ${{ github.event.inputs.php_src_ref || 'php-8.5.9' }}
+  # The canonical configure line, in one place because more than one cell has
+  # to use exactly it. fpmng-phpt-fiber (issue #97) is only meaningful as a
+  # comparison against the default build: if the two configure lines drift --
+  # the way --with-openssl was once added to just one of them for task 039 --
+  # then a test can silently run on one cell and skip on the other, and the
+  # fiber cell stops being evidence about the flag. Three copies of the same
+  # string could not be kept in step by a comment, so there is one string.
+  #
+  # --with-openssl: the C-level HAVE_FPM_HTTP_TLS (gateway TLS termination)
+  # comes from libssl-dev alone, but the CLI php built here also needs
+  # ext/openssl itself -- our own .phpt tests for TLS features (task 039's
+  # fpmng-http-tls-chain.phpt, and 040/041/042) drive the gateway over a real
+  # TLS handshake via PHP's ssl:// stream wrapper and openssl_x509_parse(),
+  # both of which live in ext/openssl, not in core. Without this flag those
+  # tests silently SKIP ("requires the openssl extension") instead of running
+  # -- caught on task 039's first CI run.
+  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-session --with-openssl
 
 jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
@@ -167,20 +184,23 @@ jobs:
           CC: ccache gcc
           CXX: ccache g++
         run: |
-          # --with-openssl: the C-level HAVE_FPM_HTTP_TLS (gateway TLS termination)
-          # comes from libssl-dev alone, but the CLI php built here also needs
-          # ext/openssl itself -- our own .phpt tests for TLS features (task 039's
-          # fpmng-http-tls-chain.phpt, and more to come for 040/041/042) drive the
-          # gateway over a real TLS handshake via PHP's ssl:// stream wrapper and
-          # openssl_x509_parse(), both of which live in ext/openssl, not in core.
-          # Without this flag those tests silently SKIP ("requires the openssl
-          # extension") instead of running -- caught on task 039's first CI run.
-          ./configure --disable-all --enable-fpmng --enable-session --with-openssl \
-            2>&1 | tee ../configure.log
+          # shellcheck disable=SC2086 -- the flag list is meant to word-split
+          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure.rc ) | tee ../configure.log
+          exit "$(cat ../configure.rc)"
 
       - name: build
         working-directory: php-src
-        run: make -j"$(nproc)" fpmng cli 2>&1 | tee ../make.log
+        # The steps here run under `sh -e` -- this container has no bash, so
+        # GitHub's usual `bash -e` default falls back to dash, where
+        # `set -o pipefail` is an error ("Illegal option -o pipefail",
+        # measured on run 34580495525). Without the exit status of the left
+        # side of the pipe the step reports tee's, so a failed build looks
+        # green and the error is only in the artifact. Hence the rc file --
+        # and the `set +e` inside it, because errexit propagates into the
+        # subshell and would abort it before the rc file was ever written.
+        run: |
+          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make.rc ) | tee ../make.log
+          exit "$(cat ../make.rc)"
 
       # Issue #111: the build is warning-free in the files we ship, and stays
       # that way. -Werror is not available here -- this compiles all of
@@ -324,6 +344,106 @@ jobs:
           name: fpmng-phpt-results
           path: fpmng-phpt-results
 
+  # Issue #97: ten of the .phpt tests this repo owns are gated on
+  # --enable-fpmng-fiber, and no cell built with it -- so they could only ever
+  # report SKIP. Reachable and unconditionally skipped is still untested:
+  # nothing in CI would have noticed the fiber executor's request isolation,
+  # its flock() interception, or the listening-flag normalisation across
+  # reloads breaking, which is precisely the behaviour those tests exist for.
+  #
+  # This cell builds its own binary rather than reusing fpmng-canonical-build:
+  # the flag changes the SAPI that gets compiled, so there is no artifact to
+  # download. The default build keeps running the same suite in fpmng-phpt
+  # above, so both sides of the flag stay covered -- which matters, because
+  # the executor is chosen per pool and a stock binary does not contain this
+  # code at all.
+  #
+  # --enable-fpmng-async is deliberately NOT set here: issue #87 records that
+  # fpmng-config-rejected-directives.phpt can only pass with it off, so a cell
+  # turning both on is a separate decision.
+  #
+  # Measured on the poligon, 2026-09-11, php-8.5.9, this exact configure line:
+  # PASS=58, FAIL/ERROR=0, SKIP=0 of 58.
+  fpmng-phpt-fiber:
+    needs: patches
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      volumes:
+        - /opt/gh-runner/cache/ccache:/ccache
+      # As root php-fpm refuses to start, so the suite would report PASS=0
+      # with everything skipped and still look green. Same note as fpmng-phpt.
+      options: --user 1001:1001
+    steps:
+      - uses: actions/checkout@v7
+      # fpmng-http-direct-request-parity.phpt needs this locale to be
+      # discriminating at all -- see the same step on fpmng-phpt (issue #105).
+      - name: assert tr_TR.UTF-8 is present (issue #105)
+        run: locale -a | grep -i tr_TR
+
+      - name: clone pinned php-src
+        run: |
+          git init php-src
+          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
+          git -C php-src checkout FETCH_HEAD
+
+      - name: prepare sapi/fpmng in php-src
+        run: ./build/prepare.sh "$PWD/php-src"
+
+      - name: buildconf --force
+        working-directory: php-src
+        run: ./buildconf --force
+
+      - name: configure with the fiber executor
+        working-directory: php-src
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          # $FPMNG_CONFIGURE_FLAGS and nothing else, plus the one flag this
+          # cell is about, so the two builds cannot differ in anything else.
+          # shellcheck disable=SC2086 -- the flag list is meant to word-split
+          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > ../configure-fiber.rc ) | tee ../configure-fiber.log
+          [ "$(cat ../configure-fiber.rc)" -eq 0 ]
+          # configure does not fail on an unknown --enable flag, it warns; so
+          # assert the executor is actually in this build rather than trusting
+          # the command line. Without this the whole cell could silently
+          # degrade into a second copy of fpmng-phpt.
+          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" ../configure-fiber.log
+
+      - name: build
+        working-directory: php-src
+        # Captures make's own status, not tee's; a build that failed would
+        # otherwise reach the test step looking fine. See the longer note on
+        # the `build` job for why this is not `set -o pipefail`.
+        run: |
+          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make-fiber.rc ) | tee ../make-fiber.log
+          exit "$(cat ../make-fiber.rc)"
+
+      - name: run fpmng-owned .phpt tests on the fiber build
+        run: |
+          chmod +x build/run-fpmng-phpt.sh
+          TEST_PHP_EXECUTABLE="$PWD/php-src/sapi/cli/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/php-src/sapi/fpmng/php-fpm-ng" \
+          TEST_FPM_TIMEOUT=120 \
+          ./build/run-fpmng-phpt.sh "$PWD/php-src" "$PWD/fpmng-phpt-fiber-results"
+
+      # The green/red of the step above is not the acceptance criterion: a run
+      # where all ten fiber tests SKIP passes it. See the script's header.
+      - name: assert the fiber-gated tests actually ran (issue #97)
+        run: |
+          chmod +x build/assert-fiber-tests-ran.sh
+          ./build/assert-fiber-tests-ran.sh "$PWD/fpmng-phpt-fiber-results"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fpmng-phpt-fiber-results
+          path: fpmng-phpt-fiber-results
+
   # Task 076 acceptance criterion ("the test is reachable from CI on at least
   # one job that has opcache, or... gains one; say which was done"): NO new
   # job was added. `ext/opcache/config.m4` calls
@@ -394,8 +514,9 @@ jobs:
         working-directory: php-src
         run: |
           ./buildconf --force
-          ./configure --disable-all --enable-fpmng --enable-session --with-openssl \
-            2>&1 | tee ../configure-lint.log
+          # shellcheck disable=SC2086 -- the flag list is meant to word-split
+          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure-lint.rc ) | tee ../configure-lint.log
+          exit "$(cat ../configure-lint.rc)"
 
       - name: clang-tidy report (our files only)
         run: |

@@ -32,9 +32,12 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_static.h"
+#include "fpm_http_direct_ops.h"
+#include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
+#include "fpm_scoreboard.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
@@ -91,6 +94,12 @@ struct fpm_direct_worker {
 	/* Whether this child is inside a request, i.e. whether its event loop is
 	 * blocked. Drives the accept gate, see fpm_direct_accept_enable(). */
 	int in_request;
+	/* issue #59: listen.allowed_clients, ping.path, pm.status_path and the
+	 * pool-wide counters behind the status page. NULL only if the child could
+	 * not set them up, which is fatal there. */
+	struct fpm_http_direct_ops *ops;
+	/* access.log; NULL when the pool sets none. */
+	struct fpm_http_direct_access_log_s *access_log;
 };
 
 struct fpm_direct_request {
@@ -123,6 +132,13 @@ struct fpm_direct_request {
 	int stream_declined;	/* this response will not stream: decided once, not per write */
 	int may_stream;		/* set only around php_execute_script(), see fpm_direct_flush() */
 	long stream_waited_ms;	/* http.stream_write_timeout is spent across the whole response */
+	/* access.log, issue #59. Counted where the bytes are handed to libevent
+	 * rather than read back from the connection afterwards: on a streamed
+	 * response the buffer has already been drained by then, and on a buffered
+	 * one the request may be gone. */
+	size_t bytes_sent;
+	struct timeval started;
+	time_t started_epoch;
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -738,6 +754,7 @@ static void fpm_direct_stream_push(struct fpm_direct_request *r)
 	if (evbuffer_get_length(r->output)) {
 		/* Drains r->output into the connection: no copy, and no part of the
 		 * response is held twice. */
+		r->bytes_sent += evbuffer_get_length(r->output);
 		evhttp_send_reply_chunk(r->http, r->output);
 	}
 	fpm_direct_stream_pump(r, FPM_DIRECT_STREAM_HIGHWATER);
@@ -782,6 +799,7 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 		return;
 	}
 	if (evbuffer_get_length(r->output)) {
+		r->bytes_sent += evbuffer_get_length(r->output);
 		evhttp_send_reply_chunk(r->http, r->output);
 	}
 	connection = evhttp_request_get_connection(r->http);
@@ -866,7 +884,15 @@ static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on)
  * fpm_http_direct_tls_child_attach(), by the TLS one. */
 static void fpm_direct_accept_close_gate(void *arg)
 {
-	fpm_direct_accept_enable(arg, 0);
+	struct fpm_direct_worker *w = arg;
+
+	/* The one hook libevent runs per accepted connection, and therefore the
+	 * only place a direct pool can count one. The ACL is deliberately NOT
+	 * here: evhttp has not associated the descriptor with the connection yet,
+	 * so the peer address is not knowable -- it is checked in the request
+	 * callback instead, exactly as the gateway does (fpm_http.c). */
+	fpm_http_direct_ops_accepted(w->ops);
+	fpm_direct_accept_enable(w, 0);
 }
 
 static struct bufferevent *fpm_direct_accept_bevcb(struct event_base *base, void *arg)
@@ -943,6 +969,124 @@ static void fpm_direct_retire(struct fpm_direct_request *r)
 	}
 }
 
+
+/* --- access.log (issue #59) ----------------------------------------------
+ *
+ * Two entry points, because this pool answers two kinds of request and they
+ * know different things. A PHP request leaves its method, URI, script, CPU and
+ * memory in this child's scoreboard slot, which is exactly where upstream's
+ * fpm_log.c reads them -- so reading them from there is what keeps a format
+ * written for a fastcgi pool meaning the same thing here. A file, a ping, a
+ * status page or a refusal never touches the slot, and reading it for them
+ * would report whatever PHP request this child happened to serve last.
+ */
+/* The same arithmetic upstream's %%C does (fpm_log.c): the tms delta the last
+ * request cost, over the wall-clock it took, over the tick. Zero unless
+ * request_cpu_tracking is on, again exactly as upstream. Taken from the
+ * caller's snapshot rather than from a second lock on the slot. */
+static double fpm_direct_last_request_cpu(const struct fpm_scoreboard_proc_s *proc)
+{
+#ifdef HAVE_TIMES
+	double seconds = (double) proc->cpu_duration.tv_sec + (double) proc->cpu_duration.tv_usec / 1000000.;
+	clock_t total = proc->last_request_cpu.tms_utime + proc->last_request_cpu.tms_stime +
+		proc->last_request_cpu.tms_cutime + proc->last_request_cpu.tms_cstime;
+
+	if (seconds <= 0.) {
+		return 0.;
+	}
+	return (double) total / fpm_scoreboard_get_tick() / seconds * 100.;
+#else
+	(void) proc;
+	return 0.;
+#endif
+}
+
+static void fpm_direct_log_php(struct fpm_direct_request *r)
+{
+	struct fpm_direct_worker *w = r->w;
+	struct fpm_http_direct_access_entry e;
+	struct fpm_scoreboard_proc_s snapshot, *proc;
+	char *query;
+
+	if (!w->access_log) {
+		return;
+	}
+	memset(&snapshot, 0, sizeof(snapshot));
+	proc = fpm_scoreboard_proc_acquire(NULL, -1, 0);
+	if (proc) {
+		snapshot = *proc;
+		fpm_scoreboard_proc_release(proc);
+	}
+	memset(&e, 0, sizeof(e));
+	e.method = snapshot.request_method;
+	/* %r is the path and %q the query string, so the two must not both carry
+	 * it. A direct pool puts REQUEST_URI -- query string and all -- into
+	 * SG(request_info).request_uri, because that is what $_SERVER and PHP_SELF
+	 * report here; upstream's fastcgi path happens to put SCRIPT_NAME there
+	 * instead. Cutting at the '?' is what makes one access.format mean the
+	 * same thing on both transports. The slot is this child's own snapshot,
+	 * so writing into it is local. */
+	query = strchr(snapshot.request_uri, '?');
+	if (query) {
+		*query = '\0';
+	}
+	e.uri = snapshot.request_uri;
+	e.query_string = snapshot.query_string;
+	e.script_filename = snapshot.script_filename;
+	e.remote_user = snapshot.auth_user;
+	e.remote_addr = evhttp_find_header(&r->env, "REMOTE_ADDR");
+	e.content_length = snapshot.content_length;
+	e.bytes_sent = r->bytes_sent;
+	e.status = r->status;
+	e.started = r->started;
+	e.started_epoch = snapshot.accepted_epoch ? snapshot.accepted_epoch : r->started_epoch;
+	e.duration = snapshot.duration;
+	e.cpu_percent = fpm_direct_last_request_cpu(&snapshot);
+	e.memory = snapshot.memory;
+	e.env = &r->env;
+	/* May be NULL on a streamed response whose client vanished; the renderer
+	 * then has nothing to answer %o{...} with, which is the truth. */
+	e.http = r->http;
+	fpm_http_direct_access_log_write(w->access_log, &e);
+}
+
+/* Everything answered without PHP: a static file, ping, the status page, and
+ * the two refusals. The URI is split here rather than taken from the request
+ * object because %r is the path and %q the query string, the same split
+ * fpm_request.c makes for the scoreboard. */
+static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_request *http,
+	const char *peer, const struct timeval *started, time_t started_epoch, int status, size_t bytes)
+{
+	struct fpm_http_direct_access_entry e;
+	const char *raw = evhttp_request_get_uri(http);
+	const char *query = raw ? strchr(raw, '?') : NULL;
+	char path[512];
+
+	if (!w->access_log) {
+		return;
+	}
+	memset(&e, 0, sizeof(e));
+	if (raw) {
+		size_t len = query ? (size_t) (query - raw) : strlen(raw);
+
+		if (len >= sizeof(path)) {
+			len = sizeof(path) - 1;
+		}
+		memcpy(path, raw, len);
+		path[len] = '\0';
+		e.uri = path;
+		e.query_string = query ? query + 1 : "";
+	}
+	e.method = fpm_http_direct_method(evhttp_request_get_command(http));
+	e.remote_addr = peer;
+	e.status = status;
+	e.bytes_sent = bytes;
+	e.started = *started;
+	e.started_epoch = started_epoch;
+	e.http = http;
+	fpm_http_direct_access_log_write(w->access_log, &e);
+}
+
 /* The buffered ending: everything from deciding the final status to handing the
  * reply to libevent. Split out of fpm_direct_handle() so that fpmng_respond()
  * reaches the same code rather than a second copy of it -- the framing, the
@@ -974,6 +1118,7 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 	fpm_direct_tick(-1, 0, w);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
 	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
+	r->bytes_sent += evbuffer_get_length(r->output);
 	evhttp_send_reply(http, r->status, NULL, r->output);
 	if (flush) {
 		fpm_direct_push_now(r);
@@ -1107,12 +1252,31 @@ static void fpm_direct_register_functions(const char *pool)
  * to be verifiable from the outside.
  *
  * The root is the one the pool already resolved for its front controller, i.e.
- * chdir -- the same directory DOCUMENT_ROOT reports to the script. A direct
- * pool has no access log to write (access.log is in
- * FPM_HTTP_DIRECT_REJECTS_COMMON), so no log hook is installed.
+ * chdir -- the same directory DOCUMENT_ROOT reports to the script.
  */
-static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_request *http)
+struct fpm_direct_static_log {
+	struct fpm_direct_worker *w;
+	struct evhttp_request *http;
+	const char *peer;
+	struct timeval started;
+	time_t started_epoch;
+};
+
+/* fpm_http_static's hook, called just before the reply it is about to send.
+ * The one place that knows both the status and the byte count of a file this
+ * process never read into memory (evbuffer_add_file()). */
+static void fpm_direct_static_logged(void *ctx, int status, size_t bytes)
 {
+	struct fpm_direct_static_log *log = ctx;
+
+	fpm_http_direct_ops_local(log->w->ops);
+	fpm_direct_log_local(log->w, log->http, log->peer, &log->started, log->started_epoch, status, bytes);
+}
+
+static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_request *http,
+	const char *peer, const struct timeval *started, time_t started_epoch)
+{
+	struct fpm_direct_static_log log = { w, http, peer, *started, started_epoch };
 	struct fpm_http_static st;
 	size_t path_len;
 	char *path;
@@ -1133,6 +1297,8 @@ static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_requ
 	 * an application directory, so there "I do not know what this is" is a
 	 * reason to leave the file alone, not to hand it over. */
 	st.known_types_only = 1;
+	st.log = fpm_direct_static_logged;
+	st.log_ctx = &log;
 	/* Counted and hooked up before the reply, not after it: from the moment
 	 * libevent has the response the connection may complete or die, and
 	 * w->pending is what the shutdown path waits on. Both callbacks are the
@@ -1165,15 +1331,54 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	zend_file_handle file;
 	struct sigaction term_before;
 	const char *authorization;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(http);
+	char *peer = NULL;
+	ev_uint16_t peer_port = 0;
+	struct timeval started;
+	time_t started_epoch = time(NULL);
+	int local_status = 0;
+	size_t local_bytes = 0;
 
+	gettimeofday(&started, NULL);
+	if (evcon) {
+		evhttp_connection_get_peer(evcon, &peer, &peer_port);
+	}
+
+	/* listen.allowed_clients, issue #59. Before anything else this function
+	 * does: a client that may not be here must not reach the static file
+	 * server, the status page or PHP, and must not be told which of them
+	 * exists. Enforced on the direct peer, never on an X-Forwarded-For --
+	 * a direct pool has no trusted-proxy list, and the address this test is
+	 * about is the one that made the connection. */
+	if (!fpm_http_direct_ops_allowed(w->ops, peer)) {
+		fpm_http_direct_ops_refused(w->ops);
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 403, 0);
+		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
+		evhttp_send_error(http, 403, "Forbidden");
+		return;
+	}
 	if (fpm_direct_stopping || w->pending >= FPM_DIRECT_PENDING_MAX) {
+		fpm_http_direct_ops_refused(w->ops);
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 503, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 503, "Worker unavailable");
 		return;
 	}
-	if (fpm_direct_try_static(w, http)) {
+	/* ping.path and pm.status_path, issue #59. Ahead of the static server and
+	 * of PHP, and after the 503 gate: a pool that has stopped accepting work
+	 * is not healthy, so answering "pong" there would be the one wrong answer
+	 * this endpoint can give. */
+	if (fpm_http_direct_ops_try_local(w->ops, http, &local_status, &local_bytes)) {
+		fpm_http_direct_ops_local(w->ops);
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, local_status, local_bytes);
 		return;
 	}
+	if (fpm_direct_try_static(w, http, peer, &started, started_epoch)) {
+		return;
+	}
+	fpm_http_direct_ops_active(w->ops, 1);
+	r.started = started;
+	r.started_epoch = started_epoch;
 	r.http = http;
 	r.w = w;
 	r.pool = w->wp->config->name;
@@ -1183,6 +1388,8 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	if (!r.output || fpm_direct_prepare_request(w, &r) < 0) {
 		evhttp_clear_headers(&r.env);
 		if (r.output) evbuffer_free(r.output);
+		fpm_http_direct_ops_active(w->ops, -1);
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
 		evhttp_send_error(http, 400, "Bad request");
 		return;
 	}
@@ -1246,15 +1453,20 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	SG(server_context) = NULL;
 	fpm_direct_current = NULL;
 	fpm_stdio_flush_child();
-	evhttp_clear_headers(&r.env);
+	/* r.env is cleared by each of the three endings below rather than here:
+	 * %e{...} in access.format reads it, and the log line is written where the
+	 * byte count is final. */
 
 	if (r.responded) {
 		/* fpmng_respond() framed and sent this response, retired the request
 		 * and handed the connection to the completion callbacks. Whatever the
 		 * script produced afterwards was discarded as it was written. */
+		fpm_direct_log_php(&r);
+		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
 		fpm_direct_tick(-1, 0, w);
+		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
 	}
@@ -1264,9 +1476,12 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		 * before the first byte left. */
 		fpm_direct_retire(&r);
 		fpm_direct_stream_finish(&r, 0);
+		fpm_direct_log_php(&r);
+		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
 		fpm_direct_tick(-1, 0, w);
+		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
 	}
@@ -1275,7 +1490,10 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	 * much still in a request. */
 	w->in_request = 0;
 	fpm_direct_send_buffered(&r, 0);
+	fpm_direct_log_php(&r);
+	evhttp_clear_headers(&r.env);
 	evbuffer_free(r.output);
+	fpm_http_direct_ops_active(w->ops, -1);
 	fpm_request_accepting(true);
 }
 
@@ -1327,6 +1545,18 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	sigemptyset(&action.sa_mask);
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	fpm_direct_install_sapi();
+	/* Both of these are per-child: the ACL and the endpoint paths are parsed
+	 * once here rather than on every request, and the access log takes the
+	 * descriptor the master opened before the fork, so a SIGUSR1 rotation in
+	 * the master reaches this child through the same fd. */
+	w.ops = fpm_http_direct_ops_init_child(wp);
+	if (!w.ops) {
+		/* A pool whose listen.allowed_clients could not be parsed must not
+		 * start: a list meant to keep someone out is worse than useless if it
+		 * silently keeps nobody out. */
+		exit(FPM_EXIT_CONFIG);
+	}
+	w.access_log = fpm_http_direct_access_log_init_child(wp);
 	/* After install_sapi(), which is where this file's other function-table
 	 * surgery lives, and before the loop: registered once per child, so the
 	 * name exists for every request this worker serves. */
@@ -1338,5 +1568,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	event_free(tick);
 	evhttp_free(w.http);
 	event_base_free(w.base);
+	fpm_http_direct_access_log_free(w.access_log);
+	fpm_http_direct_ops_free(w.ops);
 	exit(FPM_EXIT_OK);
 }

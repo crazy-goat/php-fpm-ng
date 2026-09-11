@@ -5,7 +5,7 @@
 # WHAT THIS BUILD IS. For `pool.type = fastcgi` and `pool.type = http-direct`
 # this is the shipping path (issue #219): the packages in #221/#222 are built
 # from what this script produces, and a user installs them without a compiler.
-# 58 translation units, against 711 files for the full php-src build.
+# 62 translation units, against 711 files for the full php-src build.
 #
 # WHAT IT IS NOT. It cannot speak for `pool.type = fastcgi-ng` or
 # `pool.type = http` -- they need zend_signal_use_persistent_handlers(), added
@@ -17,8 +17,8 @@
 # run produced.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
-# 54 sources out of config.m4 plus 5, and the owned .phpt suite reports
-# PASS=34 FAIL=0 SKIP=31 of 65 against this binary. The 31 skips are the tests
+# 57 sources out of config.m4 plus 5, and the owned .phpt suite reports
+# PASS=35 FAIL=0 SKIP=31 of 66 against this binary. The 31 skips are the tests
 # whose pool needs one of the two types refused above; they ask the binary and
 # skip rather than fail (issue #230), which is what makes this suite usable as
 # a gate for the package.

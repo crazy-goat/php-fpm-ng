@@ -53,12 +53,16 @@ struct fpm_http_direct_labels {
 };
 
 /* Pool directives neither executor can honour. Shared as a macro rather than
- * an array so a list can extend it (the worker adds the per-request deadlines)
- * without holding a second copy of the common entries. */
+ * an array so a list can extend it (the worker adds the per-request deadlines
+ * and the per-request observability) without holding a second copy of the
+ * common entries.
+ *
+ * pm.status_listen stays here for both: it asks for a second listening socket
+ * served by a second process, and a direct child owns exactly one listener --
+ * the pool's. pm.status_path on the pool's own listener is supported by the
+ * classic executor (issue #59). */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON \
-	"fiber.", "supervisor.", "cron.", "chroot", "listen.allowed_clients", \
-	"pm.status_path", "pm.status_listen", "ping.path", "ping.response", \
-	"access.log", "access.format", "access.suppress_path"
+	"fiber.", "supervisor.", "cron.", "pm.status_listen"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

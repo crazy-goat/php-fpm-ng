@@ -63,6 +63,7 @@
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_acl.h"
 #include "fpm_std_streams.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -142,6 +143,9 @@ static struct {
 	char script[PATH_MAX];
 	char server_addr[NI_MAXHOST];
 	char server_port[NI_MAXSERV];
+	/* listen.allowed_clients (issue #59), parsed once in child_main(). NULL
+	 * means the directive is unset and every peer is allowed. */
+	struct fpm_http_acl_s *acl;
 	int notify_read;
 	int notify_write;
 	zval notify_stream;
@@ -171,6 +175,15 @@ const char *const fpm_http_direct_worker_rejects[] = {
 	 * never fire or kill a healthy worker. Rejected instead of silently
 	 * unenforced. */
 	"request_terminate_timeout", "request_slowlog_timeout", "slowlog",
+	/* Same reason, one step further (issue #59). This executor calls
+	 * fpm_request_accepting(false) once for the life of the child, so the
+	 * scoreboard has no per-request stage, duration, CPU or peak memory to
+	 * report and no request to count. A status page would show one process
+	 * stuck in one state and an access log would have nothing to time, so
+	 * both are refused rather than answered with placeholders. The classic
+	 * executor supports all of these. */
+	"pm.status_path", "ping.path", "ping.response",
+	"access.log", "access.format", "access.suppress_path",
 	NULL
 };
 
@@ -368,8 +381,22 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 {
 	struct fpm_worker_pending *p;
+	char *peer = NULL;
+	ev_uint16_t peer_port = 0;
 
 	(void) arg;
+	/* Before the saturation check below: a client that may not be here learns
+	 * nothing about how busy the worker is. */
+	if (fw.acl) {
+		/* Not in an on-accept hook: libevent's bevcb runs before the peer
+		 * address is known, so the first place this can be asked is here --
+		 * the same place the http gateway asks it. */
+		evhttp_connection_get_peer(evhttp_request_get_connection(http), &peer, &peer_port);
+		if (!peer || !fpm_http_acl_check(fw.acl, peer)) {
+			fpm_worker_send_error(http, 403, "Forbidden");
+			return;
+		}
+	}
 	if (fpm_worker_stopping || fw.ready_count >= FPM_WORKER_PENDING_MAX ||
 		zend_hash_num_elements(&fw.pending) >= FPM_WORKER_PENDING_MAX) {
 		/* No "Connection: close" of our own: evhttp_send_error() clears the
@@ -1456,6 +1483,13 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 
 	fw.wp = wp;
 	fw.next_id = 1;
+	/* Before anything is accepted, and fatal on a malformed address: a list
+	 * meant to keep someone out must never end up keeping nobody out. */
+	if (wp->config->listen_allowed_clients && *wp->config->listen_allowed_clients &&
+		fpm_http_acl_parse(wp->config->name, "listen.allowed_clients",
+			wp->config->listen_allowed_clients, &fw.acl) < 0) {
+		exit(FPM_EXIT_CONFIG);
+	}
 	/* Against the directory the child actually chdir'd into, not against the
 	 * configured one the master already checked. */
 	if (fpm_http_direct_resolve_script(NULL, wp->config->http_front_controller, fw.root, fw.script) < 0) {

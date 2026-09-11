@@ -18,6 +18,7 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function concurrentHttpGet(array $urls): array
 {
@@ -86,7 +87,7 @@ EOT;
 @mkdir("$docRoot/sessions", 0700, true);
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 $bodies = concurrentHttpGet([

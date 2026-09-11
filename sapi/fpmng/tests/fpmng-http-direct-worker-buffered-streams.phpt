@@ -17,6 +17,7 @@ if ($st !== 0) {
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -287,7 +288,7 @@ CFG;
 
 $tester = new FPM\Tester($cfg, '<?php');
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     $hello = file_get_contents("http://127.0.0.1:$port/");
     check(is_string($hello) && str_starts_with($hello, 'hello from pid '), 'hello: ' . var_export($hello, true));

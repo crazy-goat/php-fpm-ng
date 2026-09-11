@@ -5,6 +5,7 @@ fpm-ng: the HTTP gateway refuses "Proxy" and bounds a request header name like H
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* The gateway (sapi/fpmng/fpm/fpm_http.c) and HTTP-direct
  * (sapi/fpmng/fpm/fpm_http_direct_request.c) derive HTTP_* keys from the same
@@ -79,7 +80,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$root/env.php"));
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 /* httpoxy (CVE-2016-5385): "Proxy" must not reach the worker as HTTP_PROXY at

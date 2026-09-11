@@ -5,6 +5,7 @@ fpm-ng: the classic and worker HTTP-direct executors derive the same request (is
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Both executors build their CGI environment, refuse a malformed request and
  * drop the framing headers through one implementation
@@ -122,7 +123,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* One request, byte for byte, to both pools. */
     $get = "GET /probe?q=1&r=2 HTTP/1.1\r\nHost: parity.test\r\n"

@@ -5,6 +5,7 @@ fpm-ng: worker-mode HTTP-direct — an accepted request is never closed without 
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -152,7 +153,7 @@ CFG;
 $tester = new FPM\Tester(poolConfig('drop', $portA, $root, ''), '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     $hello = file_get_contents("http://127.0.0.1:$portA/");
     check(is_string($hello) && str_starts_with($hello, 'hello from pid '), 'hello: ' . var_export($hello, true));
@@ -183,7 +184,7 @@ try {
 $tester = new FPM\Tester(poolConfig('probe', $portB, $root, 'pm.max_requests = 1'), '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     $slow = httpGetStart("http://127.0.0.1:$portB/sleep");
     $fast = httpGetStart("http://127.0.0.1:$portB/probe", 0.2);

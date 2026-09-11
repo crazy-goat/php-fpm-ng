@@ -37,6 +37,7 @@ if ($notBuilt) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 039: fpm_http_tls_ctx_new()/fpm_http_tls_check() used to install only
 // the first PEM block from http.tls_cert (the leaf), silently dropping every
@@ -143,7 +144,7 @@ EOT;
 
 $tester1 = new FPM\Tester($cfg1, $code);
 $tester1->start();
-$tester1->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester1);
 
 $httpAddr1 = $tester1->getAddr('ipv4', '[chain]');
 
@@ -189,7 +190,7 @@ EOT;
 
 $tester2 = new FPM\Tester($cfg2, $code);
 $tester2->start();
-$tester2->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester2);
 
 $httpAddr2 = $tester2->getAddr('ipv4', '[leafonly]');
 $leafOnly = connectAndCollectChain($httpAddr2, null);

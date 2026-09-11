@@ -8,6 +8,7 @@ include "skipif.inc";
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 031, acceptance criterion 3: a full pool is distinguishable from any
 // other upstream failure in the HTTP response. With pm.max_children = 1 and
@@ -35,7 +36,7 @@ EOT;
 
 $tester = new FPM\Tester($config, '<?php sleep(5); echo "slow";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $script = '/' . basename($tester->makeSourceFile());
 

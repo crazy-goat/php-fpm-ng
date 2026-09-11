@@ -5,6 +5,7 @@ fpm-ng: HTTP-direct http.stream sends the body as the script produces it
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 $root = __DIR__;
 $script = '/fpmng-direct-stream-front-' . getmypid() . '.php';
 file_put_contents($root . $script, <<<'PHP'
@@ -145,7 +146,7 @@ function expected16MiB(): string
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* 1. Default: unchanged. The oversized response is still refused whole and
      *    an ordinary one still carries a Content-Length. */

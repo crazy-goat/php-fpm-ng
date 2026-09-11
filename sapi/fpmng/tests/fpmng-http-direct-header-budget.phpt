@@ -5,6 +5,7 @@ fpm-ng: both HTTP-direct executors spend the same response-header budget on the 
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* One cap, one set of bytes: `name: value\r\n` per header that reaches the
  * wire, charged by fpm_http_direct_header_charge() for whoever serves the
@@ -197,7 +198,7 @@ $pools = ['classic' => $classicPort, 'worker' => $workerPort];
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* Exactly FPM_HTTP_HEADERS_MAX (64 KiB) of header bytes is served,
      * and every header the application set is on the wire. */

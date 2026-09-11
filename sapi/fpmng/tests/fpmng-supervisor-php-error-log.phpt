@@ -6,6 +6,7 @@ fpm-ng: a PHP error in a supervisor script reaches error_log as plain text (issu
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-phperr-' . getmypid();
 @mkdir($work, 0700, true);
@@ -53,7 +54,7 @@ $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 /* Criterion 1 and 2: one entry, at an FPM level derived from the severity
  * (ERROR for a fatal, not the NOTICE upstream's sapi_cgi_log_message() uses

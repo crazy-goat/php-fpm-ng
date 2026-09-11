@@ -37,6 +37,7 @@ foreach ((array) $messages as $message) {
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -209,7 +210,7 @@ CFG;
 $tester = new FPM\Tester($config, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* 1. The classic executor: a real handshake, a real request, and the CGI
      * variables that tell the application it is behind TLS. */

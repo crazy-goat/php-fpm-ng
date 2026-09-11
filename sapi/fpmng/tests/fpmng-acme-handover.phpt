@@ -33,6 +33,7 @@ foreach ((array) $messages as $message) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 require_once __DIR__ . '/../acme/state.php';
 
 use FpmNg\Acme\State;
@@ -154,7 +155,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php echo "worker\n";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $addr = $tester->getAddr('ipv4', '[tls]');
 

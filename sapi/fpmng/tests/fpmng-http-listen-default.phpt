@@ -7,6 +7,7 @@ FastCGI port + 1; a unix-socket listen is still refused (task 015)
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
@@ -48,7 +49,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php echo "' . $label . '";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $addr = $tester->getAddr('ipv4');
 [$host, $port] = explode(':', $addr);

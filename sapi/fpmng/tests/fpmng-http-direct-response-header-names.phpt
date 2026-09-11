@@ -5,6 +5,7 @@ fpm-ng: direct HTTP refuses a malformed response header name instead of writing 
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 /* Issue #102. header() rejects only CR, LF and NUL in the whole line
  * (main/SAPI.c:758-773), so a name with a space, a tab or no name at all
  * reaches the SAPI, and evhttp_add_header() stores it verbatim. Measured on
@@ -94,7 +95,7 @@ function check(bool $ok, string $message): void
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $error, 5);
     stream_set_timeout($fp, 5);
 

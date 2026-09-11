@@ -14,6 +14,7 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Each request gets its own php process. `delay` staggers the ARRIVAL of the
  * requests, which this test needs: the waiter must reach flock() while the
@@ -157,7 +158,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 /* H holds LOCK_EX for 1 s (arrives at 0). W asks for the same lock 150 ms in,

@@ -8,6 +8,7 @@ include "skipif.inc";
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 018 gap 1: a URL that resolves to an existing directory with no
 // index.php of its own (e.g. "/somedir") used to reach the worker as a
@@ -65,7 +66,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $addr = $tester->getAddr('ipv4', '[gw]');
 
@@ -123,7 +124,7 @@ EOT;
 
 $tester2 = new FPM\Tester($cfg2, '<?php');
 $tester2->start();
-$tester2->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester2);
 // checkAllLogs: the warning is logged from fpm_run(), before the "ready to
 // handle connections" notice expectLogStartNotices() just consumed -- rescan
 // from the beginning instead of only reading forward from here.

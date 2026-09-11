@@ -5,6 +5,7 @@ fpm-ng: the gateway answers the HTTP-01 challenge from shared state, before stat
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* docs/NOTES.md section 3l reserved one hook for responses the gateway
  * produces itself and required the fixed challenge path to come before files
@@ -118,7 +119,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $frontController);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 $nostatic = $tester->getAddr('ipv4', '[nostatic]');
 

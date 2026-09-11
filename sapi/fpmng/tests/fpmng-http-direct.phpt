@@ -5,6 +5,7 @@ fpm-ng: direct HTTP classic requests, headers, bodies, isolation, limits and kee
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -82,7 +83,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
     $fp = connectDirect("127.0.0.1:$port");
     for ($i = 0; $i < 3; $i++) {
         $body = 'field=value' . $i;

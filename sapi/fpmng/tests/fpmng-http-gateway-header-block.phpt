@@ -5,6 +5,7 @@ fpm-ng: the HTTP gateway bounds the whole request header block like HTTP-direct 
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Issue #115 bounded a request header *name* on both transports, which says
  * nothing about how many of them a client may send. Both HTTP-direct
@@ -99,7 +100,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$root/env.php"));
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 /* Served, and worth having for a second reason: a block this size does not

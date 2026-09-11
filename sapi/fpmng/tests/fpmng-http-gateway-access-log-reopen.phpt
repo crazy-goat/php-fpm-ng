@@ -6,6 +6,7 @@ fpm-ng: a gateway reopens http.access_log on a SIGUSR1 after a logrotate (issue 
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Pid-suffixed so two runs of the suite on the same box (the poligon is
  * shared) cannot share a docroot; --CLEAN-- runs in another process and finds
@@ -60,7 +61,7 @@ $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $accessLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
 $rotated   = $accessLog . '.rotated';

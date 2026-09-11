@@ -33,6 +33,7 @@ foreach ((array) $messages as $message) {
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* http.plain_listen is the redirect-only companion of a TLS pool (task 042),
  * and it is the socket a CA actually connects to: HTTP-01 is plain HTTP by
@@ -126,7 +127,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $frontController);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $plain = $tester->getAddr('ipv4', '[plain]');
 
 $deadline = microtime(true) + 10;

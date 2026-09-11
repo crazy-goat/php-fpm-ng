@@ -6,6 +6,7 @@ fpm-ng: a pool with no pool.type behaves as upstream FastCGI (docs/NOTES.md §3i
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $cfg = <<<EOT
 [global]
@@ -19,7 +20,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php echo "fastcgi-ok";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $tester->request()->expectBody('fastcgi-ok', skipHeadersCheck: true);
 $tester->terminate();
 $tester->expectLogTerminatingNotices();

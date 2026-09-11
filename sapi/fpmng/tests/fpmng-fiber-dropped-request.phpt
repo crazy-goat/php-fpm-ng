@@ -14,6 +14,7 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Returns [$bodies, $durations]: $durations[$i] is how long, in seconds, the
  * fetch of $requests[$i] took according to the CHILD's own clock (written to
@@ -131,7 +132,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 /* D suspends and is dropped. S is already in flight, suspended in usleep(),

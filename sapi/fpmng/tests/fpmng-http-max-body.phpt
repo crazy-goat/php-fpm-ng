@@ -8,6 +8,7 @@ include "skipif.inc";
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 031, acceptance criterion 2 (backpressure decision): the gateway
 // buffers a whole request body in memory (libevent evhttp does that before
@@ -34,7 +35,7 @@ EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "len=", $_SERVER["CONTENT_LENGTH"] ?? "none";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $script = '/' . basename($tester->makeSourceFile());
 

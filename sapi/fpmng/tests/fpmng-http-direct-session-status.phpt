@@ -8,6 +8,7 @@ if (!extension_loaded('session')) die('skip requires session');
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 $root = __DIR__;
 $script = '/fpmng-http-direct-session-front-' . getmypid() . '.php';
 $sessionDir = sys_get_temp_dir() . '/fpmng-direct-session-' . getmypid();
@@ -35,7 +36,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
     foreach (['alpha' => [1, 2], 'beta' => [1, 2]] as $session => $counts) {
         foreach ($counts as $count) {
             $context = stream_context_create(['http' => ['header' => "Cookie: PHPSESSID=$session\r\n", 'timeout' => 5]]);

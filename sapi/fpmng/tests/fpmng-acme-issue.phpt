@@ -13,6 +13,7 @@ if (!function_exists('openssl_csr_new')) {
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Issue #49 criteria 2, 3 and 4, proved the only way they can be: a real
  * order, against a server that actually fetches the HTTP-01 answer from this
@@ -136,7 +137,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, "<?php echo \"worker\\n\";\n");
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 /* The CA binds port 0 and reports what it got, so nothing here races it. */

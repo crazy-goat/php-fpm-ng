@@ -24,6 +24,7 @@ if ($opcacheIni === '' || $opcacheIni === '0' || $opcacheIni === 'off' || $opcac
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -139,7 +140,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* Worker pool first: shared.php's SHM entry gets created here, so if it
      * were ever wrongly foldable this is where the wrong answer would be

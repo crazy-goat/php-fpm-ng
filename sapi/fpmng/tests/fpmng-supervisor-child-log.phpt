@@ -6,6 +6,7 @@ fpm-ng: a supervisor pool's own messages reach error_log without catch_workers_o
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-suplog-' . getmypid();
 @mkdir($work, 0700, true);
@@ -65,7 +66,7 @@ $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 /* Criterion 1 and 2: the pool's own NOTICE and the failed script open, at
  * their own levels. The patterns pin the LEVEL as well as the text, because

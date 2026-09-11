@@ -18,6 +18,7 @@ if ($status !== 0 || !str_contains($info, '--enable-fpmng-fiber')) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 006 acceptance criteria:
 // 1) N concurrent requests, each calling stream_select() on its own socket
@@ -144,7 +145,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 // One single-shot server process per request id.

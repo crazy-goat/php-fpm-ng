@@ -6,6 +6,7 @@ fpm-ng: pool.type = status answers /status and /metrics (docs/NOTES.md §3j/§3u
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function httpLine(string $addr, string $path): string
 {
@@ -30,7 +31,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php /* unused */');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $addr = $tester->getAddr('ipv4');
 
 $status = httpLine($addr, '/status');

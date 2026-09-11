@@ -6,6 +6,7 @@ fpm-ng: cron pool runs its script on schedule (docs/cron.md, docs/NOTES.md §3r)
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-cron-' . getmypid();
 @mkdir($work, 0700, true);
@@ -31,7 +32,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $script);
 $tester->start(extraArgs: ['-R'], forceStderr: true, daemonize: false);
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $deadline = time() + 75;
 while (time() < $deadline) {

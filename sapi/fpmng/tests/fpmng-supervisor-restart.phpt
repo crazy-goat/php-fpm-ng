@@ -6,6 +6,7 @@ fpm-ng: supervisor pool respawns a script that exits (docs/NOTES.md §3o)
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-sup-' . getmypid();
 @mkdir($work, 0700, true);
@@ -108,7 +109,7 @@ $tester = new FPM\Tester($cfg, $script);
 
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 /* The first run still needs a fork and a PHP request startup after the startup
  * notices, so an empty file is legitimate for a few milliseconds; poll instead

@@ -6,6 +6,7 @@ fpm-ng: startup warnings when process_control_timeout is too small for superviso
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $script = <<<'EOT'
 <?php
@@ -26,7 +27,7 @@ $supCfg = $base . "\n"
     . "supervisor.processes = 1\n";
 $sup = new FPM\Tester($supCfg, $script);
 $sup->start();
-$sup->expectLogStartNotices();
+fpmng_expect_log_start_notices($sup);
 $sup->expectLogPattern(
     '/WARNING: .*\\[pool worker\\] supervisor\\.stop_timeout = 10s but global process_control_timeout = 0s;/',
     true
@@ -43,7 +44,7 @@ $cronDefault = $base . "\n"
     . "cron.script = {{FILE:*tick.php}}\n";
 $cron0 = new FPM\Tester($cronDefault, $script);
 $cron0->start();
-$cron0->expectLogStartNotices();
+fpmng_expect_log_start_notices($cron0);
 $cron0->expectNoLogPattern(
     '/WARNING: .*\\[pool tick\\] cron\\.timeout =/',
     true
@@ -61,7 +62,7 @@ $cronWarn = $base . "\n"
     . "cron.timeout = 30\n";
 $cron = new FPM\Tester($cronWarn, $script);
 $cron->start();
-$cron->expectLogStartNotices();
+fpmng_expect_log_start_notices($cron);
 $cron->expectLogPattern(
     '/WARNING: .*\\[pool job\\] cron\\.timeout = 30s but global process_control_timeout = 0s;/',
     true
@@ -79,7 +80,7 @@ $okCfg = $base . "\n"
     . "supervisor.processes = 1\n";
 $ok = new FPM\Tester($okCfg, $script);
 $ok->start();
-$ok->expectLogStartNotices();
+fpmng_expect_log_start_notices($ok);
 $ok->expectNoLogPattern(
     '/WARNING: .*\\[pool worker\\] supervisor\\.stop_timeout =/',
     true

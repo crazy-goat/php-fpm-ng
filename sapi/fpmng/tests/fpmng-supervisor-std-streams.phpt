@@ -6,6 +6,7 @@ fpm-ng: STDIN, STDOUT and STDERR exist in a script-running pool (issue #126)
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-std-' . getmypid();
 @mkdir($work, 0700, true);
@@ -71,7 +72,7 @@ $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 /* What the script wrote through the constants reaches the operator by the same
  * route as echo does, which is the whole point of having them. */

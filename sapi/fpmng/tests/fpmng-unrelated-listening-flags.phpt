@@ -17,6 +17,7 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function masterListenFlags(int $pid, string $address): int
 {
@@ -102,7 +103,7 @@ EOT;
 $tester = new FPM\Tester($config, '<?php echo "ok";');
 
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $tester->request(address: $fiberAddress)->expectBody('ok', skipHeadersCheck: true);
 $tester->request(address: $classicAddress)->expectBody('ok', skipHeadersCheck: true);
 assertNonblocking(masterListenFlags($tester->getPid(), $fiberAddress), true, 'fiber socket');

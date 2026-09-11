@@ -21,6 +21,7 @@ if (!function_exists('time_nanosleep')) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Each URL is fetched by its own php process, so the N requests really are in
  * flight at the same time against the single worker below. */
@@ -116,7 +117,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 function decodeAll(array $bodies): array

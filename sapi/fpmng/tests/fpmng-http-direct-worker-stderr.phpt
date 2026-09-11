@@ -5,6 +5,7 @@ fpm-ng: worker-mode HTTP-direct — STDIN, STDOUT and STDERR exist, and a failin
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -106,7 +107,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     /* All three constants, and what STDIN actually is in such a child: a
      * handle on the /dev/null fpm_stdio_init_main() installs, so an immediate

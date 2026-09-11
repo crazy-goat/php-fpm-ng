@@ -40,6 +40,7 @@ if ($notBuilt) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 041: ALPN (advertise http/1.1, reject a client offering only some
 // other protocol) and SNI (one pool, two certificates, selected by
@@ -135,7 +136,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $code);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $addr = $tester->getAddr('ipv4', '[gw]');
 

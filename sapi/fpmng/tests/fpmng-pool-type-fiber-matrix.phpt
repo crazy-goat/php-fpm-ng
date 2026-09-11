@@ -14,6 +14,7 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 $dir = __DIR__;
 
@@ -43,7 +44,7 @@ EOT;
 
     $tester = new FPM\Tester($cfg, '<?php echo "' . $label . '";');
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     if ($http) {
         $addr = $tester->getAddr('ipv4', '[http]');

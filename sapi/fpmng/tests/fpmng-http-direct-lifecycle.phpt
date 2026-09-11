@@ -8,6 +8,7 @@ if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux /proc');
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 function verify(bool $ok, string $message): void { if (!$ok) throw new RuntimeException($message); }
 function waitFor(callable $condition, string $label): void
 {
@@ -78,7 +79,7 @@ $tester = new FPM\Tester($cfg, '<?php');
 $closed = false;
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
     $pid1 = getPidHttp($addr);
     verify($pid1 > 0 && getPidHttp($addr) === $pid1, 'first two requests not in same worker');
     $pid2 = getPidHttp($addr);

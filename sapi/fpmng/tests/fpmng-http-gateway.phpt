@@ -6,6 +6,7 @@ fpm-ng: HTTP gateway serves static files without PHP, runs scripts, and routes f
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function httpGet(string $url): string|false
 {
@@ -43,7 +44,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$docRoot/hit.php"));
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 $static = httpGet("http://$http/static.txt");
@@ -99,7 +100,7 @@ EOT;
 
 $tester2 = new FPM\Tester($cfgOff, file_get_contents("$docRoot/hit.php"));
 $tester2->start();
-$tester2->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester2);
 $http2 = $tester2->getAddr('ipv4', '[http]');
 $headers = @get_headers("http://$http2/missing-route");
 $statusLine = is_array($headers) ? ($headers[0] ?? '') : '';

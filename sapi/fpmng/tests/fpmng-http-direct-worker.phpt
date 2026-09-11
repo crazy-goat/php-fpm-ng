@@ -5,6 +5,7 @@ fpm-ng: worker-mode HTTP-direct — one booted script owns the loop and serves c
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 function check(bool $condition, string $message): void
 {
@@ -160,7 +161,7 @@ CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
 
     $hello = file_get_contents("http://127.0.0.1:$port/");
     check(is_string($hello) && str_starts_with($hello, 'hello world from pid '), 'hello world: ' . var_export($hello, true));

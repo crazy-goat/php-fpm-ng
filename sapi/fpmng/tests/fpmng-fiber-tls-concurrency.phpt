@@ -33,6 +33,7 @@ if ($status !== 0 || !str_contains($info, '--enable-fpmng-fiber')) {
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 005 acceptance criteria 1 + 3: with pool.executor = fiber, N
 // concurrent requests each fetching a tls:// endpoint that sleeps must
@@ -130,7 +131,7 @@ EOT;
 
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 $http = $tester->getAddr('ipv4', '[http]');
 
 // One single-shot server process per request id.

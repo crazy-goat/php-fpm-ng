@@ -6,6 +6,7 @@ fpm-ng: a gateway child's own line is decorated like a master line in the same e
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* A fixed name, not one derived from getmypid(): --CLEAN-- runs in another
  * process and could not find a pid-suffixed directory to remove. */
@@ -39,7 +40,7 @@ $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $errorLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
 $http = $tester->getAddr('ipv4', '[http]');

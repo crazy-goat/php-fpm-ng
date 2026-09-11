@@ -8,6 +8,7 @@ include "skipif.inc";
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 // Task 031, acceptance criterion 1: a client sending one byte at a time,
 // never going fully idle, must be cut off within a bounded, documented time
@@ -35,7 +36,7 @@ EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "ok";');
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 // The docroot is the tests directory (chdir above); the worker script is the
 // tester's own source file, addressed by basename -- the pattern

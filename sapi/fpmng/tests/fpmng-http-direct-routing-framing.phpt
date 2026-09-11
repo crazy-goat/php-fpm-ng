@@ -5,6 +5,7 @@ fpm-ng: direct HTTP fixed routing ignores doc_root/user_dir and bodyless respons
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 $root = __DIR__;
 $script = '/fpmng-direct-routing-front-' . getmypid() . '.php';
 $target = '/fpmng-direct-routing-secret-' . getmypid() . '.txt';
@@ -58,7 +59,7 @@ function fetchDirect($fp, string $path, string $method = 'GET', int $expected = 
 $tester = new FPM\Tester($cfg, '<?php');
 try {
     $tester->start();
-    $tester->expectLogStartNotices();
+    fpmng_expect_log_start_notices($tester);
     $fp = stream_socket_client("tcp://127.0.0.1:$port", $errno, $error, 5);
     stream_set_timeout($fp, 5);
     foreach ([$target, '/../../etc/passwd', '/%2e%2e/%2e%2e/etc/passwd', '/~' . get_current_user() . $target] as $path) {

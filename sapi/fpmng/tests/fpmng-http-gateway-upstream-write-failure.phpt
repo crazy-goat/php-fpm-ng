@@ -6,6 +6,7 @@ fpm-ng: HTTP gateway survives a synchronous write failure while handing a reques
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-tester.inc";
 
 /* Issue #129: fpm_http_pump() handed the assembled request to an upstream and
  * then freed the buffer it had just handed over. A *synchronous* hard write
@@ -53,7 +54,7 @@ EOT;
 
 $tester = new FPM\Tester($config);
 $tester->start();
-$tester->expectLogStartNotices();
+fpmng_expect_log_start_notices($tester);
 
 $script = '/served.php';
 [$host, $port] = explode(':', $tester->getAddr('ipv4', '[http]'));

@@ -1562,9 +1562,19 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		 * STDERR_FILENO, and the master collects it under
 		 * catch_workers_output. */
 		fpm_std_streams_register(wp->config->name);
-		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_READ", FPM_WORKER_EV_READ, CONST_PERSISTENT);
-		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_WRITE", FPM_WORKER_EV_WRITE, CONST_PERSISTENT);
-		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_TIMER", FPM_WORKER_EV_TIMER, CONST_PERSISTENT);
+		/* NOT CONST_PERSISTENT (issue #149). That flag is what the optimizer
+		 * folds on -- Zend/Optimizer/pass1.c folds both a ZEND_FETCH_CONSTANT
+		 * and defined() for a constant carrying it -- and these three exist
+		 * in worker children only, while the opcache SHM entry is keyed on
+		 * the script path and shared by every pool of one master. A bootstrap
+		 * included by a worker pool and by a classic/fiber/fcgi pool would
+		 * otherwise get whichever process compiled it first baked in: a value
+		 * for a constant that does not exist in the reader. Without the flag
+		 * each process resolves them at runtime, one hash lookup per fetch.
+		 * Covered by sapi/fpmng/tests/fpmng-http-direct-worker-opcache.phpt. */
+		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_READ", FPM_WORKER_EV_READ, 0);
+		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_WRITE", FPM_WORKER_EV_WRITE, 0);
+		REGISTER_MAIN_LONG_CONSTANT("FPMNG_WORKER_TIMER", FPM_WORKER_EV_TIMER, 0);
 
 		zend_stream_init_filename(&file, fw.script);
 		file.primary_script = true;

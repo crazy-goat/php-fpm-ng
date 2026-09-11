@@ -11,12 +11,15 @@
  * as before.
  *
  * Persistent connections: a kept FastCGI connection pins one PHP worker, so
- * the gateways together never hold more than pm.max_children of them and
- * requests beyond that wait in the gateway's own queue instead of the kernel
- * backlog. The budget is a counter in shared memory rather than a fixed share
- * per process, so a gateway that happens to get all the clients can still use
- * every worker. A worker waiting for the next request on a kept connection counts
- * as active, so dynamic spawns spare workers for everyone else as it should.
+ * the gateways together never hold more than pm.max_children of them.
+ * A request beyond that is rejected with 503 + Retry-After, not queued: it
+ * sits on gw->waiting only for the one dispatch round that fails to take a
+ * budget slot, and that round then drains the whole queue to 503 (:1397 says
+ * why -- the wait would be unbounded and invisible to the client). The budget
+ * is a counter in shared memory rather than a fixed share per process, so a
+ * gateway that happens to get all the clients can still use every worker.
+ * A worker waiting for the next request on a kept connection counts as
+ * active, so dynamic spawns spare workers for everyone else as it should.
  * ondemand never reaps such a worker though, and with any pm a pinned worker
  * is unavailable to other FastCGI clients (nginx, the status page), so an
  * idle connection is dropped after FPM_HTTP_IDLE_MS (env override, 0 keeps

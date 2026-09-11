@@ -167,6 +167,18 @@ struct fpm_worker_pool_config_s {
 	 * parse still fails startup: that is an operator error, not an
 	 * unfinished issuance. See docs/tls.md. */
 	int http_tls_wait_for_cert;
+	/* fpm-ng: pool.type = http-direct only (the classic blocking executor).
+	 * Off by default: the response is buffered whole and sent with a
+	 * Content-Length, which is what every existing test measures. With it, the
+	 * worker hands the body to the client as the script produces it, using
+	 * chunked transfer encoding -- see fpm_http_direct.c and docs/http-direct.md
+	 * (issue #56). */
+	int http_stream;
+	/* fpm-ng: milliseconds the worker will spend waiting for a client that has
+	 * stopped reading a streamed response before it gives up and truncates the
+	 * message. Only meaningful with http.stream = yes; must be > 0, because a
+	 * worker blocked forever on one slow client serves nobody else. */
+	int http_stream_write_timeout;
 	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */
 	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class

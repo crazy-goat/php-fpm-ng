@@ -3,9 +3,12 @@
  * gateway, this event loop cannot progress while PHP is executing. */
 #include "fpm_config.h"
 
+#include <errno.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -14,6 +17,7 @@
 #include <event2/http_struct.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/buffer.h>
+#include <event2/bufferevent.h>
 
 #include "php.h"
 #include "php_main.h"
@@ -33,17 +37,35 @@
 
 #define FPM_DIRECT_RESPONSE_MAX (8 * 1024 * 1024)
 #define FPM_DIRECT_PENDING_MAX 16
+/* http.stream only. How much output accumulates before it is handed to the
+ * transport as one chunk: small enough that a slow consumer sees progress,
+ * large enough that a script echoing a few bytes at a time does not pay a
+ * chunk header and a write syscall per echo. */
+#define FPM_DIRECT_STREAM_CHUNK (64 * 1024)
+/* http.stream only. The script keeps running until this much of the response
+ * is still unwritten on the connection, then blocks until the client has taken
+ * enough of it. This, and not the response size, is the memory a streamed
+ * response costs. */
+#define FPM_DIRECT_STREAM_HIGHWATER (256 * 1024)
 
 const char *const fpm_http_direct_rejects[] = { FPM_HTTP_DIRECT_REJECTS_COMMON, NULL };
 
 /* How this executor names itself in the startup errors of the shared
  * validation (fpm_http_direct_request.c). */
+/* Only this executor has them: the worker executor answers from a PHP callable
+ * it drives itself, so there is no per-request SAPI write for a stream to
+ * hook. */
+static const char *const fpm_direct_extra_directives[] = {
+	"http.stream", "http.stream_write_timeout", NULL
+};
+
 static const struct fpm_http_direct_labels fpm_direct_labels = {
 	.subject = "http-direct",
 	.chdir_note = "",
 	.type_label = "pool.type = http-direct",
 	.script_context = "http-direct",
 	.script_noun = "front controller",
+	.extra_directives = fpm_direct_extra_directives,
 };
 
 struct fpm_direct_worker {
@@ -60,6 +82,12 @@ struct fpm_direct_worker {
 };
 
 struct fpm_direct_request {
+	/* With http.stream this is cleared the moment the client goes away, which
+	 * can now happen while PHP is still producing output, because the pump
+	 * below writes to the socket from inside the script. Every streaming path
+	 * tests it before touching the transport; NULL means "let the engine run
+	 * to a clean shutdown, but throw the bytes away". Without http.stream it
+	 * is never NULL. */
 	struct evhttp_request *http;
 	/* The pool this request belongs to. Only the log prefix needs it, and
 	 * fpm_direct_send_headers() reaches the request through fpm_direct_current
@@ -72,13 +100,48 @@ struct fpm_direct_request {
 	 * Every cause ends the same way — 500, this text as the body — but an
 	 * operator reading the wire has to be able to tell them apart. */
 	const char *rejected;
+	/* Everything below is http.stream only; without it they stay zero and
+	 * this file behaves exactly as it did before issue #56. */
+	struct fpm_direct_worker *w;
+	int streaming;		/* the status line and the headers are already on the wire */
+	int stream_declined;	/* this response will not stream: decided once, not per write */
+	int may_stream;		/* set only around php_execute_script(), see fpm_direct_flush() */
 };
 
 static struct fpm_direct_request *fpm_direct_current;
 static volatile sig_atomic_t fpm_direct_stopping;
 
+/* http.stream. Defined below, next to the response-completion callbacks they
+ * share with the buffered path; the SAPI hooks just under this are their only
+ * callers. */
+static void fpm_direct_stream_begin(struct fpm_direct_request *r);
+static void fpm_direct_stream_push(struct fpm_direct_request *r);
+static void fpm_direct_stream_abort(struct fpm_direct_request *r, const char *why);
+
 int fpm_http_direct_validate(struct fpm_worker_pool_s *wp)
 {
+	/* Before the shared validation: these two say that a combination cannot
+	 * work at all, which is more use to an operator than whatever the generic
+	 * check would have complained about first. */
+	if (wp->config->http_stream && wp->config->http_stream_write_timeout <= 0) {
+		/* A worker that waits forever for one client that stopped reading
+		 * serves nobody else: there is exactly one request in flight per child
+		 * here. */
+		zlog(ZLOG_ALERT, "[pool %s] http.stream requires http.stream_write_timeout > 0", wp->config->name);
+		return -1;
+	}
+	/* The pump writes the connection's output buffer to its own descriptor,
+	 * which is only the response for as long as the two carry the same bytes.
+	 * On a TLS connection that buffer holds plaintext, and libevent 2.1 has no
+	 * way to flush an SSL bufferevent from inside a callback
+	 * (be_openssl_flush() is an "XXXX Implement this" stub), so there is no
+	 * correct implementation to fall back to. Refusing the combination beats a
+	 * directive that quietly does nothing on the pools that most want it. */
+	if (wp->config->http_stream && wp->config->http_tls_cert && *wp->config->http_tls_cert) {
+		zlog(ZLOG_ALERT, "[pool %s] http.stream cannot be combined with http.tls_cert: the streaming "
+			"writer cannot flush an encrypted connection from inside a request", wp->config->name);
+		return -1;
+	}
 	return fpm_http_direct_validate_common(wp, &fpm_direct_labels);
 }
 
@@ -127,12 +190,23 @@ static void fpm_direct_register_variables(zval *array)
 
 static char *fpm_direct_cookies(void)
 {
+	if (!fpm_direct_current->http) {
+		return NULL;	/* http.stream: the client went away mid-request */
+	}
 	return (char *) evhttp_find_header(evhttp_request_get_input_headers(fpm_direct_current->http), "Cookie");
 }
 
 static size_t fpm_direct_read_post(char *buffer, size_t size)
 {
-	int n = evbuffer_remove(evhttp_request_get_input_buffer(fpm_direct_current->http), buffer, size);
+	int n;
+	/* php_request_shutdown() drains whatever the script did not read, long
+	 * after a streamed response may have lost its client. Measured on the test
+	 * box against the first version of this file: SIGSEGV inside
+	 * evhttp_request_get_input_buffer(NULL), from sapi_deactivate_module(). */
+	if (!fpm_direct_current->http) {
+		return 0;
+	}
+	n = evbuffer_remove(evhttp_request_get_input_buffer(fpm_direct_current->http), buffer, size);
 	return n < 0 ? 0 : (size_t) n;
 }
 
@@ -141,6 +215,25 @@ static size_t fpm_direct_write(const char *str, size_t len)
 	struct fpm_direct_request *r = fpm_direct_current;
 	if (!r) {
 		return 0;
+	}
+	/* An opted-in pool leaves the buffered path here, one chunk short of
+	 * filling it -- before FPM_DIRECT_RESPONSE_MAX can reject the response,
+	 * which is the whole point of issue #56. */
+	if (!r->streaming && r->may_stream &&
+		len > FPM_DIRECT_STREAM_CHUNK - evbuffer_get_length(r->output)) {
+		fpm_direct_stream_begin(r);
+	}
+	if (r->streaming) {
+		/* r->http == NULL means the client is already gone: the bytes go
+		 * nowhere, but PHP must still reach its own shutdown, so the buffer
+		 * is simply not grown. */
+		if (r->http && evbuffer_add(r->output, str, len) < 0) {
+			fpm_direct_stream_abort(r, "out of memory while buffering a chunk");
+		}
+		if (evbuffer_get_length(r->output) >= FPM_DIRECT_STREAM_CHUNK) {
+			fpm_direct_stream_push(r);
+		}
+		return len;
 	}
 	if (!r->rejected && (len > FPM_DIRECT_RESPONSE_MAX - evbuffer_get_length(r->output) ||
 		evbuffer_add(r->output, str, len) < 0)) {
@@ -154,12 +247,18 @@ static size_t fpm_direct_write(const char *str, size_t len)
 static int fpm_direct_send_headers(sapi_headers_struct *headers)
 {
 	struct fpm_direct_request *r = fpm_direct_current;
-	struct evkeyvalq *out = evhttp_request_get_output_headers(r->http);
+	struct evkeyvalq *out;
 	sapi_header_struct *h;
 	zend_llist_position pos;
 	size_t total = 0;
 
 	r->status = headers->http_response_code;
+	/* http.stream: nowhere to put them, and on a streamed response they went
+	 * out before the client left anyway. */
+	if (!r->http) {
+		return SAPI_HEADER_SENT_SUCCESSFULLY;
+	}
+	out = evhttp_request_get_output_headers(r->http);
 	for (h = zend_llist_get_first_ex(&headers->headers, &pos); h;
 		h = zend_llist_get_next_ex(&headers->headers, &pos)) {
 		char *colon = memchr(h->header, ':', h->header_len);
@@ -225,12 +324,25 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 
 static void fpm_direct_flush(void *context)
 {
+	struct fpm_direct_request *r = fpm_direct_current;
 	(void) context;
-	/* Freeze PHP's headers, but never re-enter libevent from PHP: that could
-	 * run another request against the same engine globals. Output is buffered. */
-	if (fpm_direct_current) {
-		sapi_send_headers();
-		SG(headers_sent) = true;
+	if (!r) {
+		return;
+	}
+	/* Freeze PHP's headers. Without http.stream that is all a flush can do:
+	 * re-entering libevent from PHP could run another request against the same
+	 * engine globals, so the output stays buffered. http.stream pushes it
+	 * instead -- without re-entering libevent either, see the pump below. */
+	sapi_send_headers();
+	SG(headers_sent) = true;
+	/* Only from the script itself. php_request_shutdown() flushes too, and
+	 * turning every ordinary response chunked at that point would cost each
+	 * one its Content-Length for nothing. */
+	if (r->may_stream) {
+		fpm_direct_stream_begin(r);
+		if (r->streaming) {
+			fpm_direct_stream_push(r);
+		}
 	}
 }
 
@@ -239,7 +351,7 @@ static ZEND_FUNCTION(fpm_direct_request_headers)
 	struct evkeyval *kv;
 	ZEND_PARSE_PARAMETERS_NONE();
 	array_init(return_value);
-	if (fpm_direct_current) {
+	if (fpm_direct_current && fpm_direct_current->http) {
 		for (kv = evhttp_request_get_input_headers(fpm_direct_current->http)->tqh_first; kv; kv = kv->next.tqe_next) {
 			add_assoc_string(return_value, kv->key, kv->value);
 		}
@@ -313,6 +425,260 @@ static void fpm_direct_response_done(struct evhttp_request *request, void *arg)
 	if (fpm_direct_stopping && !w->pending) event_base_loopbreak(w->base);
 }
 
+/* --- http.stream ---------------------------------------------------------
+ *
+ * The buffered path above builds the whole response in r->output and hands it
+ * to libevent once, after PHP has shut down. That caps a response at
+ * FPM_DIRECT_RESPONSE_MAX and delays the first byte until the last one exists.
+ *
+ * Streaming lifts both, and the price is that bytes have to reach the socket
+ * while PHP is still on the stack -- and this child's event loop cannot run
+ * then. The comment that used to sit in fpm_direct_flush() gave one reason;
+ * libevent enforces another anyway. Measured on the test box against the first
+ * version of this file (libevent 2.1.12): a nested event_base_loop() on the
+ * base we are already dispatching from prints "event_base_loop: reentrant
+ * invocation" and returns -1, and every streamed response came out truncated.
+ *
+ * So the pump never runs the loop. It writes the connection's own output
+ * buffer to its own descriptor with poll() and evbuffer_write(), which is what
+ * bufferevent_writecb() would have done, and leaves the rest of the child
+ * untouched: no other connection is read, no request is dispatched, nothing
+ * can execute PHP inside PHP. When the request callback finally returns, the
+ * write event is still armed and libevent finishes the reply its usual way.
+ *
+ * The cost is that this reaches past the bufferevent to the descriptor, which
+ * is only correct while the two carry the same bytes. They do not on a TLS
+ * connection -- that output buffer holds plaintext -- and libevent 2.1 offers
+ * nothing to flush an SSL bufferevent from inside a callback
+ * (be_openssl_flush() is an "XXXX Implement this" stub). http.stream therefore
+ * refuses to start on a pool with http.tls_cert; see fpm_http_direct_validate().
+ */
+
+/* The close callback of a response that is already on the wire. Unlike the
+ * buffered path, the request object can be freed by libevent while PHP is
+ * still producing output for it, so this clears the pointer the SAPI hooks
+ * test rather than only counting. */
+static void fpm_direct_stream_closed(struct evhttp_connection *connection, void *arg)
+{
+	struct fpm_direct_request *r = arg;
+	(void) connection;
+	r->http = NULL;
+	r->w->pending--;
+	if (fpm_direct_stopping && !r->w->pending) event_base_loopbreak(r->w->base);
+}
+
+/* Whether this response is the last one this child will serve, decided before
+ * the headers go out because a streamed response cannot gain a Connection
+ * header afterwards. Mirrors the two triggers the buffered tail applies after
+ * w->requests++. */
+static bool fpm_direct_last_request(const struct fpm_direct_worker *w)
+{
+	int max = w->wp->config->pm_max_requests;
+	return fpm_direct_stopping || (max > 0 && w->requests + 1 >= (unsigned) max);
+}
+
+static void fpm_direct_stream_begin(struct fpm_direct_request *r)
+{
+	struct fpm_direct_worker *w = r->w;
+
+	if (r->streaming || r->stream_declined) {
+		return;
+	}
+	/* Every reason to stay buffered, and each one matters:
+	 *  - the pool did not ask for streaming;
+	 *  - the client is already gone;
+	 *  - the response is doomed already, and the buffered tail still owes it a
+	 *    500 whose body names the cause -- impossible once a status line is on
+	 *    the wire;
+	 *  - the status is not one evhttp_send_reply() would frame, which the
+	 *    buffered tail also refuses to send;
+	 *  - HEAD/204/205/304 carry no body, so there is nothing to stream and the
+	 *    buffered path already drops the bytes. */
+	if (!w->wp->config->http_stream || !r->http || r->rejected ||
+		!fpm_http_direct_status_final(r->status) ||
+		fpm_http_direct_status_bodyless(r->http, r->status)) {
+		r->stream_declined = 1;
+		return;
+	}
+	if (fpm_direct_last_request(w)) {
+		evhttp_add_header(evhttp_request_get_output_headers(r->http), "Connection", "close");
+	}
+	/* Counted from here rather than from the tail: from this point a client
+	 * that disappears has to be noticed, and w->pending is what the shutdown
+	 * path waits on. */
+	w->pending++;
+	evhttp_connection_set_closecb(evhttp_request_get_connection(r->http), fpm_direct_stream_closed, r);
+	evhttp_request_set_on_complete_cb(r->http, fpm_direct_response_done, w);
+	/* libevent picks chunked itself for an HTTP/1.1 client with no
+	 * Content-Length, and omits the framing entirely for a bodyless response. */
+	evhttp_send_reply_start(r->http, r->status, NULL);
+	r->streaming = 1;
+}
+
+/* Takes the connection away from the client without pretending the message
+ * ended. A chunked body cut short of its terminator is the only truthful thing
+ * left to send once the status line has gone out; shutdown() is how the
+ * connection dies from inside a callback, because the event loop then sees the
+ * socket fail on its next pass and frees the request there, not on this stack. */
+static void fpm_direct_stream_abort(struct fpm_direct_request *r, const char *why)
+{
+	struct evhttp_connection *connection;
+	struct bufferevent *bev;
+	evutil_socket_t fd;
+
+	if (!r->http) {
+		return;
+	}
+	zlog(ZLOG_WARNING, "[pool %s] http-direct: %s; the streamed response is cut short and the "
+		"connection closed without its terminating chunk", r->pool, why);
+	connection = evhttp_request_get_connection(r->http);
+	/* Both callbacks go first: this function does the accounting itself, and
+	 * the request is about to be freed by somebody else. */
+	evhttp_request_set_on_complete_cb(r->http, NULL, NULL);
+	evhttp_connection_set_closecb(connection, NULL, NULL);
+	r->http = NULL;
+	r->w->pending--;
+	evbuffer_drain(r->output, evbuffer_get_length(r->output));
+	bev = evhttp_connection_get_bufferevent(connection);
+	fd = bev ? bufferevent_getfd(bev) : -1;
+	if (fd >= 0) {
+		shutdown(fd, SHUT_RDWR);
+	}
+}
+
+/* Milliseconds left of `budget` since `start`, never negative. */
+static int fpm_direct_stream_left(const struct timespec *start, int budget)
+{
+	struct timespec now;
+	long elapsed;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+		return 0;	/* no clock, no bounded wait: give up rather than block forever */
+	}
+	elapsed = (long) (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
+	return elapsed >= budget ? 0 : (int) (budget - elapsed);
+}
+
+/* Writes as much of the response as the socket will take right now, and then
+ * blocks the script until the client has taken enough of the rest to leave
+ * less than `limit` unwritten.
+ *
+ * The first half is what makes flush() mean something: the bytes are on the
+ * wire when the script asked for them to be, not when the request callback
+ * returns. The second half is the backpressure -- without it the connection's
+ * output buffer would grow with the response and streaming would have traded
+ * one unbounded buffer for another.
+ *
+ * The wait is bounded by http.stream_write_timeout, because there is exactly
+ * one request in flight per child here: a client that stops reading must not
+ * take the worker with it. */
+static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
+{
+	struct bufferevent *bev;
+	struct evbuffer *out;
+	evutil_socket_t fd;
+	struct timespec start;
+	int budget = r->w->wp->config->http_stream_write_timeout;
+
+	if (!r->http) {
+		return;
+	}
+	bev = evhttp_connection_get_bufferevent(evhttp_request_get_connection(r->http));
+	fd = bev ? bufferevent_getfd(bev) : -1;
+	if (!bev || fd < 0 || clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+		return;
+	}
+	out = bufferevent_get_output(bev);
+	while (evbuffer_get_length(out) > 0) {
+		struct pollfd pfd = { fd, POLLOUT, 0 };
+		int left, ready, written;
+
+		/* Exactly what bufferevent_writecb() does with this buffer and this
+		 * descriptor, minus the event loop we are not allowed to re-enter --
+		 * including the unfreeze. A bufferevent keeps the front of its output
+		 * buffer frozen so that nothing but its own writer may drain it, and
+		 * evbuffer_write() on a frozen buffer fails without touching errno:
+		 * measured on the test box against the first version of this file,
+		 * where every write "failed", the response went out only when the
+		 * callback returned, and the stale errno eventually looked fatal and
+		 * aborted the connection. errno is cleared for the same reason. */
+		errno = 0;
+		evbuffer_unfreeze(out, 1);
+		written = evbuffer_write(out, fd);
+		evbuffer_freeze(out, 1);
+		if (written > 0) {
+			continue;
+		}
+		if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+			fpm_direct_stream_abort(r, "writing the response to the client failed");
+			return;
+		}
+		/* The socket is full. Below the mark that is fine: the rest goes out
+		 * through libevent once this request callback returns. */
+		if (evbuffer_get_length(out) <= limit) {
+			return;
+		}
+		left = fpm_direct_stream_left(&start, budget);
+		if (left == 0) {
+			fpm_direct_stream_abort(r, "the client stopped reading the response");
+			return;
+		}
+		ready = poll(&pfd, 1, left);
+		if (ready < 0 && errno != EINTR) {
+			fpm_direct_stream_abort(r, "poll() on the client connection failed");
+			return;
+		}
+		if (ready > 0 && (pfd.revents & (POLLERR | POLLHUP | POLLNVAL))) {
+			fpm_direct_stream_abort(r, "the client closed the connection mid-response");
+			return;
+		}
+	}
+}
+
+static void fpm_direct_stream_push(struct fpm_direct_request *r)
+{
+	if (!r->http) {
+		evbuffer_drain(r->output, evbuffer_get_length(r->output));
+		return;
+	}
+	if (evbuffer_get_length(r->output)) {
+		/* Drains r->output into the connection: no copy, and no part of the
+		 * response is held twice. */
+		evhttp_send_reply_chunk(r->http, r->output);
+	}
+	fpm_direct_stream_pump(r, FPM_DIRECT_STREAM_HIGHWATER);
+}
+
+/* The streaming counterpart of the buffered tail of fpm_direct_handle(). */
+static void fpm_direct_stream_finish(struct fpm_direct_request *r)
+{
+	if (!r->http) {
+		return;
+	}
+	if (r->rejected) {
+		/* The buffered path answers 500 with the cause as the body. Here the
+		 * status line left the process before the cause was known, so the only
+		 * signal left is an unterminated message. */
+		fpm_direct_stream_abort(r, r->rejected);
+		return;
+	}
+	if (evbuffer_get_length(r->output)) {
+		evhttp_send_reply_chunk(r->http, r->output);
+	}
+	/* Hand the connection back to the callback the buffered path uses. `r` is
+	 * a local of fpm_direct_handle() and stops existing the moment this
+	 * request is over, while the close notice can arrive much later -- on the
+	 * next keep-alive idle close. Measured on the test box against the first
+	 * version of this file: a second request on the same connection, then
+	 * SIGSEGV in the close callback reading through the dead frame. */
+	evhttp_connection_set_closecb(evhttp_request_get_connection(r->http),
+		fpm_direct_response_closed, r->w);
+	/* No pump here: from this point the response is an ordinary queued reply,
+	 * w->pending keeps the child alive for it, and the event loop writes it out
+	 * exactly as it does a buffered one. */
+	evhttp_send_reply_end(r->http);
+}
+
 static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 {
 	struct fpm_direct_worker *w = arg;
@@ -327,6 +693,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		return;
 	}
 	r.http = http;
+	r.w = w;
 	r.pool = w->wp->config->name;
 	r.status = 200;
 	r.env.tqh_last = &r.env.tqh_first;
@@ -376,11 +743,16 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 				SG(sapi_headers).http_response_code = 404;
 			} else {
 				fpm_request_executing();
+				/* The only window in which a flush() may put the response on
+				 * the wire: see fpm_direct_flush(). */
+				r.may_stream = 1;
 				php_execute_script(&file);
+				r.may_stream = 0;
 			}
 			if (!file.in_list) zend_destroy_file_handle(&file);
 		}
 	} zend_catch {
+		r.may_stream = 0;
 		if (!SG(headers_sent)) SG(sapi_headers).http_response_code = 500;
 	} zend_end_try();
 	fpm_request_end();
@@ -393,6 +765,20 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	fpm_stdio_flush_child();
 	evhttp_clear_headers(&r.env);
 
+	if (r.streaming) {
+		/* The status line and the headers are long gone; everything the
+		 * buffered tail below decides was decided in fpm_direct_stream_begin(),
+		 * before the first byte left. */
+		w->requests++;
+		if (w->wp->config->pm_max_requests && w->requests >= (unsigned) w->wp->config->pm_max_requests) {
+			fpm_direct_stopping = 1;
+		}
+		fpm_direct_stream_finish(&r);
+		evbuffer_free(r.output);
+		fpm_direct_tick(-1, 0, w);
+		fpm_request_accepting(true);
+		return;
+	}
 	if (r.rejected || !fpm_http_direct_status_final(r.status)) {
 		const char *why = r.rejected ? r.rejected : "response status is not a final status";
 		evbuffer_drain(r.output, evbuffer_get_length(r.output));

@@ -67,8 +67,10 @@ HTTP/1.x keep-alive.
 
 - No static files, trusted-proxy handling, gateway ACLs, gateway access log,
   HTTP/2, WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below.
-- Only `http.front_controller`, `http.max_body`, `http.read_timeout` and the
-  `http.tls_*` group from the gateway's `http.*` directives are accepted. Other
+- Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
+  `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`
+  and `http.stream_write_timeout` from the gateway's `http.*` directives are
+  accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
 - `chdir` must be absolute; chroot and `listen.allowed_clients` are rejected.
@@ -78,10 +80,12 @@ HTTP/1.x keep-alive.
   hook is not used. Use php.ini and the pool's `php_value` / `php_admin_value`.
 - Requests have a 64 KiB header limit and a body limit of 32 MiB by default,
   configurable down to one byte. Body size cannot be zero/unlimited or above 32 MiB.
-- Responses are buffered until PHP shutdown, capped at 8 MiB body and 64 KiB
-  forwarded headers. Overflow produces HTTP 500 instead of a partial response.
-  `flush()` freezes PHP headers but **does not stream to the client**.
-  `fastcgi_finish_request()` is unavailable, not a misleading no-op.
+- By default responses are buffered until PHP shutdown, capped at 8 MiB body and
+  64 KiB forwarded headers. Overflow produces HTTP 500 instead of a partial
+  response. `flush()` freezes PHP headers but **does not stream to the client**.
+  `http.stream = yes` lifts the body cap and makes `flush()` reach the wire — see
+  [Streaming responses](#streaming-responses-httpstream). The header cap applies
+  either way. `fastcgi_finish_request()` is unavailable, not a misleading no-op.
 - The 64 KiB header cap counts the bytes that reach the wire, not the bytes the
   application set: `name: value\r\n` per emitted header, and nothing for a
   dropped framing header or for `Status:`, neither of which is written. Both
@@ -121,6 +125,76 @@ timeout are exercised by `sapi/fpmng/tests/fpmng-http-*.phpt`. These files
 are automatically included by `build/run-fpmng-phpt.sh` and the CI `fpmng-phpt`
 job. Production hardening, full framework compatibility, and a total memory bound
 are **not measured/implemented**.
+
+## Streaming responses (`http.stream`)
+
+Off by default. With `http.stream = yes` on `pool.type = http-direct` and
+`pool.executor = classic`, the worker hands the body to the client as the script
+produces it, using chunked transfer encoding, instead of holding the whole
+response until PHP shutdown (issue #56).
+
+```ini
+http.stream = yes
+http.stream_write_timeout = 10000   ; ms, default 10000, must be > 0
+```
+
+What changes:
+
+- The response starts on the wire as soon as the script has produced more than
+  64 KiB (`FPM_DIRECT_STREAM_CHUNK` in `fpm_http_direct.c`) or calls `flush()`.
+  From that moment the status line and the headers are committed.
+- The 8 MiB response cap no longer applies: the memory a streamed response costs
+  is the unwritten remainder, bounded by 256 KiB
+  (`FPM_DIRECT_STREAM_HIGHWATER`), not the response size.
+- Backpressure is synchronous. Once more than the high-water mark is still
+  unwritten, the script blocks in the SAPI write until the client has taken
+  enough of it. This worker serves nobody else meanwhile — that is the same
+  property the buffered path already has, applied to a slower phase.
+- Nothing streams that cannot: a non-final status (`1xx`), a bodyless response
+  (HEAD, 204, 205, 304), or a response already doomed by the header caps stays
+  on the buffered path, so the existing framing and error behaviour is unchanged.
+  The task 054 tests measure the default and are unmodified.
+
+**Failure mode when the client stalls.** A client that stops reading is given
+`http.stream_write_timeout` milliseconds. On expiry — or on any write error, or
+if the peer closes — the worker logs a `WARNING`
+(`the client stopped reading the response`), drops the buffered remainder and
+shuts the socket down **without the terminating chunk**. The client therefore
+sees an unterminated chunked message and can tell the response is incomplete; it
+never sees a silently short 200. The worker's memory does not grow after the
+abort: output from the still-running script is discarded, and the script runs to
+its normal shutdown.
+
+**`http.stream` cannot be combined with `http.tls_cert`**; the pool is rejected
+at startup. To write from inside a running request without re-entering the event
+loop — libevent refuses a reentrant `event_base_loop()` on the base it is
+already dispatching from — the writer drives the connection's own descriptor
+directly, which is only correct while the descriptor and the bufferevent carry
+the same bytes. On a TLS connection they do not. libevent 2.1.12 offers no way
+out: `be_openssl_flush()` is an unimplemented stub
+(`bufferevent_openssl.c:1259`) and `bufferevent_base_set()` refuses a non-socket
+bufferevent.
+
+### Measured results (Intel i7-6700T, 8 threads, poligon, 2026-09-11)
+
+`build/benchmark-http-direct-stream.py`, php-8.5.9, one static worker per pool,
+`output_buffering = 0`, loopback client, median of 15 rounds. Peak RSS is the
+pool's largest resident size sampled from `/proc` every 5 ms while the response
+is in flight. Raw data: `metadata.json` / `results.json` in the scratch folder.
+
+| response | pool | status | TTFB | total | peak RSS |
+| --- | --- | --- | --- | --- | --- |
+| 4 MiB | buffered | 200 | 2.68 ms | 4.71 ms | 29.6 MiB |
+| 4 MiB | streamed | 200 | **0.23 ms** | 1.95 ms | **25.7 MiB** |
+| 16 MiB | buffered | 500 (over the 8 MiB cap) | 5.78 ms | 5.78 ms | 33.4 MiB |
+| 16 MiB | streamed | 200 | **0.18 ms** | 8.23 ms | **25.7 MiB** |
+
+Time to first byte is ~12x lower at 4 MiB and does not grow with the response,
+which is the point: it is the time to the first chunk, not to the last. Peak RSS
+is flat across both sizes for the streamed pool and grows with the response for
+the buffered one; at 16 MiB the buffered pool has no answer at all. The
+loopback client never stalls, so these numbers do not exercise backpressure —
+`sapi/fpmng/tests/fpmng-http-direct-streaming.phpt` does.
 
 ## TLS
 

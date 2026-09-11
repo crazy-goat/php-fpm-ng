@@ -126,6 +126,15 @@ expectConfigFailure(
     ["'request_terminate_timeout' is not supported by pool.type = http-direct with pool.executor = worker"]
 );
 
+/* issue #56. http.stream hooks the SAPI write of a per-request script; the
+ * worker executor answers from a PHP callable it drives itself, so accepting
+ * the directive here would read as if streaming were merely unimplemented. */
+expectConfigFailure(
+    'direct-worker-stream',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.stream = yes",
+    ["'http.stream' is not supported by pool.type = http-direct with pool.executor = worker"]
+);
+
 expectConfigFailure(
     'direct-worker-max-execution-time',
     $workerBase . "\nphp_admin_value[max_execution_time] = 30",
@@ -177,6 +186,7 @@ cron-pm: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
 direct-worker-request-terminate-timeout: rejected
+direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected

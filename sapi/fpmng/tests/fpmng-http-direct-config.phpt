@@ -41,6 +41,13 @@ $cases = [
     'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
     'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
     'unbounded-timeout' => [$base . "\nhttp.read_timeout = 0", 'http.read_timeout > 0'],
+    /* issue #56. A streamed response blocks the child on one client, and this
+     * executor has exactly one request in flight, so an unbounded wait would
+     * take the whole pool down with a single stalled reader. */
+    'stream-without-timeout' => [$base . "\nhttp.stream = yes\nhttp.stream_write_timeout = 0", 'http.stream requires http.stream_write_timeout > 0'],
+    /* issue #56. The streaming writer reaches past the bufferevent to the
+     * descriptor, which on a TLS connection would send plaintext. */
+    'stream-with-tls' => [$base . "\nhttp.stream = yes\nhttp.tls_cert = /missing.pem\nhttp.tls_key = /missing.pem", 'http.stream cannot be combined with http.tls_cert'],
     'missing-script' => [$base . "\nhttp.front_controller = /missing-direct-script.php", 'front controller must be a regular file inside chdir'],
 ];
 foreach ($cases as $label => [$config, $needle]) {
@@ -74,6 +81,8 @@ chroot: rejected
 traversal: rejected
 unbounded-body: rejected
 unbounded-timeout: rejected
+stream-without-timeout: rejected
+stream-with-tls: rejected
 missing-script: rejected
 classic: accepted
 --CLEAN--

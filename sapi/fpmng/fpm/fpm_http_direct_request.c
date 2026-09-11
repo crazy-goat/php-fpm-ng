@@ -160,6 +160,29 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	if (fpm_http_direct_tls_validate(wp) < 0) {
 		return -1; /* logged there, with the pool name and what is wrong */
 	}
+	/* The master is not chrooted, so under `chroot` the pool's chdir names a
+	 * directory that only exists once the child has called chroot(2). Prepend
+	 * it exactly the way fpm_conf.c does when it checks that the chdir exists
+	 * (fpm_conf.c, "the chdir path '%s' within the chroot path '%s'"), so the
+	 * startup check looks at the same directory the child will. The child's
+	 * own resolution passes base = NULL and runs after chroot(), where the
+	 * unprefixed path is the right one. */
+	if (c->chroot && *c->chroot) {
+		char base[PATH_MAX];
+
+		if ((size_t) snprintf(base, sizeof(base), "%s%s", c->chroot, c->chdir) >= sizeof(base)) {
+			zlog(ZLOG_ALERT, "[pool %s] %s: chroot + chdir is longer than PATH_MAX",
+				c->name, labels->script_context);
+			return -1;
+		}
+		if (fpm_http_direct_resolve_script(base, c->http_front_controller, root, script) < 0) {
+			zlog(ZLOG_ALERT, "[pool %s] %s: %s must be a regular file inside chdir, "
+				"which is resolved inside chroot '%s' here",
+				c->name, labels->script_context, labels->script_noun, c->chroot);
+			return -1;
+		}
+		return 0;
+	}
 	if (fpm_http_direct_resolve_script(c->chdir, c->http_front_controller, root, script) < 0) {
 		zlog(ZLOG_ALERT, "[pool %s] %s: %s must be a regular file inside chdir",
 			c->name, labels->script_context, labels->script_noun);

@@ -148,15 +148,18 @@ above come from one sitting on one toolchain for that reason.
 - No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2,
   WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below. Static
   files are too, opt-in and on the classic executor only — see below as well.
+  The pool-level operator directives (`ping.path`, `pm.status_path`,
+  `access.log`, `listen.allowed_clients`, `chroot`) are supported as well — see
+  [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
   `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`,
   `http.stream_write_timeout` and `http.static` from the gateway's `http.*`
   directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
-- `chdir` must be absolute; chroot and `listen.allowed_clients` are rejected.
-  FPM ping/status listeners and the FastCGI access log are not implemented here;
-  use a separate `pool.type = status` for the FPM scoreboard.
+- `chdir` must be absolute. `pm.status_listen` is rejected on both executors: it
+  asks for a second listening socket served by a second process, and a direct
+  child owns exactly one listener — the pool's.
 - The FastCGI-specific `.user.ini` / per-host/per-directory php.ini activation
   hook is not used. Use php.ini and the pool's `php_value` / `php_admin_value`.
 - Requests have a 64 KiB header limit and a body limit of 32 MiB by default,
@@ -528,12 +531,144 @@ A static hit costs no PHP request, and is not counted as one: it does not
 advance `pm.max_requests`, and it does not move the scoreboard. It does hold a
 slot in the pool's in-flight count until the client has taken the response or
 gone away, which is what stops a child exiting with a reply still on the wire.
+It is counted separately as a `non-php request` on the status page and written
+to `access.log` like any other response — see
+[Operating a direct pool](#operating-a-direct-pool).
 
 The implementation is shared with the `http` gateway
 (`sapi/fpmng/fpm/fpm_http_static.c`) rather than copied: the containment check,
 the dot-segment rule and the conditional handling are the parts that have to be
 right, and a second copy of them is a second place to get them wrong. The
 gateway gained `Last-Modified` and `If-Modified-Since` from the same change.
+
+## Operating a direct pool
+
+Since issue #59 a direct pool answers the pool-level operator directives an
+FPM operator already knows, on the **classic executor**:
+
+```ini
+[app]
+pool.type = http-direct
+listen = 127.0.0.1:9100
+chdir = /srv/app/public
+http.front_controller = /index.php
+
+ping.path = /ping
+ping.response = pong
+pm.status_path = /status
+access.log = /var/log/php-fpm/app.access.log
+access.format = "%R - %u %t \"%m %r%Q%q\" %s %{milli}d %{kilo}M"
+access.suppress_path[] = /ping
+listen.allowed_clients = 10.0.0.4,10.0.0.5
+chroot = /srv/jail
+```
+
+### `ping.path` and `pm.status_path`
+
+Both are answered by the worker's own event loop on the pool's listener, before
+any PHP request is started, and neither counts against `pm.max_requests`. They
+are matched against the request path with the query string cut off, and matched
+*whole*: `/statuses` is the application's URL, not the status page. There is no
+percent-decoding — the directive is a literal in the pool file and upstream
+matches it literally too, so `/%73tatus` is not a way past a proxy rule written
+against the documented spelling.
+
+`pm.status_path` answers plain text, or JSON for `?json`, with the same
+`Expires`/`Cache-Control` headers upstream's `fpm_status.c` sends. The fields:
+
+| Field | Where it comes from |
+|---|---|
+| `pool`, `process manager`, `start time`, `start since` | the pool's scoreboard |
+| `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
+| `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
+| `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
+| `non-php requests` | static files, pings and status pages: answered without starting a PHP request |
+| `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
+| `active requests` | PHP requests in flight right now |
+
+Two deviations from the fastcgi status page, both deliberate:
+
+- There is no per-process detail (`?full`). The scoreboard's per-process slots
+  describe a FastCGI request, and a direct child's request is not one.
+- `accepted conn` counts **connections**, not requests, and there is no
+  "active connections" gauge. libevent's per-connection hook
+  (`evhttp_set_bevcb()`) runs before the peer address is known and offers no
+  close notification, and the per-response close callback a direct child
+  already installs cannot be shared with a permanent one. A monotonic count of
+  accepts plus an in-flight request gauge is what can be reported truthfully.
+
+`pm.status_listen` stays rejected on both executors: it asks for a second
+listening socket served by a second process, and a direct child owns exactly
+one listener — the pool's.
+
+### `access.log`
+
+The format is the FastCGI one, validated by the same code that validates it for
+a fastcgi pool (`fpm_conf.c` runs every pool's `access.format` through
+upstream's parser at startup), and the file is the descriptor the master opened
+before the first fork — so `SIGUSR1` rotation works exactly as it does
+elsewhere. One `write()` per line on an `O_APPEND` descriptor is what keeps the
+children's lines from interleaving.
+
+The renderer is ours (`fpm_http_direct_access_log.c`) rather than upstream's
+`fpm_log.c`, for a reason that is not stylistic: `%e{VAR}` there casts
+`SG(server_context)` to a `fcgi_request *`, which under this transport is a
+`struct fpm_direct_request *` — reading a foreign object — and `%R` reads a
+`fastcgi.c` global that nothing in a direct pool writes. Everything else reads
+the scoreboard slot and is portable, and that is what is reused.
+
+What differs from a fastcgi pool:
+
+- `%e{VAR}` reads the CGI environment this pool built for the request, and `%R`
+  is the direct peer address (never an `X-Forwarded-For`: a direct pool has no
+  trusted-proxy list).
+- `%r` is the request path. On a fastcgi pool it is `SCRIPT_NAME`, which for a
+  front-controller application is always `/index.php`; here the path is what
+  the client asked for, and `%Q%q` still carries the query string exactly once.
+- Responses that never ran PHP — a static file, a ping, the status page, a
+  `403` or a `503` — are logged too, with the fields that do not apply (`%M`,
+  `%C`, `%f`, `%u`) left at zero or `-` rather than carried over from whatever
+  this child served last.
+- `access.suppress_path[]` matches the same request path.
+
+Under `pool.executor = worker` all three of `ping.path`, `pm.status_path` and
+`access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
+that executor calls `fpm_request_accepting(false)` once for the life of the
+child, so there is no per-request stage, duration, CPU or peak memory to report
+and no request to count. Refusing the directive is better than answering it
+with placeholders.
+
+### `listen.allowed_clients`
+
+A comma-separated list of literal IPv4/IPv6 addresses, the same matching rules
+FastCGI's `listen.allowed_clients` uses (no CIDR; an IPv4 peer also matches an
+allowed IPv4-mapped IPv6 entry). It shares the matcher with the gateway's
+`http.allowed_clients` (`fpm_http_acl.c`).
+
+It is enforced in the request callback, not at accept: libevent's
+`evhttp_set_bevcb()` runs before the peer address is known. The TCP connection
+is therefore accepted and the request answered `403`, which is also what the
+`http` gateway does. A refused request reaches neither the static file server,
+nor the status page, nor PHP, and is counted as `refused requests`. A
+malformed address in the list is fatal at child start-up: a list meant to keep
+someone out must never end up keeping nobody out.
+
+Both executors enforce it.
+
+### `chroot`
+
+`chroot` is the master's, applied by `fpm_unix_init_child()` before the child
+reaches any of this code, so it works on both executors and needs nothing from
+the transport. What issue #59 had to fix was the startup check: the master is
+not chrooted, so the pool's `chdir` names a directory that only exists after
+`chroot(2)`. The front controller is now resolved against `chroot + chdir` at
+startup — the same prefixing `fpm_conf.c` already does when it checks that the
+`chdir` exists — and against the plain `chdir` in the child, which runs after
+the `chroot(2)`.
+
+Because `chroot(2)` needs root, there is no `.phpt` that starts such a pool;
+what is covered is the validation path, in
+`sapi/fpmng/tests/fpmng-http-direct-config.phpt`.
 
 ## TLS
 

@@ -39,9 +39,20 @@ $cases = [
      * never passes through there, so the directive is refused rather than
      * accepted into doing nothing. */
     'worker-static' => [$base . "\npool.executor = worker\nhttp.static = yes", "'http.static' is not supported"],
+    /* http.allowed_clients is the GATEWAY's directive and stays refused; the
+     * pool-level listen.allowed_clients is supported since issue #59 and is
+     * among the accepted cases below. */
     'gateway-acl' => [$base . "\nhttp.allowed_clients = 127.0.0.1", "'http.allowed_clients' is not supported"],
-    'fastcgi-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1", "'listen.allowed_clients' is not supported"],
-    'chroot' => [$base . "\nchroot = /", "'chroot' is not supported"],
+    /* issue #59. The classic executor answers ping, status and access.log from
+     * the per-request scoreboard slot it maintains; the worker executor keeps
+     * the same slot untouched for the whole life of the child, so there the
+     * directives are refused rather than answered with placeholders. */
+    'worker-ping' => [$base . "\npool.executor = worker\nping.path = /ping", "'ping.path' is not supported"],
+    'worker-status' => [$base . "\npool.executor = worker\npm.status_path = /status", "'pm.status_path' is not supported"],
+    'worker-access-log' => [$base . "\npool.executor = worker\naccess.log = /dev/null", "'access.log' is not supported"],
+    /* Refused for both: it asks for a second listening socket served by a
+     * second process, and a direct child owns exactly one listener. */
+    'status-listen' => [$base . "\npm.status_listen = 127.0.0.1:1", "'pm.status_listen' is not supported"],
     'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
     'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
     'unbounded-timeout' => [$base . "\nhttp.read_timeout = 0", 'http.read_timeout > 0'],
@@ -62,7 +73,17 @@ foreach ($cases as $label => [$config, $needle]) {
     }
     echo "$label: rejected\n";
 }
-foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no"] as $extra) {
+/* issue #59: the operator directives a fastcgi pool has always had. chroot is
+ * validated here (the front controller is resolved inside it, as the child
+ * will see it) even though chroot(2) itself needs root at run time, which is
+ * why there is no chroot .phpt that actually starts such a pool. */
+foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no",
+          "\nlisten.allowed_clients = 127.0.0.1",
+          "\nping.path = /ping\nping.response = alive",
+          "\npm.status_path = /status",
+          "\naccess.log = /dev/null",
+          "\naccess.log = /dev/null\naccess.format = %R %m %r %s\naccess.suppress_path[] = /ping",
+          "\nchroot = /"] as $extra) {
     $tester = new FPM\Tester($base . $extra, '<?php');
     if ($tester->testConfig() !== null) throw new RuntimeException('classic config failed');
 }
@@ -80,8 +101,10 @@ tls-tuning-without-cert: rejected
 gateway-plain-listen: rejected
 worker-static: rejected
 gateway-acl: rejected
-fastcgi-acl: rejected
-chroot: rejected
+worker-ping: rejected
+worker-status: rejected
+worker-access-log: rejected
+status-listen: rejected
 traversal: rejected
 unbounded-body: rejected
 unbounded-timeout: rejected

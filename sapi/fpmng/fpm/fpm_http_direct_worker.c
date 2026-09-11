@@ -385,7 +385,11 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 		 * the child exits, the master respawns it. A genuine burst of more
 		 * than FPM_WORKER_PENDING_MAX concurrent requests therefore recycles
 		 * the worker as well; that is the same drain pm.max_requests performs,
-		 * and the pool is already answering 503 at that point. */
+		 * and the pool is already answering 503 at that point. The cost of
+		 * that choice -- 256 deliberately held long-polls are lost with the
+		 * worker -- is the documented contract of this mode, not an accident:
+		 * see "Held requests under pool.executor = worker" in
+		 * docs/http-direct.md (issue #184). */
 		if (!fpm_worker_stopping) {
 			zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %d requests accepted but unanswered; "
 				"answering 503 and asking the worker script to stop so the master can respawn it",

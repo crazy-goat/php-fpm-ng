@@ -394,6 +394,17 @@ if test "$PHP_FPMNG" != "no"; then
 
   AC_SUBST([php_fpm_systemd])
 
+  dnl This SAPI is built against a php-src that build/prepare.sh has patched,
+  dnl so patches/0006 (persistent Zend signal handlers) is present by
+  dnl construction -- the `patches` CI job fails if it is not. The define
+  dnl exists so that the ONE other way this SAPI can be built,
+  dnl build/libphp-build.sh (a distribution libphp, which carries no patch of
+  dnl ours inside Zend/), has something to leave unset. It gates the call in
+  dnl fpm.c and the pool types that depend on it
+  dnl (fpm_pool_type_check_build_support). See issue #214.
+  AC_DEFINE([HAVE_FPMNG_PERSISTENT_SIGNALS], [1],
+    [Define to 1 if Zend carries patches/0006 (persistent signal handlers).])
+
   dnl The HTTP gateway is not optional in fpm-ng, it is the point of it.
   PKG_CHECK_MODULES([LIBEVENT], [libevent >= 2.1])
   AC_DEFINE([HAVE_FPM_HTTP], [1],

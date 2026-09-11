@@ -23,6 +23,12 @@ switch ($_GET['mode'] ?? 'plain') {
         header('Content-Type: application/octet-stream');
         foreach (pieces() as $piece) { echo $piece; }
         break;
+    case 'medium':
+        /* Comfortably above FPM_DIRECT_STREAM_CHUNK and below
+         * FPM_DIRECT_RESPONSE_MAX: a 1.1 client gets it chunked, a 1.0 client
+         * must get it buffered with a Content-Length. */
+        for ($i = 0; $i < 32; $i++) { echo str_repeat('M', 65536); }
+        break;
     case 'early':
         echo "first\n";
         flush();
@@ -100,10 +106,10 @@ function readExactly($fp, int $n): string
 }
 
 /** Status line plus headers, lower-cased names. */
-function readHead($fp, int $expected): array
+function readHead($fp, int $expected, string $version = '1.1'): array
 {
     $line = fgets($fp);
-    if (!$line || !str_starts_with($line, "HTTP/1.1 $expected ")) {
+    if (!$line || !str_starts_with($line, "HTTP/$version $expected ")) {
         throw new RuntimeException('bad status line: ' . var_export($line, true));
     }
     $headers = [];
@@ -196,6 +202,31 @@ try {
     fclose($fp);
     echo "streamed-bodyless: framing intact\n";
 
+    /* 4b. An HTTP/1.0 client has no chunked framing to receive, so streaming
+     *     declines and the response is buffered with a Content-Length. Getting
+     *     this wrong puts a body after `Content-Length: 0` on a keep-alive
+     *     connection, which the next response would be read out of. */
+    $fp = connect($streamPort);
+    fwrite($fp, "GET /?mode=medium HTTP/1.0\r\nHost: t\r\nConnection: keep-alive\r\n\r\n");
+    $headers = readHead($fp, 200, '1.0');
+    if (isset($headers['transfer-encoding'])) throw new RuntimeException('HTTP/1.0 client got chunked framing');
+    if (($headers['content-length'] ?? null) !== (string) (32 * 65536)) {
+        throw new RuntimeException('HTTP/1.0 content-length: ' . var_export($headers['content-length'] ?? null, true));
+    }
+    $body = readExactly($fp, 32 * 65536);
+    if ($body !== str_repeat('M', 32 * 65536)) throw new RuntimeException('HTTP/1.0 body differs');
+    if (($headers['connection'] ?? '') === 'keep-alive') {
+        /* Only then is a desync observable: the next response must start at the
+         * next byte, not somewhere inside the previous body. */
+        fwrite($fp, "GET / HTTP/1.0\r\nHost: t\r\nConnection: keep-alive\r\n\r\n");
+        $headers = readHead($fp, 200, '1.0');
+        if (readExactly($fp, (int) $headers['content-length']) !== 'plain') {
+            throw new RuntimeException('HTTP/1.0 keep-alive connection is out of sync');
+        }
+    }
+    fclose($fp);
+    echo "streamed-http10: buffered with a content-length\n";
+
     /* 5. A client that stops reading is dropped after http.stream_write_timeout,
      *    with the message deliberately unterminated. */
     $fp = connect($stallPort);
@@ -220,6 +251,7 @@ buffered-default: unchanged
 streamed-16MiB: 16777216 bytes in order
 streamed-early: first chunk before the script finished
 streamed-bodyless: framing intact
+streamed-http10: buffered with a content-length
 streamed-stall: connection dropped, message unterminated
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

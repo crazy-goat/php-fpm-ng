@@ -174,10 +174,12 @@ struct fpm_worker_pool_config_s {
 	 * chunked transfer encoding -- see fpm_http_direct.c and docs/http-direct.md
 	 * (issue #56). */
 	int http_stream;
-	/* fpm-ng: milliseconds the worker will spend waiting for a client that has
-	 * stopped reading a streamed response before it gives up and truncates the
-	 * message. Only meaningful with http.stream = yes; must be > 0, because a
-	 * worker blocked forever on one slow client serves nobody else. */
+	/* fpm-ng: milliseconds the worker will spend blocked on a client that is
+	 * not taking a streamed response, summed over the whole response, before it
+	 * gives up and truncates the message. A per-wait budget would not bound
+	 * anything: a client reading one byte just before each deadline would renew
+	 * it forever. Only meaningful with http.stream = yes; must be > 0, because
+	 * a worker blocked forever on one slow client serves nobody else. */
 	int http_stream_write_timeout;
 	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */

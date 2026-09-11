@@ -30,25 +30,21 @@
  *    zend_signal_activate() restores is not the child's sig_soft_quit handler.
  *    Making this a first-class seam rather than a substitution is issue #213.
  *
- * 2. zend_signal_use_persistent_handlers() is added by patches/0006 inside
- *    Zend/, which a distribution libphp obviously does not carry. It is called
- *    only for pool.type = fastcgi-ng and pool.type = http
- *    (sapi/fpmng/fpm/fpm.c:184-187), and this build supports neither. The
- *    no-op closes the link and leaves upstream signal behaviour in place for
- *    the pool types that are supported -- it is not an implementation, and the
- *    binary must refuse those two pool types at startup rather than run them
- *    on top of it. That refusal is issue #214.
+ * 2. zend_signal_use_persistent_handlers() (patches/0006, inside Zend/) USED to
+ *    be substituted here with a no-op so the link would close. It is not, any
+ *    more: a no-op is upstream signal behaviour wearing the name of the
+ *    opposite, and nothing at run time would have said so. This build now
+ *    leaves HAVE_FPMNG_PERSISTENT_SIGNALS unset instead, which compiles the
+ *    call out of fpm.c and makes every pool type that depends on it refuse to
+ *    start with a named reason (issue #214,
+ *    fpm_pool_type_check_build_support()). One fact, one define, one place to
+ *    change when the missing patch arrives -- not a stub to remember to
+ *    delete.
  */
 #include "php.h"
 #include "zend_signal.h"
-#include "libphp_compat.h"
 
 void zend_signal_init(void)
 {
 	zend_signal_startup();
-}
-
-void zend_signal_use_persistent_handlers(bool enable)
-{
-	(void) enable;
 }

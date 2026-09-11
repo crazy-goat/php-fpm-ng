@@ -61,7 +61,12 @@ def main():
     root = args.scratch.resolve()
     root.mkdir(parents=True, exist_ok=False)
     strings = subprocess.check_output(["strings", binary], text=True)
-    marker = "http-direct requires pm = static"
+    # The literal in the binary, not a rendered one: fpm_http_direct_request.c
+    # logs "[pool %s] %s requires pm = static", so the pool type is a format
+    # argument and never appears in .rodata next to the rest. This guard used to
+    # look for "http-direct requires pm = static" and therefore rejected every
+    # binary ever passed to it, including correct ones.
+    marker = "requires pm = static"
     if marker not in strings:
         raise RuntimeError("wrong binary: missing direct transport marker")
     nginx = shutil.which("nginx") or "/usr/sbin/nginx"

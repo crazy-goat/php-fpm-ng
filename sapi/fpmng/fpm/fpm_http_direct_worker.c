@@ -1479,8 +1479,12 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		EVHTTP_REQ_PUT | EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_gencb(fw.http, fpm_worker_accept, NULL);
 	/* See the same call in fpm_http_direct.c: before the listener, so no
-	 * connection is ever accepted in the plain. */
-	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http) < 0) {
+	 * connection is ever accepted in the plain. No on-accept hook: the accept
+	 * gate of issue #53 is the classic executor's, where the loop is blocked for
+	 * the whole of every request. Here the loop is driven by userland, which can
+	 * hold several requests in flight, so the same gate would be a throughput
+	 * cost against a different -- and unmeasured -- fairness problem. */
+	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http, NULL, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	fw.listener = evhttp_accept_socket_with_handle(fw.http, wp->listening_socket);

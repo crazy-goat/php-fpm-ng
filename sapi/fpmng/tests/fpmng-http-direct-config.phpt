@@ -34,7 +34,11 @@ $cases = [
     'tls-key-without-cert' => [$base . "\nhttp.tls_key = /missing.pem", 'nothing to attach the key to'],
     'tls-tuning-without-cert' => [$base . "\nhttp.tls_min_version = TLSv1.2", 'require http.tls_cert'],
     'gateway-plain-listen' => [$base . "\nhttp.plain_listen = 127.0.0.1:1", "'http.plain_listen' is not supported"],
-    'gateway-static' => [$base . "\nhttp.static = 0", "'http.static' is not supported"],
+    /* issue #58. http.static IS supported on the classic executor, which serves
+     * the file in its request callback before any PHP runs. The worker executor
+     * never passes through there, so the directive is refused rather than
+     * accepted into doing nothing. */
+    'worker-static' => [$base . "\npool.executor = worker\nhttp.static = yes", "'http.static' is not supported"],
     'gateway-acl' => [$base . "\nhttp.allowed_clients = 127.0.0.1", "'http.allowed_clients' is not supported"],
     'fastcgi-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1", "'listen.allowed_clients' is not supported"],
     'chroot' => [$base . "\nchroot = /", "'chroot' is not supported"],
@@ -58,8 +62,8 @@ foreach ($cases as $label => [$config, $needle]) {
     }
     echo "$label: rejected\n";
 }
-foreach (['', "\npool.executor = classic"] as $executor) {
-    $tester = new FPM\Tester($base . $executor, '<?php');
+foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no"] as $extra) {
+    $tester = new FPM\Tester($base . $extra, '<?php');
     if ($tester->testConfig() !== null) throw new RuntimeException('classic config failed');
 }
 echo "classic: accepted\n";
@@ -74,7 +78,7 @@ tls-cert-without-key: rejected
 tls-key-without-cert: rejected
 tls-tuning-without-cert: rejected
 gateway-plain-listen: rejected
-gateway-static: rejected
+worker-static: rejected
 gateway-acl: rejected
 fastcgi-acl: rejected
 chroot: rejected

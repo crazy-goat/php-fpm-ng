@@ -36,6 +36,13 @@ on:
 # GitHub-hosted fallback run that path is empty and ccache starts cold, which
 # is what the hosted runner did anyway.
 #
+# The jobs that do not compile run on `poligon`, the label shared by all 13
+# runner instances on the box (3 registered to this repository, 10 to the
+# organisation, whose runner group already grants this repository access).
+# They used to sit on `fpmng`, which is only the 3, so the ten short jobs that
+# wait on `build` queued in waves of three. The three compiling jobs are
+# pinned to one instance each instead -- see the note on each of them.
+#
 # static-musl is the exception: it drives `docker run` with host bind mounts,
 # and -v paths are resolved by the host daemon, so a containerised copy of it
 # would mount empty directories. It runs on poligon-host, a runner instance
@@ -74,7 +81,7 @@ jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
   # contributor entry points. Fast — checkout only.
   comment-content-rule:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -96,7 +103,7 @@ jobs:
   # this repo owns, so a new test file cannot be silently unreachable. Hermetic
   # -- no build, no binary; the runner stops at its own preflight.
   fpmng-phpt-coverage:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -119,7 +126,7 @@ jobs:
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -295,7 +302,7 @@ jobs:
   # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
   phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -331,7 +338,7 @@ jobs:
   # off by default); cron may take up to one minute.
   fpmng-phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -681,7 +688,7 @@ jobs:
   # folded into phpt.
   gateway-privileges:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -718,7 +725,7 @@ jobs:
   # privileges), so it stays out of the phpt job rather than needing sudo.
   tls-reload:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -752,7 +759,7 @@ jobs:
   # read as a reload failure.
   tls-wait-for-cert:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -781,7 +788,7 @@ jobs:
   # reload failure.
   read-deadline:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -814,7 +821,7 @@ jobs:
   # failure here means one specific thing.
   gateway-write-failure:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -840,7 +847,7 @@ jobs:
 
   plain-http-listener:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:

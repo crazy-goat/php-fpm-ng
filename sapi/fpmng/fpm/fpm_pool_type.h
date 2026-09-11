@@ -134,6 +134,26 @@ struct fpm_pool_type_s {
 	 * and its children, so a child must not change this after fork. */
 	unsigned listening_socket_nonblocking:1;
 
+	/* TCP_NODELAY on the same master-side socket, for a type whose children
+	 * speak to the client directly (issue #244). FPM's own listener code never
+	 * set it: it was written for FastCGI, where the peer is a web server on the
+	 * same host and Nagle costs nothing. For a type that answers the client, it
+	 * costs the trailing partial segment of every response over a few kilobytes
+	 * a wait for the peer's delayed ACK -- 43 ms on the poligon, against 0.3 ms
+	 * without.
+	 *
+	 * In the master and before the fork, not in the child, because Linux copies
+	 * the listening socket's options onto a connection when the handshake
+	 * completes and not when accept() returns it. A child that sets the option
+	 * during its own start-up therefore leaves whatever was already sitting in
+	 * the accept queue on the old setting -- which is exactly the race that a
+	 * first attempt at this produced, as a test that stalled on some runs and
+	 * not others.
+	 *
+	 * A no-op on a unix socket, where there is no Nagle: the flag is applied
+	 * only to AF_INET/AF_INET6. */
+	unsigned listening_socket_nodelay:1;
+
 	/* Every pool.executor value this type accepts, and the type variant each
 	 * one resolves to. Terminated by an entry with .name == NULL. NULL = the
 	 * type accepts no pool.executor at all. Data, not a name comparison in

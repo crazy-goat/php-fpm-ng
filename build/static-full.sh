@@ -30,7 +30,7 @@ cd /build
 # where the configure line lives. Any mismatch wipes /build: a tree half-built
 # from two configurations links without complaint.
 key_file=/build/.fpmng-musl-key
-key=$( { cat /src/.fpmng-ci-key 2>/dev/null; cat /repo/build/static-full.sh; } | sha256sum | cut -d" " -f1)
+key=$( { cat /src/.fpmng-ci-key /src/.fpmng-ci-epoch 2>/dev/null; cat /repo/build/static-full.sh; } | sha256sum | cut -d" " -f1)
 reuse=no
 if [ -f "$key_file" ] && [ "$(cat "$key_file")" = "$key" ] && [ -f /build/Makefile ] &&
    [ ! -f /build/.fpmng-musl-dirty ]; then

@@ -641,6 +641,12 @@ jobs:
   # a scratch image.
   static-musl:
     runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    env:
+      # This job is not containerised -- it drives `docker run` with host bind
+      # mounts -- so it names the host path directly rather than a /buildtree
+      # mount. poligon-host is a runner instance of its own, so nothing else
+      # touches this directory.
+      MUSL_CACHE: /opt/gh-runner/cache/buildtree-musl
     steps:
       # The Alpine build below writes into the workspace as root, and the
       # runner user cannot unlink that afterwards -- the next job on this
@@ -654,19 +660,30 @@ jobs:
             chown -R "$(id -u):$(id -g)" /w
 
       - uses: actions/checkout@v7
-      - name: clone pinned php-src
+
+      # Issue #197: the same reused tree as the container jobs get from
+      # ci-build-tree.sh, minus configure -- the musl toolchain that has to
+      # run it only exists inside the Alpine container below, which
+      # configures out of tree and keeps its own key next to /build.
+      - name: php-src tree for the static build (reused between runs)
+        env:
+          FPMNG_TREE_SKIP_CONFIGURE: "yes"
         run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
+          ( set +e; ./build/ci-build-tree.sh "$MUSL_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF" 2>&1; echo "$?" > tree-musl.rc ) | tee tree-musl.log
+          exit "$(cat tree-musl.rc)"
+
       - name: build static php-fpm-ng on Alpine
+        # /build, /ccache and the apk cache are host directories kept between
+        # runs. This was the only compiling job in the matrix with no compiler
+        # cache at all and a full 25-package apk install every time: 456 s on
+        # run 34594056547, the longest job by a wide margin.
         run: |
-          mkdir build-static out-static
+          mkdir -p "$MUSL_CACHE/build" "$MUSL_CACHE/ccache" "$MUSL_CACHE/apk" out-static
           docker run --rm \
-            -v "$PWD/php-src:/src" \
-            -v "$PWD/build-static:/build" \
+            -v "$MUSL_CACHE/src:/src" \
+            -v "$MUSL_CACHE/build:/build" \
+            -v "$MUSL_CACHE/ccache:/ccache" \
+            -v "$MUSL_CACHE/apk:/etc/apk/cache" \
             -v "$PWD:/repo" \
             -v "$PWD/out-static:/out" \
             alpine:3.22 sh /repo/build/static-full.sh

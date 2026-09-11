@@ -154,6 +154,19 @@ struct fpm_worker_pool_config_s {
 	char *http_tls_sni_cert;
 	int http_tls_reload_check;		/* seconds between cert/key mtime checks on disk, without restarting the gateway (task 040);
 						 * unset -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = disabled */
+	/* fpm-ng: start this pool before its certificate exists (issue #172).
+	 * Off by default, and deliberately so: without it a missing or
+	 * unparseable http.tls_cert is a startup failure of the whole master,
+	 * which is the fail-closed behaviour a pool that is supposed to serve
+	 * TLS must keep. With it, a cert path that does not exist YET puts the
+	 * pool in NO_CERT -- the TLS listener is bound but not listening, so
+	 * :443 refuses connections, and http.plain_listen answers HTTP-01
+	 * challenges only -- until the certificate appears on disk, at which
+	 * point every gateway picks it up through the http.tls_reload_check
+	 * machinery and starts accepting. A cert path that exists but does not
+	 * parse still fails startup: that is an operator error, not an
+	 * unfinished issuance. See docs/tls.md. */
+	int http_tls_wait_for_cert;
 	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
 	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */
 	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class

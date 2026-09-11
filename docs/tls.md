@@ -65,3 +65,87 @@ for the key — generous for a real-world `fullchain.pem`, not a hard
 protocol limit). A pair larger than that is rejected like any other invalid
 candidate: logged, not installed. This bound does not apply to the
 certificate a pool starts up with, only to a later reload.
+
+## Starting before the certificate exists (`http.tls_wait_for_cert`)
+
+- **`http.tls_wait_for_cert`** (optional, boolean, default: `no`) — start the
+  pool even though `http.tls_cert` does not exist yet, and begin serving TLS
+  by itself once it appears. Requires `http.tls_cert` to be configured and
+  `http.tls_reload_check` to be non-zero.
+
+**Read the default as a safety property, not as an omission.** With the
+default `no`, a missing or unreadable `http.tls_cert` fails the master's
+startup outright. That is fail-closed: a pool that was meant to serve HTTPS
+never quietly comes up as something else. Turning this on trades that
+guarantee for the one case where it is wrong — a container booting for the
+very first time, where the certificate is about to be issued by the ACME
+client inside the same binary (see
+[`acme-renewal.md`](acme-renewal.md)) and cannot exist before the pool that
+answers the challenge does. **Do not set it on a pool whose certificate is
+provisioned externally**, where a missing file means an operator mistake and
+you want to hear about it at boot.
+
+A cert path that exists but does not parse still fails startup, opt-in or
+not. That is an operator error, not an unfinished issuance.
+
+### The two states
+
+**NO_CERT** — the certificate is not there yet.
+
+- `http.listen` (the TLS port) is **bound but not listening**. A client gets
+  a connection refused, not a TLS handshake failure. This is deliberate: a
+  refusal says "not ready", whereas answering the handshake with a
+  self-signed or expired certificate teaches clients to distrust the name.
+- `http.plain_listen` answers `/.well-known/acme-challenge/...` from the
+  challenge store as usual, and answers everything else with **503 Service
+  Unavailable** and `Retry-After: 60` instead of its normal 308 redirect to
+  a port that is not there.
+- The master logs the state once at startup, naming the path it is waiting
+  for and the re-check interval.
+
+**READY** — the certificate has appeared.
+
+- Each gateway process notices the new generation on its own timer, within
+  `http.tls_reload_check` seconds, calls `listen()` on the socket it already
+  holds and starts accepting. It logs `leaving NO_CERT` with the generation
+  number, once, per process.
+- The plain listener goes back to redirecting with 308.
+
+The transition is **one-way within the life of a process**. Deleting the
+certificate afterwards does not take TLS back down: the loaded certificate
+keeps serving, the master logs one warning that renewal is blocked until the
+pair is readable again, and a later restore logs that it is readable again.
+Same rule as an ordinary reload — a broken or absent candidate never replaces
+a working certificate.
+
+### What an operator polls
+
+There is no TLS-state field in `fpm_status`: the status callback on a pool
+type is wired only for types that do not serve requests (supervisor, cron),
+so exposing one here would be a larger change than this feature warrants.
+Two things are enough, and both are already there:
+
+- **The log.** `NO_CERT` at startup, then one `leaving NO_CERT` line per
+  gateway process. Count them: the pool is fully in READY when that count
+  equals `http.gateways`.
+- **The port itself.** A TCP connect to `http.listen` is refused in NO_CERT
+  and accepted in READY. `ss -lnt` shows the port only once it is listening.
+
+### Caveat: binding early does not reserve the port
+
+The socket is bound before `listen()`, but that does **not** hold the port
+against another process. Measured on 2026-09-11: a second process with
+`SO_REUSEADDR` bound *and* listened on the same port while our socket sat
+bound-not-listening, and our later `listen()` then failed with `EADDRINUSE`.
+That failure is logged as an error naming the gateway that is not serving,
+and only that gateway is affected. Do not run anything else on the TLS port.
+
+### Not compatible with `http.tls_sni_cert`
+
+A pool that sets `http.tls_wait_for_cert` may not also set
+`http.tls_sni_cert`; the combination is refused at configuration time. SNI
+certificates are loaded once, as part of the startup pair, and are not part
+of the certificate-watch poll — a pool that started without them would go on
+serving the primary certificate for every SNI name after the transition, and
+silently, because the validation that would have complained was skipped too.
+Closing that gap means making SNI reloadable, which is out of scope here.

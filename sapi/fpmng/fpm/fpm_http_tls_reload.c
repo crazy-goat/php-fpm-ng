@@ -131,6 +131,16 @@ struct fpm_http_tls_reload_s {
 	 * read deadline from every connection accepted after the reload. */
 	struct bufferevent *(*child_bevcb)(struct event_base *, void *);
 	void *child_bevcb_arg;
+	/* Master only: has the "certificate has become unreadable" warning
+	 * already been logged for the current disappearance? Cleared as soon as
+	 * the pair reads again, so a second disappearance warns again. */
+	int warned_unreadable;
+	/* NO_CERT -> READY hook, issue #172; NULL for every pool that started
+	 * with a certificate, which is all of them unless
+	 * http.tls_wait_for_cert is set. Cleared as it fires so it cannot run
+	 * twice. */
+	void (*child_on_first_cert)(void *);
+	void *child_on_first_cert_arg;
 	char local_cert_pem[FPM_HTTP_TLS_RELOAD_MAX_CERT];
 	char local_key_pem[FPM_HTTP_TLS_RELOAD_MAX_KEY];
 };
@@ -250,6 +260,7 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	struct fpm_http_tls_s *fresh;
 	unsigned long gen;
 	unsigned target;
+	int first_cert;
 
 	(void) ev;
 	if (which != FPM_EV_TIMEOUT) {
@@ -260,7 +271,28 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 			fpm_http_tls_reload_file_digest(r->key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, key_digest) != 0) {
 		/* Transient (mid write, or the volume is not there yet): not fatal,
 		 * skip this tick, the certificate already in use keeps serving. */
+		if (!r->warned_unreadable && fpm_http_tls_reload_has_cert(r)) {
+			/* Once, and only for a pool that IS serving a certificate. This
+			 * is the answer to issue #172 criterion 5's "what does the
+			 * operator see instead": deleting the certificate under a live
+			 * pool deliberately does NOT drop it back to NO_CERT -- an
+			 * operator mistake or a half-finished write must not take TLS
+			 * down -- so without a line here the only symptom would be the
+			 * certificate silently expiring weeks later. Warning rather than
+			 * error: nothing is broken yet, and the pool recovers by itself
+			 * the moment the pair is readable again.
+			 *
+			 * Not logged in NO_CERT, where an unreadable pair is the normal
+			 * state and this would fire on every tick of every first boot. */
+			zlog(ZLOG_WARNING, "[pool %s] http: TLS certificate/key at '%s' has become unreadable; the certificate already loaded keeps serving and will NOT be renewed until the pair is back",
+				r->pool, r->cert_path);
+			r->warned_unreadable = 1;
+		}
 		return;
+	}
+	if (r->warned_unreadable) {
+		zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate/key at '%s' is readable again", r->pool, r->cert_path);
+		r->warned_unreadable = 0;
 	}
 	if (memcmp(cert_digest, r->cert_digest, sizeof(cert_digest)) == 0 &&
 			memcmp(key_digest, r->key_digest, sizeof(key_digest)) == 0) {
@@ -313,6 +345,12 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 
 	gen = r->shared->generation;
 	target = (unsigned) ((gen + 1) % 2);
+	/* Read before the publish below overwrites nothing relevant but the
+	 * generation: an empty current slot means this pool has been in NO_CERT
+	 * (issue #172) and this is its first certificate, not a renewal. The two
+	 * deserve different log lines -- "reloaded" on a first boot would be a
+	 * lie, and the transition is the line an operator greps for. */
+	first_cert = r->shared->slot[gen % 2].cert_len == 0;
 
 	r->shared->slot[target].cert_len = fresh->cert_len;
 	r->shared->slot[target].key_len = fresh->key_len;
@@ -330,8 +368,13 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
 	fpm_http_tls_free(fresh);
 
-	zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate reloaded from disk (generation %lu); gateway processes adopt it within http.tls_reload_check seconds",
-		r->pool, gen + 1);
+	if (first_cert) {
+		zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate found on disk (generation %lu); the pool leaves NO_CERT and each gateway process opens its TLS listener within http.tls_reload_check seconds",
+			r->pool, gen + 1);
+	} else {
+		zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate reloaded from disk (generation %lu); gateway processes adopt it within http.tls_reload_check seconds",
+			r->pool, gen + 1);
+	}
 }
 /* }}} */
 
@@ -341,7 +384,7 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 {
 	struct fpm_http_tls_reload_s *r;
 
-	if (initial->cert_len > FPM_HTTP_TLS_RELOAD_MAX_CERT || initial->key_len > FPM_HTTP_TLS_RELOAD_MAX_KEY) {
+	if (initial && (initial->cert_len > FPM_HTTP_TLS_RELOAD_MAX_CERT || initial->key_len > FPM_HTTP_TLS_RELOAD_MAX_KEY)) {
 		zlog(ZLOG_WARNING, "[pool %s] http.tls_reload_check: certificate/key is larger than the %u/%u byte reload buffer, disabling reload for this pool (a restart is needed to pick up a renewed certificate)",
 			pool, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_CERT, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_KEY);
 		return NULL;
@@ -363,12 +406,19 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 		return NULL;
 	}
 
-	r->shared->slot[0].cert_len = initial->cert_len;
-	r->shared->slot[0].key_len = initial->key_len;
-	r->shared->slot[0].min_version = initial->min_version;
-	memcpy(r->shared->slot[0].cert_pem, initial->cert_pem, initial->cert_len);
-	memcpy(r->shared->slot[0].key_pem, initial->key_pem, initial->key_len);
-	memcpy(r->shared->slot[0].ticket_key, initial->ticket_key, sizeof(initial->ticket_key));
+	/* NULL `initial` is http.tls_wait_for_cert's NO_CERT state (issue #172):
+	 * leave generation 0 exactly as fpm_shm_alloc() returned it -- all zero,
+	 * so cert_len is 0 and fpm_http_tls_reload_has_cert() below reads false.
+	 * Generation 0 still exists and is still the published one; it just says
+	 * "no certificate yet" rather than "here is the startup certificate". */
+	if (initial) {
+		r->shared->slot[0].cert_len = initial->cert_len;
+		r->shared->slot[0].key_len = initial->key_len;
+		r->shared->slot[0].min_version = initial->min_version;
+		memcpy(r->shared->slot[0].cert_pem, initial->cert_pem, initial->cert_len);
+		memcpy(r->shared->slot[0].key_pem, initial->key_pem, initial->key_len);
+		memcpy(r->shared->slot[0].ticket_key, initial->ticket_key, sizeof(initial->ticket_key));
+	}
 	/* Plain store: nothing has forked yet, so there is no other reader. */
 	r->shared->generation = 0;
 
@@ -378,18 +428,31 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 	r->min_version = min_version && *min_version ? strdup(min_version) : NULL;
 	r->check_interval_sec = check_interval_sec;
 	/* Borrowed, not copied -- see the fields' declaration above. */
-	r->sni = initial->sni;
-	r->sni_count = initial->sni_count;
+	r->sni = initial ? initial->sni : NULL;
+	r->sni_count = initial ? initial->sni_count : 0;
 
 	/* Baseline: the bytes the gateway is about to start serving. A failure
 	 * here leaves the digest all-zero, which no file matches, so the first
 	 * tick that can read the pair treats it as a change and reloads it --
 	 * one redundant load, never a missed one. */
-	if (fpm_http_tls_reload_file_digest(cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
+	if (!initial) {
+		/* NO_CERT: no baseline at all. Taking one here would be actively
+		 * wrong -- a certificate already sitting on disk (a restart of a pool
+		 * that is past its first issuance, or a write that landed between
+		 * fpm_http_tls_load() failing and this call) would become the
+		 * "nothing has changed" reference and never be published, leaving the
+		 * pool in NO_CERT forever with the certificate right there. All-zero
+		 * matches no file, so the first tick that can read the pair publishes
+		 * it. */
 		memset(r->cert_digest, 0, sizeof(r->cert_digest));
-	}
-	if (fpm_http_tls_reload_file_digest(key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
 		memset(r->key_digest, 0, sizeof(r->key_digest));
+	} else {
+		if (fpm_http_tls_reload_file_digest(cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
+			memset(r->cert_digest, 0, sizeof(r->cert_digest));
+		}
+		if (fpm_http_tls_reload_file_digest(key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
+			memset(r->key_digest, 0, sizeof(r->key_digest));
+		}
 	}
 
 	if (check_interval_sec > 0) {
@@ -472,6 +535,18 @@ static unsigned long fpm_http_tls_reload_snapshot(struct fpm_http_tls_reload_s *
 }
 /* }}} */
 
+int fpm_http_tls_reload_has_cert(struct fpm_http_tls_reload_s *reload) /* {{{ */
+{
+	unsigned long gen;
+
+	if (!reload) {
+		return 0;
+	}
+	gen = reload->shared->generation;
+	return reload->shared->slot[gen % 2].cert_len > 0;
+}
+/* }}} */
+
 SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload) /* {{{ */
 {
 	struct fpm_http_tls_s tmp;
@@ -479,6 +554,14 @@ SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload)
 	SSL_CTX *ctx;
 
 	if (!reload) {
+		return NULL;
+	}
+	if (!fpm_http_tls_reload_has_cert(reload)) {
+		/* NO_CERT (issue #172): return NULL WITHOUT going through
+		 * fpm_http_tls_ctx_new(), which would log a parse failure for an
+		 * empty PEM on every gateway at every boot. "Not issued yet" is the
+		 * configured state here, not an error, and the caller knows the
+		 * difference because it is the one that set http.tls_wait_for_cert. */
 		return NULL;
 	}
 
@@ -518,6 +601,15 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 
 	gen = fpm_http_tls_reload_snapshot(r, &tmp);
 
+	if (tmp.cert_len == 0) {
+		/* Still NO_CERT (issue #172). Unreachable as the master publishes
+		 * today -- it only ever publishes a pair it has just validated -- so
+		 * this is a guard against a future publisher, not a state the code
+		 * below could otherwise be reached in. Leaving last_seen_generation
+		 * alone means the next real certificate is still seen as a change. */
+		return;
+	}
+
 	new_ctx = fpm_http_tls_ctx_new(r->pool, &tmp);
 	if (!new_ctx) {
 		/* fpm_http_tls_ctx_new() already logged. These bytes were already
@@ -538,9 +630,27 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 	} else {
 		evhttp_set_bevcb(r->child_http, fpm_http_tls_bevcb, new_ctx);
 	}
+	/* SSL_CTX_free(NULL) is a documented no-op, which is what makes the
+	 * NO_CERT case (issue #172) need no branch here: this child simply had
+	 * no context to free. */
 	SSL_CTX_free(*r->child_ctx_slot);
 	*r->child_ctx_slot = new_ctx;
 	r->last_seen_generation = gen;
+
+	if (r->child_on_first_cert) {
+		void (*cb)(void *) = r->child_on_first_cert;
+		void *cb_arg = r->child_on_first_cert_arg;
+
+		/* Cleared BEFORE the call, not after: the callback opens this
+		 * child's TLS listener and must run exactly once even if it somehow
+		 * re-enters this tick. Afterwards this pool is indistinguishable
+		 * from one that started with a certificate. */
+		r->child_on_first_cert = NULL;
+		r->child_on_first_cert_arg = NULL;
+		zlog(ZLOG_NOTICE, "[pool %s] http gateway: TLS certificate arrived (generation %lu), leaving NO_CERT", r->pool, gen);
+		cb(cb_arg);
+		return;
+	}
 
 	zlog(ZLOG_NOTICE, "[pool %s] http gateway: adopted reloaded TLS certificate (generation %lu)", r->pool, gen);
 }
@@ -580,6 +690,17 @@ void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 	every.tv_usec = 0;
 	reload->child_timer = event_new(base, -1, EV_PERSIST, fpm_http_tls_reload_child_tick, reload);
 	event_add(reload->child_timer, &every);
+}
+/* }}} */
+
+void fpm_http_tls_reload_child_on_first_cert(struct fpm_http_tls_reload_s *reload,
+	void (*cb)(void *), void *arg) /* {{{ */
+{
+	if (!reload) {
+		return;
+	}
+	reload->child_on_first_cert = cb;
+	reload->child_on_first_cert_arg = arg;
 }
 /* }}} */
 

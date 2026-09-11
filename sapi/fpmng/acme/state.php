@@ -15,6 +15,7 @@
  *   $base/<domain>/privkey.pem    certificate private key, 0600
  *   $base/<domain>/fullchain.pem  leaf + intermediate, 0644 (public)
  *   $base/<domain>/renewal.json   renewal metadata, 0600
+ *   $base/<domain>/renewal.lock   the single-renewer lock, 0600 (lock.php)
  *
  * One base directory, one subdirectory per domain -- a pool serving several
  * certificates over SNI (task 041) needs several subdirectories, not several
@@ -90,7 +91,43 @@ final class State
 
     public function domainDir(string $domain): string
     {
-        return $this->baseDir . '/' . $domain;
+        return $this->baseDir . '/' . self::canonicalDomain($domain);
+    }
+
+    /**
+     * The directory name a certificate is filed under, and with it the name
+     * of its renewal lock (issue #47) -- so two spellings of one certificate
+     * must not produce two names. DNS is case-insensitive and the trailing
+     * root dot is not part of the name, so 'Example.com', 'example.com.' and
+     * 'example.com' are one certificate to the CA and must be one directory
+     * here; otherwise two pools configured with different spellings would
+     * take two different locks and both run an order for the same name.
+     *
+     * Everything else is rejected rather than escaped. The domain comes from
+     * operator configuration, not from a request, so this is not injection
+     * defence -- it is refusing to turn a typo into a path: '../foo' would
+     * otherwise have ensureDomainDir() create a directory outside the state
+     * root, and an empty name would make the state root its own domain
+     * directory.
+     */
+    public static function canonicalDomain(string $domain): string
+    {
+        $name = strtolower(rtrim($domain, '.'));
+        $labels = $name === '' ? [] : explode('.', $name);
+        if ($labels === []) {
+            throw new StateError('an empty string is not a domain name');
+        }
+        foreach ($labels as $i => $label) {
+            /* A wildcard certificate is named '*.example.com' by the CA, so
+             * that is the one label that may hold a '*', and only first. */
+            if ($i === 0 && $label === '*' && count($labels) > 1) {
+                continue;
+            }
+            if (!preg_match('/\\A[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\z/', $label)) {
+                throw new StateError("'$domain' is not a usable domain name");
+            }
+        }
+        return implode('.', $labels);
     }
 
     public function certKeyPath(string $domain): string
@@ -106,6 +143,16 @@ final class State
     public function renewalMetaPath(string $domain): string
     {
         return $this->domainDir($domain) . '/renewal.json';
+    }
+
+    /**
+     * The advisory lock that makes one process the only renewer of this
+     * certificate (issue #47; see lock.php for why it lives here rather
+     * than in the master's shared memory).
+     */
+    public function renewalLockPath(string $domain): string
+    {
+        return $this->domainDir($domain) . '/renewal.lock';
     }
 
     /** Load the account key, generating it once if absent. */
@@ -156,7 +203,12 @@ final class State
         $this->writePublic($this->certChainPath($domain), $fullchainPem);
     }
 
-    private function ensureDomainDir(string $domain): void
+    /**
+     * Public because RenewalLock has to create the directory before there is
+     * any certificate in it: on a fresh bootstrap the first thing that
+     * happens under $base/<domain>/ is taking the renewal lock.
+     */
+    public function ensureDomainDir(string $domain): void
     {
         $dir = $this->domainDir($domain);
         if (is_dir($dir)) {

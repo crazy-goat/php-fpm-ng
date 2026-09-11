@@ -58,8 +58,11 @@ without a restart, are documented in [`docs/tls.md`](docs/tls.md).
 The gateway answers the ACME HTTP-01 challenge itself, on both `http.listen`
 and the plain `http.plain_listen` companion, from state a `cron` or
 `supervisor` pool publishes with `fpmng_acme_challenge_set()` — see
-[`docs/acme-challenge.md`](docs/acme-challenge.md). Obtaining and renewing
-certificates is not implemented yet.
+[`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
+renew a given certificate, and the result reaches every gateway through the
+existing no-restart certificate reload —
+[`docs/acme-renewal.md`](docs/acme-renewal.md). Obtaining and renewing
+certificates against a CA is not implemented yet.
 
 ## Experimental direct HTTP
 

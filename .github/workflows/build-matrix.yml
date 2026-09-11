@@ -157,39 +157,36 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
+    env:
+      PHPSRC: /buildtree/${{ runner.name }}/dynamic
     steps:
       - uses: actions/checkout@v7
 
-      - name: clone pinned php-src
-        run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
-
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf --force
-        working-directory: php-src
-        run: ./buildconf --force
-
-      - name: configure
-        working-directory: php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. Measured on the poligon: 3 s instead of 96 s for a push that
+      # only touches sapi/fpmng/. The tree is per-runner because a runner
+      # executes one job at a time, and that is what keeps two jobs off the
+      # same directory.
+      - name: php-src build tree (reused between runs)
         env:
           CC: ccache gcc
           CXX: ccache g++
         run: |
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure.rc ) | tee ../configure.log
-          exit "$(cat ../configure.rc)"
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree.rc ) | tee tree.log
+          exit "$(cat tree.rc)"
 
       - name: build
-        working-directory: php-src
         # The steps here run under `sh -e` -- this container has no bash, so
         # GitHub's usual `bash -e` default falls back to dash, where
         # `set -o pipefail` is an error ("Illegal option -o pipefail",
@@ -199,8 +196,8 @@ jobs:
         # and the `set +e` inside it, because errexit propagates into the
         # subshell and would abort it before the rc file was ever written.
         run: |
-          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make.rc ) | tee ../make.log
-          exit "$(cat ../make.rc)"
+          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make.rc ) | tee make.log
+          exit "$(cat make.rc)"
 
       # Issue #111: the build is warning-free in the files we ship, and stays
       # that way. -Werror is not available here -- this compiles all of
@@ -222,12 +219,11 @@ jobs:
           ./build/check-owned-warnings.sh "$PWD/make.log"
 
       - name: verify the binary that got built
-        working-directory: php-src
         run: |
-          test -x sapi/fpmng/php-fpm-ng
-          file sapi/fpmng/php-fpm-ng
-          strings sapi/fpmng/php-fpm-ng | grep -q 'X-Powered-By: PHP' || true
-          sapi/fpmng/php-fpm-ng -v
+          test -x "$PHPSRC/sapi/fpmng/php-fpm-ng"
+          file "$PHPSRC/sapi/fpmng/php-fpm-ng"
+          strings "$PHPSRC/sapi/fpmng/php-fpm-ng" | grep -q 'X-Powered-By: PHP' || true
+          "$PHPSRC/sapi/fpmng/php-fpm-ng" -v
 
       - name: stage artifact
         # A single top-level path, not a multi-entry `path:` list: with more
@@ -238,21 +234,21 @@ jobs:
         # depending on that ancestor computation at all.
         run: |
           mkdir -p stage/bin stage/prepared/sapi/fpmng stage/prepared/ext/standard/tests/misc
-          cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
-          cp php-src/sapi/cli/php stage/bin/
-          cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+          cp "$PHPSRC"/sapi/fpmng/php-fpm-ng stage/bin/
+          cp "$PHPSRC"/sapi/cli/php stage/bin/
+          cp -r "$PHPSRC"/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
           # fpmng-acme-state.phpt (task 044) requires ../acme/state.php relative to
           # the test itself -- stage that source alongside tests/, the same
           # way tests/ itself is staged, or the require fails on this job's
           # copy even though it works from a full build/prepare.sh tree.
-          cp -r php-src/sapi/fpmng/acme stage/prepared/sapi/fpmng/acme
+          cp -r "$PHPSRC"/sapi/fpmng/acme stage/prepared/sapi/fpmng/acme
           # run-fpm-phpt.sh (build/run-fpm-phpt.sh:88) requires run-tests.php
           # directly below the "prepared php-src" path it's given.
-          cp php-src/run-tests.php stage/prepared/
+          cp "$PHPSRC"/run-tests.php stage/prepared/
           # gh12621.phpt reads __DIR__/../../../ext/standard/tests/misc/browscap.ini
           # (a source-tree fixture, not a build product); without it the test
           # fails on a nonexistent browscap path rather than exercising fpmng.
-          cp php-src/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
+          cp "$PHPSRC"/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
 
       - name: upload build (for the phpt job)
         uses: actions/upload-artifact@v7
@@ -374,9 +370,16 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # As root php-fpm refuses to start, so the suite would report PASS=0
       # with everything skipped and still look green. Same note as fpmng-phpt.
       options: --user 1001:1001
+    env:
+      # A directory of its own: --enable-fpmng-fiber is a different configure,
+      # so it cannot share objects with the default build. Sharing one
+      # directory would make the two jobs wipe each other's tree on every run.
+      PHPSRC: /buildtree/${{ runner.name }}/fiber
     steps:
       - uses: actions/checkout@v7
       # fpmng-http-direct-request-parity.phpt needs this locale to be
@@ -384,21 +387,13 @@ jobs:
       - name: assert tr_TR.UTF-8 is present (issue #105)
         run: locale -a | grep -i tr_TR
 
-      - name: clone pinned php-src
-        run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
-
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf --force
-        working-directory: php-src
-        run: ./buildconf --force
-
-      - name: configure with the fiber executor
-        working-directory: php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. The tree is per-runner because a runner executes one job at
+      # a time, and that is what keeps two jobs off the same directory.
+      - name: php-src build tree with the fiber executor (reused between runs)
         env:
           CC: ccache gcc
           CXX: ccache g++
@@ -406,30 +401,35 @@ jobs:
           # $FPMNG_CONFIGURE_FLAGS and nothing else, plus the one flag this
           # cell is about, so the two builds cannot differ in anything else.
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > ../configure-fiber.rc ) | tee ../configure-fiber.log
-          [ "$(cat ../configure-fiber.rc)" -eq 0 ]
-          # configure does not fail on an unknown --enable flag, it warns; so
-          # assert the executor is actually in this build rather than trusting
-          # the command line. Without this the whole cell could silently
-          # degrade into a second copy of fpmng-phpt.
-          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" ../configure-fiber.log
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > tree-fiber.rc ) | tee tree-fiber.log
+          exit "$(cat tree-fiber.rc)"
+
+      - name: assert the fiber executor is really in this build
+        # configure does not fail on an unknown --enable flag, it warns; so
+        # assert the executor is actually in this build rather than trusting
+        # the command line. Without this the whole cell could silently degrade
+        # into a second copy of fpmng-phpt. The log is read from inside the
+        # tree, not from the workspace, because a reused tree does not run
+        # configure again -- an assertion that has nothing to read on the fast
+        # path is worse than no assertion.
+        run: |
+          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
 
       - name: build
-        working-directory: php-src
         # Captures make's own status, not tee's; a build that failed would
         # otherwise reach the test step looking fine. See the longer note on
         # the `build` job for why this is not `set -o pipefail`.
         run: |
-          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make-fiber.rc ) | tee ../make-fiber.log
-          exit "$(cat ../make-fiber.rc)"
+          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make-fiber.rc ) | tee make-fiber.log
+          exit "$(cat make-fiber.rc)"
 
       - name: run fpmng-owned .phpt tests on the fiber build
         run: |
           chmod +x build/run-fpmng-phpt.sh
-          TEST_PHP_EXECUTABLE="$PWD/php-src/sapi/cli/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PWD/php-src/sapi/fpmng/php-fpm-ng" \
+          TEST_PHP_EXECUTABLE="$PHPSRC/sapi/cli/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PHPSRC/sapi/fpmng/php-fpm-ng" \
           TEST_FPM_TIMEOUT=120 \
-          ./build/run-fpmng-phpt.sh "$PWD/php-src" "$PWD/fpmng-phpt-fiber-results"
+          ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-fiber-results"
 
       # The green/red of the step above is not the acceptance criterion: a run
       # where all ten fiber tests SKIP passes it. See the script's header.
@@ -493,35 +493,39 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
+    env:
+      # The same configure line as `build`, so on a runner that has already run
+      # `build` this job finds the tree ready and skips configure entirely.
+      PHPSRC: /buildtree/${{ runner.name }}/dynamic
     steps:
       - uses: actions/checkout@v7
 
-      - name: clone pinned php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. The tree is per-runner because a runner executes one job at
+      # a time, and that is what keeps two jobs off the same directory.
+      - name: php-src build tree (headers only; no make)
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
         run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
-
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf + configure (headers only; no make)
-        working-directory: php-src
-        run: |
-          ./buildconf --force
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure-lint.rc ) | tee ../configure-lint.log
-          exit "$(cat ../configure-lint.rc)"
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree-lint.rc ) | tee tree-lint.log
+          exit "$(cat tree-lint.rc)"
 
       - name: clang-tidy report (our files only)
         run: |
           chmod +x build/lint-c.sh
-          ./build/lint-c.sh "$PWD/php-src" 2>&1 | tee lint-c-report.txt
+          ./build/lint-c.sh "$PHPSRC" 2>&1 | tee lint-c-report.txt
 
       - uses: actions/upload-artifact@v7
         if: always()

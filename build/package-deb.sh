@@ -51,9 +51,15 @@ $(ldd "$BIN" 2>&1 | grep -i 'not found' || echo '  (ldd found everything; run th
 # php-fpm-ng's own version. The repository has no VERSION file, so the release
 # is the short commit and the upstream version is PHP's -- which is the honest
 # description of an artefact that is a SAPI for exactly one PHP minor.
+#
+# FPMNG_RELEASE replaces the commit when there is a tag to name instead
+# (issue #223: the release workflow sets it). Both halves stay in the version
+# either way, because a user with two PHP minors installed has to be able to
+# tell two of these files apart before installing either one.
 COMMIT=$(cd "$REPO" && git rev-parse --short HEAD 2>/dev/null || echo unknown)
+RELEASE=${FPMNG_RELEASE:-$COMMIT}
 PHP_FULL=$("$BIN" -n -v 2>/dev/null | sed -n 's/^PHP \([0-9.]*\).*/\1/p' | head -1)
-VERSION="${PHP_FULL}-1~$COMMIT"
+VERSION="${PHP_FULL}-1~$RELEASE"
 
 ARCH=$(dpkg --print-architecture)
 

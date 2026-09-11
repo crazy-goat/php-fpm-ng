@@ -5,6 +5,9 @@
 #include <string.h>
 #include <stdio.h>
 #include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -152,6 +155,7 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.requires_pm                  = 1,
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
+	.listening_socket_nodelay     = 1,
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above. An executor variant
@@ -256,6 +260,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm                  = 1,
 		.serves_requests              = 1,
 		.listening_socket_nonblocking = 1,
+		.listening_socket_nodelay     = 1,
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,
 		.rejects                      = fpm_http_direct_rejects,
@@ -570,6 +575,35 @@ const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp)
 	return type ? type : FPM_POOL_TYPE_DEFAULT;
 }
 
+/* TCP_NODELAY for a type that declares it, on the socket the master owns. Why
+ * here and not in the child: see listening_socket_nodelay in fpm_pool_type.h.
+ *
+ * A socket that is not AF_INET/AF_INET6 has no Nagle to turn off, and asking
+ * for the option there would fail with ENOPROTOOPT -- so the family decides
+ * whether there is anything to do, rather than the error being swallowed. */
+static int fpm_pool_type_set_nodelay(struct fpm_worker_pool_s *wp)
+{
+	struct sockaddr_storage address;
+	socklen_t address_len = sizeof(address);
+	int on = 1;
+
+	if (getsockname(wp->listening_socket, (struct sockaddr *) &address, &address_len) < 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] failed to read the listening socket's address",
+			wp->config->name);
+		return -1;
+	}
+	if (address.ss_family != AF_INET && address.ss_family != AF_INET6) {
+		return 0;
+	}
+	if (setsockopt(wp->listening_socket, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on)) < 0) {
+		zlog(ZLOG_SYSERROR, "[pool %s] failed to set TCP_NODELAY on the listening socket",
+			wp->config->name);
+		return -1;
+	}
+
+	return 0;
+}
+
 int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp)
 {
 	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
@@ -587,6 +621,10 @@ int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp)
 	if (flags < 0) {
 		zlog(ZLOG_SYSERROR, "[pool %s] failed to read listening socket flags",
 			wp->config->name);
+		return -1;
+	}
+
+	if (type->listening_socket_nodelay && fpm_pool_type_set_nodelay(wp) < 0) {
 		return -1;
 	}
 

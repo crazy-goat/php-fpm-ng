@@ -308,6 +308,58 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 };
 
+/* Two different questions get answered in the same place at startup and it is
+ * worth keeping them apart. fpm_pool_type_check_directives() above asks "does
+ * this TYPE support this directive" -- a configuration mistake, identical on
+ * every build of this project. This one asks "does this BINARY carry what this
+ * type needs" -- the configuration is fine, the executable is not.
+ *
+ * There is exactly one build where the answer can be no:
+ * build/libphp-build.sh links against a distribution's libphp (issue #212) so
+ * that `pool.type = fastcgi` and `pool.type = http-direct` can ship as a
+ * package with no compilation on the user's side. A distribution libphp is
+ * built from unpatched php-src, so patches/0006 -- which lives inside Zend/ --
+ * is not in it, and zend_signal_use_persistent_handlers() does not exist
+ * there.
+ *
+ * Keyed off the capability bit, not off a list of type names. A name list
+ * would be a second copy of the same fact and would drift the first time a
+ * type gains or loses the behaviour; this way a new type that sets
+ * reuses_request_runtime is covered on the day it is written, by the person
+ * who set the bit.
+ *
+ * Why refuse instead of degrading: patch 0006 is invisible when it is missing.
+ * Such a pool would start, serve traffic and pass its own tests, while the
+ * Zend signal handlers were reinstalled on every request -- upstream
+ * behaviour under a name that promises the opposite. That makes every
+ * measurement taken on it wrong and says nothing while doing it. The fiber and
+ * async executors need patches 0007/0008 and are handled differently, by being
+ * compiled out entirely (HAVE_FPMNG_FIBER / HAVE_FPMNG_ASYNC): an executor
+ * that is not in the type's list is already rejected by name, so there is
+ * nothing to add here for them.
+ */
+int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+#ifdef HAVE_FPMNG_PERSISTENT_SIGNALS
+	(void) wp;
+	(void) type;
+	return 0;
+#else
+	if (!type->reuses_request_runtime) {
+		return 0;
+	}
+
+	zlog(ZLOG_ALERT, "[pool %s] 'pool.type = %s' is not supported by this binary: it was linked "
+		"against a distribution libphp, which does not carry patches/0006 (persistent Zend "
+		"signal handlers) -- a pool of this type would run with upstream signal behaviour "
+		"without saying so", wp->config->name, type->name);
+	zlog(ZLOG_ALERT, "[pool %s] use 'pool.type = fastcgi' or 'pool.type = http-direct', which this "
+		"binary supports in full, or a build from patched source (build/static-full.sh)",
+		wp->config->name);
+	return -1;
+#endif
+}
+
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
 	const char *const *reject;

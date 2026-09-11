@@ -1034,6 +1034,12 @@ static int fpm_conf_process_all_pools(void)
 			return -1;
 		}
 
+		/* A type this binary cannot honour — reject before anything starts,
+		 * rather than run it on top of the missing patch (issue #214). */
+		if (0 > fpm_pool_type_check_build_support(wp, type)) {
+			return -1;
+		}
+
 		/* listen — resolved before type->validate() (fpmng: task 015) so that
 		 * wp->listen_address_domain is populated by the time a type's validate()
 		 * reads it. fpm_http_validate_pool() needs this to tell a TCP listen

@@ -199,4 +199,10 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 /* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
+/* Reject a type this BINARY cannot honour, as opposed to one this
+ * CONFIGURATION misuses. 0 or -1. Always present; on the ordinary build it has
+ * nothing to reject. See the definition for why it is keyed off the capability
+ * bits rather than off type names. */
+int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
+
 #endif

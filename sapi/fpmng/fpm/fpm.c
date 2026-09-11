@@ -24,6 +24,7 @@
 #include "fpm_request.h"
 #include "fpm_metrics.h"
 #include "fpm_acme_challenge.h"
+#include "fpm_libphp_compat.h"
 #include "fastcgi.h"
 #include "zend_signal.h"
 #include "zlog.h"
@@ -60,7 +61,12 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	fpm_globals.run_as_root = run_as_root;
 	fpm_globals.force_stderr = force_stderr;
 
-	if (0 > fpm_php_init_main()           ||
+	/* Before anything forks: a module registered here is inherited by every
+	 * child, and its INI entries exist before fpm_conf_init_main() parses the
+	 * configuration. On the from-source build this is a no-op -- see
+	 * fpm_libphp_compat.c (issue #216). */
+	if (0 > fpmng_libphp_register_bundled_modules() ||
+	    0 > fpm_php_init_main()           ||
 	    0 > fpm_stdio_init_main()         ||
 	    0 > fpm_conf_init_main(test_conf, force_daemon) ||
 	    0 > fpm_unix_init_main()          ||

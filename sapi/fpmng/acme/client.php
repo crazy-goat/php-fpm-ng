@@ -112,9 +112,16 @@ final class Client
                 $this->authorize((string) $authzUrl);
             }
 
+            /* The key is held in memory until the chain that matches it is
+             * in hand; nothing under the domain directory changes before
+             * installCertificate() below. A key persisted here would outlive
+             * a failed finalize and no longer match the certificate still
+             * being served. */
+            [$certKey, $keyIsNew] = $this->state->loadOrMakeCertKey($primary);
+
             $body = $this->awaitStatus($orderUrl, ['ready', 'valid'], 'order');
             if (($body['status'] ?? '') === 'ready') {
-                $csr = $this->csr($primary, $domains);
+                $csr = $this->csr($primary, $domains, $certKey);
                 $this->post((string) $body['finalize'], ['csr' => Jws::b64($csr)]);
                 $body = $this->awaitStatus($orderUrl, ['valid'], 'order');
             }
@@ -128,7 +135,7 @@ final class Client
                 throw new TransportError('the CA returned something that is not a certificate chain');
             }
 
-            $this->state->installCertificateChain($primary, $chain);
+            $this->state->installCertificate($primary, $chain, $keyIsNew ? $certKey : null);
             $this->say("certificate installed for $primary");
             return $chain;
         } finally {
@@ -331,9 +338,8 @@ final class Client
      * RFC 2818 stopped reading the CN years ago, and a CA that honours the CN
      * anyway would produce a certificate no modern client accepts.
      */
-    private function csr(string $primary, array $domains): string
+    private function csr(string $primary, array $domains, \OpenSSLAsymmetricKey $key): string
     {
-        $key = $this->state->loadOrCreateCertKey($primary);
         $sans = implode(',', array_map(static fn(string $d): string => "DNS:$d", $domains));
 
         /* openssl_csr_new() can only pass extensions through a config file,

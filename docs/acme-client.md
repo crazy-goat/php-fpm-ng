@@ -74,9 +74,41 @@ default is staging and a production URL is refused until
 
 The check is against the **endpoint**, not against a flag someone named
 "production" — the hazard is which server is asked, not what the
-configuration calls it. Loopback, `*.localhost`, `*.internal` and any host
-whose name contains `staging` or `test` are accepted without the opt-in,
-because none of them can be a CA that rate-limits a real name.
+configuration calls it. Accepted without the opt-in: loopback; the reserved
+suffixes `.test`, `.localhost`, `.invalid`, `.example` and `.internal`; and
+any host with `staging` or `test` as a whole word, splitting on both the dot
+and the hyphen. None of those can be a CA that rate-limits a real name.
+
+Whole words, because a substring match is the wrong side to err on.
+`acme.contest-ca.org` and `latest-ca.org` both contain `test`; matching them
+would skip the gate silently and spend a real rate limit, while a false
+negative costs the operator one `env[ACME_ALLOW_PRODUCTION]`. Splitting on
+the hyphen too is not optional — Let's Encrypt's own staging endpoint is
+`acme-staging-v02.api.letsencrypt.org`, where `staging` sits inside a single
+DNS label.
+
+### Plaintext reaches loopback and nothing else
+
+ACME's integrity does not rest on TLS: every request is a signed JWS and
+every answer is bound to a nonce the client issued. Its confidentiality
+does. The account URL, the names being ordered and the issued chain all
+travel in the clear over `http://`, and a cleartext directory is one DNS
+answer away from an attacker choosing the CA. So `http://` is refused for
+anything but a loopback address or `*.localhost` — matched exactly, so
+`127.0.0.1.attacker.example` is not loopback. The exception exists for the
+test suite's fake CA, which cannot present a certificate for a name that
+resolves nowhere.
+
+### A failed order changes nothing under the domain directory
+
+The certificate's private key is generated **in memory** and persisted only
+together with the chain that matches it (`State::installCertificate()`). A
+key written when the CSR is built would outlive a rejected finalize or a CA
+outage, leaving `privkey.pem` describing a certificate that was never issued
+while `fullchain.pem` still holds the old, valid one — a mismatch that takes
+TLS down on the next reload, which is the outcome this client exists to
+avoid. On renewal the persisted key is reused and nothing is written until
+the new chain arrives.
 
 ## When it renews
 
@@ -180,13 +212,37 @@ and it cannot be asked to validate a name that resolves to a test box.
   fixed-width curve point rather than against a length.
 - `fpmng-acme-issue.phpt` — a real order end to end against
   `sapi/fpmng/tests/acme-fake-ca.inc`, a separate CLI process. The fake is
-  strict: it verifies every ES256 signature, spends each nonce once, checks
-  the signed `url`, hands out a different token per authorization, refuses a
-  CSR that does not ask for every ordered name, and **fetches
-  `/.well-known/acme-challenge/<token>` over TCP from this build's own
-  gateway** and compares it with the key authorization it derives from the
-  client's JWK. A client that publishes nothing, or the wrong answer, fails
-  there exactly as it would against Let's Encrypt.
+  strict, and each piece of that strictness exists because a laxer fake made
+  a real bug invisible:
+
+  - It verifies every ES256 signature, spends each nonce once, and checks the
+    signed `url`.
+  - It **rejects a JWK whose coordinates are not exactly 32 octets** instead
+    of padding them itself. RFC 7518 §6.2.1.2 requires the full field width,
+    and an earlier draft that repaired the input let a client with no padding
+    pass here while Boulder refuses every request made with the roughly
+    1-in-128 account key that has a short coordinate.
+  - It requires each ordered name **inside the CSR's `subjectAltName`**, not
+    merely somewhere in the DER, and issues the SANs from the order. An
+    earlier draft searched the whole DER, which the subject CN alone
+    satisfies — so a client that stopped emitting `req_extensions` still
+    passed, and would have shipped a certificate no browser accepts for the
+    second name.
+  - It answers `GET /directory` **without** a `Replay-Nonce`, as a real CA
+    does, so the client's `HEAD newNonce` path — the first request any
+    production run makes — is actually executed.
+  - It rejects the first `POST /new-order` with an injected `badNonce`, the
+    one error RFC 8555 requires a client to retry. The test then asserts the
+    order was finalized exactly once: a retry that duplicated the order would
+    be worse than no retry.
+  - It **fetches `/.well-known/acme-challenge/<token>` over TCP from this
+    build's own gateway** and compares it with the key authorization it
+    derives from the client's JWK. A client that publishes nothing, or the
+    wrong answer, fails there exactly as it would against Let's Encrypt.
+
+  Both of the first two were verified by mutation: dropping the padding in
+  `Jws::jwk()`, and dropping `req_extensions` from `Client::csr()`, each turn
+  this test red.
 - `fpmng-acme-renew-policy.phpt` — the policy, offline. Deliberately under
   the CLI, where the challenge builtins are absent: that is the environment
   the preflight has to describe correctly.

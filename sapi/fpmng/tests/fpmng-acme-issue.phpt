@@ -147,6 +147,16 @@ $ca = proc_open(
     $pipes
 );
 check(is_resource($ca), 'could not start the fake CA');
+/* Every check() below throws, and only the success path reaches
+ * proc_terminate(). Registered here so a failing assertion does not leave an
+ * orphaned CA holding a loopback port on a shared runner. The CA also has an
+ * absolute deadline of its own, for the case where this process dies
+ * outright. */
+register_shutdown_function(static function () use (&$ca): void {
+    if (is_resource($ca)) {
+        @proc_terminate($ca);
+    }
+});
 $caPort = (int) waitFor("$root/ca-ready", 10, 'the fake CA to listen');
 check($caPort > 0, "the fake CA reported port $caPort");
 echo "fake-ca-listening: ok\n";
@@ -203,13 +213,28 @@ fclose($fp);
 check(str_contains($raw, ' 404 '), 'the token is still published after the order: ' . substr($raw, 0, 40));
 echo "tokens-cleared-after-order: ok\n";
 
-/* Criterion 3, the half that matters: the second tick placed no order. One
- * POST /new-order in the whole run, and the CA never heard from us again
- * after the certificate was fetched. */
-check(substr_count($requests, "POST /new-order\n") === 1,
-    "orders placed:\n$requests");
+/* Criterion 3, the half that matters: the second tick placed no order.
+ *
+ * Exactly two POST /new-order in the whole run -- the fake CA rejects the
+ * first with an injected badNonce, which is the one error RFC 8555 requires
+ * a client to retry. Both requests belong to the first tick; the certificate
+ * proves only one of them created an order, because the CA resets its
+ * authorizations on every successful /new-order and the chain that came back
+ * carries both names. After the certificate was fetched the CA never heard
+ * from us again. */
+check(substr_count($requests, "POST /new-order\n") === 2,
+    "expected one injected badNonce plus one retry:\n$requests");
+check(substr_count($requests, "POST /order/1/finalize\n") === 1,
+    "the order was finalized more than once:\n$requests");
 check(str_contains($ticks, 'tick2: up-to-date'), "second tick:\n$ticks");
 echo "valid-certificate-is-not-reordered: ok\n";
+
+/* The directory carries no Replay-Nonce, as at a real CA, so the client has
+ * to ask for one. Without this the HEAD newNonce path -- the first request
+ * any production run makes -- is never executed by the suite. */
+check(substr_count($requests, "HEAD /nonce\n") >= 1,
+    "the client never fetched a nonce of its own:\n$requests");
+echo "nonce-is-fetched-and-badnonce-retried: ok\n";
 
 proc_terminate($ca);
 proc_close($ca);
@@ -247,6 +272,7 @@ key-matches-and-is-private: ok
 both-challenges-validated: ok
 tokens-cleared-after-order: ok
 valid-certificate-is-not-reordered: ok
+nonce-is-fetched-and-badnonce-retried: ok
 no-key-material-in-the-log: ok
 Done
 --CLEAN--

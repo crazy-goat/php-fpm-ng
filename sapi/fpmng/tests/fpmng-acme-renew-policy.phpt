@@ -25,9 +25,11 @@ if (!function_exists('openssl_csr_new')) {
 require __DIR__ . '/../acme/renew.php';
 
 use FpmNg\Acme\Client;
+use FpmNg\Acme\HttpClient;
 use FpmNg\Acme\Renewer;
 use FpmNg\Acme\State;
 use FpmNg\Acme\StateError;
+use FpmNg\Acme\TransportError;
 use FpmNg\Acme\UnsupportedEnvironment;
 
 function check(bool $condition, string $message): void
@@ -84,10 +86,44 @@ try {
     check(str_contains($e->getMessage(), $refused),
         'the refusal does not name the URL: ' . $e->getMessage());
 }
+/* The gate matches whole words, not substrings. "contest" and "latest"
+ * contain "test"; a CA whose operator happened to pick such a name would
+ * otherwise skip the opt-in entirely and spend a real rate limit. */
+foreach (['https://acme.contest-ca.org/directory',
+          'https://latest-ca.org/directory',
+          'https://testing-grounds.example.org/directory'] as $notATestServer) {
+    try {
+        Renewer::assertDirectoryAllowed($notATestServer);
+        check(false, "a substring match let $notATestServer through the production gate");
+    } catch (StateError $e) {
+        check(str_contains($e->getMessage(), 'ACME_ALLOW_PRODUCTION'),
+            'the refusal does not name the opt-in: ' . $e->getMessage());
+    }
+}
 putenv('ACME_ALLOW_PRODUCTION=1');
 Renewer::assertDirectoryAllowed($refused);
 putenv('ACME_ALLOW_PRODUCTION');
 echo "staging-by-default: ok\n";
+
+/* Plaintext reaches loopback and nothing else. The opt-in above says which
+ * CA may be used; this says the account key, the ordered names and the
+ * issued chain do not travel in the clear to get there. */
+$transport = new HttpClient('php-fpm-ng ACME client test', null);
+try {
+    $transport->get('http://acme-v02.api.letsencrypt.org/directory');
+    check(false, 'a plaintext request to a public CA was allowed');
+} catch (TransportError $e) {
+    check(str_contains($e->getMessage(), 'plaintext'),
+        'the refusal does not say why: ' . $e->getMessage());
+}
+/* Not loopback, whatever it looks like. */
+try {
+    $transport->get('http://127.0.0.1.attacker.example/directory');
+    check(false, 'a hostname merely starting with 127.0.0.1 was treated as loopback');
+} catch (TransportError $e) {
+    check(str_contains($e->getMessage(), 'plaintext'), 'wrong refusal: ' . $e->getMessage());
+}
+echo "plaintext-only-to-loopback: ok\n";
 
 $state = new State("$root/state");
 $log = static function (string $message): void {};
@@ -195,6 +231,7 @@ exec('rm -rf ' . escapeshellarg($root));
 Done
 --EXPECT--
 staging-by-default: ok
+plaintext-only-to-loopback: ok
 no-certificate-is-due: ok
 healthy-certificate-is-not-due: ok
 expiring-certificate-is-due: ok

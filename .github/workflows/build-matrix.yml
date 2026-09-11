@@ -1007,7 +1007,21 @@ jobs:
   #
   # Gating, not informational (which is where #217 left it): once this build is
   # what users install, a regression that only CI could have caught would
-  # otherwise ship and be found by a user.
+  # otherwise ship and be found by a user. That is also why #217 asked for a
+  # second, non-gating cell doing the same build and closed without one -- it
+  # would have been this job with its verdict thrown away.
+  #
+  # HOW TO READ A FAILURE HERE (issue #217). This is the one cell that links
+  # against a PHP nobody in this repository pinned: 8.5.4 from Ubuntu and
+  # 8.5.10 from Alpine, against the php-8.5.9 the rest of the matrix builds.
+  # So a red here that no other cell shows is a question before it is a
+  # verdict, and the first thing to check is the version line the job prints
+  # ("libphp-build.sh: php-config8.5 -> PHP x.y.z"). A distribution moving its
+  # minor, dropping a symbol, or changing what its php_config.h claims about
+  # the build host all land here and nowhere else. It still blocks the merge,
+  # because the packages are what users install and shipping a package this
+  # cell cannot install is worse than waiting -- but the fix may well be in
+  # this repository's expectations rather than in the change under review.
   #
   # On poligon-host, like static-musl and for the same reason: the script drives
   # `docker run` with host bind mounts, and -v paths are resolved by the host

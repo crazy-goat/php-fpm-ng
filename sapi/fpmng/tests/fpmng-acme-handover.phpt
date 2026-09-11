@@ -2,7 +2,8 @@
 ACME: a certificate installed by the renewer reaches every gateway process, through task 040's mechanism and no other (issue #47)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }

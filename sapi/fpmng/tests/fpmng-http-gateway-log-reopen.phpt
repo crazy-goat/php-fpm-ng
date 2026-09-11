@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: a gateway child follows error_log across a SIGUSR1 reopen (issue #134)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

@@ -2,7 +2,8 @@
 FPM http gateway: http.read_timeout cuts off a client that trickles its request (task 031)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 ?>
 --FILE--
 <?php

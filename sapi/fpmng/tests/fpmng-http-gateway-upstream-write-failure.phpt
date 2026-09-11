@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: HTTP gateway survives a synchronous write failure while handing a request to an upstream (issue #129)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

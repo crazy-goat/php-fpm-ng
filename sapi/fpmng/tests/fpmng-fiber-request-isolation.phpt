@@ -2,7 +2,8 @@
 fpm-ng: fiber executor isolates superglobals, sessions, and ini_set under concurrency (docs/frameworks.md, docs/NOTES.md §3t)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 
 if (!extension_loaded('session')) {
     die('skip requires the session extension');

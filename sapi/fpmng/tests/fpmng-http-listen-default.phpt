@@ -2,7 +2,10 @@
 fpm-ng: pool.type = http with a TCP listen and no http.listen defaults to the
 FastCGI port + 1; a unix-socket listen is still refused (task 015)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

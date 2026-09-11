@@ -63,6 +63,23 @@ supplies response status, headers (including repeated Set-Cookie), and body thro
 SAPI. The transport owns Content-Length/Transfer-Encoding and supports HEAD and
 HTTP/1.x keep-alive.
 
+## The listening socket
+
+`listen` is the pool's own socket, opened by the master before the children fork
+and shared by all of them. The master sets `TCP_NODELAY` on it before forking,
+and Linux copies the option onto every connection accepted through it. (Before
+the fork, not in the child: the copy happens when the handshake completes, so a
+child setting the option during its own start-up would leave whatever was
+already queued behind it on the old setting.)
+
+That is not a tuning knob but a correctness one. FPM's listener code was written
+for FastCGI, where the peer is a web server on the same host; here the peer is
+the client, and without `TCP_NODELAY` the trailing partial segment of every
+response over a few kilobytes waits for the client's delayed ACK. Measured on a
+256 KiB response before issue #244 fixed it: 31 requests per second with a p99
+of 43 ms, against 4282 and 0.32 ms after. The `http` gateway never had this — it
+sets the option on its own listener.
+
 ## Sharing a burst across workers
 
 Every child accepts on the one listening socket the master opened, so the kernel

@@ -3,50 +3,46 @@ fpm-ng: rejected directives and illegal executors fail at configuration validati
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
 ?>
 --FILE--
 <?php
 
 require_once "tester.inc";
 
-/* Which optional executors this binary was built with. The configure line in
- * `php-fpm-ng -i` is the only thing that reports it: the flags decide whether
- * the sources are compiled at all (build/prepare.sh, sapi/fpmng/config.m4), and
- * the same query is what the fiber tests' SKIPIF sections use.
+/* Whether the async executor was compiled in, asked OF THE BINARY, not of the
+ * way it was built.
  *
- * Only that one line is read, and `--enable-X=no` counts as off: `-i` also
- * prints the environment, so a variable that happens to mention the flag would
- * otherwise decide what the binary supports, and autoconf spells a disabled
- * flag `--enable-fpmng-async=no` — both would make this test demand the wrong
- * rejection message. */
-function fpmngBuildHasFlag(string $flag): bool
-{
-    static $configureCommand = null;
+ * This used to read the `Configure Command` line out of `php-fpm-ng -i`. That
+ * line exists only because we ran ./configure ourselves; a binary linked
+ * against a distribution libphp (build/libphp-build.sh) never printed it, and
+ * the test failed there for a reason that had nothing to do with rejected
+ * directives (issue #215).
+ *
+ * The two builds refuse `pool.executor = async` through two different code
+ * paths and say so differently: without the flag the executor entry has no
+ * .type and fpm_pool_type_resolve() names the flag that is missing
+ * (fpm_pool_type.c), with it the resolve succeeds and fpm_pool_async_validate()
+ * rejects the pool as policy (fpm_pool_async.c). Which sentence comes back is
+ * the binary stating its own build, and it is the only such statement there is:
+ * async is rejected in every build, so no accepted configuration differs.
+ *
+ * A build that lost the async sources would answer the other sentence and this
+ * probe would believe it -- so the answer is not taken on trust. The caller
+ * asserts the full message of the branch it picked AND that the other build's
+ * sentence is absent, which is what makes a half-changed message a failure
+ * rather than a silent change of branch. */
+const FPMNG_ASYNC_DISABLED_BY_POLICY = 'pool.executor = async is disabled';
+const FPMNG_ASYNC_NOT_BUILT = '--enable-fpmng-async';
 
-    if ($configureCommand === null) {
-        $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
-        exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);
-        if ($status !== 0) {
-            echo "FAIL: cannot query the build flags of $binary\n";
-            exit(1);
-        }
-        foreach ($output as $line) {
-            if (str_starts_with($line, 'Configure Command =>')) {
-                $configureCommand = $line;
-                break;
-            }
-        }
-        if ($configureCommand === null) {
-            echo "FAIL: $binary -i printed no Configure Command line\n";
-            exit(1);
-        }
-    }
-
-    $quoted = preg_quote($flag, '/');
-
-    return (bool) preg_match("/{$quoted}(?![\\w=-])|{$quoted}=(?!no|off|0)/", $configureCommand);
-}
+/* A binary linked against a distribution libphp refuses `pool.type = http` and
+ * `pool.type = fastcgi-ng` outright, before any directive of that pool is
+ * looked at (fpm_pool_type_check_build_support()). The cases below that use
+ * `http` are then rejected for that reason instead of the one they name, which
+ * is the binary being right, not the test failing -- so that refusal counts as
+ * a rejection here. The other ten cases run on both builds, which is the point:
+ * this file used to SKIP in its entirety on the libphp path and covered nothing
+ * there at all (issue #215). */
+const FPMNG_TYPE_UNSUPPORTED = 'does not carry patches/0006';
 
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
@@ -57,6 +53,10 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
         exit(1);
     }
     $text = implode("\n", $messages);
+    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
+        echo "$label: rejected\n";
+        return;
+    }
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";
@@ -65,6 +65,45 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
         }
     }
     echo "$label: rejected\n";
+}
+
+/* See the comment at the top: the branch is chosen by what the binary says,
+ * and then both halves of that branch are asserted while the other build's
+ * sentence must be absent. */
+function expectAsyncRejected(string $cfg): void
+{
+    $tester = new FPM\Tester($cfg, '<?php echo "ok";');
+    $messages = $tester->testConfig(true);
+    if ($messages === null) {
+        echo "FAIL: async-disabled unexpectedly passed validation\n";
+        exit(1);
+    }
+    $text = implode("\n", $messages);
+
+    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
+        echo "async-disabled: rejected\n";
+        return;
+    }
+
+    $builtIn = str_contains($text, FPMNG_ASYNC_DISABLED_BY_POLICY);
+    $needles = $builtIn
+        ? [FPMNG_ASYNC_DISABLED_BY_POLICY, 'pool.executor = classic or fiber']
+        : [FPMNG_ASYNC_NOT_BUILT];
+    $forbidden = $builtIn ? FPMNG_ASYNC_NOT_BUILT : FPMNG_ASYNC_DISABLED_BY_POLICY;
+
+    foreach ($needles as $needle) {
+        if (!str_contains($text, $needle)) {
+            echo "FAIL: async-disabled missing needle: $needle\n";
+            echo "got:\n$text\n";
+            exit(1);
+        }
+    }
+    if (str_contains($text, $forbidden)) {
+        echo "FAIL: async-disabled answered for both builds at once\n";
+        echo "got:\n$text\n";
+        exit(1);
+    }
+    echo "async-disabled: rejected\n";
 }
 
 $base = <<<EOT
@@ -170,14 +209,7 @@ rmdir($workerRoot);
  * fpm_pool_async_validate() rejects the pool as a matter of policy
  * (sapi/fpmng/fpm/fpm_pool_async.c:73). Asserting only the first needle made
  * this case fail in any --enable-fpmng-async build. */
-$asyncBuiltIn = fpmngBuildHasFlag('--enable-fpmng-async');
-expectConfigFailure(
-    'async-disabled',
-    $base . "\npool.type = http\npool.executor = async\nhttp.listen = {{ADDR[http]}}",
-    $asyncBuiltIn
-        ? ['pool.executor = async is disabled', 'pool.executor = classic or fiber']
-        : ['--enable-fpmng-async']
-);
+expectAsyncRejected($base . "\npool.type = http\npool.executor = async\nhttp.listen = {{ADDR[http]}}");
 
 ?>
 Done

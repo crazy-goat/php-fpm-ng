@@ -2,7 +2,8 @@
 FPM http gateway: TLS advertises ALPN http/1.1 and selects a certificate by SNI (task 041)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }

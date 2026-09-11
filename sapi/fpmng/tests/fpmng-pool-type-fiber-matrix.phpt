@@ -2,7 +2,9 @@
 fpm-ng: legal pool.type values with the fiber executor start, serve one request, and shut down (docs/NOTES.md §3t)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
+fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);

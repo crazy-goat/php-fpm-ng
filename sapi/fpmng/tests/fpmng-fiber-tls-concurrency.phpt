@@ -2,7 +2,8 @@
 fpm-ng: fiber executor makes outgoing TLS (https://) concurrent, with per-request data isolation (task 005)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 
 if (!function_exists('stream_socket_server')) {
     die('skip requires stream transports');

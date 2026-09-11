@@ -1,7 +1,11 @@
 --TEST--
 fpm-ng: legal pool.type values with the classic executor start, serve one request, and shut down (docs/NOTES.md §3i)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

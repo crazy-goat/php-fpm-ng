@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: the HTTP gateway bounds the whole request header block like HTTP-direct (issue #117)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 require_once "tester.inc";

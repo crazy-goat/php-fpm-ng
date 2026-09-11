@@ -2,7 +2,8 @@
 fpm-ng: fiber executor drops a request that suspends outside the scheduler, warns, and keeps serving (sapi/fpmng/fpm/fpm_pool_fiber.c fpm_fiber_after_switch)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
 exec(escapeshellarg($binary) . ' -i 2>&1', $output, $status);

@@ -213,7 +213,7 @@ for f in $(sources); do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # list belongs to the distribution's libphp. The same FPMNG_LIBPHP_BUILD file
 # registers it at runtime from fpm_init(), so the userland fpm_metric_*()
 # functions exist in a worker on both builds (issue #216). What differs is
-# `php-fpm-ng -m`, which never reaches fpm_init().
+# `php-fpm-ng -m` and `-i`, neither of which ever reaches fpm_init().
 for f in "$SRC/sapi/fpmng/fpm/fpm_trace.c" "$SRC/sapi/fpmng/fpm/fpm_trace_pread.c" \
          "$SRC/main/fastcgi.c" "$SRC/ext/fpmng_metrics/fpmng_metrics.c" \
          "$REPO/build/libphp/libphp_abi_check.c"; do

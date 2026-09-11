@@ -9,7 +9,10 @@
 #define FPM_LIBPHP_COMPAT_H 1
 
 /* Registers the PHP modules this binary carries but the loaded libphp does not
- * know about. Call once, from the master, after php_module_startup(). */
-void fpmng_libphp_register_bundled_modules(void);
+ * know about. Call once, from the master, after php_module_startup(). Returns 0
+ * on success and -1 if a module the binary carries could not be registered --
+ * a master that keeps going from there serves requests without the functions
+ * and INI entries it advertises, so the caller is expected to refuse to start. */
+int fpmng_libphp_register_bundled_modules(void);
 
 #endif

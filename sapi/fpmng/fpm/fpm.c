@@ -62,11 +62,11 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	fpm_globals.force_stderr = force_stderr;
 
 	/* Before anything forks: a module registered here is inherited by every
-	 * child. On the from-source build this is a no-op -- see
+	 * child, and its INI entries exist before fpm_conf_init_main() parses the
+	 * configuration. On the from-source build this is a no-op -- see
 	 * fpm_libphp_compat.c (issue #216). */
-	fpmng_libphp_register_bundled_modules();
-
-	if (0 > fpm_php_init_main()           ||
+	if (0 > fpmng_libphp_register_bundled_modules() ||
+	    0 > fpm_php_init_main()           ||
 	    0 > fpm_stdio_init_main()         ||
 	    0 > fpm_conf_init_main(test_conf, force_daemon) ||
 	    0 > fpm_unix_init_main()          ||

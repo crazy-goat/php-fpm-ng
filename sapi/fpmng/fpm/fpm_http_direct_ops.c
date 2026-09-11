@@ -86,9 +86,12 @@ int fpm_http_direct_ops_init_main(struct fpm_worker_pool_s *wp)
 	unsigned nslots = (unsigned) (wp->config->pm_max_children > 0 ? wp->config->pm_max_children : 1);
 
 	if (fpm_http_direct_ops_shared_get(wp)) {
-		/* fpm_conf.c re-runs the per-pool init on a reload; the segment from
-		 * the previous generation is still mapped and still the one the
-		 * children will read. */
+		/* fpm_conf.c can re-run the per-pool init inside one master process;
+		 * a second segment would be one the children never read. This is not
+		 * what happens on SIGUSR2: the master re-executes there, so a reload
+		 * does start the counters again. Measured on the poligon 2026-09-11 --
+		 * accepted conn 9 before, 1 after. Documented in docs/http-direct.md
+		 * under "Reset semantics". */
 		return 0;
 	}
 	shared = fpm_shm_alloc(sizeof(*shared) + nslots * sizeof(shared->slots[0]));

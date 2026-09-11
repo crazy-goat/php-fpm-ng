@@ -74,6 +74,9 @@ struct fpm_http_direct_tls_s {
 	 * NULL everywhere else -- same rule as fpm_http_tls.h states for the
 	 * gateway. */
 	SSL_CTX *ctx;
+	/* Child-only, like ctx: the caller's accept gate, see the header. */
+	void (*on_accept)(void *);
+	void *on_accept_arg;
 	struct fpm_http_direct_tls_s *next;
 };
 
@@ -99,6 +102,9 @@ static struct bufferevent *fpm_http_direct_tls_bevcb(struct event_base *base, vo
 {
 	struct fpm_http_direct_tls_s *st = arg;
 
+	if (st->on_accept) {
+		st->on_accept(st->on_accept_arg);
+	}
 	return fpm_http_tls_bevcb(base, st->ctx);
 }
 
@@ -164,7 +170,7 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 }
 
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http)
+	struct evhttp *http, void (*on_accept)(void *), void *on_accept_arg)
 {
 	struct fpm_http_direct_tls_s *st;
 
@@ -190,6 +196,10 @@ int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_
 	if (!st->ctx) {
 		return -1;
 	}
+	/* Before the pair is registered anywhere, so neither the reload path nor
+	 * the first connection can run the bevcb without it. */
+	st->on_accept = on_accept;
+	st->on_accept_arg = on_accept_arg;
 	/* Before evhttp_set_bevcb() below only by convention -- the reload code
 	 * records the pair and first uses it on a later generation change. A no-op
 	 * when reload is NULL or its interval is 0. */
@@ -224,9 +234,9 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 }
 
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http)
+	struct evhttp *http, void (*on_accept)(void *), void *on_accept_arg)
 {
-	(void) wp; (void) base; (void) http;
+	(void) wp; (void) base; (void) http; (void) on_accept; (void) on_accept_arg;
 	return 0;
 }
 

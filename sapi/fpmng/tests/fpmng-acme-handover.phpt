@@ -40,7 +40,7 @@ use FpmNg\Acme\State;
 // Issue #47 criterion 3: after a successful renewal every gateway process
 // serves the new certificate -- "this is 040's mechanism; this task must
 // not grow a second one". So this test deliberately adds nothing: the
-// renewer's only act is State::installCertificateChain(), the ordinary
+// renewer's only act is State::installCertificate(), the ordinary
 // atomic write into the ACME state directory, and http.tls_cert points
 // straight at that file. Everything after the rename is task 040's
 // content-digest poll in the master plus the per-child adoption in
@@ -91,7 +91,7 @@ run("openssl req -x509 -new -key $dir/privkey.pem -sha256 -days 2 " .
 
 // The certificate in effect before the renewal, installed the same way the
 // renewer installs one.
-$state->installCertificateChain(DOMAIN, (string) file_get_contents("$root/first.pem"));
+$state->installCertificate(DOMAIN, (string) file_get_contents("$root/first.pem"), null);
 
 /** The serial the gateway on this connection is serving, or null. */
 function servedSerial(string $addr): ?string
@@ -168,7 +168,7 @@ echo "all-gateways-serve-the-installed-certificate: ok\n";
 
 /* The renewal. Nothing else happens: no signal, no reload, no new
  * directive -- just the atomic install the ACME client performs. */
-$state->installCertificateChain(DOMAIN, (string) file_get_contents("$root/renewed.pem"));
+$state->installCertificate(DOMAIN, (string) file_get_contents("$root/renewed.pem"), null);
 
 /* http.tls_reload_check = 1s, so the master notices within about a second
  * and each gateway adopts on its own timer. Waiting for the first sighting

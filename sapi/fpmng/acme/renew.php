@@ -123,8 +123,16 @@ final class Renewer
 
     /**
      * Staging and local test servers, recognised without a list of CAs to
-     * maintain: a host that is loopback or carries "staging"/"test" in its
-     * name cannot be a production CA that rate limits a real domain.
+     * maintain: a host that is loopback, or that carries "staging"/"test" as
+     * a DNS label of its own, cannot be a production CA that rate limits a
+     * real domain.
+     *
+     * Matched per label, never as a substring. str_contains($host, 'test')
+     * also accepts "acme.contest-ca.example" and "latest-ca.example", so a
+     * hostname nobody chose for its meaning would silently skip the gate
+     * this method exists to enforce -- and skipping it is what spends a real
+     * rate limit. Erring towards "this is production" only ever costs the
+     * operator one env[ACME_ALLOW_PRODUCTION].
      */
     private static function isNonProduction(string $directory): bool
     {
@@ -132,18 +140,56 @@ final class Renewer
         if ($host === '') {
             throw new StateError("env[ACME_DIRECTORY] is not a URL: '$directory'");
         }
-        if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1' || str_ends_with($host, '.localhost')) {
+        if ($host === 'localhost' || $host === '127.0.0.1' || $host === '::1' || $host === '[::1]') {
             return true;
         }
-        return str_contains($host, 'staging') || str_contains($host, 'test') || str_ends_with($host, '.internal');
+        $labels = explode('.', trim($host, '[]'));
+        /* Reserved and private-use suffixes: RFC 6761 .test/.localhost/
+         * .invalid, RFC 2606 .example, and .internal for an operator's own
+         * network. None of them can be a public CA. */
+        if (in_array((string) end($labels), ['test', 'localhost', 'invalid', 'example', 'internal'], true)) {
+            return true;
+        }
+        /* Split on the hyphen too, not just the dot: Let's Encrypt's own
+         * staging endpoint is "acme-staging-v02.api.letsencrypt.org", where
+         * "staging" is one hyphen-separated word inside a single DNS label.
+         * Whole words only -- "contest-ca.example" and "latest.example"
+         * contain "test" but are not test servers, and treating them as such
+         * would skip the opt-in this method gates. */
+        foreach (preg_split('/[.-]/', $host) ?: [] as $word) {
+            if ($word === 'staging' || $word === 'test') {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
      * One scheduler tick. Returns a short word for the cron log; every
      * decision is also logged with its reason, because "the cron pool ran and
      * did nothing" must be distinguishable from "the cron pool is broken".
+     *
+     * This method does not throw. A renewer that propagates an exception on a
+     * read-only state volume or a malformed env[ACME_DOMAINS] gives its caller
+     * nothing to log and no backoff, and the caller here is a cron pool whose
+     * only other output is a non-zero exit status. Everything is funnelled
+     * into 'failed' instead -- see tickOrThrow() for the body.
      */
     public function tick(): string
+    {
+        try {
+            return $this->tickOrThrow();
+        } catch (\Throwable $e) {
+            /* Reached only for failures outside an order: preflight, an
+             * unusable state directory, a malformed domain. recordFailure()
+             * needs a canonical name and may itself be unable to write, so
+             * this path logs and returns rather than trying again. */
+            $this->say('ERROR: ' . $e->getMessage());
+            return 'failed';
+        }
+    }
+
+    private function tickOrThrow(): string
     {
         Client::preflight();
         $this->state->assertUsable();
@@ -151,7 +197,7 @@ final class Renewer
         $primary = State::canonicalDomain($this->domains[0]);
         $meta = $this->state->readRenewalMeta($primary);
 
-        $due = $this->dueReason($primary, $meta);
+        $due = $this->dueReason($primary);
         if ($due === null) {
             return 'up-to-date';
         }
@@ -205,7 +251,7 @@ final class Renewer
      * changes its validity period, and reissues a perfectly good certificate
      * on every boot.
      */
-    public function dueReason(string $domain, array $meta = []): ?string
+    public function dueReason(string $domain): ?string
     {
         $path = $this->state->certChainPath($domain);
         if (!is_file($path)) {
@@ -307,15 +353,28 @@ final class Renewer
             $this->say('WARNING ' . $warning);
         }
 
-        $this->state->writeRenewalMeta($domain, [
-            'last_success' => $meta['last_success'] ?? null,
-            'directory' => $this->directoryUrl,
-            'domains' => $this->domains,
-            'failures' => $failures,
-            'last_error' => $e->getMessage(),
-            'last_failure' => gmdate('c'),
-            'next_attempt' => gmdate('c', time() + $wait),
-        ]);
+        /* A state directory that has gone read-only is itself one of the
+         * failures being recorded here. Letting the write throw would replace
+         * the reported 'failed' with an exception out of tick(), losing the
+         * message above -- the only thing the operator gets. Losing the
+         * backoff instead costs one retry per tick, which is the cheaper of
+         * the two. */
+        try {
+            $this->state->writeRenewalMeta($domain, [
+                'last_success' => $meta['last_success'] ?? null,
+                'directory' => $this->directoryUrl,
+                'domains' => $this->domains,
+                'failures' => $failures,
+                'last_error' => $e->getMessage(),
+                'last_failure' => gmdate('c'),
+                'next_attempt' => gmdate('c', time() + $wait),
+            ]);
+        } catch (\Throwable $writeError) {
+            $this->say(
+                'ERROR: could not record the failure for ' . $domain . ', so no backoff applies '
+                . 'and the next tick will retry immediately: ' . $writeError->getMessage()
+            );
+        }
     }
 
     private function backoffRemaining(array $meta): int

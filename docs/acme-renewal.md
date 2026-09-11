@@ -91,7 +91,7 @@ serves the new certificate, and explicitly forbids growing a second
 mechanism for it. There is none. The path is:
 
 1. The renewer writes `fullchain.pem` into the state directory with
-   `State::installCertificateChain()`, which writes a temporary file in the
+   `State::installCertificate()`, which writes a temporary file in the
    same directory and `rename()`s it, so a reader never sees a partial file.
 2. `http.tls_cert` and `http.tls_key` point straight at those files.
 3. The master's reload timer (task 040, `fpm_http_tls_reload.c`) digests

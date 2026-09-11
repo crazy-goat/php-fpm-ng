@@ -86,17 +86,42 @@ function thumbprint(array $jwk): string
 }
 
 /**
+ * Is this a well-formed P-256 JWK? RFC 7518 section 6.2.1.2 requires each
+ * coordinate to be the full field size -- 32 octets -- left-padded, not the
+ * minimal integer encoding openssl_pkey_get_details() hands back.
+ *
+ * Checked separately and enforced, because an earlier draft of this file
+ * quietly str_pad()ed the coordinates before verifying, which made the
+ * padding in Jws::jwk() untestable end to end: a client that dropped the
+ * padding still produced a verifiable signature here and a green test, while
+ * Boulder answers "JWS verification error" on every request made with the
+ * roughly 1-in-128 account key that has a short coordinate.
+ */
+function jwk_is_wellformed(mixed $jwk): bool
+{
+    if (!is_array($jwk) || ($jwk['kty'] ?? '') !== 'EC' || ($jwk['crv'] ?? '') !== 'P-256') {
+        return false;
+    }
+    foreach (['x', 'y'] as $member) {
+        if (!is_string($jwk[$member] ?? null) || strlen(b64d($jwk[$member])) !== 32) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
  * A PEM public key built from a JWK. Hand-assembled from the fixed
  * SubjectPublicKeyInfo prefix for id-ecPublicKey + prime256v1, because this
  * build has no JWK parser and that prefix never varies for this one curve.
- * Deliberately re-derives the point from x and y rather than trusting the
- * client: a client that pads a coordinate wrong produces a key that does not
- * verify its own signature, which is the bug this catches.
+ *
+ * Takes the coordinates exactly as the client sent them -- callers must have
+ * passed jwk_is_wellformed() first. Nothing is padded here on purpose; see
+ * that function for why repairing the input hides the bug.
  */
 function jwk_to_pem(array $jwk): string
 {
-    $point = "\x04" . str_pad(b64d((string) $jwk['x']), 32, "\0", STR_PAD_LEFT)
-        . str_pad(b64d((string) $jwk['y']), 32, "\0", STR_PAD_LEFT);
+    $point = "\x04" . b64d((string) $jwk['x']) . b64d((string) $jwk['y']);
     $prefix = "\x30\x59\x30\x13\x06\x07\x2a\x86\x48\xce\x3d\x02\x01"
         . "\x06\x08\x2a\x86\x48\xce\x3d\x03\x01\x07\x03\x42\x00";
     return "-----BEGIN PUBLIC KEY-----\n"
@@ -116,14 +141,22 @@ $accountJwk = null;
 $authz = [];   /* index => ['domain' => .., 'token' => .., 'status' => .., 'error' => ..] */
 $order = null;
 $serial = 0x5000;
+$injectBadNonce = true;
 
 /* Written last, and atomically, so that a reader that sees the file sees a
  * complete port number and a socket already listening. */
 file_put_contents("$workdir/ca-ready.tmp", "$port\n");
 rename("$workdir/ca-ready.tmp", "$workdir/ca-ready");
 
-while (true) {
-    $client = @stream_socket_accept($server, 60);
+/* An absolute deadline, because this process is started by a .phpt and every
+ * assertion in that test throws: the success path terminates the CA, no
+ * failure path does, and --CLEAN-- knows nothing about it. Without this, one
+ * flaky run on the self-hosted runners leaves an orphan holding a loopback
+ * port for as long as the box is up, and they accumulate. */
+$deadline = time() + 180;
+
+while (time() < $deadline) {
+    $client = @stream_socket_accept($server, 5);
     if ($client === false) {
         continue;
     }
@@ -178,13 +211,17 @@ while (true) {
                 'detail' => 'this CA only accepts ES256'];
         } else {
             $jwk = $protected['jwk'] ?? $accountJwk;
-            $ok = is_array($jwk) && openssl_verify(
+            $ok = jwk_is_wellformed($jwk) && openssl_verify(
                 $jws['protected'] . '.' . $jws['payload'],
                 rs_to_der(b64d((string) $jws['signature'])),
                 jwk_to_pem($jwk),
                 OPENSSL_ALGO_SHA256
             ) === 1;
-            if (!$ok) {
+            if (!jwk_is_wellformed($jwk)) {
+                $status = 400;
+                $payload = ['type' => 'urn:ietf:params:acme:error:malformed',
+                    'detail' => 'the JWK is not a P-256 key with two 32-octet coordinates'];
+            } elseif (!$ok) {
                 $status = 400;
                 $payload = ['type' => 'urn:ietf:params:acme:error:malformed',
                     'detail' => 'JWS verification error'];
@@ -196,6 +233,22 @@ while (true) {
                 $status = 403;
                 $payload = ['type' => 'urn:ietf:params:acme:error:unauthorized',
                     'detail' => 'the signed url does not match the request'];
+            } elseif ($path === '/new-order' && $injectBadNonce) {
+                /* One injected badNonce, on the first order only.
+                 *
+                 * badNonce is the single error RFC 8555 says a client must
+                 * retry, and without this nothing in the suite ever took that
+                 * branch. The nonce is spent first, exactly as a real CA
+                 * would: the retry has to carry a fresh one, taken from this
+                 * very response, or it fails again. The end-to-end test then
+                 * asserts that only one order exists despite two requests --
+                 * a retry that duplicated the order would be worse than no
+                 * retry at all. */
+                $injectBadNonce = false;
+                unset($nonces[$protected['nonce']]);
+                $status = 400;
+                $payload = ['type' => 'urn:ietf:params:acme:error:badNonce',
+                    'detail' => 'injected once, to exercise the client retry'];
             } else {
                 unset($nonces[$protected['nonce']]);
                 $request = ($jws['payload'] ?? '') === ''
@@ -211,6 +264,10 @@ while (true) {
     if ($payload === null) {
         switch (true) {
             case $path === '/directory':
+                /* Answered without a Replay-Nonce, below. A real CA does not
+                 * put one on the directory, so a client that assumes
+                 * otherwise never exercises its HEAD newNonce path -- which
+                 * is the very first request it makes in production. */
                 $payload = [
                     'newNonce' => "$base/nonce",
                     'newAccount' => "$base/new-account",
@@ -323,17 +380,37 @@ while (true) {
                         'detail' => 'the CSR does not parse'];
                     break;
                 }
-                /* Every ordered name must appear in the DER. A dNSName is
-                 * stored as plain ASCII there, and for every name except the
-                 * subject the only place it can come from is subjectAltName
-                 * -- which is what the order actually depends on. Checking
-                 * the DER rather than shelling out to `openssl req -text`
-                 * keeps the test running on a build with no openssl CLI. */
+                /* Every ordered name must appear inside the CSR's
+                 * subjectAltName, not merely somewhere in the DER.
+                 *
+                 * An earlier draft searched the whole DER, which the subject
+                 * CN alone satisfies for the primary name and any attribute
+                 * or extension satisfies for the rest -- so a client that
+                 * stopped emitting req_extensions still passed. This CA then
+                 * issued both names anyway, because the SANs below come from
+                 * the order rather than from the CSR, and the end-to-end test
+                 * asserting "certificate covers both names" could not fail.
+                 * A real CA honours the CSR, so that client ships a
+                 * certificate no browser accepts for the second name.
+                 *
+                 * Located by the id-ce-subjectAltName OID (2.5.29.17) rather
+                 * than by parsing ASN.1: the extension's value is the tail of
+                 * the DER from that point on, which is precise enough to tell
+                 * "in the SAN" from "in the subject". */
+                $sanOid = "\x06\x03\x55\x1d\x11";
+                $sanAt = strpos($der, $sanOid);
+                $san = $sanAt === false ? '' : substr($der, $sanAt + strlen($sanOid));
                 $missing = [];
                 foreach ($authz as $a) {
-                    if (!str_contains($der, $a['domain'])) {
+                    if (!str_contains($san, $a['domain'])) {
                         $missing[] = $a['domain'];
                     }
+                }
+                if ($sanAt === false) {
+                    $status = 400;
+                    $payload = ['type' => 'urn:ietf:params:acme:error:badCSR',
+                        'detail' => 'the CSR carries no subjectAltName extension'];
+                    break;
                 }
                 if ($missing !== []) {
                     $status = 400;
@@ -385,15 +462,20 @@ while (true) {
         }
     }
 
-    $nonce = bin2hex(random_bytes(8));
-    $nonces[$nonce] = true;
+    /* Not on the directory: see the case above. */
+    $headers = '';
+    if ($path !== '/directory') {
+        $nonce = bin2hex(random_bytes(8));
+        $nonces[$nonce] = true;
+        $headers = "Replay-Nonce: $nonce\r\n";
+    }
     $encoded = $payload === [] ? '{}' : (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
     $reason = [200 => 'OK', 201 => 'Created', 400 => 'Bad Request',
         403 => 'Forbidden', 404 => 'Not Found'][$status] ?? 'Error';
 
     $response = "HTTP/1.1 $status $reason\r\n"
         . 'Content-Type: ' . ($status >= 400 ? 'application/problem+json' : 'application/json') . "\r\n"
-        . "Replay-Nonce: $nonce\r\n";
+        . $headers;
     foreach ($extra as $name => $value) {
         $response .= "$name: $value\r\n";
     }

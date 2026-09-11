@@ -178,11 +178,40 @@ final class State
         return $this->loadOrCreateKey($this->accountKeyPath());
     }
 
-    /** Load a certificate's private key, generating it once if absent. */
-    public function loadOrCreateCertKey(string $domain): \OpenSSLAsymmetricKey
+    /**
+     * A certificate's private key: the persisted one if there is one, a fresh
+     * unpersisted one otherwise. The second element says which.
+     *
+     * Deliberately not "load or create and write": a key written when the CSR
+     * is built is a key already on disk if the order then fails at finalize,
+     * leaving privkey.pem describing a certificate that was never issued
+     * while fullchain.pem still holds the old, valid one. That mismatch takes
+     * TLS down on the next reload -- the exact outcome issue #49 criterion 5
+     * exists to prevent. The key is persisted by installCertificate(), once
+     * the chain that matches it is in hand.
+     *
+     * @return array{0: \OpenSSLAsymmetricKey, 1: bool} the key, and whether it is new
+     */
+    public function loadOrMakeCertKey(string $domain): array
     {
-        $this->ensureDomainDir($domain);
-        return $this->loadOrCreateKey($this->certKeyPath($domain));
+        $path = $this->certKeyPath($domain);
+        if (is_file($path)) {
+            $pem = file_get_contents($path);
+            $key = $pem === false ? false : openssl_pkey_get_private($pem);
+            if ($key === false) {
+                // Never include $pem in the message -- task 044 acceptance criterion 3.
+                throw new StateError("'$path' does not contain a usable private key");
+            }
+            return [$key, false];
+        }
+        $key = openssl_pkey_new([
+            'private_key_type' => OPENSSL_KEYTYPE_EC,
+            'curve_name' => 'prime256v1',
+        ]);
+        if ($key === false) {
+            throw new StateError("cannot generate a private key for '$path'");
+        }
+        return [$key, true];
     }
 
     /**
@@ -213,10 +242,23 @@ final class State
         return $meta;
     }
 
-    /** Install a freshly issued certificate chain -- public, 0644 (readers other than the owner never need the key). */
-    public function installCertificateChain(string $domain, string $fullchainPem): void
+    /**
+     * Install a freshly issued certificate: the key 0600, the chain 0644
+     * (readers other than the owner never need the key).
+     *
+     * Both in one call, key first, and only ever called once the chain is in
+     * hand -- see loadOrMakeCertKey(). $newKey is null when the persisted key
+     * was reused, which is the common case on renewal.
+     */
+    public function installCertificate(string $domain, string $fullchainPem, ?\OpenSSLAsymmetricKey $newKey): void
     {
         $this->ensureDomainDir($domain);
+        if ($newKey !== null) {
+            if (!openssl_pkey_export($newKey, $pem)) {
+                throw new StateError("cannot export the generated private key for '$domain'");
+            }
+            $this->writeRestricted($this->certKeyPath($domain), $pem);
+        }
         $this->writePublic($this->certChainPath($domain), $fullchainPem);
     }
 

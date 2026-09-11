@@ -126,6 +126,22 @@ final class HttpClient
         if (!preg_match('#\Ahttps?://#i', $url)) {
             throw new TransportError('an ACME URL must be http(s): ' . $url);
         }
+        /* Plaintext only to loopback. ACME's own integrity does not depend on
+         * TLS -- every request is a signed JWS and every answer is bound to a
+         * nonce we issued -- but the account URL, the ordered names and the
+         * issued chain travel in the clear, and a cleartext directory is one
+         * DNS answer away from an attacker choosing the CA. The exception
+         * exists because the test suite runs a fake CA on 127.0.0.1, which
+         * cannot present a certificate for a name that resolves nowhere. */
+        if (strcasecmp((string) parse_url($url, PHP_URL_SCHEME), 'http') === 0
+            && !self::isLoopback((string) parse_url($url, PHP_URL_HOST))
+        ) {
+            throw new TransportError(
+                'refusing to talk to a CA over plaintext HTTP: ' . $url
+                . ' -- the account key, the ordered names and the issued certificate '
+                . 'would all be readable and modifiable in transit. Use https://'
+            );
+        }
 
         $headers = ['User-Agent: ' . $this->userAgent, 'Accept: application/json'];
         if ($contentType !== null) {
@@ -164,6 +180,11 @@ final class HttpClient
             'ssl' => $ssl,
         ]);
 
+        /* error_get_last() is process-global and nothing clears it. Without
+         * this, a transport failure that raises no diagnostic of its own
+         * reports whatever warning this worker last produced -- from any
+         * part of the application -- as if it were the CA's fault. */
+        error_clear_last();
         $raw = @file_get_contents($url, false, $context);
         /* $http_response_header is set by the wrapper even when the body read
          * fails, so read it before deciding the request failed at all. */
@@ -211,6 +232,24 @@ final class HttpClient
             $headers[strtolower(trim(substr($line, 0, $colon)))] = trim(substr($line, $colon + 1));
         }
         return [$status, $headers];
+    }
+
+    /**
+     * Loopback by address or by name. Matched exactly, never as a substring:
+     * "127.0.0.1.attacker.example" is not loopback, and neither is
+     * "notlocalhost".
+     */
+    private static function isLoopback(string $host): bool
+    {
+        $host = strtolower(trim($host, '[]'));
+        if ($host === 'localhost' || str_ends_with($host, '.localhost')) {
+            return true;
+        }
+        $packed = @inet_pton($host);
+        if ($packed === false) {
+            return false;
+        }
+        return $packed === inet_pton('::1') || (strlen($packed) === 4 && $packed[0] === "\x7f");
     }
 
     private static function lastErrorMessage(): string

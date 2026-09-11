@@ -55,6 +55,7 @@
 #include "zend_API.h"
 #include "zend_signal.h"
 #include "php_fpmng_metrics.h"
+#include "zlog.h"
 
 #ifdef ZTS
 # error "the libphp build substitutes zend_signal_init() with zend_signal_startup(), which is not idempotent under ZTS; build against an NTS libphp or build from source"
@@ -77,22 +78,42 @@ void zend_signal_init(void)
  * so. A "fast check" binary with fewer PHP-visible functions than the real one is
  * the kind of difference that makes people stop trusting the fast check.
  *
+ * The module also owns the fpmng_metrics.series_limit INI entry, which
+ * fpm_metrics_init_main() reads to size the shared memory region. Without this
+ * registration that read returns a zeroed globals struct and the limit clamps to 1,
+ * so the libphp build reserved room for a single series per worker.
+ *
  * Registering after php_module_startup() is the documented way in: it is what dl()
  * does. zend_startup_module() registers the entry and runs its MINIT, and the call
  * happens in the master before any child is forked, so every child inherits it.
  *
- * This does NOT make the module appear in `php-fpm-ng -m`: that path prints the
- * registry and exits without ever reaching fpm_init(). The probe that matters is a
- * request -- sapi/fpmng/tests/fpmng-metrics-userland-functions.phpt asks a running
- * pool whether the functions are there, which is the question a user actually has.
+ * WHY THE RESULT IS CHECKED. A failing MINIT is loud -- zend_startup_module_ex()
+ * turns it into E_CORE_ERROR and does not return. The other failure mode is not:
+ * if zend_register_functions() rejects the function set, because a distribution's
+ * libphp already exports one of the fpm_metric_* names, the engine emits a single
+ * E_CORE_WARNING and hands back NULL. Started that way the daemon looks healthy:
+ * /metrics renders, but the INI entry is missing, the shm holds one series, and the
+ * operator sees "series limit exhausted" instead of the real cause. Refusing to
+ * start says it once, at the point where it can still be read.
+ *
+ * This does NOT make the module appear in `php-fpm-ng -m` or in `php-fpm-ng -i`:
+ * both print and exit without ever reaching fpm_init(). The probe that matters is a
+ * request -- sapi/fpmng/tests/fpmng-metrics-userland.phpt asks a running pool
+ * whether the functions are there, which is the question a user actually has.
  */
-void fpmng_libphp_register_bundled_modules(void)
+int fpmng_libphp_register_bundled_modules(void)
 {
 	if (zend_hash_str_exists(&module_registry, "fpmng_metrics", sizeof("fpmng_metrics") - 1)) {
-		return;
+		return 0;
 	}
 
-	zend_startup_module(&fpmng_metrics_module_entry);
+	if (zend_startup_module(&fpmng_metrics_module_entry) == FAILURE) {
+		zlog(ZLOG_ERROR, "could not register the fpmng_metrics extension against this libphp; "
+				"see the E_CORE_WARNING above for what the engine rejected");
+		return -1;
+	}
+
+	return 0;
 }
 
 #else
@@ -102,8 +123,9 @@ void fpmng_libphp_register_bundled_modules(void)
  * file are done elsewhere. The no-op keeps the call site in fpm_init() free of
  * an #ifdef -- the caller asks the same question in both builds and one of the
  * two answers is "nothing to do". */
-void fpmng_libphp_register_bundled_modules(void)
+int fpmng_libphp_register_bundled_modules(void)
 {
+	return 0;
 }
 
 #endif

@@ -17,6 +17,7 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_worker.h"
+#include "fpm_http_direct_ops.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
 #include "fpm_pool_status.h"
@@ -52,6 +53,18 @@ static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
 static int fpm_pool_type_http_direct_init(struct fpm_worker_pool_s *wp)
 {
 	return fpm_http_direct_tls_init_main(wp);
+}
+
+/* The classic executor only (issue #59): the shared segment behind
+ * pm.status_path counts what the children do, so it has to exist before the
+ * first of them forks. The worker executor rejects pm.status_path, so it has
+ * nothing to allocate. */
+static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
+{
+	if (fpm_pool_type_http_direct_init(wp) < 0) {
+		return -1;
+	}
+	return fpm_http_direct_ops_init_main(wp);
 }
 
 #ifdef HAVE_FPMNG_FIBER
@@ -265,7 +278,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.executors_type_specific      = 1,
 		.rejects                      = fpm_http_direct_rejects,
 		.validate                     = fpm_http_direct_validate,
-		.init_main                    = fpm_pool_type_http_direct_init,
+		.init_main                    = fpm_pool_type_http_direct_classic_init,
 		.child_main                   = fpm_http_direct_child_main,
 	},
 	{

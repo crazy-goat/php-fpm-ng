@@ -8,8 +8,8 @@
  * right, and a second copy of them is a second place to get them wrong.
  *
  * The caller supplies the resolved document root and, optionally, a callback
- * for its access log: the gateway writes one, a direct pool has no access.log
- * at all (it is in FPM_HTTP_DIRECT_REJECTS_COMMON), so the hook is how the
+ * for its access log: each caller writes its own (the gateway its own log, a
+ * direct pool the pool's access.log since issue #59), and the hook is how the
  * difference stays out of this file.
  */
 

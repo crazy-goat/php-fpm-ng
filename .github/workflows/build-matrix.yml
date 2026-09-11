@@ -165,9 +165,25 @@ jobs:
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
     env:
-      PHPSRC: /buildtree/${{ runner.name }}/dynamic
+      BUILDTREE: /buildtree/${{ runner.name }}/dynamic
     steps:
       - uses: actions/checkout@v7
+
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` because
+      # a job-level value would override what GITHUB_ENV writes.
+      - name: choose the build tree location
+        run: |
+          if mkdir -p "$BUILDTREE" 2>/dev/null; then
+            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          else
+            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
       # It reuses the tree the previous run left on this runner as long as the
@@ -196,7 +212,14 @@ jobs:
         # and the `set +e` inside it, because errexit propagates into the
         # subshell and would abort it before the rc file was ever written.
         run: |
+          # Issue #196: mark the tree unfinished for the duration of the build.
+          # cancel-in-progress kills this step outright on every superseded
+          # push, and a .o truncated by that kill keeps a fresh mtime, so make
+          # would consider it current for good. ci-build-tree.sh starts over
+          # when it finds this marker.
+          touch "$PHPSRC/.fpmng-ci-dirty"
           ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make.rc ) | tee make.log
+          if [ "$(cat make.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
           exit "$(cat make.rc)"
 
       # Issue #111: the build is warning-free in the files we ship, and stays
@@ -210,7 +233,7 @@ jobs:
       # path prefix would claim them. See build/check-owned-warnings.sh.
       #
       # $PWD is the workspace root here (no working-directory), which is where
-      # the build step's `tee ../make.log` lands. The script exits 2 -- not 0
+      # the build step's `tee make.log` lands. The script exits 2 -- not 0
       # -- if that log turns out to contain no compile of an owned file, so
       # moving either path cannot silently reduce this gate to a no-op.
       - name: no compiler warnings in our own sources (issue #111)
@@ -379,9 +402,25 @@ jobs:
       # A directory of its own: --enable-fpmng-fiber is a different configure,
       # so it cannot share objects with the default build. Sharing one
       # directory would make the two jobs wipe each other's tree on every run.
-      PHPSRC: /buildtree/${{ runner.name }}/fiber
+      BUILDTREE: /buildtree/${{ runner.name }}/fiber
     steps:
       - uses: actions/checkout@v7
+
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` because
+      # a job-level value would override what GITHUB_ENV writes.
+      - name: choose the build tree location
+        run: |
+          if mkdir -p "$BUILDTREE" 2>/dev/null; then
+            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          else
+            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
       # fpmng-http-direct-request-parity.phpt needs this locale to be
       # discriminating at all -- see the same step on fpmng-phpt (issue #105).
       - name: assert tr_TR.UTF-8 is present (issue #105)
@@ -420,7 +459,14 @@ jobs:
         # otherwise reach the test step looking fine. See the longer note on
         # the `build` job for why this is not `set -o pipefail`.
         run: |
+          # Issue #196: mark the tree unfinished for the duration of the build.
+          # cancel-in-progress kills this step outright on every superseded
+          # push, and a .o truncated by that kill keeps a fresh mtime, so make
+          # would consider it current for good. ci-build-tree.sh starts over
+          # when it finds this marker.
+          touch "$PHPSRC/.fpmng-ci-dirty"
           ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make-fiber.rc ) | tee make-fiber.log
+          if [ "$(cat make-fiber.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
           exit "$(cat make-fiber.rc)"
 
       - name: run fpmng-owned .phpt tests on the fiber build
@@ -503,9 +549,25 @@ jobs:
     env:
       # The same configure line as `build`, so on a runner that has already run
       # `build` this job finds the tree ready and skips configure entirely.
-      PHPSRC: /buildtree/${{ runner.name }}/dynamic
+      BUILDTREE: /buildtree/${{ runner.name }}/dynamic
     steps:
       - uses: actions/checkout@v7
+
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` because
+      # a job-level value would override what GITHUB_ENV writes.
+      - name: choose the build tree location
+        run: |
+          if mkdir -p "$BUILDTREE" 2>/dev/null; then
+            echo "PHPSRC=$BUILDTREE" >> "$GITHUB_ENV"
+          else
+            echo "$BUILDTREE is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
       # It reuses the tree the previous run left on this runner as long as the

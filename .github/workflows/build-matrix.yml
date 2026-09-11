@@ -36,6 +36,13 @@ on:
 # GitHub-hosted fallback run that path is empty and ccache starts cold, which
 # is what the hosted runner did anyway.
 #
+# The jobs that do not compile run on `poligon`, the label shared by all 13
+# runner instances on the box (3 registered to this repository, 10 to the
+# organisation, whose runner group already grants this repository access).
+# They used to sit on `fpmng`, which is only the 3, so the ten short jobs that
+# wait on `build` queued in waves of three. The three compiling jobs are
+# pinned to one instance each instead -- see the note on each of them.
+#
 # static-musl is the exception: it drives `docker run` with host bind mounts,
 # and -v paths are resolved by the host daemon, so a containerised copy of it
 # would mount empty directories. It runs on poligon-host, a runner instance
@@ -74,7 +81,7 @@ jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
   # contributor entry points. Fast — checkout only.
   comment-content-rule:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -96,7 +103,7 @@ jobs:
   # this repo owns, so a new test file cannot be silently unreachable. Hermetic
   # -- no build, no binary; the runner stops at its own preflight.
   fpmng-phpt-coverage:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -119,7 +126,7 @@ jobs:
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -149,7 +156,14 @@ jobs:
   # release.
   build:
     needs: patches
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treebuild' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -157,39 +171,56 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
+    env:
+      BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
-      - name: clone pinned php-src
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
+      - name: choose the build tree location
         run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
+          else
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
 
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf --force
-        working-directory: php-src
-        run: ./buildconf --force
-
-      - name: configure
-        working-directory: php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. Measured on the poligon: 3 s instead of 96 s for a push that
+      # only touches sapi/fpmng/. The tree is per-runner because a runner
+      # executes one job at a time, and that is what keeps two jobs off the
+      # same directory.
+      - name: php-src build tree (reused between runs)
         env:
           CC: ccache gcc
           CXX: ccache g++
         run: |
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure.rc ) | tee ../configure.log
-          exit "$(cat ../configure.rc)"
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree.rc ) | tee tree.log
+          exit "$(cat tree.rc)"
 
       - name: build
-        working-directory: php-src
         # The steps here run under `sh -e` -- this container has no bash, so
         # GitHub's usual `bash -e` default falls back to dash, where
         # `set -o pipefail` is an error ("Illegal option -o pipefail",
@@ -199,8 +230,15 @@ jobs:
         # and the `set +e` inside it, because errexit propagates into the
         # subshell and would abort it before the rc file was ever written.
         run: |
-          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make.rc ) | tee ../make.log
-          exit "$(cat ../make.rc)"
+          # Issue #196: mark the tree unfinished for the duration of the build.
+          # cancel-in-progress kills this step outright on every superseded
+          # push, and a .o truncated by that kill keeps a fresh mtime, so make
+          # would consider it current for good. ci-build-tree.sh starts over
+          # when it finds this marker.
+          touch "$PHPSRC/.fpmng-ci-dirty"
+          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make.rc ) | tee make.log
+          if [ "$(cat make.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
+          exit "$(cat make.rc)"
 
       # Issue #111: the build is warning-free in the files we ship, and stays
       # that way. -Werror is not available here -- this compiles all of
@@ -213,7 +251,7 @@ jobs:
       # path prefix would claim them. See build/check-owned-warnings.sh.
       #
       # $PWD is the workspace root here (no working-directory), which is where
-      # the build step's `tee ../make.log` lands. The script exits 2 -- not 0
+      # the build step's `tee make.log` lands. The script exits 2 -- not 0
       # -- if that log turns out to contain no compile of an owned file, so
       # moving either path cannot silently reduce this gate to a no-op.
       - name: no compiler warnings in our own sources (issue #111)
@@ -222,12 +260,11 @@ jobs:
           ./build/check-owned-warnings.sh "$PWD/make.log"
 
       - name: verify the binary that got built
-        working-directory: php-src
         run: |
-          test -x sapi/fpmng/php-fpm-ng
-          file sapi/fpmng/php-fpm-ng
-          strings sapi/fpmng/php-fpm-ng | grep -q 'X-Powered-By: PHP' || true
-          sapi/fpmng/php-fpm-ng -v
+          test -x "$PHPSRC/sapi/fpmng/php-fpm-ng"
+          file "$PHPSRC/sapi/fpmng/php-fpm-ng"
+          strings "$PHPSRC/sapi/fpmng/php-fpm-ng" | grep -q 'X-Powered-By: PHP' || true
+          "$PHPSRC/sapi/fpmng/php-fpm-ng" -v
 
       - name: stage artifact
         # A single top-level path, not a multi-entry `path:` list: with more
@@ -238,21 +275,21 @@ jobs:
         # depending on that ancestor computation at all.
         run: |
           mkdir -p stage/bin stage/prepared/sapi/fpmng stage/prepared/ext/standard/tests/misc
-          cp php-src/sapi/fpmng/php-fpm-ng stage/bin/
-          cp php-src/sapi/cli/php stage/bin/
-          cp -r php-src/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
+          cp "$PHPSRC"/sapi/fpmng/php-fpm-ng stage/bin/
+          cp "$PHPSRC"/sapi/cli/php stage/bin/
+          cp -r "$PHPSRC"/sapi/fpmng/tests stage/prepared/sapi/fpmng/tests
           # fpmng-acme-state.phpt (task 044) requires ../acme/state.php relative to
           # the test itself -- stage that source alongside tests/, the same
           # way tests/ itself is staged, or the require fails on this job's
           # copy even though it works from a full build/prepare.sh tree.
-          cp -r php-src/sapi/fpmng/acme stage/prepared/sapi/fpmng/acme
+          cp -r "$PHPSRC"/sapi/fpmng/acme stage/prepared/sapi/fpmng/acme
           # run-fpm-phpt.sh (build/run-fpm-phpt.sh:88) requires run-tests.php
           # directly below the "prepared php-src" path it's given.
-          cp php-src/run-tests.php stage/prepared/
+          cp "$PHPSRC"/run-tests.php stage/prepared/
           # gh12621.phpt reads __DIR__/../../../ext/standard/tests/misc/browscap.ini
           # (a source-tree fixture, not a build product); without it the test
           # fails on a nonexistent browscap path rather than exercising fpmng.
-          cp php-src/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
+          cp "$PHPSRC"/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
 
       - name: upload build (for the phpt job)
         uses: actions/upload-artifact@v7
@@ -265,7 +302,7 @@ jobs:
   # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
   phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -301,7 +338,7 @@ jobs:
   # off by default); cron may take up to one minute.
   fpmng-phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -366,7 +403,14 @@ jobs:
   # PASS=58, FAIL/ERROR=0, SKIP=0 of 58.
   fpmng-phpt-fiber:
     needs: patches
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treefiber' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -374,31 +418,50 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # As root php-fpm refuses to start, so the suite would report PASS=0
       # with everything skipped and still look green. Same note as fpmng-phpt.
       options: --user 1001:1001
+    env:
+      # A directory of its own: --enable-fpmng-fiber is a different configure,
+      # so it cannot share objects with the default build. Sharing one
+      # directory would make the two jobs wipe each other's tree on every run.
+      BUILDTREE_CONFIG: fiber
     steps:
       - uses: actions/checkout@v7
+
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
+      - name: choose the build tree location
+        run: |
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
+          else
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
       # fpmng-http-direct-request-parity.phpt needs this locale to be
       # discriminating at all -- see the same step on fpmng-phpt (issue #105).
       - name: assert tr_TR.UTF-8 is present (issue #105)
         run: locale -a | grep -i tr_TR
 
-      - name: clone pinned php-src
-        run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
-
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf --force
-        working-directory: php-src
-        run: ./buildconf --force
-
-      - name: configure with the fiber executor
-        working-directory: php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. The tree is per-runner because a runner executes one job at
+      # a time, and that is what keeps two jobs off the same directory.
+      - name: php-src build tree with the fiber executor (reused between runs)
         env:
           CC: ccache gcc
           CXX: ccache g++
@@ -406,30 +469,42 @@ jobs:
           # $FPMNG_CONFIGURE_FLAGS and nothing else, plus the one flag this
           # cell is about, so the two builds cannot differ in anything else.
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > ../configure-fiber.rc ) | tee ../configure-fiber.log
-          [ "$(cat ../configure-fiber.rc)" -eq 0 ]
-          # configure does not fail on an unknown --enable flag, it warns; so
-          # assert the executor is actually in this build rather than trusting
-          # the command line. Without this the whole cell could silently
-          # degrade into a second copy of fpmng-phpt.
-          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" ../configure-fiber.log
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > tree-fiber.rc ) | tee tree-fiber.log
+          exit "$(cat tree-fiber.rc)"
+
+      - name: assert the fiber executor is really in this build
+        # configure does not fail on an unknown --enable flag, it warns; so
+        # assert the executor is actually in this build rather than trusting
+        # the command line. Without this the whole cell could silently degrade
+        # into a second copy of fpmng-phpt. The log is read from inside the
+        # tree, not from the workspace, because a reused tree does not run
+        # configure again -- an assertion that has nothing to read on the fast
+        # path is worse than no assertion.
+        run: |
+          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
 
       - name: build
-        working-directory: php-src
         # Captures make's own status, not tee's; a build that failed would
         # otherwise reach the test step looking fine. See the longer note on
         # the `build` job for why this is not `set -o pipefail`.
         run: |
-          ( set +e; make -j"$(nproc)" fpmng cli 2>&1; echo "$?" > ../make-fiber.rc ) | tee ../make-fiber.log
-          exit "$(cat ../make-fiber.rc)"
+          # Issue #196: mark the tree unfinished for the duration of the build.
+          # cancel-in-progress kills this step outright on every superseded
+          # push, and a .o truncated by that kill keeps a fresh mtime, so make
+          # would consider it current for good. ci-build-tree.sh starts over
+          # when it finds this marker.
+          touch "$PHPSRC/.fpmng-ci-dirty"
+          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make-fiber.rc ) | tee make-fiber.log
+          if [ "$(cat make-fiber.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
+          exit "$(cat make-fiber.rc)"
 
       - name: run fpmng-owned .phpt tests on the fiber build
         run: |
           chmod +x build/run-fpmng-phpt.sh
-          TEST_PHP_EXECUTABLE="$PWD/php-src/sapi/cli/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PWD/php-src/sapi/fpmng/php-fpm-ng" \
+          TEST_PHP_EXECUTABLE="$PHPSRC/sapi/cli/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PHPSRC/sapi/fpmng/php-fpm-ng" \
           TEST_FPM_TIMEOUT=120 \
-          ./build/run-fpmng-phpt.sh "$PWD/php-src" "$PWD/fpmng-phpt-fiber-results"
+          ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-fiber-results"
 
       # The green/red of the step above is not the acceptance criterion: a run
       # where all ten fiber tests SKIP passes it. See the script's header.
@@ -485,7 +560,14 @@ jobs:
   # lands in a PR that is already about the toolchain rather than on an
   # unrelated one.
   lint:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treelint' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -493,35 +575,59 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
       volumes:
         - /opt/gh-runner/cache/ccache:/ccache
+        # Issue #196: the php-src build tree, kept between runs.
+        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
+    env:
+      # The same configure line as `build`, so on a runner that has already run
+      # `build` this job finds the tree ready and skips configure entirely.
+      BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
-      - name: clone pinned php-src
+      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
+      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
+      # Docker creates the mount point root-owned and this job, running as
+      # 1001, cannot write into it. There is nothing to reuse on a fresh
+      # hosted runner anyway -- build in the workspace, as this job did before
+      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
+      # reasons: a job-level value would override what GITHUB_ENV writes, and
+      # the runner context is not available there at all.
+      - name: choose the build tree location
         run: |
-          git init php-src
-          git -C php-src fetch --depth 1 "$PHP_SRC_REPO" "$PHP_SRC_REF"
-          git -C php-src checkout FETCH_HEAD
+          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
+          # available in a job-level `env:`, only inside a step.
+          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
+          if mkdir -p "$tree" 2>/dev/null; then
+            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
+          else
+            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
+            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
+          fi
 
-      - name: prepare sapi/fpmng in php-src
-        run: ./build/prepare.sh "$PWD/php-src"
-
-      - name: buildconf + configure (headers only; no make)
-        working-directory: php-src
+      # Issue #196: one step in place of clone + prepare + buildconf + configure.
+      # It reuses the tree the previous run left on this runner as long as the
+      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
+      # the set of files under sapi/fpmng/ are all unchanged, and starts over
+      # otherwise. The tree is per-runner because a runner executes one job at
+      # a time, and that is what keeps two jobs off the same directory.
+      - name: php-src build tree (headers only; no make)
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
         run: |
-          ./buildconf --force
           # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./configure $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > ../configure-lint.rc ) | tee ../configure-lint.log
-          exit "$(cat ../configure-lint.rc)"
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree-lint.rc ) | tee tree-lint.log
+          exit "$(cat tree-lint.rc)"
 
       - name: clang-tidy report (our files only)
         run: |
           chmod +x build/lint-c.sh
-          ./build/lint-c.sh "$PWD/php-src" 2>&1 | tee lint-c-report.txt
+          ./build/lint-c.sh "$PHPSRC" 2>&1 | tee lint-c-report.txt
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -582,7 +688,7 @@ jobs:
   # folded into phpt.
   gateway-privileges:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -619,7 +725,7 @@ jobs:
   # privileges), so it stays out of the phpt job rather than needing sudo.
   tls-reload:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -653,7 +759,7 @@ jobs:
   # read as a reload failure.
   tls-wait-for-cert:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -682,7 +788,7 @@ jobs:
   # reload failure.
   read-deadline:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -715,7 +821,7 @@ jobs:
   # failure here means one specific thing.
   gateway-write-failure:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -741,7 +847,7 @@ jobs:
 
   plain-http-listener:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:

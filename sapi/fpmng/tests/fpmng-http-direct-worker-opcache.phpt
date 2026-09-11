@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: worker-mode HTTP-direct builtins survive opcache's function_exists() folding (task 076)
+fpm-ng: worker-mode HTTP-direct builtins and constants survive opcache folding (task 076, issue #149)
 --SKIPIF--
 <?php
 include "skipif.inc";
@@ -51,7 +51,24 @@ $root = sys_get_temp_dir() . '/fpmng-direct-worker-opcache-' . getmypid();
  * to dereference a NULL internal_function->module while doing it -- see
  * fpm_worker_register_functions() for the fix and the core-dump evidence
  * (task 076). A variable argument would defeat the folding and prove
- * nothing; this must stay literal. */
+ * nothing; this must stay literal.
+ *
+ * The same shape covers the constants (issue #149): defined() on a literal
+ * name and a bare FPMNG_WORKER_READ fetch are the two opcodes pass1 folds
+ * for a CONST_PERSISTENT constant, and these three are registered per fork
+ * in worker children only. The fetch is wrapped in a try/catch because the
+ * correct answer in the classic child is an Error -- a folded one would
+ * quietly hand it the worker's value instead.
+ *
+ * Measured, not assumed: with CONST_PERSISTENT still on the three
+ * REGISTER_MAIN_LONG_CONSTANT() calls, this test's classic child answered
+ * `"definedRead":true,"readValue":1` -- the worker's value, in a process
+ * where the constant is not registered at all -- while `hasWorkerLoop` was
+ * correctly false, i.e. the function side was already safe and only the
+ * constants leaked. CI run 34598875593. Note the first attempt measured
+ * nothing at all because `cached` was false: opcache refuses a file whose
+ * mtime is within opcache.file_update_protection, which is why both pools
+ * below set it to 0 and why the probe reports `cached`. */
 file_put_contents("$root/shared.php", <<<'PHP'
 <?php
 function fpmng_worker_probe(): array
@@ -61,6 +78,16 @@ function fpmng_worker_probe(): array
         'opcacheEnabled' => $status !== false && ($status['opcache_enabled'] ?? false) === true,
         'hasWorkerLoop' => function_exists('fpmng_worker_loop'),
         'hasBogus' => function_exists('fpmng_worker_this_does_not_exist'),
+        'cached' => function_exists('opcache_is_script_cached')
+            ? opcache_is_script_cached(__DIR__ . '/shared.php') : null,
+        'definedRead' => defined('FPMNG_WORKER_READ'),
+        'readValue' => (static function () {
+            try {
+                return FPMNG_WORKER_READ;
+            } catch (\Throwable $e) {
+                return null;
+            }
+        })(),
     ];
 }
 PHP);
@@ -124,6 +151,11 @@ catch_workers_output = yes
 php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
 php_admin_value[opcache.enable] = 1
+; The test writes shared.php a moment before FPM starts, and opcache refuses
+; to cache a file whose mtime is within opcache.file_update_protection (2s by
+; default) of now -- which would leave the shared SHM entry this test is about
+; empty. The probe's 'cached' field asserts that it is not.
+php_admin_value[opcache.file_update_protection] = 0
 [classic]
 listen = 127.0.0.1:$classicPort
 pool.type = http-direct
@@ -134,6 +166,11 @@ http.front_controller = /classic.php
 http.read_timeout = 10000
 http.max_body = 1M
 php_admin_value[opcache.enable] = 1
+; The test writes shared.php a moment before FPM starts, and opcache refuses
+; to cache a file whose mtime is within opcache.file_update_protection (2s by
+; default) of now -- which would leave the shared SHM entry this test is about
+; empty. The probe's 'cached' field asserts that it is not.
+php_admin_value[opcache.file_update_protection] = 0
 CFG;
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -149,8 +186,11 @@ try {
     $row = json_decode($body, true);
     check(is_array($row), 'worker response not json: ' . var_export($body, true));
     check($row['opcacheEnabled'] === true, 'opcache is not actually enabled in the worker child -- this test proves nothing without it');
+    check($row['cached'] === true, 'shared.php is not in the opcache SHM in the worker child -- nothing can be baked into an entry that does not exist');
     check($row['hasWorkerLoop'] === true, 'function_exists(fpmng_worker_loop) folded to false in the worker child');
     check($row['hasBogus'] === false, 'function_exists() on a nonexistent name folded to true');
+    check($row['definedRead'] === true, 'defined(FPMNG_WORKER_READ) is false in the worker child');
+    check(is_int($row['readValue']), 'FPMNG_WORKER_READ did not resolve in the worker child');
     echo "worker-opcache-folding: ok\n";
 
     /* Classic pool second, same shared.php file: must independently evaluate
@@ -161,7 +201,10 @@ try {
     $classicRow = json_decode($classicBody, true);
     check(is_array($classicRow), 'classic response not json: ' . var_export($classicBody, true));
     check($classicRow['opcacheEnabled'] === true, 'opcache is not actually enabled in the classic child -- this test proves nothing without it');
+    check($classicRow['cached'] === true, 'shared.php is not in the opcache SHM in the classic child -- it did not read the entry the worker child created');
     check($classicRow['hasWorkerLoop'] === false, 'worker builtins leaked into the classic executor (directly, or via a shared opcache cache entry)');
+    check($classicRow['definedRead'] === false, 'defined(FPMNG_WORKER_READ) folded to true in the classic executor (issue #149)');
+    check($classicRow['readValue'] === null, 'FPMNG_WORKER_READ resolved in the classic executor, so its value was folded into the shared opcache entry (issue #149)');
     echo "classic-opcache-no-leak: ok\n";
 } finally {
     $tester->terminate();

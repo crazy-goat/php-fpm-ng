@@ -38,11 +38,18 @@
  *   counted, the worker's 10 ms tick sweep does, so an fd can outlive its
  *   connection by one tick.
  * - The sweep is a pointer read per tracked connection, 100 times a second.
- *   It only runs when a limit is configured, and http.max_connections is what
- *   bounds the number of tracked connections -- which is why validation
- *   requires it whenever http.max_connections_per_client is set: the per-client
- *   count is a walk of this list, and an unbounded list would make the accept
- *   path grow with the flood it is supposed to survive.
+ *   http.max_connections is what bounds the number of tracked connections --
+ *   which is why validation requires it whenever
+ *   http.max_connections_per_client is set: the per-client count is a walk of
+ *   this list, and an unbounded list would make the accept path grow with the
+ *   flood it is supposed to survive. Where no total cap is configured the walk
+ *   happens on the tick only, never per accept, so accepting stays O(1)
+ *   whatever the list length.
+ *
+ * Since issue #64 a node outlives the first request and is kept for the whole
+ * life of the connection even when no limit is configured, because the live
+ * count is what the status page reports. Before that a deadline-only worker
+ * dropped the node the moment its request arrived.
  *
  * What is NOT here, and is rejected by validation rather than ignored:
  * per-connection limits for later requests on a keep-alive connection (the
@@ -102,10 +109,16 @@ int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns);
  * a no-op when no limit is configured. */
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
 
-/* There are deliberately no per-connection counters here. This file knows how
- * many connections it dropped, but nothing reads a number that is not on the
- * status page, and putting it there is a scoreboard change -- issue #64. A
- * counter with no reader is a fact nobody can check, which is worse than the
- * once-per-child NOTICE each policy already logs. */
+/* What this file knows, for the status page (issue #64). All three are this
+ * worker's own: live is a gauge that lags its connection by at most one sweep,
+ * the other two are totals since the child started. The worker publishes them
+ * into its shared slot from the same tick that sweeps, rather than this file
+ * reaching into the scoreboard -- accounting belongs to whoever already owns a
+ * slot. */
+unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns);
+/* Connections dropped because the first request did not arrive in time. */
+unsigned long fpm_http_direct_conns_timed_out(const struct fpm_http_direct_conns *conns);
+/* Connections refused by http.max_connections_per_client, in either shape. */
+unsigned long fpm_http_direct_conns_refused(const struct fpm_http_direct_conns *conns);
 
 #endif

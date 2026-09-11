@@ -22,10 +22,22 @@
 /* One slot per child. See the header for why there is no lock. */
 struct fpm_http_direct_ops_slot {
 	unsigned long conn_accepted;
-	unsigned long requests_refused;
+	unsigned long conn_live;		/* gauge, published from the worker's tick */
+	unsigned long conn_timed_out;
+	unsigned long conn_refused;		/* http.max_connections_per_client, issue #61 */
+	unsigned long requests_refused[FPM_HTTP_DIRECT_REFUSED_MAX];
 	unsigned long requests_local;
 	unsigned long requests_active;
+	unsigned long responses_pending;		/* gauge, published from the worker's tick */
+	unsigned long responses_rejected;
 };
+
+/* The version on the page. Bump it when a field changes meaning or leaves;
+ * adding one does not need a bump, because a reader that does not know a field
+ * ignores it and one that does finds it. This is the contract
+ * docs/http-direct.md documents, and the only reason it is a constant here is
+ * that the page has to print something a tool can compare against. */
+#define FPM_HTTP_DIRECT_SCHEMA 1
 
 struct fpm_http_direct_ops_shared {
 	unsigned nslots;
@@ -142,9 +154,20 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 			 * recycled by pm.max_requests gets the index the dead one
 			 * released, and zeroing here would make the pool's accepted
 			 * connections go backwards in the middle of a monitoring series.
-			 * The gauge, on the other hand, is exactly what a child killed
-			 * mid-request leaks, so it starts at zero. */
+			 * The gauges, on the other hand, are exactly what a child killed
+			 * mid-request leaks, so they start at zero.
+			 *
+			 * conn_timed_out and conn_refused are totals but are cleared too:
+			 * they are republished every tick from counters that live in the
+			 * predecessor's address space, so leaving the old values would
+			 * have them counted once by this child and once by the dead one,
+			 * then overwritten downwards on the first tick. Documented in the
+			 * header as a per-child total for that reason. */
 			ops->slot->requests_active = 0;
+			ops->slot->conn_live = 0;
+			ops->slot->responses_pending = 0;
+			ops->slot->conn_timed_out = 0;
+			ops->slot->conn_refused = 0;
 		}
 	}
 
@@ -188,11 +211,33 @@ void fpm_http_direct_ops_local(struct fpm_http_direct_ops *ops)
 	}
 }
 
-void fpm_http_direct_ops_refused(struct fpm_http_direct_ops *ops)
+void fpm_http_direct_ops_refused(struct fpm_http_direct_ops *ops, enum fpm_http_direct_refusal why)
+{
+	if (ops && ops->slot && why >= 0 && why < FPM_HTTP_DIRECT_REFUSED_MAX) {
+		ops->slot->requests_refused[why]++;
+	}
+}
+
+void fpm_http_direct_ops_rejected(struct fpm_http_direct_ops *ops)
 {
 	if (ops && ops->slot) {
-		ops->slot->requests_refused++;
+		ops->slot->responses_rejected++;
 	}
+}
+
+void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
+	const struct fpm_http_direct_ops_live *live)
+{
+	if (!ops || !ops->slot || !live) {
+		return;
+	}
+	ops->slot->conn_live = live->connections;
+	ops->slot->responses_pending = live->pending;
+	/* Assigned, not added: these two are totals kept by fpm_http_direct_conn.c
+	 * for the life of this child, and this child owns the slot for exactly as
+	 * long. Adding would count every tick. */
+	ops->slot->conn_timed_out = live->timed_out;
+	ops->slot->conn_refused = live->refused_conn;
 }
 
 int fpm_http_direct_ops_allowed(struct fpm_http_direct_ops *ops, const char *peer)
@@ -225,14 +270,98 @@ static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops, struct f
 		return;
 	}
 	for (i = 0; i < ops->shared->nslots; i++) {
-		out->conn_accepted += ops->shared->slots[i].conn_accepted;
-		out->requests_refused += ops->shared->slots[i].requests_refused;
-		out->requests_local += ops->shared->slots[i].requests_local;
-		out->requests_active += ops->shared->slots[i].requests_active;
+		const struct fpm_http_direct_ops_slot *in = &ops->shared->slots[i];
+		unsigned r;
+
+		out->conn_accepted += in->conn_accepted;
+		out->conn_live += in->conn_live;
+		out->conn_timed_out += in->conn_timed_out;
+		out->conn_refused += in->conn_refused;
+		for (r = 0; r < FPM_HTTP_DIRECT_REFUSED_MAX; r++) {
+			out->requests_refused[r] += in->requests_refused[r];
+		}
+		out->requests_local += in->requests_local;
+		out->requests_active += in->requests_active;
+		out->responses_pending += in->responses_pending;
+		out->responses_rejected += in->responses_rejected;
 	}
 }
 
-static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int json, struct evbuffer *out)
+/* What the "refused requests" row has always meant: requests this pool answered
+ * with a refusal. Connections refused by http.max_connections_per_client are
+ * not in it -- most of them never became a request -- and have a row of their
+ * own. */
+static unsigned long fpm_http_direct_ops_refused_total(const struct fpm_http_direct_ops_slot *total)
+{
+	unsigned long n = 0;
+	unsigned r;
+
+	for (r = 0; r < FPM_HTTP_DIRECT_REFUSED_MAX; r++) {
+		n += total->requests_refused[r];
+	}
+	return n;
+}
+
+/* The per-child rows, on `?full`. This is what makes the accept distribution
+ * measurable from the status page alone, which is the whole point of issue #64
+ * -- issue #53's fairness finding needed an external harness to see it, and a
+ * pool-wide sum cannot show it at all. A slot that has accepted nothing is
+ * printed anyway: "this child got none" is the observation. */
+static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, int json, int full,
+	struct evbuffer *out)
+{
+	unsigned i;
+
+	if (!full || !ops->shared) {
+		evbuffer_add_printf(out, "%s", json ? "}\n" : "");
+		return;
+	}
+	if (json) {
+		evbuffer_add_printf(out, ",\"workers\":[");
+	} else {
+		evbuffer_add_printf(out, "\n");
+	}
+	for (i = 0; i < ops->shared->nslots; i++) {
+		const struct fpm_http_direct_ops_slot *in = &ops->shared->slots[i];
+
+		if (json) {
+			evbuffer_add_printf(out,
+				"%s{\"slot\":%u,\"accepted conn\":%lu,\"live connections\":%lu,"
+				"\"active requests\":%lu,\"pending responses\":%lu,\"non-php requests\":%lu,"
+				"\"refused acl\":%lu,\"refused capacity\":%lu,\"refused connections\":%lu,"
+				"\"timed out connections\":%lu,\"rejected responses\":%lu}",
+				i ? "," : "", i, in->conn_accepted, in->conn_live, in->requests_active,
+				in->responses_pending, in->requests_local,
+				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
+				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
+				in->conn_refused, in->conn_timed_out, in->responses_rejected);
+		} else {
+			evbuffer_add_printf(out,
+				"slot:                 %u\n"
+				"accepted conn:        %lu\n"
+				"live connections:     %lu\n"
+				"active requests:      %lu\n"
+				"pending responses:    %lu\n"
+				"non-php requests:     %lu\n"
+				"refused acl:          %lu\n"
+				"refused capacity:     %lu\n"
+				"refused connections:  %lu\n"
+				"timed out connections:%lu\n"
+				"rejected responses:   %lu\n\n",
+				i, in->conn_accepted, in->conn_live, in->requests_active,
+				in->responses_pending, in->requests_local,
+				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
+				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
+				in->conn_refused, in->conn_timed_out, in->responses_rejected);
+		}
+	}
+	if (json) {
+		evbuffer_add_printf(out, "]}\n");
+	}
+}
+
+static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int json, int full,
+	struct evbuffer *out)
 {
 	struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(fpm_scoreboard_get(), 0);
 	struct fpm_http_direct_ops_slot total;
@@ -257,12 +386,20 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			"\"accepted conn\":%lu,\"idle processes\":%d,\"active processes\":%d,\"total processes\":%d,"
 			"\"max active processes\":%d,\"max children reached\":%u,\"requests\":%lu,"
 			"\"non-php requests\":%lu,\"refused requests\":%lu,\"active requests\":%lu,"
-			"\"slow requests\":%lu,\"memory peak\":%zu}\n",
+			"\"slow requests\":%lu,\"memory peak\":%zu,"
+			"\"direct schema\":%d,\"live connections\":%lu,\"pending responses\":%lu,"
+			"\"refused acl\":%lu,\"refused capacity\":%lu,\"refused connections\":%lu,"
+			"\"timed out connections\":%lu,\"rejected responses\":%lu",
 			copy->pool, fpm_http_direct_ops_pm_name(copy->pm), start,
 			(unsigned long) (now - copy->start_epoch), total.conn_accepted,
 			copy->idle, copy->active, copy->idle + copy->active, copy->active_max,
 			copy->max_children_reached, copy->requests, total.requests_local,
-			total.requests_refused, total.requests_active, copy->slow_rq, copy->memory_peak);
+			fpm_http_direct_ops_refused_total(&total), total.requests_active,
+			copy->slow_rq, copy->memory_peak,
+			FPM_HTTP_DIRECT_SCHEMA, total.conn_live, total.responses_pending,
+			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
+			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
+			total.conn_refused, total.conn_timed_out, total.responses_rejected);
 	} else {
 		evbuffer_add_printf(out,
 			"pool:                 %s\n"
@@ -280,30 +417,45 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			"refused requests:     %lu\n"
 			"active requests:      %lu\n"
 			"slow requests:        %lu\n"
-			"memory peak:          %zu\n",
+			"memory peak:          %zu\n"
+			"direct schema:        %d\n"
+			"live connections:     %lu\n"
+			"pending responses:    %lu\n"
+			"refused acl:          %lu\n"
+			"refused capacity:     %lu\n"
+			"refused connections:  %lu\n"
+			"timed out connections:%lu\n"
+			"rejected responses:   %lu\n",
 			copy->pool, fpm_http_direct_ops_pm_name(copy->pm), start,
 			(unsigned long) (now - copy->start_epoch), total.conn_accepted,
 			copy->idle, copy->active, copy->idle + copy->active, copy->active_max,
 			copy->max_children_reached, copy->requests, total.requests_local,
-			total.requests_refused, total.requests_active, copy->slow_rq, copy->memory_peak);
+			fpm_http_direct_ops_refused_total(&total), total.requests_active,
+			copy->slow_rq, copy->memory_peak,
+			FPM_HTTP_DIRECT_SCHEMA, total.conn_live, total.responses_pending,
+			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
+			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
+			total.conn_refused, total.conn_timed_out, total.responses_rejected);
 	}
+	fpm_http_direct_ops_status_workers(ops, json, full, out);
 	fpm_scoreboard_free_copy(copy);
 }
 
-/* Whether the query string asks for JSON. The same "?json" upstream's status
- * page uses, matched as a bare flag among '&'-separated parameters so that
- * "?json&full" keeps working the day full arrives. */
-static int fpm_http_direct_ops_wants_json(struct evhttp_request *http)
+/* Whether the query string carries this bare flag among its '&'-separated
+ * parameters -- the spelling upstream's status page uses, so "?json&full" is
+ * two flags and not one parameter named "json&full". */
+static int fpm_http_direct_ops_has_flag(struct evhttp_request *http, const char *flag)
 {
 	const char *uri = evhttp_request_get_uri(http);
 	const char *p = uri ? strchr(uri, '?') : NULL;
+	size_t want = strlen(flag);
 
 	while (p) {
 		size_t len;
 
 		p++;
 		len = strcspn(p, "&");
-		if (len == 4 && !strncmp(p, "json", 4)) {
+		if (len == want && !strncmp(p, flag, want)) {
 			return 1;
 		}
 		p = strchr(p, '&');
@@ -363,13 +515,14 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
 		return 1;
 	}
 	if (ops->status_path && !strcmp(path, ops->status_path)) {
-		int json = fpm_http_direct_ops_wants_json(http);
+		int json = fpm_http_direct_ops_has_flag(http, "json");
+		int full = fpm_http_direct_ops_has_flag(http, "full");
 
 		body = evbuffer_new();
 		if (!body) {
 			return 0;
 		}
-		fpm_http_direct_ops_status_body(ops, json, body);
+		fpm_http_direct_ops_status_body(ops, json, full, body);
 		fpm_http_direct_ops_send(http, json ? "application/json" : "text/plain", body, status, bytes);
 		evbuffer_free(body);
 		return 1;

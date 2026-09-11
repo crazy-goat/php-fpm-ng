@@ -334,9 +334,13 @@ both of which a client must be prepared for:
   the zero-timeout trick that drops a connection from outside does nothing.)
 
 The 503 is counted and logged exactly like the pool's other refusals — it
-increments the `pm.status` refusal counter and produces an `access.log` line —
-and it is emitted **after** `listen.allowed_clients`, so an address the ACL
-excludes still gets a plain `403 Forbidden` and learns nothing about the cap.
+shows up on `pm.status` as `refused connections` and produces an `access.log`
+line — and it is emitted **after** `listen.allowed_clients`, so an address the
+ACL excludes still gets a plain `403 Forbidden` and learns nothing about the
+cap. It has its own counter rather than joining `refused requests`, because a
+connection refused before its first request is not a request the pool answered;
+connections dropped by the deadline are `timed out connections` for the same
+reason.
 
 The suite (`sapi/fpmng/tests/fpmng-http-direct-connection-limits.phpt`) accepts
 either shape for exactly this reason.
@@ -701,23 +705,74 @@ against the documented spelling.
 | `non-php requests` | static files, pings and status pages: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
 | `active requests` | PHP requests in flight right now |
+| `direct schema` | the version of the direct-specific fields below (currently `1`) |
+| `live connections` | connections this pool's children hold right now |
+| `pending responses` | responses accepted but not yet fully written |
+| `refused acl` | requests answered `403` by `listen.allowed_clients` |
+| `refused capacity` | requests answered `503` because the pool was stopping or saturated |
+| `refused connections` | connections answered `503` by `http.max_connections_per_client` |
+| `timed out connections` | connections dropped by the first-request deadline |
+| `rejected responses` | responses PHP produced that could not be written to the client |
 
-Two deviations from the fastcgi status page, both deliberate:
+`refused requests` is the sum of `refused acl` and `refused capacity`, kept
+under its old name and its old meaning so a tool written against the fastcgi
+page keeps working. The split is what the sum could never answer: "the pool is
+refusing" and "the pool is refusing *the people you told it to refuse*" are
+different incidents.
 
-- There is no per-process detail (`?full`). The scoreboard's per-process slots
-  describe a FastCGI request, and a direct child's request is not one.
-- `accepted conn` counts **connections**, not requests, and there is no
-  "active connections" gauge. libevent's per-connection hook
-  (`evhttp_set_bevcb()`) runs before the peer address is known and offers no
-  close notification, and the per-response close callback a direct child
-  already installs cannot be shared with a permanent one. A monotonic count of
-  accepts plus an in-flight request gauge is what can be reported truthfully.
+`direct schema` exists so that a tool meeting a page it does not understand can
+say so instead of guessing from which fields happen to be present. It is
+bumped when a field changes meaning or leaves; adding a field does not bump it.
 
-`accepted conn`, `non-php requests` and `refused requests` belong to the pool,
-not to a child: a child recycled by `pm.max_requests` inherits the counters of
-the slot it takes over, so the totals never go backwards mid-series. Only
-`active requests` is cleared when a child starts, because that is exactly what
-a child killed mid-request would otherwise leak.
+#### What each number costs to read
+
+Three of these are **gauges**, not totals: `live connections`, `pending
+responses`, and — on `?full` — the same two per child. They are published into
+the shared slot from the worker's 10 ms tick, so they are up to 10 ms stale,
+and they stop moving entirely while that child is inside PHP: on the classic
+executor the script runs inside evhttp's request callback, so the loop that
+would publish them is not running. A child stuck in a 5 s script reports the
+connection count it had when the script started. This is deliberate — the
+alternative is a shared-memory write on every accept and every close, on the
+path the direct pool exists to keep short.
+
+`active requests` is the exception, and it is why the distinction matters: it
+is written on the request path itself, so it *does* move while PHP runs. That
+is what makes "this child is busy" visible at all.
+
+#### Reset semantics
+
+`accepted conn`, `non-php requests`, `requests`, `refused *` and `rejected
+responses` belong to the pool, not to a child: a child recycled by
+`pm.max_requests` inherits the counters of the slot it takes over, so the
+totals never go backwards mid-series. The gauges (`active requests`, `live
+connections`, `pending responses`) are cleared when a child starts, because
+that is exactly what a child killed mid-request would otherwise leak.
+
+`timed out connections` and `refused connections` are totals but are cleared
+too, and the header says so: they are republished every tick from counters that
+live in the child's own address space, so a new child inheriting the old values
+would count its predecessor's drops once itself and once again from the dead
+one, then overwrite them downwards on its first tick. They are therefore
+per-child totals summed across the live children, not pool lifetime totals. A
+reload replaces the shared segment, and every number here starts again.
+
+#### `?full`: the per-child rows
+
+`?full` appends one block per scoreboard slot, with the same fields, in both
+the text and the JSON rendering (`?json&full` stays valid JSON: the per-child
+rows are a `workers` array). A slot that has accepted nothing is printed
+anyway, because "this child got none" is the observation.
+
+This is what makes the accept distribution measurable from the status page
+alone. The fairness problem of issue #53 — one child accepting a whole
+keep-alive burst while the others sat idle — needed an external harness to see;
+a pool-wide sum cannot show it at all. Two children whose `accepted conn` reads
+1000 and 4 is the same measurement, from the page an operator already has open.
+
+Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
+method, the duration). That part is still absent: the scoreboard's per-process
+slots describe a FastCGI request, and a direct child's request is not one.
 
 `pm.status_listen` stays rejected on both executors: it asks for a second
 listening socket served by a second process, and a direct child owns exactly
@@ -771,8 +826,9 @@ It is enforced in the request callback, not at accept: libevent's
 `evhttp_set_bevcb()` runs before the peer address is known. The TCP connection
 is therefore accepted and the request answered `403`, which is also what the
 `http` gateway does. A refused request reaches neither the static file server,
-nor the status page, nor PHP, and is counted as `refused requests`. A
-malformed address in the list is rejected by `php-fpm -t` and at start-up,
+nor the status page, nor PHP, and is counted as `refused acl` (and inside the
+`refused requests` sum). A malformed address in the list is rejected by
+`php-fpm -t` and at start-up,
 before any child forks; it is fatal again in the child, which would otherwise
 be the only place it was noticed. A list meant to keep someone out must never
 end up keeping nobody out.

@@ -35,6 +35,8 @@ struct fpm_http_direct_conns {
 	struct fpm_http_direct_conns_limits limits;
 	struct fpm_direct_conn *list;
 	unsigned live;
+	unsigned long timed_out;
+	unsigned long refused;
 	int said_timed_out;	/* each limit announces itself once per child, see below */
 	int said_refused;
 };
@@ -107,10 +109,12 @@ static void fpm_direct_conn_deadline_fire(evutil_socket_t fd, short what, void *
 
 	(void) fd;
 	(void) what;
+	c->conns->timed_out++;
 	/* Once per child, not once per connection: the point is that an operator
 	 * who did not expect this limit to bite finds out that it did, and a line
 	 * per dropped client would be a log amplifier for the very flood the
-	 * deadline exists to survive. How many is a scoreboard question (#64). */
+	 * deadline exists to survive. How many is the status page's answer, since
+	 * issue #64. */
 	if (!c->conns->said_timed_out) {
 		c->conns->said_timed_out = 1;
 		zlog(ZLOG_NOTICE, "[pool %s] dropping connections whose first request does not arrive "
@@ -250,6 +254,7 @@ static int fpm_direct_conn_check_peer(struct fpm_direct_conn *c, int drop)
 	if (fpm_direct_conn_peer_count(c->conns, c) < (unsigned) c->conns->limits.max_per_client) {
 		return 0;
 	}
+	c->conns->refused++;
 	if (!c->conns->said_refused) {
 		c->conns->said_refused = 1;
 		zlog(ZLOG_NOTICE, "[pool %s] a client reached http.max_connections_per_client (%d) "
@@ -330,8 +335,17 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 	 * ended keeps its descriptor open until something releases it, and the
 	 * worker's tick is up to 10 ms away; a busy pool accepts far more often
 	 * than it ticks, so this bounds the descriptors by the connection rate
-	 * rather than by the tick. */
-	fpm_http_direct_conns_sweep(conns);
+	 * rather than by the tick.
+	 *
+	 * Only under http.max_connections, though. The sweep walks the whole list,
+	 * and http.max_connections is the only thing that bounds its length --
+	 * running it per accept without one would make accepting O(n) in the
+	 * connections already held, which is the amplifier issue #61 exists to
+	 * prevent. Where the list is unbounded the 10 ms tick is the only sweeper,
+	 * and a descriptor outlives its connection by up to one tick. */
+	if (conns->limits.max_connections > 0) {
+		fpm_http_direct_conns_sweep(conns);
+	}
 	c = calloc(1, sizeof(*c));
 	if (!c) {
 		/* OOM: this connection goes untracked and unlimited. The alternative
@@ -408,13 +422,6 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 			event_free(c->deadline);
 			c->deadline = NULL;
 		}
-		if (!fpm_direct_conn_limited(conns)) {
-			/* Nothing left to track: without a limit the node existed only to
-			 * carry the deadline, and holding its reference any longer would
-			 * keep the fd alive past the connection for no reason. */
-			fpm_direct_conn_forget(c);
-			return 0;
-		}
 		/* The EOF watcher goes with the deadline. A persistent, level-
 		 * triggered EV_READ on a connection whose bytes evhttp may leave in
 		 * the socket -- which is what a paused read or a streaming response
@@ -432,6 +439,7 @@ int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns)
 	if (!conns || conns->limits.max_connections <= 0) {
 		return 1;
 	}
+
 	/* Same reason as in the pickup pass: live counts nodes, and a node
 	 * outlives its connection until something releases it. Sweeping here is
 	 * what makes the gate reopen in the same loop pass the last connection
@@ -446,7 +454,7 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 {
 	struct fpm_direct_conn *c, *next;
 
-	if (!conns || !fpm_direct_conn_limited(conns)) {
+	if (!conns) {
 		return;
 	}
 	/* Only connections past their first request: the others have the EOF
@@ -457,4 +465,19 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 			fpm_direct_conn_forget(c);
 		}
 	}
+}
+
+unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns)
+{
+	return conns ? conns->live : 0;
+}
+
+unsigned long fpm_http_direct_conns_timed_out(const struct fpm_http_direct_conns *conns)
+{
+	return conns ? conns->timed_out : 0;
+}
+
+unsigned long fpm_http_direct_conns_refused(const struct fpm_http_direct_conns *conns)
+{
+	return conns ? conns->refused : 0;
 }

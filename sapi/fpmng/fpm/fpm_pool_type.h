@@ -109,6 +109,26 @@ struct fpm_pool_type_s {
 	 * execute the ACME client (issue #48, criterion 7). */
 	unsigned publishes_acme_challenges:1;
 
+	/* A child of this type keeps its FastCGI transport state and its signal
+	 * handlers across requests instead of tearing them down and rebuilding
+	 * them per request. It turns on two things in the child, both of which
+	 * exist because upstream assumes a worker may be handed to an arbitrary
+	 * front end between requests and we know it is not:
+	 *
+	 *   fcgi_set_optimized_transport()    patches 0004/0005: keep the
+	 *     connection's buffers and use writev for large responses, instead of
+	 *     the conservative per-request path main/fastcgi.c takes otherwise.
+	 *   zend_signal_use_persistent_handlers()   patch 0006: install the Zend
+	 *     signal handlers once instead of on every zend_signal_activate().
+	 *
+	 * Set it for a type whose children speak FastCGI over a connection the
+	 * type itself owns for the child's lifetime -- "fastcgi-ng" and the
+	 * workers behind "http", including their fiber and async variants. NOT for
+	 * plain "fastcgi", whose connection comes from whatever front end dialled
+	 * in, and not for "http-direct", which speaks HTTP itself and never
+	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
+	unsigned reuses_request_runtime:1;
+
 	/* Status flags are established on the master-side listening socket before
 	 * children are forked. The open file description is shared by the master
 	 * and its children, so a child must not change this after fork. */

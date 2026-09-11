@@ -265,7 +265,10 @@ What changes:
   property the buffered path already has, applied to a slower phase.
 - Nothing streams that cannot: an **HTTP/1.0 client** (there is no chunked
   framing to use, and a `Content-Length: 0` followed by a body would let a
-  keep-alive client read that body as the next response), a non-final status
+  keep-alive client read that body as the next response), a response for which
+  the script **declared its own `Content-Length`** (libevent only chooses
+  chunked framing when there is none, so streaming past that point would write a
+  body nobody checked against the declared length), a non-final status
   (`1xx`), a bodyless response (HEAD, 204, 205, 304), or a response already
   doomed by the header caps. All of these stay on the buffered path, so the
   existing framing and error behaviour is unchanged. The task 054 tests measure
@@ -318,6 +321,63 @@ is flat across both sizes for the streamed pool and grows with the response for
 the buffered one; at 16 MiB the buffered pool has no answer at all. The
 loopback client never stalls, so these numbers do not exercise backpressure —
 `sapi/fpmng/tests/fpmng-http-direct-streaming.phpt` does.
+
+## Finishing the response early (`fpmng_respond()`)
+
+Available on `pool.type = http-direct` pools, registered per worker, no
+configuration. It finishes the current response — status, headers and everything
+written so far — and lets the script keep running:
+
+```php
+<?php
+echo json_encode(['ok' => true]);
+fpmng_respond();
+
+// The client already has the response. This runs after it.
+$queue->push($job);
+$log->write($expensiveSummary);
+```
+
+Returns `true` when it finished the response, `false` when there was nothing to
+finish: no request in flight, the client is already gone, or the response was
+finished by an earlier call. A second call is therefore safe and does nothing.
+
+**What it gives you.** The client has the complete, correctly framed response
+while the script is still running. It is the http-direct counterpart of
+`fastcgi_finish_request()` on a FastCGI pool, and it moves the request to the
+`Finished` stage in the scoreboard, so a script that keeps working past this
+point falls under `request_terminate_timeout` only when
+`request_terminate_timeout_track_finished` is on — the same rule a FastCGI pool
+applies.
+
+**What it does not give you.** The worker is *not* free. It serves no other
+connection until the script actually ends, on any pool type. That is a property
+of the classic executor: `php_execute_script()` runs inline inside the event
+loop callback, so the loop is blocked for as long as the script runs. This
+function shortens the *client's* wait, not the worker's occupancy — if the aim
+is to free the worker, the work belongs in a queue consumed elsewhere, not after
+`fpmng_respond()`.
+
+Because the event loop is blocked, queueing the finished response with libevent
+would not put a single byte on the wire until the script returned. So the call
+writes the finished response to the connection itself, which is what makes the
+early delivery real rather than bookkeeping.
+
+**On a TLS pool it only moves the accounting.** The response waits for the event
+loop exactly as it does without the call, because that direct write is refused
+there: a TLS bufferevent holds plaintext in the buffer the write would drain and
+the encrypted session on the descriptor it would drain it to, so writing one to
+the other would put the response on the wire in the clear. This is the same
+constraint that makes `http.stream` incompatible with `http.tls_cert`.
+
+`fastcgi_finish_request()` remains disabled on http-direct pools rather than
+being pointed at this function; that is a separate decision about framework
+compatibility, not an oversight.
+
+Measured on the test box (`sapi/fpmng/tests/fpmng-http-direct-respond.phpt`,
+script sleeping 1500 ms after the call): the client has the whole response in
+well under 700 ms on both a buffered and a streaming pool. Without the direct
+write the same test measures 1501 ms — the full length of the sleep.
 
 ## TLS
 

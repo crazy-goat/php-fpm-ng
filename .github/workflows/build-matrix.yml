@@ -149,7 +149,14 @@ jobs:
   # release.
   build:
     needs: patches
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treebuild' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -389,7 +396,14 @@ jobs:
   # PASS=58, FAIL/ERROR=0, SKIP=0 of 58.
   fpmng-phpt-fiber:
     needs: patches
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treefiber' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
@@ -539,7 +553,14 @@ jobs:
   # lands in a PR that is already about the toolchain rather than on an
   # unrelated one.
   lint:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'fpmng' }}
+    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
+    # the reused php-src tree lives on the runner's own disk. Unpinned, this
+    # job landed on a different one of the three runners on nearly every run
+    # and found a cold tree there (measured on run 34592253321: build reused,
+    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
+    # costs queueing when two pull requests build at once -- which is also
+    # what keeps two jobs off one tree.
+    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treelint' }}
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:

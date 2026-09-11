@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: rejected directives and illegal executors fail at configuration validation (fpm_pool_type.c rejects[], docs/NOTES.md §3i/3o)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

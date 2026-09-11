@@ -2,7 +2,8 @@
 fpm-ng: fiber executor makes stream_select() suspend the request, not block the worker (task 006)
 --SKIPIF--
 <?php
-include "skipif.inc";
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
 
 if (!function_exists('stream_socket_server') || !function_exists('stream_select')) {
     die('skip requires stream transports');

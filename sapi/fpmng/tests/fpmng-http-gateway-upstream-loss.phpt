@@ -1,7 +1,10 @@
 --TEST--
 fpm-ng: HTTP gateway logs an upstream that took the whole request and never answered apart from one that vanished mid-write (issue #118)
 --SKIPIF--
-<?php include "skipif.inc"; ?>
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('http');
+?>
 --FILE--
 <?php
 

@@ -38,7 +38,6 @@ chdir = $dir
 pm = static
 pm.max_children = 1
 php_admin_value[opcache.enable] = 0
-php_admin_value[max_execution_time] = 0
 $extraConfig
 EOT;
 

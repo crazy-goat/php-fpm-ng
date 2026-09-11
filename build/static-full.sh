@@ -92,5 +92,51 @@ file_output=$(file "$artifact")
 echo "$file_output"
 echo "$file_output" | grep -q 'static-pie linked' ||
   fail "artefact is not static-pie linked"
+# Issue #77: the configure line above is not evidence. It was already wrong
+# once -- --enable-filter and --enable-ctype were missing, configure and the
+# build were both happy, and the failure surfaced three layers away as
+# `Error: Invalid URI: tcp://mysql:3306` from a userland library. So assert
+# what is *in the artefact*, not what was asked for on the command line.
+#
+# `strings` rather than running the binary: the artefact is a musl static-pie
+# php-fpm, and this script must also work when it is cross-inspected outside
+# the container that produced it. An internal function's name is in the
+# binary verbatim because the function table stores it.
+#
+# One entry per named consumer. An assertion nobody can explain gets deleted
+# the first time it is inconvenient, so each line says who breaks without it.
+# This is a change detector for the extension set, not a feature inventory:
+# do not grow it beyond symbols something concrete in this repository needs.
+#
+# Demonstrated on 2026-09-11, two full Alpine builds of the same tree that
+# differed only in the configure line. With --enable-filter present:
+#   static-full.sh: extension-set assertions ok
+#   static-full.sh: PASS
+# With --enable-filter removed, configure and `make` still succeeded and the
+# artefact was still a valid static-pie ELF -- which is exactly the failure
+# mode this block exists for -- and the script stopped with:
+#   static-full.sh: FAIL: the artefact has no 'filter_var':
+#   examples/http-direct-worker-mysql cannot open a connection without
+#   ext-filter. The extension set in the configure line above changed.
+symbols=$(strings -a "$artifact")
+assert_symbol() {
+  echo "$symbols" | grep -qw -- "$1" ||
+    fail "the artefact has no '$1': $2. The extension set in the configure line above changed."
+}
+# ext-filter: league/uri-interfaces calls filter_var($host, FILTER_VALIDATE_IP)
+# under amphp/socket's connect(); amphp/dns requires it outright.
+assert_symbol filter_var "examples/http-direct-worker-mysql cannot open a connection without ext-filter"
+# ext-ctype: daverandom/libdns parses the name amphp/dns resolves.
+assert_symbol ctype_digit "amphp/dns cannot resolve a hostname without ext-ctype"
+# ext-json: a hard requirement of amphp/dns, and how every worker example
+# answers a request.
+assert_symbol json_encode "amphp/dns requires ext-json, and the worker examples encode their replies with it"
+# ext-openssl: amphp/socket's TLS, and this SAPI's own https listener.
+assert_symbol openssl_encrypt "amphp/socket TLS and the pool's http.tls_* listener need ext-openssl"
+# The SAPI's own builtins: --enable-fpmng is what this binary exists for, and
+# a worker handler cannot answer a request without this one.
+assert_symbol fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
+echo "static-full.sh: extension-set assertions ok"
+
 cp "$artifact" /out/php-fpm-ng-full
 echo "static-full.sh: PASS"

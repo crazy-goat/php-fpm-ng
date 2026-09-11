@@ -80,6 +80,9 @@ key_input() {
 		sort -z | xargs -0 cat 2>/dev/null
 	cat "$REPO"/patches/*.patch "$REPO"/patches/php-*/*.patch 2>/dev/null
 	cat "$REPO/build/prepare.sh"
+	# This script decides what the tree contains and how it is reused, so a
+	# change to it must invalidate the trees it produced.
+	cat "$REPO/build/ci-build-tree.sh"
 	${CC:-cc} --version 2>&1 | head -1
 	${CC:-cc} -dumpmachine 2>&1
 }
@@ -111,6 +114,14 @@ else
 	git init -q "$TREE"
 	git -C "$TREE" fetch -q --depth 1 "$SRC_REPO" "$SRC_REF"
 	git -C "$TREE" checkout -q FETCH_HEAD
+	# Identity of THIS checkout, for anything that caches build output keyed on
+	# the tree (build/static-full.sh keeps an out-of-tree /build). The content
+	# key above cannot serve: it is equal for two different checkouts of the
+	# same inputs, and a /build full of objects whose generated sources (php
+	# writes zend_ini_scanner_defs.h and friends into srcdir) were deleted with
+	# the previous tree fails with "No rule to make target" -- observed on
+	# issue #206.
+	date +%s.%N > "$TREE/.fpmng-ci-epoch"
 fi
 
 # Always, reused or not: prepare.sh deletes and rebuilds sapi/fpmng from

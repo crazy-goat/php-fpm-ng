@@ -112,6 +112,21 @@ static struct bufferevent *fpm_http_direct_tls_bevcb(struct event_base *base, vo
 	return bev;
 }
 
+ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events)
+{
+	/* The one place both headers are in scope, so the one place the two names
+	 * for "nothing to write" can be checked against each other. */
+	enum { idle_values_match =
+		1 / (FPM_HTTP_DIRECT_TLS_WRITE_IDLE == FPM_HTTP_TLS_WRITE_IDLE) };
+	(void) idle_values_match;
+	return fpm_http_tls_write_output(bev, poll_events);
+}
+
+void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
+{
+	fpm_http_tls_notify_written(bev);
+}
+
 int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -229,6 +244,18 @@ int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 		return -1;
 	}
 	return 0;
+}
+
+ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events)
+{
+	(void) bev;
+	*poll_events = 0;
+	return -1;
+}
+
+void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
+{
+	(void) bev;
 }
 
 int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)

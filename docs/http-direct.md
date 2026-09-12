@@ -432,15 +432,35 @@ never sees a silently short 200. The worker's memory does not grow after the
 abort: output from the still-running script is discarded, and the script runs to
 its normal shutdown.
 
-**`http.stream` cannot be combined with `http.tls_cert`**; the pool is rejected
-at startup. To write from inside a running request without re-entering the event
-loop — libevent refuses a reentrant `event_base_loop()` on the base it is
-already dispatching from — the writer drives the connection's own descriptor
-directly, which is only correct while the descriptor and the bufferevent carry
-the same bytes. On a TLS connection they do not. libevent 2.1.12 offers no way
-out: `be_openssl_flush()` is an unimplemented stub
-(`bufferevent_openssl.c:1259`) and `bufferevent_base_set()` refuses a non-socket
-bufferevent.
+**Over TLS too, since issue #195.** The combination used to be refused at
+startup: writing from inside a running request means not re-entering the event
+loop — libevent refuses a reentrant `event_base_loop()` on the base it is already
+dispatching from — so the writer drove the connection's own descriptor, which is
+only correct while the descriptor and the bufferevent carry the same bytes, and
+on a TLS connection they do not. libevent 2.1.12 offers no way out of its own:
+`be_openssl_flush()` is an unimplemented stub (`bufferevent_openssl.c:1259`) and
+`bufferevent_base_set()` refuses a non-socket bufferevent.
+
+What the pool does instead is what libevent's own writer does, on our stack: the
+write step is a function pointer chosen once per child, and on a TLS pool it
+peeks the bufferevent's output buffer, hands the peeked bytes to `SSL_write()`
+and drains what OpenSSL took — the same three calls as `do_write()`
+(`bufferevent_openssl.c:654`), minus the loop. Two properties of libevent make
+that safe rather than a second writer racing the first: the pool uses
+`bufferevent_openssl_socket_new()`, and in socket mode (no underlying
+bufferevent) libevent never writes from the buffer callback, so nothing can be
+in flight while the request callback holds the loop; and libevent sets
+`SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER` (`bufferevent_openssl.c:1369`), which
+makes retrying a blocked write from a re-peeked buffer legal as long as the
+retry is at least as long as the one that blocked — so the pool hands OpenSSL
+the peeked vector's whole length, the same length `do_write()` would pass, and
+never a clamped one. Unlike the
+plaintext step, the TLS one must *not* freeze the output buffer around the
+write: an OpenSSL bufferevent never freezes it (the freeze belongs to
+`bufferevent_socket_new()`, `bufferevent_sock.c:373`), and leaving it frozen
+makes libevent's own `evbuffer_drain()` fail while `SSL_write()` keeps
+succeeding — measured as the terminating chunk written ~542,000 times in a tight
+loop after an otherwise correct 16 MiB body.
 
 ### Measured results (Intel i7-6700T, 8 threads, poligon, 2026-09-11)
 
@@ -504,12 +524,11 @@ would not put a single byte on the wire until the script returned. So the call
 writes the finished response to the connection itself, which is what makes the
 early delivery real rather than bookkeeping.
 
-**On a TLS pool it only moves the accounting.** The response waits for the event
-loop exactly as it does without the call, because that direct write is refused
-there: a TLS bufferevent holds plaintext in the buffer the write would drain and
-the encrypted session on the descriptor it would drain it to, so writing one to
-the other would put the response on the wire in the clear. This is the same
-constraint that makes `http.stream` incompatible with `http.tls_cert`.
+**On a TLS pool it does the same thing** (issue #195): the early write goes
+through the same per-child write step as streaming does, so the finished
+response is encrypted and put on the wire from inside the call rather than left
+for the event loop. Before #195 the direct write was refused on such a pool and
+the call moved only the accounting.
 
 `fastcgi_finish_request()` remains disabled on http-direct pools rather than
 being pointed at this function; that is a separate decision about framework

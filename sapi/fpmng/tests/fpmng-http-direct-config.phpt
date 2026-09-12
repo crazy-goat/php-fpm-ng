@@ -60,9 +60,13 @@ $cases = [
      * executor has exactly one request in flight, so an unbounded wait would
      * take the whole pool down with a single stalled reader. */
     'stream-without-timeout' => [$base . "\nhttp.stream = yes\nhttp.stream_write_timeout = 0", 'http.stream requires http.stream_write_timeout > 0'],
-    /* issue #56. The streaming writer reaches past the bufferevent to the
-     * descriptor, which on a TLS connection would send plaintext. */
-    'stream-with-tls' => [$base . "\nhttp.stream = yes\nhttp.tls_cert = /missing.pem\nhttp.tls_key = /missing.pem", 'http.stream cannot be combined with http.tls_cert'],
+    /* http.stream + http.tls_cert used to be refused here, because the
+     * streaming writer reached past the bufferevent to the descriptor and on a
+     * TLS connection that sends plaintext. Since issue #195 the writer hands
+     * the same buffer to SSL_write() instead and the combination is supported;
+     * what proves it is fpmng-http-direct-tls-streaming.phpt, which streams
+     * 16 MiB over TLS, rather than a line here -- a config case would need a
+     * readable certificate to get past the check that reads it. */
     /* Parsed in the master so a typo stops -t. Left to the child it would be
      * a fork loop: the child can only exit, and the master replaces it. */
     'bad-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1, not-an-ip", "listen.allowed_clients: 'not-an-ip' is not a valid IP address"],
@@ -118,7 +122,6 @@ traversal: rejected
 unbounded-body: rejected
 unbounded-timeout: rejected
 stream-without-timeout: rejected
-stream-with-tls: rejected
 bad-acl: rejected
 negative-max-connections: rejected
 per-client-above-total: rejected

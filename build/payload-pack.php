@@ -15,6 +15,13 @@
  * Usage:
  *   payload-pack.php append --binary=PATH --kind=distribution --dir=DIR [--prefix=P]
  *   payload-pack.php list   --binary=PATH
+ *   payload-pack.php digest --dir=DIR [--prefix=P]
+ *
+ * `digest` prints the SHA-256 of the archive `append` would build from the same
+ * directory, without touching a binary. build/embed-payload.sh compares it with
+ * what a binary already carries, which is how embedding stays idempotent on a
+ * build tree that is reused between CI runs -- appending on every run would
+ * grow the binary by one archive each time.
  */
 
 const MAGIC = 'FPMNGPY1';
@@ -127,6 +134,12 @@ function archive(string $dir, string $prefix): string
 
 $command = $argv[1] ?? '';
 $opts = options($argv);
+
+if ($command === 'digest') {
+    echo hash('sha256', archive($opts['dir'] ?? fail('--dir is required'), $opts['prefix'] ?? '')), "\n";
+    exit(0);
+}
+
 $binary = $opts['binary'] ?? fail('--binary is required');
 
 if ($command === 'list') {
@@ -136,7 +149,7 @@ if ($command === 'list') {
     exit(0);
 }
 if ($command !== 'append') {
-    fail("usage: payload-pack.php append|list --binary=PATH [...]");
+    fail("usage: payload-pack.php append|list|digest [...]");
 }
 
 $kind = KINDS[$opts['kind'] ?? ''] ?? fail('--kind must be distribution or application');

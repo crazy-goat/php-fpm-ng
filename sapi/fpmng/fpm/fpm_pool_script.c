@@ -217,6 +217,9 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 			if (zend_stream_open(&file_handle) == FAILURE) {
 				zlog(ZLOG_ERROR, "[pool %s] cannot open embedded script '%s'",
 					pool_name, script_path);
+				/* zend_stream_init_filename() emalloc'd the name; nothing else
+				 * frees it on this branch. */
+				zend_destroy_file_handle(&file_handle);
 				EG(exit_status) = 255;
 			} else {
 				php_execute_script(&file_handle);

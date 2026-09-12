@@ -78,6 +78,11 @@ known issues: [`docs/NOTES.md`](docs/NOTES.md).
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
 
+`pool.type = supervisor` restarts a script that exits 0 with no delay, on
+purpose — the script sets the pace, and a script that returns instead of
+looping now says so in the log. Who decides the interval, and the fast-restart
+warning: [`docs/supervisor.md`](docs/supervisor.md).
+
 A `cron`, `supervisor`, `http` or `http-direct` pool answers `pm.status_path`
 and `pm.metrics_path` on an operator listener of its own rather than on the
 socket carrying its traffic — the directives, the default of `127.0.0.1:8080`,

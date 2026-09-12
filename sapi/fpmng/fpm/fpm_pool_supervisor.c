@@ -95,7 +95,31 @@ struct fpm_supervisor_shared_s {
 	 * subtraction is done where the number is read (fpm_pool_supervisor_status)
 	 * so that this field stays a plain count of an event that happened. */
 	unsigned long starts;
+
+	/* Issue #122: the fast-restart warning. With restart = always an exit 0 is
+	 * the end of one work unit and the next one starts at once -- the script
+	 * sets the pace, deliberately (see the exit_code == 0 branch below). A
+	 * script that returns instead of looping therefore spins a whole core with
+	 * nothing in the log; measured at 12086 runs per second. These three fields
+	 * buy a single WARNING for that case and change no behaviour.
+	 *
+	 * Shared rather than local for the same reason as "starts": the streak must
+	 * survive this child dying and being respawned, which is one of the two ways
+	 * the script starts again. */
+	unsigned long fast_runs;		/* consecutive runs shorter than FPM_SUPERVISOR_FAST_RUN_MS */
+	unsigned long fast_started_ms;		/* monotonic ms at the start of the current streak */
+	unsigned char fast_warned;		/* 1 = already warned about this streak */
 };
+
+/* A run this short did no useful work of its own: it is one PHP startup and
+ * shutdown and little else. Deliberately not a directive -- it is the point at
+ * which a message is worth printing, not a policy anyone should tune. */
+#define FPM_SUPERVISOR_FAST_RUN_MS 5
+
+/* And this many of them in a row before saying anything. High enough that a
+ * script legitimately doing short bursts of work is never warned about, low
+ * enough that an operator mistake is reported within a second of starting. */
+#define FPM_SUPERVISOR_FAST_RUN_STREAK 1000
 
 struct fpm_supervisor_registry_s {
 	struct fpm_worker_pool_s *wp;
@@ -296,11 +320,27 @@ static void fpm_pool_supervisor_park(void) /* {{{ */
 }
 /* }}} */
 
+/* Monotonic milliseconds. CLOCK_MONOTONIC rather than time(NULL) because the
+ * question here is "how long did that take", at a resolution time(NULL) does
+ * not have, and a clock the operator can step must not be able to invent or
+ * erase a streak. */
+static unsigned long fpm_pool_supervisor_now_ms(void) /* {{{ */
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		return 0;
+	}
+	return (unsigned long) ts.tv_sec * 1000UL + (unsigned long) (ts.tv_nsec / 1000000L);
+}
+/* }}} */
+
 /* Backoff and the "should we try again?" decision, applied between subsequent
  * script executions in the SAME process and also by every fresh respawn after a
  * crash (because shared memory survives process death). */
 static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
-		struct fpm_supervisor_shared_s *shared, int exit_code, time_t duration) /* {{{ */
+		struct fpm_supervisor_shared_s *shared, int exit_code, time_t duration,
+		unsigned long duration_ms) /* {{{ */
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
 	int wants_retry;
@@ -329,6 +369,41 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		 * immediately, without artificial throttling on our side. */
 		shared->failures = 0;
 		shared->next_allowed_start = 0;
+
+		/* Issue #122: that contract is the right one, and it is also indis-
+		 * tinguishable from a script that was meant to loop and returns instead.
+		 * The decision was to say so once and change nothing: no floor, no new
+		 * directive, no delay. An operator who meant it loses one log line; an
+		 * operator who did not gets told which of the two mistakes it is. */
+		if (duration_ms < FPM_SUPERVISOR_FAST_RUN_MS) {
+			unsigned long now_ms = fpm_pool_supervisor_now_ms();
+
+			if (shared->fast_runs == 0) {
+				shared->fast_started_ms = now_ms;
+			}
+			shared->fast_runs++;
+
+			if (shared->fast_runs >= FPM_SUPERVISOR_FAST_RUN_STREAK && !shared->fast_warned) {
+				unsigned long elapsed_ms = now_ms - shared->fast_started_ms;
+				unsigned long per_second = elapsed_ms > 0
+					? shared->fast_runs * 1000UL / elapsed_ms
+					: shared->fast_runs;
+
+				shared->fast_warned = 1;
+				zlog(ZLOG_WARNING, "[pool %s] supervisor: %lu consecutive runs of '%s' finished in under %dms each "
+					"(about %lu restarts per second, one core spent on PHP startup and shutdown). "
+					"supervisor.restart = always restarts on exit 0 at once, by design -- the script sets the pace. "
+					"If it was meant to keep running, it is returning early; if it was meant to run once, "
+					"set supervisor.restart = never. See docs/supervisor.md (issue #122)",
+					c->name, shared->fast_runs, c->supervisor_script,
+					FPM_SUPERVISOR_FAST_RUN_MS, per_second);
+			}
+		} else {
+			/* One run that did some work re-arms the warning: the next streak is
+			 * a new fact about the pool, not a repeat of the one already reported. */
+			shared->fast_runs = 0;
+			shared->fast_warned = 0;
+		}
 		return;
 	}
 
@@ -406,6 +481,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	for (;;) {
 		time_t now, started, duration;
+		unsigned long started_ms, duration_ms;
 		int exit_code;
 
 		if (supervisor_term_requested) {
@@ -421,6 +497,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 
 		started = time(NULL);
+		started_ms = fpm_pool_supervisor_now_ms();
 		shared->starts++;
 		shared->last_start = started;
 		shared->running = 1;
@@ -429,8 +506,9 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->last_exit_code = exit_code;
 		shared->has_last_exit_code = 1;
 		duration = time(NULL) - started;
+		duration_ms = fpm_pool_supervisor_now_ms() - started_ms;
 
-		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration);
+		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms);
 
 		if (shared->terminal) {
 			break;

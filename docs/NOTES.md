@@ -926,6 +926,12 @@ see section 9 (trademark).
 
 ## 3o. `pool.type = supervisor` — implemented and verified (2026-09-05)
 
+**Amended 2026-09-13 (issue #122).** The restart contract below is unchanged —
+an exit 0 under `restart = always` still starts the next run with no delay —
+but a script that returns instead of looping now gets one WARNING saying so.
+Nothing is throttled and no directive was added; see
+[`supervisor.md`](supervisor.md).
+
 New files `sapi/fpmng/fpm/fpm_pool_supervisor.c` + `.h`, one line in
 `fpm_pool_types[]` (`fpm_pool_type.c`), and directives in `fpm_conf.c`/`fpm_conf.h`.
 Five directives from the task (`supervisor.script`, `.processes`, `.restart`,

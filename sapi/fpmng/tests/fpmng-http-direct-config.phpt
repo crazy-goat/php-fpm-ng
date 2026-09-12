@@ -50,9 +50,6 @@ $cases = [
     'worker-ping' => [$base . "\npool.executor = worker\nping.path = /ping", "'ping.path' is not supported"],
     'worker-status' => [$base . "\npool.executor = worker\npm.status_path = /status", "'pm.status_path' is not supported"],
     'worker-access-log' => [$base . "\npool.executor = worker\naccess.log = /dev/null", "'access.log' is not supported"],
-    /* Refused for both: it asks for a second listening socket served by a
-     * second process, and a direct child owns exactly one listener. */
-    'status-listen' => [$base . "\npm.status_listen = 127.0.0.1:1", "'pm.status_listen' is not supported"],
     'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
     'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
     'unbounded-timeout' => [$base . "\nhttp.read_timeout = 0", 'http.read_timeout > 0'],
@@ -94,6 +91,12 @@ foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static
           "\nlisten.allowed_clients = 127.0.0.1",
           "\nping.path = /ping\nping.response = alive",
           "\npm.status_path = /status",
+          /* Accepted since issue #275: the status page moved onto the operator
+           * endpoint, so the directive that names where that endpoint binds has
+           * something to name. It was refused before, when it could only have
+           * asked for a second FastCGI socket a direct child has nowhere to
+           * put. */
+          "\npm.status_path = /status\npm.status_listen = 127.0.0.1:9001",
           "\naccess.log = /dev/null",
           "\naccess.log = /dev/null\naccess.format = %R %m %r %s\naccess.suppress_path[] = /ping",
           "\nchroot = /"] as $extra) {
@@ -117,7 +120,6 @@ gateway-acl: rejected
 worker-ping: rejected
 worker-status: rejected
 worker-access-log: rejected
-status-listen: rejected
 traversal: rejected
 unbounded-body: rejected
 unbounded-timeout: rejected

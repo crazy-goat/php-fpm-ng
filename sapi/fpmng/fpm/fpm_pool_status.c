@@ -316,9 +316,15 @@ void fpm_pool_status_render_json(struct fpm_operator_buf_s *b, struct fpm_worker
  * is what it was before issue #274 and what it stays. The per-pool endpoint
  * built on the same server has a configurable path per format and one pool to
  * report on -- see fpm_operator_endpoint.c. */
-static void fpm_pool_status_dispatch(void *ctx, const char *path, struct fpm_operator_reply_s *reply) /* {{{ */
+static void fpm_pool_status_dispatch(void *ctx, const char *path, const char *query,
+	struct fpm_operator_reply_s *reply) /* {{{ */
 {
 	(void) ctx;
+	/* Neither page has a variant to ask for: /metrics is Prometheus text and
+	 * /status is JSON, always. A query string is accepted and ignored rather
+	 * than turned into a 404, so that a scraper appending its own parameters
+	 * still gets the page. */
+	(void) query;
 
 	if (!strcmp(path, "/metrics")) {
 		fpm_pool_status_render_prometheus(&reply->body, NULL);

@@ -8,6 +8,7 @@ if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux /proc');
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 
 /* Issue #65. Retiring is one child stepping out of a pool that keeps running,
  * which is why it is not SIGQUIT: SIGQUIT is the pool winding down and answers
@@ -29,6 +30,11 @@ PHP);
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $port = $base + 31;
 $solo = $base + 32;
+/* The status pages of both pools, on one operator listener (issue #275): the
+ * page is no longer answered by the child being retired, which is what makes
+ * "the retiring child is still on the page" an observation about the pool
+ * rather than about whether that one child still has an event loop. */
+$ops = '127.0.0.1:' . ($base + 33);
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}
@@ -41,6 +47,7 @@ pm.max_children = 2
 chdir = $root
 http.front_controller = /front.php
 pm.status_path = /status
+pm.status_listen = $ops
 [solo]
 listen = 127.0.0.1:$solo
 pool.type = http-direct
@@ -48,7 +55,8 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
+pm.status_path = /solo-status
+pm.status_listen = $ops
 ; Also the bound on how long a retiring child waits for the connections it
 ; holds, which is what this pool exercises: the reader keeps one open.
 http.read_timeout = 1000
@@ -120,12 +128,13 @@ function once(int $port, string $path): array
 
 /* The per-child rows of ?full, keyed by pid. Only live slots: a slot whose
  * child has gone prints its totals but no pid. */
-function workers(int $port): array
+function workers(string $path): array
 {
-    [$status, $body] = once($port, '/status?json&full');
-    verify($status === 200, "status?json&full: $status");
+    global $ops;
+
+    $body = fpmng_operator_body($ops, $path . '?json&full');
     $decoded = json_decode($body, true);
-    verify(is_array($decoded), "status?json&full is not JSON: $body");
+    verify(is_array($decoded), "$path?json&full is not JSON: $body");
     $out = [];
     foreach ($decoded['workers'] as $row) {
         if ($row['live']) {
@@ -156,8 +165,8 @@ try {
     /* 1. The pid is on the status row, because it is the address of the
      * signal: without it an operator reading a slot would have to go looking
      * in ps and guess which child it just read about. */
-    $rows = until(function () use ($port) {
-        $w = workers($port);
+    $rows = until(function () {
+        $w = workers('/status');
         return count($w) === 2 ? $w : null;
     }, 15, 'both children to appear on the status page');
     foreach ($rows as $pid => $row) {
@@ -174,8 +183,8 @@ try {
      * signal, this response would be truncated or refused. */
     $slow = connect($port);
     fwrite($slow, "GET /?sleep=700 HTTP/1.1\r\nHost: test\r\n\r\n");
-    $busy = until(function () use ($port) {
-        foreach (workers($port) as $pid => $row) {
+    $busy = until(function () {
+        foreach (workers('/status') as $pid => $row) {
             if ($row['active requests'] > 0) {
                 return $pid;
             }
@@ -212,8 +221,8 @@ try {
      * written for this: a child that exits on its own is replaced unless the
      * master marked it for idle_kill, so retiring deliberately does not touch
      * that flag. */
-    until(function () use ($port, $busy) {
-        $w = workers($port);
+    until(function () use ($busy) {
+        $w = workers('/status');
         return count($w) === 2 && !isset($w[$busy]) ? $w : null;
     }, 15, "child $busy to exit and be replaced");
     echo "replaced: ok\n";
@@ -226,7 +235,7 @@ try {
      * behind a load balancer does. */
     $served = 0;
     for ($round = 0; $round < 4; $round++) {
-        $before = workers($port);
+        $before = workers('/status');
         $victim = array_key_first($before);
         $tester->signal('USR1', $victim);
         /* Every answer during the drain, not a sample of them: one 503 here
@@ -236,7 +245,7 @@ try {
             verify($status === 200, "a request was answered $status during a rolling retire");
             verify((int) $body > 1, "a request came back with no pid: $body");
             $served++;
-            $w = workers($port);
+            $w = workers('/status');
             return count($w) === 2 && !isset($w[$victim]) ? $w : null;
         }, 15, "child $victim to be retired and replaced");
     }
@@ -254,9 +263,13 @@ try {
     verify($status === 200, "solo pool: $status");
     $tester->signal('USR1', (int) $pid);
     $tester->signal('USR1', (int) $pid);
-    [$status, $body, $close] = fetch($reader, '/status?json&full');
-    verify($status === 200, "solo status during retire: $status");
-    verify($close, 'the status answer of a retiring child had no Connection: close');
+    /* A request the retiring child does answer, on the connection it is
+     * draining: the answer arrives and it says the connection ends, which is
+     * how a keep-alive client is moved to a sibling of its own accord. */
+    [$status, , $close] = fetch($reader, '/');
+    verify($status === 200, "solo request during retire: $status");
+    verify($close, 'a retiring child answered without Connection: close');
+    $body = fpmng_operator_body($ops, '/solo-status?json&full');
     $decoded = json_decode($body, true);
     verify(is_array($decoded), "solo status is not JSON: $body");
     verify($decoded['retiring children'] === 1,
@@ -267,8 +280,8 @@ try {
 
     /* 6. And it goes away with the child, rather than being inherited by the
      * replacement that takes the same slot. */
-    until(function () use ($solo, $pid) {
-        $w = workers($solo);
+    until(function () use ($pid) {
+        $w = workers('/solo-status');
         return count($w) === 1 && !isset($w[(int) $pid]) && $w[array_key_first($w)]['retiring'] === 0 ? $w : null;
     }, 15, 'the solo child to be replaced by one that is not retiring');
     echo "replacement is not retiring: ok\n";

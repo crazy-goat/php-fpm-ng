@@ -158,9 +158,7 @@ above come from one sitting on one toolchain for that reason.
   directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
-- `chdir` must be absolute. `pm.status_listen` is rejected on both executors: it
-  asks for a second listening socket served by a second process, and a direct
-  child owns exactly one listener — the pool's.
+- `chdir` must be absolute.
 - The FastCGI-specific `.user.ini` / per-host/per-directory php.ini activation
   hook is not used. Use php.ini and the pool's `php_value` / `php_admin_value`.
 - Requests have a 64 KiB header limit and a body limit of 32 MiB by default,
@@ -695,6 +693,7 @@ http.front_controller = /index.php
 ping.path = /ping
 ping.response = pong
 pm.status_path = /status
+pm.status_listen = 127.0.0.1:8080
 access.log = /var/log/php-fpm/app.access.log
 access.format = "%R - %u %t \"%m %r%Q%q\" %s %{milli}d %{kilo}M"
 access.suppress_path[] = /ping
@@ -704,13 +703,27 @@ chroot = /srv/jail
 
 ### `ping.path` and `pm.status_path`
 
-Both are answered by the worker's own event loop on the pool's listener, before
-any PHP request is started, and neither counts against `pm.max_requests`. They
-are matched against the request path with the query string cut off, and matched
-*whole*: `/statuses` is the application's URL, not the status page. There is no
-percent-decoding — the directive is a literal in the pool file and upstream
-matches it literally too, so `/%73tatus` is not a way past a proxy rule written
-against the documented spelling.
+**They are on two different sockets.**
+
+`ping.path` is answered by the worker's own event loop on the pool's listener,
+before any PHP request is started, and does not count against
+`pm.max_requests`. It is a liveness probe for whatever is in front of the pool,
+so that is where it belongs.
+
+`pm.status_path` is answered by the pool's **operator endpoint**, on
+`pm.status_listen` (default `127.0.0.1:8080`) — see
+[`docs/operator-endpoint.md`](operator-endpoint.md). It used to be on the pool's
+own listener; issue #275 moved it, unchanged. The page, its fields, its two
+flags and its headers are exactly what they were; what changed is that the
+scrape is no longer one of the pool's own requests, so it is in none of the
+counters below and in no `access.log`. On the pool's own listener the path is
+the application's again, like any other URL.
+
+Both are matched against the request path with the query string cut off, and
+matched *whole*: `/statuses` is not `/status`. There is no percent-decoding —
+the directive is a literal in the pool file and upstream matches it literally
+too, so `/%73tatus` is not a way past a proxy rule written against the
+documented spelling.
 
 `pm.status_path` answers plain text, or JSON for `?json`, with the same
 `Expires`/`Cache-Control` headers upstream's `fpm_status.c` sends. The fields:
@@ -721,7 +734,7 @@ against the documented spelling.
 | `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
 | `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
 | `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
-| `non-php requests` | static files, pings and status pages: answered without starting a PHP request |
+| `non-php requests` | static files and pings: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
 | `active requests` | PHP requests in flight right now |
 | `direct schema` | the version of the direct-specific fields below (currently `1`) |
@@ -861,9 +874,15 @@ Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
 method, the duration). That part is still absent: the scoreboard's per-process
 slots describe a FastCGI request, and a direct child's request is not one.
 
-`pm.status_listen` stays rejected on both executors: it asks for a second
-listening socket served by a second process, and a direct child owns exactly
-one listener — the pool's.
+`pm.status_listen` names where the page is served since issue #275. It was
+rejected before that, when it could only have asked for a second FastCGI socket
+a direct child has nowhere to put. On `pool.executor = worker` the page is not
+served at all, because `pm.status_path` is rejected there for the reason below.
+
+The page is rendered by a process that is not one of this pool's children, which
+is why every number on it comes from shared memory: the per-slot counters the
+master allocates before the first fork, and the pool's scoreboard. That is the
+same foreign read `pool.type = status` has always done.
 
 ### Retiring one child (`SIGUSR1`)
 
@@ -953,10 +972,12 @@ What differs from a fastcgi pool:
 - `%r` is the request path. On a fastcgi pool it is `SCRIPT_NAME`, which for a
   front-controller application is always `/index.php`; here the path is what
   the client asked for, and `%Q%q` still carries the query string exactly once.
-- Responses that never ran PHP — a static file, a ping, the status page, a
-  `403` or a `503` — are logged too, with the fields that do not apply (`%M`,
-  `%C`, `%f`, `%u`) left at zero or `-` rather than carried over from whatever
-  this child served last.
+- Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
+  are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
+  left at zero or `-` rather than carried over from whatever this child served
+  last. Scrapes of `pm.status_path` are not among them: since issue #275 they
+  never reach this pool.
+
 - `access.suppress_path[]` matches the same request path.
 
 Under `pool.executor = worker` all three of `ping.path`, `pm.status_path` and
@@ -976,8 +997,8 @@ allowed IPv4-mapped IPv6 entry). It shares the matcher with the gateway's
 It is enforced in the request callback, not at accept: libevent's
 `evhttp_set_bevcb()` runs before the peer address is known. The TCP connection
 is therefore accepted and the request answered `403`, which is also what the
-`http` gateway does. A refused request reaches neither the static file server,
-nor the status page, nor PHP, and is counted as `refused acl` (and inside the
+`http` gateway does. A refused request reaches neither the static file server
+nor PHP, and is counted as `refused acl` (and inside the
 `refused requests` sum). A malformed address in the list is rejected by
 `php-fpm -t` and at start-up,
 before any child forks; it is fatal again in the child, which would otherwise

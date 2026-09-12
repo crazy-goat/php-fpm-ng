@@ -1,8 +1,8 @@
 /* fpm-ng: the operator surface of pool.type = http-direct (issue #59) --
  * listen.allowed_clients, ping.path and pm.status_path.
  *
- * These three were refused by the type until now, and each was refused for the
- * same reason: a direct pool answers the client from the child's own event
+ * These three were refused by the type until issue #59, and each was refused for
+ * the same reason: a direct pool answers the client from the child's own event
  * loop, so none of the code that implements them for a fastcgi pool is on the
  * path. listen.allowed_clients is enforced by fastcgi.c at accept time,
  * ping/status by fpm_main.c between fcgi_accept_request() and the script. A
@@ -119,10 +119,30 @@ void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
  * which is treated as not allowed whenever a list is configured. */
 int fpm_http_direct_ops_allowed(struct fpm_http_direct_ops *ops, const char *peer);
 
-/* ping.path / pm.status_path. Answers and returns 1 when the request is one of
- * them, 0 when it is not and the caller should carry on. `status` and `bytes`
- * receive what was sent, for the access log. */
+/* ping.path. Answers and returns 1 when the request is it, 0 when it is not and
+ * the caller should carry on. `status` and `bytes` receive what was sent, for
+ * the access log.
+ *
+ * pm.status_path used to be answered here too. Issue #275 moved it onto the
+ * operator endpoint's listener (fpm_pool_type_s.operator_status ->
+ * fpm_http_direct_ops_render_status below), so that the directive names one
+ * page on one socket. ping.path stayed: it is a liveness probe for whatever is
+ * in front of the pool, so the public listener is where it belongs (#273,
+ * point 9). */
 int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp_request *http,
 	int *status, size_t *bytes);
+
+/* fpm_pool_type_s.operator_status for this type: the page above, rendered for
+ * `wp` into an operator HTTP response body. `query` is the request's query
+ * string without the '?', empty when there was none; "json" and "full" are the
+ * two flags it understands, exactly as they were on the old listener.
+ *
+ * Called in the operator endpoint's child, which is not one of this pool's
+ * children, so everything it reads is a shared segment: the per-slot counters
+ * the master allocated in fpm_http_direct_ops_init_main() and wp->scoreboard.
+ * The same foreign read pool.type = status has always done. */
+struct fpm_operator_reply_s;
+void fpm_http_direct_ops_render_status(struct fpm_worker_pool_s *wp, const char *query,
+	struct fpm_operator_reply_s *reply);
 
 #endif

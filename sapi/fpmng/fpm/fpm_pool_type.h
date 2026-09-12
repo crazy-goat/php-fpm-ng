@@ -13,6 +13,7 @@
 #include <time.h>
 
 struct fpm_worker_pool_s;
+struct fpm_operator_reply_s;
 
 /* State for a pool that does NOT handle requests (serves_requests = 0). For
  * fcgi/http pools (serves_requests = 1), the data shape is different
@@ -184,32 +185,28 @@ struct fpm_pool_type_s {
 	 * the name of a pool type. */
 	unsigned operator_endpoint:1;
 
-	/* This type still answers pm.status_path on its own request listener, so the
-	 * operator endpoint does not claim that path: one directive naming two pages
-	 * on two sockets is the thing #273 set out to remove. Set only for
-	 * http-direct, and only until #275.
+	/* How this type renders its status page on the operator endpoint. NULL is
+	 * the common case and means the generic per-pool JSON that
+	 * fpm_pool_status_render_json() produces for every type.
 	 *
-	 * Why http-direct is not moved with the others: its status page is not the
-	 * per-pool summary the other types get. It is rendered inside the child that
-	 * answers, reports per-child rows and per-connection counters
-	 * (fpm_http_direct_ops.c, issue #64), and is the only instrument three of this
-	 * repo's tests have for retirement, idle-signal handling and accept
-	 * distribution. Moving the path off the public listener before an external
-	 * process can render that page deletes the observation and puts the summary in
-	 * its place. What the endpoints report is #275 and #276; this field is how
-	 * #274 stops short of it, and #275 deletes the field.
+	 * It exists for http-direct, whose page is not that summary: it carries
+	 * per-connection counters and, on "?full", a row per child (issue #64), and
+	 * three of this repo's tests have nothing else to observe retirement, idle
+	 * signalling and accept distribution with. Issue #275 moved that page from
+	 * the pool's own listener onto the operator endpoint without changing a byte
+	 * of it, and this callback is how: the endpoint asks the type for its body
+	 * instead of knowing which types have an unusual one.
 	 *
-	 * pool.type = http is NOT here, although it also answered the path on its own
-	 * listener before #274. Its page was upstream's, produced by the in-child
-	 * handler from the same scoreboard the operator endpoint reads, so the
-	 * endpoint can render it and nothing is lost by moving it. The in-child
-	 * handler is suppressed for exactly the types this field does not cover --
-	 * see fpm_child_operator_endpoint_owns_status() in fpm_children.c.
+	 * Called in the operator endpoint's own child, which is not a child of the
+	 * pool being reported on. Everything it reads must therefore be shared
+	 * memory or configuration -- never the heap of the pool's children.
 	 *
-	 * pm.metrics_path is unaffected: it is a new directive with no second meaning
-	 * to collide with, so http-direct serves it on the operator listener from the
-	 * start. */
-	unsigned status_on_own_listener:1;
+	 * query is the request's query string with the '?' removed, empty when there
+	 * was none; use fpm_operator_http_has_flag() on it. The callback fills
+	 * reply->body and may set reply->content_type; the endpoint marks the reply
+	 * handled. */
+	void (*operator_status)(struct fpm_worker_pool_s *wp, const char *query,
+		struct fpm_operator_reply_s *reply);
 
 	/* This type exists to be created by fpm-ng itself and cannot be named in a
 	 * configuration: fpm_pool_type_get() will not return it and

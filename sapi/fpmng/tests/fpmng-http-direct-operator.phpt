@@ -5,6 +5,7 @@ fpm-ng: direct HTTP answers ping/status, writes access.log and honours listen.al
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 $root = sys_get_temp_dir() . '/fpmng-operator-' . getmypid();
 @mkdir($root);
 $access = $root . '/access.log';
@@ -17,6 +18,12 @@ PHP);
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $port = $base + 16;
 $denied = $base + 17;
+/* Where pm.status_path is answered since issue #275: an operator listener of
+ * its own, not the pool's public one. ping.path deliberately stayed on the
+ * public listener -- it is a liveness probe for whatever is in front of the
+ * pool (#273, point 9) -- so this test reads the two from two places, which is
+ * exactly the split it is here to pin down. */
+$ops = '127.0.0.1:' . ($base + 18);
 /* %r is the path and %q the query string, exactly as in a fastcgi pool, so the
  * same access.format an operator already has keeps producing the same line
  * here. %{milli}d, %M and %{...}o are in the format because they are the
@@ -36,6 +43,7 @@ http.front_controller = /front.php
 ping.path = /ping
 ping.response = alive
 pm.status_path = /status
+pm.status_listen = $ops
 access.log = $access
 access.format = "%R %m %r%Q%q %s %{milli}d %M %{X-Marker}o"
 access.suppress_path[] = /ping
@@ -108,9 +116,12 @@ try {
     expect('php body', $body, 'php:/app?x=1');
     echo "php: ok\n";
 
-    [$status, $headers, $body] = fetch($fp, '/status');
+    [$status, $headers, $body] = fpmng_operator_fetch($ops, '/status');
     expect('status status', $status, 200);
-    expect('status type', $headers['content-type'], 'text/plain');
+    expect('status type', $headers['content-type'], 'text/plain; charset=utf-8');
+    /* A monitoring page a proxy may cache is a monitoring page that lies, and
+     * the move to another listener did not drop the headers that say so. */
+    expect('status cache', $headers['cache-control'], 'no-cache, no-store, must-revalidate, max-age=0');
     foreach (['pool:', 'process manager:', 'start since:', 'accepted conn:', 'idle processes:',
               'active processes:', 'total processes:', 'max children reached:', 'requests:',
               'non-php requests:', 'refused requests:', 'active requests:', 'memory peak:'] as $field) {
@@ -124,9 +135,10 @@ try {
     if (!preg_match('/^process manager: +static$/m', $body)) {
         throw new RuntimeException("status pm:\n$body");
     }
-    /* One PHP request has ended by now, and the status page itself is not one:
-     * the counters have to tell those two apart, which is the whole reason a
-     * direct pool keeps its own. */
+    /* One PHP request and one ping have happened by now, and the counters tell
+     * them apart -- which is the whole reason a direct pool keeps its own. The
+     * scrape itself is in neither column since #275: it never reached this
+     * pool. */
     if (!preg_match('/^requests: +([1-9]\d*)$/m', $body)) {
         throw new RuntimeException("status requests:\n$body");
     }
@@ -135,7 +147,7 @@ try {
     }
     echo "status: ok\n";
 
-    [$status, $headers, $body] = fetch($fp, '/status?json');
+    [$status, $headers, $body] = fpmng_operator_fetch($ops, '/status?json');
     expect('json status', $status, 200);
     expect('json type', $headers['content-type'], 'application/json');
     $decoded = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
@@ -146,10 +158,18 @@ try {
     }
     echo "status json: ok\n";
 
-    /* "/statuses" is not "/status": the path is matched whole, so a longer URL
-     * that starts with it belongs to the application. */
-    [, , $body] = fetch($fp, '/statuses');
-    expect('prefix is not the endpoint', $body, 'php:/statuses');
+    /* "/statuses" is not "/status": the path is matched whole on the operator
+     * listener too, so a longer URL that starts with it is a 404 there and
+     * names the paths that would have worked. */
+    [$status, , $body] = fpmng_operator_fetch($ops, '/statuses');
+    expect('prefix is not the endpoint', $status, 404);
+    if (!str_contains($body, 'known paths: /status')) {
+        throw new RuntimeException("404 body does not name the known paths:\n$body");
+    }
+    /* And on the public listener the path the operator endpoint took over is
+     * the application's again: one directive, one page, one socket (#273). */
+    [, , $body] = fetch($fp, '/status');
+    expect('the public listener no longer answers it', $body, 'php:/status');
     echo "whole path: ok\n";
 
     fclose($fp);
@@ -168,13 +188,15 @@ try {
 
     /* The children write the log; give the last line time to land. */
     $lines = [];
-    for ($i = 0; $i < 50 && count($lines) < 4; $i++) {
+    for ($i = 0; $i < 50 && count($lines) < 2; $i++) {
         usleep(100000);
         $lines = array_values(array_filter(explode("\n", (string) @file_get_contents($access))));
     }
     /* ping is in access.suppress_path, so it must not be here at all; /app is
-     * a PHP request and /statuses another; the 403 belongs to the other pool,
-     * which has its own. */
+     * a PHP request and /status another -- since #275 the public listener hands
+     * that path to the application. The scrapes of the operator listener are in
+     * no pool's access log: they were never this pool's requests. The 403
+     * belongs to the other pool, which has its own log. */
     foreach ($lines as $line) {
         if (str_contains($line, '/ping')) {
             throw new RuntimeException("suppressed path logged: $line");
@@ -183,12 +205,13 @@ try {
     if (!preg_match('#^127\.0\.0\.1 GET /app\?x=1 200 [0-9]+\.[0-9]{3} [0-9]+ mark$#', $lines[0] ?? '')) {
         throw new RuntimeException('php line: ' . var_export($lines, true));
     }
-    /* The status page never runs PHP, so %M has nothing to report and %{...}o
-     * reads the headers this module set: a non-PHP line is still a line, with
-     * the fields that do not apply left at zero rather than carried over from
-     * whatever the child served last. */
-    if (!preg_match('#^127\.0\.0\.1 GET /status 200 [0-9]+\.[0-9]{3} 0 -$#', $lines[1] ?? '')) {
-        throw new RuntimeException('local line: ' . var_export($lines, true));
+    if (!preg_match('#^127\.0\.0\.1 GET /status 200 [0-9]+\.[0-9]{3} [0-9]+ mark$#', $lines[1] ?? '')) {
+        throw new RuntimeException('second php line: ' . var_export($lines, true));
+    }
+    foreach ($lines as $line) {
+        if (str_contains($line, '/statuses')) {
+            throw new RuntimeException("an operator scrape reached the pool's access log: $line");
+        }
     }
     echo "access log: ok\n";
 

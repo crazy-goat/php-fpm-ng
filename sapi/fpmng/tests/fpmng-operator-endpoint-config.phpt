@@ -125,25 +125,28 @@ expectRejected(
     ["'pm.max_children' is not supported by pool.type = cron"]
 );
 
-/* A type whose status page has not moved onto the operator listener yet still
- * takes the metrics path there: the metrics directives are new and have no
- * second meaning to collide with, so the one half that is ready is not held
- * back by the other (fpm_pool_type.h, .status_on_own_listener; issue #275). */
+/* Both of http-direct's operator pages go to the operator listener, and both
+ * directives that name where are accepted on it. pm.status_listen used to be
+ * refused by this type outright -- under its upstream meaning it asked for a
+ * second FastCGI socket a direct child has nowhere to put -- and issue #275 is
+ * what gave it something to name. */
 expectAccepted(
-    'metrics path on http-direct',
-    $head . $direct('web', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics")
+    'both operator paths on http-direct',
+    $head . $direct('web', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics\n"
+                         . "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
 );
 
-/* The other half of the same decision, and the case that catches it going wrong:
- * on a type with .status_on_own_listener, pm.status_path registers NO route at
- * all, so two such pools can name the same path without colliding -- there is
- * nothing on the operator listener for them to collide over. Without the flag
- * both would claim /status on the default address and this would be refused,
- * which is what makes it a test rather than a restatement. */
-expectAccepted(
-    'status path on two http-direct pools does not reach the operator listener',
-    $head . $direct('one', "pm.status_path = /status")
-          . $direct('two', "pm.status_path = /status")
+/* And the status route is a real route, so it collides like one: since #275
+ * http-direct's status page IS on the operator listener, and two pools naming
+ * the same path on the same address is two answers for one URL. This case was
+ * accepted while the move was still pending, which is exactly why it is here --
+ * a regression that put the page back on the pool's own listener would make it
+ * pass again. */
+expectRejected(
+    'status path claimed by two http-direct pools on one listener',
+    $head . $direct('one', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
+          . $direct('two', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status"),
+    ['collides with pool', 'an address, a port and a path identify one endpoint']
 );
 
 /* One socket is one process and one identity. Pools sharing an operator address
@@ -182,8 +185,8 @@ both formats on one listener: accepted
 the internal type is not configurable: rejected
 carved-out pm. directive on cron: accepted
 other pm. directive on cron: rejected
-metrics path on http-direct: accepted
-status path on two http-direct pools does not reach the operator listener: accepted
+both operator paths on http-direct: accepted
+status path claimed by two http-direct pools on one listener: rejected
 pools sharing a listener disagree on identity: rejected
 metrics path on a fastcgi pool: rejected
 Done

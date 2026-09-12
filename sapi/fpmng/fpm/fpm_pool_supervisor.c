@@ -82,6 +82,19 @@ struct fpm_supervisor_shared_s {
 	time_t last_start;			/* epoch start of the last iteration, 0 = none yet */
 	int last_exit_code;			/* exit code of the last COMPLETED iteration */
 	unsigned char has_last_exit_code;
+
+	/* Issue #277: every start of the supervised script, by every process of
+	 * this pool. Monotonic, and in the shared region rather than in the loop's
+	 * own stack because there are two ways to start again and both count -- the
+	 * loop below going round, and this child dying and the master respawning
+	 * it, which loses any counter the child was keeping.
+	 *
+	 * Starts, not restarts, even though the reported counter is restarts: what
+	 * makes a start a restart is that it is not one of the pool's first, and
+	 * "the pool's first" is supervisor.processes of them, one per process. The
+	 * subtraction is done where the number is read (fpm_pool_supervisor_status)
+	 * so that this field stays a plain count of an event that happened. */
+	unsigned long starts;
 };
 
 struct fpm_supervisor_registry_s {
@@ -408,6 +421,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 
 		started = time(NULL);
+		shared->starts++;
 		shared->last_start = started;
 		shared->running = 1;
 		exit_code = fpm_pool_script_run(c->name, c->supervisor_script);
@@ -458,6 +472,16 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 	out->last_exit_code = shared->last_exit_code;
 	out->has_last_exit_code = shared->has_last_exit_code;
 	out->consecutive_failures = shared->failures;
+	/* Every start past the first one per process is a restart -- see
+	 * fpm_supervisor_shared_s.starts. Clamped rather than allowed to go
+	 * negative: during startup the pool's processes have not all started their
+	 * script yet, and "no restarts yet" is the truth then. */
+	{
+		unsigned long expected = wp->config->supervisor_processes > 0
+			? (unsigned long) wp->config->supervisor_processes : 1;
+
+		out->baseline = shared->starts > expected ? shared->starts - expected : 0;
+	}
 	out->has_backoff_until = 1;
 	out->backoff_until = shared->next_allowed_start;
 	/* next_run is not marked as available — a scheduled due time makes sense

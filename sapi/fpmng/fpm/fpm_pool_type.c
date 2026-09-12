@@ -105,6 +105,7 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.serves_requests              = 1,
 	.reuses_request_runtime       = 1,
 	.listening_socket_nonblocking = 1,
+	.baseline_counter             = "requests",
 	.rejects                      = fpm_coop_rejects,
 	.validate                     = fpm_pool_type_fiber_validate,
 	.child_main                   = fpm_pool_fiber_child_main,
@@ -117,6 +118,7 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.serves_requests              = 1,
 	.reuses_request_runtime       = 1,
 	.listening_socket_nonblocking = 1,
+	.baseline_counter             = "requests",
 	.operator_endpoint            = 1,
 	.rejects                      = fpm_coop_rejects,
 	.validate                     = fpm_pool_type_fiber_validate,
@@ -132,6 +134,7 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
 	.requires_pm            = 1,
 	.serves_requests        = 1,
 	.reuses_request_runtime = 1,
+	.baseline_counter       = "requests",
 	.rejects                = fpm_pool_async_rejects,
 	.validate               = fpm_pool_async_validate,
 	.child_main             = fpm_pool_async_child_main,
@@ -143,6 +146,7 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.requires_pm            = 1,
 	.serves_requests        = 1,
 	.reuses_request_runtime = 1,
+	.baseline_counter       = "requests",
 	.operator_endpoint      = 1,
 	.rejects                = fpm_pool_async_rejects,
 	.validate               = fpm_pool_async_validate,
@@ -172,6 +176,7 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
 	.listening_socket_nodelay     = 1,
+	.baseline_counter             = "requests",
 	/* Both, like everything else here, are repeated rather than inherited: an
 	 * executor variant replaces the whole type struct. The renderer has no
 	 * effect on this executor yet -- it still rejects pm.status_path itself
@@ -257,6 +262,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		.baseline_counter = "requests",
 		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
@@ -265,6 +271,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm            = 1,
 		.serves_requests        = 1,
 		.reuses_request_runtime = 1,
+		.baseline_counter       = "requests",
 		.executors              = fpm_fastcgi_ng_executors,
 		.rejects                = fpm_pool_fastcgi_rejects,
 	},
@@ -274,6 +281,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm            = 1,
 		.serves_requests        = 1,
 		.reuses_request_runtime = 1,
+		.baseline_counter       = "requests",
 		.executors              = fpm_http_executors,
 		.operator_endpoint      = 1,
 		.rejects                = fpm_pool_http_classic_rejects,
@@ -287,6 +295,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests              = 1,
 		.listening_socket_nonblocking = 1,
 		.listening_socket_nodelay     = 1,
+		.baseline_counter             = "requests",
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,
 		.operator_endpoint            = 1,
@@ -303,6 +312,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen         = 0,
 		.requires_pm             = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
 		.serves_requests         = 0,
+		/* Restarts, not runs: a supervised script is meant to be running, so
+		 * the number that says something is wrong is how often it had to be
+		 * started again. Issue #122 measured 12086 of those per second and
+		 * nothing counted them. */
+		.baseline_counter        = "restarts",
 		.child_logs_via_master   = 1,	/* the whole policy runs in the child; see fpm_child_log.h */
 		.publishes_acme_challenges = 1,	/* see the same flag on "cron" below */
 		.operator_endpoint       = 1,
@@ -322,6 +336,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen         = 0,
 		.requires_pm             = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
 		.serves_requests         = 0,
+		/* Runs, not restarts: a cron script is meant to end, so the number that
+		 * says the pool is alive is how many times the schedule fired. */
+		.baseline_counter        = "runs",
 		.child_logs_via_master   = 1,	/* same as supervisor: fpm_pool_cron_child_main() is where the policy lives */
 		/* docs/NOTES.md section 3l puts the dedicated ACME process in a cron
 		 * pool, and "supervisor" above carries the same flag: both are

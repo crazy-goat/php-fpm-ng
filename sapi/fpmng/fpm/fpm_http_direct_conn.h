@@ -131,6 +131,12 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
  * reaching into the scoreboard -- accounting belongs to whoever already owns a
  * slot. */
 unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns);
+/* The same count with the lag taken out, by walking every node first. For a
+ * caller that is about to act on it rather than report it -- a retiring child
+ * deciding whether it may exit (issue #65) -- and priced like the walk in
+ * may_accept(): pay it where the decision is worth an exact answer, not on the
+ * tick of a child that is only publishing a gauge. */
+unsigned fpm_http_direct_conns_live_exact(struct fpm_http_direct_conns *conns);
 /* Connections dropped because the first request did not arrive in time. */
 unsigned long fpm_http_direct_conns_timed_out(const struct fpm_http_direct_conns *conns);
 /* Connections refused by http.max_connections_per_client, in either shape. */

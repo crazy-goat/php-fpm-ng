@@ -581,6 +581,15 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 	}
 }
 
+unsigned fpm_http_direct_conns_live_exact(struct fpm_http_direct_conns *conns)
+{
+	if (!conns) {
+		return 0;
+	}
+	fpm_direct_conn_sweep_all(conns);
+	return conns->live;
+}
+
 unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns)
 {
 	return conns ? conns->live : 0;

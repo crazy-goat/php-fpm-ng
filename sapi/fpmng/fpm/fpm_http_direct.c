@@ -104,6 +104,10 @@ struct fpm_direct_worker {
 	/* issue #61: the first-request deadline and the connection limits. NULL
 	 * only on OOM at start-up, which is fatal there. */
 	struct fpm_http_direct_conns *conns;
+	/* issue #65. When this child is retiring, the moment after which it stops
+	 * waiting for its remaining connections and exits anyway. Zero until the
+	 * retirement is noticed, which is what makes entering it idempotent. */
+	struct timeval retire_deadline;
 };
 
 struct fpm_direct_request {
@@ -148,6 +152,13 @@ struct fpm_direct_request {
 static struct fpm_direct_request *fpm_direct_current;
 static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on);
 static volatile sig_atomic_t fpm_direct_stopping;
+/* issue #65. Set by SIGUSR1 on this child alone. Distinct from stopping on
+ * purpose: stopping is the pool winding down and refuses what arrives, while
+ * retiring is one child stepping out of a pool that carries on, so it keeps
+ * answering the connections it already holds and only stops taking new ones.
+ * The master's SIGUSR1 (reopen the logs) never reaches a child, so there is no
+ * meaning to collide with here. */
+static volatile sig_atomic_t fpm_direct_retiring;
 
 /* http.stream. Defined below, next to the response-completion callbacks they
  * share with the buffered path; the SAPI hooks just under this are their only
@@ -189,6 +200,139 @@ static void fpm_direct_stop(int signo)
 	fpm_direct_stopping = 1;
 }
 
+static void fpm_direct_retire_signal(int signo)
+{
+	(void) signo;
+	fpm_direct_retiring = 1;
+}
+
+/* Monotonic, unlike the gettimeofday() this file uses to stamp requests for the
+ * access log: a deadline read off the wall clock moves when NTP steps it, and
+ * the step either stretches a drain or ends it on the spot. Same reason
+ * fpm_pool_status.c:371 gives for its write deadline. */
+static void fpm_direct_now(struct timeval *tv)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		/* Cannot fail on Linux with a constant clock id; if it ever does, a
+		 * wall-clock deadline still bounds the drain. */
+		evutil_gettimeofday(tv, NULL);
+		return;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (suseconds_t) (ts.tv_nsec / 1000);
+}
+
+/* Everything that happens once, the first time a tick sees the flag. A second
+ * SIGUSR1 lands on a child whose deadline is already stamped and does nothing,
+ * which is the idempotence issue #65 asks for: a deploy script that retries is
+ * not a deploy script that shortens the drain it is waiting for. */
+static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
+{
+	struct timeval now, grace;
+
+	if (w->retire_deadline.tv_sec || w->retire_deadline.tv_usec) {
+		return;
+	}
+	/* Out of accept before anything else: the listening socket is shared with
+	 * the siblings, so every connection this child does not take is one they
+	 * do, and that is the whole point of retiring one child rather than
+	 * reloading the pool. */
+	if (w->listener) {
+		evhttp_del_accept_socket(w->http, w->listener);
+		w->listener = NULL;
+	}
+	/* The bound on how long a client can keep this child alive. A connection
+	 * held open and never used would otherwise pin a child that is supposed to
+	 * be going away, and a deploy would wait for a client that has nothing to
+	 * say. http.read_timeout rather than a knob of its own: it is already the
+	 * answer this pool gives to "how long may a connection stay silent", and
+	 * validation guarantees it is positive (fpm_http_direct_request.c:171). */
+	grace.tv_sec = w->wp->config->http_read_timeout / 1000;
+	grace.tv_usec = (w->wp->config->http_read_timeout % 1000) * 1000;
+	fpm_direct_now(&now);
+	evutil_timeradd(&now, &grace, &w->retire_deadline);
+	zlog(ZLOG_NOTICE, "[pool %s] child %d is retiring: no new connections, finishing the ones it "
+		"holds, exiting within %d ms", w->wp->config->name, (int) getpid(),
+		w->wp->config->http_read_timeout);
+}
+
+/* True once there is nothing left worth staying for -- and true regardless once
+ * the deadline is up.
+ *
+ * That order is the decision. Nothing outside this function bounds a retiring
+ * child: a pool-wide stop is bounded by the master, which SIGKILLs whatever has
+ * not gone by process_control_timeout, but a retiring child is one the master
+ * is not waiting for. And what libevent gives a response in flight is an
+ * inactivity timeout (evhttp_set_timeout_tv above), which every byte the client
+ * takes resets -- so a client reading a large response a byte a second holds
+ * w->pending at 1 for as long as it cares to, and one such client would
+ * otherwise pin the child and the deploy waiting for it indefinitely. Past the
+ * deadline the connections go with the process and a client that has not
+ * finished reading gets a truncated response. That is the price, and it is
+ * smaller than a deploy that never ends.
+ *
+ * Before the deadline both halves matter: a response handed to libevent is not
+ * on the wire yet, and a connection with no response in flight may still be a
+ * client about to send its next request -- every answer this child gives while
+ * retiring carries Connection: close, so each of those connections ends on its
+ * own, one request later at worst. */
+static int fpm_direct_retire_done(struct fpm_direct_worker *w)
+{
+	struct timeval now;
+
+	fpm_direct_now(&now);
+	if (evutil_timercmp(&now, &w->retire_deadline, >=)) {
+		if (w->pending || fpm_http_direct_conns_live(w->conns)) {
+			zlog(ZLOG_NOTICE, "[pool %s] child %d stopped waiting for %u connection(s) and "
+				"%u response(s) in flight after http.read_timeout and is exiting",
+				w->wp->config->name, (int) getpid(),
+				fpm_http_direct_conns_live(w->conns), w->pending);
+		}
+		return 1;
+	}
+	if (w->pending) {
+		return 0;
+	}
+	/* The exact count, not the gauge: the bounded sweep may not have reached
+	 * the connections that ended, and exiting is not a decision to take on a
+	 * number that lags. Affordable because it only runs on the ticks of a
+	 * child that is already leaving. */
+	return !fpm_http_direct_conns_live_exact(w->conns);
+}
+
+/* One store per published field, which is cheap enough to do on every path
+ * that can change one; what is not cheap is the sweep the timer does before
+ * calling this. */
+static void fpm_direct_publish(struct fpm_direct_worker *w)
+{
+	struct fpm_http_direct_ops_live live;
+
+	live.connections = fpm_http_direct_conns_live(w->conns);
+	live.pending = (unsigned) w->pending;
+	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
+	live.refused_conn = fpm_http_direct_conns_refused(w->conns);
+	live.retiring = fpm_direct_retiring ? 1 : 0;
+	fpm_http_direct_ops_publish(w->ops, &live);
+}
+
+/* Retire now, from the request path, so that the answer this child is about to
+ * give already reflects the signal. Two reasons, both about the operator who
+ * signalled and then read the status page: a "retiring: 0" that is merely one
+ * tick stale is indistinguishable from a signal that went to the wrong pid, and
+ * a child that answers a request is a child that should have left the listening
+ * socket before it did, not 10 ms later.
+ *
+ * Not fpm_direct_tick_body(): that one may break the event loop, and from
+ * inside evhttp's request callback that would leave the response this child is
+ * still building unwritten. */
+static void fpm_direct_retire_now(struct fpm_direct_worker *w)
+{
+	fpm_direct_retire_enter(w);
+	fpm_direct_publish(w);
+}
+
 /* sweep = 1 only on the timer. The sweep walks every tracked connection, and
  * since issue #64 that list holds them for their whole life, so calling it
  * from the end of every request makes the request path grow with the
@@ -201,7 +345,6 @@ static void fpm_direct_stop(int signo)
  * which is what the header already promises. */
 static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
-	struct fpm_http_direct_ops_live live;
 	if (fpm_direct_stopping) {
 		if (w->listener) {
 			evhttp_del_accept_socket(w->http, w->listener);
@@ -211,6 +354,12 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 			event_base_loopbreak(w->base);
 		}
 		return;
+	}
+	/* After the stopping gate, never before it: a child told to retire and
+	 * then caught by a pool-wide shutdown has to follow the shutdown, which
+	 * refuses what arrives instead of serving it. */
+	if (fpm_direct_retiring) {
+		fpm_direct_retire_enter(w);
 	}
 	/* The safety net for the accept gate, not its normal path: the end of a
 	 * request re-opens accepting itself, through the call to this function that
@@ -229,7 +378,7 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 	 * being inside a request: the listening socket belongs to the whole pool,
 	 * so a connection this child does not take is one a sibling can take, and
 	 * one it refuses with a response is one nobody can. */
-	if (!w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
+	if (!fpm_direct_retiring && !w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
 		fpm_direct_accept_enable(w, 1);
 	}
 	/* issue #64. Last, after everything above that can release a connection:
@@ -237,14 +386,14 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 	 * let go, and on a pool with http.max_connections the gate just did an
 	 * exhaustive walk this gauge may as well benefit from. On the inline call
 	 * there has been no sweep, so this publishes what the last one left -- the
-	 * gauge is documented as stale by up to one rotation for that reason. A
-	 * store per field is cheap enough to do on both paths; what is not cheap
-	 * is the walk above. */
-	live.connections = fpm_http_direct_conns_live(w->conns);
-	live.pending = (unsigned) w->pending;
-	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
-	live.refused_conn = fpm_http_direct_conns_refused(w->conns);
-	fpm_http_direct_ops_publish(w->ops, &live);
+	 * gauge is documented as stale by up to one rotation for that reason. */
+	fpm_direct_publish(w);
+	/* Last, after the publish: the page an operator is watching has to show
+	 * this child retiring at least once, and the tick that decides to exit is
+	 * the one that would otherwise never say so. */
+	if (fpm_direct_retiring && fpm_direct_retire_done(w)) {
+		event_base_loopbreak(w->base);
+	}
 }
 
 /* The 10 ms timer. */
@@ -589,6 +738,20 @@ static void fpm_direct_stream_closed(struct evhttp_connection *connection, void 
 	if (fpm_direct_stopping && !r->w->pending) event_base_loopbreak(r->w->base);
 }
 
+/* Connection: close, from whichever ending reaches it first. Removing before
+ * adding is the point: the gate in fpm_direct_handle() sets this header for a
+ * retiring child so that the status page and the static server carry it too,
+ * and the PHP endings below would otherwise put a second one on the same
+ * answer -- two Connection headers is a malformed response, and a client is
+ * within its rights to read the pair as anything at all. */
+static void fpm_direct_close_header(struct evhttp_request *http)
+{
+	struct evkeyvalq *headers = evhttp_request_get_output_headers(http);
+
+	evhttp_remove_header(headers, "Connection");
+	evhttp_add_header(headers, "Connection", "close");
+}
+
 /* Whether this response is the last one this child will serve, decided before
  * the headers go out because a streamed response cannot gain a Connection
  * header afterwards. Mirrors the two triggers the buffered tail applies after
@@ -604,7 +767,7 @@ static void fpm_direct_stream_closed(struct evhttp_connection *connection, void 
 static bool fpm_direct_last_request(const struct fpm_direct_worker *w)
 {
 	int max = w->wp->config->pm_max_requests;
-	return fpm_direct_stopping || (max > 0 && w->requests + 1 >= (unsigned) max);
+	return fpm_direct_stopping || fpm_direct_retiring || (max > 0 && w->requests + 1 >= (unsigned) max);
 }
 
 static void fpm_direct_stream_begin(struct fpm_direct_request *r)
@@ -644,7 +807,7 @@ static void fpm_direct_stream_begin(struct fpm_direct_request *r)
 		return;
 	}
 	if (fpm_direct_last_request(w)) {
-		evhttp_add_header(evhttp_request_get_output_headers(r->http), "Connection", "close");
+		fpm_direct_close_header(r->http);
 	}
 	/* Counted from here rather than from the tail: from this point a client
 	 * that disappears has to be noticed, and w->pending is what the shutdown
@@ -1176,8 +1339,14 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 		evbuffer_drain(r->output, evbuffer_get_length(r->output));
 	}
 	fpm_direct_retire(r);
-	if (fpm_direct_stopping) {
-		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
+	/* Both endings of this child, and the only place the buffered path decides:
+	 * fpm_direct_retire() above has already set stopping if pm.max_requests was
+	 * reached, so this one test covers recycling too. Retiring is separate
+	 * because it does not stop the child serving -- it stops it accepting --
+	 * and a keep-alive client that is not told the connection ends would keep
+	 * sending requests to a child on its way out (issue #65). */
+	if (fpm_direct_stopping || fpm_direct_retiring) {
+		fpm_direct_close_header(http);
 	}
 	w->pending++;
 	fpm_direct_tick_now(w);
@@ -1369,10 +1538,10 @@ static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_requ
 	 * w->pending is what the shutdown path waits on. Both callbacks are the
 	 * ones the PHP paths install, so a static reply drains identically.
 	 *
-	 * No Connection: close for a retiring child here, unlike the buffered path:
-	 * this function is reached only past fpm_direct_handle()'s gate, which has
-	 * already answered 503 if this child is stopping. A draining worker serves
-	 * no files either. */
+	 * Nothing to do here for a retiring child: fpm_direct_handle() has already
+	 * put Connection: close on the request before it got this far, because
+	 * this ending and the status page answer without ever reaching the PHP
+	 * paths that decide for themselves. */
 	w->pending++;
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
 	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
@@ -1469,6 +1638,16 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	 * of PHP, and after the 503 gate: a pool that has stopped accepting work
 	 * is not healthy, so answering "pong" there would be the one wrong answer
 	 * this endpoint can give. */
+	/* Every answer a retiring child gives says the connection ends, and the two
+	 * endings below -- the status page and the static server -- answer without
+	 * reaching a PHP path that could decide for itself, so the decision is made
+	 * once, here, for all of them. The PHP endings re-set it rather than
+	 * inherit it: pm.max_requests is only reached at the end of a request, so
+	 * they have a reason of their own that is not known yet (issue #65). */
+	if (fpm_direct_retiring) {
+		fpm_direct_close_header(http);
+		fpm_direct_retire_now(w);
+	}
 	if (fpm_http_direct_ops_try_local(w->ops, http, &local_status, &local_bytes)) {
 		fpm_http_direct_ops_local(w->ops);
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, local_status, local_bytes);
@@ -1656,7 +1835,20 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
 	action.sa_handler = fpm_direct_stop;
 	sigemptyset(&action.sa_mask);
+	/* SA_RESTART for the same reason upstream's fpm_signals_init_child() sets
+	 * it: in this executor PHP runs inside evhttp's request callback, so a
+	 * signal aimed at a busy child arrives while the script is blocked in
+	 * read() or write() on a database, cache or HTTP socket. Without it that
+	 * syscall returns EINTR, and PHP streams and several extensions report
+	 * that as an I/O failure rather than retrying -- retiring a child would
+	 * fail the very request it was retiring around (issue #65). */
+	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
+	/* issue #65. Without this SIGUSR1 is SIG_DFL in a child (fpm_signals.c
+	 * resets it there), so the signal an operator would reach for first would
+	 * kill the child outright, dropping the requests it was serving. */
+	action.sa_handler = fpm_direct_retire_signal;
+	if (sigaction(SIGUSR1, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	fpm_direct_install_sapi();
 	/* Both of these are per-child: the ACL and the endpoint paths are parsed
 	 * once here rather than on every request, and the access log takes the

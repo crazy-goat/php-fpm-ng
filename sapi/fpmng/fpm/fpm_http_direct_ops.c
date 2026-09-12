@@ -30,6 +30,7 @@ struct fpm_http_direct_ops_slot {
 	unsigned long requests_active;
 	unsigned long responses_pending;		/* gauge, published from the worker's tick */
 	unsigned long responses_rejected;
+	unsigned retiring;		/* gauge, issue #65: this child is draining and will exit */
 };
 
 /* The version on the page. Bump it when a field changes meaning or leaves;
@@ -175,6 +176,9 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 			ops->slot->requests_active = 0;
 			ops->slot->conn_live = 0;
 			ops->slot->responses_pending = 0;
+			/* A replacement is not born retiring, however its predecessor
+			 * left. */
+			ops->slot->retiring = 0;
 		}
 	}
 
@@ -240,6 +244,7 @@ void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	}
 	ops->slot->conn_live = live->connections;
 	ops->slot->responses_pending = live->pending;
+	ops->slot->retiring = live->retiring;
 	/* The difference since the last publish, not the value: see
 	 * published_timed_out. The caller's two numbers only ever grow, so the
 	 * subtraction cannot wrap. */
@@ -316,6 +321,7 @@ static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops,
 			out->conn_live += in->conn_live;
 			out->requests_active += in->requests_active;
 			out->responses_pending += in->responses_pending;
+			out->retiring += in->retiring;
 		}
 	}
 }
@@ -364,14 +370,23 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 		unsigned long conn_live = alive ? in->conn_live : 0;
 		unsigned long requests_active = alive ? in->requests_active : 0;
 		unsigned long responses_pending = alive ? in->responses_pending : 0;
+		unsigned retiring = alive ? in->retiring : 0;
+		/* The pid is on the row because it is the address of the retire
+		 * signal: issue #65 retires a child with SIGUSR1, and without the pid
+		 * here an operator would have to go looking for it in ps and guess
+		 * which of the pool's children is the slot they just read. Taken from
+		 * the scoreboard rather than kept in the slot -- the scoreboard
+		 * already has it, and one copy cannot disagree with itself. */
+		int pid = alive ? (int) fpm_scoreboard_get()->procs[i].pid : 0;
 
 		if (json) {
 			evbuffer_add_printf(out,
-				"%s{\"slot\":%u,\"live\":%d,\"accepted conn\":%lu,\"live connections\":%lu,"
+				"%s{\"slot\":%u,\"live\":%d,\"pid\":%d,\"retiring\":%u,"
+				"\"accepted conn\":%lu,\"live connections\":%lu,"
 				"\"active requests\":%lu,\"pending responses\":%lu,\"non-php requests\":%lu,"
 				"\"refused acl\":%lu,\"refused capacity\":%lu,\"refused connections\":%lu,"
 				"\"timed out connections\":%lu,\"rejected responses\":%lu}",
-				i ? "," : "", i, alive, in->conn_accepted, conn_live, requests_active,
+				i ? "," : "", i, alive, pid, retiring, in->conn_accepted, conn_live, requests_active,
 				responses_pending, in->requests_local,
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
@@ -380,6 +395,8 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 			evbuffer_add_printf(out,
 				"slot:                 %u\n"
 				"live:                 %d\n"
+				"pid:                  %d\n"
+				"retiring:             %u\n"
 				"accepted conn:        %lu\n"
 				"live connections:     %lu\n"
 				"active requests:      %lu\n"
@@ -390,7 +407,7 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 				"refused connections:  %lu\n"
 				"timed out connections:%lu\n"
 				"rejected responses:   %lu\n\n",
-				i, alive, in->conn_accepted, conn_live, requests_active,
+				i, alive, pid, retiring, in->conn_accepted, conn_live, requests_active,
 				responses_pending, in->requests_local,
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
@@ -431,7 +448,8 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			"\"slow requests\":%lu,\"memory peak\":%zu,"
 			"\"direct schema\":%d,\"live connections\":%lu,\"pending responses\":%lu,"
 			"\"refused acl\":%lu,\"refused capacity\":%lu,\"refused connections\":%lu,"
-			"\"timed out connections\":%lu,\"rejected responses\":%lu",
+			"\"timed out connections\":%lu,\"rejected responses\":%lu,"
+			"\"retiring children\":%u",
 			copy->pool, fpm_http_direct_ops_pm_name(copy->pm), start,
 			(unsigned long) (now - copy->start_epoch), total.conn_accepted,
 			copy->idle, copy->active, copy->idle + copy->active, copy->active_max,
@@ -441,7 +459,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			FPM_HTTP_DIRECT_SCHEMA, total.conn_live, total.responses_pending,
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
-			total.conn_refused, total.conn_timed_out, total.responses_rejected);
+			total.conn_refused, total.conn_timed_out, total.responses_rejected, total.retiring);
 	} else {
 		evbuffer_add_printf(out,
 			"pool:                 %s\n"
@@ -467,7 +485,8 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			"refused capacity:     %lu\n"
 			"refused connections:  %lu\n"
 			"timed out connections:%lu\n"
-			"rejected responses:   %lu\n",
+			"rejected responses:   %lu\n"
+			"retiring children:    %u\n",
 			copy->pool, fpm_http_direct_ops_pm_name(copy->pm), start,
 			(unsigned long) (now - copy->start_epoch), total.conn_accepted,
 			copy->idle, copy->active, copy->idle + copy->active, copy->active_max,
@@ -477,7 +496,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			FPM_HTTP_DIRECT_SCHEMA, total.conn_live, total.responses_pending,
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
-			total.conn_refused, total.conn_timed_out, total.responses_rejected);
+			total.conn_refused, total.conn_timed_out, total.responses_rejected, total.retiring);
 	}
 	fpm_http_direct_ops_status_workers(ops, json, full, out);
 	fpm_scoreboard_free_copy(copy);

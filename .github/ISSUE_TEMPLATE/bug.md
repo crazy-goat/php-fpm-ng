@@ -6,7 +6,7 @@ labels: ["bug"]
 
 ## Where it was seen
 
-<!-- Date, environment (poligon / CI / local), build under test. Confirm you
+<!-- Date, environment (CI / local / test box), build under test. Confirm you
      measured the binary you think you did (`strings` on a distinctive literal). -->
 
 ## What happens

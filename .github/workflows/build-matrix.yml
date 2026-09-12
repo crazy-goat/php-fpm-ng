@@ -27,7 +27,9 @@ on:
 # the concurrency block below.
 #
 # Every job runs on ubuntu-latest. It used to run on the self-hosted `poligon`
-# box, which is off now: this repository is public, and GitHub-hosted minutes
+# box, whose runners were unregistered and whose services were disabled on
+# 2026-09-12 -- until then they stayed online and kept picking up jobs from
+# branches older than this file: this repository is public, and GitHub-hosted minutes
 # are free for public repositories, while a self-hosted runner on a public
 # repository is a machine that a pull request from a stranger can be made to
 # execute code on.

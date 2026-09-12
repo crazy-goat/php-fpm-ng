@@ -6,7 +6,7 @@ Closes #
 
 ## Test plan
 
-- [ ] Built (poligon `192.168.8.50` / local — say which)
+- [ ] Built (say where: local, container, or a test box)
 - [ ] Relevant suites run, named here with their result
 - [ ] Bugbot review on added/changed code; valid findings acted on or opened as issues
 

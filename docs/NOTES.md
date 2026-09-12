@@ -2476,8 +2476,9 @@ newer CPU the absolute gain shrinks 3–5x.
 
 ## 4. Measured: performance is NOT the argument
 
-Test host 192.168.8.103, k3d, i7-6700T. Full data is in the Claude project
-memory (`reference_k3d_bench_poligon.md`).
+Test host 192.168.8.103, k3d, i7-6700T. Full data was in the Claude project
+memory (`reference_k3d_bench_poligon.md`), which is not a file in this
+repository -- the table below is the whole of it that survives here.
 
 CPU per request, clean measurement (`wrk -t1 -c2`, unsaturated node):
 

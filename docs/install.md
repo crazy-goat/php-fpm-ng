@@ -10,28 +10,32 @@ under [What the packaged build supports](#what-the-packaged-build-supports)
 says which, and names the mechanism in each case rather than saying "not
 supported" and leaving the next reader to guess.
 
-Every command below was run on 2026-09-11 in the image it names, in the order
-printed, as `root` (so no `sudo`; add it if you are not root). The exceptions
+Every command below was run on 2026-09-12 against v0.2.0, in the image it
+names, in the order printed, as `root` (so no `sudo`; add it if you are not
+root). The exceptions
 are called out where they appear: `systemctl` needs an init system a container
-does not have, and the plain `curl`/`wget` download lines need the repository
-to be public, which it is not yet -- both say so on the spot.
+does not have, and says so on the spot.
 
 ## Getting the files
 
-The repository is private, so the release assets are not anonymously
-downloadable yet. What works today, with a GitHub account that can see the
-repository:
-
-```sh
-gh release download v0.1.0 --repo crazy-goat/php-fpm-ng
-```
-
-Once the repository is public the same three files are at stable URLs, and this
-is the form to use:
+The repository is public and the release assets download anonymously -- no
+GitHub account, no token:
 
 ```sh
 curl -fLO https://github.com/crazy-goat/php-fpm-ng/releases/latest/download/SHA256SUMS
-curl -fLO https://github.com/crazy-goat/php-fpm-ng/releases/latest/download/php-fpm-ng_v0.1.0_php8.5_amd64.deb
+curl -fLO https://github.com/crazy-goat/php-fpm-ng/releases/latest/download/php-fpm-ng_v0.2.0_php8.5_amd64.deb
+```
+
+`latest/download/` redirects to whatever the newest release is, so the file
+name in the second line has to match that release -- it is the version, not a
+placeholder. Checked on 2026-09-12 against v0.2.0 with the credentials removed
+from the environment: HTTP 200, and the SHA256SUMS body lists the .deb and the
+.apk of that release.
+
+With a GitHub account this is the shorter equivalent:
+
+```sh
+gh release download v0.2.0 --repo crazy-goat/php-fpm-ng
 ```
 
 Either way you end up with `SHA256SUMS` and the package next to it, which is
@@ -43,7 +47,7 @@ Image: `ubuntu:26.04`.
 
 ```sh
 sha256sum -c --ignore-missing SHA256SUMS
-apt install -y ./php-fpm-ng_v0.1.0_php8.5_amd64.deb
+apt install -y ./php-fpm-ng_v0.2.0_php8.5_amd64.deb
 ```
 
 `apt` pulls `libphp8.5-embed` in as a dependency; that is the PHP the binary
@@ -53,7 +57,7 @@ install by path, not a repository your machine trusts for every future upgrade
 
 ```console
 # dpkg -l php-fpm-ng | tail -1
-ii  php-fpm-ng  8.5.4-1~v0.1.0  amd64  FPM process manager with HTTP-direct pools, on the distribution PHP
+ii  php-fpm-ng  8.5.4-1~v0.2.0  amd64  FPM process manager with HTTP-direct pools, on the distribution PHP
 # php-fpm-ng -t -y /etc/php-fpm-ng/php-fpm-ng.conf
 NOTICE: configuration file /etc/php-fpm-ng/php-fpm-ng.conf test is successful
 ```
@@ -80,8 +84,8 @@ and answers a FastCGI request.
 Image: `alpine:edge`.
 
 ```sh
-grep php-fpm-ng-v0.1.0-php8.5-x86_64.apk SHA256SUMS | sha256sum -c -
-apk add --allow-untrusted ./php-fpm-ng-v0.1.0-php8.5-x86_64.apk
+grep php-fpm-ng-v0.2.0-php8.5-x86_64.apk SHA256SUMS | sha256sum -c -
+apk add --allow-untrusted ./php-fpm-ng-v0.2.0-php8.5-x86_64.apk
 ```
 
 The checksum line is spelled differently here because BusyBox `sha256sum` has
@@ -94,7 +98,7 @@ being told the truth about what it is being handed.
 
 ```console
 # apk info -v php-fpm-ng
-php-fpm-ng: FPM process manager with HTTP-direct pools, on the distribution PHP (v0.1.0)
+php-fpm-ng: FPM process manager with HTTP-direct pools, on the distribution PHP (v0.2.0)
 ```
 
 apk keeps `pkgver` at the PHP version and `pkgrel` an integer, so our release

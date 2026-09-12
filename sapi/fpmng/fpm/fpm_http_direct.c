@@ -108,6 +108,16 @@ struct fpm_direct_worker {
 	 * waiting for its remaining connections and exits anyway. Zero until the
 	 * retirement is noticed, which is what makes entering it idempotent. */
 	struct timeval retire_deadline;
+	/* issue #195: how this child puts bytes of a response on the wire from
+	 * inside a request, which is the one thing a TLS pool does differently.
+	 * Chosen once, at start-up, from the pool's transport -- a pool does not
+	 * change transport while it runs, so the write path costs no test and the
+	 * executor keeps no "if (tls)" of its own. */
+	ev_ssize_t (*stream_write)(struct bufferevent *bev, evutil_socket_t fd,
+		short *poll_events, const char **why);
+	/* The other half of that write step, or NULL when the transport needs no
+	 * second half; see fpm_direct_stream_notify(). */
+	void (*stream_notify)(struct bufferevent *bev);
 };
 
 struct fpm_direct_request {
@@ -177,18 +187,6 @@ int fpm_http_direct_validate(struct fpm_worker_pool_s *wp)
 		 * serves nobody else: there is exactly one request in flight per child
 		 * here. */
 		zlog(ZLOG_ALERT, "[pool %s] http.stream requires http.stream_write_timeout > 0", wp->config->name);
-		return -1;
-	}
-	/* The pump writes the connection's output buffer to its own descriptor,
-	 * which is only the response for as long as the two carry the same bytes.
-	 * On a TLS connection that buffer holds plaintext, and libevent 2.1 has no
-	 * way to flush an SSL bufferevent from inside a callback
-	 * (be_openssl_flush() is an "XXXX Implement this" stub), so there is no
-	 * correct implementation to fall back to. Refusing the combination beats a
-	 * directive that quietly does nothing on the pools that most want it. */
-	if (wp->config->http_stream && wp->config->http_tls_cert && *wp->config->http_tls_cert) {
-		zlog(ZLOG_ALERT, "[pool %s] http.stream cannot be combined with http.tls_cert: the streaming "
-			"writer cannot flush an encrypted connection from inside a request", wp->config->name);
 		return -1;
 	}
 	return fpm_http_direct_validate_common(wp, &fpm_direct_labels);
@@ -721,8 +719,11 @@ static void fpm_direct_response_done(struct evhttp_request *request, void *arg)
  * is only correct while the two carry the same bytes. They do not on a TLS
  * connection -- that output buffer holds plaintext -- and libevent 2.1 offers
  * nothing to flush an SSL bufferevent from inside a callback
- * (be_openssl_flush() is an "XXXX Implement this" stub). http.stream therefore
- * refuses to start on a pool with http.tls_cert; see fpm_http_direct_validate().
+ * (be_openssl_flush() is an "XXXX Implement this" stub). So a TLS pool gets a
+ * different write step, not a different pump: fpm_direct_write_tls() hands the
+ * same plaintext buffer to SSL_write() instead of to the descriptor, and
+ * everything else here -- the backpressure, the budget, the aborts -- is the
+ * same code on both transports (issue #195).
  */
 
 /* The close callback of a response that is already on the wire. Unlike the
@@ -864,6 +865,79 @@ static long fpm_direct_stream_elapsed(const struct timespec *start)
 	return (long) (now.tv_sec - start->tv_sec) * 1000 + (now.tv_nsec - start->tv_nsec) / 1000000;
 }
 
+/* Neither progress nor a reason to wait: the transport took nothing and said
+ * nothing was wrong. Distinct from 0, which means "blocked, wait for
+ * *poll_events", because a caller that treats the two alike either spins or
+ * waits on a descriptor that is already writable. */
+#define FPM_DIRECT_WRITE_IDLE (-2)
+
+/* The plaintext write step. Exactly what bufferevent_writecb() does with this
+ * buffer and this descriptor, minus the event loop we are not allowed to
+ * re-enter -- including the unfreeze. A bufferevent keeps the front of its
+ * output buffer frozen so that nothing but its own writer may drain it, and
+ * evbuffer_write() on a frozen buffer fails without touching errno: measured on
+ * the test box against the first version of this file, where every write
+ * "failed", the response went out only when the callback returned, and the
+ * stale errno eventually looked fatal and aborted the connection. errno is
+ * cleared for the same reason. */
+static ev_ssize_t fpm_direct_write_plain(struct bufferevent *bev, evutil_socket_t fd,
+	short *poll_events, const char **why)
+{
+	struct evbuffer *out = bufferevent_get_output(bev);
+	int written;
+
+	*poll_events = POLLOUT;
+	errno = 0;
+	evbuffer_unfreeze(out, 1);
+	written = evbuffer_write(out, fd);
+	evbuffer_freeze(out, 1);
+	if (written > 0) {
+		return written;
+	}
+	if (written == 0) {
+		return FPM_DIRECT_WRITE_IDLE;
+	}
+	/* EAGAIN and EWOULDBLOCK are the same value on Linux, so spelling both out
+	 * in one condition is a -Wlogical-op warning that fails the build (issue
+	 * #111); the preprocessor dance is the same one fpm_http_direct_conn.c:56
+	 * uses, and its helper is static there rather than shared. */
+	if (errno == EAGAIN || errno == EINTR) {
+		return 0;
+	}
+#if EWOULDBLOCK != EAGAIN
+	if (errno == EWOULDBLOCK) {
+		return 0;
+	}
+#endif
+	*why = "writing the response to the client failed";
+	return -1;
+}
+
+/* The TLS write step (issue #195). The descriptor is not the response here --
+ * the output buffer holds plaintext and the session is on the wire -- so this
+ * one hands the same buffer to OpenSSL instead; see fpm_http_tls_write_output()
+ * for why that is safe to do while libevent holds the other end of this
+ * bufferevent. */
+static ev_ssize_t fpm_direct_write_tls(struct bufferevent *bev, evutil_socket_t fd,
+	short *poll_events, const char **why)
+{
+	ev_ssize_t written;
+
+	(void) fd;
+	written = fpm_http_direct_tls_write(bev, poll_events);
+	/* The two negative values mean opposite things: FPM_HTTP_TLS_WRITE_IDLE is
+	 * "nothing to hand OpenSSL", which the pump counts and tolerates once,
+	 * while anything else below zero ends the connection. They share a value
+	 * (-2) on purpose, so the mapping is a rename rather than arithmetic. */
+	if (written == FPM_HTTP_DIRECT_TLS_WRITE_IDLE) {
+		return FPM_DIRECT_WRITE_IDLE;
+	}
+	if (written < 0) {
+		*why = "encrypting the response for the client failed";
+	}
+	return written;
+}
+
 /* Writes as much of the response as the socket will take right now, and then
  * blocks the script until the client has taken enough of the rest to leave
  * less than `limit` unwritten.
@@ -901,35 +975,26 @@ static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
 	while (evbuffer_get_length(out) > 0) {
 		struct pollfd pfd = { fd, POLLOUT, 0 };
 		struct timespec before;
+		const char *why = NULL;
+		ev_ssize_t written;
+		short wait_for;
 		long waited;
-		int left, ready, written;
+		int left, ready;
 
-		/* Exactly what bufferevent_writecb() does with this buffer and this
-		 * descriptor, minus the event loop we are not allowed to re-enter --
-		 * including the unfreeze. A bufferevent keeps the front of its output
-		 * buffer frozen so that nothing but its own writer may drain it, and
-		 * evbuffer_write() on a frozen buffer fails without touching errno:
-		 * measured on the test box against the first version of this file,
-		 * where every write "failed", the response went out only when the
-		 * callback returned, and the stale errno eventually looked fatal and
-		 * aborted the connection. errno is cleared for the same reason. */
-		errno = 0;
-		evbuffer_unfreeze(out, 1);
-		written = evbuffer_write(out, fd);
-		evbuffer_freeze(out, 1);
+		written = r->w->stream_write(bev, fd, &wait_for, &why);
 		if (written > 0) {
 			idle_writes = 0;
 			continue;
 		}
-		if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-			fpm_direct_stream_abort(r, "writing the response to the client failed");
+		if (written == -1) {
+			fpm_direct_stream_abort(r, why);
 			return;
 		}
-		/* A zero-length write on a non-empty buffer means neither progress nor
-		 * an error to act on. Once in a row is tolerated; twice, with poll()
-		 * still calling the descriptor writable in between, would be a loop
+		/* A write that took nothing and reported nothing means neither progress
+		 * nor an error to act on. Once in a row is tolerated; twice, with
+		 * poll() still calling the descriptor ready in between, would be a loop
 		 * spinning at full CPU until the budget ran out. */
-		if (written == 0 && ++idle_writes > 1) {
+		if (written == FPM_DIRECT_WRITE_IDLE && ++idle_writes > 1) {
 			fpm_direct_stream_abort(r, "the client connection accepted no data");
 			return;
 		}
@@ -938,6 +1003,11 @@ static void fpm_direct_stream_pump(struct fpm_direct_request *r, size_t limit)
 		if (evbuffer_get_length(out) <= limit) {
 			return;
 		}
+		/* What the transport is waiting for, not always writability: a TLS
+		 * write stopped by a renegotiation needs the peer's bytes first, and
+		 * waiting for POLLOUT there would wait on a descriptor that is already
+		 * writable until the budget ran out. */
+		pfd.events = wait_for ? wait_for : POLLOUT;
 		left = (int) (budget - r->stream_waited_ms);
 		if (left <= 0 || clock_gettime(CLOCK_MONOTONIC, &before) != 0) {
 			/* No budget, or no clock to bound the next wait with. Either way
@@ -988,6 +1058,41 @@ static void fpm_direct_stream_completed_inline(struct evhttp_request *request, v
 	 * running after fpmng_respond() and whose shutdown reads r->http. */
 	r->http = NULL;
 	fpm_direct_response_done(request, w);
+}
+
+/* Tells the transport that a complete response has been written out of the
+ * buffer by this file rather than by the event loop.
+ *
+ * Only the TLS step needs it. A plaintext write leaves the descriptor libevent
+ * is already watching, so evhttp still finishes the request by itself; the TLS
+ * step empties the buffer behind libevent's back, and evhttp's writecb -- the
+ * one call that ends up in evhttp_send_done() -- runs only off a write libevent
+ * performed (bufferevent_openssl.c:727, called from a consider_writing() loop
+ * that a drained buffer already ended, :877). Measured on the test box without
+ * this call: the client got its response and then waited out its 4 s timeout on
+ * the next request of the same keep-alive connection, against 0.30 s on a
+ * plaintext pool.
+ *
+ * Never with bytes still queued: the notification is deferred to the loop, and
+ * evhttp_write_cb() does not look at the buffer before deciding the response
+ * is out. Measured the other way round, notifying after every write: a 16 MiB
+ * streamed body reached the client 5 bytes short, without its "0\r\n\r\n"
+ * terminating chunk, because the terminator was queued after the last write
+ * but the deferred callback ran first. */
+static void fpm_direct_stream_notify(struct fpm_direct_request *r)
+{
+	struct evhttp_connection *connection;
+	struct bufferevent *bev;
+
+	if (!r->http || !r->w->stream_notify) {
+		return;
+	}
+	connection = evhttp_request_get_connection(r->http);
+	bev = connection ? evhttp_connection_get_bufferevent(connection) : NULL;
+	if (!bev || evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
+		return;
+	}
+	r->w->stream_notify(bev);
 }
 
 /* The streaming counterpart of the buffered tail of fpm_direct_handle().
@@ -1052,6 +1157,10 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 	evhttp_request_set_on_complete_cb(r->http, fpm_direct_response_done, r->w);
 	if (flush) {
 		fpm_direct_stream_pump(r, 0);
+		/* The terminating chunk evhttp_send_reply_end() queued above is part of
+		 * what the pump just wrote, so this is the first moment the response is
+		 * both complete and out. */
+		fpm_direct_stream_notify(r);
 	}
 }
 
@@ -1145,13 +1254,7 @@ static void fpm_direct_push_now(struct fpm_direct_request *r)
 	struct evbuffer *out;
 	evutil_socket_t fd;
 
-	/* On a TLS pool the bufferevent's output buffer holds plaintext while the
-	 * descriptor carries the encrypted session, so writing the one to the other
-	 * would put the response on the wire in the clear. That is the same reason
-	 * http.stream is refused together with http.tls_cert; here it costs only
-	 * the early delivery, so the pool keeps working and the response waits for
-	 * the loop. */
-	if (!r->http || fpm_http_direct_tls_enabled(r->w->wp)) {
+	if (!r->http) {
 		return;
 	}
 	connection = evhttp_request_get_connection(r->http);
@@ -1162,18 +1265,21 @@ static void fpm_direct_push_now(struct fpm_direct_request *r)
 	}
 	out = bufferevent_get_output(bev);
 	while (evbuffer_get_length(out) > 0) {
-		int written;
+		const char *why = NULL;
+		short wait_for;
 
-		/* The unfreeze is not optional; see fpm_direct_stream_pump(), where
-		 * leaving it out made every write fail silently. */
-		errno = 0;
-		evbuffer_unfreeze(out, 1);
-		written = evbuffer_write(out, fd);
-		evbuffer_freeze(out, 1);
-		if (written <= 0) {
+		/* The same write step the streaming pump uses, so a TLS pool gets the
+		 * early delivery too (issue #195): what it hands the transport is the
+		 * plaintext buffer either way, and only the step knows whether that
+		 * means the descriptor or SSL_write(). Anything that is not progress
+		 * ends the loop -- blocked, idle and fatal alike -- because this
+		 * function never waits; the response is complete and queued, so
+		 * whatever is left is delivered by the event loop exactly as before. */
+		if (r->w->stream_write(bev, fd, &wait_for, &why) <= 0) {
 			return;
 		}
 	}
+	fpm_direct_stream_notify(r);
 }
 
 /* The accounting every ending of a request shares: one more request served by
@@ -1378,12 +1484,10 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
  *    streaming one through fpm_direct_stream_pump() and the buffered one
  *    through fpm_direct_push_now(). Without that this function would move the
  *    accounting and change nothing the client could see.
- *  - Except on a TLS pool, where fpm_direct_push_now() declines: the plaintext
- *    in the bufferevent must not be written to a descriptor carrying an
- *    encrypted session. There the response waits for the loop, as it does
- *    today, and only the accounting moves early. (http.stream is refused
- *    outright on such a pool for the same reason, so the streaming branch
- *    cannot be reached there at all.)
+ *    A TLS pool included, since issue #195: the write step is chosen once at
+ *    child start-up (w->stream_write), so the plaintext in the bufferevent
+ *    goes to SSL_write() rather than to the descriptor, and neither ending
+ *    needs to know which pool it is on.
  *  - The worker is NOT free. It serves no other connection while the script
  *    keeps computing, on either kind of pool. That is a property of the classic
  *    executor holding the event loop, not something this call can change; the
@@ -1806,6 +1910,11 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	/* Before the bevcb is installed, because the first connection this child
 	 * accepts already goes through it. */
 	limits.pool = wp->config->name;
+	/* issue #195. Once, here, rather than per write: the transport of a pool is
+	 * fixed for its whole life, and this is the only thing the response path
+	 * does differently on TLS. */
+	w.stream_write = fpm_http_direct_tls_enabled(wp) ? fpm_direct_write_tls : fpm_direct_write_plain;
+	w.stream_notify = fpm_http_direct_tls_enabled(wp) ? fpm_http_direct_tls_notify_written : NULL;
 	limits.read_timeout_ms = wp->config->http_read_timeout;
 	limits.max_connections = wp->config->http_max_connections;
 	limits.max_per_client = wp->config->http_max_connections_per_client;

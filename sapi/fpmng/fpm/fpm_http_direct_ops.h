@@ -106,6 +106,10 @@ struct fpm_http_direct_ops_live {
 	 * counted cannot double-count by being called twice. */
 	unsigned long timed_out;	/* first request never arrived */
 	unsigned long refused_conn;	/* http.max_connections_per_client */
+	/* issue #65: 1 while this child is draining towards its own exit. A gauge
+	 * like the two above it -- a replacement child in the same slot publishes
+	 * 0 and the page stops saying it. */
+	unsigned retiring;
 };
 void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	const struct fpm_http_direct_ops_live *live);

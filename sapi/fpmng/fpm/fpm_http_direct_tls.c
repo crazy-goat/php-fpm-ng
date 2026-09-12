@@ -112,6 +112,11 @@ static struct bufferevent *fpm_http_direct_tls_bevcb(struct event_base *base, vo
 	return bev;
 }
 
+ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events)
+{
+	return fpm_http_tls_write_output(bev, poll_events);
+}
+
 int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -229,6 +234,13 @@ int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 		return -1;
 	}
 	return 0;
+}
+
+ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events)
+{
+	(void) bev;
+	*poll_events = 0;
+	return -1;
 }
 
 int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)

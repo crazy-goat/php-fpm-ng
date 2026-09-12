@@ -189,11 +189,19 @@ static void fpm_direct_stop(int signo)
 	fpm_direct_stopping = 1;
 }
 
-static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
+/* sweep = 1 only on the timer. The sweep walks every tracked connection, and
+ * since issue #64 that list holds them for their whole life, so calling it
+ * from the end of every request makes the request path grow with the
+ * connections the child happens to hold. Measured on the poligon 2026-09-12,
+ * one child, no http.max_connections, one busy keep-alive connection against N
+ * idle ones: 9422 rps at N=0, 8498 at N=500, 5304 at N=2000, back to 9703 at
+ * N=0. On the timer alone the same walk costs 100 * N pointer reads a second
+ * and does not touch the request path at all; the price is that a descriptor
+ * whose connection ended can outlive it by one tick instead of by one request,
+ * which is what the header already promises. */
+static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
-	struct fpm_direct_worker *w = arg;
-	(void) fd;
-	(void) events;
+	struct fpm_http_direct_ops_live live;
 	if (fpm_direct_stopping) {
 		if (w->listener) {
 			evhttp_del_accept_socket(w->http, w->listener);
@@ -214,7 +222,9 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 	 * itself, so this call is for the descriptors, not for the count: a child
 	 * that is accepting freely still has to let go of the fds of connections
 	 * that ended, and nothing else would ask it to. */
-	fpm_http_direct_conns_sweep(w->conns);
+	if (sweep) {
+		fpm_http_direct_conns_sweep(w->conns);
+	}
 	/* http.max_connections is a reason to stay out of accept, exactly like
 	 * being inside a request: the listening socket belongs to the whole pool,
 	 * so a connection this child does not take is one a sibling can take, and
@@ -222,6 +232,34 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 	if (!w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
 		fpm_direct_accept_enable(w, 1);
 	}
+	/* issue #64. Last, after everything above that can release a connection:
+	 * the live count is only true once the connections that ended have been
+	 * let go, and on a pool with http.max_connections the gate just did an
+	 * exhaustive walk this gauge may as well benefit from. On the inline call
+	 * there has been no sweep, so this publishes what the last one left -- the
+	 * gauge is documented as stale by up to one rotation for that reason. A
+	 * store per field is cheap enough to do on both paths; what is not cheap
+	 * is the walk above. */
+	live.connections = fpm_http_direct_conns_live(w->conns);
+	live.pending = (unsigned) w->pending;
+	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
+	live.refused_conn = fpm_http_direct_conns_refused(w->conns);
+	fpm_http_direct_ops_publish(w->ops, &live);
+}
+
+/* The 10 ms timer. */
+static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	fpm_direct_tick_body(arg, 1);
+}
+
+/* The end of a request, which re-opens the accept gate without waiting for the
+ * timer. It does not sweep -- see fpm_direct_tick_body(). */
+static void fpm_direct_tick_now(struct fpm_direct_worker *w)
+{
+	fpm_direct_tick_body(w, 0);
 }
 
 static char *fpm_direct_getenv(const char *name, size_t len)
@@ -807,7 +845,10 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 	if (r->rejected) {
 		/* The buffered path answers 500 with the cause as the body. Here the
 		 * status line left the process before the cause was known, so the only
-		 * signal left is an unterminated message. */
+		 * signal left is an unterminated message. Counted the same way either
+		 * way: from the outside both are this pool failing to deliver the
+		 * response the application built (issue #64). */
+		fpm_http_direct_ops_rejected(r->w ? r->w->ops : NULL);
 		fpm_direct_stream_abort(r, r->rejected);
 		return;
 	}
@@ -1118,6 +1159,11 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 
 	if (r->rejected || !fpm_http_direct_status_final(r->status)) {
 		const char *why = r->rejected ? r->rejected : "response status is not a final status";
+		/* Counted at the one place both causes meet, rather than at each of
+		 * the four that set r->rejected: what an operator is looking for is
+		 * "this pool answered 500 instead of what the application built", and
+		 * that is this branch (issue #64). */
+		fpm_http_direct_ops_rejected(w->ops);
 		evbuffer_drain(r->output, evbuffer_get_length(r->output));
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
 		evbuffer_add_printf(r->output, "http-direct: %s\n", why);
@@ -1134,7 +1180,7 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 	}
 	w->pending++;
-	fpm_direct_tick(-1, 0, w);
+	fpm_direct_tick_now(w);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
 	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
 	r->bytes_sent += evbuffer_get_length(r->output);
@@ -1395,20 +1441,25 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	 * a direct pool has no trusted-proxy list, and the address this test is
 	 * about is the one that made the connection. */
 	if (!fpm_http_direct_ops_allowed(w->ops, peer)) {
-		fpm_http_direct_ops_refused(w->ops);
+		fpm_http_direct_ops_refused(w->ops, FPM_HTTP_DIRECT_REFUSED_ACL);
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 403, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 403, "Forbidden");
 		return;
 	}
 	if (over_client_cap) {
-		fpm_http_direct_ops_refused(w->ops);
+		/* Not counted here. This shape of the per-client refusal is the one
+		 * that got a request in first; the other closes the connection before
+		 * evhttp hands us one, and both are counted by the file that makes the
+		 * decision (fpm_http_direct_conn.c) and published from the tick.
+		 * Counting it here as well would double the ones a client happened to
+		 * lose the race on. */
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 503, 0);
 		evhttp_send_error(http, 503, "Too many connections");
 		return;
 	}
 	if (fpm_direct_stopping || w->pending >= FPM_DIRECT_PENDING_MAX) {
-		fpm_http_direct_ops_refused(w->ops);
+		fpm_http_direct_ops_refused(w->ops, FPM_HTTP_DIRECT_REFUSED_CAPACITY);
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 503, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 503, "Worker unavailable");
@@ -1515,7 +1566,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
-		fpm_direct_tick(-1, 0, w);
+		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
@@ -1530,7 +1581,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
-		fpm_direct_tick(-1, 0, w);
+		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
@@ -1579,6 +1630,9 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	limits.read_timeout_ms = wp->config->http_read_timeout;
 	limits.max_connections = wp->config->http_max_connections;
 	limits.max_per_client = wp->config->http_max_connections_per_client;
+	/* This executor has the 10 ms tick, so it can afford to keep a node for
+	 * the whole connection and report a truthful live count (issue #64). */
+	limits.track_live = 1;
 	w.conns = fpm_http_direct_conns_new(w.base, &limits);
 	if (!w.conns) exit(FPM_EXIT_SOFTWARE);
 	evhttp_set_max_headers_size(w.http, FPM_HTTP_HEADERS_MAX);

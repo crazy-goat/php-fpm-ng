@@ -337,13 +337,36 @@ jobs:
           # (a source-tree fixture, not a build product); without it the test
           # fails on a nonexistent browscap path rather than exercising fpmng.
           cp "$PHPSRC"/ext/standard/tests/misc/browscap.ini stage/prepared/ext/standard/tests/misc/
+          # Strip the staged copies, not the originals: 34 MB of artifact per
+          # run was 99.8% of this repository's Actions storage (issue #261),
+          # and almost all of it is debug symbols in these two binaries. The
+          # trade is that anyone who downloads this artifact to chase a core
+          # dump from a failed test gets a stripped backtrace -- the build job
+          # still has the unstripped binaries in its own workspace while it
+          # runs, so the symbols exist where a crash would actually happen.
+          strip stage/bin/php-fpm-ng stage/bin/php
+          # Re-embed, because strip just threw the payload away. It is appended
+          # past the last ELF section, not held in one, so strip(1) rewrites the
+          # file without it -- build/embed-payload.sh:18-19 says so and
+          # fpmng-payload-distribution.phpt caught it when this step first
+          # stripped and stopped there (run 34699384655, FAIL=1 of 72). Running
+          # the embed again afterwards is the whole fix: the script is
+          # idempotent and this is a fresh copy that has lost its entry, so it
+          # appends one.
+          ./build/embed-payload.sh "$PWD/stage/bin/php-fpm-ng" "$PWD/stage/bin/php"
+          du -sh stage
 
       - name: upload build (for the phpt job)
         uses: actions/upload-artifact@v7
         with:
           name: fpmng-canonical-build
           path: stage
-          retention-days: 3
+          # One day, not three. Nothing reads this after its own run ends --
+          # every consumer is a job in the same run -- so the only thing
+          # retention buys is pulling the binary of a failed run by hand, and
+          # that is worth a day. At three days and ~48 runs on a busy day this
+          # artifact alone held 2.6 GB (issue #261).
+          retention-days: 1
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         env:

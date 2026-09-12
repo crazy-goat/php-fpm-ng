@@ -225,17 +225,6 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 	if (sweep) {
 		fpm_http_direct_conns_sweep(w->conns);
 	}
-	/* issue #64. After the sweep, never before: the live count is only true
-	 * once the connections that ended have been let go. On the inline call
-	 * there has been no sweep, so this publishes what the last one left --
-	 * the gauge is documented as up to one tick stale for exactly this
-	 * reason. A store per field is cheap enough to do on both paths; what is
-	 * not cheap is the walk above. */
-	live.connections = fpm_http_direct_conns_live(w->conns);
-	live.pending = (unsigned) w->pending;
-	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
-	live.refused_conn = fpm_http_direct_conns_refused(w->conns);
-	fpm_http_direct_ops_publish(w->ops, &live);
 	/* http.max_connections is a reason to stay out of accept, exactly like
 	 * being inside a request: the listening socket belongs to the whole pool,
 	 * so a connection this child does not take is one a sibling can take, and
@@ -243,6 +232,19 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 	if (!w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
 		fpm_direct_accept_enable(w, 1);
 	}
+	/* issue #64. Last, after everything above that can release a connection:
+	 * the live count is only true once the connections that ended have been
+	 * let go, and on a pool with http.max_connections the gate just did an
+	 * exhaustive walk this gauge may as well benefit from. On the inline call
+	 * there has been no sweep, so this publishes what the last one left -- the
+	 * gauge is documented as stale by up to one rotation for that reason. A
+	 * store per field is cheap enough to do on both paths; what is not cheap
+	 * is the walk above. */
+	live.connections = fpm_http_direct_conns_live(w->conns);
+	live.pending = (unsigned) w->pending;
+	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
+	live.refused_conn = fpm_http_direct_conns_refused(w->conns);
+	fpm_http_direct_ops_publish(w->ops, &live);
 }
 
 /* The 10 ms timer. */

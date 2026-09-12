@@ -102,6 +102,13 @@ static void fpm_direct_conn_link_front(struct fpm_http_direct_conns *conns, stru
 	conns->list = c;
 }
 
+/* Precondition: the node is linked. fpm_direct_conn_unlink() below trusts
+ * prev == NULL to mean "this is the head" and writes conns->list, so calling
+ * this on a node that is not in the list would orphan every node after the
+ * real head and leave live counting them forever -- with http.max_connections
+ * that wedges the accept gate shut for the life of the child. The failure
+ * paths in fpm_http_direct_conns_accepted() free their node directly for this
+ * reason: they run before it is linked. */
 static void fpm_direct_conn_forget(struct fpm_direct_conn *c)
 {
 	fpm_direct_conn_unlink(c);
@@ -158,16 +165,28 @@ static void fpm_direct_conn_deadline_fire(evutil_socket_t fd, short what, void *
 	fpm_direct_conn_forget(c);
 }
 
-/* True once evhttp is done with this connection. bufferevent_free() clears the
- * callbacks (libevent-2.1.12 bufferevent.c:809) and our reference keeps the
- * object alive past that point, so "no read callback" is exactly "evhttp has
- * let go". */
+/* True once evhttp is done with this connection. bufferevent_free() clears
+ * every callback (libevent-2.1.12 bufferevent.c:809 -- setcb(NULL, NULL, NULL,
+ * NULL)) and our reference keeps the object alive past that point, so "no
+ * callbacks at all" is exactly "evhttp has let go".
+ *
+ * All three, not just the read callback: while it writes a response evhttp
+ * deliberately sets the read callback to NULL and keeps the other two
+ * (http.c:382, evhttp_write_buffer, "Disable the read callback: we don't
+ * actually care about data"). Asking only about readcb therefore called every
+ * connection abandoned for as long as its response was being written, and the
+ * sweep released the node underneath it: measured on the poligon 2026-09-12 as
+ * a status page reporting `live connections: 0` on a child that had just
+ * answered 730 requests on a keep-alive connection it was still holding, with
+ * both of the test's connections landing on that one child because
+ * may_accept() believed the same zero. */
 static int fpm_direct_conn_abandoned(const struct fpm_direct_conn *c)
 {
-	bufferevent_data_cb readcb = NULL;
+	bufferevent_data_cb readcb = NULL, writecb = NULL;
+	bufferevent_event_cb eventcb = NULL;
 
-	bufferevent_getcb(c->bev, &readcb, NULL, NULL, NULL);
-	return readcb == NULL;
+	bufferevent_getcb(c->bev, &readcb, &writecb, &eventcb, NULL);
+	return readcb == NULL && writecb == NULL && eventcb == NULL;
 }
 
 /* EV_READ on a connection whose first request has not arrived. Only a real EOF
@@ -524,19 +543,27 @@ static void fpm_direct_conn_sweep_all(struct fpm_http_direct_conns *conns)
  * idle ones) an exhaustive sweep on the 10 ms tick cost 9460 rps at N=0 but
  * 6708 at N=2000, against 9534 / 9686 for the same binary with the sweep
  * disabled and 9534 / 9686 for origin/main, which does not track a served
- * connection at all. A bounded sweep costs the same at every N; what it buys
- * with the bound is time, not correctness -- a descriptor whose connection
+ * connection at all. A bounded sweep costs the same at every N -- measured on
+ * the final binary at 9320 / 9778 / 9272 / 9426 / 9369 rps for N = 0 / 5 / 32
+ * / 500 / 2000, against 9267 rps for a second N=0 pass, which is the width of
+ * the noise. What it buys with the bound is time, not correctness -- a descriptor whose connection
  * ended waits at most live/FPM_DIRECT_SWEEP_MAX ticks instead of one, and
  * anything that needs an exact count asks for the exhaustive walk above. */
 #define FPM_DIRECT_SWEEP_MAX 32u
 
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 {
-	unsigned budget = FPM_DIRECT_SWEEP_MAX;
+	unsigned budget;
 
 	if (!conns) {
 		return;
 	}
+	/* Never more than one full rotation. Without this a child holding five
+	 * connections would still pay 32 examinations per sweep -- and a sweep
+	 * runs on every accept as well as every tick -- where the exhaustive walk
+	 * it replaced paid five. The bound exists to cap the cost on a long list,
+	 * not to invent work on a short one. */
+	budget = conns->live < FPM_DIRECT_SWEEP_MAX ? conns->live : FPM_DIRECT_SWEEP_MAX;
 	/* From the tail, because that is where connections that have stopped
 	 * making requests collect: every request moves its node to the head.
 	 * A node that survives the examination goes to the head too, so repeated

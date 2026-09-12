@@ -105,6 +105,7 @@ function fetch($fp, string $path): array
         }
         $body .= $chunk;
     }
+    $GLOBALS['last_page'] = $body;
     return [$status, $body];
 }
 
@@ -131,7 +132,11 @@ function until(callable $done, float $seconds, string $what)
         }
         usleep(20000);
     } while (microtime(true) < $deadline);
-    throw new RuntimeException("timed out waiting for $what");
+    /* With the page it last read: a gauge that did not move is only
+     * diagnosable against the numbers that were there instead, and a bare
+     * "timed out" turns every flake into a re-run. */
+    throw new RuntimeException("timed out waiting for $what\nlast page:\n" .
+        ($GLOBALS['last_page'] ?? '(none)'));
 }
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -168,7 +173,7 @@ try {
     $other = connect($port);
     fetch($other, '/app');
     until(function () use ($reader, $accepted) {
-        [, $b] = fetch($reader, '/status');
+        [, $b] = fetch($reader, '/status?full');
         return field($b, 'accepted conn') > $accepted && field($b, 'live connections') >= 2 ? $b : null;
     }, 15, 'the second connection to be counted');
     fclose($other);

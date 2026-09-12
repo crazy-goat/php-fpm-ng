@@ -39,6 +39,17 @@ on:
 # php-src checkout, far too large to tar into the cache service every run, so
 # every job configures from scratch and leans on ccache for the compile.
 #
+# What the cache is worth, measured on two consecutive runs on main --
+# 34702558731 cold, 34703566697 warm off it:
+#
+#   build              202 s -> 89 s
+#   static-musl        318 s -> 107 s
+#   fpmng-phpt-fiber   262 s -> 168 s
+#
+# Per job, not per run: run wall clock is dominated by how many hosted runners
+# the account gets at that moment, and the warm run of the pair happened to
+# queue behind another.
+#
 # Every job below except static-musl and package-gate runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from
 # .github/docker/ci.Dockerfile), which is why none of them apt-get anything
@@ -757,8 +768,9 @@ jobs:
       # The Alpine container below writes its ccache and its downloaded .apk
       # files into these two host directories. On the self-hosted box they
       # simply stayed there; here they have to be carried between runs. What
-      # this is worth has not been measured yet -- the only figure that exists
-      # is the cold one, 456 s on run 34594056547 with no cache of any kind.
+      # this is worth is 318 s -> 107 s for this job, measured on runs
+      # 34702558731 and 34703566697; the figure from the poligon era, 456 s
+      # with no cache of any kind, was run 34594056547.
       # /build is deliberately not cached -- it is object files for a configure
       # that runs inside the container, and ccache already covers the compile.
       - name: restore the musl compiler and package caches
@@ -777,7 +789,7 @@ jobs:
         # and is here because static-full.sh configures out of tree. This was
         # the only compiling job in the matrix with no compiler cache at all
         # and a full 25-package apk install every time -- see the cache step
-        # above for the measurement.
+        # above for what fixing that was worth.
         run: |
           mkdir -p "$MUSL_CACHE/build" "$MUSL_CACHE/ccache" "$MUSL_CACHE/apk" out-static
           docker run --rm \

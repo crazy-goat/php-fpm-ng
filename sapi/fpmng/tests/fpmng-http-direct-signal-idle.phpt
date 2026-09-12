@@ -3,7 +3,6 @@ fpm-ng: a direct child that is idle and has served requests still obeys SIGUSR1 
 --SKIPIF--
 <?php
 include "skipif.inc";
-if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux /proc');
 ?>
 --FILE--
 <?php

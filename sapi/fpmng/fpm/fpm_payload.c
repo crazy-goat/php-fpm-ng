@@ -51,7 +51,21 @@ const char *fpm_payload_self_path(void)
 	 * would find the NEW binary after a package upgrade. */
 	n = readlink("/proc/self/exe", resolved, sizeof(resolved) - 1);
 	if (n > 0) {
-		resolved[n] = '\0';
+		static const char deleted[] = " (deleted)";
+		size_t len = (size_t) n;
+
+		resolved[len] = '\0';
+		/* An unlinked binary reads back as "/usr/bin/php-fpm-ng (deleted)".
+		 * Without this branch access() on that literal name fails, the code
+		 * falls through to argv[0], and argv[0] after a package upgrade names
+		 * the NEW file -- so a cron run in a master started before the upgrade
+		 * would load the new version's PHP into old machine code. There is no
+		 * path to the running inode left to return, so say so. */
+		if (len >= sizeof(deleted) - 1 &&
+			0 == strcmp(resolved + len - (sizeof(deleted) - 1), deleted)) {
+			resolved[0] = '\0';
+			return NULL;
+		}
 		if (access(resolved, R_OK) == 0) {
 			return resolved;
 		}

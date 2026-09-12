@@ -72,9 +72,15 @@ scope here.
 Appended data is not part of any ELF section, so `strip` drops it and the
 binary silently goes back to having no payload. Embed *after* stripping, or
 do not strip at all — which is what this repository's packaging does:
-`build/package-apk.sh` builds with `!strip`, `build/package-deb.sh` never
-strips, and `build/libphp-build.sh` appends after the link and then reads the
-entry back to prove the append landed.
+`build/package-apk.sh` builds with `!strip` and `build/package-deb.sh` never
+strips.
+
+`build/embed-payload.sh` is the one step every build path calls after linking
+(`build/libphp-build.sh` for the packages, `build/static-full.sh` for the musl
+binary, the CI build jobs for the binary the test suite runs), and it reads
+the entry back to prove the append landed. It is idempotent: a binary that
+already carries the archive it would write is left alone, so a reused build
+tree does not collect one archive per run.
 
 ## Appending your own
 

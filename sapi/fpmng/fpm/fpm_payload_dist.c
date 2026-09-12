@@ -191,7 +191,11 @@ static php_stream *fpm_payload_dist_opener(php_stream_wrapper *wrapper, const ch
 	php_stream *stream;
 
 	(void) context;
-	if (strpbrk(mode, "wa+")) {
+	/* Anything that is not a plain read is refused. Listing the write modes
+	 * instead ("wa+") missed 'c' (write without truncating) and 'x' (create
+	 * exclusive), both of which then got a working handle whose first fwrite()
+	 * failed with the memory stream's generic error instead of this message. */
+	if (mode[0] != 'r' || strchr(mode, '+')) {
 		/* NOTES.md:157-201, "Writes -- the biggest problem": embedded code is
 		 * immutable, and state belongs on a volume. Refused with a message
 		 * rather than silently opened read-only. */

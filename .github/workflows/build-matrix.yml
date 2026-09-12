@@ -295,6 +295,17 @@ jobs:
           chmod +x build/check-owned-warnings.sh
           ./build/check-owned-warnings.sh "$PWD/make.log"
 
+      # Issue #171: the .phpt suite tests this binary, and
+      # fpmng-payload-distribution.phpt reads the payload out of the binary
+      # under test -- so the CI binary has to carry one just like a packaged
+      # build does. The step is idempotent (see build/embed-payload.sh): this
+      # tree is reused between runs, and a binary make did not relink still has
+      # last run's payload.
+      - name: embed the distribution payload (issue #171)
+        run: |
+          chmod +x build/embed-payload.sh
+          ./build/embed-payload.sh "$PHPSRC/sapi/fpmng/php-fpm-ng" "$PHPSRC/sapi/cli/php"
+
       - name: verify the binary that got built
         run: |
           test -x "$PHPSRC/sapi/fpmng/php-fpm-ng"
@@ -548,6 +559,13 @@ jobs:
           ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make-fiber.rc ) | tee make-fiber.log
           if [ "$(cat make-fiber.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
           exit "$(cat make-fiber.rc)"
+
+      # Same as on the `build` job: the suite reads the payload out of the
+      # binary it tests (issue #171), and this cell builds its own binary.
+      - name: embed the distribution payload (issue #171)
+        run: |
+          chmod +x build/embed-payload.sh
+          ./build/embed-payload.sh "$PHPSRC/sapi/fpmng/php-fpm-ng" "$PHPSRC/sapi/cli/php"
 
       - name: run fpmng-owned .phpt tests on the fiber build
         run: |

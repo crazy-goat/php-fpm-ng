@@ -713,6 +713,7 @@ against the documented spelling.
 | `refused connections` | connections answered `503` by `http.max_connections_per_client` |
 | `timed out connections` | connections dropped by the first-request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
+| `retiring children` | children draining towards their own exit (see below) |
 
 `refused requests` is the sum of `refused acl` and `refused capacity`, kept
 under its old name and its old meaning so a tool written against the fastcgi
@@ -812,6 +813,10 @@ upstream's `accepted conn`.
 
 #### `?full`: the per-child rows
 
+Every row also carries `pid` and `retiring`, which the pool-wide block has no
+place for: the pid because it is the address of the retire signal below, and
+`retiring` because it is a property of one child.
+
 `?full` appends one block per scoreboard slot, with the same fields, in both
 the text and the JSON rendering (`?json&full` stays valid JSON: the per-child
 rows are a `workers` array). A slot that has accepted nothing is printed
@@ -840,6 +845,64 @@ slots describe a FastCGI request, and a direct child's request is not one.
 `pm.status_listen` stays rejected on both executors: it asks for a second
 listening socket served by a second process, and a direct child owns exactly
 one listener — the pool's.
+
+### Retiring one child (`SIGUSR1`)
+
+`kill -USR1 <child pid>` tells one child of a direct pool to step out: it stops
+accepting, finishes what it is doing, and exits, and the master puts a
+replacement in its place the way it does for any child that exits on its own.
+The pid is on the `?full` row of the status page, which is the point of it
+being there.
+
+This is what a rolling deploy needs and what `SIGQUIT` cannot give. `SIGQUIT`
+is the pool winding down: a child that has it answers `503` to everything that
+arrives, which is right when the whole pool is going away and wrong when the
+pool is carrying on without this one child. A retiring child keeps serving:
+
+- it removes itself from the pool's listening socket immediately, so every
+  connection it does not take is one a sibling takes -- the socket is shared,
+  so nothing is refused and nothing is queued behind the child that is leaving;
+- it answers the requests that arrive on the connections it already holds, and
+  every answer carries `Connection: close`, so a keep-alive client is told to
+  go and open its next connection somewhere else rather than finding out from a
+  reset;
+- it exits when it holds no connection and no response is still being written,
+  or when `http.read_timeout` has passed since the signal -- whichever is
+  first. The deadline is what stops a client that opened a connection and never
+  used it from pinning a child a deploy is waiting for. It is the same
+  directive that already answers "how long may a connection stay silent", so a
+  pool that has tuned one has tuned both.
+
+A second `SIGUSR1` to a child that is already retiring does nothing: the drain
+it is waiting for is not shortened by asking twice.
+
+Retiring every child one at a time is a rolling restart of the pool with no
+failed request, which is what the test asserts, with a client that opens a
+connection per request throughout. One at a time is the contract: the siblings
+are what keeps the pool answering, so wait for the replacement -- `?full` shows
+it as a new `pid` in that slot -- before signalling the next.
+
+Interactions:
+
+- **`pm.max_requests`.** Both end in the same drain. A child that reaches its
+  recycling limit while retiring simply has two reasons to go.
+- **A graceful reload or stop.** The master's `SIGQUIT` wins: a child caught by
+  a pool-wide shutdown follows the shutdown, `503` included. There is no point
+  serving new requests for a pool that is going away.
+- **`http.max_connections`.** A retiring child stops accepting, so it cannot
+  reach the cap; the connections it already holds count against nothing else.
+- **`pool.executor = worker`.** `SIGUSR1` there is the same graceful stop
+  `SIGQUIT` gives. That executor tracks no connections, so it has nothing with
+  which to tell "drain the connections I hold" from "drain the requests I
+  hold". What it does buy is that the signal is not the default action, which
+  would kill the child outright and drop what it was serving.
+
+What this deliberately does **not** do is start the replacement before the old
+child exits. The replacement arrives when the slot frees, so a pool of `N`
+children serves on `N - 1` for the length of one drain. Starting it earlier
+would mean running `pm.max_children + 1` processes, and `pm.max_children` is
+the promise on which an operator sized the machine's memory. Retire one child
+at a time and the pool never dips below `N - 1`.
 
 ### `access.log`
 

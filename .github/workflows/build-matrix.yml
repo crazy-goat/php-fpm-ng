@@ -732,12 +732,16 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # This job is not containerised -- it drives `docker run` with host bind
-      # mounts, which the host daemon resolves -- so it names a host path. Under
-      # RUNNER_TEMP, not /opt: the runner user does not own /opt on a hosted
-      # image, and the two reclaim-from-root steps that used to stand here are
-      # gone with the box that needed them, because a hosted runner hands the
-      # next job a new machine rather than the workspace this one left behind.
-      MUSL_CACHE: ${{ runner.temp }}/buildtree-musl
+      # mounts, which the host daemon resolves -- so it names a host path.
+      # Beside the checkout rather than in /opt (the runner user does not own
+      # /opt on a hosted image) and spelled with the github context rather than
+      # `${{ runner.temp }}`: the runner context does not exist in a job-level
+      # env: and naming it there fails the whole workflow at startup, which is
+      # how the first run of this change ended. The two reclaim-from-root steps
+      # that used to stand here are gone with the box that needed them -- a
+      # hosted runner hands the next job a new machine, not the workspace this
+      # one left root-owned.
+      MUSL_CACHE: ${{ github.workspace }}/../buildtree-musl
     steps:
       - uses: actions/checkout@v7
 
@@ -762,8 +766,8 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            ${{ runner.temp }}/buildtree-musl/ccache
-            ${{ runner.temp }}/buildtree-musl/apk
+            ${{ github.workspace }}/../buildtree-musl/ccache
+            ${{ github.workspace }}/../buildtree-musl/apk
           key: musl-${{ env.PHP_SRC_REF }}-${{ github.sha }}
           restore-keys: |
             musl-${{ env.PHP_SRC_REF }}-
@@ -1056,11 +1060,13 @@ jobs:
     needs: patches
     runs-on: ubuntu-latest
     env:
-      # Under RUNNER_TEMP for the same reason static-musl is: a host path the
-      # runner user owns. The reclaim-from-root steps that used to precede the
-      # checkout are gone with the shared box -- nothing outside this run will
-      # ever try to unlink what the containers below write as root.
-      PACKAGE_CACHE: ${{ runner.temp }}/buildtree-package
+      # Beside the checkout, for the same reason static-musl is: a host path
+      # the runner user owns, named without the runner context, which a
+      # job-level env: does not have. The reclaim-from-root steps that used to
+      # precede the checkout are gone with the shared box -- nothing outside
+      # this run will ever try to unlink what the containers below write as
+      # root.
+      PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
     steps:
       - uses: actions/checkout@v7
 

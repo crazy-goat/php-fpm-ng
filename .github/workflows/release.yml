@@ -45,8 +45,9 @@ jobs:
     # directories.
     runs-on: ubuntu-latest
     env:
-      # A host path the runner user owns; /opt on a hosted image is root's.
-      PACKAGE_CACHE: ${{ runner.temp }}/buildtree-package
+      # A host path the runner user owns; /opt on a hosted image is root's,
+      # and the runner context is not available in a job-level env: at all.
+      PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
     steps:
       - uses: actions/checkout@v7
 

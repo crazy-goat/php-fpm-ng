@@ -20,6 +20,7 @@
 #include "fpm_pool_script.h"
 #include "fpm_std_streams.h"
 #include "fpm_acme_challenge.h"
+#include "fpm_payload_dist.h"
 #include "fpm_pool_type.h"
 #include "fpm_worker_pool.h"
 #include "fpm_stdio.h"
@@ -182,8 +183,48 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 		 * constant registration), so it is the first that can bail out. */
 		fpm_std_streams_register(pool_name);
 		fpm_pool_script_register_acme_builtins(pool_name);
+		if (fpm_payload_dist_is_path(script_path)) {
+			/* Only for a script that asks for it: registering a URL wrapper
+			 * reads the payload out of the binary and keeps it in memory for
+			 * the life of the process, which a pool running a script from disk
+			 * has no reason to pay for. The master already refused the pool if
+			 * the file is not there (fpm_pool_cron_validate()), so a failure
+			 * here is the payload becoming unreadable after startup -- worth
+			 * the message and worth failing the run. */
+			const char *why = NULL;
 
-		if (php_fopen_primary_script(&file_handle) == FAILURE) {
+			if (0 > fpm_payload_dist_register(&why)) {
+				zlog(ZLOG_ERROR, "[pool %s] cannot use embedded script '%s': %s",
+					pool_name, script_path, why);
+				EG(exit_status) = 255;
+			}
+		}
+
+		if (EG(exit_status) == 255) {
+			/* The wrapper above failed; there is nothing to open. */
+		} else if (fpm_payload_dist_is_path(script_path)) {
+			/* php_fopen_primary_script() cannot open this: it resolves the path
+			 * through php_resolve_path(), which returns NULL for every scheme
+			 * except file:// (fopen_wrappers.c, "Don't resolve paths which
+			 * contain protocol"), and a NULL there is a FAILURE before any
+			 * wrapper is consulted. Opening the stream directly is the same
+			 * pair of calls php_fopen_primary_script() ends with, minus the
+			 * resolution step that has nothing to resolve -- an embedded path
+			 * is already absolute within the binary, needs no include_path
+			 * search and has no realpath. */
+			zend_stream_init_filename(&file_handle, script_path);
+			file_handle.primary_script = 1;
+			if (zend_stream_open(&file_handle) == FAILURE) {
+				zlog(ZLOG_ERROR, "[pool %s] cannot open embedded script '%s'",
+					pool_name, script_path);
+				EG(exit_status) = 255;
+			} else {
+				php_execute_script(&file_handle);
+				if (!file_handle.in_list) {
+					zend_destroy_file_handle(&file_handle);
+				}
+			}
+		} else if (php_fopen_primary_script(&file_handle) == FAILURE) {
 			zlog(ZLOG_ERROR, "[pool %s] cannot open script '%s'", pool_name, script_path);
 			EG(exit_status) = 255;
 		} else {

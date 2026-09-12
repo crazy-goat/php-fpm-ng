@@ -21,11 +21,16 @@ issue #48 (`fpmng_acme_challenge_set()`).
 [acme]
 pool.type = cron
 cron.schedule = 17 3,15 * * *
-cron.script = /usr/local/lib/fpmng/acme/renew.php
+cron.script = fpmng-dist://acme/renew.php
 
 env[ACME_STATE_DIR] = /var/lib/fpmng/acme
 env[ACME_DOMAINS]   = example.com,www.example.com
 ```
+
+`fpmng-dist://acme/renew.php` is the copy of this client embedded in the
+binary itself, so no `.php` file has to be installed or kept in step with the
+package — see [`docs/payload.md`](payload.md). A path on disk works exactly
+the same way if you want to run a modified copy.
 
 `pool.type = cron` is the intended home: it is pinned to one process, it
 carries `publishes_acme_challenges`, and its schedule is the renewal

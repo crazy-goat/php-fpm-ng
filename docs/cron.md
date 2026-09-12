@@ -16,7 +16,10 @@ overlap: the next run cannot start until the previous one has exited.
   hour day-of-month month day-of-week) or one of `@hourly`, `@daily`,
   `@weekly`, `@monthly`, `@yearly`. Invalid syntax is rejected at startup with
   a specific error, not accepted and silently never run.
-- **`cron.script`** (required) — the PHP script to run.
+- **`cron.script`** (required) — the PHP script to run. A path on disk, or a
+  `fpmng-dist://` path naming a script embedded in the binary
+  ([`docs/payload.md`](payload.md)); an embedded name that is not there is
+  rejected at startup.
 - **`cron.timeout`** (optional, seconds, default: no limit) — kills the
   script's process if it runs longer than this.
 - **`cron.timezone`** (optional, default: unset = UTC) — an IANA zone name,

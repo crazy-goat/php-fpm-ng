@@ -9,3 +9,5 @@ examples/http/certs/
 __pycache__/
 findings.md
 .run/
+# Claude Code session state: worktrees, local MCP settings, transcripts.
+.claude/

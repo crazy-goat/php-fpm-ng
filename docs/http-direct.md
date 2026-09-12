@@ -737,9 +737,16 @@ busy keep-alive connection against N idle ones:
 
 | N idle connections | origin/main | exhaustive sweep per tick | bounded sweep (shipped) |
 |---:|---:|---:|---:|
-| 0 | 9534 rps | 9460 rps | 9789 rps |
-| 500 | 9555 rps | 9180 rps | 9651 rps |
-| 2000 | 9686 rps | 6708 rps | 9506 rps |
+| 0 | 9534 rps | 9460 rps | 9320 rps |
+| 5 | -- | -- | 9778 rps |
+| 32 | -- | -- | 9272 rps |
+| 500 | 9555 rps | 9180 rps | 9426 rps |
+| 2000 | 9686 rps | 6708 rps | 9369 rps |
+
+The first two columns are the run that decided the design; the third is a
+re-measurement of the binary that shipped, so read it for its flatness rather
+than against the other two. It has no trend: the two `N = 0` measurements of
+that run were 9267 and 9320 rps, which is the width of the noise.
 
 So the sweep examines at most 32 nodes per pass, taken from the end of the list
 that requests move away from. A descriptor whose connection has ended is

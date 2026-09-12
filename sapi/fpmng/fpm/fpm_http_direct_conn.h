@@ -124,8 +124,9 @@ int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns);
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
 
 /* What this file knows, for the status page (issue #64). All three are this
- * worker's own: live is a gauge that lags its connection by at most one sweep,
- * the other two are totals since the child started. The worker publishes them
+ * worker's own: live is a gauge that lags its connection by at most a full
+ * rotation of the bounded sweep (see FPM_DIRECT_SWEEP_MAX in the .c), the
+ * other two are totals since the child started. The worker publishes them
  * into its shared slot from the same tick that sweeps, rather than this file
  * reaching into the scoreboard -- accounting belongs to whoever already owns a
  * slot. */

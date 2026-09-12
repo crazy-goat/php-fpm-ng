@@ -32,12 +32,20 @@
  * statement is a call to zend_signal_init() (Zend/zend_signal.c:443). What it
  * does on top is zend_signal_globals_ctor() -- a memset of the globals, reset
  * = 1, and a rebuild of the pending-queue free list -- and a recomputation of
- * global_sigmask. All of that is idempotent at both points FPM calls this: the
- * child has forked and has not run a request, so the globals still hold
- * exactly the post-ctor state the master left them in. Calling it again writes
- * back the values that are already there. A call after a request has run would
- * not be safe -- it would clear SIGG(active) and drop the pending queue -- and
- * neither caller is in that position.
+ * global_sigmask. Neither call runs after a request, so there is no SIGG(active)
+ * to clear and no pending queue to drop, and the free list and global_sigmask
+ * are rebuilt to the values they already held.
+ *
+ * ONE THING IS LOST, at the first call, not the second. zend.signal_check is an
+ * ZEND_INI_SYSTEM entry stored inside zend_signal_globals_t (Zend/zend.c:270)
+ * and set during module startup in the master, before the fork.
+ * zend_signal_globals_ctor() memsets the whole struct (Zend/zend_signal.c:387),
+ * so the first substituted call zeroes SIGG(check) and the
+ * "handler was replaced for signal (%d) after startup" warning
+ * (Zend/zend_signal.c:347-362) never fires in a libphp-build child -- including
+ * a debug build, where SIGNAL_CHECK_DEFAULT is "1" (Zend/zend.c:256). That is
+ * the price of the stand-in and it is paid once; the second call adds nothing,
+ * because the field is already zero by the time it runs.
  *
  * NOT VALID UNDER ZTS. There zend_signal_globals_ctor() is reached through
  * ts_allocate_fast_id(), and calling it twice allocates a second thread-local

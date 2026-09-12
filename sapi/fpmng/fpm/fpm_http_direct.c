@@ -1951,7 +1951,15 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * read() or write() on a database, cache or HTTP socket. Without it that
 	 * syscall returns EINTR, and PHP streams and several extensions report
 	 * that as an I/O failure rather than retrying -- retiring a child would
-	 * fail the very request it was retiring around (issue #65). */
+	 * fail the very request it was retiring around (issue #65).
+	 *
+	 * It only holds until the child's first request. zend_signal_register()
+	 * installs the deferring handler with sa_flags = SA_SIGINFO and nothing
+	 * else (Zend/zend_signal.c:305), so from then on the kernel-level action
+	 * for these two signals does not restart syscalls; what the snapshot below
+	 * preserves is the handler, not the flag. Nothing at this call site can
+	 * change that -- the first activate() happens long after child_main() has
+	 * returned into the event loop. Tracked by issue #259. */
 	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	/* issue #65. Without this SIGUSR1 is SIG_DFL in a child (fpm_signals.c

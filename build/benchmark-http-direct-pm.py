@@ -191,6 +191,22 @@ def pss_bytes(pid):
     return None
 
 
+def fd_count(pid):
+    """Open descriptors held by one child.
+
+    An idle keep-alive connection costs a descriptor whether or not it costs
+    measurable memory, and nothing balances accepted connections across
+    children -- so the aggregate says nothing about which child hits
+    RLIMIT_NOFILE first. Measured on issue #164: at 1024 connections over four
+    children the busiest held 35 % of them on plaintext and 57 % on TLS, not
+    the 25 % an even split would give.
+    """
+    try:
+        return len(os.listdir(f"/proc/{pid}/fd"))
+    except OSError:
+        return None
+
+
 def children_of(pid):
     """Direct children of the master, from /proc.
 
@@ -849,6 +865,7 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
                 "children": len(children),
                 "rss_child_bytes": {str(pid): rss_bytes(pid) for pid in children},
                 "pss_child_bytes": {str(pid): pss_bytes(pid) for pid in children},
+                "fd_child_count": {str(pid): fd_count(pid) for pid in children},
                 "idle_conns_per_child": {str(pid): len(cs) for pid, cs in idle_set.by_pid.items()},
             }
             steady_from = time.monotonic()

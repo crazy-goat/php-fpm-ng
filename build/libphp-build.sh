@@ -257,6 +257,29 @@ ${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_N
   exit 1
 }
 
+# --- embed the distribution payload (issue #171) -------------------------------
+# After the link and before anything reads the binary, because this is an
+# append: strip(1) would drop it (it is not an ELF section), so nothing may
+# strip after this point. build/package-apk.sh already builds with `!strip`
+# and build/package-deb.sh never strips.
+#
+# The packer is PHP, and the interpreter comes from the same installation as
+# php-config rather than from PATH: this build already depends on that
+# installation for libphp itself, and a `php` found on PATH could be a
+# different version with a different set of extensions.
+PHP_BIN=$("$PHP_CONFIG" --php-binary 2>/dev/null || true)
+[ -n "$PHP_BIN" ] && [ -x "$PHP_BIN" ] || PHP_BIN=$(command -v php || true)
+[ -n "$PHP_BIN" ] || fail "no PHP interpreter to run build/payload-pack.php; install the cli package next to php-config"
+"$PHP_BIN" "$REPO/build/payload-pack.php" append --binary="$BIN" \
+  --kind=distribution --dir="$REPO/sapi/fpmng/acme" --prefix=acme ||
+  fail "the distribution payload could not be embedded"
+# Read it back with the same walker the C side uses. The append above can fail
+# silently in exactly one way -- a short write -- and the failure would then
+# show up as a PHP parse error at the first ACME order.
+"$PHP_BIN" "$REPO/build/payload-pack.php" list --binary="$BIN" | grep -q '^kind=1 ' ||
+  fail "the binary carries no distribution payload after the embedding step"
+echo "libphp-build.sh: $("$PHP_BIN" "$REPO/build/payload-pack.php" list --binary="$BIN")"
+
 # --- assert the binary, not the flags ------------------------------------------
 # Same reasoning as build/static-full.sh (issue #77): the flags above are
 # exactly what was wrong when this went wrong, so a check that reads them would

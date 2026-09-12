@@ -68,7 +68,8 @@ int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_
  * of the connection's output buffer on the wire with SSL_write() instead of
  * writing it to the descriptor, which on a TLS connection would put plaintext
  * there. Returns the bytes accepted (> 0), 0 if the write blocked (*poll_events
- * then says what to wait for), or -1 on an error that ends the connection.
+ * then says what to wait for), FPM_HTTP_DIRECT_TLS_WRITE_IDLE when the buffer's
+ * front held nothing to write, or -1 on an error that ends the connection.
  * Never blocks and never runs the event loop -- see fpm_http_tls_write_output()
  * for why the caller may not.
  *
@@ -78,7 +79,20 @@ int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_
  *
  * Kept here rather than in fpm_http_direct.c so that the executor has one write
  * step per transport and no #ifdef of its own. */
+/* Declared outside the TLS build guard, because the caller compares against it
+ * in both builds. Its value is FPM_HTTP_TLS_WRITE_IDLE's, which is checked in
+ * fpm_http_direct_tls.c where both headers are in scope. */
+#define FPM_HTTP_DIRECT_TLS_WRITE_IDLE (-2)
+
 ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events);
+
+/* Issue #195. Tells libevent that a response written by fpm_http_direct_tls_write()
+ * has left the buffer, which is what makes evhttp finish the request. Call it
+ * only with the response complete AND the output buffer empty; per write, or
+ * with bytes still queued, it finishes the request on top of data that has not
+ * been sent yet. A no-op in a build without TLS support and on a plaintext
+ * pool, whose write step goes through the descriptor libevent is watching. */
+void fpm_http_direct_tls_notify_written(struct bufferevent *bev);
 
 /* Whether this pool terminates TLS, i.e. whether REQUEST_SCHEME is https and
  * HTTPS is on for every request it serves. Answers from configuration, so it

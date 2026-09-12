@@ -137,8 +137,26 @@ struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg);
  *
  * Returns the plaintext bytes accepted (> 0), 0 if the write blocked -- then
  * *poll_events is POLLOUT, or POLLIN when a renegotiation made the write wait
- * on a read -- or -1 on an error that ends the connection. Never blocks. */
+ * on a read -- FPM_HTTP_TLS_WRITE_IDLE when there was nothing to hand OpenSSL,
+ * or -1 on an error that ends the connection. Never blocks. */
+/* Neither progress nor a reason to wait: the buffer's front held no bytes to
+ * write. A caller that treated this as "blocked" would wait on a descriptor
+ * that is already writable; one that treated it as an error would drop a live
+ * connection. Same value and same meaning as FPM_DIRECT_WRITE_IDLE, which is
+ * what fpm_http_direct_tls_write() maps it to. */
+#define FPM_HTTP_TLS_WRITE_IDLE (-2)
+/* How many vectors the write step peeks at once. Eight, as libevent's
+ * do_write() does (bufferevent_openssl.c:669), so that empty chains in front
+ * of the data can be skipped rather than reported as a zero-length write. */
+#define FPM_HTTP_TLS_WRITE_VECS 8
+
 ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events);
+
+/* Tells libevent -- and through it evhttp -- that a response this module wrote
+ * itself has left the buffer, which is what finishes the request. Call it once
+ * the response is complete and the buffer is empty, NOT after each write; see
+ * the definition for what each mistake costs. */
+void fpm_http_tls_notify_written(struct bufferevent *bev);
 
 #endif /* HAVE_FPM_HTTP_TLS */
 

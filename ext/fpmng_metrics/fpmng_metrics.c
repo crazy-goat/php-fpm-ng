@@ -592,14 +592,14 @@ static void bucket_literal(char *out, size_t outsz, double le)
 	snprintf(out, outsz, "%.15g", le);
 }
 
-int fpmng_metrics_render_text(char **out, size_t *out_len)
+int fpmng_metrics_render_range(uint32_t first_slot, uint32_t slot_count, char **out, size_t *out_len)
 {
 	struct rbuf_s b = {0};
 	struct agg_s **aggs = NULL;
 	size_t naggs = 0, cap = 0;
 	uint32_t si, ei;
 	struct fpmng_metrics_shm_s *shm = m_shm;
-	uint32_t slots;
+	uint32_t first, end;
 	uint32_t limit;
 	int is_local = 0;
 	size_t i;
@@ -613,7 +613,13 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 		if (!shm || shm->magic != FPMNG_METRICS_MAGIC) {
 			return -1;
 		}
-		slots = shm->slots;
+		/* The caller asks for a half-open slot range, clamped here rather than
+		 * validated: a pool whose slots were never allocated (metrics shm
+		 * failed, or the pool has no children) must render an empty page, not
+		 * an error, because the endpoint being up is independent of anything
+		 * having been written to it. */
+		first = first_slot < shm->slots ? first_slot : shm->slots;
+		end = slot_count > shm->slots - first ? shm->slots : first + slot_count;
 		limit = shm->limit;
 	} else {
 		/* CLI: render of what is in the process; an empty result is fine */
@@ -625,7 +631,11 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 			*out_len = 0;
 			return 0;
 		}
-		slots = 1;
+		/* CLI has exactly one slot and no pools to divide it between, so the
+		 * range is ignored rather than applied to a process-local array whose
+		 * index means nothing. */
+		first = 0;
+		end = 1;
 		limit = m_limit;
 		is_local = 1;
 	}
@@ -637,7 +647,7 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 	size_t nmetas = 0, mcap = 0;
 
 	if (m_mode_shm) {
-		for (si = 0; si < slots; si++) {
+		for (si = first; si < end; si++) {
 			struct fpmng_metrics_slot_s *slot = shm_slot(shm, si);
 
 			for (ei = 0; ei < slot->used && ei < limit; ei++) {
@@ -690,7 +700,7 @@ int fpmng_metrics_render_text(char **out, size_t *out_len)
 	}
 
 	/* aggregation: by full key (with labels) */
-	for (si = 0; si < slots; si++) {
+	for (si = first; si < end; si++) {
 		struct fpmng_metrics_slot_s *slot = is_local
 			? m_slot
 			: shm_slot(shm, si);
@@ -915,6 +925,11 @@ done:
 	}
 	free(metas);
 	return *out ? 0 : (naggs ? -1 : 0);
+}
+
+int fpmng_metrics_render_text(char **out, size_t *out_len)
+{
+	return fpmng_metrics_render_range(0, UINT32_MAX, out, out_len);
 }
 
 /* ===== PHP functions ===== */

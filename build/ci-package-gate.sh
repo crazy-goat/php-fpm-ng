@@ -47,7 +47,7 @@ OUT=$(cd "$OUT" && pwd)
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 32 of the 76 owned tests skip on either
+# The expected score, per distribution. 32 of the 77 owned tests skip on either
 # of them for the same reason: their pool type needs patches/0006 inside Zend/,
 # which a distribution libphp does not carry, so they ask the binary and skip
 # (issue #230) instead of failing. That number is a property of this build path
@@ -57,6 +57,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # added four tests: three exercise cron, supervisor and http-direct pools and run
 # here, and fpmng-operator-endpoint-http.phpt needs pool.type = http and joins
 # the skips.
+#
+# It moved to 77 with the per-pool metrics path (issue #276), which added
+# fpmng-metrics-per-pool.phpt. That one uses http-direct pools on purpose, so it
+# runs on both distributions rather than joining the skips: the filter it tests
+# is the same filter on either build path.
 #
 # The two distributions differ by two more tests, and the difference is in how
 # they package PHP, not in what we ship. Ubuntu compiles session into its CLI
@@ -70,12 +75,12 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
 EXPECT_FAIL=0
-EXPECT_TOTAL=76
+EXPECT_TOTAL=77
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=44
+    EXPECT_PASS=45
     EXPECT_SKIP=32
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -100,7 +105,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=42
+    EXPECT_PASS=43
     EXPECT_SKIP=34
     # openssl-dev is named explicitly: on Ubuntu php8.5-dev drags libssl-dev
     # in, on Alpine php85-dev does not, and without it fpm_http_tls.h stops the

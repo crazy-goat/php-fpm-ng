@@ -120,9 +120,51 @@ and request total. A pool that does not (`cron`, `supervisor`) reports its state
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs.
 
+## Application metrics on a per-pool metrics path
+
+`pm.metrics_path` carries the series your PHP code registered with
+`fpm_metric_register()` and fed with `fpm_metric_inc()`, `fpm_metric_set()` and
+`fpm_metric_observe()`, appended to the pool metrics above in the same
+exposition format.
+
+**It reports the scraped pool's workers and nobody else's.** The store is one
+shared region with a slot per worker, and each pool owns a contiguous run of
+slots, so a per-pool scrape aggregates that run alone. Two pools that register a
+series under the same name get two independent numbers on two endpoints; a pool
+whose code registered nothing adds no lines at all.
+
+Every series keeps its automatic `pool="…"` label, even though on a per-pool
+endpoint that label never varies. It is what lets a scraper that reads several
+pools' endpoints put the series side by side once they are in one database —
+without it, the same series name would mean a different pool depending on which
+port it was collected from.
+
+The aggregate endpoint has not changed: `pool.type = status` still answers
+`/metrics` with every pool's series at once. The difference is what you point a
+scraper at — one port for the whole master, or one port per pool with the pool
+chosen by path.
+
+### Turning metrics off
+
+Unset `pm.metrics_path`. That is the off switch, and it is a real one: the path
+is not answered, and if nothing else on that address needs a listener the port
+is not bound at all.
+
+What it does **not** switch off is the API. `fpm_metric_register()` and the rest
+keep working in every pool, keep writing to the same shared slots, and keep
+costing exactly what they cost. A script cannot tell whether its pool exposes a
+metrics path, which is deliberate: turning off an endpoint is an operator's
+decision about exposure, not a change to what the application may call.
+
+### `?openmetrics` is not an alias
+
+Upstream FPM emits OpenMetrics as a query flag on the status page. php-fpm-ng
+does not. `GET <pm.status_path>?openmetrics` is the status page being asked for
+a variant it does not have, exactly like `?json` or `?xml`; metrics live on
+`pm.metrics_path` and nowhere else. Two paths are what gives the two pages
+independent on/off switches, since "on" means "the path is set".
+
 ## What is not here yet
 
 - `ping.path` stays on the pool's own listener on every type. It is a liveness
   probe for whatever is in front of the pool, so that is where it belongs.
-- Application metrics registered from PHP with `fpm_metric_inc()` are reported
-  by `pool.type = status`, not yet by a per-pool metrics path (issue #276).

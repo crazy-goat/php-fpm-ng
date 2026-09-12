@@ -28,9 +28,11 @@ Verified 2026-09-07 against `sapi/fpmng`:
   `pool.executor = classic | fiber | async` (default `classic`; `async` is
   currently rejected during configuration validation)
 - metrics: `pool.type = status` exposes a built-in `/metrics` (Prometheus)
-  and `/status` (JSON); application metrics from PHP (`fpm_metric_register/inc/
-  set/observe`, NOTES 3k/3w) through the `ext/fpmng_metrics/` extension,
-  also from CLI via `fpm_metric_render()`
+  and `/status` (JSON) for every pool at once, and `pm.metrics_path` /
+  `pm.metrics_listen` expose one pool's series on their own path and port
+  (`docs/operator-endpoint.md`); application metrics from PHP
+  (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
+  `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
 - the `fiber` executor is experimental and not intended for production, while
   `async` is currently rejected during configuration validation until it has
   the same hardening; limitations are described in `docs/async_errors.md` and

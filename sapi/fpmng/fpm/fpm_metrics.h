@@ -17,6 +17,10 @@
 #ifndef FPM_METRICS_H
 #define FPM_METRICS_H 1
 
+#include <stddef.h>
+
+struct fpm_worker_pool_s;
+
 /* Master, after fpm_conf_init_main(), before child fork. Failure does NOT kill
  * FPM (application metrics are an add-on, not the foundation) — returns -1 and
  * logs; all fpm_metric_* functions then return false. */
@@ -26,5 +30,18 @@ int fpm_metrics_init_main(void);
  * fpm_cleanups_run(CHILD) — after that, the pool list and config disappear, but
  * we need the number of earlier pools' pm.max_children and our own name. */
 void fpm_metrics_child_init(void);
+
+/* The Prometheus text of ONE pool's application series (issue #276). The
+ * per-pool operator endpoint answers with its own pool's numbers only, so it
+ * renders the slot range that pool owns -- the run this file hands out in
+ * fpm_metrics_child_init() -- instead of aggregating the whole region the way
+ * the aggregate pool.type = status endpoint does.
+ *
+ * Called from the operator endpoint's child, which is not one of the pool's
+ * workers: everything it reads is the shared region the master allocated, so
+ * there is nothing process-local to get wrong. Malloc'ed buffer, freed by the
+ * caller; *out may be NULL with *len 0 when the pool has no slots. Returns
+ * 0/-1. */
+int fpm_metrics_render_pool(struct fpm_worker_pool_s *wp, char **out, size_t *len);
 
 #endif

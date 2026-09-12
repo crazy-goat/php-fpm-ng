@@ -55,6 +55,12 @@ known issues: [`docs/NOTES.md`](docs/NOTES.md).
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
 
+A `cron`, `supervisor`, `http` or `http-direct` pool answers `pm.status_path`
+and `pm.metrics_path` on an operator listener of its own rather than on the
+socket carrying its traffic — the directives, the default of `127.0.0.1:8080`,
+the collision rule and what each page contains are in
+[`docs/operator-endpoint.md`](docs/operator-endpoint.md).
+
 Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 `cron.timeout`, `request_terminate_timeout`) and what stock defaults do on
 `docker stop` are documented in

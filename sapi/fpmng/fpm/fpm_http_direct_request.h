@@ -57,12 +57,24 @@ struct fpm_http_direct_labels {
  * and the per-request observability) without holding a second copy of the
  * common entries.
  *
- * pm.status_listen stays here for both: it asks for a second listening socket
- * served by a second process, and a direct child owns exactly one listener --
- * the pool's. pm.status_path on the pool's own listener is supported by the
- * classic executor (issue #59). */
+ * pm.status_listen is rejected for a reason that changed shape in #273 without
+ * going away. Under its upstream meaning it asked for a second listening socket
+ * served by a second FastCGI pool, and a direct child owns exactly one listener
+ * -- the pool's. Under the new meaning it names where this pool's operator
+ * endpoint binds (fpm_operator_endpoint.h), and http-direct has not moved its
+ * status page there: the page is rendered inside the child that answers and
+ * reports per-child rows nothing outside the pool can produce yet
+ * (fpm_pool_type.h, .status_on_own_listener). So the directive still has
+ * nothing to name here, and saying so is better than accepting an address and
+ * binding nothing. #275 moves the page and removes this entry.
+ *
+ * pm.metrics_listen is deliberately NOT rejected: the metrics path is a new
+ * directive with no second meaning, and it does go to the operator listener.
+ *
+ * pm.status_path on the pool's own listener is supported by the classic
+ * executor (issue #59) and is the subject of #275. */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON \
-	"fiber.", "supervisor.", "cron.", "pm.status_listen"
+	"pm.status_listen", "fiber.", "supervisor.", "cron."
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

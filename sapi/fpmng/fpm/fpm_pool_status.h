@@ -22,10 +22,20 @@ extern const char *const fpm_pool_status_rejects[];
  * directive is needed). */
 int fpm_pool_status_validate(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.child_main — accept loop on its own socket
- * (wp->listening_socket), raw HTTP/1.0 without keep-alive: parses only the
- * request line (GET <path>), returns Prometheus text on /metrics or JSON on
- * /status, and 404 for everything else. Does not return. */
+/* fpm_pool_type_s.child_main — the shared operator HTTP server
+ * (fpm_operator_http.h) on this pool's own socket, answering Prometheus text on
+ * /metrics and JSON on /status, 404 everything else. Does not return. */
 void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp);
+
+/* Render every pool (only = NULL) or exactly one (only = that pool) into an
+ * operator HTTP response body. Exported for the per-pool operator endpoint
+ * (fpm_operator_endpoint.c, issue #274), which serves the same two formats from
+ * a different listener and must not grow its own copy of them.
+ *
+ * Called from the endpoint's own child, so like everything else here they read
+ * only shared memory and configuration -- never another process's heap. */
+struct fpm_operator_buf_s;
+void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *only);
+void fpm_pool_status_render_json(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *only);
 
 #endif

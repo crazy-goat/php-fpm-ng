@@ -13,6 +13,7 @@
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
 #include "fpm_shm.h"
 #include "fpm_http_acl.h"
@@ -145,7 +146,27 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 		ops->ping_path = wp->config->ping_path;
 		ops->ping_response = wp->config->ping_response ? wp->config->ping_response : "pong";
 	}
-	if (wp->config->pm_status_path && *wp->config->pm_status_path) {
+	/* pm.status_path stays on the public listener here, and only here.
+	 * Issue #274 moves the operator endpoint of every type that has one onto a
+	 * listener of its own, and #273 is explicit that one directive must not name
+	 * two pages on two sockets -- so a type either answers the path itself or
+	 * the operator listener does, never both. .status_on_own_listener is which
+	 * one, as data; fpm_operator_endpoint.c reads the same field and registers
+	 * no route when it is set.
+	 *
+	 * http-direct is the one type where it is set, because this page is not the
+	 * per-pool summary the operator listener renders: it is built in the child
+	 * that answers, from that child's own connection counters and, on ?full,
+	 * from a per-child row for every scoreboard slot (issue #64). Nothing
+	 * outside the pool can produce it yet, and moving the path before something
+	 * can would replace the observation with a summary rather than relocate it.
+	 * That is #275's subject, and #275 clears this field.
+	 *
+	 * ping.path above is untouched for a different reason: it is a liveness
+	 * probe for whatever is in front of the pool, so the public listener is
+	 * where it belongs, and #273 kept it there deliberately (point 9). */
+	if (fpm_pool_type_of(wp)->status_on_own_listener
+		&& wp->config->pm_status_path && *wp->config->pm_status_path) {
 		ops->status_path = wp->config->pm_status_path;
 	}
 

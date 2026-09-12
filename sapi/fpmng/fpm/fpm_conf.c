@@ -25,6 +25,7 @@
 #include "fpm_stdio.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
+#include "fpm_operator_endpoint.h"
 #include "fpm_cleanup.h"
 #include "fpm_php.h"
 #include "fpm_sockets.h"
@@ -142,6 +143,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "pm.max_requests",           &fpm_conf_set_integer,     WPO(pm_max_requests) },
 	{ "pm.status_path",            &fpm_conf_set_string,      WPO(pm_status_path) },
 	{ "pm.status_listen",          &fpm_conf_set_string,      WPO(pm_status_listen) },
+	{ "pm.metrics_path",           &fpm_conf_set_string,      WPO(pm_metrics_path) },
+	{ "pm.metrics_listen",         &fpm_conf_set_string,      WPO(pm_metrics_listen) },
 	{ "ping.path",                 &fpm_conf_set_string,      WPO(ping_path) },
 	{ "ping.response",             &fpm_conf_set_string,      WPO(ping_response) },
 	{ "access.log",                &fpm_conf_set_string,      WPO(access_log) },
@@ -812,6 +815,9 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->listen_mode);
 	free(wpc->listen_allowed_clients);
 	free(wpc->pm_status_path);
+	free(wpc->pm_status_listen);
+	free(wpc->pm_metrics_path);
+	free(wpc->pm_metrics_listen);
 	free(wpc->ping_path);
 	free(wpc->ping_response);
 	free(wpc->access_log);
@@ -931,6 +937,59 @@ static int fpm_worker_pool_shared_status_alloc(struct fpm_worker_pool_s *shared_
 }
 /* }}} */
 
+struct fpm_worker_pool_s *fpm_conf_internal_pool_alloc(const char *name, const char *type,
+	const char *listen_address, struct fpm_worker_pool_s *like) /* {{{ */
+{
+	struct fpm_worker_pool_config_s *config;
+	struct fpm_worker_pool_s *wp, *saved = current_wp;
+
+	config = fpm_worker_pool_config_alloc();
+	if (!config) {
+		return NULL;
+	}
+	wp = current_wp;
+	/* fpm_worker_pool_config_alloc() moves current_wp to the pool it just
+	 * created, which is how the config PARSER tracks the section it is inside.
+	 * We are past parsing, so put it back rather than leave a pool nobody
+	 * parsed looking like the current section. */
+	current_wp = saved;
+
+	config->name = strdup(name);
+	config->type = strdup(type);
+	config->listen_address = strdup(listen_address);
+	if (!config->name || !config->type || !config->listen_address) {
+		return NULL;
+	}
+
+	/* Identity only, and only from the pool that asked for this listener: a
+	 * process created on a pool's behalf must not run with more privilege than
+	 * the pool itself. Everything else a pool carries -- php_value, chroot,
+	 * request timeouts -- describes running PHP, which this process never
+	 * does. */
+	if (like && like->config) {
+		static const size_t identity[] = {
+			WPO(user), WPO(group), WPO(listen_owner), WPO(listen_group), WPO(listen_mode)
+		};
+		size_t i;
+
+		for (i = 0; i < sizeof(identity) / sizeof(identity[0]); i++) {
+			char *const *from = (char *const *) ((char *) like->config + identity[i]);
+			char **to = (char **) ((char *) config + identity[i]);
+
+			if (*from && !(*to = strdup(*from))) {
+				return NULL;
+			}
+		}
+	}
+
+	/* Deliberately NOT noted in set_directives: nothing here was set by a
+	 * configuration, and a reject list must be free to refuse a directive on
+	 * this type without that refusal being triggered by fpm-ng's own doing. */
+
+	return wp;
+}
+/* }}} */
+
 static int fpm_evaluate_full_path(char **path, struct fpm_worker_pool_s *wp, char *default_prefix, int expand) /* {{{ */
 {
 	char *prefix = NULL;
@@ -1011,6 +1070,9 @@ static int fpm_conf_process_all_pools(void)
 			fpm_pool_type_list(known, sizeof(known));
 			zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
 				wp->config->name, wp->config->type, known);
+			return -1;
+		}
+		if (0 > fpm_pool_type_check_configurable(wp, type)) {
 			return -1;
 		}
 		if (0 > fpm_pool_type_validate_executor(wp)) {
@@ -1156,9 +1218,32 @@ static int fpm_conf_process_all_pools(void)
 			config->pm_max_spare_servers = 0;
 		}
 
-		/* status */
-		if (wp->config->pm_status_listen && fpm_worker_pool_shared_status_alloc(wp)) {
+		/* status and metrics.
+		 *
+		 * On a type that carries its own operator endpoint (#273, #274) the two
+		 * pm.*_listen directives say where THAT endpoint binds, and the pool it
+		 * binds is created by fpm_operator_endpoint.c. On every other type
+		 * pm.status_listen keeps its upstream meaning and auto-allocates a
+		 * second FastCGI pool named <pool>_status -- see #278 for the migration
+		 * note, and fpm_pool_type_s.operator_endpoint for why this is a flag on
+		 * the type and not a name compared here. */
+		if (type->operator_endpoint) {
+			if (0 > fpm_operator_endpoint_configure(wp, type)) {
+				return -1;
+			}
+		} else if (wp->config->pm_status_listen && fpm_worker_pool_shared_status_alloc(wp)) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to initialize a status listener pool", wp->config->name);
+		}
+
+		if (!type->operator_endpoint && wp->config->pm_metrics_path && *wp->config->pm_metrics_path) {
+			/* Refused rather than ignored: on a type with a front end in place
+			 * the Prometheus endpoint is #276's subject and does not exist yet,
+			 * and a directive that is accepted and does nothing is worse than
+			 * one that is refused. */
+			zlog(ZLOG_ALERT, "[pool %s] 'pm.metrics_path' is not supported by pool.type = %s: "
+				"only a type that serves its own operator endpoint has somewhere to put it",
+				wp->config->name, type->name);
+			return -1;
 		}
 
 		if (wp->config->pm_status_path && *wp->config->pm_status_path) {
@@ -1990,6 +2075,8 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\tpm.process_idle_timeout = %d",    wp->config->pm_process_idle_timeout);
 		zlog(ZLOG_NOTICE, "\tpm.max_requests = %d",            wp->config->pm_max_requests);
 		zlog(ZLOG_NOTICE, "\tpm.status_path = %s",             STR2STR(wp->config->pm_status_path));
+		zlog(ZLOG_NOTICE, "\tpm.metrics_path = %s",            STR2STR(wp->config->pm_metrics_path));
+		zlog(ZLOG_NOTICE, "\tpm.metrics_listen = %s",          STR2STR(wp->config->pm_metrics_listen));
 		zlog(ZLOG_NOTICE, "\tpm.status_listen = %s",           STR2STR(wp->config->pm_status_listen));
 		zlog(ZLOG_NOTICE, "\tping.path = %s",                  STR2STR(wp->config->ping_path));
 		zlog(ZLOG_NOTICE, "\tping.response = %s",              STR2STR(wp->config->ping_response));

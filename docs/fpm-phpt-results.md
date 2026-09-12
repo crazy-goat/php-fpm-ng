@@ -14,6 +14,39 @@ The final run covered all 150 discovered tests:
 | NOT MEASURED | 0 |
 | **TOTAL** | **150** |
 
+## Deliberate deviations (2026-09-13, issue #278)
+
+Four tests in the inventory below — `status-listen.phpt`,
+`status-listen-expose-php-on.phpt`, `status-listen-expose-php-off.phpt` and
+`status-ping.phpt` — passed when this table was measured and fail now. Issue
+#278 removed `pm.status_listen` and the shared status pool they configure; a
+status page is a `pm.status_path` on the pool it describes, served from that
+pool's own or operator listener. The behaviour they test is gone on purpose,
+so they can only fail.
+
+They are recorded, with that reason, in
+`sapi/fpmng/tests/upstream-deviations.list`. The runner still runs them,
+categorises them as `DEVIATION` rather than `FAIL/ERROR`, and fails the run if
+one of them starts passing again — see
+[Deliberate deviations](fpm-phpt.md#deliberate-deviations). The rows below are
+left as they were measured; this section is the amendment.
+
+The suite on the same binary reads:
+
+| Category | Count |
+|---|---:|
+| PASS | 118 |
+| FAIL/ERROR | 0 |
+| WARN | 1 |
+| DEVIATION | 4 |
+| SKIP | 18 |
+| NOT MEASURED | 0 |
+| **TOTAL** | **141** |
+
+The inventory is 141 rather than 150 because the eight GH-18956 fixture files
+added for the original run are not in the php-src tree used since, and
+`http-basic.phpt` no longer exists upstream there.
+
 ## Measurement
 
 The source checkout started at upstream PHP commit

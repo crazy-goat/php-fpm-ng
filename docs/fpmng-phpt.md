@@ -91,6 +91,12 @@ a name without the `fpmng-` prefix — an excluded test keeps the prefix, becaus
 in the other job. The list is empty today. It is not an escape hatch for a
 failing test — that gets fixed or gets an issue.
 
+Its counterpart on the upstream side,
+`sapi/fpmng/tests/upstream-deviations.list`, is a different thing: it names
+upstream tests that fail because fpm-ng removed the behaviour they test. Our
+own tests are never a deviation from upstream, so an `fpmng-` name there is
+refused. See [`fpm-phpt.md`](fpm-phpt.md#deliberate-deviations).
+
 ## CI
 
 The `fpmng-phpt` job in `.github/workflows/build-matrix.yml` downloads the

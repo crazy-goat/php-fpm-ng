@@ -16,6 +16,11 @@
 # ran them too — every fpmng test ran twice per PR, and nine of our tests were
 # covered only by that accident. They belong to build/run-fpmng-phpt.sh, which
 # checks its own coverage against the repo.
+#
+# A handful of upstream tests exercise behaviour fpm-ng removed on purpose, so
+# they can only fail. Those are named, with a reason, in
+# sapi/fpmng/tests/upstream-deviations.list; they still run, and the runner
+# fails if one of them passes. Everything else failing fails the run.
 set -eu
 
 usage() {
@@ -107,8 +112,9 @@ RUN_LOG=$RESULTS_DIR/run.log
 OUTPUT_LOG=$RESULTS_DIR/test-output.log
 METADATA=$RESULTS_DIR/metadata.txt
 SUMMARY=$RESULTS_DIR/summary.txt
+DEVIATIONS=$RESULTS_DIR/deviations.tsv
 
-rm -f "$DISCOVERED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY"
+rm -f "$DISCOVERED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY" "$DEVIATIONS"
 
 if ! (
     cd "$PHPSRC"
@@ -118,6 +124,40 @@ if ! (
 fi
 TEST_COUNT=$(awk 'END {print NR + 0}' "$DISCOVERED")
 [ "$TEST_COUNT" -gt 0 ] || fail "no upstream FPM .phpt tests were discovered"
+
+# Deliberate deviations: upstream tests for behaviour fpm-ng does not have.
+# Parsed and validated before anything runs, so a stale entry is a hard error
+# rather than a silently ignored line.
+DEVIATIONS_LIST=$PHPSRC/$TEST_DIR/upstream-deviations.list
+: > "$DEVIATIONS"
+if [ -f "$DEVIATIONS_LIST" ]; then
+    line_no=0
+    while IFS= read -r line || [ -n "$line" ]; do
+        line_no=$((line_no + 1))
+        case $line in
+            ''|'#'*) continue ;;
+        esac
+        name=${line%%[ 	]*}
+        reason=${line#"$name"}
+        reason=$(printf '%s' "$reason" | sed 's/^[ 	]*//; s/[ 	]*$//')
+        [ -n "$reason" ] || fail "upstream-deviations.list:$line_no: no reason given for $name"
+        case $name in
+            fpmng-*) fail "upstream-deviations.list:$line_no: $name is ours, not upstream's -- see sapi/fpmng/tests/not-run-in-ci.list" ;;
+            *.phpt) ;;
+            *) fail "upstream-deviations.list:$line_no: not a .phpt file name: $name" ;;
+        esac
+        case $name in
+            */*) fail "upstream-deviations.list:$line_no: name a file, not a path: $name" ;;
+        esac
+        grep -qxF "$TEST_DIR/$name" "$DISCOVERED" \
+            || fail "upstream-deviations.list:$line_no: no such upstream test: $name"
+        if awk -F '\t' -v k="$TEST_DIR/$name" '$1 == k {found = 1} END {exit !found}' "$DEVIATIONS"; then
+            fail "upstream-deviations.list:$line_no: listed twice: $name"
+        fi
+        printf '%s\t%s\n' "$TEST_DIR/$name" "$reason" >> "$DEVIATIONS"
+    done < "$DEVIATIONS_LIST"
+fi
+DEVIATION_COUNT=$(awk 'END {print NR + 0}' "$DEVIATIONS")
 
 if [ -e "$PHPSRC/.git" ] && command -v git >/dev/null 2>&1; then
     SOURCE_COMMIT=$(git -C "$PHPSRC" rev-parse HEAD 2>/dev/null || printf '%s' unknown)
@@ -155,14 +195,17 @@ write_metadata() {
 
 write_counts() {
     awk -F '\t' '
-        NR > 1 { count[$2]++ }
+        NR > 1 { count[$2]++; total++ }
         END {
             printf "PASS=%d\n", count["PASS"] + 0
             printf "FAIL/ERROR=%d\n", count["FAIL/ERROR"] + 0
             printf "SKIP=%d\n", count["SKIP"] + 0
             printf "WARN=%d\n", count["WARN"] + 0
+            printf "DEVIATION=%d\n", count["DEVIATION"] + 0
             printf "NOT MEASURED=%d\n", count["NOT MEASURED"] + 0
-            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["NOT MEASURED"]) + 0
+            # Every row, so an UNEXPECTED category cannot quietly shrink the
+            # total it is missing from.
+            printf "TOTAL=%d\n", total + 0
         }
     ' "$RESULTS"
 }
@@ -277,7 +320,7 @@ set -e
 
 {
     printf 'test\tcategory\traw_status\n'
-    awk -F '\t' -v status_file="$STATUS_RAW" -v source_root="$PHPSRC" '
+    awk -F '\t' -v status_file="$STATUS_RAW" -v source_root="$PHPSRC" -v deviations_file="$DEVIATIONS" '
         function normalize(path, prefix) {
             sub(/^\.\//, "", path)
             prefix = source_root "/"
@@ -285,6 +328,10 @@ set -e
                 path = substr(path, length(prefix) + 1)
             }
             return path
+        }
+        FILENAME == deviations_file {
+            deviation[normalize($1)] = 1
+            next
         }
         FILENAME == status_file {
             if (NF >= 2) {
@@ -307,12 +354,20 @@ set -e
             } else {
                 category = "FAIL/ERROR"
             }
+            # A listed deviation failing is the recorded state, not a
+            # regression; one passing is: either the feature came back or the
+            # entry outlived it. Both are worth a distinct category.
+            if (deviation[key]) {
+                category = (category == "FAIL/ERROR") ? "DEVIATION" : "UNEXPECTED " category
+            }
             printf "%s\t%s\t%s\n", $0, category, raw
         }
-    ' "$STATUS_RAW" "$DISCOVERED"
+    ' "$DEVIATIONS" "$STATUS_RAW" "$DISCOVERED"
 } > "$RESULTS"
 
 NOT_MEASURED_COUNT=$(awk -F '\t' 'NR > 1 && $2 == "NOT MEASURED" {count++} END {print count + 0}' "$RESULTS")
+FAIL_COUNT=$(awk -F '\t' 'NR > 1 && $2 == "FAIL/ERROR" {count++} END {print count + 0}' "$RESULTS")
+UNEXPECTED_COUNT=$(awk -F '\t' 'NR > 1 && $2 ~ /^UNEXPECTED / {count++} END {print count + 0}' "$RESULTS")
 if [ "$NOT_MEASURED_COUNT" -gt 0 ]; then
     MEASUREMENT_STATUS=PARTIAL
     BLOCKER='run-tests.php did not emit a status for every discovered test; see run.log'
@@ -324,10 +379,25 @@ fi
     printf 'measurement_status=%s\n' "$MEASUREMENT_STATUS"
     printf 'run_exit_status=%s\n' "$RUN_STATUS"
     printf 'blocker=%s\n' "$BLOCKER"
+    printf 'declared_deviations=%s\n' "$DEVIATION_COUNT"
+    printf 'unexpected_deviation_passes=%s\n' "$UNEXPECTED_COUNT"
     write_counts
 } > "$SUMMARY"
 
 cat "$SUMMARY" >&2
 printf '%s\n' "Raw run log: $RUN_LOG" >&2
 printf '%s\n' "Per-test results: $RESULTS" >&2
-exit "$RUN_STATUS"
+
+# run-tests.php exits non-zero for any failure, including the deviations we
+# already expect, so the verdict is read off the categorised results instead.
+EXIT_STATUS=0
+if [ "$FAIL_COUNT" -gt 0 ] || [ "$NOT_MEASURED_COUNT" -gt 0 ]; then
+    EXIT_STATUS=1
+fi
+if [ "$UNEXPECTED_COUNT" -gt 0 ]; then
+    printf '%s\n' "run-fpm-phpt.sh: $UNEXPECTED_COUNT test(s) listed in upstream-deviations.list did not fail:" >&2
+    awk -F '\t' 'NR > 1 && $2 ~ /^UNEXPECTED / {printf "  %s\t%s\n", $1, $3}' "$RESULTS" >&2
+    printf '%s\n' 'run-fpm-phpt.sh: drop the entry, or find out what put the behaviour back' >&2
+    EXIT_STATUS=1
+fi
+exit "$EXIT_STATUS"

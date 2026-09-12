@@ -78,7 +78,11 @@ grep -q 'S\["LIBEVENT_OPENSSL_LIBS"\]="[^"]*event_openssl' /build/config.status 
 # next run then throws /build away instead of trusting objects a SIGKILL
 # truncated mid-write -- see build/ci-build-tree.sh for the same reasoning.
 touch /build/.fpmng-musl-dirty
-make -j"${JOBS:-8}" fpmng > /out/make-full.log 2>&1 || {
+# `cli` as well as `fpmng`: the payload packer is PHP (see
+# build/embed-payload.sh), and this container has no interpreter other than the
+# one this tree can build. The objects are shared with fpmng, so it is a link,
+# not a second build.
+make -j"${JOBS:-8}" fpmng cli > /out/make-full.log 2>&1 || {
   echo "=== BUILD FAILED ==="
   grep -iE "error|undefined reference|cannot find -l" /out/make-full.log | sort -u | head -25
   exit 1
@@ -137,6 +141,12 @@ assert_symbol openssl_encrypt "amphp/socket TLS and the pool's http.tls_* listen
 # a worker handler cannot answer a request without this one.
 assert_symbol fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
 echo "static-full.sh: extension-set assertions ok"
+
+# Issue #171: the ACME client goes in after the link and before the artefact is
+# copied anywhere. Nothing here strips, which is what makes this safe -- strip(1)
+# drops appended data.
+/repo/build/embed-payload.sh "$artifact" /build/sapi/cli/php ||
+  fail "the distribution payload could not be embedded"
 
 cp "$artifact" /out/php-fpm-ng-full
 echo "static-full.sh: PASS"

@@ -22,6 +22,7 @@
 #include "fpm_pool_cron.h"
 #include "fpm_pool_status.h"
 #include "fpm_pool_async.h"
+#include "fpm_operator_endpoint.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_statics.h"
 #include "fpm_pool_fiber.h"
@@ -116,6 +117,7 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.serves_requests              = 1,
 	.reuses_request_runtime       = 1,
 	.listening_socket_nonblocking = 1,
+	.operator_endpoint            = 1,
 	.rejects                      = fpm_coop_rejects,
 	.validate                     = fpm_pool_type_fiber_validate,
 	.init_main                    = fpm_pool_type_http_concurrent_init,
@@ -141,6 +143,7 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.requires_pm            = 1,
 	.serves_requests        = 1,
 	.reuses_request_runtime = 1,
+	.operator_endpoint      = 1,
 	.rejects                = fpm_pool_async_rejects,
 	.validate               = fpm_pool_async_validate,
 	.init_main              = fpm_pool_type_http_concurrent_init,
@@ -169,6 +172,13 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
 	.listening_socket_nodelay     = 1,
+	/* The flag, like everything else here, is repeated rather than inherited:
+	 * an executor variant replaces the whole type struct. Note that this
+	 * executor still rejects pm.status_path itself (see
+	 * fpm_http_direct_worker_rejects and issue #59), so the flag has no effect
+	 * until that reject is revisited under the new meaning in #275. */
+	.operator_endpoint            = 1,
+	.status_on_own_listener       = 1,
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above. An executor variant
@@ -263,6 +273,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests        = 1,
 		.reuses_request_runtime = 1,
 		.executors              = fpm_http_executors,
+		.operator_endpoint      = 1,
 		.rejects                = fpm_pool_http_classic_rejects,
 		.validate               = fpm_http_validate_pool,
 		.init_main              = fpm_pool_type_http_init,
@@ -276,6 +287,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.listening_socket_nodelay     = 1,
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,
+		.operator_endpoint            = 1,
+		/* until #275; see the field's comment in fpm_pool_type.h */
+		.status_on_own_listener       = 1,
 		.rejects                      = fpm_http_direct_rejects,
 		.validate                     = fpm_http_direct_validate,
 		.init_main                    = fpm_pool_type_http_direct_classic_init,
@@ -288,7 +302,13 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests         = 0,
 		.child_logs_via_master   = 1,	/* the whole policy runs in the child; see fpm_child_log.h */
 		.publishes_acme_challenges = 1,	/* see the same flag on "cron" below */
+		.operator_endpoint       = 1,
 		.rejects                 = fpm_pool_supervisor_rejects,
+		/* supervisor rejects the whole "pm." namespace, for a good reason that
+		 * stays: its pm.* is generated from supervisor.processes. The operator
+		 * endpoint's directives live under the same prefix (#273) and are the
+		 * exception -- see .reject_exceptions and issue #283. */
+		.reject_exceptions       = fpm_operator_endpoint_directives,
 		.validate                = fpm_pool_supervisor_validate,
 		.init_main               = fpm_pool_supervisor_init_main,
 		.child_main              = fpm_pool_supervisor_child_main,
@@ -308,7 +328,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * #48, criterion 7). Whether the client is scheduled or long-running
 		 * is issue #49's decision, and this flag does not prejudge it. */
 		.publishes_acme_challenges = 1,
+		.operator_endpoint       = 1,
 		.rejects                 = fpm_pool_cron_rejects,
+		.reject_exceptions       = fpm_operator_endpoint_directives,	/* as supervisor above */
 		.validate                = fpm_pool_cron_validate,
 		.init_main               = fpm_pool_cron_init_main,
 		.child_main              = fpm_pool_cron_child_main,
@@ -323,6 +345,26 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects                  = fpm_pool_status_rejects,
 		.validate                 = fpm_pool_status_validate,
 		.child_main               = fpm_pool_status_child_main,
+	},
+	{
+		/* Not configurable: created by fpm_operator_endpoint.c, one per distinct
+		 * operator listen address, and hidden from fpm_pool_type_get() and
+		 * fpm_pool_type_list() by .internal_only. It is an ordinary pool in
+		 * every other respect so that it gets a listening socket, a supervised
+		 * child and a place in reload without a second supervision path being
+		 * invented for it. */
+		.name                      = "operator-endpoint",
+		.internal_only             = 1,
+		.requires_listen           = 1,	/* its whole purpose */
+		.requires_pm               = 0,	/* validate() sets static + 1 */
+		.serves_requests           = 0,
+		.reads_foreign_scoreboards = 1,	/* it reports on the pools it serves, not on itself */
+		.rejects                   = fpm_operator_endpoint_rejects,
+		.validate                  = fpm_operator_endpoint_validate,
+		.child_main                = fpm_operator_endpoint_child_main,
+		/* No .status: it has no state of its own worth reporting, and like
+		 * pool.type = status it is therefore skipped by the collector rather
+		 * than detected there by name. */
 	},
 };
 
@@ -378,6 +420,25 @@ int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct
 #endif
 }
 
+/* Is this directive one of the type's declared exceptions to its own reject
+ * list? Called with the name as it appears in set_directives, which is not
+ * NUL-terminated there, hence the explicit length. */
+static int fpm_pool_type_directive_excepted(const struct fpm_pool_type_s *type,
+	const char *name, size_t len)
+{
+	const char *const *allow;
+
+	if (!type->reject_exceptions) {
+		return 0;
+	}
+	for (allow = type->reject_exceptions; *allow; allow++) {
+		if (strlen(*allow) == len && !strncmp(*allow, name, len)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
 	const char *const *reject;
@@ -412,13 +473,17 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 			}
 			while ((p = strstr(p, needle)) != NULL) {
 				const char *end = strchr(p + 1, ';');
+				size_t name_len = end ? (size_t)(end - p - 1) : 0;
 
-				zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
-					wp->config->name, end ? (int)(end - p - 1) : 0, p + 1, where);
-				bad = 1;
+				if (!fpm_pool_type_directive_excepted(type, p + 1, name_len)) {
+					zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
+						wp->config->name, (int) name_len, p + 1, where);
+					bad = 1;
+				}
 				p = end ? end : p + strlen(p);
 			}
-		} else if (fpm_conf_directive_was_set(wp->config, *reject)) {
+		} else if (fpm_conf_directive_was_set(wp->config, *reject)
+			&& !fpm_pool_type_directive_excepted(type, *reject, len)) {
 			zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by %s",
 				wp->config->name, *reject, where);
 			bad = 1;
@@ -444,6 +509,13 @@ const struct fpm_pool_type_s *fpm_pool_type_get(const char *name)
 		return FPM_POOL_TYPE_DEFAULT;
 	}
 
+	/* Internal-only types are found here too. They have to be: every pool goes
+	 * through fpm_pool_type_of() -> resolve() -> get(), including the ones
+	 * fpm-ng creates for itself, and a NULL here would silently fall back to
+	 * the default type (fastcgi) and run an operator listener as a FastCGI
+	 * pool. Keeping such a type out of a CONFIGURATION is a separate question,
+	 * answered where a configuration is read -- see
+	 * fpm_pool_type_check_configurable(). */
 	for (i = 0; i < FPM_POOL_TYPE_COUNT; i++) {
 		if (!strcmp(fpm_pool_types[i].name, name)) {
 			return &fpm_pool_types[i];
@@ -451,6 +523,27 @@ const struct fpm_pool_type_s *fpm_pool_type_get(const char *name)
 	}
 
 	return NULL;
+}
+
+/* Was this type named by the configuration rather than created by fpm-ng?
+ * An internal-only type that a pool section asked for is not a type this
+ * configuration may have: the pool behind it is an implementation detail of
+ * some other pool, with settings its owner chose, so a section naming it would
+ * get a pool it cannot configure and did not ask for. Reported as an unknown
+ * type, which is what it is from a configuration's point of view. */
+int fpm_pool_type_check_configurable(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+	char known[256];
+
+	if (!type->internal_only || !fpm_conf_directive_was_set(wp->config, "pool.type")) {
+		return 0;
+	}
+
+	fpm_pool_type_list(known, sizeof(known));
+	zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
+		wp->config->name, wp->config->type, known);
+
+	return -1;
 }
 
 void fpm_pool_type_list(char *buf, size_t len)
@@ -463,8 +556,13 @@ void fpm_pool_type_list(char *buf, size_t len)
 	buf[0] = '\0';
 
 	for (i = 0; i < FPM_POOL_TYPE_COUNT && off + 1 < len; i++) {
-		int n = snprintf(buf + off, len - off, "%s%s",
-			i ? ", " : "", fpm_pool_types[i].name);
+		int n;
+
+		if (fpm_pool_types[i].internal_only) {
+			continue;
+		}
+		n = snprintf(buf + off, len - off, "%s%s",
+			off ? ", " : "", fpm_pool_types[i].name);
 		if (n < 0 || (size_t)n >= len - off) {
 			break;
 		}

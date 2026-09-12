@@ -168,11 +168,80 @@ struct fpm_pool_type_s {
 	 * because for such a type the name may well be valid elsewhere. */
 	unsigned executors_type_specific:1;
 
+	/* This type has nothing in front of it that could answer an operator's
+	 * scrape, so a pool of it serves its own stats and metrics from a small
+	 * HTTP listener of its own -- see fpm_operator_endpoint.h and issue #273.
+	 * Set for cron, supervisor, http and http-direct.
+	 *
+	 * Off for fastcgi and fastcgi-ng, where it changes what pm.status_path
+	 * means: with the flag off the path keeps its upstream meaning, answered on
+	 * the pool's own FastCGI socket by whatever web server is already in front
+	 * of it, which on those types is exactly what an operator has (#273,
+	 * point 2). The flag is therefore not cosmetic and not a default -- adding
+	 * it to a type moves that type's status endpoint onto another socket.
+	 *
+	 * Data rather than a name comparison in fpm_conf.c, which must not learn
+	 * the name of a pool type. */
+	unsigned operator_endpoint:1;
+
+	/* This type still answers pm.status_path on its own request listener, so the
+	 * operator endpoint does not claim that path: one directive naming two pages
+	 * on two sockets is the thing #273 set out to remove. Set only for
+	 * http-direct, and only until #275.
+	 *
+	 * Why http-direct is not moved with the others: its status page is not the
+	 * per-pool summary the other types get. It is rendered inside the child that
+	 * answers, reports per-child rows and per-connection counters
+	 * (fpm_http_direct_ops.c, issue #64), and is the only instrument three of this
+	 * repo's tests have for retirement, idle-signal handling and accept
+	 * distribution. Moving the path off the public listener before an external
+	 * process can render that page deletes the observation and puts the summary in
+	 * its place. What the endpoints report is #275 and #276; this field is how
+	 * #274 stops short of it, and #275 deletes the field.
+	 *
+	 * pool.type = http is NOT here, although it also answered the path on its own
+	 * listener before #274. Its page was upstream's, produced by the in-child
+	 * handler from the same scoreboard the operator endpoint reads, so the
+	 * endpoint can render it and nothing is lost by moving it. The in-child
+	 * handler is suppressed for exactly the types this field does not cover --
+	 * see fpm_child_operator_endpoint_owns_status() in fpm_children.c.
+	 *
+	 * pm.metrics_path is unaffected: it is a new directive with no second meaning
+	 * to collide with, so http-direct serves it on the operator listener from the
+	 * start. */
+	unsigned status_on_own_listener:1;
+
+	/* This type exists to be created by fpm-ng itself and cannot be named in a
+	 * configuration: fpm_pool_type_get() will not return it and
+	 * fpm_pool_type_list() does not mention it. Set for the internal listener
+	 * pool behind the operator endpoint, which is an implementation detail of
+	 * the pools it serves rather than something an operator configures. */
+	unsigned internal_only:1;
+
 	/* Directives unsupported by this type. NULL-terminated, may be NULL.
 	 * A REJECTION list, not an allow-list — a new directive is allowed everywhere
 	 * by default, so an omission does not break backward compatibility.
 	 * A name ending in a dot works as a prefix: "pm." matches all pm.*. */
 	const char *const *rejects;
+
+	/* Directives this type accepts even though .rejects matches them.
+	 * NULL-terminated, may be NULL. Exact names only -- a prefix here would be
+	 * a second pattern language arguing with the first one.
+	 *
+	 * It exists because the operator endpoint's directives live under "pm."
+	 * (pm.status_path and friends, issue #273) while the types that most need
+	 * that endpoint -- cron, supervisor -- reject the whole "pm." namespace,
+	 * and for a good reason: their pm.* is generated programmatically, so a
+	 * user-set one would be a second source of truth. The carve-out keeps that
+	 * reason intact and names the handful of exceptions instead of weakening
+	 * the prefix.
+	 *
+	 * Not by dropping the prefix and enumerating the ~20 real pm.* directives:
+	 * that is the enumeration-versus-pattern mistake build/prepare.sh:75-79
+	 * documents, and a pm.* added later would silently become legal on a cron
+	 * pool. An exception must be added deliberately; a new directive must not
+	 * become one by omission. */
+	const char *const *reject_exceptions;
 
 	/* Type-specific checks; NULL = none. Returns 0 or -1. */
 	int (*validate)(struct fpm_worker_pool_s *wp);
@@ -197,6 +266,12 @@ struct fpm_pool_type_s {
  * — without this every existing fpm.conf would stop working. "fcgi" remains a
  * compatibility alias for "fastcgi". */
 const struct fpm_pool_type_s *fpm_pool_type_get(const char *name);
+
+/* Refuse an internal-only type that a pool SECTION named. fpm_pool_type_get()
+ * finds such a type -- it has to, every pool resolves through it -- so the
+ * "not configurable" half of .internal_only is checked here instead, where a
+ * configuration is being read. 0 or -1. */
+int fpm_pool_type_check_configurable(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
 /* Effective variant resulting from pool.type + pool.executor, or NULL. */
 const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp);

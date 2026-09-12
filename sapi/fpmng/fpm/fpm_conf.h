@@ -82,6 +82,8 @@ struct fpm_worker_pool_config_s {
 	int pm_max_requests;
 	char *pm_status_path;
 	char *pm_status_listen;
+	char *pm_metrics_path;		/* fpm-ng: Prometheus text on the operator endpoint; see fpm_operator_endpoint.h */
+	char *pm_metrics_listen;	/* fpm-ng: where that path binds; default 127.0.0.1:8080 */
 	char *ping_path;
 	char *ping_response;
 	char *access_log;
@@ -217,6 +219,24 @@ enum {
 	PM_STYLE_DYNAMIC = 2,
 	PM_STYLE_ONDEMAND = 3
 };
+
+/* fpm-ng: allocate a pool that fpm-ng creates for itself rather than one the
+ * configuration asked for -- today only the operator endpoint's listener
+ * (fpm_operator_endpoint.h). It is appended to fpm_worker_all_pools like any
+ * other, so it is validated, gets a socket and a supervised child, and takes
+ * part in reload without a second code path.
+ *
+ * `like` is the pool that needed it: the identity it runs under (user, group,
+ * and the socket's ownership and mode) is copied from there, because a listener
+ * created on a pool's behalf must not run with more privilege than the pool
+ * that asked for it. Nothing else is copied -- in particular no php_value, no
+ * chroot and no request settings, which would be meaningless on a process that
+ * never starts PHP.
+ *
+ * Returns the new pool, or NULL. Must be called during configuration, before
+ * fpm_conf_process_all_pools() has walked past the end of the list. */
+struct fpm_worker_pool_s *fpm_conf_internal_pool_alloc(const char *name, const char *type,
+	const char *listen_address, struct fpm_worker_pool_s *like);
 
 int fpm_conf_init_main(int test_conf, int force_daemon);
 int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc);

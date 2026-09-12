@@ -47,11 +47,16 @@ OUT=$(cd "$OUT" && pwd)
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 31 of the 72 owned tests skip on either
+# The expected score, per distribution. 32 of the 76 owned tests skip on either
 # of them for the same reason: their pool type needs patches/0006 inside Zend/,
 # which a distribution libphp does not carry, so they ask the binary and skip
 # (issue #230) instead of failing. That number is a property of this build path
 # and is the same everywhere.
+#
+# It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
+# added four tests: three exercise cron, supervisor and http-direct pools and run
+# here, and fpmng-operator-endpoint-http.phpt needs pool.type = http and joins
+# the skips.
 #
 # The two distributions differ by two more tests, and the difference is in how
 # they package PHP, not in what we ship. Ubuntu compiles session into its CLI
@@ -65,13 +70,13 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
 EXPECT_FAIL=0
-EXPECT_TOTAL=72
+EXPECT_TOTAL=76
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=41
-    EXPECT_SKIP=31
+    EXPECT_PASS=44
+    EXPECT_SKIP=32
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
@@ -95,8 +100,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=39
-    EXPECT_SKIP=33
+    EXPECT_PASS=42
+    EXPECT_SKIP=34
     # openssl-dev is named explicitly: on Ubuntu php8.5-dev drags libssl-dev
     # in, on Alpine php85-dev does not, and without it fpm_http_tls.h stops the
     # build at openssl/ssl.h rather than quietly producing a smaller binary.

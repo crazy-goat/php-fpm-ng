@@ -368,6 +368,12 @@ void fpm_http_direct_conns_free(struct fpm_http_direct_conns *conns)
 	if (!conns) {
 		return;
 	}
+	/* Re-reading conns->list each turn is the loop, not a bug: forget()
+	 * unlinks before it frees, so by the time the node is gone conns->list is
+	 * already the next one. clang-analyzer reports this as a use-after-free
+	 * (lint-c report, two sites) because it does not follow the write through
+	 * c->conns inside fpm_direct_conn_unlink(). Caching the head in a local
+	 * and walking c->next would be the actual use-after-free. */
 	while (conns->list) {
 		fpm_direct_conn_forget(conns->list);
 	}
@@ -569,6 +575,10 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 	 * A node that survives the examination goes to the head too, so repeated
 	 * sweeps rotate through the whole list rather than re-examining the same
 	 * few nodes. */
+	/* Second clang-analyzer use-after-free report, same false positive as the
+	 * one in fpm_http_direct_conns_free(): forget() unlinks before it frees, so
+	 * the conns->tail this re-reads after `continue` is already the next node.
+	 * See the comment there for why the analyzer misses the write. */
 	while (budget-- > 0 && conns->tail) {
 		struct fpm_direct_conn *c = conns->tail;
 

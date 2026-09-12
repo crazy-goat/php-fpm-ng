@@ -243,7 +243,7 @@ int fpm_acme_challenge_clear(const char *token)
 	}
 	draft = fpm_acme_challenge_draft(&gen);
 	for (i = 0; i < draft->count; i++) {
-		if (strcmp(draft->entry[i].token, token)) {
+		if (strcmp(draft->entry[i].token, token) != 0) {
 			continue;
 		}
 		/* Move the last entry into the hole and shrink; order carries no

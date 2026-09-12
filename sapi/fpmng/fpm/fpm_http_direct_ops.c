@@ -65,6 +65,14 @@ struct fpm_http_direct_ops {
 	const char *status_path;		/* NULL = pm.status_path unset */
 	struct fpm_http_direct_ops_shared *shared;
 	struct fpm_http_direct_ops_slot *slot;	/* this child's own, NULL if unknown */
+	/* What this child has already added to the two connection totals in the
+	 * slot. fpm_http_direct_conn.c keeps them as totals since this child
+	 * started, so the tick publishes the difference: adding the whole value
+	 * every tick would count each drop a hundred times a second, and assigning
+	 * it would make the slot's total restart at zero for the next child to
+	 * take this index -- which is the one thing a counter must never do. */
+	unsigned long published_timed_out;
+	unsigned long published_refused;
 };
 
 static struct fpm_http_direct_ops_shared *fpm_http_direct_ops_shared_get(struct fpm_worker_pool_s *wp)
@@ -160,17 +168,13 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 			 * The gauges, on the other hand, are exactly what a child killed
 			 * mid-request leaks, so they start at zero.
 			 *
-			 * conn_timed_out and conn_refused are totals but are cleared too:
-			 * they are republished every tick from counters that live in the
-			 * predecessor's address space, so leaving the old values would
-			 * have them counted once by this child and once by the dead one,
-			 * then overwritten downwards on the first tick. Documented in the
-			 * header as a per-child total for that reason. */
+			 * conn_timed_out and conn_refused are totals and stay: the tick
+			 * publishes them as a difference against this child's own
+			 * watermark (see published_timed_out), so a successor adds to what
+			 * it inherits instead of restarting the series at zero. */
 			ops->slot->requests_active = 0;
 			ops->slot->conn_live = 0;
 			ops->slot->responses_pending = 0;
-			ops->slot->conn_timed_out = 0;
-			ops->slot->conn_refused = 0;
 		}
 	}
 
@@ -236,11 +240,13 @@ void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	}
 	ops->slot->conn_live = live->connections;
 	ops->slot->responses_pending = live->pending;
-	/* Assigned, not added: these two are totals kept by fpm_http_direct_conn.c
-	 * for the life of this child, and this child owns the slot for exactly as
-	 * long. Adding would count every tick. */
-	ops->slot->conn_timed_out = live->timed_out;
-	ops->slot->conn_refused = live->refused_conn;
+	/* The difference since the last publish, not the value: see
+	 * published_timed_out. The caller's two numbers only ever grow, so the
+	 * subtraction cannot wrap. */
+	ops->slot->conn_timed_out += live->timed_out - ops->published_timed_out;
+	ops->slot->conn_refused += live->refused_conn - ops->published_refused;
+	ops->published_timed_out = live->timed_out;
+	ops->published_refused = live->refused_conn;
 }
 
 int fpm_http_direct_ops_allowed(struct fpm_http_direct_ops *ops, const char *peer)
@@ -261,10 +267,32 @@ static const char *fpm_http_direct_ops_pm_name(int pm)
 	}
 }
 
+/* Whether the child that owns this slot is still alive, from the scoreboard
+ * copy the status page already made. A slot belongs to a scoreboard index and
+ * is only ever reset by the next child to take that index, so a child that
+ * died -- scaled down, recycled, or killed outright -- leaves its gauges
+ * standing until then. Totals are meant to stand; gauges are not, and a "live
+ * connections" that only ever ratchets upwards is worse than none.
+ *
+ * Reading `used` rather than clearing the slot at exit is what also covers the
+ * child nothing runs in: SIGKILL, request_terminate_timeout, a crash.
+ *
+ * The shared scoreboard, not the copy the page took: fpm_scoreboard_copy() is
+ * called with copy_procs = 0 here, so the copy has no procs array at all. An
+ * unlocked int read is the right price for a gauge that is already up to one
+ * tick stale -- taking the scoreboard's lock per slot to decide whether to add
+ * a number would cost more than the number is worth. */
+static int fpm_http_direct_ops_slot_alive(const struct fpm_scoreboard_s *live, unsigned i)
+{
+	return live && i < live->nprocs && live->procs[i].used;
+}
+
 /* The pool's totals, summed over the slots. Children that have never run leave
  * theirs at zero, so a pool that has not reached pm.max_children still adds up
- * to what it has actually done. */
-static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops, struct fpm_http_direct_ops_slot *out)
+ * to what it has actually done. The gauges are summed over the live children
+ * only, for the reason above. */
+static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops,
+	const struct fpm_scoreboard_s *copy, struct fpm_http_direct_ops_slot *out)
 {
 	unsigned i;
 
@@ -277,16 +305,18 @@ static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops, struct f
 		unsigned r;
 
 		out->conn_accepted += in->conn_accepted;
-		out->conn_live += in->conn_live;
 		out->conn_timed_out += in->conn_timed_out;
 		out->conn_refused += in->conn_refused;
 		for (r = 0; r < FPM_HTTP_DIRECT_REFUSED_MAX; r++) {
 			out->requests_refused[r] += in->requests_refused[r];
 		}
 		out->requests_local += in->requests_local;
-		out->requests_active += in->requests_active;
-		out->responses_pending += in->responses_pending;
 		out->responses_rejected += in->responses_rejected;
+		if (fpm_http_direct_ops_slot_alive(copy, i)) {
+			out->conn_live += in->conn_live;
+			out->requests_active += in->requests_active;
+			out->responses_pending += in->responses_pending;
+		}
 	}
 }
 
@@ -326,21 +356,30 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 	}
 	for (i = 0; i < ops->shared->nslots; i++) {
 		const struct fpm_http_direct_ops_slot *in = &ops->shared->slots[i];
+		int alive = fpm_http_direct_ops_slot_alive(fpm_scoreboard_get(), i);
+		/* The same rule the pool totals use, said out loud per row: the totals
+		 * of a child that has gone are still this pool's, its gauges are not.
+		 * `live` is on the row so that a reader can tell "this child holds
+		 * nothing" from "no child holds this slot". */
+		unsigned long conn_live = alive ? in->conn_live : 0;
+		unsigned long requests_active = alive ? in->requests_active : 0;
+		unsigned long responses_pending = alive ? in->responses_pending : 0;
 
 		if (json) {
 			evbuffer_add_printf(out,
-				"%s{\"slot\":%u,\"accepted conn\":%lu,\"live connections\":%lu,"
+				"%s{\"slot\":%u,\"live\":%d,\"accepted conn\":%lu,\"live connections\":%lu,"
 				"\"active requests\":%lu,\"pending responses\":%lu,\"non-php requests\":%lu,"
 				"\"refused acl\":%lu,\"refused capacity\":%lu,\"refused connections\":%lu,"
 				"\"timed out connections\":%lu,\"rejected responses\":%lu}",
-				i ? "," : "", i, in->conn_accepted, in->conn_live, in->requests_active,
-				in->responses_pending, in->requests_local,
+				i ? "," : "", i, alive, in->conn_accepted, conn_live, requests_active,
+				responses_pending, in->requests_local,
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 				in->conn_refused, in->conn_timed_out, in->responses_rejected);
 		} else {
 			evbuffer_add_printf(out,
 				"slot:                 %u\n"
+				"live:                 %d\n"
 				"accepted conn:        %lu\n"
 				"live connections:     %lu\n"
 				"active requests:      %lu\n"
@@ -351,8 +390,8 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 				"refused connections:  %lu\n"
 				"timed out connections:%lu\n"
 				"rejected responses:   %lu\n\n",
-				i, in->conn_accepted, in->conn_live, in->requests_active,
-				in->responses_pending, in->requests_local,
+				i, alive, in->conn_accepted, conn_live, requests_active,
+				responses_pending, in->requests_local,
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 				in->conn_refused, in->conn_timed_out, in->responses_rejected);
@@ -376,7 +415,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 		evbuffer_add_printf(out, "%s", json ? "{}\n" : "unavailable\n");
 		return;
 	}
-	fpm_http_direct_ops_totals(ops, &total);
+	fpm_http_direct_ops_totals(ops, fpm_scoreboard_get(), &total);
 	if (localtime_r(&copy->start_epoch, &tm) && strftime(start, sizeof(start), "%d/%b/%Y:%H:%M:%S %z", &tm)) {
 		/* nothing: start is filled in */
 	} else {

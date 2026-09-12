@@ -27,13 +27,23 @@ struct fpm_direct_conn {
 	socklen_t peer_len;
 	int checked;	/* the per-client cap has already passed judgement on this one */
 	int served;			/* the first request arrived: only the limits keep this node */
+	/* Doubly linked, with a tail, so that unlinking one node is O(1). It used
+	 * to be a singly linked list walked from the head, which was fine while
+	 * the list only held connections waiting for their first request; since
+	 * issue #64 it holds every connection this child has, and a walk per close
+	 * is a walk per connection. */
 	struct fpm_direct_conn *next;
+	struct fpm_direct_conn *prev;
 };
 
 struct fpm_http_direct_conns {
 	struct event_base *base;
 	struct fpm_http_direct_conns_limits limits;
+	/* Most recently touched at the head, so the sweep can start at the tail:
+	 * a connection that just made a request is the least likely to be the one
+	 * that ended. */
 	struct fpm_direct_conn *list;
+	struct fpm_direct_conn *tail;
 	unsigned live;
 	unsigned long timed_out;
 	unsigned long refused;
@@ -62,17 +72,40 @@ static int fpm_direct_conn_limited(const struct fpm_http_direct_conns *conns)
 	return conns->limits.max_connections > 0 || conns->limits.max_per_client > 0;
 }
 
+static void fpm_direct_conn_unlink(struct fpm_direct_conn *c)
+{
+	struct fpm_http_direct_conns *conns = c->conns;
+
+	if (c->prev) {
+		c->prev->next = c->next;
+	} else {
+		conns->list = c->next;
+	}
+	if (c->next) {
+		c->next->prev = c->prev;
+	} else {
+		conns->tail = c->prev;
+	}
+	c->next = NULL;
+	c->prev = NULL;
+}
+
+static void fpm_direct_conn_link_front(struct fpm_http_direct_conns *conns, struct fpm_direct_conn *c)
+{
+	c->prev = NULL;
+	c->next = conns->list;
+	if (conns->list) {
+		conns->list->prev = c;
+	} else {
+		conns->tail = c;
+	}
+	conns->list = c;
+}
+
 static void fpm_direct_conn_forget(struct fpm_direct_conn *c)
 {
-	struct fpm_direct_conn **p;
-
-	for (p = &c->conns->list; *p; p = &(*p)->next) {
-		if (*p == c) {
-			*p = c->next;
-			c->conns->live--;
-			break;
-		}
-	}
+	fpm_direct_conn_unlink(c);
+	c->conns->live--;
 	if (c->deadline) {
 		event_free(c->deadline);
 	}
@@ -99,9 +132,9 @@ static void fpm_direct_conn_drop(struct fpm_direct_conn *c)
 	bufferevent_set_timeouts(c->bev, &now, &now);
 }
 
-/* Defined below, called from the pickup pass and from may_accept(): both ask
- * for a count, and a count is only true once the dead nodes are gone. */
-void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
+/* Defined below, called from the per-client check and from may_accept(): both
+ * ask for a count, and a count is only true once the dead nodes are gone. */
+static void fpm_direct_conn_sweep_all(struct fpm_http_direct_conns *conns);
 
 static void fpm_direct_conn_deadline_fire(evutil_socket_t fd, short what, void *arg)
 {
@@ -246,11 +279,14 @@ static int fpm_direct_conn_check_peer(struct fpm_direct_conn *c, int drop)
 	 * released by the sweep, and until then it still answers to this peer:
 	 * counting it would charge a client for connections it has already closed.
 	 * A client fast enough to open and close more than max_per_client
-	 * connections inside one 10 ms tick would otherwise refuse itself. Not
-	 * measured -- the sweep is a pointer read per node, so buying the
-	 * correctness outright was cheaper than establishing the rate at which the
-	 * lag starts to bite. */
-	fpm_http_direct_conns_sweep(c->conns);
+	 * connections inside one 10 ms tick would otherwise refuse itself. The
+	 * exhaustive walk, not the bounded one, because a count that has not
+	 * looked at every node is not a count -- affordable for the same reason as
+	 * in may_accept(): this path only exists when http.max_connections_per_client
+	 * is set, and validation requires http.max_connections alongside it, which
+	 * is what bounds the walk. The count below is a second walk of the same
+	 * list, so the bound was already the price of this directive. */
+	fpm_direct_conn_sweep_all(c->conns);
 	if (fpm_direct_conn_peer_count(c->conns, c) < (unsigned) c->conns->limits.max_per_client) {
 		return 0;
 	}
@@ -337,15 +373,10 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 	 * than it ticks, so this bounds the descriptors by the connection rate
 	 * rather than by the tick.
 	 *
-	 * Only under http.max_connections, though. The sweep walks the whole list,
-	 * and http.max_connections is the only thing that bounds its length --
-	 * running it per accept without one would make accepting O(n) in the
-	 * connections already held, which is the amplifier issue #61 exists to
-	 * prevent. Where the list is unbounded the 10 ms tick is the only sweeper,
-	 * and a descriptor outlives its connection by up to one tick. */
-	if (conns->limits.max_connections > 0) {
-		fpm_http_direct_conns_sweep(conns);
-	}
+	 * The sweep is bounded (FPM_DIRECT_SWEEP_MAX), so this costs the same
+	 * whatever the child is holding -- which is what lets it run on the accept
+	 * path at all. */
+	fpm_http_direct_conns_sweep(conns);
 	c = calloc(1, sizeof(*c));
 	if (!c) {
 		/* OOM: this connection goes untracked and unlimited. The alternative
@@ -373,8 +404,7 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 			return;
 		}
 	}
-	c->next = conns->list;
-	conns->list = c;
+	fpm_direct_conn_link_front(conns, c);
 	conns->live++;
 	/* Either timer failing to arm leaves a node nothing can ever release: the
 	 * pickup is what installs the EOF watcher and the deadline is what ends a
@@ -422,6 +452,17 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 			event_free(c->deadline);
 			c->deadline = NULL;
 		}
+		if (!conns->limits.track_live && !fpm_direct_conn_limited(conns)) {
+			/* Nothing left to track: the deadline is spent, no limit counts
+			 * this connection and no gauge reports it. The node holds a
+			 * bufferevent reference and therefore an fd, and past this point
+			 * only the sweep would give it back -- a caller with neither a
+			 * limit nor track_live has no sweep, so keeping it would leak one
+			 * descriptor per connection (pool.executor = worker,
+			 * fpm_http_direct_worker.c has no periodic tick). */
+			fpm_direct_conn_forget(c);
+			return 0;
+		}
 		/* The EOF watcher goes with the deadline. A persistent, level-
 		 * triggered EV_READ on a connection whose bytes evhttp may leave in
 		 * the socket -- which is what a paused read or a streaming response
@@ -429,6 +470,13 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 		 * is what releases this node, one tick later at worst. */
 		event_del(c->watch);
 		c->served = 1;
+		/* To the head: the sweep starts at the tail, so a connection that is
+		 * making requests drifts away from the end that gets examined, and the
+		 * connections that sit still drift towards it. That is the whole
+		 * ordering policy -- the sweep is looking for connections that ended,
+		 * and one that just spoke is the least likely candidate. */
+		fpm_direct_conn_unlink(c);
+		fpm_direct_conn_link_front(conns, c);
 		return 0;
 	}
 	return 0;
@@ -440,30 +488,69 @@ int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns)
 		return 1;
 	}
 
-	/* Same reason as in the pickup pass: live counts nodes, and a node
-	 * outlives its connection until something releases it. Sweeping here is
-	 * what makes the gate reopen in the same loop pass the last connection
-	 * ended rather than up to one tick later -- which matters most at exactly
-	 * the moment the gate is closed, because then the tick is the only thing
-	 * that can reopen it. */
-	fpm_http_direct_conns_sweep(conns);
+	if (conns->live < (unsigned) conns->limits.max_connections) {
+		return 1;
+	}
+	/* At the cap, and live counts nodes rather than connections: a node
+	 * outlives its connection until something releases it, so the gate would
+	 * stay shut on behalf of connections that have already ended. The bounded
+	 * sweep is not enough here -- it may not have reached them -- so this one
+	 * walk is exhaustive. It is affordable because it only runs when the child
+	 * is at a cap the operator configured, and http.max_connections is exactly
+	 * what bounds the length of the walk. */
+	fpm_direct_conn_sweep_all(conns);
 	return conns->live < (unsigned) conns->limits.max_connections;
 }
 
+/* Every node, however many there are. Only for a caller that needs the count
+ * to be exact right now -- see fpm_http_direct_conns_may_accept(). */
+static void fpm_direct_conn_sweep_all(struct fpm_http_direct_conns *conns)
+{
+	struct fpm_direct_conn *c, *prev;
+
+	for (c = conns->tail; c; c = prev) {
+		prev = c->prev;
+		/* Only connections past their first request: the others have the EOF
+		 * watcher, which notices the same thing without waiting for a tick. */
+		if (c->served && fpm_direct_conn_abandoned(c)) {
+			fpm_direct_conn_forget(c);
+		}
+	}
+}
+
+/* How many nodes one sweep examines. The walk is not free: bufferevent_getcb()
+ * takes the bufferevent's lock, and measured on the poligon 2026-09-12 (one
+ * child, no http.max_connections, one busy keep-alive connection against N
+ * idle ones) an exhaustive sweep on the 10 ms tick cost 9460 rps at N=0 but
+ * 6708 at N=2000, against 9534 / 9686 for the same binary with the sweep
+ * disabled and 9534 / 9686 for origin/main, which does not track a served
+ * connection at all. A bounded sweep costs the same at every N; what it buys
+ * with the bound is time, not correctness -- a descriptor whose connection
+ * ended waits at most live/FPM_DIRECT_SWEEP_MAX ticks instead of one, and
+ * anything that needs an exact count asks for the exhaustive walk above. */
+#define FPM_DIRECT_SWEEP_MAX 32u
+
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 {
-	struct fpm_direct_conn *c, *next;
+	unsigned budget = FPM_DIRECT_SWEEP_MAX;
 
 	if (!conns) {
 		return;
 	}
-	/* Only connections past their first request: the others have the EOF
-	 * watcher, which notices the same thing without waiting for a tick. */
-	for (c = conns->list; c; c = next) {
-		next = c->next;
+	/* From the tail, because that is where connections that have stopped
+	 * making requests collect: every request moves its node to the head.
+	 * A node that survives the examination goes to the head too, so repeated
+	 * sweeps rotate through the whole list rather than re-examining the same
+	 * few nodes. */
+	while (budget-- > 0 && conns->tail) {
+		struct fpm_direct_conn *c = conns->tail;
+
 		if (c->served && fpm_direct_conn_abandoned(c)) {
 			fpm_direct_conn_forget(c);
+			continue;
 		}
+		fpm_direct_conn_unlink(c);
+		fpm_direct_conn_link_front(conns, c);
 	}
 }
 

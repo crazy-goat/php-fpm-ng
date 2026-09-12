@@ -455,8 +455,9 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 
 	if (!shared) {
 		/* Should not happen — init_main allocates this for every supervisor pool
-		 * in the master before anything can fork (including the status pool). A
-		 * zero state is a safe result. */
+		 * in the master before anything can fork, including the operator
+		 * endpoint's child, which is what calls this. A zero state is a safe
+		 * result. */
 		return;
 	}
 

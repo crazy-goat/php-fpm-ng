@@ -24,10 +24,14 @@
  * Issue #64 added the per-connection fields and a schema version on the page.
  * Reset semantics, which the version is there to let tooling reason about:
  * TOTALS belong to the pool and survive a child recycled by pm.max_requests --
- * the successor inherits the slot and keeps counting -- while GAUGES belong to
- * the child and start at zero, because a child killed mid-request is exactly
- * what leaks a gauge. A reload replaces the whole segment, so everything
- * starts over; a graceful stop leaves the last values in place until then.
+ * the successor inherits the slot and keeps counting, and the two totals kept
+ * in the child's own memory are published as a difference for that reason --
+ * while GAUGES belong to the child and start at zero, because a child killed
+ * mid-request is exactly what leaks a gauge. The page ignores the gauges of a
+ * slot whose child is gone (the scoreboard's `used` flag), so a pool that
+ * scaled down does not keep reporting connections nobody holds. A reload
+ * re-executes the master and therefore starts every number over -- measured on
+ * the poligon 2026-09-11, accepted conn 9 before and 1 after.
  */
 
 #ifndef FPM_HTTP_DIRECT_OPS_H
@@ -97,8 +101,11 @@ struct fpm_http_direct_ops_live {
 	 * blocking. "active requests" is the one that keeps moving there, because
 	 * it is written on the request path itself. */
 	unsigned pending;
-	unsigned long timed_out;	/* total: first request never arrived */
-	unsigned long refused_conn;	/* total: http.max_connections_per_client */
+	/* Both are totals since this child started, not deltas: the publish works
+	 * out the difference itself, so a caller that simply reports what it has
+	 * counted cannot double-count by being called twice. */
+	unsigned long timed_out;	/* first request never arrived */
+	unsigned long refused_conn;	/* http.max_connections_per_client */
 };
 void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	const struct fpm_http_direct_ops_live *live);

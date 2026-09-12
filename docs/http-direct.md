@@ -724,6 +724,32 @@ different incidents.
 say so instead of guessing from which fields happen to be present. It is
 bumped when a field changes meaning or leaves; adding a field does not bump it.
 
+#### What tracking a connection costs
+
+Reporting `live connections` means keeping a small node per connection for as
+long as the connection lasts, and releasing it when the connection ends. That
+release is a sweep, and the sweep is not free: `bufferevent_getcb()` -- the
+call that asks libevent whether evhttp has let go -- takes the bufferevent's
+lock.
+
+Measured on the poligon 2026-09-12, one child, no `http.max_connections`, one
+busy keep-alive connection against N idle ones:
+
+| N idle connections | origin/main | exhaustive sweep per tick | bounded sweep (shipped) |
+|---:|---:|---:|---:|
+| 0 | 9534 rps | 9460 rps | 9789 rps |
+| 500 | 9555 rps | 9180 rps | 9651 rps |
+| 2000 | 9686 rps | 6708 rps | 9506 rps |
+
+So the sweep examines at most 32 nodes per pass, taken from the end of the list
+that requests move away from. A descriptor whose connection has ended is
+therefore released within `live / 32` ticks rather than one, which for 2000
+connections is under a second -- measured as `live connections` falling from
+1408 to 0 within three seconds of the client closing them all. Anything that
+needs an exact count right now (the accept gate at `http.max_connections`, the
+per-client count) asks for an exhaustive walk instead, and both of those only
+exist when a cap is configured, which is what bounds the walk.
+
 #### What each number costs to read
 
 Three of these are **gauges**, not totals: `live connections`, `pending
@@ -749,12 +775,23 @@ totals never go backwards mid-series. The gauges (`active requests`, `live
 connections`, `pending responses`) are cleared when a child starts, because
 that is exactly what a child killed mid-request would otherwise leak.
 
-`timed out connections` and `refused connections` are totals but are cleared
-too, and the header says so: they are republished every tick from counters that
-live in the child's own address space, so a new child inheriting the old values
-would count its predecessor's drops once itself and once again from the dead
-one, then overwrite them downwards on its first tick. They are therefore
-per-child totals summed across the live children, not pool lifetime totals.
+`timed out connections` and `refused connections` are pool totals like the
+rest, even though the numbers behind them live in each child's own memory: the
+tick publishes the *difference* since its last publish, so a child adds to the
+slot it inherits instead of overwriting it. Assigning instead would have made
+both rows drop to zero at every `pm.max_requests` recycle, and a scraper reads
+a counter that drops as a reset of the whole series.
+
+The gauges are summed over the **live** children only. A slot belongs to a
+scoreboard index and is only ever re-zeroed by the next child to take that
+index, so a child that was scaled down, recycled or killed outright would
+otherwise leave `live connections: 20` standing for as long as the pool stayed
+small. The page checks the scoreboard's `used` flag for each slot instead
+(`fpm_http_direct_ops.c`, `fpm_http_direct_ops_slot_alive()`), which needs
+nothing to run in the dying child and therefore also covers `SIGKILL`,
+`request_terminate_timeout` and a crash. On `?full` the same fact is a row:
+`live: 1` or `live: 0` says whether a child holds the slot at all, which is
+what tells "this child holds no connections" apart from "no child here".
 
 A reload (`SIGUSR2`) starts every number here again, the scoreboard's own
 `requests` included: the master re-executes, so the shared segment is a new

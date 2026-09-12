@@ -47,9 +47,11 @@
  *   whatever the list length.
  *
  * Since issue #64 a node outlives the first request and is kept for the whole
- * life of the connection even when no limit is configured, because the live
- * count is what the status page reports. Before that a deadline-only worker
- * dropped the node the moment its request arrived.
+ * life of the connection when the caller asks for it (limits.track_live),
+ * because the live count is what the status page reports. Before that a
+ * deadline-only worker dropped the node the moment its request arrived, and
+ * that is still what a caller without a sweep gets -- the node is what holds
+ * the fd, and past the first request only the sweep gives it back.
  *
  * What is NOT here, and is rejected by validation rather than ignored:
  * per-connection limits for later requests on a keep-alive connection (the
@@ -70,6 +72,15 @@ struct fpm_http_direct_conns_limits {
 	int read_timeout_ms;	/* first-request deadline; 0 disables it */
 	int max_connections;	/* per worker; 0 = unlimited */
 	int max_per_client;	/* per peer address, per worker; 0 = unlimited */
+	/* Keep a node for the whole life of a connection rather than dropping it
+	 * when its first request arrives, so that live() is a true gauge of what
+	 * this worker holds (issue #64). Only a caller that sweeps may ask for
+	 * this: the node holds a bufferevent reference and therefore an fd, and
+	 * past the first request the sweep is the only thing that releases it.
+	 * pool.executor = worker leaves this at 0 -- it has no periodic tick and
+	 * no status page to report the gauge on, so a node kept there would be an
+	 * fd leaked per connection. */
+	int track_live;
 };
 
 /* NULL only on OOM. A worker whose limits are all off still gets an object:
@@ -105,8 +116,11 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
  * behalf of connections that have already ended. */
 int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns);
 
-/* Releases connections evhttp has finished with. Call from the worker's tick;
- * a no-op when no limit is configured. */
+/* Releases connections evhttp has finished with, by walking the tracked list.
+ * Call from the worker's tick. Not a no-op when no limit is configured: since
+ * issue #64 a node with track_live set outlives its first request, and this is
+ * what collects it. A caller that does not call this must not set track_live
+ * and must not set either limit. */
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
 
 /* What this file knows, for the status page (issue #64). All three are this

@@ -1549,10 +1549,12 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	/* Before the bevcb is installed, because the first connection this child
-	 * accepts already goes through it. Both limits are zero by design: this
-	 * executor rejects them, so only the deadline is tracked here and no
-	 * connection is ever kept past its first request -- which is why this
-	 * executor needs no sweep and therefore no periodic tick. */
+	 * accepts already goes through it. Both limits are zero by design (this
+	 * executor rejects them) and so is limits.track_live: only the deadline is
+	 * tracked here, no connection is kept past its first request, and that is
+	 * why this executor needs no sweep and therefore no periodic tick. Asking
+	 * for track_live without a sweep would leak the fd of every connection
+	 * that sends a request -- see fpm_http_direct_conn.h. */
 	limits.pool = wp->config->name;
 	limits.read_timeout_ms = wp->config->http_read_timeout;
 	fw.conns = fpm_http_direct_conns_new(fw.base, &limits);

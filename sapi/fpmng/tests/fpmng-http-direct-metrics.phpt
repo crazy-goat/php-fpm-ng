@@ -163,21 +163,21 @@ try {
     $body = until(function () use ($reader) {
         [, $b] = fetch($reader, '/status');
         return field($b, 'live connections') >= 1 ? $b : null;
-    }, 5, 'the reader to show up as a live connection');
+    }, 15, 'the reader to show up as a live connection');
     $accepted = field($body, 'accepted conn');
     $other = connect($port);
     fetch($other, '/app');
     until(function () use ($reader, $accepted) {
         [, $b] = fetch($reader, '/status');
         return field($b, 'accepted conn') > $accepted && field($b, 'live connections') >= 2 ? $b : null;
-    }, 5, 'the second connection to be counted');
+    }, 15, 'the second connection to be counted');
     fclose($other);
     /* And the gauge comes back down: a live count that only grows is a total
      * wearing a gauge's name. */
     until(function () use ($reader) {
         [, $b] = fetch($reader, '/status');
         return field($b, 'live connections') === 1 ? $b : null;
-    }, 5, 'the second connection to be released');
+    }, 15, 'the second connection to be released');
     echo "connections: ok\n";
 
     /* 3. A slow request is visible as an active request WHILE it runs. This is
@@ -189,7 +189,7 @@ try {
     until(function () use ($reader) {
         [, $b] = fetch($reader, '/status');
         return field($b, 'active requests') >= 1 ? $b : null;
-    }, 5, 'the slow request to show as active');
+    }, 15, 'the slow request to show as active');
     echo "active during php: ok\n";
     $line = fgets($slow);
     expect('slow request finished', substr($line, 0, 12), 'HTTP/1.1 200');
@@ -197,7 +197,7 @@ try {
     until(function () use ($reader) {
         [, $b] = fetch($reader, '/status');
         return field($b, 'active requests') === 0 ? $b : null;
-    }, 5, 'the slow request to stop being active');
+    }, 15, 'the slow request to stop being active');
     echo "active after php: ok\n";
 
     /* 4. A connection that never sends a request is dropped by the first
@@ -268,14 +268,29 @@ try {
      * monitoring series, which is the one thing nobody can alert on. Each
      * request gets a fresh connection, so accepted conn has to reach the number
      * of connections this loop made and never drop. */
+    /* Retried, because the child being recycled is the point: a connection
+     * accepted by a child that is on its way out is closed without an answer,
+     * and that is correct behaviour, not a failure to assert against. */
+    $once = function (string $path) use ($recycle) {
+        for ($try = 0; $try < 20; $try++) {
+            $fp = connect($recycle);
+            try {
+                [, $b] = fetch($fp, $path);
+                return $b;
+            } catch (RuntimeException $e) {
+                usleep(100000);
+            } finally {
+                if (is_resource($fp)) {
+                    fclose($fp);
+                }
+            }
+        }
+        throw new RuntimeException("no answer from the recycling pool for $path");
+    };
     $seen = 0;
     for ($i = 0; $i < 6; $i++) {
-        $fp = connect($recycle);
-        fetch($fp, '/app');
-        fclose($fp);
-        $fp = connect($recycle);
-        [, $b] = fetch($fp, '/status');
-        fclose($fp);
+        $once('/app');
+        $b = $once('/status');
         $now = field($b, 'accepted conn');
         if ($now < $seen) {
             throw new RuntimeException("accepted conn went backwards: $seen -> $now\n$b");

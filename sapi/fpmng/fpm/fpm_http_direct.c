@@ -189,12 +189,19 @@ static void fpm_direct_stop(int signo)
 	fpm_direct_stopping = 1;
 }
 
-static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
+/* sweep = 1 only on the timer. The sweep walks every tracked connection, and
+ * since issue #64 that list holds them for their whole life, so calling it
+ * from the end of every request makes the request path grow with the
+ * connections the child happens to hold. Measured on the poligon 2026-09-12,
+ * one child, no http.max_connections, one busy keep-alive connection against N
+ * idle ones: 9422 rps at N=0, 8498 at N=500, 5304 at N=2000, back to 9703 at
+ * N=0. On the timer alone the same walk costs 100 * N pointer reads a second
+ * and does not touch the request path at all; the price is that a descriptor
+ * whose connection ended can outlive it by one tick instead of by one request,
+ * which is what the header already promises. */
+static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
-	struct fpm_direct_worker *w = arg;
 	struct fpm_http_direct_ops_live live;
-	(void) fd;
-	(void) events;
 	if (fpm_direct_stopping) {
 		if (w->listener) {
 			evhttp_del_accept_socket(w->http, w->listener);
@@ -215,14 +222,15 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 	 * itself, so this call is for the descriptors, not for the count: a child
 	 * that is accepting freely still has to let go of the fds of connections
 	 * that ended, and nothing else would ask it to. */
-	fpm_http_direct_conns_sweep(w->conns);
+	if (sweep) {
+		fpm_http_direct_conns_sweep(w->conns);
+	}
 	/* issue #64. After the sweep, never before: the live count is only true
-	 * once the connections that ended have been let go, and a gauge that is
-	 * one tick stale in the other direction would report connections this
-	 * child no longer holds. The tick is also the only place this is done --
-	 * a store per field 100 times a second costs nothing measurable, while
-	 * publishing from the accept and request paths would put shared-memory
-	 * writes on them for a number nobody reads between ticks. */
+	 * once the connections that ended have been let go. On the inline call
+	 * there has been no sweep, so this publishes what the last one left --
+	 * the gauge is documented as up to one tick stale for exactly this
+	 * reason. A store per field is cheap enough to do on both paths; what is
+	 * not cheap is the walk above. */
 	live.connections = fpm_http_direct_conns_live(w->conns);
 	live.pending = (unsigned) w->pending;
 	live.timed_out = fpm_http_direct_conns_timed_out(w->conns);
@@ -235,6 +243,21 @@ static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
 	if (!w->in_request && fpm_http_direct_conns_may_accept(w->conns)) {
 		fpm_direct_accept_enable(w, 1);
 	}
+}
+
+/* The 10 ms timer. */
+static void fpm_direct_tick(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	fpm_direct_tick_body(arg, 1);
+}
+
+/* The end of a request, which re-opens the accept gate without waiting for the
+ * timer. It does not sweep -- see fpm_direct_tick_body(). */
+static void fpm_direct_tick_now(struct fpm_direct_worker *w)
+{
+	fpm_direct_tick_body(w, 0);
 }
 
 static char *fpm_direct_getenv(const char *name, size_t len)
@@ -1155,7 +1178,7 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 	}
 	w->pending++;
-	fpm_direct_tick(-1, 0, w);
+	fpm_direct_tick_now(w);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_direct_response_closed, w);
 	evhttp_request_set_on_complete_cb(http, fpm_direct_response_done, w);
 	r->bytes_sent += evbuffer_get_length(r->output);
@@ -1541,7 +1564,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
-		fpm_direct_tick(-1, 0, w);
+		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
@@ -1556,7 +1579,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_clear_headers(&r.env);
 		evbuffer_free(r.output);
 		w->in_request = 0;
-		fpm_direct_tick(-1, 0, w);
+		fpm_direct_tick_now(w);
 		fpm_http_direct_ops_active(w->ops, -1);
 		fpm_request_accepting(true);
 		return;
@@ -1605,6 +1628,9 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	limits.read_timeout_ms = wp->config->http_read_timeout;
 	limits.max_connections = wp->config->http_max_connections;
 	limits.max_per_client = wp->config->http_max_connections_per_client;
+	/* This executor has the 10 ms tick, so it can afford to keep a node for
+	 * the whole connection and report a truthful live count (issue #64). */
+	limits.track_live = 1;
 	w.conns = fpm_http_direct_conns_new(w.base, &limits);
 	if (!w.conns) exit(FPM_EXIT_SOFTWARE);
 	evhttp_set_max_headers_size(w.http, FPM_HTTP_HEADERS_MAX);

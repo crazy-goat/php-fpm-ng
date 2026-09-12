@@ -21,6 +21,20 @@ is measured rather than derived:
                                    window only, never mixed with steady state
   latency                          successful-only and non-2xx, reported apart
 
+`--executors nginx` is the fourth arm, added for issue #168: a `pool.type =
+fastcgi` pool behind nginx, driven by the same client, the same scripts and the
+same binary as the direct rows. It is a **total-system and behaviour
+reference**, not a per-worker or per-connection head-to-head. nginx holds the
+client connections in C with no PHP heap behind them and the children hold
+nothing between requests, so "RSS per idle connection" for that stack is an
+nginx number and its retirement is a no-op rather than a drain. The two things
+it is a reference for are the whole-stack footprint (nginx + master + children
+against master + direct workers, with the breakdown kept in the row so the
+merge is auditable) and the zero that a scale-down behind nginx costs clients,
+which is the yardstick http-direct's `n_conn_closed_without_response` is read
+against. Every nginx row carries that sentence in `stack_note`, so the number
+cannot be lifted out of this file and quoted as a comparison it is not.
+
 The decision rule these numbers are judged against is in
 `build/benchmark-http-direct-pm.md` and was written before the first run.
 
@@ -37,6 +51,7 @@ import os
 from pathlib import Path
 import resource
 import selectors
+import shutil
 import signal
 import socket
 import ssl
@@ -99,6 +114,10 @@ while (!fpmng_worker_may_exit()) {
 # t_exit lands at or past this bound measured the SIGKILL, not a drain, and the
 # drain time it appears to report is the escalation delay instead.
 SIGKILL_FLOOR_MS = 1000.0
+
+# Not /etc/nginx and not the system pid file: everything this arm touches lives
+# under the scratch directory, because the box is shared with other work.
+NGINX_BINARY = shutil.which("nginx") or "/usr/sbin/nginx"
 
 # The literal as it appears in .rodata: fpm_http_direct_request.c:105 logs
 # "[pool %s] %s requires pm = static", so the subject is a format argument and
@@ -235,6 +254,28 @@ def alive(pid):
     return Path(f"/proc/{pid}").exists()
 
 
+CLOCK_TICKS = os.sysconf("SC_CLK_TCK")
+
+
+def cpu_seconds(pid):
+    """utime+stime of one process.
+
+    Sampled at both ends of the steady window and differenced, because the
+    total since exec includes the pool's startup and -- on the nginx arm --
+    whatever nginx did while the idle set was being opened. Only the delta over
+    a window in which the request count is also known can be turned into a cost
+    per request, which is what #168 compares stack against stack.
+    """
+    try:
+        # Everything after the last ')' -- the comm field is parenthesised and
+        # may itself contain spaces and parentheses, so splitting the whole line
+        # is wrong. state is [0] here, so utime/stime are [11] and [12].
+        fields = Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()
+        return (int(fields[11]) + int(fields[12])) / CLOCK_TICKS
+    except (OSError, IndexError, ValueError):
+        return None
+
+
 class Client:
     """One HTTP/1.1 keep-alive connection, spoken by hand over a raw socket.
 
@@ -367,8 +408,11 @@ class Client:
 class Pool:
     """One configured fpm-ng pool in its own directory, on its own port."""
 
-    def __init__(self, binary, root, name, port, config_text):
+    def __init__(self, binary, root, name, port, config_text, listen_path=None):
         self.binary = binary
+        # Set for the nginx arm only, where the pool speaks FastCGI over a unix
+        # socket and `port` belongs to nginx rather than to the pool.
+        self.listen_path = listen_path
         self.directory = root / name
         self.directory.mkdir(parents=True, exist_ok=True)
         self.port = port
@@ -379,7 +423,7 @@ class Pool:
         self.stderr = self.directory / "stderr.log"
         self.process = None
 
-    def start(self, tls_context=None, seconds=20.0):
+    def start(self, tls_context=None, seconds=20.0, probe=True):
         """Start, and report a configuration refusal as a result, not a crash.
 
         Today's binary refuses `pm = dynamic` and `pm = ondemand` for an
@@ -402,6 +446,19 @@ class Pool:
                 return {"started": False, "refused": True,
                         "exit_code": self.process.returncode,
                         "error": self._refusal_reason()}
+            if not probe:
+                # The nginx arm has no HTTP port of its own -- the pool listens on
+                # a unix socket and nginx is not started yet. Readiness here is
+                # only "the listener exists"; the arm's real readiness check is the
+                # HTTP probe through nginx, which run_scenario does next and which
+                # fails if the pool never answered.
+                if self.listen_path is not None and self.listen_path.exists():
+                    return {"started": True, "refused": False}
+                if time.monotonic() > deadline:
+                    return {"started": False, "refused": False,
+                            "error": f"pool never created {self.listen_path}"}
+                time.sleep(0.05)
+                continue
             try:
                 client = Client(self.port, tls_context, timeout=2.0)
             except OSError:
@@ -465,6 +522,158 @@ class Pool:
                 self.process.wait(timeout=5)
         if getattr(self, "_log_handle", None):
             self._log_handle.close()
+
+
+class Nginx:
+    """nginx in front of a FastCGI pool -- the other half of the #168 baseline.
+
+    Own prefix, own configuration, own pid file, own port: nothing here reads
+    /etc/nginx or signals the system nginx, because the box is shared.
+
+    Three defaults are overridden for a reason and the row records all three.
+    `keepalive_timeout` is the harness's own idle set: at nginx's default of 75 s
+    the connections this arm is supposed to be holding would be closed by nginx
+    partway through a round, and the closes would be counted as client-visible
+    failures of the pool. `keepalive_requests` likewise -- the stream does tens
+    of thousands of requests on one connection and the default 1000 would make
+    nginx recycle it mid-window. `worker_connections` has to cover the client
+    side and the upstream side of every connection at once.
+    """
+
+    def __init__(self, directory, port, socket_path, root, scenario, keep_conn,
+                 idle, stream_connections):
+        self.directory = directory
+        self.port = port
+        self.pid_file = directory / "nginx.pid"
+        self.config = directory / "nginx.conf"
+        self.process = None
+        self._log_handle = None
+        # Both sides of every connection, plus the probes retire() opens.
+        self.worker_connections = 2 * (idle + stream_connections) + 512
+        self.keep_conn = keep_conn
+        # `fastcgi_keep_conn on` without an upstream keepalive pool is a no-op:
+        # nginx keeps its end open and then closes it anyway with nowhere to
+        # park it. The two go together or the setting is not being tested.
+        upstream_keepalive = "        keepalive 32;\n" if keep_conn else ""
+        tls = ""
+        listen = f"listen 127.0.0.1:{port};"
+        if scenario["tls"]:
+            listen = f"listen 127.0.0.1:{port} ssl;"
+            tls = (f"        ssl_certificate {scenario['tls_cert']};\n"
+                   f"        ssl_certificate_key {scenario['tls_key']};\n")
+        self.config.write_text(f"""worker_processes 1;
+worker_rlimit_nofile {self.worker_connections + 1024};
+pid {self.pid_file};
+error_log {directory}/nginx-error.log warn;
+events {{ worker_connections {self.worker_connections}; }}
+http {{
+    access_log off;
+    client_body_temp_path {directory}/body;
+    fastcgi_temp_path {directory}/fastcgi;
+    proxy_temp_path {directory}/proxy;
+    uwsgi_temp_path {directory}/uwsgi;
+    scgi_temp_path {directory}/scgi;
+    keepalive_timeout 3600s;
+    keepalive_requests 10000000;
+    upstream php {{
+        server unix:{socket_path};
+{upstream_keepalive}    }}
+    server {{
+        {listen}
+{tls}        location / {{
+            fastcgi_pass php;
+            fastcgi_keep_conn {'on' if keep_conn else 'off'};
+            fastcgi_read_timeout {scenario['read_timeout_ms']}ms;
+            fastcgi_param SCRIPT_FILENAME {root}/index.php;
+            fastcgi_param SCRIPT_NAME /index.php;
+            fastcgi_param REQUEST_METHOD $request_method;
+            fastcgi_param QUERY_STRING $query_string;
+            fastcgi_param REQUEST_URI $request_uri;
+            fastcgi_param CONTENT_TYPE $content_type;
+            fastcgi_param CONTENT_LENGTH $content_length;
+            fastcgi_param SERVER_PROTOCOL $server_protocol;
+            fastcgi_param SERVER_NAME $host;
+            fastcgi_param SERVER_PORT $server_port;
+            fastcgi_param REMOTE_ADDR $remote_addr;
+            fastcgi_param REMOTE_PORT $remote_port;
+            fastcgi_param DOCUMENT_ROOT {root};
+            fastcgi_param GATEWAY_INTERFACE CGI/1.1;
+        }}
+    }}
+}}
+""")
+
+    def start(self):
+        self._log_handle = open(self.directory / "nginx-stderr.log", "w")
+        self.process = subprocess.Popen(
+            [NGINX_BINARY, "-p", f"{self.directory}/", "-c", str(self.config),
+             "-g", "daemon off;"],
+            stdout=self._log_handle, stderr=self._log_handle,
+            # Same reason as the pool: teardown has to be able to reach the
+            # worker as well as the master.
+            start_new_session=True)
+
+    def processes(self):
+        """Master first, then its workers. Empty if it is already gone."""
+        if not self.process or self.process.poll() is not None:
+            return []
+        return [self.process.pid] + sorted(children_of(self.process.pid))
+
+    def error_lines(self):
+        path = self.directory / "nginx-error.log"
+        return path.read_text().splitlines()[-3:] if path.exists() else []
+
+    def stop(self):
+        if self.process and self.process.poll() is None:
+            try:
+                os.kill(self.process.pid, signal.SIGQUIT)
+            except OSError:
+                pass
+            try:
+                self.process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                except OSError:
+                    self.process.kill()
+                self.process.wait(timeout=5)
+        if self._log_handle:
+            self._log_handle.close()
+
+
+def wait_http(port, tls_context, seconds=20.0):
+    """Wait until 127.0.0.1:port answers one request with 200.
+
+    Separate from Pool.start() because on the nginx arm the thing that has to
+    answer is not the thing that was started: readiness is nginx's, and a pool
+    that came up fine behind a misconfigured nginx has to fail here rather than
+    be measured.
+    """
+    deadline = time.monotonic() + seconds
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            client = Client(port, tls_context, timeout=2.0)
+        except OSError as exc:
+            last = repr(exc)
+            time.sleep(0.05)
+            continue
+        try:
+            record = client.exchange(deadline=5.0)
+        except (OSError, RuntimeError, ValueError) as exc:
+            # RuntimeError and ValueError as well as OSError: nginx answers with
+            # its own error page while the upstream is still coming up, and that
+            # page is not a format this parser has to support -- it is a retry.
+            last = repr(exc)
+            record = None
+        finally:
+            client.close()
+        if record and record["status"] == 200:
+            return {"started": True}
+        if record:
+            last = record["outcome"]
+        time.sleep(0.05)
+    return {"started": False, "error": f"port {port} never answered 200 ({last})"}
 
 
 def percentile(values, fraction):
@@ -792,6 +1001,34 @@ def make_tls(root):
 
 
 def config_text(scenario, directory, root, port):
+    if scenario["executor"] == "nginx":
+        # The baseline arm. No http.* directives at all: the transport is
+        # FastCGI over a unix socket and nginx owns the HTTP port, which is the
+        # whole reason this row is a total-system reference rather than a
+        # per-worker one. TLS, when the scenario asks for it, is terminated by
+        # nginx -- there is nowhere else in this stack it could be.
+        spare = ""
+        if scenario["pm"] in ("dynamic", "ondemand"):
+            spare = (f"pm.start_servers = {scenario['start_servers']}\n"
+                     f"pm.min_spare_servers = {scenario['min_spare']}\n"
+                     f"pm.max_spare_servers = {scenario['max_spare']}\n"
+                     f"pm.process_idle_timeout = {scenario['idle_timeout']}s\n")
+        return f"""[global]
+error_log = {directory}/fpm.log
+pid = {directory}/fpm.pid
+daemonize = no
+[pm{scenario['index']}]
+listen = {directory}/fpm.sock
+pool.type = fastcgi
+pm = {scenario['pm']}
+pm.max_children = {scenario['max_children']}
+pm.max_requests = {scenario['max_requests']}
+{spare}chdir = {root}
+catch_workers_output = no
+request_cpu_tracking = no
+php_admin_value[max_execution_time] = 0
+php_admin_value[opcache.enable] = 0
+"""
     tls = ""
     if scenario["tls"]:
         tls = (f"http.tls_cert = {scenario['tls_cert']}\n"
@@ -828,12 +1065,27 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
     directory_name = (f"{scenario['executor']}-{scenario['pm']}"
                       f"-{'tls' if scenario['tls'] else 'plain'}-n{scenario['idle']}")
     directory = root / f"{directory_name}-{scenario['index']}"
+    baseline = scenario["executor"] == "nginx"
+    socket_path = directory / "fpm.sock" if baseline else None
     pool = Pool(args.binary, root, directory.name, port,
-                config_text(scenario, directory, root, port))
+                config_text(scenario, directory, root, port),
+                listen_path=socket_path)
+    nginx = None
     row_base = {k: scenario[k] for k in
                 ("executor", "pm", "tls", "idle", "max_children", "max_requests",
                  "min_spare", "max_spare", "workload", "read_timeout_ms")}
     row_base["stream_mode"] = args.stream_mode
+    row_base["stack"] = "nginx+fastcgi" if baseline else "http-direct"
+    if baseline:
+        row_base["fastcgi_keep_conn"] = "on" if args.fastcgi_keep_conn else "off"
+        # Carried in every row on purpose: a figure quoted out of results.json
+        # without this sentence is a comparison this arm cannot support. See
+        # issue #168.
+        row_base["stack_note"] = (
+            "total-system and behaviour reference, NOT a per-worker or "
+            "per-connection head-to-head: nginx holds the client connections "
+            "and the FastCGI children hold none, so per-connection memory here "
+            "is an nginx figure and a scale-down is a no-op rather than a drain")
     rows = []
     idle_set = None
     stream = None
@@ -844,11 +1096,22 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
         # malformed one (RuntimeError, ValueError) -- none of which is OSError.
         # Raised outside, it would leave a live master bound to this port on a
         # shared box, reachable only through the pid file this path never wrote.
-        status = pool.start(tls_context if scenario["tls"] else None)
+        status = pool.start(tls_context if scenario["tls"] else None,
+                            probe=not baseline)
         if not status["started"]:
             return [row_base | {"round": 0,
                                 "result": "refused" if status["refused"] else "failed",
                                 "error": status.get("error")}]
+        if baseline:
+            nginx = Nginx(directory, port, socket_path, root, scenario,
+                          args.fastcgi_keep_conn, scenario["idle"],
+                          args.stream_connections)
+            nginx.start()
+            ready = wait_http(port, tls_context if scenario["tls"] else None)
+            if not ready["started"]:
+                return [row_base | {"round": 0, "result": "failed",
+                                    "error": ready["error"],
+                                    "nginx_error": nginx.error_lines()}]
         for round_index in range(1, args.rounds + 1):
             idle_set = IdleSet(port, scenario["idle"], tls_context if scenario["tls"] else None)
             stream = Stream(port, args.stream_connections,
@@ -859,6 +1122,8 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
             # accepting its share of the idle set has not paid for it yet.
             time.sleep(args.settle_seconds)
             children = pool.children()
+            master = pool.master_pid()
+            nginx_pids = nginx.processes() if nginx is not None else []
             row = row_base | {
                 "round": round_index,
                 "result": "ok",
@@ -867,18 +1132,71 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
                 "pss_child_bytes": {str(pid): pss_bytes(pid) for pid in children},
                 "fd_child_count": {str(pid): fd_count(pid) for pid in children},
                 "idle_conns_per_child": {str(pid): len(cs) for pid, cs in idle_set.by_pid.items()},
+                # The master is measured on every arm, not only the baseline:
+                # #168 compares whole stack against whole stack, and leaving the
+                # master out of one side would be the same mistake in a smaller
+                # font.
+                "rss_master_bytes": rss_bytes(master),
+                "pss_master_bytes": pss_bytes(master),
+                "rss_nginx_bytes": {str(pid): rss_bytes(pid) for pid in nginx_pids},
+                "pss_nginx_bytes": {str(pid): pss_bytes(pid) for pid in nginx_pids},
             }
+            # Only Pss is summed. VmRSS counts libphp's text once per child, so a
+            # four-child total is several times the memory that actually exists;
+            # measured on issue #164 at 4.8x. The RSS components stay in the row
+            # because they are what an operator sees in top -- they are just not
+            # a stack total.
+            row["pss_total_bytes"] = sum(
+                v for v in (list(row["pss_child_bytes"].values())
+                            + list(row["pss_nginx_bytes"].values())
+                            + [row["pss_master_bytes"]]) if v)
+            row["pss_total_components"] = {
+                "children": sum(v for v in row["pss_child_bytes"].values() if v),
+                "master": row["pss_master_bytes"] or 0,
+                "nginx": sum(v for v in row["pss_nginx_bytes"].values() if v),
+            }
+            cpu_before = {pid: cpu_seconds(pid)
+                          for pid in list(children) + list(nginx_pids) + [master]}
             steady_from = time.monotonic()
             time.sleep(args.seconds)
             steady_to = time.monotonic()
+            cpu_after = {pid: cpu_seconds(pid) for pid in cpu_before}
             steady = [r for r in stream.snapshot() if steady_from <= r["at"] <= steady_to]
             row["steady"] = latency_split(steady) | failures_between(steady, steady_from, steady_to)
+            # Over the same window the request count above was taken from, so
+            # the pair is a cost per request. A process that died inside the
+            # window contributes nothing and is counted, rather than silently
+            # dropping its share of the CPU the stack actually spent.
+            def spent(pids):
+                return round(sum(cpu_after[p] - cpu_before[p] for p in pids
+                                 if cpu_before.get(p) is not None
+                                 and cpu_after.get(p) is not None), 3)
+            row["cpu_seconds"] = {
+                "window_seconds": round(steady_to - steady_from, 3),
+                "children": spent(children),
+                "master": spent([master]),
+                "nginx": spent(nginx_pids),
+                "n_processes_lost_in_window": sum(
+                    1 for p in cpu_before if cpu_after.get(p) is None),
+            }
+            row["cpu_seconds"]["total"] = round(
+                row["cpu_seconds"]["children"] + row["cpu_seconds"]["master"]
+                + row["cpu_seconds"]["nginx"], 3)
             if scenario["workload"] == "retire":
                 row["retirement"] = retire(pool, idle_set, stream, args.inflight_ms,
                                            scenario["read_timeout_ms"],
                                            args.retire_timeout_seconds,
                                            args.retire_signal)
                 row["retirement_trigger"] = f"harness {args.retire_signal.name} to one child"
+                if baseline and isinstance(row["retirement"], dict):
+                    # Without this, `idle_conns_on_target: 300` next to
+                    # `n_conn_closed_without_response: 0` reads as a drain that
+                    # went perfectly. It is not a drain at all.
+                    row["retirement"]["held_means"] = (
+                        "client connections last answered by the retired child, "
+                        "not connections it holds -- nginx owns every client "
+                        "socket in this arm, so a zero below is the yardstick "
+                        "rather than a result")
             stream.stop()
             idle_set.close()
             stream, idle_set = None, None
@@ -891,6 +1209,10 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
             stream.stop()
         if idle_set is not None:
             idle_set.close()
+        # nginx first: stopping the pool underneath a live nginx turns the last
+        # in-flight requests into 502s in the log for no reason.
+        if nginx is not None:
+            nginx.stop()
         pool.stop()
     return rows
 
@@ -902,7 +1224,15 @@ def main():
     parser.add_argument("scratch", type=Path)
     parser.add_argument("--base-port", type=int, default=28300)
     parser.add_argument("--executors", nargs="+", default=["classic"],
-                        choices=["classic", "worker"])
+                        choices=["classic", "worker", "nginx"],
+                        help="nginx is the issue #168 baseline arm: a pool.type = "
+                             "fastcgi pool behind nginx, reported as a total-system "
+                             "and behaviour reference and nothing else")
+    parser.add_argument("--fastcgi-keep-conn", action="store_true",
+                        help="nginx arm only: keep the FastCGI connection open "
+                             "between requests (and give the upstream a keepalive "
+                             "pool). Off by default because that is nginx's default "
+                             "and what docs/http-direct.md:192 measured")
     parser.add_argument("--pms", nargs="+", default=["static"],
                         choices=["static", "dynamic", "ondemand"])
     parser.add_argument("--tls-modes", nargs="+", default=["plain"],
@@ -994,6 +1324,11 @@ def main():
                      for k, v in vars(args).items()},
         "platform": subprocess.check_output(["uname", "-a"], text=True).strip(),
         "load_before": os.getloadavg(),
+        # Recorded only when the arm is in the grid, so a direct-only run does
+        # not claim a dependency it never used.
+        "nginx": (subprocess.run([NGINX_BINARY, "-v"], capture_output=True,
+                                 text=True).stderr.strip()
+                  if "nginx" in args.executors else None),
         "sigkill_floor_ms": SIGKILL_FLOOR_MS,
         "decision_rule": "build/benchmark-http-direct-pm.md",
     }

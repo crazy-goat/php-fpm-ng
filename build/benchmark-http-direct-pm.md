@@ -81,12 +81,68 @@ One row per (executor, pm, TLS, N, workload, round) in `results.json`:
 | `retirement.n_conn_closed_without_response` | requests in flight when the socket died |
 | `retirement.n_client_visible_failures` | 5xx, resets and timeouts in the retirement window only |
 | `retirement.sigkill_floor_hit` | `t_exit_ms >= 1000`; the row measured a kill, not a drain |
+| `rss_master_bytes` / `pss_master_bytes` | the master, on every arm — a whole-stack total that leaves one side's master out is the same mistake in a smaller font |
+| `rss_nginx_bytes` / `pss_nginx_bytes` | nginx master and workers; empty `{}` on the direct arms |
+| `pss_total_bytes` | children + master + nginx, summed. Pss only: VmRSS counts libphp's text once per child and over-counts a four-child pool 4.8x (#164) |
+| `pss_total_components` | the same total split three ways, so the merge is auditable |
+| `cpu_seconds` | utime+stime per component over the same window `steady` counts requests in, so the pair is a cost per request |
 
 t0 for every `t_*` is one timestamp: the harness's own, taken immediately before
 it sends SIGQUIT to the chosen child. The signal is sent by the harness because
 the master's SIGQUIT has no timestamp observable from outside; it is the same
 signal on the same child-side path. The master's SIGKILL escalation is **not**
 reproduced this way — see the flag above.
+
+## The nginx baseline arm (`--executors nginx`, issue #168)
+
+`--executors nginx` runs a `pool.type = fastcgi` pool behind its own nginx, on
+the same binary, the same scripts, the same client and the same workload as the
+direct rows. **It is a total-system and behaviour reference, and nothing else.**
+
+It is not a per-worker or per-connection head-to-head, and #168 exists because
+#66 asked for it as though it were. nginx splits the two roles a direct worker
+merges: nginx holds the client keep-alive connections, in C, with no PHP heap
+behind them, and the children hold nothing between requests. So:
+
+- per-connection memory on this arm is an **nginx** figure. Comparing it to a
+  direct worker's answers "is nginx's connection handling cheaper per
+  connection?", to which the answer is yes, and which does not bear on whether
+  direct pools should support `pm = dynamic`.
+- retirement on this arm is a **no-op, not a drain**. A scaled-down FastCGI
+  child genuinely owns no client socket. `idle_conns_on_target` still counts the
+  connections the retired child last answered, because that is the set the
+  yardstick is measured over — `retirement.held_means` says so in the row.
+
+The two comparisons it does support:
+
+1. **Whole stack against whole stack.** `pss_total_bytes` and
+   `cpu_seconds.total` for (nginx + master + N children) against (master + N
+   direct workers) at the same client-connection count. That is the comparison
+   an operator choosing between the two deployments actually faces.
+2. **The zero.** `n_conn_closed_without_response` and
+   `n_client_visible_failures` for an nginx scale-down are expected to be zero.
+   The interesting number is how far http-direct's sit above it, so the zero is
+   reported as the yardstick rather than dropped as uninteresting.
+
+Every nginx row carries that first sentence verbatim in `stack_note`, so a
+figure lifted out of `results.json` cannot be quoted as a comparison this arm
+does not support.
+
+`fastcgi_keep_conn` is **off** by default, which is nginx's default and what
+`docs/http-direct.md` measured. `--fastcgi-keep-conn` turns it on and gives the
+upstream a `keepalive 32;` pool at the same time — `fastcgi_keep_conn on`
+without one is a no-op, so the two go together or the setting is not being
+tested. Run the pair if the total-system figure moves by more than the
+run-to-run spread.
+
+Three nginx defaults are overridden, and the reason is the harness rather than
+performance: `keepalive_timeout 3600s` (at the default 75 s nginx would close
+the idle set partway through a round and the closes would be counted against the
+pool), `keepalive_requests 10000000` (the stream does far more than the default
+1000 on one connection), and `worker_connections` sized to both sides of every
+connection at once. `worker_processes` is 1 and stays 1: this is a reference
+point, not a contest, and one nginx worker keeps the component breakdown
+legible.
 
 ## Usage
 
@@ -136,3 +192,8 @@ never listened", which reads like a broken binary.
   N = 1024 that is a second or so of setup, and which child accepts each
   connection is the kernel's choice, not the harness's — `idle_conns_per_child`
   reports the distribution that actually happened.
+- `cpu_seconds` is utime+stime of the processes that existed at both ends of the
+  window. A child that was spawned and retired inside it contributes nothing;
+  the count of those is in `n_processes_lost_in_window` rather than left out.
+  Under `pm = dynamic` with a short `pm.process_idle_timeout` that is not a rare
+  case, and a total with a non-zero count there is a floor, not a figure.

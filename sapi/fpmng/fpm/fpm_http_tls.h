@@ -131,9 +131,10 @@ struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg);
  * fpm_http_tls_bevcb() builds -- libevent writes only from its write event, so
  * it cannot be mid-write while the caller holds the loop; and libevent sets
  * SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER (bufferevent_openssl.c:1369), so a write
- * OpenSSL left pending may be retried from a different address as long as it
- * is at least as long, which peeking the same unmodified buffer front
- * guarantees.
+ * OpenSSL left pending may be retried from a different address, provided the
+ * retry is at least as long -- which is why this function hands OpenSSL the
+ * peeked vector's whole length, exactly as do_write() does, instead of
+ * clamping it (see FPM_HTTP_TLS_WRITE_FRAME in fpm_http_tls.c).
  *
  * Returns the plaintext bytes accepted (> 0), 0 if the write blocked -- then
  * *poll_events is POLLOUT, or POLLIN when a renegotiation made the write wait

@@ -14,6 +14,8 @@
 
 #include "fpm_config.h"
 
+#include <limits.h>
+
 #ifdef HAVE_FPM_HTTP_TLS
 
 #include "fpm_http_tls.h"
@@ -735,15 +737,25 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 	return ctx;
 }
 
-/* One TLS record's worth per SSL_write(): 16384 is SSL3_RT_MAX_PLAIN_LENGTH,
- * the most plaintext OpenSSL puts in one record, so a call maps to at most one
- * record on the wire. Deliberately NOT libevent's WRITE_FRAME, which is 15000
- * (bufferevent_openssl.c:731) and does not bound its SSL_write() anyway --
- * do_write() overwrites that argument (bufferevent_openssl.c:664) and passes
- * the whole peeked iov_len, because evbuffer_peek() does not trim the last
- * vector to the requested length (buffer.c, evbuffer_peek: iov_len =
- * chain->off). Bigger here would not put more on the wire and would make a
- * blocked write hold a larger promise that every retry has to keep. */
+/* How much of the buffer to ask evbuffer_peek() for: 16384 is
+ * SSL3_RT_MAX_PLAIN_LENGTH, the most plaintext OpenSSL puts in one record.
+ * Deliberately NOT libevent's WRITE_FRAME, which is 15000
+ * (bufferevent_openssl.c:731) and does not bound its SSL_write() either --
+ * do_write() overwrites that argument (bufferevent_openssl.c:664).
+ *
+ * A request, not a limit, and the vector's own length is what is written: this
+ * is the one number that must not differ from what libevent's do_write() would
+ * pass for the same buffer front. evbuffer_peek() does not trim the last vector
+ * to the requested length (buffer.c, evbuffer_peek: iov_len = chain->off), so
+ * do_write() hands OpenSSL the whole chain; clamping here to 16384 would hand
+ * it less. With SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER a pending write may be
+ * retried from a different address, but only if the retry is at least as long
+ * -- a shorter one is SSL_R_BAD_LENGTH, which is fatal to the session. That is
+ * unreachable in this tree (evhttp nulls the read callback while a response is
+ * outstanding, http.c:382-386, so no request callback runs while libevent has a
+ * partial write pending) but it is an invariant worth holding in the code
+ * rather than in a comment about evhttp's callback juggling. Clamping bought
+ * nothing on the wire anyway: max_send_fragment already caps the record. */
 #define FPM_HTTP_TLS_WRITE_FRAME 16384
 
 /* The other half of libevent's do_write(), and the reason it cannot live in the
@@ -818,7 +830,12 @@ ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events
 	if (i >= n) {
 		return FPM_HTTP_TLS_WRITE_IDLE;
 	}
-	len = vec[i].iov_len < FPM_HTTP_TLS_WRITE_FRAME ? vec[i].iov_len : FPM_HTTP_TLS_WRITE_FRAME;
+	/* The vector's own length, unclamped -- see FPM_HTTP_TLS_WRITE_FRAME. An
+	 * evbuffer chain larger than INT_MAX would not fit SSL_write()'s int; it
+	 * cannot occur here (a chain is a single allocation of a response fragment)
+	 * and is capped rather than truncated silently, because a negative int
+	 * would be an SSL_write() error with no error queue entry. */
+	len = vec[i].iov_len > INT_MAX ? (size_t) INT_MAX : vec[i].iov_len;
 	/* Cleared before, not read after a success: SSL_get_error() is only
 	 * meaningful against a fresh queue, and a stale entry from an earlier
 	 * handshake would otherwise be reported as this write's failure. */

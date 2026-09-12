@@ -378,6 +378,25 @@ int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct
 #endif
 }
 
+/* Is this directive one of the type's declared exceptions to its own reject
+ * list? Called with the name as it appears in set_directives, which is not
+ * NUL-terminated there, hence the explicit length. */
+static int fpm_pool_type_directive_excepted(const struct fpm_pool_type_s *type,
+	const char *name, size_t len)
+{
+	const char *const *allow;
+
+	if (!type->reject_exceptions) {
+		return 0;
+	}
+	for (allow = type->reject_exceptions; *allow; allow++) {
+		if (strlen(*allow) == len && !strncmp(*allow, name, len)) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
 	const char *const *reject;
@@ -412,13 +431,17 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 			}
 			while ((p = strstr(p, needle)) != NULL) {
 				const char *end = strchr(p + 1, ';');
+				size_t name_len = end ? (size_t)(end - p - 1) : 0;
 
-				zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
-					wp->config->name, end ? (int)(end - p - 1) : 0, p + 1, where);
-				bad = 1;
+				if (!fpm_pool_type_directive_excepted(type, p + 1, name_len)) {
+					zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
+						wp->config->name, (int) name_len, p + 1, where);
+					bad = 1;
+				}
 				p = end ? end : p + strlen(p);
 			}
-		} else if (fpm_conf_directive_was_set(wp->config, *reject)) {
+		} else if (fpm_conf_directive_was_set(wp->config, *reject)
+			&& !fpm_pool_type_directive_excepted(type, *reject, len)) {
 			zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by %s",
 				wp->config->name, *reject, where);
 			bad = 1;

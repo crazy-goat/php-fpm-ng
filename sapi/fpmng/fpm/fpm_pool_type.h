@@ -174,6 +174,25 @@ struct fpm_pool_type_s {
 	 * A name ending in a dot works as a prefix: "pm." matches all pm.*. */
 	const char *const *rejects;
 
+	/* Directives this type accepts even though .rejects matches them.
+	 * NULL-terminated, may be NULL. Exact names only -- a prefix here would be
+	 * a second pattern language arguing with the first one.
+	 *
+	 * It exists because the operator endpoint's directives live under "pm."
+	 * (pm.status_path and friends, issue #273) while the types that most need
+	 * that endpoint -- cron, supervisor -- reject the whole "pm." namespace,
+	 * and for a good reason: their pm.* is generated programmatically, so a
+	 * user-set one would be a second source of truth. The carve-out keeps that
+	 * reason intact and names the handful of exceptions instead of weakening
+	 * the prefix.
+	 *
+	 * Not by dropping the prefix and enumerating the ~20 real pm.* directives:
+	 * that is the enumeration-versus-pattern mistake build/prepare.sh:75-79
+	 * documents, and a pm.* added later would silently become legal on a cron
+	 * pool. An exception must be added deliberately; a new directive must not
+	 * become one by omission. */
+	const char *const *reject_exceptions;
+
 	/* Type-specific checks; NULL = none. Returns 0 or -1. */
 	int (*validate)(struct fpm_worker_pool_s *wp);
 

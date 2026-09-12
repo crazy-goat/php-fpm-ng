@@ -1637,7 +1637,7 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 	ssize_t len;
 	int cmd;
 
-	if (path_len < prefix_len || memcmp(path, fpm_http_acme_prefix, prefix_len)) {
+	if (path_len < prefix_len || memcmp(path, fpm_http_acme_prefix, prefix_len) != 0) {
 		return 0;
 	}
 	token = path + prefix_len;

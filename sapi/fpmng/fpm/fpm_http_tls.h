@@ -17,6 +17,7 @@
 #include <openssl/ssl.h>
 #include <event2/event.h>
 #include <event2/bufferevent.h>
+#include <event2/util.h>
 
 /* One SNI-selected certificate (task 041), on top of the default
  * cert_pem/key_pem below. Same fork()-copied-once-in-the-master property as
@@ -112,6 +113,32 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls);
  * process. evhttp calls it once per incoming connection and attaches the
  * accepted fd itself via bufferevent_setfd() — hence fd = -1 here. */
 struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg);
+
+/* Issue #195. Puts the front of an SSL bufferevent's own output buffer on the
+ * wire with SSL_write(), for a caller that is not allowed to run the event
+ * loop and so cannot let libevent do it: inside an evhttp request callback a
+ * nested event_base_loop() on the base being dispatched is refused, and
+ * libevent 2.1's bufferevent_flush() is a no-op on an SSL bufferevent
+ * (be_openssl_flush() is an "XXXX Implement this" stub,
+ * bufferevent_openssl.c:1259). Reaching past the bufferevent to the descriptor
+ * -- what the plaintext path does -- is not an option here, because that
+ * buffer holds plaintext and the descriptor carries the session.
+ *
+ * One record's worth per call, the same shape libevent's own do_write() has
+ * (bufferevent_openssl.c:654): peek the front of the output buffer, SSL_write
+ * it, drain what was accepted. Safe to interleave with libevent's writer for
+ * two reasons, and only for those two: in socket mode -- which is what
+ * fpm_http_tls_bevcb() builds -- libevent writes only from its write event, so
+ * it cannot be mid-write while the caller holds the loop; and libevent sets
+ * SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER (bufferevent_openssl.c:1369), so a write
+ * OpenSSL left pending may be retried from a different address as long as it
+ * is at least as long, which peeking the same unmodified buffer front
+ * guarantees.
+ *
+ * Returns the plaintext bytes accepted (> 0), 0 if the write blocked -- then
+ * *poll_events is POLLOUT, or POLLIN when a renegotiation made the write wait
+ * on a read -- or -1 on an error that ends the connection. Never blocks. */
+ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events);
 
 #endif /* HAVE_FPM_HTTP_TLS */
 

@@ -24,6 +24,8 @@
 
 #include <stdbool.h>
 
+#include <event2/util.h>
+
 struct fpm_worker_pool_s;
 struct event_base;
 struct evhttp;
@@ -61,6 +63,22 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp);
  * them. May be NULL. */
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
 	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg);
+
+/* Issue #195. The streaming writer's write step for a TLS pool: puts the front
+ * of the connection's output buffer on the wire with SSL_write() instead of
+ * writing it to the descriptor, which on a TLS connection would put plaintext
+ * there. Returns the bytes accepted (> 0), 0 if the write blocked (*poll_events
+ * then says what to wait for), or -1 on an error that ends the connection.
+ * Never blocks and never runs the event loop -- see fpm_http_tls_write_output()
+ * for why the caller may not.
+ *
+ * In a build without TLS support this returns -1, which no pool can reach: a
+ * pool with http.tls_cert is refused at startup there, and a pool without one
+ * never gets this write step.
+ *
+ * Kept here rather than in fpm_http_direct.c so that the executor has one write
+ * step per transport and no #ifdef of its own. */
+ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events);
 
 /* Whether this pool terminates TLS, i.e. whether REQUEST_SCHEME is https and
  * HTTPS is on for every request it serves. Answers from configuration, so it

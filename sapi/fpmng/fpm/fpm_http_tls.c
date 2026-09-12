@@ -22,9 +22,12 @@
 #include <string.h>
 #include <stdio.h>
 
+#include <poll.h>
+
 #include <openssl/err.h>
 #include <openssl/pem.h>
 #include <openssl/rand.h>
+#include <event2/buffer.h>
 #include <event2/bufferevent_ssl.h>
 
 #include "zlog.h"
@@ -730,6 +733,69 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 	SSL_CTX_set_tlsext_servername_arg(ctx, table);
 
 	return ctx;
+}
+
+/* One TLS record's worth per SSL_write(), which is what libevent's own writer
+ * uses (WRITE_FRAME, bufferevent_openssl.c). Bigger would not put more on the
+ * wire -- the record is the unit OpenSSL emits -- and would make a blocked
+ * write hold a larger promise that every retry has to keep. */
+#define FPM_HTTP_TLS_WRITE_FRAME 16384
+
+ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events)
+{
+	struct evbuffer *out = bufferevent_get_output(bev);
+	SSL *ssl = bufferevent_openssl_get_ssl(bev);
+	struct evbuffer_iovec vec;
+	ev_ssize_t written;
+	size_t len;
+	int r;
+
+	*poll_events = POLLOUT;
+	if (!ssl) {
+		return -1;
+	}
+	/* No unfreeze here, and above all no freeze: unlike the plaintext step,
+	 * which has to lift the bufferevent's own freeze to drain the buffer, an
+	 * OpenSSL bufferevent never freezes anything. The freeze of the output
+	 * front belongs to bufferevent_socket_new() (bufferevent_sock.c:373) and
+	 * bufferevent_openssl.c contains no evbuffer_freeze() call at all, which
+	 * is why its do_write() (bufferevent_openssl.c:654) drains the buffer
+	 * directly. Freezing it here left it frozen for libevent: the drain at the
+	 * end of do_write() returns -1 without removing anything (buffer.c,
+	 * evbuffer_drain: `if (buf->freeze_start) return -1`) while SSL_write()
+	 * keeps succeeding, so consider_writing() loops on a buffer that never
+	 * empties. Measured on the test box: after a correct 16 MiB body the pool
+	 * wrote the 5-byte terminating chunk about 542,000 times -- 2.7 MB of
+	 * "0\r\n\r\n" -- with strace showing back-to-back 27-byte TLS records and
+	 * no poll() between them. */
+	r = evbuffer_peek(out, FPM_HTTP_TLS_WRITE_FRAME, NULL, &vec, 1);
+	if (r < 1 || vec.iov_len == 0) {
+		return 0;
+	}
+	len = vec.iov_len < FPM_HTTP_TLS_WRITE_FRAME ? vec.iov_len : FPM_HTTP_TLS_WRITE_FRAME;
+	/* Cleared before, not read after a success: SSL_get_error() is only
+	 * meaningful against a fresh queue, and a stale entry from an earlier
+	 * handshake would otherwise be reported as this write's failure. */
+	ERR_clear_error();
+	r = SSL_write(ssl, vec.iov_base, (int) len);
+	if (r > 0) {
+		evbuffer_drain(out, (size_t) r);
+		return (ev_ssize_t) r;
+	}
+	written = 0;
+	switch (SSL_get_error(ssl, r)) {
+	case SSL_ERROR_WANT_WRITE:
+		break;
+	case SSL_ERROR_WANT_READ:
+		/* A renegotiation: the write cannot finish until the peer's half of it
+		 * arrives, so waiting for writability would wait forever. */
+		*poll_events = POLLIN;
+		break;
+	default:
+		written = -1;
+		break;
+	}
+	return written;
 }
 
 struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg)

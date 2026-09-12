@@ -15,9 +15,12 @@
  * export, because inside php-src the caller and the callee are in the same
  * link.
  *
- * WHY IT MATTERS. FPM calls it once per child, from fpm_signals_init_child()
+ * WHY IT MATTERS. FPM calls it from fpm_signals_init_child()
  * (sapi/fpmng/fpm/fpm_signals.c), to snapshot the child's signal handlers into
- * the file-static global_orig_handlers. zend_signal_activate() copies that
+ * the file-static global_orig_handlers, and a second time from an http-direct
+ * classic child (fpm_http_direct.c, issue #256), which installs its own
+ * SIGQUIT and SIGUSR1 handlers after that first snapshot was taken and needs
+ * the snapshot redone over them. zend_signal_activate() copies that
  * snapshot into SIGG(handlers) at the start of every request. The child
  * installs its own SIGQUIT/SIGTERM handlers before that point, so without the
  * snapshot each request restores the MASTER's handlers and a graceful stop
@@ -29,10 +32,12 @@
  * statement is a call to zend_signal_init() (Zend/zend_signal.c:443). What it
  * does on top is zend_signal_globals_ctor() -- a memset of the globals, reset
  * = 1, and a rebuild of the pending-queue free list -- and a recomputation of
- * global_sigmask. All of that is idempotent at the only point FPM calls this:
- * the child has just forked and has not run a request, so the globals still
- * hold exactly the post-ctor state the master left them in. Calling it again
- * writes back the values that are already there.
+ * global_sigmask. All of that is idempotent at both points FPM calls this: the
+ * child has forked and has not run a request, so the globals still hold
+ * exactly the post-ctor state the master left them in. Calling it again writes
+ * back the values that are already there. A call after a request has run would
+ * not be safe -- it would clear SIGG(active) and drop the pending queue -- and
+ * neither caller is in that position.
  *
  * NOT VALID UNDER ZTS. There zend_signal_globals_ctor() is reached through
  * ts_allocate_fast_id(), and calling it twice allocates a second thread-local

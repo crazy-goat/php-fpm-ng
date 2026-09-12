@@ -897,9 +897,18 @@ static ev_ssize_t fpm_direct_write_plain(struct bufferevent *bev, evutil_socket_
 	if (written == 0) {
 		return FPM_DIRECT_WRITE_IDLE;
 	}
-	if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+	/* EAGAIN and EWOULDBLOCK are the same value on Linux, so spelling both out
+	 * in one condition is a -Wlogical-op warning that fails the build (issue
+	 * #111); the preprocessor dance is the same one fpm_http_direct_conn.c:56
+	 * uses, and its helper is static there rather than shared. */
+	if (errno == EAGAIN || errno == EINTR) {
 		return 0;
 	}
+#if EWOULDBLOCK != EAGAIN
+	if (errno == EWOULDBLOCK) {
+		return 0;
+	}
+#endif
 	*why = "writing the response to the client failed";
 	return -1;
 }

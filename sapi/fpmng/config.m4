@@ -412,33 +412,55 @@ if test "$PHP_FPMNG" != "no"; then
   PHP_EVAL_LIBLINE([$LIBEVENT_LIBS], [FPMNG_EXTRA_LIBS], [yes])
   PHP_EVAL_INCLINE([$LIBEVENT_CFLAGS])
 
-  dnl TLS termination for the HTTP gateway (http.tls_cert/http.tls_key) is
-  dnl optional, unlike plain HTTP above: libevent's OpenSSL glue and OpenSSL
-  dnl itself are looked for, but their absence is not a build failure. Without
-  dnl them the gateway is built without TLS support and http.tls_cert is
-  dnl refused at config-validation time with a message naming what is missing
-  dnl (see fpm_http_validate_pool() in fpm_http.c).
-  fpmng_http_tls=no
-  PKG_CHECK_MODULES([LIBEVENT_OPENSSL], [libevent_openssl >= 2.1], [
-    PKG_CHECK_MODULES([FPMNG_OPENSSL], [openssl >= 1.1.1], [
-      fpmng_http_tls=yes
-    ], [
-      LIBS_save=$LIBS
-      AC_CHECK_LIB([ssl], [SSL_CTX_new], [
-        AC_CHECK_HEADER([openssl/ssl.h], [
-          FPMNG_OPENSSL_LIBS="-lssl -lcrypto"
-          fpmng_http_tls=yes
-        ])
-      ])
-      LIBS=$LIBS_save
-    ])
-  ], [
-    AC_MSG_WARN([libevent_openssl not found: building the HTTP gateway without TLS support; http.tls_cert will be refused at startup.])
-  ])
+  dnl TLS termination (http.tls_cert/http.tls_key), for both the `http`
+  dnl gateway and pool.type = http-direct, is opt-in and OFF by default
+  dnl (issue #280, part of #279): this code is beta, unaudited and
+  dnl network-facing, and until this flag existed the answer to "does this
+  dnl binary terminate TLS?" was "whatever was installed on the build host",
+  dnl which is not a default anybody chose.
+  dnl
+  dnl Without the flag nothing below runs, nothing links against OpenSSL, the
+  dnl fpm_tls_*.c sources are not compiled at all (build/prepare.sh puts them
+  dnl in their own list), and http.tls_cert is refused at config-validation
+  dnl time with a message naming this flag -- see fpm_http_validate_pool() in
+  dnl fpm_http.c and the stubs in fpm_http_direct_tls.c.
+  dnl
+  dnl With the flag the library probe is a hard error rather than the old
+  dnl AC_MSG_WARN: the operator asked for TLS, so a missing libevent_openssl
+  dnl must stop the build instead of quietly producing the binary they were
+  dnl trying not to build.
+  PHP_ARG_ENABLE([fpmng-tls],
+    [whether to build TLS termination in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-tls],
+      [Build fpm-ng with TLS termination for the HTTP gateway and http-direct (BETA, unaudited)])],
+    [no],
+    [no])
 
-  AS_VAR_IF([fpmng_http_tls], [yes], [
+  PHP_FPMNG_TLS_FILES=""
+  AS_VAR_IF([PHP_FPMNG_TLS], [no],, [
+    fpmng_http_tls=no
+    PKG_CHECK_MODULES([LIBEVENT_OPENSSL], [libevent_openssl >= 2.1], [
+      PKG_CHECK_MODULES([FPMNG_OPENSSL], [openssl >= 1.1.1], [
+        fpmng_http_tls=yes
+      ], [
+        LIBS_save=$LIBS
+        AC_CHECK_LIB([ssl], [SSL_CTX_new], [
+          AC_CHECK_HEADER([openssl/ssl.h], [
+            FPMNG_OPENSSL_LIBS="-lssl -lcrypto"
+            fpmng_http_tls=yes
+          ])
+        ])
+        LIBS=$LIBS_save
+      ])
+    ], [
+      AC_MSG_ERROR([--enable-fpmng-tls needs libevent_openssl >= 2.1 (Debian/Ubuntu: libevent-openssl-2.1-7 + libevent-dev, Alpine: libevent-dev; both also need OpenSSL's development package). Build without --enable-fpmng-tls for a binary with no TLS support.])
+    ])
+    AS_VAR_IF([fpmng_http_tls], [yes],, [
+      AC_MSG_ERROR([--enable-fpmng-tls needs OpenSSL >= 1.1.1 development files (Debian/Ubuntu: libssl-dev, Alpine: openssl-dev). libevent_openssl was found, OpenSSL itself was not.])
+    ])
     AC_DEFINE([HAVE_FPM_HTTP_TLS], [1],
-      [Define to 1 if the HTTP gateway can terminate TLS (libevent_openssl + OpenSSL found at build time).])
+      [Define to 1 if fpm-ng terminates TLS (--enable-fpmng-tls).])
+    PHP_FPMNG_TLS_FILES="@FPMNG_TLS_SOURCES@"
     PHP_EVAL_LIBLINE([$LIBEVENT_OPENSSL_LIBS], [FPMNG_EXTRA_LIBS], [yes])
     PHP_EVAL_LIBLINE([$FPMNG_OPENSSL_LIBS], [FPMNG_EXTRA_LIBS], [yes])
     PHP_EVAL_INCLINE([$LIBEVENT_OPENSSL_CFLAGS])
@@ -607,7 +629,7 @@ if test "$PHP_FPMNG" != "no"; then
 
   PHP_SELECT_SAPI([fpmng],
     [program],
-    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES],
+    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES $PHP_FPMNG_TLS_FILES],
     [-I$abs_srcdir/sapi/fpm -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
   AS_CASE([$host_alias],

@@ -154,10 +154,10 @@ struct fpm_worker_pool_config_s {
 	 * Whitespace around commas/colons is trimmed. Empty/unset = no extra SNI
 	 * certificates, exactly today's single-certificate behaviour. A
 	 * connection with no SNI, or an unrecognized servername, falls back to
-	 * the default http.tls_cert/http.tls_key pair -- see fpm_http_tls.c. */
+	 * the default http.tls_cert/http.tls_key pair -- see fpm_tls_http.c. */
 	char *http_tls_sni_cert;
 	int http_tls_reload_check;		/* seconds between cert/key mtime checks on disk, without restarting the gateway (task 040);
-						 * unset -> FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT (fpm_http_tls_reload.h), 0 = disabled */
+						 * unset -> FPM_TLS_RELOAD_CHECK_DEFAULT (fpm_tls_reload.h), 0 = disabled */
 	/* fpm-ng: start this pool before its certificate exists (issue #172).
 	 * Off by default, and deliberately so: without it a missing or
 	 * unparseable http.tls_cert is a startup failure of the whole master,

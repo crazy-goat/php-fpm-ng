@@ -27,7 +27,7 @@ $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
 foreach ((array) $messages as $message) {
     if (str_contains($message, 'built with TLS support')) {
-        die('skip php-fpm-ng built without TLS support (libevent_openssl and/or OpenSSL not found at build time)');
+        die('skip php-fpm-ng built without TLS support (configure without --enable-fpmng-tls, issue #280)');
     }
 }
 ?>

@@ -34,7 +34,7 @@ foreach ((array) $messages as $message) {
     }
 }
 if ($notBuilt) {
-    die('skip php-fpm-ng built without TLS support (libevent_openssl and/or OpenSSL not found at build time)');
+    die('skip php-fpm-ng built without TLS support (configure without --enable-fpmng-tls, issue #280)');
 }
 ?>
 --FILE--

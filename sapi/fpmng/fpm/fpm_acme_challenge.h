@@ -16,12 +16,12 @@
  * forbids.
  *
  * Layout follows the one existing cross-process publication idiom in this
- * SAPI, fpm_http_tls_reload.c: two fixed-size slots plus one generation
+ * SAPI, fpm_tls_reload.c: two fixed-size slots plus one generation
  * counter, the writer always filling the slot that is NOT published and
  * bumping the counter afterwards. Readers are lock-free: they retry against
  * a generation that did not move while they copied.
  *
- * Unlike fpm_http_tls_reload.c, the writer here is not the master process,
+ * Unlike fpm_tls_reload.c, the writer here is not the master process,
  * and "one writer" is a property of a configuration rather than of the code:
  * supervisor.processes may be greater than one, and nothing stops a second
  * pool.type = cron pool from carrying the same flag. Two of them editing the

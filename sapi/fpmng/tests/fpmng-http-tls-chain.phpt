@@ -31,7 +31,7 @@ foreach ((array) $messages as $message) {
     }
 }
 if ($notBuilt) {
-    die('skip php-fpm-ng built without TLS support (libevent_openssl and/or OpenSSL not found at build time)');
+    die('skip php-fpm-ng built without TLS support (configure without --enable-fpmng-tls, issue #280)');
 }
 ?>
 --FILE--
@@ -39,7 +39,7 @@ if ($notBuilt) {
 
 require_once "tester.inc";
 
-// Task 039: fpm_http_tls_ctx_new()/fpm_http_tls_check() used to install only
+// Task 039: fpm_tls_http_ctx_new()/fpm_tls_http_check() used to install only
 // the first PEM block from http.tls_cert (the leaf), silently dropping every
 // intermediate that follows it in a fullchain.pem. This test builds a real
 // 2-level CA (root -> intermediate -> leaf), points one pool at the full

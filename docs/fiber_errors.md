@@ -415,7 +415,7 @@ than a loud error.
   so wrapping the listener would hand accepted sockets a wrapper whose
   `close()` frees a structure it does not own. Refused instead of corrupted.
   This does not affect serving HTTPS: the fpm-ng HTTP gateway terminates TLS
-  in libevent (`fpm_http_tls.c`) and never touches these transports.
+  in libevent (`fpm_tls_http.c`) and never touches these transports.
 
 Not refused, still blocking (as before): a build with a **shared**
 `openssl.so` — configure prints a warning that the fiber TLS interception is

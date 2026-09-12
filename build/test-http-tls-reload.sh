@@ -273,7 +273,7 @@ wait "$LOAD_PID" || true
 [ -s "$DIR/load.errors" ] && { cat "$DIR/load.errors" >&2; fail "acceptance criterion 2: $(wc -l < "$DIR/load.errors") request(s) failed across the reload"; }
 info "acceptance criterion 2: 300 requests across the swap, zero failures"
 
-# One notice per gateway process (fpm_http_tls_reload.c:509), so 3 of them is
+# One notice per gateway process (fpm_tls_reload.c:509), so 3 of them is
 # every gateway of this pool having adopted the new generation.
 wait_for_log_count "adopted reloaded TLS certificate" 3 "post-reload"
 
@@ -295,7 +295,7 @@ done
 info "issue #91: a gateway killed after the reload is respawned onto the RELOADED certificate"
 # A gateway forked by the respawn path gets its SSL_CTX from the master's
 # gw->tls -- the bytes read once before the FIRST fork, generation 0 -- while
-# fpm_http_tls_reload_child_init() used to seed its watch state with the
+# fpm_tls_reload_child_init() used to seed its watch state with the
 # CURRENT generation. Both halves are wrong for a respawn: the certificate is
 # the startup one and the counter says "already up to date", so the child tick
 # returned early forever. Measured before the fix, on this exact scenario: 7 of
@@ -365,7 +365,7 @@ REJECTIONS_BEFORE=$(grep -c "http.tls_cert/http.tls_key:" "$DIR/error.log" 2>/de
 swap_key_in leaf1.key		# leaf2 cert on disk, leaf1 key: mismatch
 # Waiting for the rejection notice instead of sleeping is also strictly
 # stronger than the `sleep 4` it replaces: the master rejects the pair without
-# bumping the shared generation (fpm_http_tls_reload.c:285-291), so once this
+# bumping the shared generation (fpm_tls_reload.c:285-291), so once this
 # line exists there is nothing left for a gateway to adopt and the serials
 # below are settled -- whereas the fixed sleep asserted at an arbitrary point
 # that might have been before the tick ran at all.
@@ -386,7 +386,7 @@ assert_all_serve "$HTTP_PORT" "$SERIAL1" 12 "corrected pair"
 # truncates and then writes, and the two files of a pair are written one after
 # the other, so a tick landing inside either window legitimately sees a
 # half-written or mismatched pair and logs a second rejection -- that is the
-# torn-read contract fpm_http_tls_reload.c documents, not a regression. The
+# torn-read contract fpm_tls_reload.c documents, not a regression. The
 # property worth asserting is that a rejection does not repeat every tick, and
 # the idle scenario below asserts exactly that.
 

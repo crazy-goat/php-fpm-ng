@@ -27,7 +27,7 @@
  * 0640). open() in the gateway would fail with EACCES, and the diagnostic
  * about it would go into the old file. So this follows the rule the TLS
  * reload machinery already states for the private key: the master owns the
- * file, children never open it (fpm_http_tls_reload.c).
+ * file, children never open it (fpm_tls_reload.c).
  *
  * The mechanism. One AF_UNIX SOCK_DGRAM socketpair per followed process,
  * created in the master immediately before fork(). After the reopen the

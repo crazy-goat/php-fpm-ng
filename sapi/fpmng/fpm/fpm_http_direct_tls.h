@@ -3,8 +3,8 @@
  *
  * Deliberately thin. The gateway already terminates TLS and already reloads a
  * certificate without restarting anything, and all of that lives behind two
- * headers that know nothing about gateways: fpm_http_tls.h (validate, load in
- * the master, build an SSL_CTX per process) and fpm_http_tls_reload.h
+ * headers that know nothing about gateways: fpm_tls_http.h (validate, load in
+ * the master, build an SSL_CTX per process) and fpm_tls_reload.h
  * (master-side digest timer over a shared-memory double buffer, per-child
  * adoption timer). Direct pools accept on the same kind of `struct evhttp`,
  * so what was missing was not a TLS implementation but somewhere to keep the
@@ -31,13 +31,27 @@ struct event_base;
 struct evhttp;
 struct bufferevent;
 
+/* This contract has two implementations, picked at build time by
+ * --enable-fpmng-tls (issue #280): fpm_tls_http_direct.c, which terminates
+ * TLS, and the stubs in fpm_http_direct_tls.c, which refuse a TLS pool at
+ * startup and are no-ops for everything else. Callers see one set of
+ * functions and carry no #ifdef.
+ */
+
 /* Config validation, in the master, before anything forks. Refuses a
- * half-configured pair, refuses TLS at all in a build without OpenSSL or
- * libevent's OpenSSL glue (naming what is missing rather than serving plain
- * HTTP on a port the operator configured as HTTPS), and otherwise hands
- * cert/key/min_version/sni to fpm_http_tls_validate(), which is the same
+ * half-configured pair, refuses TLS at all in a build made without
+ * --enable-fpmng-tls (naming the flag rather than serving plain HTTP on a
+ * port the operator configured as HTTPS), and otherwise hands
+ * cert/key/min_version/sni to fpm_tls_http_validate(), which is the same
  * check the `http` pool type gets. Returns 0 or -1, logging by itself. */
 int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp);
+
+/* The part of the check above that is the same in both builds, because it
+ * only reads the configuration: cert without key, key without cert, and the
+ * knobs that only mean anything once a certificate is served. Lives in
+ * fpm_http_direct_tls.c and is shared with fpm_tls_http_direct.c; not for
+ * anyone else. Returns 0 or -1, logging by itself. */
+int fpm_http_direct_tls_validate_pairing(struct fpm_worker_pool_s *wp);
 
 /* Once per pool, in the master, after validation and BEFORE the first child
  * forks: reads the PEM files into memory and arms the reload machinery, so
@@ -70,18 +84,18 @@ int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_
  * there. Returns the bytes accepted (> 0), 0 if the write blocked (*poll_events
  * then says what to wait for), FPM_HTTP_DIRECT_TLS_WRITE_IDLE when the buffer's
  * front held nothing to write, or -1 on an error that ends the connection.
- * Never blocks and never runs the event loop -- see fpm_http_tls_write_output()
+ * Never blocks and never runs the event loop -- see fpm_tls_http_write_output()
  * for why the caller may not.
  *
- * In a build without TLS support this returns -1, which no pool can reach: a
- * pool with http.tls_cert is refused at startup there, and a pool without one
- * never gets this write step.
+ * In a build made without --enable-fpmng-tls this returns -1, which no pool
+ * can reach: a pool with http.tls_cert is refused at startup there, and a pool
+ * without one never gets this write step.
  *
  * Kept here rather than in fpm_http_direct.c so that the executor has one write
  * step per transport and no #ifdef of its own. */
 /* Declared outside the TLS build guard, because the caller compares against it
- * in both builds. Its value is FPM_HTTP_TLS_WRITE_IDLE's, which is checked in
- * fpm_http_direct_tls.c where both headers are in scope. */
+ * in both builds. Its value is FPM_TLS_HTTP_WRITE_IDLE's, which is checked in
+ * fpm_tls_http_direct.c where both headers are in scope. */
 #define FPM_HTTP_DIRECT_TLS_WRITE_IDLE (-2)
 
 ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events);
@@ -90,7 +104,7 @@ ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events
  * has left the buffer, which is what makes evhttp finish the request. Call it
  * only with the response complete AND the output buffer empty; per write, or
  * with bytes still queued, it finishes the request on top of data that has not
- * been sent yet. A no-op in a build without TLS support and on a plaintext
+ * been sent yet. A no-op in a build without --enable-fpmng-tls and on a plaintext
  * pool, whose write step goes through the descriptor libevent is watching. */
 void fpm_http_direct_tls_notify_written(struct bufferevent *bev);
 

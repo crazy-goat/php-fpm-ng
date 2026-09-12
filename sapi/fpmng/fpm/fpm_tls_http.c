@@ -1,12 +1,12 @@
-/* fpm-ng: TLS termination for the HTTP gateway, see fpm_http_tls.h.
+/* fpm-ng: TLS termination for the HTTP gateway, see fpm_tls_http.h.
  *
  * Compiled in only when config.m4 found both libevent_openssl and OpenSSL
  * (HAVE_FPM_HTTP_TLS); otherwise this whole file is an empty translation
  * unit and http.tls_cert is refused at config-validation time in fpm_http.c.
  *
  * Cert and key are read into memory once, in the master, before any gateway
- * child is forked (fpm_http_tls_load()); every child inherits those bytes
- * through fork() and builds its OWN SSL_CTX from them (fpm_http_tls_ctx_new()),
+ * child is forked (fpm_tls_http_load()); every child inherits those bytes
+ * through fork() and builds its OWN SSL_CTX from them (fpm_tls_http_ctx_new()),
  * so the private key file itself is only ever opened by the master, and the
  * gateway process -- which forks straight off the master and never drops
  * privileges (see fpm_http_gateway_run()) -- never has to reopen it.
@@ -18,7 +18,7 @@
 
 #ifdef HAVE_FPM_HTTP_TLS
 
-#include "fpm_http_tls.h"
+#include "fpm_tls_http.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +36,7 @@
 
 /* Slurps a whole file into a malloc'd, NUL-terminated buffer. Never logs the
  * content, only ever the path, on failure. */
-static char *fpm_http_tls_read_file(const char *path, size_t *out_len)
+static char *fpm_tls_http_read_file(const char *path, size_t *out_len)
 {
 	FILE *f;
 	long size;
@@ -70,7 +70,7 @@ static char *fpm_http_tls_read_file(const char *path, size_t *out_len)
 }
 
 /* "" or NULL -> TLSv1.2 (default). Unknown name -> -1; the caller logs it. */
-static int fpm_http_tls_resolve_min_version(const char *min_version)
+static int fpm_tls_http_resolve_min_version(const char *min_version)
 {
 	if (!min_version || !*min_version || strcmp(min_version, "TLSv1.2") == 0) {
 		return TLS1_2_VERSION;
@@ -86,9 +86,9 @@ static int fpm_http_tls_resolve_min_version(const char *min_version)
  * fix), every block after it as a chain certificate
  * (SSL_CTX_add_extra_chain_cert()) so a fullchain.pem's intermediates are
  * actually sent to the client instead of being read into memory
- * (fpm_http_tls_load()) and then never installed -- that was the bug
- * (task 039). Shared by fpm_http_tls_check() (throwaway validation ctx) and
- * fpm_http_tls_ctx_new() (the real per-child ctx), so both parse and both
+ * (fpm_tls_http_load()) and then never installed -- that was the bug
+ * (task 039). Shared by fpm_tls_http_check() (throwaway validation ctx) and
+ * fpm_tls_http_ctx_new() (the real per-child ctx), so both parse and both
  * serve exactly the same way.
  *
  * Decision (039, acceptance criterion 4): this does NOT verify that block 2
@@ -105,7 +105,7 @@ static int fpm_http_tls_resolve_min_version(const char *min_version)
  * (caller must free it); SSL_CTX_add_extra_chain_cert() DOES take ownership
  * of every cert passed to it (SSL_CTX_free() frees them), so those must not
  * be freed here. */
-static int fpm_http_tls_install_chain(SSL_CTX *ctx, const char *cert_pem, size_t cert_len, const char **what)
+static int fpm_tls_http_install_chain(SSL_CTX *ctx, const char *cert_pem, size_t cert_len, const char **what)
 {
 	BIO *bio;
 	X509 *leaf;
@@ -153,7 +153,7 @@ static int fpm_http_tls_install_chain(SSL_CTX *ctx, const char *cert_pem, size_t
 /* Parse cert+key from memory into a throwaway SSL_CTX and verify that they
  * match. Returns 0/-1; `what` describes what failed (for the caller's error
  * message), NEVER key material. */
-static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char *key_pem, size_t key_len,
+static int fpm_tls_http_check(const char *cert_pem, size_t cert_len, const char *key_pem, size_t key_len,
 	const char **what)
 {
 	SSL_CTX *ctx;
@@ -167,7 +167,7 @@ static int fpm_http_tls_check(const char *cert_pem, size_t cert_len, const char 
 		return -1;
 	}
 
-	if (fpm_http_tls_install_chain(ctx, cert_pem, cert_len, what) != 0) {
+	if (fpm_tls_http_install_chain(ctx, cert_pem, cert_len, what) != 0) {
 		goto out;
 	}
 
@@ -198,13 +198,13 @@ out:
 
 /* One parsed http.tls_sni_cert entry, "servername:cert_path:key_path", before
  * any file is opened -- just the split-out strings. */
-struct fpm_http_tls_sni_spec_s {
+struct fpm_tls_http_sni_spec_s {
 	char *servername;
 	char *cert_path;
 	char *key_path;
 };
 
-static void fpm_http_tls_sni_spec_free(struct fpm_http_tls_sni_spec_s *specs, size_t count)
+static void fpm_tls_http_sni_spec_free(struct fpm_tls_http_sni_spec_s *specs, size_t count)
 {
 	size_t i;
 
@@ -220,7 +220,7 @@ static void fpm_http_tls_sni_spec_free(struct fpm_http_tls_sni_spec_s *specs, si
 }
 
 /* Trims leading/trailing spaces and tabs in place, returns the trimmed start. */
-static char *fpm_http_tls_trim(char *s)
+static char *fpm_tls_http_trim(char *s)
 {
 	char *end;
 
@@ -240,9 +240,9 @@ static char *fpm_http_tls_trim(char *s)
  * exactly 2 colons) fails with *what set to a static, ready-to-log message
  * naming the bad entry text (never key material -- this is a path spec, not
  * a PEM); caller frees whatever was built so far via
- * fpm_http_tls_sni_spec_free(). Shared by fpm_http_tls_validate() and
- * fpm_http_tls_load() so the syntax is parsed in exactly one place. */
-static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec_s **out,
+ * fpm_tls_http_sni_spec_free(). Shared by fpm_tls_http_validate() and
+ * fpm_tls_http_load() so the syntax is parsed in exactly one place. */
+static int fpm_tls_http_sni_parse(const char *spec, struct fpm_tls_http_sni_spec_s **out,
 	size_t *out_count, const char **what)
 {
 	/* `what` on the malformed-entry path must outlive `dup`, which is freed
@@ -252,7 +252,7 @@ static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec
 	 * concurrently (this is master-process startup/reload code only). */
 	static char bad_entry[256];
 	char *dup, *saveptr, *entry;
-	struct fpm_http_tls_sni_spec_s *specs = NULL;
+	struct fpm_tls_http_sni_spec_s *specs = NULL;
 	size_t count = 0, cap = 0;
 
 	*out = NULL;
@@ -270,9 +270,9 @@ static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec
 	}
 
 	for (entry = strtok_r(dup, ",", &saveptr); entry; entry = strtok_r(NULL, ",", &saveptr)) {
-		char *trimmed = fpm_http_tls_trim(entry);
+		char *trimmed = fpm_tls_http_trim(entry);
 		char *first_colon, *second_colon;
-		struct fpm_http_tls_sni_spec_s *slot;
+		struct fpm_tls_http_sni_spec_s *slot;
 
 		if (!*trimmed) {
 			continue; /* tolerate a trailing comma / empty entry */
@@ -283,18 +283,18 @@ static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec
 		if (!first_colon || !second_colon || strchr(second_colon + 1, ':')) {
 			snprintf(bad_entry, sizeof(bad_entry), "malformed entry '%s' (want servername:cert_path:key_path)", trimmed);
 			*what = bad_entry;
-			fpm_http_tls_sni_spec_free(specs, count);
+			fpm_tls_http_sni_spec_free(specs, count);
 			free(dup);
 			return -1;
 		}
 
 		if (count == cap) {
 			size_t new_cap = cap ? cap * 2 : 4;
-			struct fpm_http_tls_sni_spec_s *grown = realloc(specs, new_cap * sizeof(*specs));
+			struct fpm_tls_http_sni_spec_s *grown = realloc(specs, new_cap * sizeof(*specs));
 
 			if (!grown) {
 				*what = "out of memory";
-				fpm_http_tls_sni_spec_free(specs, count);
+				fpm_tls_http_sni_spec_free(specs, count);
 				free(dup);
 				return -1;
 			}
@@ -307,19 +307,19 @@ static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec
 		*second_colon = '\0';
 		/* trimmed was truncated in place at first_colon, above, but only the
 		 * OUTER whitespace of the whole entry was stripped so far
-		 * (fpm_http_tls_trim() at the top of this loop) -- trim again so
+		 * (fpm_tls_http_trim() at the top of this loop) -- trim again so
 		 * "servername : cert : key" (spaces around the colons) does not
 		 * leave a trailing space baked into the servername SNI actually
 		 * matches against. */
-		slot->servername = strdup(fpm_http_tls_trim(trimmed));
-		slot->cert_path = strdup(fpm_http_tls_trim(first_colon + 1));
-		slot->key_path = strdup(fpm_http_tls_trim(second_colon + 1));
+		slot->servername = strdup(fpm_tls_http_trim(trimmed));
+		slot->cert_path = strdup(fpm_tls_http_trim(first_colon + 1));
+		slot->key_path = strdup(fpm_tls_http_trim(second_colon + 1));
 		if (!slot->servername || !slot->cert_path || !slot->key_path) {
 			free(slot->servername);
 			free(slot->cert_path);
 			free(slot->key_path);
 			*what = "out of memory";
-			fpm_http_tls_sni_spec_free(specs, count);
+			fpm_tls_http_sni_spec_free(specs, count);
 			free(dup);
 			return -1;
 		}
@@ -332,34 +332,34 @@ static int fpm_http_tls_sni_parse(const char *spec, struct fpm_http_tls_sni_spec
 	return 0;
 }
 
-int fpm_http_tls_validate(const char *pool, const char *cert_path, const char *key_path,
+int fpm_tls_http_validate(const char *pool, const char *cert_path, const char *key_path,
 	const char *min_version, const char *sni_spec)
 {
 	char *cert_pem, *key_pem;
 	size_t cert_len, key_len;
 	const char *what = NULL;
 	int ret;
-	struct fpm_http_tls_sni_spec_s *specs = NULL;
+	struct fpm_tls_http_sni_spec_s *specs = NULL;
 	size_t spec_count = 0, i;
 
-	if (fpm_http_tls_resolve_min_version(min_version) < 0) {
+	if (fpm_tls_http_resolve_min_version(min_version) < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_min_version '%s' is not one of TLSv1.2, TLSv1.3", pool, min_version);
 		return -1;
 	}
 
-	cert_pem = fpm_http_tls_read_file(cert_path, &cert_len);
+	cert_pem = fpm_tls_http_read_file(cert_path, &cert_len);
 	if (!cert_pem) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_cert: cannot read '%s'", pool, cert_path);
 		return -1;
 	}
-	key_pem = fpm_http_tls_read_file(key_path, &key_len);
+	key_pem = fpm_tls_http_read_file(key_path, &key_len);
 	if (!key_pem) {
 		free(cert_pem);
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_key: cannot read '%s'", pool, key_path);
 		return -1;
 	}
 
-	ret = fpm_http_tls_check(cert_pem, cert_len, key_pem, key_len, &what);
+	ret = fpm_tls_http_check(cert_pem, cert_len, key_pem, key_len, &what);
 	free(cert_pem);
 	free(key_pem);
 	if (ret != 0) {
@@ -367,7 +367,7 @@ int fpm_http_tls_validate(const char *pool, const char *cert_path, const char *k
 		return -1;
 	}
 
-	if (fpm_http_tls_sni_parse(sni_spec, &specs, &spec_count, &what) != 0) {
+	if (fpm_tls_http_sni_parse(sni_spec, &specs, &spec_count, &what) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s", pool, what);
 		return -1;
 	}
@@ -376,40 +376,40 @@ int fpm_http_tls_validate(const char *pool, const char *cert_path, const char *k
 		char *sni_cert_pem, *sni_key_pem;
 		size_t sni_cert_len, sni_key_len;
 
-		sni_cert_pem = fpm_http_tls_read_file(specs[i].cert_path, &sni_cert_len);
+		sni_cert_pem = fpm_tls_http_read_file(specs[i].cert_path, &sni_cert_len);
 		if (!sni_cert_pem) {
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s: cannot read '%s'", pool, specs[i].servername, specs[i].cert_path);
-			fpm_http_tls_sni_spec_free(specs, spec_count);
+			fpm_tls_http_sni_spec_free(specs, spec_count);
 			return -1;
 		}
-		sni_key_pem = fpm_http_tls_read_file(specs[i].key_path, &sni_key_len);
+		sni_key_pem = fpm_tls_http_read_file(specs[i].key_path, &sni_key_len);
 		if (!sni_key_pem) {
 			free(sni_cert_pem);
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s: cannot read '%s'", pool, specs[i].servername, specs[i].key_path);
-			fpm_http_tls_sni_spec_free(specs, spec_count);
+			fpm_tls_http_sni_spec_free(specs, spec_count);
 			return -1;
 		}
 
-		ret = fpm_http_tls_check(sni_cert_pem, sni_cert_len, sni_key_pem, sni_key_len, &what);
+		ret = fpm_tls_http_check(sni_cert_pem, sni_cert_len, sni_key_pem, sni_key_len, &what);
 		free(sni_cert_pem);
 		free(sni_key_pem);
 		if (ret != 0) {
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s: %s", pool, specs[i].servername, what);
-			fpm_http_tls_sni_spec_free(specs, spec_count);
+			fpm_tls_http_sni_spec_free(specs, spec_count);
 			return -1;
 		}
 	}
 
-	fpm_http_tls_sni_spec_free(specs, spec_count);
+	fpm_tls_http_sni_spec_free(specs, spec_count);
 	return 0;
 }
 
-struct fpm_http_tls_s *fpm_http_tls_load(const char *pool, const char *cert_path,
+struct fpm_tls_http_s *fpm_tls_http_load(const char *pool, const char *cert_path,
 	const char *key_path, const char *min_version, const char *sni_spec)
 {
-	struct fpm_http_tls_s *tls;
+	struct fpm_tls_http_s *tls;
 	const char *what = NULL;
-	struct fpm_http_tls_sni_spec_s *specs = NULL;
+	struct fpm_tls_http_sni_spec_s *specs = NULL;
 	size_t spec_count = 0, i;
 
 	tls = calloc(1, sizeof(*tls));
@@ -417,48 +417,48 @@ struct fpm_http_tls_s *fpm_http_tls_load(const char *pool, const char *cert_path
 		return NULL;
 	}
 
-	tls->min_version = fpm_http_tls_resolve_min_version(min_version);
+	tls->min_version = fpm_tls_http_resolve_min_version(min_version);
 	if (tls->min_version < 0) {
-		/* fpm_http_tls_validate() already refused this at config-validation
+		/* fpm_tls_http_validate() already refused this at config-validation
 		 * time; reaching this means the config changed underneath us. */
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_min_version '%s' is not one of TLSv1.2, TLSv1.3", pool, min_version);
 		free(tls);
 		return NULL;
 	}
 
-	tls->cert_pem = fpm_http_tls_read_file(cert_path, &tls->cert_len);
-	tls->key_pem = tls->cert_pem ? fpm_http_tls_read_file(key_path, &tls->key_len) : NULL;
+	tls->cert_pem = fpm_tls_http_read_file(cert_path, &tls->cert_len);
+	tls->key_pem = tls->cert_pem ? fpm_tls_http_read_file(key_path, &tls->key_len) : NULL;
 	if (!tls->cert_pem || !tls->key_pem) {
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot re-read TLS certificate/key at startup", pool);
-		fpm_http_tls_free(tls);
+		fpm_tls_http_free(tls);
 		return NULL;
 	}
 
-	if (fpm_http_tls_check(tls->cert_pem, tls->cert_len, tls->key_pem, tls->key_len, &what) != 0) {
+	if (fpm_tls_http_check(tls->cert_pem, tls->cert_len, tls->key_pem, tls->key_len, &what) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_cert/http.tls_key: %s", pool, what);
-		fpm_http_tls_free(tls);
+		fpm_tls_http_free(tls);
 		return NULL;
 	}
 
 	/* Shared session ticket key for ALL gateway processes of this pool:
 	 * generated once, here, in the master, BEFORE the first child forks —
 	 * fork() copies `tls` (and thus this key) into every child, which sets
-	 * it in its OWN SSL_CTX (fpm_http_tls_ctx_new()). Without this every
+	 * it in its OWN SSL_CTX (fpm_tls_http_ctx_new()). Without this every
 	 * gateway process would have its own random key, and a client hitting
 	 * one process and then the other (SO_REUSEPORT) would pay the full
 	 * handshake every time. */
 	if (RAND_bytes(tls->ticket_key, sizeof(tls->ticket_key)) != 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http: RAND_bytes() failed generating the TLS session ticket key", pool);
-		fpm_http_tls_free(tls);
+		fpm_tls_http_free(tls);
 		return NULL;
 	}
 
 	/* http.tls_sni_cert (task 041): same defensive re-read-and-re-check
 	 * pattern as the primary cert/key pair just above, in case the files on
-	 * disk changed between fpm_http_tls_validate() and here. */
-	if (fpm_http_tls_sni_parse(sni_spec, &specs, &spec_count, &what) != 0) {
+	 * disk changed between fpm_tls_http_validate() and here. */
+	if (fpm_tls_http_sni_parse(sni_spec, &specs, &spec_count, &what) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s", pool, what);
-		fpm_http_tls_free(tls);
+		fpm_tls_http_free(tls);
 		return NULL;
 	}
 
@@ -466,40 +466,40 @@ struct fpm_http_tls_s *fpm_http_tls_load(const char *pool, const char *cert_path
 		tls->sni = calloc(spec_count, sizeof(*tls->sni));
 		if (!tls->sni) {
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: out of memory", pool);
-			fpm_http_tls_sni_spec_free(specs, spec_count);
-			fpm_http_tls_free(tls);
+			fpm_tls_http_sni_spec_free(specs, spec_count);
+			fpm_tls_http_free(tls);
 			return NULL;
 		}
 	}
 
 	for (i = 0; i < spec_count; i++) {
-		struct fpm_http_tls_sni_s *slot = &tls->sni[tls->sni_count];
+		struct fpm_tls_http_sni_s *slot = &tls->sni[tls->sni_count];
 
 		slot->servername = strdup(specs[i].servername);
-		slot->cert_pem = fpm_http_tls_read_file(specs[i].cert_path, &slot->cert_len);
-		slot->key_pem = slot->cert_pem ? fpm_http_tls_read_file(specs[i].key_path, &slot->key_len) : NULL;
+		slot->cert_pem = fpm_tls_http_read_file(specs[i].cert_path, &slot->cert_len);
+		slot->key_pem = slot->cert_pem ? fpm_tls_http_read_file(specs[i].key_path, &slot->key_len) : NULL;
 		if (!slot->servername || !slot->cert_pem || !slot->key_pem) {
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s: cannot re-read certificate/key at startup", pool, specs[i].servername);
-			tls->sni_count++; /* so fpm_http_tls_free() below frees this half-filled slot too */
-			fpm_http_tls_sni_spec_free(specs, spec_count);
-			fpm_http_tls_free(tls);
+			tls->sni_count++; /* so fpm_tls_http_free() below frees this half-filled slot too */
+			fpm_tls_http_sni_spec_free(specs, spec_count);
+			fpm_tls_http_free(tls);
 			return NULL;
 		}
-		if (fpm_http_tls_check(slot->cert_pem, slot->cert_len, slot->key_pem, slot->key_len, &what) != 0) {
+		if (fpm_tls_http_check(slot->cert_pem, slot->cert_len, slot->key_pem, slot->key_len, &what) != 0) {
 			zlog(ZLOG_ERROR, "[pool %s] http.tls_sni_cert: %s: %s", pool, specs[i].servername, what);
 			tls->sni_count++;
-			fpm_http_tls_sni_spec_free(specs, spec_count);
-			fpm_http_tls_free(tls);
+			fpm_tls_http_sni_spec_free(specs, spec_count);
+			fpm_tls_http_free(tls);
 			return NULL;
 		}
 		tls->sni_count++;
 	}
 
-	fpm_http_tls_sni_spec_free(specs, spec_count);
+	fpm_tls_http_sni_spec_free(specs, spec_count);
 	return tls;
 }
 
-void fpm_http_tls_free(struct fpm_http_tls_s *tls)
+void fpm_tls_http_free(struct fpm_tls_http_s *tls)
 {
 	size_t i;
 
@@ -521,13 +521,13 @@ void fpm_http_tls_free(struct fpm_http_tls_s *tls)
  * strings; 8 = strlen("http/1.1"). Exactly one entry -- this is the server's
  * preference list, and the gateway speaks HTTP/1.1 and nothing else
  * (docs/NOTES.md, "What we do NOT do": no HTTP/2). */
-static const unsigned char fpm_http_tls_alpn_protos[] = "\x08http/1.1";
+static const unsigned char fpm_tls_http_alpn_protos[] = "\x08http/1.1";
 
 /* SSL_CTX_set_alpn_select_cb() callback, registered on every SSL_CTX this
- * file ever builds (default and per-SNI, see fpm_http_tls_build_ctx()) so
+ * file ever builds (default and per-SNI, see fpm_tls_http_build_ctx()) so
  * ALPN negotiates the same way regardless of which certificate a connection
  * ends up on. SSL_select_next_proto() picks the first protocol in the
- * SERVER's list (fpm_http_tls_alpn_protos) that also appears in the CLIENT's
+ * SERVER's list (fpm_tls_http_alpn_protos) that also appears in the CLIENT's
  * list (in/inlen) -- server preference, not client preference, is what
  * decides here since our list has exactly one entry anyway.
  *
@@ -537,14 +537,14 @@ static const unsigned char fpm_http_tls_alpn_protos[] = "\x08http/1.1";
  * which would ignore what the client explicitly asked for. A client that
  * sends NO ALPN extension at all never reaches this callback -- unaffected,
  * served as HTTP/1.1 by assumption, exactly today's (pre-041) behaviour. */
-static int fpm_http_tls_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
+static int fpm_tls_http_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outlen,
 	const unsigned char *in, unsigned int inlen, void *arg)
 {
 	(void) ssl;
 	(void) arg;
 
-	if (SSL_select_next_proto((unsigned char **) out, outlen, fpm_http_tls_alpn_protos,
-			sizeof(fpm_http_tls_alpn_protos) - 1, in, inlen) == OPENSSL_NPN_NO_OVERLAP) {
+	if (SSL_select_next_proto((unsigned char **) out, outlen, fpm_tls_http_alpn_protos,
+			sizeof(fpm_tls_http_alpn_protos) - 1, in, inlen) == OPENSSL_NPN_NO_OVERLAP) {
 		return SSL_TLSEXT_ERR_ALERT_FATAL;
 	}
 	return SSL_TLSEXT_ERR_OK;
@@ -554,14 +554,14 @@ static int fpm_http_tls_alpn_select_cb(SSL *ssl, const unsigned char **out, unsi
  * install the chain, set and check the private key, minimum protocol
  * version, session id context, SSL_OP_NO_COMPRESSION, the shared ticket key,
  * and the ALPN select callback above. Shared by the default ctx and every
- * per-SNI-name ctx in fpm_http_tls_ctx_new() (task 041) -- both need exactly
+ * per-SNI-name ctx in fpm_tls_http_ctx_new() (task 041) -- both need exactly
  * this construction, and building it in one place means an SNI certificate
  * can never end up silently missing one of these settings (e.g. the ALPN
  * callback, or a different min_version) that the default certificate has.
  * `log_name` identifies which certificate failed, for the caller's error
  * message: the pool name for the default ctx, "pool %s, http.tls_sni_cert
  * %s" for a per-SNI one. */
-static SSL_CTX *fpm_http_tls_build_ctx(const char *log_name, const char *cert_pem, size_t cert_len,
+static SSL_CTX *fpm_tls_http_build_ctx(const char *log_name, const char *cert_pem, size_t cert_len,
 	const char *key_pem, size_t key_len, int min_version, const unsigned char ticket_key[80])
 {
 	SSL_CTX *ctx;
@@ -575,12 +575,12 @@ static SSL_CTX *fpm_http_tls_build_ctx(const char *log_name, const char *cert_pe
 		return NULL;
 	}
 
-	/* Already validated once in the master (fpm_http_tls_load(), which calls
-	 * the same fpm_http_tls_check() / fpm_http_tls_install_chain()); getting
+	/* Already validated once in the master (fpm_tls_http_load(), which calls
+	 * the same fpm_tls_http_check() / fpm_tls_http_install_chain()); getting
 	 * a failure here means something changed the in-memory bytes since then,
 	 * which should be impossible -- fail loudly rather than silently serve
 	 * plain HTTP or an incomplete chain. */
-	if (fpm_http_tls_install_chain(ctx, cert_pem, cert_len, &what) != 0) {
+	if (fpm_tls_http_install_chain(ctx, cert_pem, cert_len, &what) != 0) {
 		zlog(ZLOG_ERROR, "[%s] http: cannot rebuild TLS context in gateway child: %s", log_name, what);
 		SSL_CTX_free(ctx);
 		return NULL;
@@ -609,20 +609,20 @@ static SSL_CTX *fpm_http_tls_build_ctx(const char *log_name, const char *cert_pe
 		SSL_CTX_free(ctx);
 		return NULL;
 	}
-	SSL_CTX_set_alpn_select_cb(ctx, fpm_http_tls_alpn_select_cb, NULL);
+	SSL_CTX_set_alpn_select_cb(ctx, fpm_tls_http_alpn_select_cb, NULL);
 
 	return ctx;
 }
 
 /* One servername -> SSL_CTX* entry in the per-process SNI switch table
- * built by fpm_http_tls_ctx_new() below. */
-struct fpm_http_tls_sni_ctx_entry_s {
+ * built by fpm_tls_http_ctx_new() below. */
+struct fpm_tls_http_sni_ctx_entry_s {
 	char *servername;
 	SSL_CTX *ctx;
 };
 
-struct fpm_http_tls_sni_ctx_table_s {
-	struct fpm_http_tls_sni_ctx_entry_s *entries;
+struct fpm_tls_http_sni_ctx_table_s {
+	struct fpm_tls_http_sni_ctx_entry_s *entries;
 	size_t count;
 };
 
@@ -630,10 +630,10 @@ struct fpm_http_tls_sni_ctx_table_s {
  * DEFAULT ctx (there would be no point registering it anywhere else: SNI
  * extension processing happens before any per-SNI ctx is selected). `arg` is
  * the table SSL_CTX_set_tlsext_servername_arg() was given, built once by
- * fpm_http_tls_ctx_new(). */
-static int fpm_http_tls_sni_select_cb(SSL *ssl, int *al, void *arg)
+ * fpm_tls_http_ctx_new(). */
+static int fpm_tls_http_sni_select_cb(SSL *ssl, int *al, void *arg)
 {
-	struct fpm_http_tls_sni_ctx_table_s *table = arg;
+	struct fpm_tls_http_sni_ctx_table_s *table = arg;
 	const char *requested;
 	size_t i;
 
@@ -658,13 +658,13 @@ static int fpm_http_tls_sni_select_cb(SSL *ssl, int *al, void *arg)
 	return SSL_TLSEXT_ERR_OK;
 }
 
-SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
+SSL_CTX *fpm_tls_http_ctx_new(const char *pool, struct fpm_tls_http_s *tls)
 {
 	SSL_CTX *ctx;
-	struct fpm_http_tls_sni_ctx_table_s *table;
+	struct fpm_tls_http_sni_ctx_table_s *table;
 	size_t i;
 
-	ctx = fpm_http_tls_build_ctx(pool, tls->cert_pem, tls->cert_len, tls->key_pem, tls->key_len,
+	ctx = fpm_tls_http_build_ctx(pool, tls->cert_pem, tls->cert_len, tls->key_pem, tls->key_len,
 		tls->min_version, tls->ticket_key);
 	if (!ctx) {
 		return NULL;
@@ -694,11 +694,11 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 		SSL_CTX *sni_ctx;
 
 		snprintf(log_name, sizeof(log_name), "pool %s, http.tls_sni_cert %s", pool, tls->sni[i].servername);
-		sni_ctx = fpm_http_tls_build_ctx(log_name, tls->sni[i].cert_pem, tls->sni[i].cert_len,
+		sni_ctx = fpm_tls_http_build_ctx(log_name, tls->sni[i].cert_pem, tls->sni[i].cert_len,
 			tls->sni[i].key_pem, tls->sni[i].key_len, tls->min_version, tls->ticket_key);
 		if (!sni_ctx) {
-			/* fpm_http_tls_build_ctx() already logged which one failed.
-			 * Reaching here should be impossible -- fpm_http_tls_load()
+			/* fpm_tls_http_build_ctx() already logged which one failed.
+			 * Reaching here should be impossible -- fpm_tls_http_load()
 			 * already validated these same bytes -- but an SNI certificate
 			 * failing to (re)build must fail the whole gateway process the
 			 * same way the default certificate failing does, not silently
@@ -721,17 +721,17 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 
 	/* Deliberate simplification (task 041): this table, and every per-name
 	 * SSL_CTX* inside it, is intentionally never freed. It lives for the
-	 * lifetime of the gateway child process; fpm_http_tls_ctx_new() rebuilds
+	 * lifetime of the gateway child process; fpm_tls_http_ctx_new() rebuilds
 	 * a brand new table (and a brand new set of SSL_CTX*s) every time it
 	 * runs again -- once at child startup, and again if task 040's
-	 * hot-reload rebuilds the default ctx (see fpm_http_tls_reload.c) -- and
+	 * hot-reload rebuilds the default ctx (see fpm_tls_reload.c) -- and
 	 * the previous table simply leaks. That leak is small and bounded (one
 	 * entry per configured SNI name) and happens at most once every
 	 * http.tls_reload_check seconds; inventing an ex_data-based
 	 * free-on-SSL_CTX_free() lifetime hook to reclaim it is not worth it for
 	 * a handful of certificates. This leak is the accepted design, not an
 	 * oversight. */
-	SSL_CTX_set_tlsext_servername_callback(ctx, fpm_http_tls_sni_select_cb);
+	SSL_CTX_set_tlsext_servername_callback(ctx, fpm_tls_http_sni_select_cb);
 	SSL_CTX_set_tlsext_servername_arg(ctx, table);
 
 	return ctx;
@@ -756,7 +756,7 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
  * partial write pending) but it is an invariant worth holding in the code
  * rather than in a comment about evhttp's callback juggling. Clamping bought
  * nothing on the wire anyway: max_send_fragment already caps the record. */
-#define FPM_HTTP_TLS_WRITE_FRAME 16384
+#define FPM_TLS_HTTP_WRITE_FRAME 16384
 
 /* The other half of libevent's do_write(), and the reason it cannot live in the
  * write step above: libevent ends a successful write with
@@ -780,16 +780,16 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
  *
  * Deferred rather than immediate because evhttp_send_done() frees the request
  * and the caller is inside that request's own callback. */
-void fpm_http_tls_notify_written(struct bufferevent *bev)
+void fpm_tls_http_notify_written(struct bufferevent *bev)
 {
 	bufferevent_trigger(bev, EV_WRITE, BEV_TRIG_DEFER_CALLBACKS);
 }
 
-ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events)
+ev_ssize_t fpm_tls_http_write_output(struct bufferevent *bev, short *poll_events)
 {
 	struct evbuffer *out = bufferevent_get_output(bev);
 	SSL *ssl = bufferevent_openssl_get_ssl(bev);
-	struct evbuffer_iovec vec[FPM_HTTP_TLS_WRITE_VECS];
+	struct evbuffer_iovec vec[FPM_TLS_HTTP_WRITE_VECS];
 	ev_ssize_t written;
 	size_t len;
 	int r, n, i;
@@ -820,17 +820,17 @@ ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events
 	 * length to the caller as "blocked" would spin: the pump would poll() a
 	 * socket that is already writable, spend no measurable time, and never
 	 * reach its http.stream_write_timeout. */
-	n = evbuffer_peek(out, FPM_HTTP_TLS_WRITE_FRAME, NULL, vec, FPM_HTTP_TLS_WRITE_VECS);
-	if (n > FPM_HTTP_TLS_WRITE_VECS) {
-		n = FPM_HTTP_TLS_WRITE_VECS;
+	n = evbuffer_peek(out, FPM_TLS_HTTP_WRITE_FRAME, NULL, vec, FPM_TLS_HTTP_WRITE_VECS);
+	if (n > FPM_TLS_HTTP_WRITE_VECS) {
+		n = FPM_TLS_HTTP_WRITE_VECS;
 	}
 	for (i = 0; i < n && vec[i].iov_len == 0; i++) {
 		/* nothing: an empty chain in front of the data */
 	}
 	if (i >= n) {
-		return FPM_HTTP_TLS_WRITE_IDLE;
+		return FPM_TLS_HTTP_WRITE_IDLE;
 	}
-	/* The vector's own length, unclamped -- see FPM_HTTP_TLS_WRITE_FRAME. An
+	/* The vector's own length, unclamped -- see FPM_TLS_HTTP_WRITE_FRAME. An
 	 * evbuffer chain larger than INT_MAX would not fit SSL_write()'s int; it
 	 * cannot occur here (a chain is a single allocation of a response fragment)
 	 * and is capped rather than truncated silently, because a negative int
@@ -864,7 +864,7 @@ ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events
 	return written;
 }
 
-struct bufferevent *fpm_http_tls_bevcb(struct event_base *base, void *arg)
+struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg)
 {
 	SSL_CTX *ctx = arg;
 	SSL *ssl = SSL_new(ctx);

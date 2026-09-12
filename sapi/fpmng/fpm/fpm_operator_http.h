@@ -44,13 +44,24 @@ struct fpm_operator_reply_s {
 };
 
 /* Called once per request, in the child, with the path exactly as it arrived on
- * the request line (no decoding, no query-string splitting -- a path carrying
- * either simply will not match, which is the behaviour an operator endpoint
- * wants: a typo is a 404, not a silently different answer).
+ * the request line with any query string cut off, and that query string handed
+ * over separately (empty, never NULL, when the request carried none).
+ *
+ * The path is not decoded, so a path spelled "/%73tatus" simply will not match
+ * -- which is the behaviour an operator endpoint wants: a typo is a 404, not a
+ * silently different answer. The query string is split off rather than left on
+ * the path because it is how a status page has always been asked for a variant
+ * ("?json", "?json&full"); a handler that does not care about it ignores the
+ * argument, and one that does parses its own flags out of it.
  *
  * ctx is whatever was handed to fpm_operator_http_serve(). */
-typedef void (*fpm_operator_http_dispatch_cb)(void *ctx, const char *path,
+typedef void (*fpm_operator_http_dispatch_cb)(void *ctx, const char *path, const char *query,
 	struct fpm_operator_reply_s *reply);
+
+/* Whether a query string carries this bare flag among its '&'-separated
+ * parameters -- the spelling upstream's status page uses, so "json&full" is two
+ * flags and not one parameter named "json&full". query may be NULL. */
+int fpm_operator_http_has_flag(const char *query, const char *flag);
 
 /* Accept loop. Does not return: this is a child's whole life.
  *

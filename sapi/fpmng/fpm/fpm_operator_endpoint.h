@@ -4,13 +4,20 @@
  * operator's scrape -- cron, supervisor, http, http-direct -- serves its own
  * stats and metrics from a small HTTP listener of its own:
  *
- *   pm.status_path     JSON,            unset = off
- *   pm.metrics_path    Prometheus text, unset = off
+ *   pm.status_path     the pool's status page,   unset = off
+ *   pm.metrics_path    Prometheus text,          unset = off
  *   pm.status_listen   where the above bind, default 127.0.0.1:8080
  *   pm.metrics_listen  the same, for the metrics path
  *
  * There is no separate on/off directive: the endpoint exists iff a path is set
  * (#273, point 4). With both paths unset nothing is bound at all.
+ *
+ * The metrics page is the same exposition format on every type, so that one
+ * scraper can compare labelled series across pools. The status page is the
+ * TYPE'S OWN where the type has one -- http-direct's carries per-connection
+ * counters and a row per child (issue #64), and issue #275 moved that page here
+ * unchanged rather than replacing it with the generic summary. Which types have
+ * one is fpm_pool_type_s.operator_status, data like everything else here.
  *
  * Whether a type gets this at all is data, not a name comparison: it is
  * fpm_pool_type_s.operator_endpoint. On fastcgi and fastcgi-ng the flag is off

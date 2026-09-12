@@ -27,11 +27,6 @@ pm.metrics_path   = /tick/metrics
 | `pm.status_listen` | Where `pm.status_path` binds. Default `127.0.0.1:8080`. |
 | `pm.metrics_listen` | Where `pm.metrics_path` binds. Default `127.0.0.1:8080`. |
 
-On `http-direct`, `pm.status_path` is not on this listener yet — see
-[What is not here yet](#what-is-not-here-yet). There the operator endpoint serves
-`pm.metrics_path` and nothing else, so an `http-direct` pool that sets only
-`pm.status_path` binds no new socket and behaves exactly as it did before.
-
 There is **no on/off directive**. The endpoint exists exactly when a path is
 set. A `pm.status_listen` with no `pm.status_path` binds nothing — the address
 is where an endpoint would go, not an instruction to open one.
@@ -88,9 +83,37 @@ public listener has to move to the operator address; one pointed at a
 `pool.type = status` pool is untouched, and so is `pool.type = fastcgi`, where
 `pm.status_path` keeps its upstream meaning in full.
 
+## Upgrading an `http-direct` pool that already set `pm.status_path`
+
+The page is the same page — the one described in
+[`docs/http-direct.md`](http-direct.md#pingpath-and-pmstatus_path), with the
+per-connection counters, the `direct schema` version and the per-child rows on
+`?full`, unchanged field for field and byte for byte. What changed is the socket
+it is on: the operator listener instead of the pool's own, so a scraper moves
+from `http://<listen>/status` to `http://<pm.status_listen>/status` and keeps
+parsing exactly what it parsed before. `?json` and `?full` work there too.
+
+Two consequences worth knowing before you compare numbers across the upgrade:
+
+- The scrape is no longer one of the pool's own requests. It used to arrive on
+  the pool's listener and be counted — `accepted conn` and `non-php requests`
+  both included it, and it appeared in `access.log`. Now it reaches a different
+  process entirely, so those counters describe your traffic and nothing else.
+- The path is free on the public listener again. A request for `/status` there
+  goes to your application like any other URL.
+
+`pm.status_listen` is accepted on this type since the move; it used to be
+refused, because under its upstream meaning it asked for a second FastCGI socket
+a direct child has nowhere to put.
+
 ## What the pages contain
 
 Both formats report the pool that configured the path, and only that pool.
+
+The status page is the pool type's own where the type has one: `http-direct`
+answers the page described above, and every other type answers the per-pool JSON
+described here. The metrics page is the same exposition format on every type, on
+purpose — a scraper reads one endpoint and compares labelled series across pools.
 
 A pool that serves requests (`http`, `http-direct`) reports its worker counts
 and request total. A pool that does not (`cron`, `supervisor`) reports its state,
@@ -99,12 +122,6 @@ code, and — for `cron` — when it next runs.
 
 ## What is not here yet
 
-- `http-direct` keeps `pm.status_path` on its **own** listener for now. That page
-  is built inside the child that answers and reports per-child rows and
-  per-connection counters, which no other process can render today; see
-  [`docs/http-direct.md`](http-direct.md). `pm.status_listen` is refused on that
-  type until the page moves (issue #275). `pm.metrics_path` already goes to the
-  operator listener.
 - `ping.path` stays on the pool's own listener on every type. It is a liveness
   probe for whatever is in front of the pool, so that is where it belongs.
 - Application metrics registered from PHP with `fpm_metric_inc()` are reported

@@ -328,15 +328,13 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 	/* #273, point 4: no on/off directive. The endpoint exists iff a path is
 	 * set, so a pool that configured neither binds nothing and no internal
 	 * listener pool is created for it. */
-	/* Not every type that has an operator endpoint has moved its status page
-	 * onto it yet: http-direct answers pm.status_path inside the child that
-	 * serves the request, with per-child rows an external process cannot render
-	 * today (fpm_pool_type.h, .status_on_own_listener; issue #275). Registering
-	 * a route for it here would give one directive two pages on two sockets,
-	 * which is the confusion #273 removed. Where the route IS registered, the
-	 * other half of that rule is enforced in the child
-	 * (fpm_child_operator_endpoint_owns_status() in fpm_children.c). */
-	if (status_path && *status_path && !type->status_on_own_listener) {
+	/* Every type with an operator endpoint registers its status route here, and
+	 * the other half of the rule -- that the pool's own listener does not answer
+	 * the same path -- is enforced in the child, by
+	 * fpm_child_operator_endpoint_owns_status() in fpm_children.c for the types
+	 * that go through fpm_main.c and by fpm_http_direct_ops_init_child() for
+	 * http-direct. One directive, one page, one socket. */
+	if (status_path && *status_path) {
 		const char *listen = wp->config->pm_status_listen;
 
 		if (!listen || !*listen) {
@@ -364,19 +362,36 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 }
 /* }}} */
 
-static void fpm_operator_endpoint_dispatch(void *ctx, const char *path,
+static void fpm_operator_endpoint_dispatch(void *ctx, const char *path, const char *query,
 	struct fpm_operator_reply_s *reply) /* {{{ */
 {
 	struct fpm_operator_listener_s *l = ctx;
 	struct fpm_operator_route_s *r;
 
 	for (r = l->routes; r; r = r->next) {
+		const struct fpm_pool_type_s *type;
+
 		if (strcmp(r->path, path)) {
 			continue;
 		}
 
 		if (r->format == FPM_OPERATOR_FORMAT_PROMETHEUS) {
+			/* One exposition format for every pool, by design: a scraper reads
+			 * one endpoint and gets labelled series it can compare across
+			 * pools, which a per-type body would take away. */
 			fpm_pool_status_render_prometheus(&reply->body, r->pool);
+			reply->handled = 1;
+			return;
+		}
+
+		/* The status page, on the other hand, is the type's own if the type has
+		 * one: http-direct's carries per-connection counters and, on "?full", a
+		 * row per child (issue #64), and issue #275 moved that page here rather
+		 * than replacing it with the summary. Which types have one is data on
+		 * the type (fpm_pool_type_s.operator_status), never a name test. */
+		type = fpm_pool_type_of(r->pool);
+		if (type->operator_status) {
+			type->operator_status(r->pool, query, reply);
 		} else {
 			reply->content_type = "application/json";
 			fpm_pool_status_render_json(&reply->body, r->pool);

@@ -57,24 +57,20 @@ struct fpm_http_direct_labels {
  * and the per-request observability) without holding a second copy of the
  * common entries.
  *
- * pm.status_listen is rejected for a reason that changed shape in #273 without
- * going away. Under its upstream meaning it asked for a second listening socket
- * served by a second FastCGI pool, and a direct child owns exactly one listener
- * -- the pool's. Under the new meaning it names where this pool's operator
- * endpoint binds (fpm_operator_endpoint.h), and http-direct has not moved its
- * status page there: the page is rendered inside the child that answers and
- * reports per-child rows nothing outside the pool can produce yet
- * (fpm_pool_type.h, .status_on_own_listener). So the directive still has
- * nothing to name here, and saying so is better than accepting an address and
- * binding nothing. #275 moves the page and removes this entry.
+ * pm.status_listen and pm.metrics_listen are deliberately NOT here. Since issue
+ * #275 both of this type's operator pages are served by the operator endpoint
+ * (fpm_operator_endpoint.h) on a listener of its own, so both directives have
+ * something to name. The upstream meaning of pm.status_listen -- a second
+ * FastCGI socket served by a second pool -- is gone from fpm-ng, and a direct
+ * child still owns exactly one request listener; what changed is that the
+ * operator page is no longer on it.
  *
- * pm.metrics_listen is deliberately NOT rejected: the metrics path is a new
- * directive with no second meaning, and it does go to the operator listener.
- *
- * pm.status_path on the pool's own listener is supported by the classic
- * executor (issue #59) and is the subject of #275. */
+ * pm.status_path on the pool's own listener was supported by the classic
+ * executor between issues #59 and #275; it is now answered on the operator
+ * listener instead, unchanged. The worker executor rejects it still (see
+ * fpm_http_direct_worker_rejects) for reasons of its own. */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON \
-	"pm.status_listen", "fiber.", "supervisor.", "cron."
+	"fiber.", "supervisor.", "cron."
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

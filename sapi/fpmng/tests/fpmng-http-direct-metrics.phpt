@@ -5,22 +5,28 @@ fpm-ng: direct HTTP status reports per-connection counters that move with the lo
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 
 /* Issue #64. Every assertion here is about a counter MOVING under a load this
  * test produced, not about a field being present: a status page whose numbers
  * are wrong is worse than one that is missing, because it is believed.
  *
+ * The page is read from the operator listener, not from the pool's own: issue
+ * #275 moved it there, and nothing about the numbers changed in the move. What
+ * did change is that the reader is no longer a client of the pool it reads --
+ * the connections and requests below are the ones this test made on purpose,
+ * with none of the scrape's own mixed in.
+ *
  * http.max_connections = 1 on [metrics] is the lever that makes the test
  * deterministic rather than a policy under test here. A child that holds a
  * connection is at capacity, so fpm_http_direct_conns_may_accept() keeps it out
  * of accept (issue #53's gate) and every further connection lands on a
- * different child. Without it the slow request below could land on the same
- * child as the status reader, and the status request would simply queue behind
- * the PHP it was supposed to observe -- the classic executor runs PHP inside
- * evhttp's request callback, so that child answers nothing until it returns.
+ * different child -- which is what gives the per-child rows below two children
+ * with something on each.
  *
  * [recycle] is separate because its pm.max_requests would recycle the child
- * holding the reader's connection in the middle of everything else. */
+ * holding the connection this test keeps open in the middle of everything
+ * else. */
 $root = sys_get_temp_dir() . '/fpmng-metrics-' . getmypid();
 @mkdir($root);
 file_put_contents($root . '/front.php', <<<'PHP'
@@ -33,6 +39,7 @@ PHP);
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $port = $base + 21;
 $recycle = $base + 22;
+$ops = '127.0.0.1:' . ($base + 23);
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}
@@ -46,9 +53,10 @@ http.max_connections = 1
 chdir = $root
 http.front_controller = /front.php
 pm.status_path = /status
+pm.status_listen = $ops
 ; Short enough that a connection which sends nothing is dropped inside this
-; test's patience, long enough that the reader's keep-alive connection is not
-; dropped between two of its own requests.
+; test's patience, long enough that a connection this test means to hold open
+; between two reads of the page is not dropped under it.
 http.read_timeout = 1500
 [recycle]
 listen = 127.0.0.1:$recycle
@@ -58,7 +66,12 @@ pm.max_children = 1
 pm.max_requests = 2
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
+; The same operator listener as [metrics], on a path of its own: two pools may
+; share one listener as long as the triple (address, port, path) is unique
+; (issue #273, point 7), and a test that reads both pages is the cheapest place
+; to keep saying so.
+pm.status_path = /recycle-status
+pm.status_listen = $ops
 CFG;
 
 function expect(string $what, $actual, $expected): void
@@ -144,13 +157,14 @@ try {
     $tester->start();
     $tester->expectLogStartNotices();
 
-    /* The reader's own connection, kept open for the whole test: every gauge
-     * below is read through it, so it is itself one of the live connections
-     * the pool reports -- which is the point of reading a gauge rather than
-     * asserting a constant. */
-    $reader = connect($port);
-    [$status, $body] = fetch($reader, '/status');
-    expect('status status', $status, 200);
+    /* One connection per read, on the operator listener: that server answers
+     * one request and closes. */
+    $page = function (string $query = '') use ($ops): string {
+        $body = fpmng_operator_body($ops, '/status' . $query);
+        $GLOBALS['last_page'] = $body;
+        return $body;
+    };
+    $body = $page();
 
     /* 1. The schema marker and the fields behind it. A tool that finds a
      * version it does not know can stop; one that finds no version at all has
@@ -162,25 +176,27 @@ try {
     }
     echo "schema: ok\n";
 
-    /* 2. Connections. The reader's own connection is held by one child, so the
-     * pool-wide live count includes it, and a second connection lands on the
-     * other child and raises both counters. */
-    $body = until(function () use ($reader) {
-        [, $b] = fetch($reader, '/status');
+    /* 2. Connections. One connection held open by this test is one live
+     * connection on the page; a second one lands on the other child (see
+     * http.max_connections above) and raises both counters. */
+    $held = connect($port);
+    fetch($held, '/app');
+    $body = until(function () use ($page) {
+        $b = $page();
         return field($b, 'live connections') >= 1 ? $b : null;
-    }, 15, 'the reader to show up as a live connection');
+    }, 15, 'the held connection to show up as a live connection');
     $accepted = field($body, 'accepted conn');
     $other = connect($port);
     fetch($other, '/app');
-    until(function () use ($reader, $accepted) {
-        [, $b] = fetch($reader, '/status?full');
+    until(function () use ($page, $accepted) {
+        $b = $page('?full');
         return field($b, 'accepted conn') > $accepted && field($b, 'live connections') >= 2 ? $b : null;
     }, 15, 'the second connection to be counted');
     fclose($other);
     /* And the gauge comes back down: a live count that only grows is a total
      * wearing a gauge's name. */
-    until(function () use ($reader) {
-        [, $b] = fetch($reader, '/status');
+    until(function () use ($page) {
+        $b = $page();
         return field($b, 'live connections') === 1 ? $b : null;
     }, 15, 'the second connection to be released');
     echo "connections: ok\n";
@@ -191,16 +207,16 @@ try {
      * request path itself, and this check is what says so. */
     $slow = connect($port);
     fwrite($slow, "GET /app?sleep=1000 HTTP/1.1\r\nHost: test\r\n\r\n");
-    until(function () use ($reader) {
-        [, $b] = fetch($reader, '/status');
+    until(function () use ($page) {
+        $b = $page();
         return field($b, 'active requests') >= 1 ? $b : null;
     }, 15, 'the slow request to show as active');
     echo "active during php: ok\n";
     $line = fgets($slow);
     expect('slow request finished', substr($line, 0, 12), 'HTTP/1.1 200');
     fclose($slow);
-    until(function () use ($reader) {
-        [, $b] = fetch($reader, '/status');
+    until(function () use ($page) {
+        $b = $page();
         return field($b, 'active requests') === 0 ? $b : null;
     }, 15, 'the slow request to stop being active');
     echo "active after php: ok\n";
@@ -210,8 +226,8 @@ try {
      * operator who sees connections disappear has to be able to tell this
      * reason from a client that simply went away. */
     $silent = connect($port);
-    until(function () use ($reader) {
-        [, $b] = fetch($reader, '/status');
+    until(function () use ($page) {
+        $b = $page();
         return field($b, 'timed out connections') >= 1 ? $b : null;
     }, 10, 'the silent connection to time out');
     fclose($silent);
@@ -222,9 +238,9 @@ try {
      * are zero -- what the assertion is really about is that they are separate
      * fields: a page that reported only the sum would make "nothing was
      * refused" indistinguishable from "everything was refused for a reason you
-     * cannot see". The ACL counter cannot be exercised from here, because a
-     * pool that refuses this test's address refuses its status request too. */
-    [, $body] = fetch($reader, '/status');
+     * cannot see". The ACL counter is exercised by
+     * fpmng-http-direct-operator.phpt, on a pool that refuses everyone. */
+    $body = $page();
     expect('refused acl', field($body, 'refused acl'), 0);
     expect('refused capacity', field($body, 'refused capacity'), 0);
     expect('refused requests', field($body, 'refused requests'), 0);
@@ -236,8 +252,7 @@ try {
      * needed an external harness, and a pool-wide sum cannot show it at all.
      * Two children, so two rows, and their accepted connections have to add up
      * to the pool's. */
-    [$status, $body] = fetch($reader, '/status?full');
-    expect('full status', $status, 200);
+    $body = $page('?full');
     preg_match_all('/^slot: *(\d+)$/m', $body, $m);
     expect('slots', count($m[1]), 2);
     preg_match_all('/^accepted conn: *(\d+)$/m', $body, $rows);
@@ -251,8 +266,9 @@ try {
     /* 7. JSON stays JSON with the rows in it: a monitoring tool reads this
      * page, and a page that is only valid in one of its two modes breaks the
      * day someone asks for detail. */
-    [$status, $body] = fetch($reader, '/status?json&full');
+    [$status, $headers, $body] = fpmng_operator_fetch($ops, '/status?json&full');
     expect('json status', $status, 200);
+    expect('json type', $headers['content-type'], 'application/json');
     $decoded = json_decode($body, true);
     if (!is_array($decoded)) {
         throw new RuntimeException("status?json&full is not JSON\n$body");
@@ -295,13 +311,17 @@ try {
     $seen = 0;
     for ($i = 0; $i < 6; $i++) {
         $once('/app');
-        $b = $once('/status');
+        /* The page of the OTHER pool on the same operator listener, so this
+         * also says that two pools sharing one listener are told apart by
+         * their paths. */
+        $b = fpmng_operator_body($ops, '/recycle-status');
         $now = field($b, 'accepted conn');
         if ($now < $seen) {
             throw new RuntimeException("accepted conn went backwards: $seen -> $now\n$b");
         }
         $seen = $now;
     }
+    /* Six connections, one per /app: the scrape is no longer one of them. */
     if ($seen < 6) {
         throw new RuntimeException("accepted conn did not survive recycling: $seen");
     }
@@ -309,8 +329,8 @@ try {
 
     echo "Done\n";
 } finally {
-    if (isset($reader) && is_resource($reader)) {
-        fclose($reader);
+    if (isset($held) && is_resource($held)) {
+        fclose($held);
     }
     $tester->terminate();
     $tester->close();

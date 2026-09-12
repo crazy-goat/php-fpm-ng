@@ -207,15 +207,16 @@ static int fpm_child_cloexec(void)
  * wrote (fpm_conf_dump() still prints it), and fork() has already made this
  * copy of the config private, so nothing outside this process sees the change.
  *
- * .status_on_own_listener is the exception, as data: a type that still answers
- * the path itself keeps it (http-direct, until #275). ping.path is deliberately
- * untouched on every type -- #273, point 9, leaves it on the request listener,
- * because it is a liveness probe for whatever sits in front of the pool. */
+ * Every type with an operator endpoint is covered, with no exception: since
+ * issue #275 there is no type left that answers the path on its own listener.
+ * ping.path is deliberately untouched on every type -- #273, point 9, leaves it
+ * on the request listener, because it is a liveness probe for whatever sits in
+ * front of the pool. */
 static void fpm_child_operator_endpoint_owns_status(struct fpm_worker_pool_s *wp)
 {
 	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
 
-	if (!type->operator_endpoint || type->status_on_own_listener) {
+	if (!type->operator_endpoint) {
 		return;
 	}
 	if (wp->config->pm_status_path) {

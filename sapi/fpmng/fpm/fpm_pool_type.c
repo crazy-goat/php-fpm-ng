@@ -172,13 +172,15 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
 	.listening_socket_nodelay     = 1,
-	/* The flag, like everything else here, is repeated rather than inherited:
-	 * an executor variant replaces the whole type struct. Note that this
-	 * executor still rejects pm.status_path itself (see
-	 * fpm_http_direct_worker_rejects and issue #59), so the flag has no effect
-	 * until that reject is revisited under the new meaning in #275. */
+	/* Both, like everything else here, are repeated rather than inherited: an
+	 * executor variant replaces the whole type struct. The renderer has no
+	 * effect on this executor yet -- it still rejects pm.status_path itself
+	 * (see fpm_http_direct_worker_rejects and issue #59), so no route is ever
+	 * registered for it -- but it is the same page from the same shared
+	 * counters, so it is set here rather than left for whoever lifts that
+	 * reject to discover it missing. */
 	.operator_endpoint            = 1,
-	.status_on_own_listener       = 1,
+	.operator_status              = fpm_http_direct_ops_render_status,
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above. An executor variant
@@ -288,8 +290,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,
 		.operator_endpoint            = 1,
-		/* until #275; see the field's comment in fpm_pool_type.h */
-		.status_on_own_listener       = 1,
+		/* Not the generic per-pool summary: this type's own page, moved onto
+		 * the operator listener unchanged by issue #275. */
+		.operator_status              = fpm_http_direct_ops_render_status,
 		.rejects                      = fpm_http_direct_rejects,
 		.validate                     = fpm_http_direct_validate,
 		.init_main                    = fpm_pool_type_http_direct_classic_init,

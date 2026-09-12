@@ -133,6 +133,26 @@ static void fpm_operator_http_write_all(int fd, const char *data, size_t len) /*
 }
 /* }}} */
 
+int fpm_operator_http_has_flag(const char *query, const char *flag) /* {{{ */
+{
+	const char *p = query;
+	size_t want = strlen(flag);
+
+	while (p && *p) {
+		size_t len = strcspn(p, "&");
+
+		if (len == want && !strncmp(p, flag, want)) {
+			return 1;
+		}
+		p += len;
+		if (*p == '&') {
+			p++;
+		}
+	}
+	return 0;
+}
+/* }}} */
+
 static void fpm_operator_http_handle_conn(int fd, fpm_operator_http_dispatch_cb cb, void *ctx,
 	const char *known_paths) /* {{{ */
 {
@@ -140,10 +160,11 @@ static void fpm_operator_http_handle_conn(int fd, fpm_operator_http_dispatch_cb 
 	ssize_t n;
 	size_t total = 0;
 	char path[256] = "";
+	char *query;
 	struct fpm_operator_reply_s reply;
 	int status_code = 200;
 	const char *status_text = "OK";
-	char header[256];
+	char header[512];
 	int header_len;
 
 	memset(&reply, 0, sizeof(reply));
@@ -180,8 +201,16 @@ static void fpm_operator_http_handle_conn(int fd, fpm_operator_http_dispatch_cb 
 		}
 	}
 
+	/* "/status?json&full" is the status page asked for a variant, not a path
+	 * nobody configured. The path is matched whole against the routes, so the
+	 * query has to come off it first. */
+	query = strchr(path, '?');
+	if (query) {
+		*query++ = '\0';
+	}
+
 	if (path[0]) {
-		cb(ctx, path, &reply);
+		cb(ctx, path, query ? query : "", &reply);
 	}
 
 	if (!reply.handled) {
@@ -196,10 +225,17 @@ static void fpm_operator_http_handle_conn(int fd, fpm_operator_http_dispatch_cb 
 		}
 	}
 
+	/* A monitoring page a proxy is free to cache is a monitoring page that
+	 * lies; upstream's fpm_status.c sends the same two, and so did the
+	 * http-direct status page on its own listener before issue #275 moved it
+	 * here. Sent on the 404 as well -- a path that is wrong now is not
+	 * permanently wrong, and a cached one would hide the fix. */
 	header_len = snprintf(header, sizeof(header),
 		"HTTP/1.1 %d %s\r\n"
 		"Content-Type: %s\r\n"
 		"Content-Length: %zu\r\n"
+		"Expires: Thu, 01 Jan 1970 00:00:00 GMT\r\n"
+		"Cache-Control: no-cache, no-store, must-revalidate, max-age=0\r\n"
 		"Connection: close\r\n"
 		"\r\n",
 		status_code, status_text, reply.content_type, reply.body.len);

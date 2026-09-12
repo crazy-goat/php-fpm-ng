@@ -18,6 +18,7 @@
 #include "fpm_shm.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_direct_ops.h"
+#include "fpm_operator_http.h"
 #include "zlog.h"
 
 /* One slot per child. See the header for why there is no lock. */
@@ -64,7 +65,6 @@ struct fpm_http_direct_ops {
 	struct fpm_http_acl_s *acl;		/* NULL = listen.allowed_clients unset */
 	const char *ping_path;			/* NULL = ping.path unset */
 	const char *ping_response;
-	const char *status_path;		/* NULL = pm.status_path unset */
 	struct fpm_http_direct_ops_shared *shared;
 	struct fpm_http_direct_ops_slot *slot;	/* this child's own, NULL if unknown */
 	/* What this child has already added to the two connection totals in the
@@ -146,29 +146,16 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 		ops->ping_path = wp->config->ping_path;
 		ops->ping_response = wp->config->ping_response ? wp->config->ping_response : "pong";
 	}
-	/* pm.status_path stays on the public listener here, and only here.
-	 * Issue #274 moves the operator endpoint of every type that has one onto a
-	 * listener of its own, and #273 is explicit that one directive must not name
-	 * two pages on two sockets -- so a type either answers the path itself or
-	 * the operator listener does, never both. .status_on_own_listener is which
-	 * one, as data; fpm_operator_endpoint.c reads the same field and registers
-	 * no route when it is set.
+	/* pm.status_path is deliberately NOT read here. Issue #275 moved this
+	 * pool's status page onto the operator endpoint's listener
+	 * (fpm_operator_endpoint.c), which renders it from the same shared counters
+	 * through fpm_pool_type_s.operator_status -- so the page is unchanged and
+	 * the directive names exactly one page on one socket, which is the rule
+	 * #273 was written to restore.
 	 *
-	 * http-direct is the one type where it is set, because this page is not the
-	 * per-pool summary the operator listener renders: it is built in the child
-	 * that answers, from that child's own connection counters and, on ?full,
-	 * from a per-child row for every scoreboard slot (issue #64). Nothing
-	 * outside the pool can produce it yet, and moving the path before something
-	 * can would replace the observation with a summary rather than relocate it.
-	 * That is #275's subject, and #275 clears this field.
-	 *
-	 * ping.path above is untouched for a different reason: it is a liveness
-	 * probe for whatever is in front of the pool, so the public listener is
-	 * where it belongs, and #273 kept it there deliberately (point 9). */
-	if (fpm_pool_type_of(wp)->status_on_own_listener
-		&& wp->config->pm_status_path && *wp->config->pm_status_path) {
-		ops->status_path = wp->config->pm_status_path;
-	}
+	 * ping.path above stays, for a different reason: it is a liveness probe for
+	 * whatever is in front of the pool, so the public listener is where it
+	 * belongs, and #273 kept it there deliberately (point 9). */
 
 	ops->shared = fpm_http_direct_ops_shared_get(wp);
 	/* The child's own slot is its scoreboard index: the scoreboard already
@@ -317,17 +304,17 @@ static int fpm_http_direct_ops_slot_alive(const struct fpm_scoreboard_s *live, u
  * theirs at zero, so a pool that has not reached pm.max_children still adds up
  * to what it has actually done. The gauges are summed over the live children
  * only, for the reason above. */
-static void fpm_http_direct_ops_totals(struct fpm_http_direct_ops *ops,
+static void fpm_http_direct_ops_totals(const struct fpm_http_direct_ops_shared *shared,
 	const struct fpm_scoreboard_s *copy, struct fpm_http_direct_ops_slot *out)
 {
 	unsigned i;
 
 	memset(out, 0, sizeof(*out));
-	if (!ops->shared) {
+	if (!shared) {
 		return;
 	}
-	for (i = 0; i < ops->shared->nslots; i++) {
-		const struct fpm_http_direct_ops_slot *in = &ops->shared->slots[i];
+	for (i = 0; i < shared->nslots; i++) {
+		const struct fpm_http_direct_ops_slot *in = &shared->slots[i];
 		unsigned r;
 
 		out->conn_accepted += in->conn_accepted;
@@ -367,23 +354,23 @@ static unsigned long fpm_http_direct_ops_refused_total(const struct fpm_http_dir
  * -- issue #53's fairness finding needed an external harness to see it, and a
  * pool-wide sum cannot show it at all. A slot that has accepted nothing is
  * printed anyway: "this child got none" is the observation. */
-static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, int json, int full,
-	struct evbuffer *out)
+static void fpm_http_direct_ops_status_workers(const struct fpm_http_direct_ops_shared *shared,
+	const struct fpm_scoreboard_s *live, int json, int full, struct fpm_operator_buf_s *out)
 {
 	unsigned i;
 
-	if (!full || !ops->shared) {
-		evbuffer_add_printf(out, "%s", json ? "}\n" : "");
+	if (!full || !shared) {
+		fpm_operator_buf_appendf(out, "%s", json ? "}\n" : "");
 		return;
 	}
 	if (json) {
-		evbuffer_add_printf(out, ",\"workers\":[");
+		fpm_operator_buf_appendf(out, ",\"workers\":[");
 	} else {
-		evbuffer_add_printf(out, "\n");
+		fpm_operator_buf_appendf(out, "\n");
 	}
-	for (i = 0; i < ops->shared->nslots; i++) {
-		const struct fpm_http_direct_ops_slot *in = &ops->shared->slots[i];
-		int alive = fpm_http_direct_ops_slot_alive(fpm_scoreboard_get(), i);
+	for (i = 0; i < shared->nslots; i++) {
+		const struct fpm_http_direct_ops_slot *in = &shared->slots[i];
+		int alive = fpm_http_direct_ops_slot_alive(live, i);
 		/* The same rule the pool totals use, said out loud per row: the totals
 		 * of a child that has gone are still this pool's, its gauges are not.
 		 * `live` is on the row so that a reader can tell "this child holds
@@ -398,10 +385,10 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 		 * which of the pool's children is the slot they just read. Taken from
 		 * the scoreboard rather than kept in the slot -- the scoreboard
 		 * already has it, and one copy cannot disagree with itself. */
-		int pid = alive ? (int) fpm_scoreboard_get()->procs[i].pid : 0;
+		int pid = alive ? (int) live->procs[i].pid : 0;
 
 		if (json) {
-			evbuffer_add_printf(out,
+			fpm_operator_buf_appendf(out,
 				"%s{\"slot\":%u,\"live\":%d,\"pid\":%d,\"retiring\":%u,"
 				"\"accepted conn\":%lu,\"live connections\":%lu,"
 				"\"active requests\":%lu,\"pending responses\":%lu,\"non-php requests\":%lu,"
@@ -413,7 +400,7 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 				in->requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 				in->conn_refused, in->conn_timed_out, in->responses_rejected);
 		} else {
-			evbuffer_add_printf(out,
+			fpm_operator_buf_appendf(out,
 				"slot:                 %u\n"
 				"live:                 %d\n"
 				"pid:                  %d\n"
@@ -436,24 +423,33 @@ static void fpm_http_direct_ops_status_workers(struct fpm_http_direct_ops *ops, 
 		}
 	}
 	if (json) {
-		evbuffer_add_printf(out, "]}\n");
+		fpm_operator_buf_appendf(out, "]}\n");
 	}
 }
 
-static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int json, int full,
-	struct evbuffer *out)
+/* Rendered from shared memory and configuration only -- see the header of
+ * fpm_pool_type_s.operator_status. `wp` is the pool being reported on, which
+ * since issue #275 is NOT the pool of the process doing the rendering: the
+ * operator endpoint's child answers the request, so the scoreboard comes from
+ * wp->scoreboard rather than from fpm_scoreboard_get() and the counters from
+ * the registry entry the master filled in before the first fork. Both are
+ * shared segments, which is why this works at all, and it is the same foreign
+ * read pool.type = status has always done (fpm_pool_status.c). */
+static void fpm_http_direct_ops_status_body(struct fpm_worker_pool_s *wp, int json, int full,
+	struct fpm_operator_buf_s *out)
 {
-	struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(fpm_scoreboard_get(), 0);
+	const struct fpm_http_direct_ops_shared *shared = fpm_http_direct_ops_shared_get(wp);
+	struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(wp->scoreboard, 0);
 	struct fpm_http_direct_ops_slot total;
 	char start[64];
 	struct tm tm;
 	time_t now = time(NULL);
 
 	if (!copy) {
-		evbuffer_add_printf(out, "%s", json ? "{}\n" : "unavailable\n");
+		fpm_operator_buf_appendf(out, "%s", json ? "{}\n" : "unavailable\n");
 		return;
 	}
-	fpm_http_direct_ops_totals(ops, fpm_scoreboard_get(), &total);
+	fpm_http_direct_ops_totals(shared, wp->scoreboard, &total);
 	if (localtime_r(&copy->start_epoch, &tm) && strftime(start, sizeof(start), "%d/%b/%Y:%H:%M:%S %z", &tm)) {
 		/* nothing: start is filled in */
 	} else {
@@ -461,7 +457,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 	}
 
 	if (json) {
-		evbuffer_add_printf(out,
+		fpm_operator_buf_appendf(out,
 			"{\"pool\":\"%s\",\"process manager\":\"%s\",\"start time\":\"%s\",\"start since\":%lu,"
 			"\"accepted conn\":%lu,\"idle processes\":%d,\"active processes\":%d,\"total processes\":%d,"
 			"\"max active processes\":%d,\"max children reached\":%u,\"requests\":%lu,"
@@ -482,7 +478,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 			total.conn_refused, total.conn_timed_out, total.responses_rejected, total.retiring);
 	} else {
-		evbuffer_add_printf(out,
+		fpm_operator_buf_appendf(out,
 			"pool:                 %s\n"
 			"process manager:      %s\n"
 			"start time:           %s\n"
@@ -519,30 +515,17 @@ static void fpm_http_direct_ops_status_body(struct fpm_http_direct_ops *ops, int
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 			total.conn_refused, total.conn_timed_out, total.responses_rejected, total.retiring);
 	}
-	fpm_http_direct_ops_status_workers(ops, json, full, out);
+	fpm_http_direct_ops_status_workers(shared, wp->scoreboard, json, full, out);
 	fpm_scoreboard_free_copy(copy);
 }
 
-/* Whether the query string carries this bare flag among its '&'-separated
- * parameters -- the spelling upstream's status page uses, so "?json&full" is
- * two flags and not one parameter named "json&full". */
-static int fpm_http_direct_ops_has_flag(struct evhttp_request *http, const char *flag)
+void fpm_http_direct_ops_render_status(struct fpm_worker_pool_s *wp, const char *query,
+	struct fpm_operator_reply_s *reply)
 {
-	const char *uri = evhttp_request_get_uri(http);
-	const char *p = uri ? strchr(uri, '?') : NULL;
-	size_t want = strlen(flag);
+	int json = fpm_operator_http_has_flag(query, "json");
 
-	while (p) {
-		size_t len;
-
-		p++;
-		len = strcspn(p, "&");
-		if (len == want && !strncmp(p, flag, want)) {
-			return 1;
-		}
-		p = strchr(p, '&');
-	}
-	return 0;
+	reply->content_type = json ? "application/json" : "text/plain; charset=utf-8";
+	fpm_http_direct_ops_status_body(wp, json, fpm_operator_http_has_flag(query, "full"), &reply->body);
 }
 
 static void fpm_http_direct_ops_send(struct evhttp_request *http, const char *content_type,
@@ -560,11 +543,15 @@ static void fpm_http_direct_ops_send(struct evhttp_request *http, const char *co
 	evhttp_send_reply(http, 200, "OK", body);
 }
 
-/* Matched against the path, with any query string cut off: "/status?json" is
- * the status page, and a path is compared whole so that "/statuses" is not. No
- * percent-decoding, which is deliberate -- pm.status_path is a literal in the
- * pool file and upstream matches it literally too, so "/%73tatus" is not a way
- * past a proxy rule written against the documented spelling. */
+/* Matched against the path, with any query string cut off, and matched whole so
+ * that "/pings" is not "/ping". No percent-decoding, which is deliberate --
+ * ping.path is a literal in the pool file and upstream matches it literally
+ * too, so "/%70ing" is not a way past a proxy rule written against the
+ * documented spelling.
+ *
+ * Only ping.path is here. pm.status_path left this listener in issue #275 and
+ * is answered by the operator endpoint -- see the note in
+ * fpm_http_direct_ops_init_child(). */
 int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp_request *http,
 	int *status, size_t *bytes)
 {
@@ -574,10 +561,7 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
 	struct evbuffer *body;
 	char path[512];
 
-	if (!ops || !uri) {
-		return 0;
-	}
-	if (!ops->ping_path && !ops->status_path) {
+	if (!ops || !uri || !ops->ping_path) {
 		return 0;
 	}
 	path_len = query ? (size_t) (query - uri) : strlen(uri);
@@ -586,7 +570,7 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
 	}
 	memcpy(path, uri, path_len);
 	path[path_len] = '\0';
-	if (ops->ping_path && !strcmp(path, ops->ping_path)) {
+	if (!strcmp(path, ops->ping_path)) {
 		body = evbuffer_new();
 		if (!body) {
 			return 0;
@@ -596,19 +580,5 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
 		evbuffer_free(body);
 		return 1;
 	}
-	if (ops->status_path && !strcmp(path, ops->status_path)) {
-		int json = fpm_http_direct_ops_has_flag(http, "json");
-		int full = fpm_http_direct_ops_has_flag(http, "full");
-
-		body = evbuffer_new();
-		if (!body) {
-			return 0;
-		}
-		fpm_http_direct_ops_status_body(ops, json, full, body);
-		fpm_http_direct_ops_send(http, json ? "application/json" : "text/plain", body, status, bytes);
-		evbuffer_free(body);
-		return 1;
-	}
-
 	return 0;
 }

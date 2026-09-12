@@ -7,6 +7,7 @@ include "skipif.inc";
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 
 /* Issue #256. fpmng-http-direct-retire.phpt signals a child that is INSIDE a
  * request, and that path works for a reason that does not generalise: while
@@ -32,6 +33,11 @@ file_put_contents($root . '/front.php', '<?php echo getmypid();');
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $retire = $base + 41;
 $stop = $base + 42;
+/* Both status pages, on one operator listener (issue #275). The page is not
+ * answered by the child under test any more, which is why the checks below ask
+ * the held connection for a PHP request as well: the page says what the pool
+ * reports, the request says the child is still there to report it. */
+$ops = '127.0.0.1:' . ($base + 43);
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}
@@ -44,6 +50,7 @@ pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
 pm.status_path = /status
+pm.status_listen = $ops
 ; Long enough that the drain is ended by this test closing the connection and
 ; not by the read timeout: a timeout would hide a child that never retired.
 http.read_timeout = 30000
@@ -54,7 +61,8 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
+pm.status_path = /stop-status
+pm.status_listen = $ops
 http.read_timeout = 30000
 CFG;
 
@@ -152,11 +160,15 @@ try {
     $held = connect($retire);
     $pid = warm($held);
     $tester->signal('USR1', $pid);
-    $decoded = until(function () use ($held) {
-        [$status, $body, $close] = fetch($held, '/status?json&full');
-        verify($status === 200, "status on the held connection: $status");
-        $decoded = json_decode($body, true);
-        verify(is_array($decoded), "status is not JSON: $body");
+    $decoded = until(function () use ($held, $pid, $ops) {
+        /* On the connection the child is draining: it answers, and it is still
+         * the same child. Before the fix this threw on a closed connection. */
+        [$status, $body] = fetch($held, '/');
+        verify($status === 200, "request on the held connection: $status");
+        verify((int) $body === $pid, "a different child answered: $body, not $pid");
+        $page = fpmng_operator_body($ops, '/status?json&full');
+        $decoded = json_decode($page, true);
+        verify(is_array($decoded), "status is not JSON: $page");
         return $decoded['retiring children'] === 1 ? $decoded : null;
     }, 15, 'the idle child to report itself retiring');
     verify($decoded['workers'][0]['pid'] === $pid,

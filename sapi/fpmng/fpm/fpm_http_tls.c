@@ -735,20 +735,52 @@ SSL_CTX *fpm_http_tls_ctx_new(const char *pool, struct fpm_http_tls_s *tls)
 	return ctx;
 }
 
-/* One TLS record's worth per SSL_write(), which is what libevent's own writer
- * uses (WRITE_FRAME, bufferevent_openssl.c). Bigger would not put more on the
- * wire -- the record is the unit OpenSSL emits -- and would make a blocked
- * write hold a larger promise that every retry has to keep. */
+/* One TLS record's worth per SSL_write(): 16384 is SSL3_RT_MAX_PLAIN_LENGTH,
+ * the most plaintext OpenSSL puts in one record, so a call maps to at most one
+ * record on the wire. Deliberately NOT libevent's WRITE_FRAME, which is 15000
+ * (bufferevent_openssl.c:731) and does not bound its SSL_write() anyway --
+ * do_write() overwrites that argument (bufferevent_openssl.c:664) and passes
+ * the whole peeked iov_len, because evbuffer_peek() does not trim the last
+ * vector to the requested length (buffer.c, evbuffer_peek: iov_len =
+ * chain->off). Bigger here would not put more on the wire and would make a
+ * blocked write hold a larger promise that every retry has to keep. */
 #define FPM_HTTP_TLS_WRITE_FRAME 16384
+
+/* The other half of libevent's do_write(), and the reason it cannot live in the
+ * write step above: libevent ends a successful write with
+ * bufferevent_trigger_nolock_(bev, EV_WRITE, BEV_OPT_DEFER_CALLBACKS)
+ * (bufferevent_openssl.c:727), and that callback is how evhttp finds out a
+ * response has left -- evhttp_write_cb() runs evcon->cb, which for a finished
+ * reply is evhttp_send_done(). Nothing else fires it on this path:
+ * consider_writing() calls do_write() only while the buffer still holds
+ * something (bufferevent_openssl.c:877), so a buffer emptied by us leaves the
+ * request open forever. Measured on the test box: after fpmng_respond() on a
+ * TLS pool the client got its response and then never got an answer to the
+ * next request on the same keep-alive connection (4 s client timeout), while
+ * the same script on a plaintext pool answered it in 0.30 s.
+ *
+ * Called only where the response is complete, never per write. Per write it
+ * truncates: the callback is deferred, the loop runs it after the request
+ * callback returns, and by then the terminating chunk has been queued but not
+ * yet written -- evhttp_write_cb() does not look at the buffer, so
+ * evhttp_send_done() finishes the request on top of it. Measured the same way:
+ * a 16 MiB streamed body arrived exactly 5 bytes short, without its "0\r\n\r\n".
+ *
+ * Deferred rather than immediate because evhttp_send_done() frees the request
+ * and the caller is inside that request's own callback. */
+void fpm_http_tls_notify_written(struct bufferevent *bev)
+{
+	bufferevent_trigger(bev, EV_WRITE, BEV_TRIG_DEFER_CALLBACKS);
+}
 
 ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events)
 {
 	struct evbuffer *out = bufferevent_get_output(bev);
 	SSL *ssl = bufferevent_openssl_get_ssl(bev);
-	struct evbuffer_iovec vec;
+	struct evbuffer_iovec vec[FPM_HTTP_TLS_WRITE_VECS];
 	ev_ssize_t written;
 	size_t len;
-	int r;
+	int r, n, i;
 
 	*poll_events = POLLOUT;
 	if (!ssl) {
@@ -768,17 +800,34 @@ ev_ssize_t fpm_http_tls_write_output(struct bufferevent *bev, short *poll_events
 	 * wrote the 5-byte terminating chunk about 542,000 times -- 2.7 MB of
 	 * "0\r\n\r\n" -- with strace showing back-to-back 27-byte TLS records and
 	 * no poll() between them. */
-	r = evbuffer_peek(out, FPM_HTTP_TLS_WRITE_FRAME, NULL, &vec, 1);
-	if (r < 1 || vec.iov_len == 0) {
-		return 0;
+	/* Several vectors, and empty ones skipped, because a chain with off == 0
+	 * in front of the data is a case libevent guards against explicitly in the
+	 * same loop: "SSL_write will (reasonably) return 0 if we tell it to send 0
+	 * data. Skip this case so we don't interpret the result as an error"
+	 * (bufferevent_openssl.c:663). Peeking one vector and handing that zero
+	 * length to the caller as "blocked" would spin: the pump would poll() a
+	 * socket that is already writable, spend no measurable time, and never
+	 * reach its http.stream_write_timeout. */
+	n = evbuffer_peek(out, FPM_HTTP_TLS_WRITE_FRAME, NULL, vec, FPM_HTTP_TLS_WRITE_VECS);
+	if (n > FPM_HTTP_TLS_WRITE_VECS) {
+		n = FPM_HTTP_TLS_WRITE_VECS;
 	}
-	len = vec.iov_len < FPM_HTTP_TLS_WRITE_FRAME ? vec.iov_len : FPM_HTTP_TLS_WRITE_FRAME;
+	for (i = 0; i < n && vec[i].iov_len == 0; i++) {
+		/* nothing: an empty chain in front of the data */
+	}
+	if (i >= n) {
+		return FPM_HTTP_TLS_WRITE_IDLE;
+	}
+	len = vec[i].iov_len < FPM_HTTP_TLS_WRITE_FRAME ? vec[i].iov_len : FPM_HTTP_TLS_WRITE_FRAME;
 	/* Cleared before, not read after a success: SSL_get_error() is only
 	 * meaningful against a fresh queue, and a stale entry from an earlier
 	 * handshake would otherwise be reported as this write's failure. */
 	ERR_clear_error();
-	r = SSL_write(ssl, vec.iov_base, (int) len);
+	r = SSL_write(ssl, vec[i].iov_base, (int) len);
 	if (r > 0) {
+		/* Drains from the front, which is why the empty chains skipped above
+		 * are not left behind: they hold no bytes, so the drain frees them and
+		 * takes r bytes out of the first chain that has any. */
 		evbuffer_drain(out, (size_t) r);
 		return (ev_ssize_t) r;
 	}

@@ -83,6 +83,13 @@ switch ($_GET['mode'] ?? 'plain') {
         usleep(1000000);
         echo "second\n";
         break;
+    case 'respond':
+        /* issue #57 on a TLS pool: the response is finished from inside the
+         * script, which goes out through the same write step streaming uses. */
+        echo "responded\n";
+        fpmng_respond();
+        usleep(300000);
+        break;
     case 'stall':
         /* Far more than any socket buffer or TLS record, so the pump is
          * guaranteed to block against a client that never reads. */
@@ -96,6 +103,7 @@ PHP);
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $streamPort = $base + 35;
 $stallPort = $base + 36;
+$respondPort = $base + 37;
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}
@@ -108,6 +116,16 @@ pm.max_children = 1
 chdir = $root
 http.front_controller = /index.php
 http.stream = yes
+http.tls_cert = $root/tls.crt
+http.tls_key = $root/tls.key
+php_admin_value[output_buffering] = 0
+[tlsrespond]
+listen = 127.0.0.1:$respondPort
+pool.type = http-direct
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = /index.php
 http.tls_cert = $root/tls.crt
 http.tls_key = $root/tls.key
 php_admin_value[output_buffering] = 0
@@ -233,7 +251,29 @@ try {
     fclose($fp);
     echo "tls-streamed-early: first chunk before the script finished\n";
 
-    /* 3. The stalled-client failure mode of #56 holds over TLS too: the worker
+    /* 3. A response finished from inside the script (issue #57) leaves the
+     *    request finished, not just delivered. The write step drains the
+     *    connection's output buffer itself, and libevent's own writer ends a
+     *    successful write by triggering the write callback -- which is how
+     *    evhttp runs evhttp_send_done(). A step that drains without that
+     *    delivers the bytes and then leaves the request open forever: measured
+     *    on the test box against the first version of this code, the client
+     *    below got 'responded' and then waited out its own timeout for the
+     *    answer to the second request. A buffered pool, because that is where
+     *    the buffer is emptied to zero by one call. */
+    $fp = tlsConnect($respondPort);
+    fwrite($fp, "GET /?mode=respond HTTP/1.1\r\nHost: t\r\n\r\n");
+    $headers = readHead($fp, 200);
+    check(readExactly($fp, (int) ($headers['content-length'] ?? 0)) === "responded\n",
+        'fpmng_respond() over TLS did not deliver its body');
+    fwrite($fp, "GET /?mode=plain HTTP/1.1\r\nHost: t\r\n\r\n");
+    $headers = readHead($fp, 200);
+    check(readExactly($fp, (int) ($headers['content-length'] ?? 0)) === 'plain',
+        'the keep-alive connection was not usable after fpmng_respond()');
+    fclose($fp);
+    echo "tls-respond: request finished, connection still usable\n";
+
+    /* 4. The stalled-client failure mode of #56 holds over TLS too: the worker
      *    is not held by a client that stopped reading, and the truncated
      *    message is left unterminated so the client cannot mistake it for a
      *    complete response. */
@@ -262,6 +302,7 @@ try {
 --EXPECT--
 tls-streamed-16MiB: 16777216 bytes in order
 tls-streamed-early: first chunk before the script finished
+tls-respond: request finished, connection still usable
 tls-streamed-stall: connection dropped, message unterminated
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

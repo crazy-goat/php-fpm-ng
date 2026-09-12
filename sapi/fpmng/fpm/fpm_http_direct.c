@@ -115,6 +115,9 @@ struct fpm_direct_worker {
 	 * executor keeps no "if (tls)" of its own. */
 	ev_ssize_t (*stream_write)(struct bufferevent *bev, evutil_socket_t fd,
 		short *poll_events, const char **why);
+	/* The other half of that write step, or NULL when the transport needs no
+	 * second half; see fpm_direct_stream_notify(). */
+	void (*stream_notify)(struct bufferevent *bev);
 };
 
 struct fpm_direct_request {
@@ -913,6 +916,13 @@ static ev_ssize_t fpm_direct_write_tls(struct bufferevent *bev, evutil_socket_t 
 
 	(void) fd;
 	written = fpm_http_direct_tls_write(bev, poll_events);
+	/* The two negative values mean opposite things: FPM_HTTP_TLS_WRITE_IDLE is
+	 * "nothing to hand OpenSSL", which the pump counts and tolerates once,
+	 * while anything else below zero ends the connection. They share a value
+	 * (-2) on purpose, so the mapping is a rename rather than arithmetic. */
+	if (written == FPM_HTTP_DIRECT_TLS_WRITE_IDLE) {
+		return FPM_DIRECT_WRITE_IDLE;
+	}
 	if (written < 0) {
 		*why = "encrypting the response for the client failed";
 	}
@@ -1041,6 +1051,41 @@ static void fpm_direct_stream_completed_inline(struct evhttp_request *request, v
 	fpm_direct_response_done(request, w);
 }
 
+/* Tells the transport that a complete response has been written out of the
+ * buffer by this file rather than by the event loop.
+ *
+ * Only the TLS step needs it. A plaintext write leaves the descriptor libevent
+ * is already watching, so evhttp still finishes the request by itself; the TLS
+ * step empties the buffer behind libevent's back, and evhttp's writecb -- the
+ * one call that ends up in evhttp_send_done() -- runs only off a write libevent
+ * performed (bufferevent_openssl.c:727, called from a consider_writing() loop
+ * that a drained buffer already ended, :877). Measured on the test box without
+ * this call: the client got its response and then waited out its 4 s timeout on
+ * the next request of the same keep-alive connection, against 0.30 s on a
+ * plaintext pool.
+ *
+ * Never with bytes still queued: the notification is deferred to the loop, and
+ * evhttp_write_cb() does not look at the buffer before deciding the response
+ * is out. Measured the other way round, notifying after every write: a 16 MiB
+ * streamed body reached the client 5 bytes short, without its "0\r\n\r\n"
+ * terminating chunk, because the terminator was queued after the last write
+ * but the deferred callback ran first. */
+static void fpm_direct_stream_notify(struct fpm_direct_request *r)
+{
+	struct evhttp_connection *connection;
+	struct bufferevent *bev;
+
+	if (!r->http || !r->w->stream_notify) {
+		return;
+	}
+	connection = evhttp_request_get_connection(r->http);
+	bev = connection ? evhttp_connection_get_bufferevent(connection) : NULL;
+	if (!bev || evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
+		return;
+	}
+	r->w->stream_notify(bev);
+}
+
 /* The streaming counterpart of the buffered tail of fpm_direct_handle().
  *
  * `flush` is what fpmng_respond() needs and the end of a request does not: put
@@ -1103,6 +1148,10 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 	evhttp_request_set_on_complete_cb(r->http, fpm_direct_response_done, r->w);
 	if (flush) {
 		fpm_direct_stream_pump(r, 0);
+		/* The terminating chunk evhttp_send_reply_end() queued above is part of
+		 * what the pump just wrote, so this is the first moment the response is
+		 * both complete and out. */
+		fpm_direct_stream_notify(r);
 	}
 }
 
@@ -1221,6 +1270,7 @@ static void fpm_direct_push_now(struct fpm_direct_request *r)
 			return;
 		}
 	}
+	fpm_direct_stream_notify(r);
 }
 
 /* The accounting every ending of a request shares: one more request served by
@@ -1855,6 +1905,7 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * fixed for its whole life, and this is the only thing the response path
 	 * does differently on TLS. */
 	w.stream_write = fpm_http_direct_tls_enabled(wp) ? fpm_direct_write_tls : fpm_direct_write_plain;
+	w.stream_notify = fpm_http_direct_tls_enabled(wp) ? fpm_http_direct_tls_notify_written : NULL;
 	limits.read_timeout_ms = wp->config->http_read_timeout;
 	limits.max_connections = wp->config->http_max_connections;
 	limits.max_per_client = wp->config->http_max_connections_per_client;

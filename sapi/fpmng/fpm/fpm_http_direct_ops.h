@@ -140,7 +140,7 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
  * Called in the operator endpoint's child, which is not one of this pool's
  * children, so everything it reads is a shared segment: the per-slot counters
  * the master allocated in fpm_http_direct_ops_init_main() and wp->scoreboard.
- * The same foreign read pool.type = status has always done. */
+ * The same foreign read the generic operator pages do. */
 struct fpm_operator_reply_s;
 void fpm_http_direct_ops_render_status(struct fpm_worker_pool_s *wp, const char *query,
 	struct fpm_operator_reply_s *reply);

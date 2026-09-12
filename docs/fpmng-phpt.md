@@ -6,7 +6,8 @@ is how the runner finds them, and `run-fpmng-phpt.sh` fails when a file this
 repo owns is not reached by it (issue #95). They use the upstream FPM harness copied by
 `build/prepare.sh` (`tester.inc`, `skipif.inc`, FastCGI client helpers) and
 assert behaviour that upstream's 150-test suite does not cover: `pool.type`,
-`pool.executor`, the HTTP gateway, cron, supervisor, and the status pool.
+`pool.executor`, the HTTP gateway, cron, supervisor, and the operator
+endpoint.
 
 Each test's `--TEST--` title and inline comments name the documented claim they
 protect (`docs/NOTES.md`, `docs/cron.md`, `docs/frameworks.md`, or a finished

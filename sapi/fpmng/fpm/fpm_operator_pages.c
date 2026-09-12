@@ -1,29 +1,25 @@
-/* fpm-ng: pool.type = status.
+/* fpm-ng: the two operator pages -- Prometheus text and JSON -- for one pool.
  *
- * See fpm_pool_status.h and section 3u of docs/NOTES.md for the design
- * rationale. In short: this is the only pool type that does not start PHP at
- * all — the child runs its own accept loop on its own socket (the same
- * mechanism as listen for fcgi/http, but listening DIRECTLY, without fcgi+1 as
- * the HTTP gateway does) and answers every connection with raw HTTP, without
- * going through PHP or FastCGI.
+ * This was pool.type = status, a pool that ran no PHP, listened on its own
+ * socket and aggregated every pool in the master. Issue #278 removed that pool
+ * and kept these renderers: the same two formats, now produced for the pool
+ * that configured the path and served by fpm_operator_endpoint.c on the
+ * operator listener. See docs/operator-endpoint.md.
  *
- * THE DATA SHAPE DIFFERS between pool types (this is the substance of the task,
- * not a detail) — branch on fpm_pool_type_s.serves_requests:
- *   - serves_requests = 1 (fcgi, http): idle/active workers, requests — read
- *     directly from that pool's scoreboard (fpm_scoreboard_copy(), the same
- *     mechanism existing fpm_status.c uses for its OWN pool — here we read
- *     ANOTHER pool's scoreboard, from ANOTHER process, hence a copy instead of
- *     direct reading under the lock).
+ * THE DATA SHAPE DIFFERS between pool types (this is the substance, not a
+ * detail) -- branch on fpm_pool_type_s.serves_requests:
+ *   - serves_requests = 1 (fcgi, http): idle/active workers and the type's
+ *     baseline counter, read from that pool's scoreboard with
+ *     fpm_scoreboard_copy() -- a copy, because the renderer runs in the
+ *     operator endpoint's process and not in one of the pool's own children.
  *   - serves_requests = 0 (supervisor, cron): state/last_start/exit_code/
  *     consecutive_failures (/next_run for cron) through fpm_pool_type_s.status(),
  *     which each such type implements in its OWN file, reading its OWN shared
  *     memory (fpm_pool_supervisor.c, fpm_pool_cron.c). This file does not know
- *     the internal structure of those states — exactly as required by the
+ *     the internal structure of those states -- exactly as required by the
  *     contract in docs/NOTES.md 3h.
- *   - types without .status and with serves_requests = 0 (that is, "status"
- *     itself) — omitted from output entirely, without special treatment by name.
  *
- * The metric label is the pool name — cardinality is naturally bounded (the
+ * The metric label is the pool name -- cardinality is naturally bounded (the
  * number of pools in the config). No labels with unbounded cardinality (no
  * request path, no timestamp as a label, etc.).
  */
@@ -43,7 +39,7 @@
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
-#include "fpm_pool_status.h"
+#include "fpm_operator_pages.h"
 #include "fpm_operator_http.h"
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
@@ -51,48 +47,7 @@
 #include "php_fpmng_metrics.h"
 #include "zlog.h"
 
-/* Rejected, not allowed, directives — see fpm_pool_type_check_directives()
- * in fpm_pool_type.c. Unlike supervisor/cron, "listen"/"listen." are NOT
- * rejected here: status really listens on its own port. The remaining reasons
- * are the same as for supervisor/cron: no FastCGI requests (so request
- * directives, ping., and access. make no sense), no PHP (so pm.* is generated
- * programmatically, always static+1 — there is no "number of processes"
- * directive; one process is entirely sufficient for monitoring scrapes), and
- * directives belonging to the OTHER pool types. */
-const char *const fpm_pool_status_rejects[] = {
-	"pm",
-	"pm.",
-	"request_terminate_timeout",
-	"request_terminate_timeout_track_finished",
-	"request_slowlog_timeout",
-	"request_slowlog_trace_depth",
-	"slowlog",
-	"ping.",
-	"access.",
-	"security.limit_extensions",
-	"supervisor.",
-	"cron.",
-	"http.",
-	"fiber.",
-	NULL
-};
-
-int fpm_pool_status_validate(struct fpm_worker_pool_s *wp) /* {{{ */
-{
-	/* One process is entirely sufficient: this is a lightweight, sequential HTTP
-	 * server for monitoring scrapes (Prometheus typically every 15-60s), not
-	 * public traffic. The absence of a "number of processes" directive is
-	 * deliberate — if more were ever needed, that would be a design decision (a
-	 * new status.processes directive, modeled on supervisor.processes), not a
-	 * default. */
-	wp->config->pm = PM_STYLE_STATIC;
-	wp->config->pm_max_children = 1;
-
-	return 0;
-}
-/* }}} */
-
-static const char *fpm_pool_status_state_name(enum fpm_pool_state_e state) /* {{{ */
+static const char *fpm_operator_page_state_name(enum fpm_pool_state_e state) /* {{{ */
 {
 	switch (state) {
 		case FPM_POOL_STATE_RUNNING:  return "running";
@@ -105,12 +60,13 @@ static const char *fpm_pool_status_state_name(enum fpm_pool_state_e state) /* {{
 }
 /* }}} */
 
-/* Shared by both formats: for every pool in the master, in config order, call
- * the callback with ready data — either from the scoreboard (serves_requests) or
- * from fpm_pool_type_s.status() (the rest). A pool without .status and with
- * serves_requests = 0 (that is, "status" itself) is skipped — there is nothing
- * to show, and no need for special detection by name. */
-struct fpm_pool_status_row_s {
+/* Shared by both formats: the one pool this endpoint reports on, with ready
+ * data — either from the scoreboard (serves_requests) or from
+ * fpm_pool_type_s.status() (the rest). Before issue #278 this walked every pool
+ * in the master, in config order, because one page covered all of them; a page
+ * is now a directive on the pool it describes, so the walk is gone and the row
+ * is the pool's own. */
+struct fpm_operator_page_row_s {
 	const char *name;
 	const char *type_name;
 	int serves_requests;
@@ -129,69 +85,59 @@ struct fpm_pool_status_row_s {
 	struct fpm_pool_status_s st;
 };
 
-typedef void (*fpm_pool_status_row_cb)(struct fpm_operator_buf_s *b, const struct fpm_pool_status_row_s *row, int first);
+typedef void (*fpm_operator_page_row_cb)(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row);
 
-static void fpm_pool_status_collect_and_render(struct fpm_operator_buf_s *b, fpm_pool_status_row_cb cb,
-	struct fpm_worker_pool_s *only) /* {{{ */
+/* Gather one pool's row and hand it to the format that asked for it. Both
+ * formats go through here so that a field added for one of them cannot go
+ * missing from the other -- which is the whole reason this is a callback and
+ * not two copies of the branch on serves_requests. */
+static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator_page_row_cb cb,
+	struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	struct fpm_worker_pool_s *wp;
-	int first = 1;
+	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+	struct fpm_operator_page_row_s row;
 
-	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
-		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
-		struct fpm_pool_status_row_s row;
+	memset(&row, 0, sizeof(row));
+	row.name = wp->config->name;
+	row.type_name = type->name;
+	row.serves_requests = type->serves_requests;
+	row.counter = type->baseline_counter;
 
-		/* A per-pool operator endpoint (issue #274) reports its OWN pool; the
-		 * aggregating pool.type = status passes NULL and reports every pool.
-		 * Same walk either way -- the filter is here rather than in a second
-		 * collector so that a row added for one of them cannot go missing from
-		 * the other. */
-		if (only && wp != only) {
-			continue;
+	if (type->serves_requests) {
+		struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(wp->scoreboard, 0);
+
+		if (!copy) {
+			return;
 		}
-
-		memset(&row, 0, sizeof(row));
-		row.name = wp->config->name;
-		row.type_name = type->name;
-		row.serves_requests = type->serves_requests;
-		row.counter = type->baseline_counter;
-
-		if (type->serves_requests) {
-			struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(wp->scoreboard, 0);
-
-			if (!copy) {
-				continue;
-			}
-			row.idle = copy->idle;
-			row.active = copy->active;
-			/* The scoreboard already counts what this type calls an
-			 * invocation, and has since upstream: the baseline counter for a
-			 * request-serving pool is that number under a name, not a second
-			 * count of the same thing. */
-			row.counter_value = copy->requests;
-			fpm_scoreboard_free_copy(copy);
-		} else if (type->status) {
-			type->status(wp, &row.st);
-			row.counter_value = row.st.baseline;
-		} else {
-			/* Type without meaningful state to show (today: "status" itself) —
-			 * skip it instead of guessing. */
-			continue;
-		}
-
-		cb(b, &row, first);
-		first = 0;
+		row.idle = copy->idle;
+		row.active = copy->active;
+		/* The scoreboard already counts what this type calls an invocation,
+		 * and has since upstream: the baseline counter for a request-serving
+		 * pool is that number under a name, not a second count of the same
+		 * thing. */
+		row.counter_value = copy->requests;
+		fpm_scoreboard_free_copy(copy);
+	} else if (type->status) {
+		type->status(wp, &row.st);
+		row.counter_value = row.st.baseline;
+	} else {
+		/* A type with no worker counts and no state to report. Nothing has
+		 * this shape since issue #278 removed pool.type = status, which did --
+		 * it reported on others and not on itself -- but a row is skipped
+		 * rather than guessed at, because the alternative is a page of zeroes
+		 * that looks like a measurement. */
+		return;
 	}
+
+	cb(b, &row);
 }
 /* }}} */
 
-static void fpm_pool_status_row_prometheus(struct fpm_operator_buf_s *b, const struct fpm_pool_status_row_s *row, int first) /* {{{ */
+static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
 {
 	static const char *const states[] = { "running", "backoff", "gave_up", "finished", "idle" };
 	time_t now = time(NULL);
 	size_t i;
-
-	(void) first;
 
 	fpm_operator_buf_appendf(b, "fpmng_pool_info{pool=\"%s\",type=\"%s\"} 1\n", row->name, row->type_name);
 
@@ -237,7 +183,7 @@ static void fpm_pool_status_row_prometheus(struct fpm_operator_buf_s *b, const s
 }
 /* }}} */
 
-void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *only) /* {{{ */
+void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	fpm_operator_buf_appendf(b,
 		"# HELP fpmng_pool_info Pool identity and type.\n"
@@ -266,7 +212,7 @@ void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_
 		"# TYPE fpmng_pool_next_run_seconds gauge\n"
 		"# HELP fpmng_pool_backoff_seconds Seconds remaining in supervisor backoff.\n"
 		"# TYPE fpmng_pool_backoff_seconds gauge\n");
-	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_prometheus, only);
+	fpm_operator_page_collect(b, fpm_operator_page_row_prometheus, wp);
 
 	/* Application metrics (NOTES 3k): the time-series tables written by workers
 	 * into shm — read another process's shared memory from this process,
@@ -274,24 +220,20 @@ void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_
 	 * series (nobody registered anything) = no additional lines, deliberately
 	 * without an "occupier" comment.
 	 *
-	 * A per-pool endpoint renders its own pool's worker slots only (#276): a
-	 * pool owns a contiguous run of them, so the filter is a slot range rather
-	 * than a string match on the pool= label, and a pool that registered
-	 * nothing renders nothing instead of the other pools' numbers. The
-	 * aggregate endpoint (pool.type = status) still renders every slot.
+	 * An endpoint renders its own pool's worker slots only (#276): a pool owns
+	 * a contiguous run of them, so the filter is a slot range rather than a
+	 * string match on the pool= label, and a pool that registered nothing
+	 * renders nothing instead of the other pools' numbers.
 	 *
-	 * The pool= label stays on both, even though on a per-pool endpoint it is
-	 * constant: it is what lets a scraper that reads several pools' endpoints
-	 * put the series side by side, and dropping it would make the same series
-	 * name mean different things depending on which port it came from. */
+	 * The pool= label stays even though on a per-pool endpoint it is constant:
+	 * it is what lets a scraper that reads several pools' endpoints put the
+	 * series side by side, and dropping it would make the same series name mean
+	 * a different pool depending on which port it came from. */
 	{
 		char *text = NULL;
 		size_t len = 0;
-		int rc = only
-			? fpm_metrics_render_pool(only, &text, &len)
-			: fpmng_metrics_render_text(&text, &len);
 
-		if (!rc && text && len) {
+		if (!fpm_metrics_render_pool(wp, &text, &len) && text && len) {
 			fpm_operator_buf_appendf(b, "%s", text);
 		}
 		free(text);
@@ -299,13 +241,9 @@ void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_
 }
 /* }}} */
 
-static void fpm_pool_status_row_json(struct fpm_operator_buf_s *b, const struct fpm_pool_status_row_s *row, int first) /* {{{ */
+static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
 {
 	time_t now = time(NULL);
-
-	if (!first) {
-		fpm_operator_buf_appendf(b, ",");
-	}
 
 	/* The baseline counter's JSON key is the short name the type chose, which is
 	 * why "requests" below is not written out: on a request-serving pool that IS
@@ -326,7 +264,7 @@ static void fpm_pool_status_row_json(struct fpm_operator_buf_s *b, const struct 
 	fpm_operator_buf_appendf(b,
 		"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false,"
 		"\"state\":\"%s\",\"last_start\":%ld,\"consecutive_failures\":%u",
-		row->name, row->type_name, fpm_pool_status_state_name(row->st.state),
+		row->name, row->type_name, fpm_operator_page_state_name(row->st.state),
 		(long) row->st.last_start, row->st.consecutive_failures);
 	if (row->counter) {
 		fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
@@ -349,41 +287,14 @@ static void fpm_pool_status_row_json(struct fpm_operator_buf_s *b, const struct 
 }
 /* }}} */
 
-void fpm_pool_status_render_json(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *only) /* {{{ */
+void fpm_operator_page_render_json(struct fpm_operator_buf_s *b, struct fpm_worker_pool_s *wp) /* {{{ */
 {
+	/* An array of one. The shape is what the aggregate page produced before
+	 * issue #278, and keeping it means a client that already parses
+	 * {"pools":[...]} keeps working against the per-pool address without
+	 * learning a second shape. */
 	fpm_operator_buf_appendf(b, "{\"pools\":[");
-	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_json, only);
+	fpm_operator_page_collect(b, fpm_operator_page_row_json, wp);
 	fpm_operator_buf_appendf(b, "]}\n");
-}
-/* }}} */
-
-/* pool.type = status answers two fixed paths and aggregates every pool, which
- * is what it was before issue #274 and what it stays. The per-pool endpoint
- * built on the same server has a configurable path per format and one pool to
- * report on -- see fpm_operator_endpoint.c. */
-static void fpm_pool_status_dispatch(void *ctx, const char *path, const char *query,
-	struct fpm_operator_reply_s *reply) /* {{{ */
-{
-	(void) ctx;
-	/* Neither page has a variant to ask for: /metrics is Prometheus text and
-	 * /status is JSON, always. A query string is accepted and ignored rather
-	 * than turned into a 404, so that a scraper appending its own parameters
-	 * still gets the page. */
-	(void) query;
-
-	if (!strcmp(path, "/metrics")) {
-		fpm_pool_status_render_prometheus(&reply->body, NULL);
-		reply->handled = 1;
-	} else if (!strcmp(path, "/status")) {
-		reply->content_type = "application/json";
-		fpm_pool_status_render_json(&reply->body, NULL);
-		reply->handled = 1;
-	}
-}
-/* }}} */
-
-void fpm_pool_status_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
-{
-	fpm_operator_http_serve(wp->listening_socket, fpm_pool_status_dispatch, NULL, "/metrics /status");
 }
 /* }}} */

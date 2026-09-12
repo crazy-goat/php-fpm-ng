@@ -79,7 +79,7 @@ struct fpmng_metrics_entry_s {
 };
 
 /* The series array of ONE worker. Only the owner writes; read at render
- * time by other processes (pool.type = status, render under CLI). */
+ * time by other processes (the operator endpoint, render under CLI). */
 struct fpmng_metrics_slot_s {
 	uint32_t used;			/* grows, never shrinks */
 	/* struct fpmng_metrics_entry_s entries[limit]; */
@@ -116,7 +116,7 @@ uint32_t fpmng_metrics_series_limit(void);
 /* The full Prometheus text of ALL series (aggregation across slots: sums for
  * counters/gauge_sum, the maximum for gauge_max, bucket sums for
  * histograms). Malloc'ed buffer, freed by the caller. Returns 0/-1. Touches
- * neither ZEND_API nor zend memory — also called from a pool.type = status
+ * neither ZEND_API nor zend memory — also called from the operator endpoint's
  * child, without any request context. */
 int fpmng_metrics_render_text(char **out, size_t *len);
 

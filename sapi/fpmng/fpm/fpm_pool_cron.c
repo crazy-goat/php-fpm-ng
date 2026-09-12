@@ -16,7 +16,7 @@
  *
  * A non-obvious consequence of this decision, recorded explicitly: cron has NO
  * control state in shared memory. Minimal historical state (last start/result)
- * exists only for pool.type = status and never affects cron behavior. Every new
+ * exists only for the operator pages and never affects cron behavior. Every new
  * process calculates its due time ONLY from the current clock and schedule,
  * never from what its predecessor did. This is also why "overlapping runs" is
  * not a policy that needs to be written: with pm.max_children = 1, a second
@@ -118,7 +118,7 @@ const char *const fpm_pool_cron_rejects[] = {
 	NULL
 };
 
-/* State read ONLY by pool.type = status (docs/NOTES.md 3u). Unlike supervisor,
+/* State read ONLY by the operator pages (docs/NOTES.md 3u). Unlike supervisor,
  * cron still has no policy that reads this back — every new process calculates
  * the due time only from the current clock and schedule (see the comment at the
  * top of the file), regardless of what is stored here. Exactly three fields,
@@ -322,7 +322,7 @@ static int fpm_pool_cron_sleep_until(time_t next) /* {{{ */
  * reload — this is a plain append-only file, the operator's own job to
  * rotate (same expectation as any other file this project writes to), kept
  * deliberately this simple because the alternative (run count / "overdue"
- * detection in pool.type = status, task 033c's other option) needs shared
+ * detection on the status page, task 033c's other option) needs shared
  * state and a design of its own that nobody has asked for yet; see
  * docs/cron.md. Format is fixed and grep-able, not configurable: ISO 8601
  * UTC start time, exit code, duration in whole seconds. */

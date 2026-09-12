@@ -74,8 +74,8 @@ struct fpm_supervisor_shared_s {
 						 * (planned completion, NOT a failure) */
 	unsigned char fatal_signaled;		/* SIGTERM sent to the master once already (idempotent) */
 
-	/* Fields added solely for pool.type = status (docs/NOTES.md 3u) — exactly
-	 * what status actually shows, not one field more. "failures"/"terminal"/
+	/* Fields added solely for the operator status page (docs/NOTES.md 3u) —
+	 * exactly what that page shows, not one field more. "failures"/"terminal"/
 	 * "gave_up" above already existed and serve both policy and status; the three
 	 * below serve status ONLY, and the policy does not read them. */
 	unsigned char running;			/* 1 = the script is currently running */

@@ -872,71 +872,6 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 }
 /* }}} */
 
-#define FPM_WPC_STR_CP_EX(_cfg, _scfg, _sf, _df) \
-	do { \
-		if ((_scfg)->_df && !((_cfg)->_sf = strdup((_scfg)->_df))) { \
-			return -1; \
-		} \
-	} while (0)
-#define FPM_WPC_STR_CP(_cfg, _scfg, _field) FPM_WPC_STR_CP_EX(_cfg, _scfg, _field, _field)
-
-static void fpm_conf_apply_kv_array_to_kv_array(struct key_value_s *src, void *dest) {
-	struct key_value_s *kv;
-
-	for (kv = src; kv; kv = kv->next) {
-		zval k, v;
-		ZVAL_STRING(&k, kv->key);
-		ZVAL_STRING(&v, kv->value);
-		fpm_conf_set_array(&k, &v, &dest, 0);
-	}
-}
-
-static int fpm_worker_pool_shared_status_alloc(struct fpm_worker_pool_s *shared_wp) { /* {{{ */
-	struct fpm_worker_pool_config_s *config, *shared_config;
-	config = fpm_worker_pool_config_alloc();
-	if (!config) {
-		return -1;
-	}
-	shared_config = shared_wp->config;
-
-	config->name = malloc(strlen(shared_config->name) + sizeof("_status"));
-	if (!config->name) {
-		return -1;
-	}
-	strcpy(config->name, shared_config->name);
-	strcpy(config->name + strlen(shared_config->name), "_status");
-
-	if (!shared_config->pm_status_path) {
-		shared_config->pm_status_path = strdup("/");
-	}
-
-	FPM_WPC_STR_CP_EX(config, shared_config, listen_address, pm_status_listen);
-#ifdef HAVE_FPM_ACL
-	FPM_WPC_STR_CP(config, shared_config, listen_acl_groups);
-	FPM_WPC_STR_CP(config, shared_config, listen_acl_users);
-#endif
-	FPM_WPC_STR_CP(config, shared_config, listen_allowed_clients);
-	FPM_WPC_STR_CP(config, shared_config, listen_group);
-	FPM_WPC_STR_CP(config, shared_config, listen_owner);
-	FPM_WPC_STR_CP(config, shared_config, listen_mode);
-	FPM_WPC_STR_CP(config, shared_config, user);
-	FPM_WPC_STR_CP(config, shared_config, group);
-	FPM_WPC_STR_CP(config, shared_config, pm_status_path);
-	FPM_WPC_STR_CP(config, shared_config, ping_path);
-	FPM_WPC_STR_CP(config, shared_config, ping_response);
-
-	fpm_conf_apply_kv_array_to_kv_array(shared_config->php_values, (char *)config + WPO(php_values));
-	fpm_conf_apply_kv_array_to_kv_array(shared_config->php_admin_values, (char *)config + WPO(php_admin_values));
-
-	config->pm = PM_STYLE_ONDEMAND;
-	config->pm_max_children = 2;
-
-	current_wp->shared = shared_wp;
-
-	return 0;
-}
-/* }}} */
-
 struct fpm_worker_pool_s *fpm_conf_internal_pool_alloc(const char *name, const char *type,
 	const char *listen_address, struct fpm_worker_pool_s *like) /* {{{ */
 {
@@ -1079,7 +1014,15 @@ static int fpm_conf_process_all_pools(void)
 		 * requirements of the effective combination. */
 		type = fpm_pool_type_get(wp->config->type);
 		if (!type) {
+			const char *retired = fpm_pool_type_retired(wp->config->type);
 			char known[256];
+
+			if (retired) {
+				zlog(ZLOG_ALERT, "[pool %s] pool.type '%s' no longer exists: %s",
+					wp->config->name, wp->config->type, retired);
+				return -1;
+			}
+
 			fpm_pool_type_list(known, sizeof(known));
 			zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
 				wp->config->name, wp->config->type, known);
@@ -1125,8 +1068,8 @@ static int fpm_conf_process_all_pools(void)
 		 * (validate() before listen) that check always saw the zero, unset
 		 * value — matching neither FPM_AF_UNIX nor FPM_AF_INET — and treated
 		 * every http pool as if it listened on a unix socket. This must still
-		 * run before type->validate(), because fpm_pool_status_validate() and
-		 * fpm_pool_supervisor_validate() set wp->config->pm/pm_max_children,
+		 * run before type->validate(), because fpm_pool_supervisor_validate()
+		 * and its like set wp->config->pm/pm_max_children,
 		 * which the "pm" checks further below depend on — moving listen later
 		 * than those would work too, but moving validate() before listen would
 		 * reintroduce this bug. */
@@ -1234,29 +1177,50 @@ static int fpm_conf_process_all_pools(void)
 		/* status and metrics.
 		 *
 		 * On a type that carries its own operator endpoint (#273, #274) the two
-		 * pm.*_listen directives say where THAT endpoint binds, and the pool it
-		 * binds is created by fpm_operator_endpoint.c. On every other type
-		 * pm.status_listen keeps its upstream meaning and auto-allocates a
-		 * second FastCGI pool named <pool>_status -- see #278 for the migration
-		 * note, and fpm_pool_type_s.operator_endpoint for why this is a flag on
-		 * the type and not a name compared here. */
+		 * pm.*_listen directives say where THAT endpoint binds, and the pool
+		 * they bind is created by fpm_operator_endpoint.c.
+		 *
+		 * On fastcgi and fastcgi-ng there is no such listener, on purpose:
+		 * those types have a web server in front of them, which is where an
+		 * operator already restricts who may reach a path. pm.status_path
+		 * therefore keeps its upstream meaning there -- answered on the pool's
+		 * own FastCGI socket -- and the two addresses have nothing to name.
+		 * Whether a type has the listener is a flag on the type and never a
+		 * name compared here; see fpm_pool_type_s.operator_endpoint. */
 		if (type->operator_endpoint) {
 			if (0 > fpm_operator_endpoint_configure(wp, type)) {
 				return -1;
 			}
-		} else if (wp->config->pm_status_listen && fpm_worker_pool_shared_status_alloc(wp)) {
-			zlog(ZLOG_ERROR, "[pool %s] failed to initialize a status listener pool", wp->config->name);
-		}
+		} else {
+			/* Refused rather than ignored, and this is a behaviour change:
+			 * until issue #278, pm.status_listen on these types auto-allocated
+			 * a second pool named <pool>_status, pm = ondemand,
+			 * pm.max_children = 2, speaking FastCGI and inheriting this pool's
+			 * user, group, status path, ping path and allowed clients. That
+			 * pool is gone -- #274 puts an operator endpoint on the types that
+			 * need one without a second pool, and keeping both would be two
+			 * answers to one question. A config that relied on it must now
+			 * restrict pm.status_path at the web server that is already in
+			 * front, so the error says so rather than starting a master that
+			 * quietly no longer has the pool the operator is scraping. */
+			static const char *const unsupported[] = { "pm.status_listen", "pm.metrics_listen", "pm.metrics_path" };
+			const char *const values[] = {
+				wp->config->pm_status_listen,
+				wp->config->pm_metrics_listen,
+				wp->config->pm_metrics_path
+			};
+			size_t i;
 
-		if (!type->operator_endpoint && wp->config->pm_metrics_path && *wp->config->pm_metrics_path) {
-			/* Refused rather than ignored: on a type with a front end in place
-			 * the Prometheus endpoint is #276's subject and does not exist yet,
-			 * and a directive that is accepted and does nothing is worse than
-			 * one that is refused. */
-			zlog(ZLOG_ALERT, "[pool %s] 'pm.metrics_path' is not supported by pool.type = %s: "
-				"only a type that serves its own operator endpoint has somewhere to put it",
-				wp->config->name, type->name);
-			return -1;
+			for (i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+				if (!values[i] || !*values[i]) {
+					continue;
+				}
+				zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s: that type has no "
+					"operator listener of its own, because it has a web server in front of it -- "
+					"keep 'pm.status_path' on the pool's own socket and restrict it there",
+					wp->config->name, unsupported[i], type->name);
+				return -1;
+			}
 		}
 
 		if (wp->config->pm_status_path && *wp->config->pm_status_path) {
@@ -1268,7 +1232,7 @@ static int fpm_conf_process_all_pools(void)
 				return -1;
 			}
 
-			if (!wp->config->pm_status_listen && !wp->shared && strlen(status) < 2) {
+			if (strlen(status) < 2) {
 				zlog(ZLOG_ERROR, "[pool %s] the status path '%s' is not long enough", wp->config->name, status);
 				return -1;
 			}
@@ -2050,7 +2014,7 @@ static void fpm_conf_dump(void)
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		struct key_value_s *kv;
 
-		if (!wp->config || wp->shared) {
+		if (!wp->config) {
 			continue;
 		}
 

@@ -2,7 +2,7 @@
  *
  * Two backends, one piece of PHP code:
  *  - under fpm-ng: series arrays in shared memory, one per worker (see
- *    php_fpmng_metrics.h), exposed by pool.type = status on /metrics —
+ *    php_fpmng_metrics.h), exposed on a pool's pm.metrics_path —
  *    the application serves nothing by itself;
  *  - under CLI (and every other SAPI): a process-local array; the text to
  *    expose is returned by fpm_metric_render().
@@ -453,7 +453,7 @@ static struct fpmng_metrics_entry_s *op_series(const char *name, const char *key
 	return e;
 }
 
-/* ===== render (C API, no ZEND_API — also called from pool.type = status) ===== */
+/* ===== render (C API, no ZEND_API — also called from the operator endpoint) ===== */
 
 struct agg_s {
 	char *key;

@@ -140,7 +140,7 @@ documented wherever it is offered:
   worker, not to a response; a handler returns its body instead. Mapping
   `echo`/`header()` onto the fiber-current request (as FrankenPHP does by
   swapping superglobals) is a later decision.
-- **Scoreboard semantics.** `pool.type = status` reports idle/active/requests
+- **Scoreboard semantics.** The status page reports idle/active/requests
   per worker; a worker serving 50 connections at once does not fit that shape.
   Related open work: tasks 064 and 066.
 

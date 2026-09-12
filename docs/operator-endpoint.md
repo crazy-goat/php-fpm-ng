@@ -69,6 +69,46 @@ Give one of them its own address. This matters more than it looks, because the
 default address is the same for every pool: sharing is the normal case, not the
 unusual one.
 
+## Replacing a `pool.type = status` pool
+
+That pool type is gone (issue #278). It was a listener of its own that reported
+on every other pool in the master — which is what the operator endpoint does,
+so keeping both meant two ways to configure the same listener and one page whose
+contents depended on a pool that was not the one you were reading about.
+
+A configuration that still names it does not start: the master says
+`pool.type 'status' no longer exists` and names what to set instead, rather
+than ignoring the pool and leaving you with a port nobody answers on.
+
+To migrate, delete the pool and put the two paths on the pools you actually
+want to watch, pointing them at the address the status pool used:
+
+```ini
+; before
+[monitor]
+listen = 127.0.0.1:9001
+pool.type = status
+
+; after
+[api]
+; …
+pm.status_listen = 127.0.0.1:9001
+pm.status_path = /api/status
+pm.metrics_path = /api/metrics
+
+[worker]
+; …
+pm.status_listen = 127.0.0.1:9001
+pm.status_path = /worker/status
+pm.metrics_path = /worker/metrics
+```
+
+`pm.metrics_listen` defaults to `pm.status_listen`, so the four paths above
+share the one port the scraper was already pointed at. What changes for that
+scraper is the path: one target per pool instead of one target holding every
+pool. The JSON body is unchanged in shape — still `{"pools":[…]}` — but the
+array is one element long, so a client that iterated it keeps working.
+
 ## Upgrading an `http` pool that already set `pm.status_path`
 
 On `pool.type = http` this directive used to be answered by upstream FPM's
@@ -79,9 +119,8 @@ public listener hands the path to your application like any other.
 
 The page is not the same page: it is the per-pool JSON described below, not
 upstream's `text`/`html`/`json`/`xml` status body. A scraper pointed at the
-public listener has to move to the operator address; one pointed at a
-`pool.type = status` pool is untouched, and so is `pool.type = fastcgi`, where
-`pm.status_path` keeps its upstream meaning in full.
+public listener has to move to the operator address. `pool.type = fastcgi` is
+untouched, and keeps `pm.status_path` with its upstream meaning in full.
 
 ## Upgrading an `http-direct` pool that already set `pm.status_path`
 
@@ -134,8 +173,7 @@ the counter's name does too:
 
 The name is the JSON key on the status page and, as `fpmng_pool_<name>_total`,
 the series on the metrics page — one name, two spellings of it, and they cannot
-disagree. `pool.type = status` reports nothing: it counts scrapes of other
-pools, which is not a fact about your application.
+disagree.
 
 All three are monotonic and survive a worker being replaced. A `pm.max_requests`
 recycle does not reset `requests`, and a supervised child exiting does not reset
@@ -170,10 +208,12 @@ pools' endpoints put the series side by side once they are in one database —
 without it, the same series name would mean a different pool depending on which
 port it was collected from.
 
-The aggregate endpoint has not changed: `pool.type = status` still answers
-`/metrics` with every pool's series at once. The difference is what you point a
-scraper at — one port for the whole master, or one port per pool with the pool
-chosen by path.
+There is no aggregate endpoint. Until issue #278 a `pool.type = status` pool
+answered `/metrics` with every pool's series at once; it was removed, because
+one pool that reported on all the others is the same listener the operator
+endpoint already runs, with a second configuration language for it. A scraper
+that wants several pools reads several paths — on one port if they share a
+`pm.metrics_listen`, which is the usual arrangement.
 
 ### Turning metrics off
 

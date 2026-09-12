@@ -20,10 +20,10 @@ extern const char *const fpm_pool_cron_rejects[];
  * pm.max_children = 1. */
 int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp);
 
-/* fpm_pool_type_s.init_main — allocates ONLY what pool.type = status needs to
+/* fpm_pool_type_s.init_main — allocates ONLY what the operator pages need to
  * show last_run/last_exit_code (docs/NOTES.md 3u). Cron still has NO
  * restart/backoff policy that must survive process death (see the rationale at
- * the top of fpm_pool_cron.c); this is READ-ONLY state for status, never state
+ * the top of fpm_pool_cron.c); this is READ-ONLY state for the pages, never state
  * that controls cron behavior itself. */
 int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp);
 
@@ -37,7 +37,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;
 
-/* fpm_pool_type_s.status — state for this pool when read by pool.type = status.
+/* fpm_pool_type_s.status — state for this pool as the operator pages read it.
  * last_run/last_exit_code come from shared memory; next_run is calculated ON
  * DEMAND from the schedule and current clock (not from any stored state) — see
  * docs/NOTES.md 3u. */

@@ -71,16 +71,21 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # need session inside the pool -- fpmng-http-direct-session-status.phpt and
 # fpmng-http-direct-worker-buffered-streams.phpt -- skip.
 #
+# It moved to 79 with the baseline counters (issue #277), which added
+# fpmng-baseline-counters.phpt and fpmng-baseline-counters-cron.phpt. Both run
+# everywhere: one uses an http-direct pool and a supervisor pool, the other a
+# cron pool, and none of those depends on how the distribution packages PHP.
+#
 # Written out here rather than read from anywhere, so that a change in the
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
 EXPECT_FAIL=0
-EXPECT_TOTAL=77
+EXPECT_TOTAL=79
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=45
+    EXPECT_PASS=47
     EXPECT_SKIP=32
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -105,7 +110,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=43
+    EXPECT_PASS=45
     EXPECT_SKIP=34
     # openssl-dev is named explicitly: on Ubuntu php8.5-dev drags libssl-dev
     # in, on Alpine php85-dev does not, and without it fpm_http_tls.h stops the

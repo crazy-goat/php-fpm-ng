@@ -132,6 +132,11 @@ struct fpm_cron_shared_s {
 	unsigned char has_last_exit_code;
 	unsigned consecutive_failures;	/* consecutive exit_code != 0; affects nothing,
 					 * it is only a signal for a human/monitoring */
+	unsigned long runs;		/* monotonic: runs STARTED since the master did
+					 * (issue #277). Here rather than in the child,
+					 * because a cron child runs once and exits and
+					 * the master respawns it -- a counter anywhere
+					 * else would read 1 for ever. */
 };
 
 struct fpm_cron_registry_s {
@@ -418,6 +423,10 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (shared) {
 		shared->last_run = started;
 		shared->running = 1;
+		/* Counted at the START, not at the end: a run that hangs and is killed
+		 * by cron.timeout still happened, and an operator looking for "did the
+		 * schedule fire" is asking about starts. */
+		shared->runs++;
 	}
 
 	exit_code = fpm_pool_script_run(c->name, c->cron_script);
@@ -477,5 +486,6 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	out->last_exit_code = shared->last_exit_code;
 	out->has_last_exit_code = shared->has_last_exit_code;
 	out->consecutive_failures = shared->consecutive_failures;
+	out->baseline = shared->runs;
 }
 /* }}} */

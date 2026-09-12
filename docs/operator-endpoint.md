@@ -120,6 +120,37 @@ and request total. A pool that does not (`cron`, `supervisor`) reports its state
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs.
 
+### The baseline counter
+
+Every pool reports one counter of its own invocations whether or not its PHP
+code ever calls `fpm_metric_*()`. What an invocation is depends on the type, so
+the counter's name does too:
+
+| Pool type | Counter | Counts |
+|---|---|---|
+| `http`, `http-direct`, `fastcgi`, `fastcgi-ng` | `requests` | Requests served. |
+| `cron` | `runs` | Scheduled runs started. |
+| `supervisor` | `restarts` | Times the supervised script was started again. |
+
+The name is the JSON key on the status page and, as `fpmng_pool_<name>_total`,
+the series on the metrics page — one name, two spellings of it, and they cannot
+disagree. `pool.type = status` reports nothing: it counts scrapes of other
+pools, which is not a fact about your application.
+
+All three are monotonic and survive a worker being replaced. A `pm.max_requests`
+recycle does not reset `requests`, and a supervised child exiting does not reset
+`restarts` — the numbers live with the pool, not with the process.
+
+`restarts` counts every start of the supervised script past the pool's first
+`supervisor.processes` of them — the starts that were meant to happen are not
+restarts, and a pool that has been up since boot without its script ever exiting
+reads zero.
+
+`restarts` counts restarts, not failures. A script that exits 0 and is brought
+back by `supervisor.restart = always` leaves `consecutive_failures` at zero
+forever while `restarts` climbs; that combination is the signature of a pool
+that is flapping silently, and reading the two together is how you see it.
+
 ## Application metrics on a per-pool metrics path
 
 `pm.metrics_path` carries the series your PHP code registered with

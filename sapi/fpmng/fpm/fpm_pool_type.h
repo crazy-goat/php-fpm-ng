@@ -37,6 +37,8 @@ struct fpm_pool_status_s {
 	unsigned consecutive_failures;	/* consecutive exit_code != 0 */
 	time_t next_run;		/* cron only: next due time from the schedule */
 	time_t backoff_until;		/* supervisor only: end of current backoff */
+	unsigned long baseline;		/* the type's baseline counter, see
+					 * fpm_pool_type_s.baseline_counter */
 	unsigned has_last_exit_code:1;
 	unsigned has_next_run:1;
 	unsigned has_backoff_until:1;
@@ -257,6 +259,30 @@ struct fpm_pool_type_s {
 	 * process (the status pool), so it must read only shared memory/configuration,
 	 * never process-local memory. */
 	void (*status)(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
+
+	/* The one counter this type reports whether or not the pool's script ever
+	 * touches fpm_metric_*() (issue #277). The answer to "is this pool doing
+	 * anything", which before this had no answer on a pool whose code registers
+	 * no series of its own -- and on supervisor could not have one, since a
+	 * supervised script is not the shape that calls fpm_metric_inc().
+	 *
+	 * This is the SHORT name: the JSON key is it, and the Prometheus series is
+	 * fpmng_pool_<this>_total. One field rather than two because the two
+	 * spellings have to agree, and a pair invites them not to.
+	 *
+	 * What it counts is the type's own idea of an invocation: a request for the
+	 * types that serve requests, a run for cron, a restart for supervisor. Where
+	 * the number comes from is not here -- a type that serves requests has it in
+	 * the scoreboard, the others fill fpm_pool_status_s.baseline from their own
+	 * shared memory. NULL = this type counts nothing (today: "status" itself,
+	 * which reports on others and not on itself).
+	 *
+	 * MONOTONIC, and that is a requirement rather than a description: a counter
+	 * that resets when a child is recycled is worse than no counter, because a
+	 * rate() over it reads as a dip rather than as a gap. Everything feeding it
+	 * lives in shared memory the master allocated, so a child dying and being
+	 * respawned does not touch it. */
+	const char *baseline_counter;
 };
 
 /* Type with this name, or NULL. An empty name gives the default (fastcgi) type

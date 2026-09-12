@@ -115,9 +115,15 @@ struct fpm_pool_status_row_s {
 	const char *type_name;
 	int serves_requests;
 
+	/* The type's baseline counter (issue #277): its short name, from
+	 * fpm_pool_type_s.baseline_counter, and the value, from wherever that type
+	 * keeps it. Reported on every pool whether or not its script ever called
+	 * fpm_metric_*(). NULL name = this type counts nothing. */
+	const char *counter;
+	unsigned long counter_value;
+
 	/* serves_requests = 1 */
 	int idle, active;
-	unsigned long requests;
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
@@ -148,6 +154,7 @@ static void fpm_pool_status_collect_and_render(struct fpm_operator_buf_s *b, fpm
 		row.name = wp->config->name;
 		row.type_name = type->name;
 		row.serves_requests = type->serves_requests;
+		row.counter = type->baseline_counter;
 
 		if (type->serves_requests) {
 			struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(wp->scoreboard, 0);
@@ -157,10 +164,15 @@ static void fpm_pool_status_collect_and_render(struct fpm_operator_buf_s *b, fpm
 			}
 			row.idle = copy->idle;
 			row.active = copy->active;
-			row.requests = copy->requests;
+			/* The scoreboard already counts what this type calls an
+			 * invocation, and has since upstream: the baseline counter for a
+			 * request-serving pool is that number under a name, not a second
+			 * count of the same thing. */
+			row.counter_value = copy->requests;
 			fpm_scoreboard_free_copy(copy);
 		} else if (type->status) {
 			type->status(wp, &row.st);
+			row.counter_value = row.st.baseline;
 		} else {
 			/* Type without meaningful state to show (today: "status" itself) —
 			 * skip it instead of guessing. */
@@ -183,11 +195,23 @@ static void fpm_pool_status_row_prometheus(struct fpm_operator_buf_s *b, const s
 
 	fpm_operator_buf_appendf(b, "fpmng_pool_info{pool=\"%s\",type=\"%s\"} 1\n", row->name, row->type_name);
 
+	/* The baseline counter (issue #277) is emitted for every type that has one,
+	 * under the name the type chose, and it is the line that used to be spelled
+	 * out here as fpmng_pool_requests_total for request-serving pools -- same
+	 * name, same value, now data on the type instead of a literal. */
 	if (row->serves_requests) {
 		fpm_operator_buf_appendf(b, "fpmng_pool_workers_idle{pool=\"%s\"} %d\n", row->name, row->idle);
 		fpm_operator_buf_appendf(b, "fpmng_pool_workers_active{pool=\"%s\"} %d\n", row->name, row->active);
-		fpm_operator_buf_appendf(b, "fpmng_pool_requests_total{pool=\"%s\"} %lu\n", row->name, row->requests);
+		if (row->counter) {
+			fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
+				row->counter, row->name, row->counter_value);
+		}
 		return;
+	}
+
+	if (row->counter) {
+		fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
+			row->counter, row->name, row->counter_value);
 	}
 
 	for (i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
@@ -224,6 +248,10 @@ void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_
 		"# TYPE fpmng_pool_workers_active gauge\n"
 		"# HELP fpmng_pool_requests_total Requests served since start (pools that serve requests).\n"
 		"# TYPE fpmng_pool_requests_total counter\n"
+		"# HELP fpmng_pool_runs_total Scheduled runs started since start, cron only.\n"
+		"# TYPE fpmng_pool_runs_total counter\n"
+		"# HELP fpmng_pool_restarts_total Times the supervised script was started again, supervisor only.\n"
+		"# TYPE fpmng_pool_restarts_total counter\n"
 		"# HELP fpmng_pool_state Current pool state; exactly one state label is 1.\n"
 		"# TYPE fpmng_pool_state gauge\n"
 		"# HELP fpmng_pool_last_start_seconds Unix time of the last start, 0 = never.\n"
@@ -279,11 +307,19 @@ static void fpm_pool_status_row_json(struct fpm_operator_buf_s *b, const struct 
 		fpm_operator_buf_appendf(b, ",");
 	}
 
+	/* The baseline counter's JSON key is the short name the type chose, which is
+	 * why "requests" below is not written out: on a request-serving pool that IS
+	 * the type's counter, and the object it produces is the one this page has
+	 * always produced. */
 	if (row->serves_requests) {
 		fpm_operator_buf_appendf(b,
 			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":true,"
-			"\"idle\":%d,\"active\":%d,\"requests\":%lu}",
-			row->name, row->type_name, row->idle, row->active, row->requests);
+			"\"idle\":%d,\"active\":%d",
+			row->name, row->type_name, row->idle, row->active);
+		if (row->counter) {
+			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
+		}
+		fpm_operator_buf_appendf(b, "}");
 		return;
 	}
 
@@ -292,6 +328,9 @@ static void fpm_pool_status_row_json(struct fpm_operator_buf_s *b, const struct 
 		"\"state\":\"%s\",\"last_start\":%ld,\"consecutive_failures\":%u",
 		row->name, row->type_name, fpm_pool_status_state_name(row->st.state),
 		(long) row->st.last_start, row->st.consecutive_failures);
+	if (row->counter) {
+		fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
+	}
 	if (row->st.state == FPM_POOL_STATE_RUNNING && row->st.last_start > 0) {
 		fpm_operator_buf_appendf(b, ",\"uptime\":%ld",
 			(long) (now > row->st.last_start ? now - row->st.last_start : 0));

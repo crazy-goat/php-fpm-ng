@@ -71,34 +71,49 @@ for f in $(cd "$REPO/sapi/fpmng" && find fpm -name '*.c' | sort); do
 $f"
 done
 
-# Split into three groups: fiber (fiber + the whole coop layer, used only by
-# fiber) and async (fpm_pool_async.c) go under --enable-fpmng-fiber /
-# --enable-fpmng-async (both default "no"); the rest is always built.
-# The split was verified against symbol references — coop.* is not used
-# outside fiber, async does not reference coop.
+# Split into four groups: fiber (fiber + the whole coop layer, used only by
+# fiber), async (fpm_pool_async.c) and tls go under --enable-fpmng-fiber /
+# --enable-fpmng-async / --enable-fpmng-tls (all default "no"); the rest is
+# always built.
+# The fiber/async split was verified against symbol references — coop.* is not
+# used outside fiber, async does not reference coop.
 # Matching by NAME PREFIX, not by enumerating files. Enumeration would undo
 # the whole point of this script: the source list must come from 'find' so a
 # new file needs no edit. With enumeration, a new fpm_pool_coop_whatever.c
 # would NOT match the pattern, would silently land in the base list, and end
 # up in the default binary — exactly what these flags are meant to prevent.
+#
+# The TLS group is why the prefix is fpm_tls_ and not the older fpm_*_tls*
+# naming (issue #280): fpm_http_direct_tls.c must stay in EVERY build — it
+# holds the config validation that refuses http.tls_cert in a build without
+# TLS, and four callers call into it with no #ifdef of their own. A pattern
+# that matched "tls anywhere in the name" would take it out of the default
+# binary and break the link. So the rule is the file name: fpm_tls_*.c is
+# code that needs OpenSSL, everything else is code that does not.
 FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
 ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
+TLS_PATTERN='^fpm/fpm_tls_[A-Za-z0-9_]*\.c$'
 
-BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN")
+BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN" \
+  | grep -Ev "$TLS_PATTERN")
 FIBER_SOURCES=$(echo "$SOURCES" | grep -E "$FIBER_PATTERN")
 ASYNC_SOURCES=$(echo "$SOURCES" | grep -E "$ASYNC_PATTERN")
+TLS_SOURCES=$(echo "$SOURCES" | grep -E "$TLS_PATTERN")
 
 [ -n "$FIBER_SOURCES" ] || { echo "no fiber/coop files found in the source list" >&2; exit 1; }
 [ -n "$ASYNC_SOURCES" ] || { echo "fpm_pool_async.c not found in the source list" >&2; exit 1; }
+[ -n "$TLS_SOURCES" ] || { echo "no fpm_tls_*.c files found in the source list" >&2; exit 1; }
 
 BASE_LIST=$(echo "$BASE_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 FIBER_LIST=$(echo "$FIBER_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 ASYNC_LIST=$(echo "$ASYNC_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
+TLS_LIST=$(echo "$TLS_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 
-awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" '{
+awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" -v tls="$TLS_LIST" '{
     gsub(/@FPMNG_SOURCES@/, "\n" base "\n  ");
     gsub(/@FPMNG_FIBER_SOURCES@/, "\n" fiber "\n  ");
     gsub(/@FPMNG_ASYNC_SOURCES@/, "\n" async "\n  ");
+    gsub(/@FPMNG_TLS_SOURCES@/, "\n" tls "\n  ");
     print
   }' "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"

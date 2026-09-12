@@ -34,7 +34,7 @@ cp sapi/fpmng/php-fpm-ng ../examples/<example>/php-fpm-ng
 
 `--with-openssl` builds `ext/openssl` into the CLI (used by our TLS tests,
 not by `php-fpm-ng` itself); the gateway's own TLS support only needs
-`libssl-dev` at configure time (`fpm_http_tls.c`). Kept here to match CI
+`libssl-dev` at configure time (`fpm_tls_http.c`). Kept here to match CI
 exactly rather than re-deriving a minimal flag set.
 
 ## Why not `docker/`

@@ -107,15 +107,22 @@ env:
   # fiber cell stops being evidence about the flag. Three copies of the same
   # string could not be kept in step by a comment, so there is one string.
   #
+  # --enable-fpmng-tls: since issue #280 TLS termination is opt-in and OFF by
+  # default, so without this flag every TLS test in the matrix would SKIP and
+  # the four TLS jobs below would be testing a binary that cannot terminate
+  # TLS. The shipped packages are the ones built WITHOUT it (see
+  # build/ci-package-gate.sh); that difference is deliberate, and it is
+  # asserted on both sides rather than assumed.
+  #
   # --with-openssl: the C-level HAVE_FPM_HTTP_TLS (gateway TLS termination)
-  # comes from libssl-dev alone, but the CLI php built here also needs
+  # comes from libssl-dev and the flag above, but the CLI php built here needs
   # ext/openssl itself -- our own .phpt tests for TLS features (task 039's
   # fpmng-http-tls-chain.phpt, and 040/041/042) drive the gateway over a real
   # TLS handshake via PHP's ssl:// stream wrapper and openssl_x509_parse(),
   # both of which live in ext/openssl, not in core. Without this flag those
   # tests silently SKIP ("requires the openssl extension") instead of running
   # -- caught on task 039's first CI run.
-  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-session --with-openssl
+  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-session --with-openssl
 
 jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
@@ -335,6 +342,16 @@ jobs:
           file "$PHPSRC/sapi/fpmng/php-fpm-ng"
           strings "$PHPSRC/sapi/fpmng/php-fpm-ng" | grep -q 'X-Powered-By: PHP' || true
           "$PHPSRC/sapi/fpmng/php-fpm-ng" -v
+
+      # Issue #280. configure does not fail on an unknown --enable flag, it
+      # warns -- so the flag is asserted where it lands, in the configure log
+      # and in the linked binary, and not on the command line that asked for
+      # it. Without this every TLS test in the matrix would quietly SKIP and
+      # the run would still be green.
+      - name: assert TLS termination is really in this build (issue #280)
+        run: |
+          grep -q "TLS termination in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
+          ldd "$PHPSRC/sapi/fpmng/php-fpm-ng" | grep -q libevent_openssl
 
       - name: stage artifact
         # A single top-level path, not a multi-entry `path:` list: with more

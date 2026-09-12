@@ -1,20 +1,20 @@
 /* fpm-ng: reload the HTTP gateway's TLS certificate/key without restarting
- * any gateway process, see fpm_http_tls_reload.h. Design (task 040, full
+ * any gateway process, see fpm_tls_reload.h. Design (task 040, full
  * reasoning in task 040, done; see docs/task-archive.md):
  *
- * - The master owns the file reads, same property fpm_http_tls.h already
+ * - The master owns the file reads, same property fpm_tls_http.h already
  *   documents for startup -- children never open the key file, here or
  *   anywhere else. A self-rearming timer in the master (fpm_events.c's own
  *   epoll-based loop, the same one fpm_pctl_heartbeat() uses) digests
  *   cert_path/key_path every http.tls_reload_check seconds. Never in the
  *   request path. That digest replaced a whole-second st_mtime comparison,
  *   which could not see a pair replaced inside one second (issue #71) --
- *   fpm_http_tls_reload_file_digest() carries the reasoning.
+ *   fpm_tls_reload_file_digest() carries the reasoning.
  * - On a content change the master calls the existing, already-stateless
- *   fpm_http_tls_validate() against the candidate paths BEFORE publishing
+ *   fpm_tls_http_validate() against the candidate paths BEFORE publishing
  *   anything a child can see (torn-read backstop: a half-written pair fails
  *   validation and is simply skipped, logged, retried next tick). Only a
- *   validated pair is read again with fpm_http_tls_load() and copied into
+ *   validated pair is read again with fpm_tls_http_load() and copied into
  *   shared memory.
  * - Propagation is a double-buffered region (fpm_shm_alloc(), plain
  *   MAP_SHARED with no locking) holding two fixed-size slots plus one
@@ -24,7 +24,7 @@
  *   written slot. Each gateway child has its OWN timer, on its OWN
  *   event_base, that cheaply compares the counter against what it last
  *   adopted; on a change it rebuilds its SSL_CTX with the existing,
- *   unmodified fpm_http_tls_ctx_new() and re-registers it with
+ *   unmodified fpm_tls_http_ctx_new() and re-registers it with
  *   evhttp_set_bevcb() -- gw->listen_fd and gw->base are never touched, and
  *   OpenSSL reference-counts SSL_CTX internally, so freeing the old one does
  *   not disturb connections already in flight against it.
@@ -37,7 +37,7 @@
 
 #ifdef HAVE_FPM_HTTP_TLS
 
-#include "fpm_http_tls_reload.h"
+#include "fpm_tls_reload.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -59,16 +59,16 @@
  * malloc'd: this lives in a fpm_shm_alloc() region shared by mmap() across
  * the master and every gateway child of the pool, so nothing here can be a
  * pointer into process-private heap memory. */
-struct fpm_http_tls_reload_slot_s {
+struct fpm_tls_reload_slot_s {
 	size_t cert_len;
 	size_t key_len;
 	int min_version;
-	unsigned char ticket_key[80];		/* see fpm_http_tls.h for the 80 = 16+32+32 layout */
-	char cert_pem[FPM_HTTP_TLS_RELOAD_MAX_CERT];
-	char key_pem[FPM_HTTP_TLS_RELOAD_MAX_KEY];
+	unsigned char ticket_key[80];		/* see fpm_tls_http.h for the 80 = 16+32+32 layout */
+	char cert_pem[FPM_TLS_RELOAD_MAX_CERT];
+	char key_pem[FPM_TLS_RELOAD_MAX_KEY];
 };
 
-struct fpm_http_tls_reload_shared_s {
+struct fpm_tls_reload_shared_s {
 	/* index = generation % 2 is the slot currently in effect. The master is
 	 * the only writer (single self-rearming timer, never re-entrant), so
 	 * this only needs to be visible across processes, not arbitrated
@@ -76,10 +76,10 @@ struct fpm_http_tls_reload_shared_s {
 	 * match the one other existing multi-process pattern in this codebase
 	 * (gw->upstreams_used, fpm_http.c) rather than inventing a second idiom. */
 	atomic_t generation;
-	struct fpm_http_tls_reload_slot_s slot[2];
+	struct fpm_tls_reload_slot_s slot[2];
 };
 
-struct fpm_http_tls_reload_s {
+struct fpm_tls_reload_s {
 	char *pool;
 	char *cert_path;
 	char *key_path;
@@ -89,33 +89,33 @@ struct fpm_http_tls_reload_s {
 	/* master-only: SHA-256 of the cert/key bytes this timer last acted on
 	 * (published, or rejected -- see the tick), and the timer itself. The
 	 * identity is the CONTENT, not st_mtime: see
-	 * fpm_http_tls_reload_file_digest() below for why (issue #71). All-zero
+	 * fpm_tls_reload_file_digest() below for why (issue #71). All-zero
 	 * until the first successful read, which is not a digest any real file
 	 * can produce, so a pair that could not be read at startup is picked up
 	 * by the first tick that can read it. */
-	unsigned char cert_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
-	unsigned char key_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
+	unsigned char cert_digest[FPM_TLS_RELOAD_DIGEST_LEN];
+	unsigned char key_digest[FPM_TLS_RELOAD_DIGEST_LEN];
 	struct fpm_event_s master_timer;
 
 	/* shared across the master and every gateway child of this pool */
-	struct fpm_http_tls_reload_shared_s *shared;
+	struct fpm_tls_reload_shared_s *shared;
 
 	/* task 041: http.tls_sni_cert's parsed PEM bytes, BORROWED (not owned,
 	 * not deep-copied, not part of the shared-memory slot) from `initial`
-	 * (the same struct fpm_http_tls_s fpm_http_tls_load() built once at
-	 * gateway startup and that fpm_http_tls_reload_master_init() below
+	 * (the same struct fpm_tls_http_s fpm_tls_http_load() built once at
+	 * gateway startup and that fpm_tls_reload_master_init() below
 	 * receives as its `initial` argument -- gw->tls in fpm_http.c). This
 	 * borrow is safe because gw->tls is never freed while the gateway child
-	 * that owns this fpm_http_tls_reload_s stays alive: fpm_http_tls_free()
+	 * that owns this fpm_tls_reload_s stays alive: fpm_tls_http_free()
 	 * is called on gw->tls nowhere in fpm_http.c (checked every call site of
-	 * fpm_http_tls_free() there before relying on this) -- gw->tls lives in
+	 * fpm_tls_http_free() there before relying on this) -- gw->tls lives in
 	 * the master for the master's entire lifetime, and every gateway child
 	 * is a fork() of the master, so the bytes stay valid for exactly as long
-	 * as this pointer is used (fpm_http_tls_reload_child_tick() below).
+	 * as this pointer is used (fpm_tls_reload_child_tick() below).
 	 * SNI certificates themselves are NOT hot-reloaded (only the primary
 	 * cert/key are, unchanged from task 040) -- a changed http.tls_sni_cert
 	 * path or file needs a restart, same as before this task existed. */
-	struct fpm_http_tls_sni_s *sni;
+	struct fpm_tls_http_sni_s *sni;
 	size_t sni_count;
 
 	/* child-only: private per gateway process after fork(), never read or
@@ -127,7 +127,7 @@ struct fpm_http_tls_reload_s {
 	/* task 031: after a reload the listener must keep its bevcb WRAPPER
 	 * (fpm_http.c arms the per-connection read deadline there), with the
 	 * gateway as arg -- the wrapper reads the new *child_ctx_slot itself.
-	 * Reinstalling fpm_http_tls_bevcb directly would silently drop the
+	 * Reinstalling fpm_tls_http_bevcb directly would silently drop the
 	 * read deadline from every connection accepted after the reload. */
 	struct bufferevent *(*child_bevcb)(struct event_base *, void *);
 	void *child_bevcb_arg;
@@ -141,8 +141,8 @@ struct fpm_http_tls_reload_s {
 	 * twice. */
 	void (*child_on_first_cert)(void *);
 	void *child_on_first_cert_arg;
-	char local_cert_pem[FPM_HTTP_TLS_RELOAD_MAX_CERT];
-	char local_key_pem[FPM_HTTP_TLS_RELOAD_MAX_KEY];
+	char local_cert_pem[FPM_TLS_RELOAD_MAX_CERT];
+	char local_key_pem[FPM_TLS_RELOAD_MAX_KEY];
 };
 
 /* SHA-256 of one file's bytes, issue #71. What this replaces is a comparison
@@ -168,7 +168,7 @@ struct fpm_http_tls_reload_s {
  * - At most `max_bytes` are read. A cert path pointing at something huge (a
  *   mistyped path, a log file) must not turn a tick into a bulk read every
  *   http.tls_reload_check seconds; such a pair is over
- *   FPM_HTTP_TLS_RELOAD_MAX_CERT/MAX_KEY and is unpublishable anyway.
+ *   FPM_TLS_RELOAD_MAX_CERT/MAX_KEY and is unpublishable anyway.
  * - st_size is mixed into the digest, so a change past that read cap is
  *   still a change: an oversized file therefore still reaches the existing
  *   "larger than the reload buffer" path in the tick, which logs it once.
@@ -176,13 +176,13 @@ struct fpm_http_tls_reload_s {
  * Cost for a real certificate: two small files read per http.tls_reload_check
  * seconds (default 5) in the master only. Never in the request path, and
  * never in a child -- children do not open the key file, the property
- * fpm_http_tls.h documents.
+ * fpm_tls_http.h documents.
  *
  * Returns 0 and fills `out` on success, -1 on any read or digest failure. The
  * digest is never logged; `out` is the only thing that leaves this function,
  * and the buffer that held key bytes is wiped before returning. */
-static int fpm_http_tls_reload_file_digest(const char *path, size_t max_bytes,
-	unsigned char out[FPM_HTTP_TLS_RELOAD_DIGEST_LEN]) /* {{{ */
+static int fpm_tls_reload_file_digest(const char *path, size_t max_bytes,
+	unsigned char out[FPM_TLS_RELOAD_DIGEST_LEN]) /* {{{ */
 {
 	int fd;
 	struct stat st;
@@ -248,16 +248,16 @@ static int fpm_http_tls_reload_file_digest(const char *path, size_t max_bytes,
 	EVP_MD_CTX_free(ctx);
 	fclose(fp);
 
-	return (ok && len == FPM_HTTP_TLS_RELOAD_DIGEST_LEN) ? 0 : -1;
+	return (ok && len == FPM_TLS_RELOAD_DIGEST_LEN) ? 0 : -1;
 }
 /* }}} */
 
-static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
+static void fpm_tls_reload_master_tick(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
 {
-	struct fpm_http_tls_reload_s *r = arg;
-	unsigned char cert_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
-	unsigned char key_digest[FPM_HTTP_TLS_RELOAD_DIGEST_LEN];
-	struct fpm_http_tls_s *fresh;
+	struct fpm_tls_reload_s *r = arg;
+	unsigned char cert_digest[FPM_TLS_RELOAD_DIGEST_LEN];
+	unsigned char key_digest[FPM_TLS_RELOAD_DIGEST_LEN];
+	struct fpm_tls_http_s *fresh;
 	unsigned long gen;
 	unsigned target;
 	int first_cert;
@@ -267,11 +267,11 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	if (fpm_http_tls_reload_file_digest(r->cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, cert_digest) != 0 ||
-			fpm_http_tls_reload_file_digest(r->key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, key_digest) != 0) {
+	if (fpm_tls_reload_file_digest(r->cert_path, FPM_TLS_RELOAD_MAX_CERT, cert_digest) != 0 ||
+			fpm_tls_reload_file_digest(r->key_path, FPM_TLS_RELOAD_MAX_KEY, key_digest) != 0) {
 		/* Transient (mid write, or the volume is not there yet): not fatal,
 		 * skip this tick, the certificate already in use keeps serving. */
-		if (!r->warned_unreadable && fpm_http_tls_reload_has_cert(r)) {
+		if (!r->warned_unreadable && fpm_tls_reload_has_cert(r)) {
 			/* Once, and only for a pool that IS serving a certificate. This
 			 * is the answer to issue #172 criterion 5's "what does the
 			 * operator see instead": deleting the certificate under a live
@@ -312,10 +312,10 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 	/* sni_spec: NULL -- this tick only ever re-checks http.tls_cert/
 	 * http.tls_key's mtimes (task 040's original scope), never
 	 * http.tls_sni_cert's paths (task 041's scope cut, see
-	 * fpm_http_tls_reload_s.sni/sni_count below): SNI certificates are not
+	 * fpm_tls_reload_s.sni/sni_count below): SNI certificates are not
 	 * hot-reloaded, only the primary cert/key are. */
-	if (fpm_http_tls_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL) != 0) {
-		/* fpm_http_tls_validate() already logged what's wrong. Remember
+	if (fpm_tls_http_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL) != 0) {
+		/* fpm_tls_http_validate() already logged what's wrong. Remember
 		 * these digests anyway so a persistently broken pair (operator
 		 * hasn't fixed it yet) does not re-log every tick; the next actual
 		 * change of the bytes re-triggers validation -- including a corrected
@@ -326,18 +326,18 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 		return;
 	}
 
-	fresh = fpm_http_tls_load(r->pool, r->cert_path, r->key_path, r->min_version, NULL);
+	fresh = fpm_tls_http_load(r->pool, r->cert_path, r->key_path, r->min_version, NULL);
 	if (!fresh) {
-		/* fpm_http_tls_load() already logged (re-read failed between the
+		/* fpm_tls_http_load() already logged (re-read failed between the
 		 * validate above and here, or RAND_bytes() failed) -- do not update
 		 * the digests, so this is retried next tick rather than skipped. */
 		return;
 	}
 
-	if (fresh->cert_len > FPM_HTTP_TLS_RELOAD_MAX_CERT || fresh->key_len > FPM_HTTP_TLS_RELOAD_MAX_KEY) {
+	if (fresh->cert_len > FPM_TLS_RELOAD_MAX_CERT || fresh->key_len > FPM_TLS_RELOAD_MAX_KEY) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_reload_check: new certificate/key is larger than the %u/%u byte reload buffer, keeping the certificate already in use",
-			r->pool, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_CERT, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_KEY);
-		fpm_http_tls_free(fresh);
+			r->pool, (unsigned) FPM_TLS_RELOAD_MAX_CERT, (unsigned) FPM_TLS_RELOAD_MAX_KEY);
+		fpm_tls_http_free(fresh);
 		memcpy(r->cert_digest, cert_digest, sizeof(r->cert_digest));
 		memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
 		return;
@@ -366,7 +366,7 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 
 	memcpy(r->cert_digest, cert_digest, sizeof(r->cert_digest));
 	memcpy(r->key_digest, key_digest, sizeof(r->key_digest));
-	fpm_http_tls_free(fresh);
+	fpm_tls_http_free(fresh);
 
 	if (first_cert) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: TLS certificate found on disk (generation %lu); the pool leaves NO_CERT and each gateway process opens its TLS listener within http.tls_reload_check seconds",
@@ -378,15 +378,15 @@ static void fpm_http_tls_reload_master_tick(struct fpm_event_s *ev, short which,
 }
 /* }}} */
 
-struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
+struct fpm_tls_reload_s *fpm_tls_reload_master_init(const char *pool,
 	const char *cert_path, const char *key_path, const char *min_version,
-	struct fpm_http_tls_s *initial, int check_interval_sec) /* {{{ */
+	struct fpm_tls_http_s *initial, int check_interval_sec) /* {{{ */
 {
-	struct fpm_http_tls_reload_s *r;
+	struct fpm_tls_reload_s *r;
 
-	if (initial && (initial->cert_len > FPM_HTTP_TLS_RELOAD_MAX_CERT || initial->key_len > FPM_HTTP_TLS_RELOAD_MAX_KEY)) {
+	if (initial && (initial->cert_len > FPM_TLS_RELOAD_MAX_CERT || initial->key_len > FPM_TLS_RELOAD_MAX_KEY)) {
 		zlog(ZLOG_WARNING, "[pool %s] http.tls_reload_check: certificate/key is larger than the %u/%u byte reload buffer, disabling reload for this pool (a restart is needed to pick up a renewed certificate)",
-			pool, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_CERT, (unsigned) FPM_HTTP_TLS_RELOAD_MAX_KEY);
+			pool, (unsigned) FPM_TLS_RELOAD_MAX_CERT, (unsigned) FPM_TLS_RELOAD_MAX_KEY);
 		return NULL;
 	}
 
@@ -408,7 +408,7 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 
 	/* NULL `initial` is http.tls_wait_for_cert's NO_CERT state (issue #172):
 	 * leave generation 0 exactly as fpm_shm_alloc() returned it -- all zero,
-	 * so cert_len is 0 and fpm_http_tls_reload_has_cert() below reads false.
+	 * so cert_len is 0 and fpm_tls_reload_has_cert() below reads false.
 	 * Generation 0 still exists and is still the published one; it just says
 	 * "no certificate yet" rather than "here is the startup certificate". */
 	if (initial) {
@@ -439,7 +439,7 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 		/* NO_CERT: no baseline at all. Taking one here would be actively
 		 * wrong -- a certificate already sitting on disk (a restart of a pool
 		 * that is past its first issuance, or a write that landed between
-		 * fpm_http_tls_load() failing and this call) would become the
+		 * fpm_tls_http_load() failing and this call) would become the
 		 * "nothing has changed" reference and never be published, leaving the
 		 * pool in NO_CERT forever with the certificate right there. All-zero
 		 * matches no file, so the first tick that can read the pair publishes
@@ -447,16 +447,16 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
 		memset(r->cert_digest, 0, sizeof(r->cert_digest));
 		memset(r->key_digest, 0, sizeof(r->key_digest));
 	} else {
-		if (fpm_http_tls_reload_file_digest(cert_path, FPM_HTTP_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
+		if (fpm_tls_reload_file_digest(cert_path, FPM_TLS_RELOAD_MAX_CERT, r->cert_digest) != 0) {
 			memset(r->cert_digest, 0, sizeof(r->cert_digest));
 		}
-		if (fpm_http_tls_reload_file_digest(key_path, FPM_HTTP_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
+		if (fpm_tls_reload_file_digest(key_path, FPM_TLS_RELOAD_MAX_KEY, r->key_digest) != 0) {
 			memset(r->key_digest, 0, sizeof(r->key_digest));
 		}
 	}
 
 	if (check_interval_sec > 0) {
-		fpm_event_set_timer(&r->master_timer, FPM_EV_PERSIST, fpm_http_tls_reload_master_tick, r);
+		fpm_event_set_timer(&r->master_timer, FPM_EV_PERSIST, fpm_tls_reload_master_tick, r);
 		fpm_event_add(&r->master_timer, (unsigned long) check_interval_sec * 1000);
 	}
 
@@ -470,7 +470,7 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
  * `r` is, and only by the one child that owns it.
  *
  * Copying out of shared memory before use, rather than pointing
- * fpm_http_tls_ctx_new() at the shm slot directly, gives the caller a stable
+ * fpm_tls_http_ctx_new() at the shm slot directly, gives the caller a stable
  * DESTINATION. It does not on its own give a stable SOURCE: there are only two
  * slots, so a publish landing two generations ahead writes into the very slot
  * being copied. Hence the generation is latched before the copy and re-read
@@ -481,18 +481,18 @@ struct fpm_http_tls_reload_s *fpm_http_tls_reload_master_init(const char *pool,
  * even one retry is already unreachable in practice -- a spinning loop here
  * would only be a way for a broken master to hang a gateway's event loop. On
  * exhaustion this returns the generation it last latched and the copy may be
- * torn, which is self-healing: a torn PEM fails fpm_http_tls_ctx_new(), so the
+ * torn, which is self-healing: a torn PEM fails fpm_tls_http_ctx_new(), so the
  * caller either falls back to gw->tls (startup) or keeps the working SSL_CTX
  * and retries on the next tick, in both cases leaving last_seen_generation
  * alone. */
-#define FPM_HTTP_TLS_RELOAD_SNAPSHOT_TRIES 4
+#define FPM_TLS_RELOAD_SNAPSHOT_TRIES 4
 
-static unsigned long fpm_http_tls_reload_snapshot(struct fpm_http_tls_reload_s *r,
-	struct fpm_http_tls_s *tmp) /* {{{ */
+static unsigned long fpm_tls_reload_snapshot(struct fpm_tls_reload_s *r,
+	struct fpm_tls_http_s *tmp) /* {{{ */
 {
 	unsigned long gen;
-	struct fpm_http_tls_reload_slot_s *slot;
-	int tries = FPM_HTTP_TLS_RELOAD_SNAPSHOT_TRIES;
+	struct fpm_tls_reload_slot_s *slot;
+	int tries = FPM_TLS_RELOAD_SNAPSHOT_TRIES;
 
 	memset(tmp, 0, sizeof(*tmp));
 	tmp->cert_pem = r->local_cert_pem;
@@ -535,7 +535,7 @@ static unsigned long fpm_http_tls_reload_snapshot(struct fpm_http_tls_reload_s *
 }
 /* }}} */
 
-int fpm_http_tls_reload_has_cert(struct fpm_http_tls_reload_s *reload) /* {{{ */
+int fpm_tls_reload_has_cert(struct fpm_tls_reload_s *reload) /* {{{ */
 {
 	unsigned long gen;
 
@@ -547,28 +547,28 @@ int fpm_http_tls_reload_has_cert(struct fpm_http_tls_reload_s *reload) /* {{{ */
 }
 /* }}} */
 
-SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload) /* {{{ */
+SSL_CTX *fpm_tls_reload_child_ctx_new(struct fpm_tls_reload_s *reload) /* {{{ */
 {
-	struct fpm_http_tls_s tmp;
+	struct fpm_tls_http_s tmp;
 	unsigned long gen;
 	SSL_CTX *ctx;
 
 	if (!reload) {
 		return NULL;
 	}
-	if (!fpm_http_tls_reload_has_cert(reload)) {
+	if (!fpm_tls_reload_has_cert(reload)) {
 		/* NO_CERT (issue #172): return NULL WITHOUT going through
-		 * fpm_http_tls_ctx_new(), which would log a parse failure for an
+		 * fpm_tls_http_ctx_new(), which would log a parse failure for an
 		 * empty PEM on every gateway at every boot. "Not issued yet" is the
 		 * configured state here, not an error, and the caller knows the
 		 * difference because it is the one that set http.tls_wait_for_cert. */
 		return NULL;
 	}
 
-	gen = fpm_http_tls_reload_snapshot(reload, &tmp);
-	ctx = fpm_http_tls_ctx_new(reload->pool, &tmp);
+	gen = fpm_tls_reload_snapshot(reload, &tmp);
+	ctx = fpm_tls_http_ctx_new(reload->pool, &tmp);
 	if (!ctx) {
-		/* fpm_http_tls_ctx_new() already logged. The caller falls back to
+		/* fpm_tls_http_ctx_new() already logged. The caller falls back to
 		 * gw->tls, which is generation 0's bytes -- and last_seen_generation
 		 * is left at its calloc() zero, which is precisely the generation
 		 * that fallback ctx would then hold, so the first child tick adopts
@@ -586,11 +586,11 @@ SSL_CTX *fpm_http_tls_reload_child_ctx_new(struct fpm_http_tls_reload_s *reload)
 }
 /* }}} */
 
-static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void *arg) /* {{{ */
+static void fpm_tls_reload_child_tick(evutil_socket_t fd, short what, void *arg) /* {{{ */
 {
-	struct fpm_http_tls_reload_s *r = arg;
+	struct fpm_tls_reload_s *r = arg;
 	unsigned long gen = r->shared->generation;
-	struct fpm_http_tls_s tmp;
+	struct fpm_tls_http_s tmp;
 	SSL_CTX *new_ctx;
 
 	(void) fd; (void) what;
@@ -599,7 +599,7 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 		return;
 	}
 
-	gen = fpm_http_tls_reload_snapshot(r, &tmp);
+	gen = fpm_tls_reload_snapshot(r, &tmp);
 
 	if (tmp.cert_len == 0) {
 		/* Still NO_CERT (issue #172). Unreachable as the master publishes
@@ -610,9 +610,9 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 		return;
 	}
 
-	new_ctx = fpm_http_tls_ctx_new(r->pool, &tmp);
+	new_ctx = fpm_tls_http_ctx_new(r->pool, &tmp);
 	if (!new_ctx) {
-		/* fpm_http_tls_ctx_new() already logged. These bytes were already
+		/* fpm_tls_http_ctx_new() already logged. These bytes were already
 		 * validated once by the master before publishing them, so reaching
 		 * this should be impossible -- keep serving the working SSL_CTX and
 		 * retry next tick rather than tearing down a working listener. */
@@ -628,7 +628,7 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 	if (r->child_bevcb) {
 		evhttp_set_bevcb(r->child_http, r->child_bevcb, r->child_bevcb_arg);
 	} else {
-		evhttp_set_bevcb(r->child_http, fpm_http_tls_bevcb, new_ctx);
+		evhttp_set_bevcb(r->child_http, fpm_tls_http_bevcb, new_ctx);
 	}
 	/* SSL_CTX_free(NULL) is a documented no-op, which is what makes the
 	 * NO_CERT case (issue #172) need no branch here: this child simply had
@@ -656,7 +656,7 @@ static void fpm_http_tls_reload_child_tick(evutil_socket_t fd, short what, void 
 }
 /* }}} */
 
-void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
+void fpm_tls_reload_child_init(struct fpm_tls_reload_s *reload,
 	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
 	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg) /* {{{ */
 {
@@ -673,7 +673,7 @@ void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 
 	/* last_seen_generation is deliberately NOT set here. It must name the
 	 * generation *ctx_slot was actually built from, and only the code that
-	 * built it knows that: fpm_http_tls_reload_child_ctx_new() above sets it,
+	 * built it knows that: fpm_tls_reload_child_ctx_new() above sets it,
 	 * and a fallback build from gw->tls leaves it at calloc()'s zero, which is
 	 * generation 0 -- what gw->tls holds by definition.
 	 *
@@ -688,12 +688,12 @@ void fpm_http_tls_reload_child_init(struct fpm_http_tls_reload_s *reload,
 
 	every.tv_sec = reload->check_interval_sec;
 	every.tv_usec = 0;
-	reload->child_timer = event_new(base, -1, EV_PERSIST, fpm_http_tls_reload_child_tick, reload);
+	reload->child_timer = event_new(base, -1, EV_PERSIST, fpm_tls_reload_child_tick, reload);
 	event_add(reload->child_timer, &every);
 }
 /* }}} */
 
-void fpm_http_tls_reload_child_on_first_cert(struct fpm_http_tls_reload_s *reload,
+void fpm_tls_reload_child_on_first_cert(struct fpm_tls_reload_s *reload,
 	void (*cb)(void *), void *arg) /* {{{ */
 {
 	if (!reload) {
@@ -704,7 +704,7 @@ void fpm_http_tls_reload_child_on_first_cert(struct fpm_http_tls_reload_s *reloa
 }
 /* }}} */
 
-void fpm_http_tls_reload_free(struct fpm_http_tls_reload_s *reload) /* {{{ */
+void fpm_tls_reload_free(struct fpm_tls_reload_s *reload) /* {{{ */
 {
 	if (!reload) {
 		return;

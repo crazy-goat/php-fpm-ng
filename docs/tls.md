@@ -3,10 +3,36 @@
 This is the operator-facing reference for TLS termination on `pool.type =
 http`'s gateway: the directives that turn it on, and how a renewed
 certificate reaches every gateway process (task 040). For the internal
-design rationale, see the header comments in `sapi/fpmng/fpm/fpm_http_tls.c`
-and `sapi/fpmng/fpm/fpm_http_tls_reload.c`, and
+design rationale, see the header comments in `sapi/fpmng/fpm/fpm_tls_http.c`
+and `sapi/fpmng/fpm/fpm_tls_reload.c`, and
 task 040 (done; see [`task-archive.md`](task-archive.md)) for why each choice
 was made the way it was.
+
+## The build flag
+
+TLS termination is **not** in a default build. It is compiled in only by
+`./configure --enable-fpmng --enable-fpmng-tls`, and the shipped `.deb`/`.apk`
+packages are built **without** it (issue #280, part of #279): this code is
+beta, unaudited and network-facing, so the binary that terminates TLS for the
+world is one somebody chose to build. Until v0.4.0 the answer depended on
+whether `libevent_openssl` happened to be installed on the build host, which
+is not a default anyone chose.
+
+What that means in practice:
+
+- `--enable-fpmng-tls` needs `libevent_openssl >= 2.1` and OpenSSL >= 1.1.1
+  development files. If they are missing, `configure` **fails** and names the
+  package; it does not downgrade.
+- Without the flag nothing here links OpenSSL at all (`ldd` shows no
+  `libssl`/`libcrypto`/`libevent_openssl`), and the `fpm_tls_*.c` sources are
+  not compiled.
+- A pool with `http.tls_cert` on such a binary is **refused at startup**,
+  naming the flag to rebuild with. It never falls back to plain HTTP on a
+  port the operator configured as HTTPS.
+
+The same applies to `pool.type = http-direct`'s TLS
+([`http-direct.md`](http-direct.md)) and to the ACME client
+([`acme-renewal.md`](acme-renewal.md)), which is TLS with extra steps.
 
 ## Directives
 

@@ -142,8 +142,8 @@ struct {								\
  * (issue #117) is the same on both transports, so each has one definition. */
 #include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
-#include "fpm_http_tls.h"
-#include "fpm_http_tls_reload.h"
+#include "fpm_tls_http.h"
+#include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
 #include "fpm_child_error_log.h"
 #include "fpm_error_log_follow.h"
@@ -241,22 +241,22 @@ struct fpm_http_gateway_s {
 #ifdef HAVE_FPM_HTTP_TLS
 	/* http.tls_cert/http.tls_key; NULL = plain HTTP, exactly as today.
 	 * gw->tls is loaded INTO MEMORY in the master, BEFORE the first child forks
-	 * (fpm_http_tls_load()) — fork() copies it. gw->tls_ctx is per-process: each
+	 * (fpm_tls_http_load()) — fork() copies it. gw->tls_ctx is per-process: each
 	 * child builds its OWN SSL_CTX from bytes the master read, so the shared
 	 * ticket key supports session resumption across processes; see
-	 * fpm_http_tls.h. Which bytes: the generation gw->reload currently
+	 * fpm_tls_http.h. Which bytes: the generation gw->reload currently
 	 * publishes when there is one, otherwise gw->tls — see
 	 * fpm_http_gateway_run() and issue #91, a gateway respawned after a
 	 * reload must not start on gw->tls's startup certificate. */
-	struct fpm_http_tls_s *tls;			/* NULL in the child after a failed startup */
+	struct fpm_tls_http_s *tls;			/* NULL in the child after a failed startup */
 	SSL_CTX *tls_ctx;				/* only in the child, NULL in the master */
 	/* NULL only when shared-memory allocation failed or the startup pair is
-	 * already bigger than the reload buffer (fpm_http_tls_reload_master_init());
+	 * already bigger than the reload buffer (fpm_tls_reload_master_init());
 	 * the gateway then behaves exactly as it did before task 040.
 	 * http.tls_reload_check = 0 does NOT make this NULL — the struct is still
 	 * built, it just never arms a timer, so generation 0 stays published
 	 * forever and every child snapshots the startup bytes. */
-	struct fpm_http_tls_reload_s *reload;
+	struct fpm_tls_reload_s *reload;
 #endif
 
 	/* Both of these are plain ints and both are read from code that is NOT
@@ -795,7 +795,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	}
 
 	/* HTTPS/REQUEST_SCHEME: "http"/unset unless either the gateway terminated
-	 * TLS on this connection itself (http.tls_cert, see fpm_http_tls.h -- that
+	 * TLS on this connection itself (http.tls_cert, see fpm_tls_http.h -- that
 	 * overrides the headers in fpm_http_request()) or a trusted proxy in front
 	 * said so via X-Forwarded-Proto. */
 	fpm_http_param(c, "REQUEST_SCHEME", c->fwd.scheme);
@@ -1528,7 +1528,7 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
 
 /* Validates http.front_controller once, in the master, before the first gateway
  * fork -- fork()'s COW then hands every gateway process gw->front_controller_ok
- * already decided, exactly like fpm_http_tls_validate() decides TLS cert/key
+ * already decided, exactly like fpm_tls_http_validate() decides TLS cert/key
  * problems at pool-validation time instead of at first request (task 018 gap 2:
  * this used to be a function-level static evaluated lazily on the first request
  * of each gateway process; that was fine only because each gateway process
@@ -2188,8 +2188,8 @@ static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct 
 
 /* The gateway's bevcb: builds the bufferevent for a new client connection and
  * arms its read deadline. TLS connections get their SSL bufferevent from
- * fpm_http_tls_bevcb() with the pool's CURRENT SSL_CTX (gw->tls_ctx), so a
- * hot-reloaded certificate (fpm_http_tls_reload.c) applies to new connections
+ * fpm_tls_http_bevcb() with the pool's CURRENT SSL_CTX (gw->tls_ctx), so a
+ * hot-reloaded certificate (fpm_tls_reload.c) applies to new connections
  * without this wrapper being re-registered. */
 static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 {
@@ -2198,7 +2198,7 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls_ctx) {
-		bev = fpm_http_tls_bevcb(base, gw->tls_ctx);
+		bev = fpm_tls_http_bevcb(base, gw->tls_ctx);
 	} else
 #endif
 	{
@@ -2374,7 +2374,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	/* Everything above this line is the only reason the gateway ever needed
 	 * root: binding http.reuseport's own listener, and holding the TLS
-	 * private key the master read before the first fork (fpm_http_tls.h).
+	 * private key the master read before the first fork (fpm_tls_http.h).
 	 * Nothing below -- the access log, static files, TLS handshakes, proxying
 	 * to the pool -- needs it. See task 010 (done; see docs/task-archive.md). */
 	fpm_http_gateway_drop_privileges(gw);
@@ -2400,7 +2400,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	if (gw->tls || gw->tls_wait_for_cert) {
 		/* Own SSL_CTX per gateway process, built from cert/key bytes the
 		 * master already read and validated, never from an SSL_CTX inherited
-		 * through fork() -- see fpm_http_tls.h.
+		 * through fork() -- see fpm_tls_http.h.
 		 *
 		 * The bytes come from the reload machinery's currently published slot
 		 * whenever there is one, not from gw->tls: gw->tls is what the master
@@ -2412,15 +2412,15 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		 * connection, with no adoption tick and no window in between. For a
 		 * gateway forked at startup the published slot is generation 0, i.e.
 		 * exactly gw->tls's bytes, so nothing about startup changes. */
-		gw->tls_ctx = fpm_http_tls_reload_child_ctx_new(gw->reload);
+		gw->tls_ctx = fpm_tls_reload_child_ctx_new(gw->reload);
 		if (!gw->tls_ctx && gw->tls) {
-			gw->tls_ctx = fpm_http_tls_ctx_new(gw->pool, gw->tls);
+			gw->tls_ctx = fpm_tls_http_ctx_new(gw->pool, gw->tls);
 		}
 		if (!gw->tls_ctx && !gw->tls_wait_for_cert) {
 			exit(FPM_EXIT_SOFTWARE);
 		}
 		/* THE decision, taken once, from the context this process actually
-		 * holds. An earlier version sampled fpm_http_tls_reload_has_cert()
+		 * holds. An earlier version sampled fpm_tls_reload_has_cert()
 		 * before the fork-time work above and treated that as the state; the
 		 * master can publish a generation in between, and then a gateway
 		 * respawned near the transition (issue #91) could reach
@@ -2443,13 +2443,13 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 			 * this process READY, and it runs on this child's own
 			 * generation-watch timer, so every gateway makes the transition
 			 * independently -- criterion 4. */
-			fpm_http_tls_reload_child_on_first_cert(gw->reload, fpm_http_gateway_tls_listener_hook, gw);
+			fpm_tls_reload_child_on_first_cert(gw->reload, fpm_http_gateway_tls_listener_hook, gw);
 		}
 
 		/* Own generation-watch timer, on this child's own base -- see
-		 * fpm_http_tls_reload.h. No-op when gw->reload is NULL. The bevcb
+		 * fpm_tls_reload.h. No-op when gw->reload is NULL. The bevcb
 		 * pair keeps a reload from dropping the read deadline (task 031). */
-		fpm_http_tls_reload_child_init(gw->reload, gw->base, gw->http, &gw->tls_ctx,
+		fpm_tls_reload_child_init(gw->reload, gw->base, gw->http, &gw->tls_ctx,
 			fpm_http_bevcb, gw);
 	}
 #endif
@@ -2707,7 +2707,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		}
 #ifdef HAVE_FPM_HTTP_TLS
 		if (gw->reload) {
-			fpm_http_tls_reload_free(gw->reload);
+			fpm_tls_reload_free(gw->reload);
 		}
 #endif
 		for (i = 0; i < gw->nproc; i++) {
@@ -2832,10 +2832,10 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 #ifdef HAVE_FPM_HTTP_TLS
 	/* fpm_http_validate_pool() already refused a bad/mismatched cert+key at
 	 * config-validation time; this is the real load, in the master, BEFORE
-	 * fpm_http_gateway_spawn() forks the first child -- see fpm_http_tls.h. */
+	 * fpm_http_gateway_spawn() forks the first child -- see fpm_tls_http.h. */
 	gw->tls_wait_for_cert = wp->config->http_tls_wait_for_cert;
 	/* Skipped entirely in NO_CERT rather than attempted and allowed to fail:
-	 * fpm_http_tls_load() logs "cannot re-read TLS certificate/key at
+	 * fpm_tls_http_load() logs "cannot re-read TLS certificate/key at
 	 * startup" at ERROR level, and under http.tls_wait_for_cert a
 	 * not-yet-issued certificate is the configured state, not a fault. An
 	 * ERROR on every first boot would train an operator to ignore the one
@@ -2846,15 +2846,15 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 			!(gw->tls_wait_for_cert &&
 				(access(wp->config->http_tls_cert, R_OK) != 0 ||
 				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0))) {
-		gw->tls = fpm_http_tls_load(gw->pool, wp->config->http_tls_cert,
+		gw->tls = fpm_tls_http_load(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version,
 			wp->config->http_tls_sni_cert);
 	}
 	/* The certificate was there all along, so there is nothing to wait for:
 	 * drop the opt-in and let every gate below behave exactly as it does for
 	 * a pool that never set it. Without this the pool stays flagged as
-	 * waiting, and if fpm_http_tls_reload_master_init() then fails -- a chain
-	 * over FPM_HTTP_TLS_RELOAD_MAX_CERT, or no shared memory -- the master
+	 * waiting, and if fpm_tls_reload_master_init() then fails -- a chain
+	 * over FPM_TLS_RELOAD_MAX_CERT, or no shared memory -- the master
 	 * binds :443 without listening while no child ever registers a hook to
 	 * open it, and a pool holding a perfectly good certificate refuses every
 	 * connection for the life of the master. */
@@ -2868,7 +2868,7 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		 * was-it-set-at-all pattern as http.gateways above. */
 		int interval = fpm_conf_directive_was_set(wp->config, "http.tls_reload_check")
 			? wp->config->http_tls_reload_check
-			: FPM_HTTP_TLS_RELOAD_CHECK_DEFAULT;
+			: FPM_TLS_RELOAD_CHECK_DEFAULT;
 
 		if (interval < 0) {
 			interval = 0;
@@ -2878,7 +2878,7 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		 * refused the combination with http.tls_reload_check = 0, so the
 		 * timer below is guaranteed to be armed and the state is guaranteed
 		 * to be escapable. */
-		gw->reload = fpm_http_tls_reload_master_init(gw->pool, wp->config->http_tls_cert,
+		gw->reload = fpm_tls_reload_master_init(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version, gw->tls, interval);
 		if (gw->tls_wait_for_cert && !gw->tls) {
 			if (!gw->reload) {
@@ -2938,7 +2938,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		fpm_http_front_controller_validate(gw);
 
 #ifdef HAVE_FPM_HTTP_TLS
-		/* fpm_http_tls_load() already logged what went wrong; http.tls_cert
+		/* fpm_tls_http_load() already logged what went wrong; http.tls_cert
 		 * was set, so falling back to plain HTTP would be a silent surprise.
 		 *
 		 * http.tls_wait_for_cert (issue #172) is the one way past this, and
@@ -3189,8 +3189,9 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1;
 		}
 #else
-		zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert requires the HTTP gateway to be built with TLS support "
-			"(libevent_openssl and/or OpenSSL were not found at build time)", wp->config->name);
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_wait_for_cert requires php-fpm-ng to be built with TLS support: "
+			"rebuild with ./configure --enable-fpmng-tls (needs libevent_openssl and OpenSSL)",
+			wp->config->name);
 		return -1;
 #endif
 	}
@@ -3227,13 +3228,14 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		if (!(wp->config->http_tls_wait_for_cert &&
 				(access(wp->config->http_tls_cert, R_OK) != 0 ||
 				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0)) &&
-				fpm_http_tls_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
+				fpm_tls_http_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
 				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert) != 0) {
-			return -1; /* fpm_http_tls_validate() already logged what is wrong */
+			return -1; /* fpm_tls_http_validate() already logged what is wrong */
 		}
 #else
-		zlog(ZLOG_ERROR, "[pool %s] http.tls_cert requires the HTTP gateway to be built with TLS support "
-			"(libevent_openssl and/or OpenSSL were not found at build time)", wp->config->name);
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_cert requires php-fpm-ng to be built with TLS support: "
+			"rebuild with ./configure --enable-fpmng-tls (needs libevent_openssl and OpenSSL)",
+			wp->config->name);
 		return -1;
 #endif
 	} else if (wp->config->http_tls_key && *wp->config->http_tls_key) {

@@ -7,6 +7,10 @@ gateway process. Serving the HTTP-01 challenge is
 certificate against a CA is [`docs/acme-client.md`](acme-client.md)
 (issue #49).
 
+All of it needs a binary built with `--enable-fpmng-tls` (issue #280, see
+[`tls.md`](tls.md#the-build-flag)), which the shipped packages are not: a
+certificate nothing can terminate TLS with has nowhere to go.
+
 ## The unit of exclusion is a certificate, not a pool
 
 `pool.type = cron` is pinned to one process (`fpm_pool_cron.c` forces
@@ -94,7 +98,7 @@ mechanism for it. There is none. The path is:
    `State::installCertificate()`, which writes a temporary file in the
    same directory and `rename()`s it, so a reader never sees a partial file.
 2. `http.tls_cert` and `http.tls_key` point straight at those files.
-3. The master's reload timer (task 040, `fpm_http_tls_reload.c`) digests
+3. The master's reload timer (task 040, `fpm_tls_reload.c`) digests
    both files every `http.tls_reload_check` seconds — a SHA-256 of the
    contents, not `st_mtime` (issue #71) — validates the pair, and publishes
    the new bytes into a double-buffered shared-memory region.

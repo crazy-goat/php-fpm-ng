@@ -26,7 +26,7 @@ $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
 foreach ((array) $messages as $message) {
     if (str_contains($message, 'built with TLS support')) {
-        die('skip php-fpm-ng built without TLS support (libevent_openssl and/or OpenSSL not found at build time)');
+        die('skip php-fpm-ng built without TLS support (configure without --enable-fpmng-tls, issue #280)');
     }
 }
 ?>
@@ -45,7 +45,7 @@ use FpmNg\Acme\State;
 // atomic write into the ACME state directory, and http.tls_cert points
 // straight at that file. Everything after the rename is task 040's
 // content-digest poll in the master plus the per-child adoption in
-// fpm_http_tls_reload.c.
+// fpm_tls_reload.c.
 //
 // The point of running with http.gateways = 4 is that each gateway builds
 // its own SSL_CTX after fork(): a mechanism that reached only the master,

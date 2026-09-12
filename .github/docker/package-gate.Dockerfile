@@ -46,9 +46,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 # reasons -- binutils for objdump, php8.5-dev for the headers, the embed package
 # for the library, libevent/libacl for what the SAPI needs. dpkg-dev stays out:
 # it pulls gcc in, and the two package sets are kept honest about who needs one.
+# libevent_openssl stays out too: the package is built without TLS (issue #280).
 RUN apt-get update -qq \
     && apt-get install -y -qq binutils php8.5-dev libphp8.5-embed \
-         libevent-dev libevent-openssl-2.1-7 libacl1-dev \
+         libevent-dev libacl1-dev \
     && rm -rf /var/lib/apt/lists/*
 
 FROM ubuntu:26.04 AS deb-test
@@ -67,11 +68,11 @@ RUN apt-get update -qq \
 # --- Alpine ----------------------------------------------------------------
 
 FROM alpine:edge AS apk-build
-# openssl-dev is named explicitly: Ubuntu's php8.5-dev drags libssl-dev in,
-# Alpine's php85-dev does not, and without it fpm_http_tls.h stops the build at
-# openssl/ssl.h rather than quietly producing a smaller binary.
+# No openssl-dev, and no libevent_openssl on the Debian side either: the
+# packages are built without TLS (issue #280), so this stage cannot link
+# OpenSSL even by accident. build/libphp-build.sh asserts that on the binary.
 RUN apk add --no-cache alpine-sdk php85-dev php85-embed \
-      libevent-dev acl-dev openssl-dev
+      libevent-dev acl-dev
 
 FROM alpine:edge AS apk-test
 # Test rig only; php85-embed, the package's own dependency, is deliberately absent.

@@ -916,7 +916,7 @@ static ev_ssize_t fpm_direct_write_plain(struct bufferevent *bev, evutil_socket_
 
 /* The TLS write step (issue #195). The descriptor is not the response here --
  * the output buffer holds plaintext and the session is on the wire -- so this
- * one hands the same buffer to OpenSSL instead; see fpm_http_tls_write_output()
+ * one hands the same buffer to OpenSSL instead; see fpm_tls_http_write_output()
  * for why that is safe to do while libevent holds the other end of this
  * bufferevent. */
 static ev_ssize_t fpm_direct_write_tls(struct bufferevent *bev, evutil_socket_t fd,
@@ -926,7 +926,7 @@ static ev_ssize_t fpm_direct_write_tls(struct bufferevent *bev, evutil_socket_t 
 
 	(void) fd;
 	written = fpm_http_direct_tls_write(bev, poll_events);
-	/* The two negative values mean opposite things: FPM_HTTP_TLS_WRITE_IDLE is
+	/* The two negative values mean opposite things: FPM_TLS_HTTP_WRITE_IDLE is
 	 * "nothing to hand OpenSSL", which the pump counts and tolerates once,
 	 * while anything else below zero ends the connection. They share a value
 	 * (-2) on purpose, so the mapping is a rename rather than arithmetic. */

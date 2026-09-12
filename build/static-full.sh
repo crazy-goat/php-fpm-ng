@@ -63,7 +63,7 @@ echo "static-full.sh: /build reuse=$reuse key=$key"
 if [ "$reuse" = no ]; then
   export PKG_CONFIG="pkg-config --static"
   LDFLAGS="-static-pie" /src/configure \
-    --disable-all --enable-fpmng \
+    --disable-all --enable-fpmng --enable-fpmng-tls \
     --enable-opcache --enable-mbstring --disable-mbregex \
     --enable-sockets --enable-pcntl --enable-posix \
     --enable-filter --enable-ctype \
@@ -72,8 +72,12 @@ if [ "$reuse" = no ]; then
     --prefix=/usr/local > /out/configure-full.log 2>&1 || { echo "=== CONFIGURE FAILED ==="; tail -12 /out/configure-full.log; exit 1; }
   echo "$key" > "$key_file"
 fi
+# --enable-fpmng-tls (issue #280) makes a missing libevent_openssl a configure
+# error, so this can no longer be a silent downgrade -- but the check stays:
+# it is the one that would catch the flag being dropped from the line above,
+# which configure would accept without a word.
 grep -q 'S\["LIBEVENT_OPENSSL_LIBS"\]="[^"]*event_openssl' /build/config.status ||
-  fail "libevent_openssl was not detected; TLS support would be missing"
+  fail "libevent_openssl was not detected; TLS support would be missing (is --enable-fpmng-tls still on the configure line?)"
 # The marker survives a killed container (a cancelled workflow run), and the
 # next run then throws /build away instead of trusting objects a SIGKILL
 # truncated mid-write -- see build/ci-build-tree.sh for the same reasoning.

@@ -27,6 +27,7 @@
 #   php-src-tree  a tree with our overlay applied (build/prepare.sh), default ./php-src
 #   outdir        default ./out-libphp
 #   PHP_CONFIG    php-config binary to build against; autodetected otherwise
+#   FPMNG_TLS     1 to build TLS termination in; default 0 (issue #280)
 set -eu
 
 fail() {
@@ -96,9 +97,27 @@ SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_CLEARENV=1
 -DHAVE_CLOCK_GETTIME=1
 -DHAVE_FPM_HTTP=1
--DHAVE_FPM_HTTP_TLS=1
 -DFPMNG_LIBPHP_BUILD=1
 -DPROC_MEM_FILE="mem"'
+
+# TLS termination is opt-in here for the same reason it is opt-in in
+# configure (--enable-fpmng-tls, issue #280): this is the path the shipped
+# packages are built from, so a flag that did not reach it would govern
+# nothing that ships. Off means three things at once, and all three are
+# asserted on the produced binary below: HAVE_FPM_HTTP_TLS unset, the
+# fpm_tls_*.c sources not compiled, and no OpenSSL on the link line.
+FPMNG_TLS=${FPMNG_TLS:-0}
+case "$FPMNG_TLS" in
+0|1) ;;
+*) fail "FPMNG_TLS must be 0 or 1, not '$FPMNG_TLS'" ;;
+esac
+if [ "$FPMNG_TLS" = 1 ]; then
+  SUPPLIED="$SUPPLIED
+-DHAVE_FPM_HTTP_TLS=1"
+  echo "libphp-build.sh: FPMNG_TLS=1, building with TLS termination"
+else
+  echo "libphp-build.sh: FPMNG_TLS=0, building without TLS termination (set FPMNG_TLS=1 for it)"
+fi
 
 # Deliberately off, with the reason. These are not oversights, and anyone
 # tempted to add one should read the reason first.
@@ -112,6 +131,7 @@ off_reason() {
   HAVE_LQ_SO_LISTENQ)           echo "BSD listen-queue probe" ;;
   HAVE_SYSTEMD)                 echo "would add a libsystemd link the packages do not want" ;;
   HAVE_APPARMOR|HAVE_SELINUX)   echo "would add a link-time dependency; not offered by the packages" ;;
+  HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
                                 echo "patches/0007 and 0008 apply inside libphp, which is the distribution's file" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)
@@ -192,6 +212,24 @@ sources() {
 src_count=$(sources | wc -l)
 [ "$src_count" -gt 20 ] || fail "only $src_count sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_FILES block moved"
 
+# The TLS group, which build/prepare.sh keeps in a list of its own so that it
+# can be left out. Read from the same file for the same reason; the anchor is
+# the opening quote at end of line, because PHP_FPMNG_TLS_FILES="" appears
+# first and would otherwise start the range.
+tls_sources() {
+  sed -n '/PHP_FPMNG_TLS_FILES="$/,/^[[:space:]]*"[[:space:]]*$/p' "$SRC/sapi/fpmng/config.m4" |
+    grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u
+}
+TLS_SRC=$(tls_sources)
+[ -n "$TLS_SRC" ] || fail "no TLS sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_TLS_FILES block moved"
+# The base list must not contain them: that is exactly the failure the
+# fpm_tls_ name prefix exists to prevent (build/prepare.sh), and it would show
+# up here as a default build that links OpenSSL after all.
+for f in $TLS_SRC; do
+  sources | grep -qx "$f" && fail "$f is in both PHP_FPMNG_FILES and PHP_FPMNG_TLS_FILES; a TLS source in the base list ships in every binary"
+done
+[ "$FPMNG_TLS" = 1 ] || TLS_SRC=
+
 : > "$OUT/compile.log"
 OBJS=""
 compile() {
@@ -201,7 +239,7 @@ compile() {
     { echo "=== COMPILE FAILED: $1 ==="; tail -20 "$OUT/compile.log"; exit 1; }
   OBJS="$OBJS $o"
 }
-for f in $(sources); do compile "$SRC/sapi/fpmng/$f" "$f"; done
+for f in $(sources) $TLS_SRC; do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # Not in PHP_FPMNG_FILES: config.m4 adds the trace backend conditionally, our
 # patched fastcgi.c belongs to main/, and the ABI guard is a property of this
 # build rather than of the SAPI. The zend_signal_init() stand-in is NOT here:
@@ -249,8 +287,10 @@ BIN="$OUT/php-fpm-ng"
 # -rpath: Alpine puts libphp.so in a version-namespaced directory that is not
 # on the default search path, so without it the binary links and then cannot
 # start. On Ubuntu the directory is already default and the flag is inert.
+TLS_LIBS=
+[ "$FPMNG_TLS" = 1 ] && TLS_LIBS="-levent_openssl -lssl -lcrypto"
 ${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_NAME" $ACL_LIBS \
-  -levent -levent_openssl -lssl -lcrypto -lm $OPT_LIBS -Wl,-E \
+  -levent $TLS_LIBS -lm $OPT_LIBS -Wl,-E \
   >"$OUT/link.log" 2>&1 || {
   echo "=== LINK FAILED ==="
   grep "undefined reference" "$OUT/link.log" | sed 's/.*undefined reference to //' | sort -u | head -20
@@ -282,8 +322,28 @@ assert_symbol() {
     fail "the binary has no '$1': $2"
 }
 assert_symbol fpm_http_init_pool "HAVE_FPM_HTTP was not set, so the http gateway is compiled out"
-assert_symbol fpm_http_tls_validate "HAVE_FPM_HTTP_TLS was not set, so TLS is compiled out"
 assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
+
+# TLS, in whichever direction was asked for. Both halves are asserted on the
+# binary: the symbol says the sources were compiled, and the dynamic section
+# says what the linker actually pulled in. Reading the flags instead would
+# have passed in both of the ways this can go wrong -- a source group that
+# leaked into the base list, and a -lssl left on the link line.
+tls_linkage() {
+  # ldd is not on every image this runs on (and says nothing useful for a
+  # static binary); the ELF dynamic section is, and it is the same evidence.
+  { ldd "$BIN" 2>/dev/null || readelf -d "$BIN" 2>/dev/null || true; } |
+    grep -cE 'libssl|libcrypto|libevent_openssl' || true
+}
+if [ "$FPMNG_TLS" = 1 ]; then
+  assert_symbol fpm_tls_http_validate "FPMNG_TLS=1 was asked for, but the TLS sources were not compiled in"
+  [ "$(tls_linkage)" -gt 0 ] || fail "FPMNG_TLS=1 was asked for, but the binary links no OpenSSL"
+else
+  nm --defined-only "$BIN" 2>/dev/null | grep -qw -- fpm_tls_http_validate &&
+    fail "a default build carries fpm_tls_http_validate: an fpm_tls_*.c source reached the base object list (issue #280)"
+  [ "$(tls_linkage)" = 0 ] ||
+    fail "a default build links OpenSSL: $(tls_linkage) OpenSSL entries in the dynamic section, and there should be none (issue #280)"
+fi
 
 # --- assert the refusal, not the define ----------------------------------------
 # Issue #214. HAVE_FPMNG_PERSISTENT_SIGNALS being absent from the compile line

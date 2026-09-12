@@ -752,8 +752,8 @@ its local-answer hook with HTTP-01.
 - **ALPN: yes.** Advertise `http/1.1`; a client offering only an unsupported
   protocol is rejected at the TLS layer.
 - **SNI: yes.** One pool may serve more than one certificate — a certificate
-  selection callback based on the server name in `fpm_http_tls_ctx_new()`, as
-  per-process state rather than a new `struct fpm_http_tls_s` field. Without
+  selection callback based on the server name in `fpm_tls_http_ctx_new()`, as
+  per-process state rather than a new `struct fpm_tls_http_s` field. Without
   SNI, or with an unknown name, use the default (first configured) certificate.
   Consequence: 020 has both ACME challenges open (HTTP-01 and TLS-ALPN-01).
 - **"one pool, one port" is NOT sufficient** — solution: a redirect-only
@@ -764,15 +764,15 @@ its local-answer hook with HTTP-01.
   that opt into it.
 
 **Implementation note (English, task 041, done):** both decisions above are
-implemented in `sapi/fpmng/fpm/fpm_http_tls.c`. ALPN: `SSL_CTX_set_alpn_select_cb()`
+implemented in `sapi/fpmng/fpm/fpm_tls_http.c`. ALPN: `SSL_CTX_set_alpn_select_cb()`
 on every `SSL_CTX` this file builds, advertising `http/1.1` only; a client
 offering ALPN without `http/1.1` gets `SSL_TLSEXT_ERR_ALERT_FATAL` (verified
 with `openssl s_client -alpn`). SNI: a new pool directive, `http.tls_sni_cert`
 (`servername:cert_path:key_path`, comma-separated, on top of the existing
 `http.tls_cert`/`http.tls_key` default pair), parsed and validated the same
 way as the primary pair; the per-servername `SSL_CTX*` switch table is built
-in `fpm_http_tls_ctx_new()`, per gateway process, exactly as this decision
-requires — never a new field of `struct fpm_http_tls_s` (that struct only
+in `fpm_tls_http_ctx_new()`, per gateway process, exactly as this decision
+requires — never a new field of `struct fpm_tls_http_s` (that struct only
 carries the raw PEM bytes, read once in the master, the same way it already
 did for the primary pair). Test: `sapi/fpmng/tests/fpmng-http-tls-alpn-sni.phpt`.
 Scope cut, not covered by this task: SNI certificates are validated once at
@@ -3847,7 +3847,7 @@ cat: /tmp/fpmng-134-rootlog: Permission denied
 
 `open()` in the gateway would fail with `EACCES`, and the diagnostic about it
 would go into the old file. So the master owns the file and children never open
-it — the rule `fpm_http_tls_reload.c` already states for the TLS private key.
+it — the rule `fpm_tls_reload.c` already states for the TLS private key.
 
 **The mechanism** (`sapi/fpmng/fpm/fpm_error_log_follow.{c,h}`, which carries
 the full reasoning): one `AF_UNIX SOCK_DGRAM` socketpair per followed process,
@@ -3951,3 +3951,60 @@ empty and both the pre- and the post-rotation line are in the rotated copy.
 directions: the post-rotation line is in the reopened `http.access_log` and is
 not in the rotated copy, with a pre-rotation line first so that a failure
 cannot be read as "the access log never worked".
+
+## 3ac. TLS termination is a build flag, off by default (issue #280, 2026-09-13)
+
+**The problem.** TLS had no flag. `HAVE_FPM_HTTP_TLS` was defined if
+`configure` found `libevent_openssl` on the build host and not defined if it
+did not, and the only trace of the difference was an `AC_MSG_WARN`. Two
+machines, the same command line, two different binaries: one that terminates
+TLS for the world, one that refuses `http.tls_cert` at startup. That is a
+default nobody chose, for code that is beta, unaudited and network-facing.
+
+**The decision** (from #279): `--enable-fpmng-tls`, default `no`, following
+the `--enable-fpmng-fiber`/`--enable-fpmng-async` convention. The probe stays,
+but with the flag given its failure is a `configure` **error** naming the
+package, not a warning and a quiet downgrade. The shipped `.deb`/`.apk` are
+built without TLS -- a deliberate regression against v0.2.0, recorded in
+`docs/install.md`.
+
+**Why the sources had to be renamed.** `build/prepare.sh` builds the source
+list with `find`, and splits off an optional group by NAME PREFIX rather than
+by enumerating files -- the comment there gives the reason: with enumeration a
+new file silently lands in the base list and ships in the default binary,
+which is the exact failure the flags exist to prevent. The TLS files were
+`fpm_http_tls.c`, `fpm_http_tls_reload.c` and `fpm_http_direct_tls.c`, and no
+"tls somewhere in the name" pattern could work, because
+`fpm_http_direct_tls.c` **must stay in every build**: it holds
+`fpm_http_direct_tls_enabled()` and the config-pairing validation, which
+`fpm_http_direct.c`, `fpm_http_direct_worker.c`, `fpm_http_direct_request.c`
+and `fpm_pool_type.c` call with no `#ifdef` of their own.
+
+So the rule became the file name itself: **`fpm_tls_*.c` is code that needs
+OpenSSL, everything else is code that does not.** `fpm_http_tls.c/.h` became
+`fpm_tls_http.c/.h`, `fpm_http_tls_reload.c/.h` became `fpm_tls_reload.c/.h`
+(symbols and macros with them), and the `#ifdef HAVE_FPM_HTTP_TLS` half of
+`fpm_http_direct_tls.c` moved to a new `fpm_tls_http_direct.c`. What stayed
+behind is the seam: the always-compiled config half, plus `#ifndef`-guarded
+no-op stubs that stand in for the file that is not there. `HAVE_FPM_HTTP_TLS`
+kept its name -- it is what the `#ifdef`s in `fpm_http.c` key off, and
+renaming it would have been churn with no reader on the other end.
+
+**Four places had to agree, and two of them are the point.**
+`build/libphp-build.sh` runs no `configure`: it hard-coded
+`-DHAVE_FPM_HTTP_TLS=1` and then asserted the symbol. It is also the path the
+shipped packages are built from, so a flag that did not reach it would govern
+nothing that ships. It now takes `FPMNG_TLS=0|1` (default `0`), compiles the
+TLS group only when asked, links OpenSSL only when asked, and asserts the
+result **on the binary in both directions**: with TLS, `fpm_tls_http_validate`
+is present and the dynamic section mentions OpenSSL; without it, the symbol is
+absent and the dynamic section mentions no OpenSSL at all. It also refuses to
+build if a TLS source is in both lists, which is the leak the prefix rule
+exists to prevent.
+
+**Refusals name the flag.** The three "built without TLS" messages
+(`fpm_http.c` twice, `fpm_http_direct_tls.c` once) used to say "libevent_openssl
+and/or OpenSSL were not found at build time", which is now the wrong story:
+the libraries may well be there and the operator still gets no TLS. They say
+`rebuild with ./configure --enable-fpmng-tls` instead. The `.phpt` skip probes
+key on the unchanged substring "built with TLS support", so they kept working.

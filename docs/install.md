@@ -144,11 +144,12 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 | `pool.type` | packaged | from source | why |
 |---|---|---|---|
 | `fastcgi` | yes | yes | upstream FPM's protocol handling; needs nothing from the engine that a distribution `libphp` does not export. |
-| `http-direct` | yes | yes | including `pool.executor = worker`, TLS termination and the ACME client. The HTTP listener lives entirely in this SAPI. |
+| `http-direct` | yes | yes | including `pool.executor = worker`. The HTTP listener lives entirely in this SAPI. |
 | `fastcgi-ng` | **no** | yes | needs `zend_signal_use_persistent_handlers()`, added by `patches/0006` **inside `Zend/`**. That is the distribution's file, not ours, so a distribution `libphp` does not export it. |
 | `http` | **no** | yes | same mechanism as `fastcgi-ng`: both keep a request runtime alive across requests, which is what the persistent signal handlers exist for. |
 | fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
 | async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
+| TLS termination (`http.tls_*`) and the ACME client | **no** | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the packaged build is the one without it. From source: `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the packaged binary terminated TLS. |
 
 The packaged binary does not silently degrade: a pool it cannot honour is
 refused before the master forks anything, by name and with the reason.
@@ -202,12 +203,20 @@ At runtime the binary checks again, and the two cases differ:
 ## If you need what the package cannot give
 
 `fastcgi-ng`, `http`, fibers and async need patches that apply inside `libphp`,
-so they need a build from source:
+so they need a build from source. TLS termination needs only a flag, but the
+packaged binary is built without it, so it is the same answer:
 
 ```sh
 ./build/prepare.sh /path/to/php-src   # applies the overlay and the patch stack
 ./build/static-full.sh                # or the dynamic build, see build/dynamic.sh
 ```
+
+For TLS from a `configure` of your own, add `--enable-fpmng-tls`; it needs
+`libevent_openssl >= 2.1` and OpenSSL >= 1.1.1 development files, and
+`configure` fails naming the missing package rather than producing a binary
+without TLS. A pool with `http.tls_cert` on a binary built without the flag is
+refused at startup, naming the flag to rebuild with -- it never falls back to
+plain HTTP on a port configured as HTTPS.
 
 For the two pool types the package does support, the package is the normal
 case -- building from source to get `fastcgi` or `http-direct` buys nothing.

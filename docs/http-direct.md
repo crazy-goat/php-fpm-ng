@@ -1026,8 +1026,14 @@ what is covered is the validation path, in
 ## TLS
 
 A direct pool terminates TLS itself, on both executors, using the same
-implementation the `http` gateway uses (`fpm_http_tls.c`,
-`fpm_http_tls_reload.c`) — no second TLS stack (issue #55).
+implementation the `http` gateway uses (`fpm_tls_http.c`,
+`fpm_tls_reload.c`) — no second TLS stack (issue #55).
+
+**It has to be built in**: `./configure --enable-fpmng --enable-fpmng-tls`,
+which the shipped packages are not (issue #280, see
+[`tls.md`](tls.md#the-build-flag)). Without the flag a pool with
+`http.tls_cert` is refused at startup, naming the flag; it is never served
+cleartext.
 
 ```ini
 [app]

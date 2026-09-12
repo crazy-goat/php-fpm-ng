@@ -96,7 +96,9 @@ Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
-without a restart, are documented in [`docs/tls.md`](docs/tls.md).
+without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS
+termination is a build flag -- `./configure --enable-fpmng-tls`, off by
+default and not in the packages (issue #280).
 
 The gateway answers the ACME HTTP-01 challenge itself, on both `http.listen`
 and the plain `http.plain_listen` companion, from state a `cron` or

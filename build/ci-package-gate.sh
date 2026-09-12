@@ -84,24 +84,31 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # Written out here rather than read from anywhere, so that a change in the
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
+# Issue #280 moved TLS termination behind --enable-fpmng-tls (FPMNG_TLS=1 for
+# build/libphp-build.sh), and the packages are built WITHOUT it. The two
+# http-direct TLS tests that used to run here now skip on both flavours, which
+# is the regression against v0.2.0 that #279 decided to take; the numbers below
+# moved by exactly that.
 EXPECT_FAIL=0
 EXPECT_TOTAL=80
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=48
-    EXPECT_SKIP=32
+    EXPECT_PASS=46
+    EXPECT_SKIP=34
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
-    # itself needs. dpkg-deb is in dpkg, which is already there -- dpkg-dev is
+    # itself needs -- no libevent_openssl, because the package is built without
+    # TLS (issue #280) and this stage should not be able to link it by accident.
+    # dpkg-deb is in dpkg, which is already there -- dpkg-dev is
     # deliberately NOT installed: it pulls in gcc, and a build stage is allowed
     # a compiler but this keeps the two package sets honest about who needs one.
     BUILD_SETUP='export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq binutils php8.5-dev libphp8.5-embed \
-            libevent-dev libevent-openssl-2.1-7 libacl1-dev >/dev/null'
+            libevent-dev libacl1-dev >/dev/null'
     # The negative control, built here because only this stage has the tools:
     # the identical package, claiming a PHP minor that is not installed on the
     # target. package-deb.sh leaves the unpacked tree behind in /out/root.
@@ -115,13 +122,14 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=46
-    EXPECT_SKIP=34
-    # openssl-dev is named explicitly: on Ubuntu php8.5-dev drags libssl-dev
-    # in, on Alpine php85-dev does not, and without it fpm_http_tls.h stops the
-    # build at openssl/ssl.h rather than quietly producing a smaller binary.
+    EXPECT_PASS=44
+    EXPECT_SKIP=36
+    # No openssl-dev: the package is built without TLS (issue #280), so the
+    # build stage does not get the headers that would let it link OpenSSL even
+    # by accident. libphp-build.sh asserts the produced binary's dynamic
+    # section, which is the evidence; this is the belt.
     BUILD_SETUP='apk add --no-cache alpine-sdk php85-dev php85-embed \
-            libevent-dev acl-dev openssl-dev >/dev/null'
+            libevent-dev acl-dev >/dev/null'
     # Same negative control on the Alpine side: abuild is re-run over the
     # APKBUILD package-apk.sh generated, with the dependency moved to a minor
     # this image does not have, under a name of its own so the two packages

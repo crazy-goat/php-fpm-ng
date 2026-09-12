@@ -17,8 +17,8 @@ DIR=${2:?usage: build/gh-release-create.sh <tag> <assets-dir>}
 : "${GITHUB_REPOSITORY:?GITHUB_REPOSITORY is not set}"
 
 API=${GITHUB_API_URL:-https://api.github.com}
-# The upload host is a separate one from the API host and has no env var of its
-# own on a self-hosted runner, so it is spelled out here.
+# The upload host is a separate one from the API host, and the runner exports
+# no env var for it the way it does GITHUB_API_URL, so it is spelled out here.
 UPLOADS=${GITHUB_UPLOAD_URL:-https://uploads.github.com}
 
 NOTES=$(cat <<NOTE

@@ -163,16 +163,16 @@ touch "$KEYFILE"
 
 # --- prune ------------------------------------------------------------------
 # A tree is ~435 MB for the dynamic configure and more for the static one, and
-# a new key (a new php-src pin, a new configure flag) leaves the old one behind
-# for good. 14 days is long enough that a branch someone comes back to still
-# finds its tree, and short enough that a retired configuration does not sit on
-# the disk forever.
+# on a machine that keeps its trees between runs a new key (a new php-src pin,
+# a new configure flag) would leave the old one behind for good. CI no longer
+# has such a machine -- every job gets a fresh runner and the tree dies with it
+# -- so this only ever fires for someone running the script by hand in a
+# directory they reuse. 14 days is long enough that a branch someone comes back
+# to still finds its tree.
 #
-# Prune from the root of the cache, not from this runner's own directory: a
-# runner that is renamed, deregistered or simply stops picking up this workflow
-# never runs this script again, so only its neighbours can ever reclaim it.
-# Depth 3 is exactly <root>/<runner>/<config>/.fpmng-ci-key, and nothing but
-# this script writes that file, so nothing outside our own trees can match.
+# Depth 3 is exactly <root>/<runner>/<config>/.fpmng-ci-key, the layout the
+# self-hosted runners used, and nothing but this script writes that file, so
+# nothing outside our own trees can match.
 ROOT=$(dirname "$(dirname "$TREE")")
 find "$ROOT" -mindepth 3 -maxdepth 3 -name .fpmng-ci-key -mtime +14 2>/dev/null |
 	while read -r stale; do

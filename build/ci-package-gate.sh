@@ -132,12 +132,22 @@ esac
 #
 # Measured on the poligon box: 232 of the deb flavour's 328 seconds were
 # `apt-get` unpacking the distribution's PHP. See .github/docker/package-gate.Dockerfile.
+#
+# FPMNG_REQUIRE_WARM_IMAGES turns the fallback into a failure. In CI it is set,
+# because there the fallback is never the situation it was written for -- it
+# means the ghcr login did not happen or the token cannot read the package, and
+# the job would otherwise take issue #240's 328 seconds again and still pass,
+# with nothing in the log a reader would stop on. Off by default, so a working
+# copy with no ghcr credentials still runs the gate.
 GATE_IMAGE_PREFIX=${FPMNG_GATE_IMAGE_PREFIX:-ghcr.io/crazy-goat/php-fpm-ng-package-gate}
 warm_image() {
     _want="$GATE_IMAGE_PREFIX:$1"
     if docker image inspect "$_want" >/dev/null 2>&1 || docker pull -q "$_want" >/dev/null 2>&1; then
         echo "$_want"
     else
+        if [ -n "${FPMNG_REQUIRE_WARM_IMAGES:-}" ]; then
+            fail "warm image $_want is unavailable and FPMNG_REQUIRE_WARM_IMAGES is set"
+        fi
         echo "$IMAGE"
     fi
 }

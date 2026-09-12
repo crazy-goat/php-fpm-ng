@@ -22,8 +22,9 @@ on:
         required: false
         default: ""
 
-# Every push to a PR branch restarts the whole 13-job matrix; without this the
-# superseded run keeps burning minutes to completion.
+# Every push to a PR branch restarts the whole 16-job matrix; without this the
+# superseded run keeps burning minutes to completion. main is excluded: see
+# the concurrency block below.
 #
 # Every job runs on ubuntu-latest. It used to run on the self-hosted `poligon`
 # box, which is off now: this repository is public, and GitHub-hosted minutes
@@ -43,6 +44,13 @@ on:
 # .github/docker/ci.Dockerfile), which is why none of them apt-get anything
 # any more. The repeated container: block is unavoidable -- GitHub Actions
 # does not expand YAML anchors.
+#
+# KNOWN LIMIT, fork pull requests. That image is a private package, and a
+# fork's GITHUB_TOKEN cannot read it: such a pull request dies at `Initialize
+# containers` with 403 before any step runs. The fix is to make the two ghcr
+# packages public (php-fpm-ng-ci and php-fpm-ng-package-gate); until that is
+# done, a contribution from a fork has to be re-pushed as a branch here to be
+# tested.
 #
 # static-musl and package-gate are the exceptions: they drive `docker run`
 # with host bind mounts, and -v paths are resolved by the host daemon, so a
@@ -65,7 +73,11 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Not on main. actions/cache does not save on a cancelled job, and the run on
+  # main exists for nothing but its cache save (see the note on `on:` above):
+  # two merges in quick succession would cancel the first and throw away
+  # exactly the entry every new branch restores from.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   # Pinned by tag, not branch (docs/NOTES.md:2760: "php-src pinned by
@@ -102,19 +114,20 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
-      # Issue #209: 15 separate jobs, so GitHub's matrix `fail-fast` does not
-      # apply. One red job otherwise leaves the other fourteen compiling on a
-      # box that has four runner instances and eight threads, for a result
-      # nobody will read. The run ends as "cancelled" rather than "failed";
+      # Issue #209: 16 separate jobs, so GitHub's matrix `fail-fast` does not
+      # apply. One red job otherwise leaves the other fifteen compiling for a
+      # result nobody will read. The run ends as "cancelled" rather than
+      # "failed";
       # build/ci-cancel-run.sh says why that is the price and what it costs.
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
@@ -132,10 +145,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -158,10 +172,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -191,10 +206,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     env:
       # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
@@ -202,35 +218,30 @@ jobs:
       # writable by uid 1001, so the cache lives in the workspace -- which is
       # also the only place actions/cache can reach from inside a container job.
       # 900M rather than the image's 5G: the whole repository gets 10 GB of
-      # cache and three jobs write one of these each, on every run.
+      # cache, and only runs on main save one (see the save step below).
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 900M
-      BUILDTREE_CONFIG: dynamic
+      # Named here, not written to GITHUB_ENV by a step: there is no longer a
+      # conditional tree location to pick between. The tree is built in the
+      # workspace and thrown away with the runner.
+      PHPSRC: ${{ github.workspace }}/php-src-dynamic
     steps:
       - uses: actions/checkout@v7
 
       # What replaces the ccache directory the self-hosted runner kept on its
-      # own disk. The key carries the commit so every run saves a fresh entry;
-      # the restore-key is the prefix, so a run picks up the newest cache of
-      # this job for this php-src pin -- from the pull request itself if it has
-      # one, and otherwise from the last run on main, which is why this
+      # own disk. Restore only; the save is a separate step after the compile,
+      # and runs on main alone. The restore-key is the prefix, so a run picks
+      # up the newest entry for this job and this php-src pin, which on a
+      # branch is always the one the last run on main wrote -- that is why this
       # workflow now also runs on push to main.
       - name: restore the compiler cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-build-${{ env.PHP_SRC_REF }}-${{ github.sha }}
           restore-keys: |
             ccache-build-${{ env.PHP_SRC_REF }}-
 
-      # The tree is built in the workspace and thrown away with the runner.
-      # A hosted runner has nothing of the previous run on it, so the reuse
-      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
-      # the script still runs, because it is also what clones, patches and
-      # configures. PHPSRC is exported here rather than in the job's `env:`
-      # because a job-level value would override what GITHUB_ENV writes.
-      - name: choose the build tree location
-        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
       # On a hosted runner there is never a tree to reuse, so what this buys
@@ -265,6 +276,18 @@ jobs:
           if [ "$(cat make.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
           exit "$(cat make.rc)"
 
+      # Only main writes. The repository's cache budget is 10 GB and these
+      # entries are up to 900M each; if every push to every branch saved one,
+      # a handful of pull-request pushes would evict the main entry that every
+      # new branch restores from -- the entry the `push: branches: [main]`
+      # trigger exists to produce.
+      - name: save the compiler cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-build-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+
       # Issue #111: the build is warning-free in the files we ship, and stays
       # that way. -Werror is not available here -- this compiles all of
       # php-src, and upstream's warnings (Zend/zend_ini_scanner.l,
@@ -287,9 +310,7 @@ jobs:
       # Issue #171: the .phpt suite tests this binary, and
       # fpmng-payload-distribution.phpt reads the payload out of the binary
       # under test -- so the CI binary has to carry one just like a packaged
-      # build does. The step is idempotent (see build/embed-payload.sh): this
-      # tree is reused between runs, and a binary make did not relink still has
-      # last run's payload.
+      # build does.
       - name: embed the distribution payload (issue #171)
         run: |
           chmod +x build/embed-payload.sh
@@ -372,10 +393,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -411,10 +433,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -491,47 +514,36 @@ jobs:
       # cache and three jobs write one of these each, on every run.
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 900M
-      # A directory of its own: --enable-fpmng-fiber is a different configure,
-      # so it cannot share objects with the default build. Sharing one
-      # directory would make the two jobs wipe each other's tree on every run.
-      BUILDTREE_CONFIG: fiber
+      # A directory and a cache prefix of its own: --enable-fpmng-fiber is a
+      # different configure, so it cannot share objects with the default build.
+      PHPSRC: ${{ github.workspace }}/php-src-fiber
     steps:
       - uses: actions/checkout@v7
 
       # What replaces the ccache directory the self-hosted runner kept on its
-      # own disk. The key carries the commit so every run saves a fresh entry;
-      # the restore-key is the prefix, so a run picks up the newest cache of
-      # this job for this php-src pin -- from the pull request itself if it has
-      # one, and otherwise from the last run on main, which is why this
+      # own disk. Restore only; the save is a separate step after the compile,
+      # and runs on main alone. The restore-key is the prefix, so a run picks
+      # up the newest entry for this job and this php-src pin, which on a
+      # branch is always the one the last run on main wrote -- that is why this
       # workflow now also runs on push to main.
       - name: restore the compiler cache
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: ${{ github.workspace }}/.ccache
           key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ github.sha }}
           restore-keys: |
             ccache-fiber-${{ env.PHP_SRC_REF }}-
 
-      # The tree is built in the workspace and thrown away with the runner.
-      # A hosted runner has nothing of the previous run on it, so the reuse
-      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
-      # the script still runs, because it is also what clones, patches and
-      # configures. PHPSRC is exported here rather than in the job's `env:`
-      # because a job-level value would override what GITHUB_ENV writes.
-      - name: choose the build tree location
-        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
       # fpmng-http-direct-request-parity.phpt needs this locale to be
       # discriminating at all -- see the same step on fpmng-phpt (issue #105).
       - name: assert tr_TR.UTF-8 is present (issue #105)
         run: locale -a | grep -i tr_TR
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
-      # It reuses the tree the previous run left on this runner as long as the
-      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
-      # the set of files under sapi/fpmng/ are all unchanged, and starts over
-      # otherwise. The tree is per-runner because a runner executes one job at
-      # a time, and that is what keeps two jobs off the same directory.
-      - name: php-src build tree with the fiber executor (reused between runs)
+      # On a hosted runner there is never a tree to reuse, so what this buys
+      # here is the four steps in one place; the compile behind it is what
+      # ccache covers.
+      - name: php-src build tree with the fiber executor
         env:
           CC: ccache gcc
           CXX: ccache g++
@@ -547,9 +559,8 @@ jobs:
         # assert the executor is actually in this build rather than trusting
         # the command line. Without this the whole cell could silently degrade
         # into a second copy of fpmng-phpt. The log is read from inside the
-        # tree, not from the workspace, because a reused tree does not run
-        # configure again -- an assertion that has nothing to read on the fast
-        # path is worse than no assertion.
+        # tree, where ci-build-tree.sh writes it, rather than from a step's own
+        # stdout: the assertion then holds wherever configure ran.
         run: |
           grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
 
@@ -648,57 +659,30 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     env:
       # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
-      # self-hosted box's own disk. There is no such mount now, and / is not
-      # writable by uid 1001, so the cache lives in the workspace -- which is
-      # also the only place actions/cache can reach from inside a container job.
-      # 900M rather than the image's 5G: the whole repository gets 10 GB of
-      # cache and three jobs write one of these each, on every run.
+      # self-hosted box's own disk and is not writable by uid 1001 here.
+      # Nothing carries this directory anywhere -- see PHPSRC below for why
+      # this job has no cache entry -- it just has to point somewhere writable
+      # so configure's conftest compiles do not fail.
       CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 900M
-      # The same configure line as `build`. That no longer shares a tree with
-      # it -- each hosted job gets its own machine -- but it does share the
-      # ccache prefix's contents in effect, since the two compile the same
-      # objects from the same sources.
-      BUILDTREE_CONFIG: dynamic
+      # The same configure line as `build`, so the tree this job configures is
+      # the one clang-tidy's compile_commands.json has to describe. It shares
+      # nothing else with that job: no cache entry of its own, because
+      # build/lint-c.sh runs clang-tidy and never make, so all a ccache entry
+      # here would ever hold is configure's conftest objects.
+      PHPSRC: ${{ github.workspace }}/php-src-dynamic
     steps:
       - uses: actions/checkout@v7
 
-      # What replaces the ccache directory the self-hosted runner kept on its
-      # own disk. The key carries the commit so every run saves a fresh entry;
-      # the restore-key is the prefix, so a run picks up the newest cache of
-      # this job for this php-src pin -- from the pull request itself if it has
-      # one, and otherwise from the last run on main, which is why this
-      # workflow now also runs on push to main.
-      - name: restore the compiler cache
-        uses: actions/cache@v6
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-lint-${{ env.PHP_SRC_REF }}-${{ github.sha }}
-          restore-keys: |
-            ccache-lint-${{ env.PHP_SRC_REF }}-
-
-      # The tree is built in the workspace and thrown away with the runner.
-      # A hosted runner has nothing of the previous run on it, so the reuse
-      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
-      # the script still runs, because it is also what clones, patches and
-      # configures. PHPSRC is exported here rather than in the job's `env:`
-      # because a job-level value would override what GITHUB_ENV writes.
-      - name: choose the build tree location
-        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
-
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
-      # It reuses the tree the previous run left on this runner as long as the
-      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
-      # the set of files under sapi/fpmng/ are all unchanged, and starts over
-      # otherwise. The tree is per-runner because a runner executes one job at
-      # a time, and that is what keeps two jobs off the same directory.
+      # Headers only -- clang-tidy needs a configured tree, not a built one.
       - name: php-src build tree (headers only; no make)
         env:
           CC: ccache gcc
@@ -758,12 +742,17 @@ jobs:
 
       # The Alpine container below writes its ccache and its downloaded .apk
       # files into these two host directories. On the self-hosted box they
-      # simply stayed there; here they have to be carried between runs, and
-      # they are what kept this job off the 456 s it cost with no cache at all.
+      # simply stayed there; here they have to be carried between runs. What
+      # this is worth has not been measured yet -- the only figure that exists
+      # is the cold one, 456 s on run 34594056547 with no cache of any kind.
       # /build is deliberately not cached -- it is object files for a configure
       # that runs inside the container, and ccache already covers the compile.
+      #
+      # The `..` in the path survives the round trip: actions/cache resolves
+      # paths relative to GITHUB_WORKSPACE and tars with -P, so a path outside
+      # the workspace restores where it was saved from.
       - name: restore the musl compiler and package caches
-        uses: actions/cache@v6
+        uses: actions/cache/restore@v6
         with:
           path: |
             ${{ github.workspace }}/../buildtree-musl/ccache
@@ -777,8 +766,8 @@ jobs:
         # the run only through the actions/cache step above; /build does not,
         # and is here because static-full.sh configures out of tree. This was
         # the only compiling job in the matrix with no compiler cache at all
-        # and a full 25-package apk install every time: 456 s on run
-        # 34594056547, the longest job by a wide margin.
+        # and a full 25-package apk install every time -- see the cache step
+        # above for the measurement.
         run: |
           mkdir -p "$MUSL_CACHE/build" "$MUSL_CACHE/ccache" "$MUSL_CACHE/apk" out-static
           docker run --rm \
@@ -789,6 +778,23 @@ jobs:
             -v "$PWD:/repo" \
             -v "$PWD/out-static:/out" \
             alpine:3.22 sh /repo/build/static-full.sh
+      # The container above ran as root and so these are root-owned, while the
+      # save below runs as the runner account. A cache save that cannot read
+      # its path only warns, so without this the entry would never be written
+      # and nothing would say so.
+      - name: hand the musl caches back to the runner account
+        if: github.ref == 'refs/heads/main'
+        run: sudo chown -R "$(id -u):$(id -g)" "$MUSL_CACHE/ccache" "$MUSL_CACHE/apk"
+
+      - name: save the musl compiler and package caches
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            ${{ github.workspace }}/../buildtree-musl/ccache
+            ${{ github.workspace }}/../buildtree-musl/apk
+          key: musl-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+
       - name: verify static binary in a scratch image
         run: ./build/test-static-full.sh "$PWD/out-static/php-fpm-ng-full"
       - uses: actions/upload-artifact@v7
@@ -830,14 +836,6 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
-
-      # This is the only job that writes to a self-hosted workspace as root.
-      # Whichever job the runner picks up next checks out as uid 1001 and
-      # cannot delete what root left behind, so actions/checkout fails before
-      # its first step. Hand the workspace back on the way out.
-      - name: hand the workspace back to the runner account
-        if: always()
-        run: chown -R 1001:1001 "$GITHUB_WORKSPACE"
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         env:
@@ -858,10 +856,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -927,10 +926,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -963,10 +963,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -992,10 +993,11 @@ jobs:
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
-      # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
-      # 47 skips and still looks green. uid 1001 is gh-runner here and the
-      # runner user on GitHub-hosted images, so it owns the workspace either way.
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
     steps:
       - uses: actions/checkout@v7
@@ -1067,16 +1069,22 @@ jobs:
       # this run will ever try to unlink what the containers below write as
       # root.
       PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
+      # Refuse the bare-base-image fallback. See the login step below.
+      FPMNG_REQUIRE_WARM_IMAGES: "1"
     steps:
       - uses: actions/checkout@v7
 
       # This job is not containerised, so nothing has authenticated its docker
       # daemon to ghcr -- and the package-gate images are private. Without this
-      # the pull in ci-package-gate.sh:138 fails, the script falls back to
-      # building both stages from a bare base image, and the job goes back to
-      # the 328 seconds issue #240 removed while still passing.
+      # the pull in ci-package-gate.sh fails and the script falls back to
+      # building both stages from a bare base image: the job goes back to the
+      # 328 seconds issue #240 removed, and still passes. Which is why
+      # FPMNG_REQUIRE_WARM_IMAGES is set below -- in CI that fallback is a
+      # failure, not a slow path.
       - name: log in to ghcr.io for the package-gate images
-        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
       # The tree is needed for its sources and its tests, never for a build
       # product: build/libphp-build.sh compiles the 54 sources config.m4 names

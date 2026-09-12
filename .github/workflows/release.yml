@@ -48,11 +48,18 @@ jobs:
       # A host path the runner user owns; /opt on a hosted image is root's,
       # and the runner context is not available in a job-level env: at all.
       PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
+      # Refuse the bare-base-image fallback. Without it a login failure would
+      # cut a release built in images that are not the ones the pull request
+      # was gated with, and say nothing -- which is the whole point of the
+      # packages: read line above.
+      FPMNG_REQUIRE_WARM_IMAGES: "1"
     steps:
       - uses: actions/checkout@v7
 
       - name: log in to ghcr.io for the package-gate images
-        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
       - name: php-src tree for the package build
         env:
@@ -100,10 +107,10 @@ jobs:
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
       #
-      # curl, not `gh`: this was written for a self-hosted runner with no gh
-      # CLI on it. ubuntu-latest does carry gh, but the script is what cut
-      # v0.1.0 and v0.2.0 and it depends on nothing but curl and python3 --
-      # rewriting a working release path to use one more tool buys nothing.
+      # curl, not `gh`: the script is what cut v0.1.0 and v0.2.0, it depends
+      # on nothing but curl and python3, and it runs the same way on a laptop
+      # as it does here. Rewriting a working release path around a CLI that
+      # only exists on the runner buys nothing.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:

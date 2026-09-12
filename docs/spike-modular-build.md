@@ -879,7 +879,10 @@ challenge**
   PASS=0 under root).
 - **Acceptance criteria:**
   - The number of build+test cells after the change is stated, with the measured
-    wall-clock added per PR on the poligon runners.
+    wall-clock added per PR on `ubuntu-latest`. (Written when the matrix ran on
+    the self-hosted box; those runners were unregistered on 2026-09-12, so the
+    figure has to come from GitHub-hosted runs, where cell count costs
+    concurrency rather than one box's cores.)
   - Every owned `.phpt` runs (status PASS) on at least one cell, proved by a
     script in `build/` that reads the `results.tsv` of all cells and fails if
     any owned test is PASS on none. Not a glob -- a check against the contents of

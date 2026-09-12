@@ -70,7 +70,8 @@ The `+0,41%` difference is within noise. This test saturates the machine and als
 
 The current gain is about `9,5 us/request`, or `8,3%` of the worker's CPU. Median throughput was about 8812 req/s for upstream and 8910 req/s for fpm-ng (`+1,1%`).
 
-Results from the test host:
+Raw results, on the test box only -- these paths are not in this repository and
+the figures above are what survives of them:
 
 ```text
 /home/piotr/opencode-fiber-poligon/bench-fastcgi/results.txt

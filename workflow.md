@@ -76,6 +76,12 @@ opportunistically, in the same commit as a real change to that code.
 `192.168.8.50`, user `piotr`, passwordless sudo. It is **shared** — other work
 runs there concurrently.
 
+**Manual builds and benchmarks only. Never CI.** It ran the CI matrix until
+2026-09-12; the runners were then unregistered and their services disabled,
+because this repository is public and a self-hosted runner on a public
+repository is a machine a pull request from a stranger can be made to execute
+code on. Re-registering one is a decision, not a convenience.
+
 - Work in your own directory and your own port range.
 - Never `pkill php-fpm` or anything matching by binary name. Kill by port
   (`ss -lntp`) or by the pid file of your own pool.

@@ -330,9 +330,12 @@ assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a r
 # have passed in both of the ways this can go wrong -- a source group that
 # leaked into the base list, and a -lssl left on the link line.
 tls_linkage() {
-  # ldd is not on every image this runs on (and says nothing useful for a
-  # static binary); the ELF dynamic section is, and it is the same evidence.
-  { ldd "$BIN" 2>/dev/null || readelf -d "$BIN" 2>/dev/null || true; } |
+  # The binary's OWN DT_NEEDED entries, not ldd: ldd prints the transitive
+  # closure, and libphp.so itself links OpenSSL for ext/openssl. A default
+  # build correctly shows libssl there through libphp and it means nothing
+  # about this binary. readelf comes from binutils, which this path already
+  # needs for objdump.
+  readelf -d "$BIN" 2>/dev/null | grep NEEDED |
     grep -cE 'libssl|libcrypto|libevent_openssl' || true
 }
 if [ "$FPMNG_TLS" = 1 ]; then

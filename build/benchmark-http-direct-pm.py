@@ -853,7 +853,10 @@ def main():
         "binary": str(args.binary),
         "sha256": sha256,
         "version": subprocess.check_output([str(args.binary), "-v"], text=True).strip(),
-        "settings": {k: (str(v) if isinstance(v, (Path, signal.Signals)) else v)
+        # signal.Signals stringifies to its number under str(); record the name,
+        # because a metadata.json saying "3" is not a reproducible run record.
+        "settings": {k: (v.name if isinstance(v, signal.Signals)
+                         else str(v) if isinstance(v, Path) else v)
                      for k, v in vars(args).items()},
         "platform": subprocess.check_output(["uname", "-a"], text=True).strip(),
         "load_before": os.getloadavg(),

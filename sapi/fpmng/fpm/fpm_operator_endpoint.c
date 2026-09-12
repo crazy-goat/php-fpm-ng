@@ -60,6 +60,7 @@ enum fpm_operator_format_e {
 
 struct fpm_operator_route_s {
 	char *path;
+	const char *directive;			/* which directive put it here, for the collision message */
 	enum fpm_operator_format_e format;
 	struct fpm_worker_pool_s *pool;		/* the pool this route reports on */
 	struct fpm_operator_route_s *next;
@@ -275,13 +276,27 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 	 * for one URL, because the operator scraping it has no way to tell which
 	 * pool replied. */
 	for (r = l->routes; r; r = r->next) {
-		if (!strcmp(r->path, path)) {
-			zlog(ZLOG_ALERT, "[pool %s] %s = %s collides with pool '%s', which already "
-				"answers that path on %s -- an address, a port and a path identify one "
-				"endpoint, so give this one a different path or a different listen address",
-				wp->config->name, directive, path, r->pool->config->name, listen_address);
+		if (strcmp(r->path, path)) {
+			continue;
+		}
+
+		/* The commonest way to hit this is one pool pointing both of its
+		 * directives at the same path, which is a different mistake from two
+		 * pools colliding and deserves a message that names both directives
+		 * rather than telling an operator their pool collides with itself. */
+		if (r->pool == wp) {
+			zlog(ZLOG_ALERT, "[pool %s] %s and %s are both %s on %s -- one path answers with "
+				"one thing, so the status page and the metrics page need different paths "
+				"or different listen addresses",
+				wp->config->name, r->directive, directive, path, listen_address);
 			return -1;
 		}
+
+		zlog(ZLOG_ALERT, "[pool %s] %s = %s collides with pool '%s', which already "
+			"answers that path on %s -- an address, a port and a path identify one "
+			"endpoint, so give this one a different path or a different listen address",
+			wp->config->name, directive, path, r->pool->config->name, listen_address);
+		return -1;
 	}
 
 	r = calloc(1, sizeof(*r));
@@ -293,6 +308,7 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 		free(r);
 		return -1;
 	}
+	r->directive = directive;
 	r->format = format;
 	r->pool = wp;
 

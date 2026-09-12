@@ -51,11 +51,10 @@ file_put_contents($root . '/loop.php', '<?php while (true) { sleep(1); }');
  * The cron schedule is @hourly so the job never fires during the test: what is
  * under test is the endpoint, not the scheduler.
  *
- * http-direct appears here with a metrics path only. Its status page has not
- * moved onto this listener -- it is rendered inside the child that answers and
- * reports per-child rows (issue #64), which is #275's subject -- so
- * pm.status_path still means the page on the pool's own listener there, and
- * fpmng-http-direct-operator.phpt is where that one is tested. */
+ * http-direct appears here with a metrics path only. Its status page is on this
+ * listener too since issue #275, but it is the type's own page rather than the
+ * generic per-pool JSON the other two answer with, so it is tested where the
+ * rest of that page is: fpmng-http-direct-operator.phpt. */
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}

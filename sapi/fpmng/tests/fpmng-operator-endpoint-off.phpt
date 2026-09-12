@@ -17,9 +17,9 @@ file_put_contents($root . '/front.php', '<?php echo "php:" . $_SERVER["REQUEST_U
  * that wrong would be invisible: an address named in the config looks like an
  * address someone meant to open.
  *
- * The metrics pair rather than the status pair because http-direct has not
- * moved its status page onto the operator listener yet and refuses
- * pm.status_listen outright (#275). */
+ * The metrics pair rather than the status pair, so that the case is the one
+ * #276 documents as the off switch for metrics: the endpoint named an address
+ * and never named a path. */
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}

@@ -102,6 +102,28 @@ expectAccepted(
                      . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics")
 );
 
+/* ...and one pool may not take both formats from ONE path, which is the same
+ * rule seen from inside a single pool: the triple is (address, port, path), and
+ * nothing about it cares whether the two claimants are two pools or one. The
+ * message has to name both directives -- "collides with pool 'a'" told an
+ * operator their pool collides with itself (issue #276). */
+expectRejected(
+    'both formats on one path',
+    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /both\n"
+                     . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /both"),
+    ['pm.status_path and pm.metrics_path are both /both',
+     'the status page and the metrics page need different paths']
+);
+
+/* The same path for both formats on two different addresses is fine: two
+ * triples, two endpoints, and an operator who wants /metrics to be spelled
+ * /metrics on every port gets to have that. */
+expectAccepted(
+    'both formats on one path, two listeners',
+    $head . $cron('a', "pm.status_listen = {{ADDR[op1]}}\npm.status_path = /page\n"
+                     . "pm.metrics_listen = {{ADDR[op2]}}\npm.metrics_path = /page")
+);
+
 /* The listener pool is created by fpm-ng and is not a type anyone can name.
  * The message is the one an unknown pool.type gets, and the list it prints must
  * not offer the internal type either. */
@@ -123,6 +145,22 @@ expectRejected(
     'other pm. directive on cron',
     $head . $cron('a', "pm.max_children = 4"),
     ["'pm.max_children' is not supported by pool.type = cron"]
+);
+
+/* supervisor carries the same reject list and the same carve-out, and the
+ * metrics pair goes through it as well as the status pair -- four directives
+ * were carved out, so all four have to be asked for somewhere. */
+expectAccepted(
+    'carved-out metrics directives on supervisor',
+    $head . "\n[sup]\npool.type = supervisor\nsupervisor.script = /dev/null\n"
+          . "supervisor.restart = never\n"
+          . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics\n"
+);
+expectRejected(
+    'other pm. directive on supervisor',
+    $head . "\n[sup]\npool.type = supervisor\nsupervisor.script = /dev/null\n"
+          . "supervisor.restart = never\npm.max_children = 4\n",
+    ["'pm.max_children' is not supported by pool.type = supervisor"]
 );
 
 /* Both of http-direct's operator pages go to the operator listener, and both
@@ -182,9 +220,13 @@ echo "Done\n";
 same path on one listener: rejected
 same path on two listeners: accepted
 both formats on one listener: accepted
+both formats on one path: rejected
+both formats on one path, two listeners: accepted
 the internal type is not configurable: rejected
 carved-out pm. directive on cron: accepted
 other pm. directive on cron: rejected
+carved-out metrics directives on supervisor: accepted
+other pm. directive on supervisor: rejected
 both operator paths on http-direct: accepted
 status path claimed by two http-direct pools on one listener: rejected
 pools sharing a listener disagree on identity: rejected

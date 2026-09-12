@@ -120,4 +120,13 @@ uint32_t fpmng_metrics_series_limit(void);
  * child, without any request context. */
 int fpmng_metrics_render_text(char **out, size_t *len);
 
+/* The same, restricted to the half-open slot range [first_slot, first_slot +
+ * slot_count). A pool owns a contiguous run of slots (see the memory-model
+ * note above: the index is the sum of earlier pools' pm.max_children plus the
+ * worker's own scoreboard index), so a range is how a per-pool endpoint asks
+ * for its own pool's series and nobody else's (issue #276). The range is
+ * clamped, not validated: asking for slots that do not exist renders an empty
+ * page. Under CLI there is one process-local slot and the range is ignored. */
+int fpmng_metrics_render_range(uint32_t first_slot, uint32_t slot_count, char **out, size_t *len);
+
 #endif

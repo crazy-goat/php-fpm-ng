@@ -50,6 +50,35 @@ int fpm_metrics_init_main(void) /* {{{ */
 }
 /* }}} */
 
+int fpm_metrics_render_pool(struct fpm_worker_pool_s *wp, char **out, size_t *len) /* {{{ */
+{
+	struct fpm_worker_pool_s *p;
+	uint32_t base = 0;
+
+	/* The same walk fpm_metrics_child_init() does, from the other side: there
+	 * the child computes its own slot, here the operator endpoint computes the
+	 * run of slots its pool owns. Both derive it from configuration order and
+	 * pm.max_children, so they cannot disagree unless the walk itself changes
+	 * -- which is why it is spelled the same way twice rather than cached in
+	 * the pool, where a reload could leave it stale. */
+	for (p = fpm_worker_all_pools; p && p != wp; p = p->next) {
+		if (p->config->pm_max_children > 0) {
+			base += (uint32_t) p->config->pm_max_children;
+		}
+	}
+
+	if (wp->config->pm_max_children <= 0) {
+		/* No workers, so no slots and nothing that could ever have been
+		 * written. Render the empty page rather than the whole region. */
+		*out = NULL;
+		*len = 0;
+		return 0;
+	}
+
+	return fpmng_metrics_render_range(base, (uint32_t) wp->config->pm_max_children, out, len);
+}
+/* }}} */
+
 void fpm_metrics_child_init(void) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;

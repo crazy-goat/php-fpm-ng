@@ -47,6 +47,7 @@
 #include "fpm_operator_http.h"
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
+#include "fpm_metrics.h"
 #include "php_fpmng_metrics.h"
 #include "zlog.h"
 
@@ -239,25 +240,30 @@ void fpm_pool_status_render_prometheus(struct fpm_operator_buf_s *b, struct fpm_
 		"# TYPE fpmng_pool_backoff_seconds gauge\n");
 	fpm_pool_status_collect_and_render(b, fpm_pool_status_row_prometheus, only);
 
-	if (only) {
-		/* The application metrics below aggregate every worker slot in shm,
-		 * with no pool dimension to filter on, so a per-pool endpoint would be
-		 * answering with another pool's numbers. Left out until #276 decides
-		 * what a per-pool scrape reports; omitting them is recoverable, showing
-		 * the wrong ones is not. */
-		return;
-	}
-
-	/* Application metrics (NOTES 3k): aggregate the time-series tables from ALL
-	 * worker slots in shm — read another process's shared memory from this
-	 * process, without PHP or request context, so render_text does not touch
-	 * ZEND_API. No series (nobody registered anything) = no additional lines,
-	 * deliberately without an "occupier" comment. */
+	/* Application metrics (NOTES 3k): the time-series tables written by workers
+	 * into shm — read another process's shared memory from this process,
+	 * without PHP or request context, so neither renderer touches ZEND_API. No
+	 * series (nobody registered anything) = no additional lines, deliberately
+	 * without an "occupier" comment.
+	 *
+	 * A per-pool endpoint renders its own pool's worker slots only (#276): a
+	 * pool owns a contiguous run of them, so the filter is a slot range rather
+	 * than a string match on the pool= label, and a pool that registered
+	 * nothing renders nothing instead of the other pools' numbers. The
+	 * aggregate endpoint (pool.type = status) still renders every slot.
+	 *
+	 * The pool= label stays on both, even though on a per-pool endpoint it is
+	 * constant: it is what lets a scraper that reads several pools' endpoints
+	 * put the series side by side, and dropping it would make the same series
+	 * name mean different things depending on which port it came from. */
 	{
 		char *text = NULL;
 		size_t len = 0;
+		int rc = only
+			? fpm_metrics_render_pool(only, &text, &len)
+			: fpmng_metrics_render_text(&text, &len);
 
-		if (!fpmng_metrics_render_text(&text, &len) && text && len) {
+		if (!rc && text && len) {
 			fpm_operator_buf_appendf(b, "%s", text);
 		}
 		free(text);

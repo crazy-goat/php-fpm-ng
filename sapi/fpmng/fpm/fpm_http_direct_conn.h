@@ -38,11 +38,20 @@
  *   counted, the worker's 10 ms tick sweep does, so an fd can outlive its
  *   connection by one tick.
  * - The sweep is a pointer read per tracked connection, 100 times a second.
- *   It only runs when a limit is configured, and http.max_connections is what
- *   bounds the number of tracked connections -- which is why validation
- *   requires it whenever http.max_connections_per_client is set: the per-client
- *   count is a walk of this list, and an unbounded list would make the accept
- *   path grow with the flood it is supposed to survive.
+ *   http.max_connections is what bounds the number of tracked connections --
+ *   which is why validation requires it whenever
+ *   http.max_connections_per_client is set: the per-client count is a walk of
+ *   this list, and an unbounded list would make the accept path grow with the
+ *   flood it is supposed to survive. Where no total cap is configured the walk
+ *   happens on the tick only, never per accept, so accepting stays O(1)
+ *   whatever the list length.
+ *
+ * Since issue #64 a node outlives the first request and is kept for the whole
+ * life of the connection when the caller asks for it (limits.track_live),
+ * because the live count is what the status page reports. Before that a
+ * deadline-only worker dropped the node the moment its request arrived, and
+ * that is still what a caller without a sweep gets -- the node is what holds
+ * the fd, and past the first request only the sweep gives it back.
  *
  * What is NOT here, and is rejected by validation rather than ignored:
  * per-connection limits for later requests on a keep-alive connection (the
@@ -63,6 +72,15 @@ struct fpm_http_direct_conns_limits {
 	int read_timeout_ms;	/* first-request deadline; 0 disables it */
 	int max_connections;	/* per worker; 0 = unlimited */
 	int max_per_client;	/* per peer address, per worker; 0 = unlimited */
+	/* Keep a node for the whole life of a connection rather than dropping it
+	 * when its first request arrives, so that live() is a true gauge of what
+	 * this worker holds (issue #64). Only a caller that sweeps may ask for
+	 * this: the node holds a bufferevent reference and therefore an fd, and
+	 * past the first request the sweep is the only thing that releases it.
+	 * pool.executor = worker leaves this at 0 -- it has no periodic tick and
+	 * no status page to report the gauge on, so a node kept there would be an
+	 * fd leaked per connection. */
+	int track_live;
 };
 
 /* NULL only on OOM. A worker whose limits are all off still gets an object:
@@ -98,14 +116,24 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
  * behalf of connections that have already ended. */
 int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns);
 
-/* Releases connections evhttp has finished with. Call from the worker's tick;
- * a no-op when no limit is configured. */
+/* Releases connections evhttp has finished with, by walking the tracked list.
+ * Call from the worker's tick. Not a no-op when no limit is configured: since
+ * issue #64 a node with track_live set outlives its first request, and this is
+ * what collects it. A caller that does not call this must not set track_live
+ * and must not set either limit. */
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
 
-/* There are deliberately no per-connection counters here. This file knows how
- * many connections it dropped, but nothing reads a number that is not on the
- * status page, and putting it there is a scoreboard change -- issue #64. A
- * counter with no reader is a fact nobody can check, which is worse than the
- * once-per-child NOTICE each policy already logs. */
+/* What this file knows, for the status page (issue #64). All three are this
+ * worker's own: live is a gauge that lags its connection by at most a full
+ * rotation of the bounded sweep (see FPM_DIRECT_SWEEP_MAX in the .c), the
+ * other two are totals since the child started. The worker publishes them
+ * into its shared slot from the same tick that sweeps, rather than this file
+ * reaching into the scoreboard -- accounting belongs to whoever already owns a
+ * slot. */
+unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns);
+/* Connections dropped because the first request did not arrive in time. */
+unsigned long fpm_http_direct_conns_timed_out(const struct fpm_http_direct_conns *conns);
+/* Connections refused by http.max_connections_per_client, in either shape. */
+unsigned long fpm_http_direct_conns_refused(const struct fpm_http_direct_conns *conns);
 
 #endif

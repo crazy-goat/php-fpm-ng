@@ -334,9 +334,13 @@ both of which a client must be prepared for:
   the zero-timeout trick that drops a connection from outside does nothing.)
 
 The 503 is counted and logged exactly like the pool's other refusals — it
-increments the `pm.status` refusal counter and produces an `access.log` line —
-and it is emitted **after** `listen.allowed_clients`, so an address the ACL
-excludes still gets a plain `403 Forbidden` and learns nothing about the cap.
+shows up on `pm.status` as `refused connections` and produces an `access.log`
+line — and it is emitted **after** `listen.allowed_clients`, so an address the
+ACL excludes still gets a plain `403 Forbidden` and learns nothing about the
+cap. It has its own counter rather than joining `refused requests`, because a
+connection refused before its first request is not a request the pool answered;
+connections dropped by the deadline are `timed out connections` for the same
+reason.
 
 The suite (`sapi/fpmng/tests/fpmng-http-direct-connection-limits.phpt`) accepts
 either shape for exactly this reason.
@@ -701,23 +705,137 @@ against the documented spelling.
 | `non-php requests` | static files, pings and status pages: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
 | `active requests` | PHP requests in flight right now |
+| `direct schema` | the version of the direct-specific fields below (currently `1`) |
+| `live connections` | connections this pool's children hold right now |
+| `pending responses` | responses accepted but not yet fully written |
+| `refused acl` | requests answered `403` by `listen.allowed_clients` |
+| `refused capacity` | requests answered `503` because the pool was stopping or saturated |
+| `refused connections` | connections answered `503` by `http.max_connections_per_client` |
+| `timed out connections` | connections dropped by the first-request deadline |
+| `rejected responses` | responses PHP produced that could not be written to the client |
 
-Two deviations from the fastcgi status page, both deliberate:
+`refused requests` is the sum of `refused acl` and `refused capacity`, kept
+under its old name and its old meaning so a tool written against the fastcgi
+page keeps working. The split is what the sum could never answer: "the pool is
+refusing" and "the pool is refusing *the people you told it to refuse*" are
+different incidents.
 
-- There is no per-process detail (`?full`). The scoreboard's per-process slots
-  describe a FastCGI request, and a direct child's request is not one.
-- `accepted conn` counts **connections**, not requests, and there is no
-  "active connections" gauge. libevent's per-connection hook
-  (`evhttp_set_bevcb()`) runs before the peer address is known and offers no
-  close notification, and the per-response close callback a direct child
-  already installs cannot be shared with a permanent one. A monotonic count of
-  accepts plus an in-flight request gauge is what can be reported truthfully.
+`direct schema` exists so that a tool meeting a page it does not understand can
+say so instead of guessing from which fields happen to be present. It is
+bumped when a field changes meaning or leaves; adding a field does not bump it.
 
-`accepted conn`, `non-php requests` and `refused requests` belong to the pool,
-not to a child: a child recycled by `pm.max_requests` inherits the counters of
-the slot it takes over, so the totals never go backwards mid-series. Only
-`active requests` is cleared when a child starts, because that is exactly what
-a child killed mid-request would otherwise leak.
+#### What tracking a connection costs
+
+Reporting `live connections` means keeping a small node per connection for as
+long as the connection lasts, and releasing it when the connection ends. That
+release is a sweep, and the sweep is not free: `bufferevent_getcb()` -- the
+call that asks libevent whether evhttp has let go -- takes the bufferevent's
+lock.
+
+Measured on the poligon 2026-09-12, one child, no `http.max_connections`, one
+busy keep-alive connection against N idle ones:
+
+| N idle connections | origin/main | exhaustive sweep per tick | bounded sweep (shipped) |
+|---:|---:|---:|---:|
+| 0 | 9534 rps | 9460 rps | 9320 rps |
+| 5 | -- | -- | 9778 rps |
+| 32 | -- | -- | 9272 rps |
+| 500 | 9555 rps | 9180 rps | 9426 rps |
+| 2000 | 9686 rps | 6708 rps | 9369 rps |
+
+The first two columns are the run that decided the design; the third is a
+re-measurement of the binary that shipped, so read it for its flatness rather
+than against the other two. It has no trend: the two `N = 0` measurements of
+that run were 9267 and 9320 rps, which is the width of the noise.
+
+So the sweep examines at most 32 nodes per pass, taken from the end of the list
+that requests move away from. A descriptor whose connection has ended is
+therefore released within `live / 32` ticks rather than one, which for 2000
+connections is under a second -- measured as `live connections` falling from
+1408 to 0 within three seconds of the client closing them all. Anything that
+needs an exact count right now (the accept gate at `http.max_connections`, the
+per-client count) asks for an exhaustive walk instead, and both of those only
+exist when a cap is configured, which is what bounds the walk.
+
+#### What each number costs to read
+
+Three of these are **gauges**, not totals: `live connections`, `pending
+responses`, and — on `?full` — the same two per child. They are published into
+the shared slot from the worker's 10 ms tick, so they are up to 10 ms stale,
+and they stop moving entirely while that child is inside PHP: on the classic
+executor the script runs inside evhttp's request callback, so the loop that
+would publish them is not running. A child stuck in a 5 s script reports the
+connection count it had when the script started. This is deliberate — the
+alternative is a shared-memory write on every accept and every close, on the
+path the direct pool exists to keep short.
+
+`active requests` is the exception, and it is why the distinction matters: it
+is written on the request path itself, so it *does* move while PHP runs. That
+is what makes "this child is busy" visible at all.
+
+#### Reset semantics
+
+`accepted conn`, `non-php requests`, `requests`, `refused *` and `rejected
+responses` belong to the pool, not to a child: a child recycled by
+`pm.max_requests` inherits the counters of the slot it takes over, so the
+totals never go backwards mid-series. The gauges (`active requests`, `live
+connections`, `pending responses`) are cleared when a child starts, because
+that is exactly what a child killed mid-request would otherwise leak.
+
+`timed out connections` and `refused connections` are pool totals like the
+rest, even though the numbers behind them live in each child's own memory: the
+tick publishes the *difference* since its last publish, so a child adds to the
+slot it inherits instead of overwriting it. Assigning instead would have made
+both rows drop to zero at every `pm.max_requests` recycle, and a scraper reads
+a counter that drops as a reset of the whole series.
+
+The gauges are summed over the **live** children only. A slot belongs to a
+scoreboard index and is only ever re-zeroed by the next child to take that
+index, so a child that was scaled down, recycled or killed outright would
+otherwise leave `live connections: 20` standing for as long as the pool stayed
+small. The page checks the scoreboard's `used` flag for each slot instead
+(`fpm_http_direct_ops.c`, `fpm_http_direct_ops_slot_alive()`), which needs
+nothing to run in the dying child and therefore also covers `SIGKILL`,
+`request_terminate_timeout` and a crash. On `?full` the same fact is a row:
+`live: 1` or `live: 0` says whether a child holds the slot at all, which is
+what tells "this child holds no connections" apart from "no child here".
+
+A reload (`SIGUSR2`) starts every number here again, the scoreboard's own
+`requests` included: the master re-executes, so the shared segment is a new
+one. Measured on the poligon 2026-09-11 -- `accepted conn` 9 and `requests` 24
+before, `accepted conn` 1 (the status request itself) and `requests` 0 after.
+The re-entrancy guard in `fpm_http_direct_ops_init_main()`
+(`fpm_http_direct_ops.c:88`) is about the per-pool init being re-run inside one
+master process, not about surviving a reload. A monitoring series therefore has
+to treat a reload as a counter reset, which is what tooling already does for
+upstream's `accepted conn`.
+
+#### `?full`: the per-child rows
+
+`?full` appends one block per scoreboard slot, with the same fields, in both
+the text and the JSON rendering (`?json&full` stays valid JSON: the per-child
+rows are a `workers` array). A slot that has accepted nothing is printed
+anyway, because "this child got none" is the observation.
+
+This is what makes the accept distribution measurable from the status page
+alone. The fairness problem of issue #53 — one child accepting a whole
+keep-alive burst while the others sat idle — needed an external harness to see;
+a pool-wide sum cannot show it at all. Two children whose `accepted conn` reads
+1000 and 4 is the same measurement, from the page an operator already has open.
+
+Measured on the poligon 2026-09-11 (4 children, 64 keep-alive connections x 20
+requests, then one `?full` read), the accept distribution came off the page as
+`accepted conn` 19 / 22 / 22 / 2 across the four slots -- the same observation
+issue #53 needed a separate harness to make.
+
+That same read is a worked example of the staleness above: it reported `live
+connections: 57` a moment after the client had closed all 64, because the
+children had not ticked yet. Three seconds later the same page read `0`, and
+the children's open descriptors were back to 10 each. The gauge is a gauge.
+
+Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
+method, the duration). That part is still absent: the scoreboard's per-process
+slots describe a FastCGI request, and a direct child's request is not one.
 
 `pm.status_listen` stays rejected on both executors: it asks for a second
 listening socket served by a second process, and a direct child owns exactly
@@ -771,8 +889,9 @@ It is enforced in the request callback, not at accept: libevent's
 `evhttp_set_bevcb()` runs before the peer address is known. The TCP connection
 is therefore accepted and the request answered `403`, which is also what the
 `http` gateway does. A refused request reaches neither the static file server,
-nor the status page, nor PHP, and is counted as `refused requests`. A
-malformed address in the list is rejected by `php-fpm -t` and at start-up,
+nor the status page, nor PHP, and is counted as `refused acl` (and inside the
+`refused requests` sum). A malformed address in the list is rejected by
+`php-fpm -t` and at start-up,
 before any child forks; it is fatal again in the child, which would otherwise
 be the only place it was noticed. A list meant to keep someone out must never
 end up keeping nobody out.

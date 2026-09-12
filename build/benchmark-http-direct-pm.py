@@ -95,8 +95,9 @@ while (!fpmng_worker_may_exit()) {
 
 # fpm_process_ctl.c:536 -- the master's idle-server maintenance pass runs once a
 # second, and fpm_pctl_kill_idle_child() (:342-350) escalates SIGQUIT to SIGKILL
-# on the pass after the one that sent it. Any master-driven retirement whose
-# t_exit lands at or past this measured SIGKILL, not a drain.
+# on the pass after the one that sent it. A master-driven retirement whose
+# t_exit lands at or past this bound measured the SIGKILL, not a drain, and the
+# drain time it appears to report is the escalation delay instead.
 SIGKILL_FLOOR_MS = 1000.0
 
 # The literal as it appears in .rodata: fpm_http_direct_request.c:105 logs
@@ -119,25 +120,39 @@ def verify_binary(binary):
     return hashlib.sha256(data).hexdigest()
 
 
-def reserve(ports):
-    """Fail before starting anything if the range is not ours to use.
+class PortRange:
+    """Holds every port of the range bound until the pool that wants it starts.
 
     The box is shared; discovering the collision from a half-started pool means
-    reading someone else's error log to find out.
+    reading someone else's error log to find out. Binding and immediately
+    closing -- the obvious version -- only checks the range at t=0, and the last
+    scenario of a twelve-row run starts minutes later: a port taken in between
+    comes back as "pool never listened", which reads like a broken binary.
+    SO_REUSEADDR lets our own pool bind the port we are still holding, so
+    release() right before start() has no window at all.
     """
-    held = []
-    for port in ports:
-        s = socket.socket()
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        try:
-            s.bind(("127.0.0.1", port))
-        except OSError as exc:
-            for h in held:
-                h.close()
-            raise SystemExit(f"port {port} is taken ({exc}); pick another --base-port")
-        held.append(s)
-    for h in held:
-        h.close()
+
+    def __init__(self, ports):
+        self.held = {}
+        for port in ports:
+            s = socket.socket()
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError as exc:
+                self.close()
+                raise SystemExit(f"port {port} is taken ({exc}); pick another --base-port")
+            self.held[port] = s
+
+    def release(self, port):
+        s = self.held.pop(port, None)
+        if s is not None:
+            s.close()
+
+    def close(self):
+        for s in self.held.values():
+            s.close()
+        self.held.clear()
 
 
 def raise_nofile(wanted):
@@ -155,6 +170,25 @@ def raise_nofile(wanted):
     if target < wanted:
         raise SystemExit(f"need {wanted} descriptors, the hard limit is {hard}")
     return target
+
+
+def pss_bytes(pid):
+    """Proportional set size: the figure the pm = dynamic decision rests on.
+
+    VmRSS counts libphp's text and every mapped extension once per child, so
+    summing it over a pool credits a retired child with tens of MB of shared
+    pages that were never duplicated and are not returned when it dies. Pss
+    divides each shared page by its sharer count, which is what actually comes
+    back. VmRSS is still recorded next to it: it is the number an operator sees
+    in top, and the gap between the two is itself worth reading.
+    """
+    try:
+        for line in open(f"/proc/{pid}/smaps_rollup"):
+            if line.startswith("Pss:"):
+                return int(line.split()[1]) * 1024
+    except OSError:
+        pass
+    return None
 
 
 def children_of(pid):
@@ -339,7 +373,12 @@ class Pool:
         handle = open(self.stderr, "w")
         self.process = subprocess.Popen(
             [str(self.binary), "-n", "-F", "-y", str(self.config)],
-            stdout=handle, stderr=handle)
+            stdout=handle, stderr=handle,
+            # Own session, so teardown can reach the workers too: SIGKILL to a
+            # wedged master leaves its children alive, still holding the
+            # inherited listening socket, and the port stays bound on a shared
+            # box long after the harness exits.
+            start_new_session=True)
         self._log_handle = handle
         deadline = time.monotonic() + seconds
         while True:
@@ -398,7 +437,15 @@ class Pool:
             try:
                 self.process.wait(timeout=15)
             except subprocess.TimeoutExpired:
-                self.process.kill()
+                # A master wedged in shutdown is exactly the state a retirement
+                # bug produces, and it is the state that orphans workers, so the
+                # escalation goes to the whole process group -- never to a
+                # pattern matching the binary name, which would hit other users
+                # of this box.
+                try:
+                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                except OSError:
+                    self.process.kill()
                 self.process.wait(timeout=5)
         if getattr(self, "_log_handle", None):
             self._log_handle.close()
@@ -462,12 +509,21 @@ class Stream:
     Separate from the idle set on purpose: the whole point of the harness is
     that traffic keeps flowing while N connections sit idle, which is exactly
     what a single `wrk` run cannot express.
+
+    `mode` is not a detail. Under keep-alive every thread stays pinned to the
+    child that first answered it, because all children accept on the same
+    inherited listening socket and a newly spawned one gets no share of
+    connections that are already open (#53). A scale-up measured that way looks
+    useless by construction -- an artefact of the client, not a result -- so
+    `new-connection` closes after each request and makes the load a stream of
+    accepts, which is the only shape in which a new child can take work.
     """
 
-    def __init__(self, port, connections, tls_context, sleep_ms):
+    def __init__(self, port, connections, tls_context, sleep_ms, mode="keepalive"):
         self.port = port
         self.tls = tls_context
         self.sleep_ms = sleep_ms
+        self.mode = mode
         self.records = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -484,6 +540,14 @@ class Stream:
             except OSError as exc:
                 record = {"status": None, "outcome": "connect_error", "ms": 0.0,
                           "at": time.monotonic(), "pid": None, "error": repr(exc)}
+                client = None
+                # Without this a dead pool has every thread spinning at memory
+                # speed: n_client_visible_failures reaches six figures for a
+                # single retirement and records grows without bound, so the
+                # rule-3 counter would report the harness, not the server.
+                self._stop.wait(0.01)
+            if self.mode == "new-connection" and client is not None:
+                client.close()
                 client = None
             if record["outcome"] != "ok":
                 # A connection that produced anything but a 200 is not reused:
@@ -583,10 +647,29 @@ def retire(pool, idle_set, stream, inflight_ms, grace_ms, timeout, sig):
     open_conns = set(held)
     deadline = t0 + timeout
     while time.monotonic() < deadline and (open_conns or t_exit is None):
-        for key, _ in selector.select(timeout=0.01):
+        events = selector.select(timeout=0.01)
+        if not events:
+            # select() over an empty registration set returns at once, so
+            # without this the loop stats /proc in a tight spin for the whole
+            # timeout -- and it does so while Stream latency is being recorded
+            # into this very window, which would measure the harness.
+            time.sleep(0.005)
+        for key, _ in events:
             client = key.data
+            record = None
             try:
-                record = client.recv()
+                # One readiness event can carry several TLS records: recv()
+                # returns the plaintext of one, and the rest sit in OpenSSL's
+                # BIO with the fd no longer readable. Stopping after one read
+                # loses a response tail or a close_notify on exactly the TLS
+                # rows this spike needs.
+                while True:
+                    got = client.recv()
+                    if got is not None:
+                        record = got
+                    sock = client.sock
+                    if not (isinstance(sock, ssl.SSLSocket) and sock.pending()):
+                        break
             except OSError:
                 record = None
                 client.closed_at = time.monotonic()
@@ -613,12 +696,31 @@ def retire(pool, idle_set, stream, inflight_ms, grace_ms, timeout, sig):
     # Its own deadline: the drain loop may have used the whole grace, and the
     # master forks the replacement only after it reaps the child.
     replacement_deadline = time.monotonic() + 10.0
+    # Probed with a fresh connection each pass rather than read off the stream:
+    # a stream thread only reconnects when its own connection failed, and the
+    # retired child need not have held any stream connection at all, so a pool
+    # whose replacement was accepting in 20 ms would still report null here.
+    # The stream is kept as a corroborating source, not the only one.
     while time.monotonic() < replacement_deadline and t_replacement_accepting is None:
         for record in stream.snapshot():
             if record["at"] > t0 and record["pid"] and record["pid"] not in before:
                 t_replacement_accepting = record["at"]
                 replacement = record["pid"]
                 break
+        if t_replacement_accepting is not None:
+            break
+        probe = None
+        try:
+            probe = Client(stream.port, stream.tls, timeout=1.0)
+            record = probe.exchange(deadline=1.0)
+            if record["pid"] and record["pid"] not in before:
+                t_replacement_accepting = record["at"]
+                replacement = record["pid"]
+        except OSError:
+            pass
+        finally:
+            if probe is not None:
+                probe.close()
         if t_replacement_accepting is None:
             time.sleep(0.02)
 
@@ -706,7 +808,7 @@ php_admin_value[opcache.enable] = 0
 """
 
 
-def run_scenario(args, root, scenario, tls_context, port):
+def run_scenario(args, root, scenario, tls_context, port, ports=None):
     directory_name = (f"{scenario['executor']}-{scenario['pm']}"
                       f"-{'tls' if scenario['tls'] else 'plain'}-n{scenario['idle']}")
     directory = root / f"{directory_name}-{scenario['index']}"
@@ -715,20 +817,27 @@ def run_scenario(args, root, scenario, tls_context, port):
     row_base = {k: scenario[k] for k in
                 ("executor", "pm", "tls", "idle", "max_children", "max_requests",
                  "min_spare", "max_spare", "workload", "read_timeout_ms")}
-    status = pool.start(tls_context if scenario["tls"] else None)
-    if not status["started"]:
-        pool.stop()
-        return [row_base | {"round": 0, "result": "refused" if status["refused"] else "failed",
-                            "error": status.get("error")}]
-
+    row_base["stream_mode"] = args.stream_mode
     rows = []
     idle_set = None
     stream = None
     try:
+        if ports is not None:
+            ports.release(port)
+        # Inside the try, because start() parses a response and can raise on a
+        # malformed one (RuntimeError, ValueError) -- none of which is OSError.
+        # Raised outside, it would leave a live master bound to this port on a
+        # shared box, reachable only through the pid file this path never wrote.
+        status = pool.start(tls_context if scenario["tls"] else None)
+        if not status["started"]:
+            return [row_base | {"round": 0,
+                                "result": "refused" if status["refused"] else "failed",
+                                "error": status.get("error")}]
         for round_index in range(1, args.rounds + 1):
             idle_set = IdleSet(port, scenario["idle"], tls_context if scenario["tls"] else None)
             stream = Stream(port, args.stream_connections,
-                            tls_context if scenario["tls"] else None, args.request_sleep_ms)
+                            tls_context if scenario["tls"] else None, args.request_sleep_ms,
+                            args.stream_mode)
             stream.start()
             # Let the pool settle before RSS is read: a child that is still
             # accepting its share of the idle set has not paid for it yet.
@@ -739,6 +848,7 @@ def run_scenario(args, root, scenario, tls_context, port):
                 "result": "ok",
                 "children": len(children),
                 "rss_child_bytes": {str(pid): rss_bytes(pid) for pid in children},
+                "pss_child_bytes": {str(pid): pss_bytes(pid) for pid in children},
                 "idle_conns_per_child": {str(pid): len(cs) for pid, cs in idle_set.by_pid.items()},
             }
             steady_from = time.monotonic()
@@ -792,6 +902,11 @@ def main():
     parser.add_argument("--idle-timeout", type=int, default=10)
     parser.add_argument("--stream-connections", type=int, default=8)
     parser.add_argument("--request-sleep-ms", type=int, default=0)
+    parser.add_argument("--stream-mode", default="keepalive",
+                        choices=["keepalive", "new-connection"],
+                        help="new-connection drives the load by accepts rather than by "
+                             "requests on connections already open; a scale-up cannot "
+                             "help the latter at all, see issue #53")
     parser.add_argument("--read-timeout-ms", type=int, default=5000,
                         help="http.read_timeout; also the grace a retiring child "
                              "gives the connections it holds (fpm_http_direct.c:245-253)")
@@ -816,9 +931,11 @@ def main():
     # Before the scratch directory is created, so a refused binary leaves
     # nothing behind to clean up.
     sha256 = verify_binary(args.binary)
+    # Same reason: a descriptor limit too low to hold the idle set is a refusal
+    # before anything exists, not a half-made directory the rerun trips over.
+    raise_nofile(max(args.idle) + args.stream_connections + 64)
     root = args.scratch.resolve()
     root.mkdir(parents=True, exist_ok=False)
-    raise_nofile(max(args.idle) + args.stream_connections + 64)
 
     (root / "index.php").write_text(FRONT_CONTROLLER)
     (root / "worker.php").write_text(WORKER_SCRIPT)
@@ -847,7 +964,7 @@ def main():
                         })
                         index += 1
 
-    reserve(range(args.base_port, args.base_port + len(scenarios)))
+    ports = PortRange(range(args.base_port, args.base_port + len(scenarios)))
 
     metadata = {
         "binary": str(args.binary),
@@ -866,12 +983,15 @@ def main():
     (root / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str))
 
     results = []
-    for scenario in scenarios:
-        port = args.base_port + scenario["index"]
-        results += run_scenario(args, root, scenario, tls_context, port)
-        # Incremental, so a run interrupted at scenario 9 of 12 still leaves
-        # nine usable scenarios behind.
-        (root / "results.json").write_text(json.dumps(results, indent=2, default=str))
+    try:
+        for scenario in scenarios:
+            port = args.base_port + scenario["index"]
+            results += run_scenario(args, root, scenario, tls_context, port, ports)
+            # Incremental, so a run interrupted at scenario 9 of 12 still leaves
+            # nine usable scenarios behind.
+            (root / "results.json").write_text(json.dumps(results, indent=2, default=str))
+    finally:
+        ports.close()
 
     metadata["load_after"] = os.getloadavg()
     (root / "metadata.json").write_text(json.dumps(metadata, indent=2, default=str))

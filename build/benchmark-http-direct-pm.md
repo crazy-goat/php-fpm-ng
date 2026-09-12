@@ -15,9 +15,15 @@ reason, not in the write-up.
 `pm = dynamic` (or `ondemand`) for an http-direct pool is **worth having** only
 if all four hold at a setting an operator would plausibly run:
 
-1. **Idle RSS saving ≥ 50 MB and ≥ 30 % of the pool's idle RSS**, measured as
-   the sum of `rss_child_bytes` over the pool at the same `pm.max_children` and
-   the same idle-connection count N, dynamic versus static.
+1. **Idle memory saving ≥ 50 MB and ≥ 30 % of the pool's idle footprint**,
+   measured as the sum of **`pss_child_bytes`** over the pool at the same
+   `pm.max_children` and the same idle-connection count N, dynamic versus
+   static. Judged on Pss, not VmRSS: VmRSS counts libphp's text and every mapped
+   extension once per child, so summing it credits a retired child with tens of
+   MB of shared pages that were never duplicated and are not returned when it
+   dies — a phantom saving large enough on its own to clear the 50 MB bar this
+   rule exists to enforce. `rss_child_bytes` is recorded next to it because it
+   is the number an operator sees in `top`, and is quoted as such, never summed.
    *Why 50 MB:* a saving smaller than one worker's resident set is available
    today by setting `pm.max_children` one lower. That costs nothing, needs no
    new code, and is what the recommendation has to beat. The 30 % relative
@@ -37,7 +43,10 @@ if all four hold at a setting an operator would plausibly run:
    that uses it can be recommended at all.
    Connections closed while genuinely idle are counted separately
    (`n_conn_closed_while_idle`) and are **not** a failure by this rule — today's
-   code drops them by design (`evhttp_free()`, `fpm_http_direct.c:471`), and
+   code drops them by design: at the end of the worker loop
+   `fpm_http_direct_conns_free()` and then `evhttp_free()`
+   (`fpm_http_direct.c:1988-1989`) free every tracked connection without waiting
+   for the idle ones, and
    whether that is acceptable is a question for #66, not a threshold here.
 
 4. **`t_replacement_accepting` < `t_last_conn_closed` + 1000 ms**, so the pool
@@ -60,7 +69,8 @@ One row per (executor, pm, TLS, N, workload, round) in `results.json`:
 
 | field | meaning |
 | --- | --- |
-| `rss_child_bytes` | per child pid, sampled with N idle connections established |
+| `rss_child_bytes` | VmRSS per child pid, sampled with N idle connections established |
+| `pss_child_bytes` | Pss per child (`smaps_rollup`); the only one of the two that may be summed across a pool |
 | `idle_conns_per_child` | how the idle set actually landed across the children |
 | `steady` | successful-only and non-2xx latency, split, plus window failures |
 | `retirement.t_exit_ms` | child gone from `/proc`, from t0 |
@@ -89,16 +99,28 @@ The binary must carry the http-direct marker and its sha256 is recorded in
 `metadata.json`; pointing the harness at a stock `php-fpm` makes it refuse
 rather than produce numbers for a different program.
 
+`--stream-mode new-connection` drives the load by accepts instead of by requests
+on connections that are already open. It matters for any scale-up question: all
+children accept on the same inherited listening socket, so a child spawned now
+receives no share of the connections already established (#53), and a "time to
+capacity" number taken under keep-alive would show dynamic as useless by
+construction.
+
 `--idle 1024` needs 1024 descriptors on the client side too; the harness raises
 its own `RLIMIT_NOFILE` soft limit towards the hard limit and refuses to start
 if the hard limit is too low, rather than quietly measuring fewer connections.
 
 ## Shared-box rules
 
-The poligon is shared. The harness uses its own scratch directory, reserves its
-whole port range up front (and refuses to start if any port is taken), and stops
-each pool through the pid file it wrote itself. Nothing is ever matched by
-binary name.
+The poligon is shared. The harness uses its own scratch directory and stops
+each pool through the pid file it wrote itself, escalating to that pool's own
+process group if the master wedges. Nothing is ever matched by binary name.
+
+Its whole port range is bound up front and **held**: each port is released only
+in the moment its own pool starts (`SO_REUSEADDR`, so there is no window). A
+bind-and-close check would only cover t=0, and the last scenario of a twelve-row
+run starts minutes later — a port taken in between would come back as "pool
+never listened", which reads like a broken binary.
 
 ## Known limits
 

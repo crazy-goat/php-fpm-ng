@@ -450,8 +450,11 @@ that safe rather than a second writer racing the first: the pool uses
 `bufferevent_openssl_socket_new()`, and in socket mode (no underlying
 bufferevent) libevent never writes from the buffer callback, so nothing can be
 in flight while the request callback holds the loop; and libevent sets
-`SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER` (`bufferevent_openssl.c:1369`), which is
-what makes retrying a blocked write from a re-peeked buffer legal. Unlike the
+`SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER` (`bufferevent_openssl.c:1369`), which
+makes retrying a blocked write from a re-peeked buffer legal as long as the
+retry is at least as long as the one that blocked — so the pool hands OpenSSL
+the peeked vector's whole length, the same length `do_write()` would pass, and
+never a clamped one. Unlike the
 plaintext step, the TLS one must *not* freeze the output buffer around the
 write: an OpenSSL bufferevent never freezes it (the freeze belongs to
 `bufferevent_socket_new()`, `bufferevent_sock.c:373`), and leaving it frozen

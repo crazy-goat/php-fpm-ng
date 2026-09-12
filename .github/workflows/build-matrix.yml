@@ -579,6 +579,15 @@ jobs:
           if [ "$(cat make-fiber.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
           exit "$(cat make-fiber.rc)"
 
+      # Same as on the `build` job, and for the same reason: only main writes,
+      # so a pull-request push cannot evict the entry it restores from.
+      - name: save the compiler cache
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+
       # Same as on the `build` job: the suite reads the payload out of the
       # binary it tests (issue #171), and this cell builds its own binary.
       - name: embed the distribution payload (issue #171)
@@ -717,15 +726,20 @@ jobs:
     env:
       # This job is not containerised -- it drives `docker run` with host bind
       # mounts, which the host daemon resolves -- so it names a host path.
-      # Beside the checkout rather than in /opt (the runner user does not own
-      # /opt on a hosted image) and spelled with the github context rather than
-      # `${{ runner.temp }}`: the runner context does not exist in a job-level
-      # env: and naming it there fails the whole workflow at startup, which is
-      # how the first run of this change ended. The two reclaim-from-root steps
-      # that used to stand here are gone with the box that needed them -- a
-      # hosted runner hands the next job a new machine, not the workspace this
-      # one left root-owned.
-      MUSL_CACHE: ${{ github.workspace }}/../buildtree-musl
+      # Inside the workspace, not beside it: actions/cache rejects any path
+      # containing `..` with `Invalid pattern ... Relative pathing '.' and
+      # '..' is not allowed`, and does so as a *warning* -- the step stays
+      # green and saves nothing. Measured on run 34702558731, where this
+      # directory was `$GITHUB_WORKSPACE/../buildtree-musl` and the cache was
+      # inert in both directions.
+      #
+      # Spelled with the github context rather than `${{ runner.temp }}`: the
+      # runner context does not exist in a job-level env: and naming it there
+      # fails the whole workflow at startup, which is how the first run of this
+      # change ended. The two reclaim-from-root steps that used to stand here
+      # are gone with the box that needed them -- a hosted runner hands the
+      # next job a new machine, not the workspace this one left root-owned.
+      MUSL_CACHE: ${{ github.workspace }}/buildtree-musl
     steps:
       - uses: actions/checkout@v7
 
@@ -747,16 +761,12 @@ jobs:
       # is the cold one, 456 s on run 34594056547 with no cache of any kind.
       # /build is deliberately not cached -- it is object files for a configure
       # that runs inside the container, and ccache already covers the compile.
-      #
-      # The `..` in the path survives the round trip: actions/cache resolves
-      # paths relative to GITHUB_WORKSPACE and tars with -P, so a path outside
-      # the workspace restores where it was saved from.
       - name: restore the musl compiler and package caches
         uses: actions/cache/restore@v6
         with:
           path: |
-            ${{ github.workspace }}/../buildtree-musl/ccache
-            ${{ github.workspace }}/../buildtree-musl/apk
+            ${{ github.workspace }}/buildtree-musl/ccache
+            ${{ github.workspace }}/buildtree-musl/apk
           key: musl-${{ env.PHP_SRC_REF }}-${{ github.sha }}
           restore-keys: |
             musl-${{ env.PHP_SRC_REF }}-
@@ -791,8 +801,8 @@ jobs:
         uses: actions/cache/save@v6
         with:
           path: |
-            ${{ github.workspace }}/../buildtree-musl/ccache
-            ${{ github.workspace }}/../buildtree-musl/apk
+            ${{ github.workspace }}/buildtree-musl/ccache
+            ${{ github.workspace }}/buildtree-musl/apk
           key: musl-${{ env.PHP_SRC_REF }}-${{ github.sha }}
 
       - name: verify static binary in a scratch image
@@ -1062,12 +1072,12 @@ jobs:
     needs: patches
     runs-on: ubuntu-latest
     env:
-      # Beside the checkout, for the same reason static-musl is: a host path
-      # the runner user owns, named without the runner context, which a
-      # job-level env: does not have. The reclaim-from-root steps that used to
-      # precede the checkout are gone with the shared box -- nothing outside
-      # this run will ever try to unlink what the containers below write as
-      # root.
+      # A host path the runner user owns, for the same reason static-musl
+      # names one, and named without the runner context, which a job-level
+      # env: does not have. Nothing caches it, so unlike MUSL_CACHE it may sit
+      # outside the workspace. The reclaim-from-root steps that used to precede
+      # the checkout are gone with the shared box -- nothing outside this run
+      # will ever try to unlink what the containers below write as root.
       PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
       # Refuse the bare-base-image fallback. See the login step below.
       FPMNG_REQUIRE_WARM_IMAGES: "1"

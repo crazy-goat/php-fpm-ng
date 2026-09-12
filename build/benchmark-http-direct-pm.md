@@ -71,6 +71,7 @@ One row per (executor, pm, TLS, N, workload, round) in `results.json`:
 | --- | --- |
 | `rss_child_bytes` | VmRSS per child pid, sampled with N idle connections established |
 | `pss_child_bytes` | Pss per child (`smaps_rollup`); the only one of the two that may be summed across a pool |
+| `fd_child_count` | open descriptors per child; what a direct pool runs into before it runs into memory |
 | `idle_conns_per_child` | how the idle set actually landed across the children |
 | `steady` | successful-only and non-2xx latency, split, plus window failures |
 | `retirement.t_exit_ms` | child gone from `/proc`, from t0 |

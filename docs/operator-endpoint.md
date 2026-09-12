@@ -27,6 +27,11 @@ pm.metrics_path   = /tick/metrics
 | `pm.status_listen` | Where `pm.status_path` binds. Default `127.0.0.1:8080`. |
 | `pm.metrics_listen` | Where `pm.metrics_path` binds. Default `127.0.0.1:8080`. |
 
+On `http-direct`, `pm.status_path` is not on this listener yet — see
+[What is not here yet](#what-is-not-here-yet). There the operator endpoint serves
+`pm.metrics_path` and nothing else, so an `http-direct` pool that sets only
+`pm.status_path` binds no new socket and behaves exactly as it did before.
+
 There is **no on/off directive**. The endpoint exists exactly when a path is
 set. A `pm.status_listen` with no `pm.status_path` binds nothing — the address
 is where an endpoint would go, not an instruction to open one.
@@ -61,6 +66,27 @@ one pool serving both formats from one address.
 
 A request for a path no pool claimed gets a 404 listing the paths that listener
 does answer.
+
+One socket is one process, so it can have only one identity. The `user`, `group`,
+`listen.owner`, `listen.group` and `listen.mode` of the pools sharing an address
+must agree; if they do not, startup fails naming the directive and both pools.
+Give one of them its own address. This matters more than it looks, because the
+default address is the same for every pool: sharing is the normal case, not the
+unusual one.
+
+## Upgrading an `http` pool that already set `pm.status_path`
+
+On `pool.type = http` this directive used to be answered by upstream FPM's
+in-child handler, on the pool's **public** listener — reachable whenever
+`http.front_controller` was empty, because that is what makes `SCRIPT_NAME` the
+request path. It is now answered on the operator listener instead, and the
+public listener hands the path to your application like any other.
+
+The page is not the same page: it is the per-pool JSON described below, not
+upstream's `text`/`html`/`json`/`xml` status body. A scraper pointed at the
+public listener has to move to the operator address; one pointed at a
+`pool.type = status` pool is untouched, and so is `pool.type = fastcgi`, where
+`pm.status_path` keeps its upstream meaning in full.
 
 ## What the pages contain
 

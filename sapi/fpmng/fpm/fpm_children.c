@@ -188,10 +188,49 @@ static int fpm_child_cloexec(void)
 	return 0;
 }
 
+/* One directive, one page, one socket -- the rule #273 was written to restore.
+ * pm.status_path on a type with an operator endpoint names the page that
+ * listener serves (fpm_operator_endpoint.c); upstream's in-child handler must
+ * therefore not answer the same path on the pool's request listener as well.
+ *
+ * It otherwise would, and does on main: fpm_status_init_child() copies
+ * pm.status_path into fpm_status_uri, and fpm_main.c matches it against
+ * SG(request_info).request_uri before the script runs. On pool.type = http that
+ * is reachable -- measured on 192.168.8.50 against a running gateway with
+ * "http.front_controller =", which is what makes SCRIPT_NAME the request path:
+ * GET /gw-status on the PUBLIC listener returned upstream's status page while
+ * GET /gw-status on the operator listener returned the new per-pool JSON. Two
+ * different pages, one directive, and one of them on the site's public port.
+ *
+ * Done here, in the child, and not by refusing the directive or by clearing it
+ * during configuration: the master's view of the pool stays what the operator
+ * wrote (fpm_conf_dump() still prints it), and fork() has already made this
+ * copy of the config private, so nothing outside this process sees the change.
+ *
+ * .status_on_own_listener is the exception, as data: a type that still answers
+ * the path itself keeps it (http-direct, until #275). ping.path is deliberately
+ * untouched on every type -- #273, point 9, leaves it on the request listener,
+ * because it is a liveness probe for whatever sits in front of the pool. */
+static void fpm_child_operator_endpoint_owns_status(struct fpm_worker_pool_s *wp)
+{
+	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+	if (!type->operator_endpoint || type->status_on_own_listener) {
+		return;
+	}
+	if (wp->config->pm_status_path) {
+		free(wp->config->pm_status_path);
+		wp->config->pm_status_path = NULL;
+	}
+}
+
 static void fpm_child_init(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	fpm_globals.max_requests = wp->config->pm_max_requests;
 	fpm_globals.listening_socket = dup(wp->listening_socket);
+
+	/* Before fpm_status_init_child() below, which is what reads it. */
+	fpm_child_operator_endpoint_owns_status(wp);
 
 	/* fpm-ng: PHP's own errors have nowhere to go in a pool whose policy runs
 	 * in the child — no response, no front end to hand a FastCGI stderr stream

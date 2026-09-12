@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <stddef.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -67,6 +68,7 @@ struct fpm_operator_route_s {
 struct fpm_operator_listener_s {
 	char *address;				/* as configured, see the note in _find() */
 	struct fpm_worker_pool_s *wp;		/* the internal pool that binds it */
+	struct fpm_worker_pool_s *first;	/* the pool whose identity wp runs with */
 	struct fpm_operator_route_s *routes;
 	char *known_paths;			/* for the 404 body; rebuilt as routes are added */
 	struct fpm_operator_listener_s *next;
@@ -119,6 +121,59 @@ static int fpm_operator_endpoint_check_path(struct fpm_worker_pool_s *wp, const 
 }
 /* }}} */
 
+/* The identity an operator listener runs with, and the identity of the socket
+ * it binds. fpm_conf_internal_pool_alloc() copies these from the pool that
+ * asked for the listener first; every pool that later names the same address
+ * shares that one process and contributes nothing.
+ *
+ * While the pools agree that is invisible. When they do not it is indefensible,
+ * and silent: pool 'b' would be reported on by a process running as pool 'a's
+ * user, and with a unix-socket address 'b's listen.group and listen.mode would
+ * be ignored, so 'b's scraper gets EACCES with nothing in the log to explain
+ * it. Since the default address is the same for every pool, sharing a listener
+ * is the normal case rather than an unusual one, so a disagreement is refused
+ * at startup instead of warned about. */
+static const struct {
+	const char *directive;
+	size_t offset;
+} fpm_operator_identity[] = {
+	{ "user",         offsetof(struct fpm_worker_pool_config_s, user) },
+	{ "group",        offsetof(struct fpm_worker_pool_config_s, group) },
+	{ "listen.owner", offsetof(struct fpm_worker_pool_config_s, listen_owner) },
+	{ "listen.group", offsetof(struct fpm_worker_pool_config_s, listen_group) },
+	{ "listen.mode",  offsetof(struct fpm_worker_pool_config_s, listen_mode) },
+};
+
+static int fpm_operator_listener_identity_ok(struct fpm_operator_listener_s *l,
+	struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	size_t i;
+
+	for (i = 0; i < sizeof(fpm_operator_identity) / sizeof(fpm_operator_identity[0]); i++) {
+		char *const *mine = (char *const *) ((char *) wp->config + fpm_operator_identity[i].offset);
+		char *const *theirs = (char *const *) ((char *) l->first->config + fpm_operator_identity[i].offset);
+
+		if (!*mine && !*theirs) {
+			continue;
+		}
+		if (*mine && *theirs && !strcmp(*mine, *theirs)) {
+			continue;
+		}
+
+		zlog(ZLOG_ALERT, "[pool %s] shares the operator listener %s with pool '%s', but the "
+			"two disagree on %s ('%s' against '%s') -- one listener is one process and one "
+			"socket, so it can only have one identity; give this pool its own listen address "
+			"or make the two agree",
+			wp->config->name, l->address, l->first->config->name,
+			fpm_operator_identity[i].directive,
+			*mine ? *mine : "(unset)", *theirs ? *theirs : "(unset)");
+		return -1;
+	}
+
+	return 0;
+}
+/* }}} */
+
 /* Listener for this address, creating it (and its internal pool) on first use.
  *
  * Addresses are compared as configured, so "localhost:8080" and
@@ -163,6 +218,7 @@ static struct fpm_operator_listener_s *fpm_operator_listener_get(struct fpm_work
 		return NULL;
 	}
 	l->wp = lwp;
+	l->first = wp;
 
 	l->next = fpm_operator_listeners;
 	fpm_operator_listeners = l;
@@ -203,6 +259,13 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 	if (!l) {
 		zlog(ZLOG_ERROR, "[pool %s] failed to create the operator listener for %s",
 			wp->config->name, listen_address);
+		return -1;
+	}
+
+	/* Joining an existing listener rather than creating one: it is already
+	 * running as some pool's user and, on a unix socket, owned by some pool's
+	 * group. It has to be this pool's too. */
+	if (0 > fpm_operator_listener_identity_ok(l, wp)) {
 		return -1;
 	}
 
@@ -270,7 +333,9 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 	 * serves the request, with per-child rows an external process cannot render
 	 * today (fpm_pool_type.h, .status_on_own_listener; issue #275). Registering
 	 * a route for it here would give one directive two pages on two sockets,
-	 * which is the confusion #273 removed. */
+	 * which is the confusion #273 removed. Where the route IS registered, the
+	 * other half of that rule is enforced in the child
+	 * (fpm_child_operator_endpoint_owns_status() in fpm_children.c). */
 	if (status_path && *status_path && !type->status_on_own_listener) {
 		const char *listen = wp->config->pm_status_listen;
 

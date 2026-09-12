@@ -62,6 +62,20 @@ $extra
 EOT;
 };
 
+$direct = function (string $name, string $extra) use ($root): string {
+    return <<<EOT
+
+[$name]
+listen = {{ADDR[$name]}}
+pool.type = http-direct
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = /front.php
+$extra
+EOT;
+};
+
 /* #273, point 7: an address, a port and a path identify one endpoint. Two pools
  * asking for the same triple is refused, because a scrape of that URL has no
  * way to tell which pool answered. */
@@ -117,9 +131,33 @@ expectRejected(
  * back by the other (fpm_pool_type.h, .status_on_own_listener; issue #275). */
 expectAccepted(
     'metrics path on http-direct',
-    $head . "\n[web]\nlisten = {{ADDR}}\npool.type = http-direct\npm = static\npm.max_children = 1\n"
-          . "chdir = $root\nhttp.front_controller = /front.php\n"
-          . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics\n"
+    $head . $direct('web', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics")
+);
+
+/* The other half of the same decision, and the case that catches it going wrong:
+ * on a type with .status_on_own_listener, pm.status_path registers NO route at
+ * all, so two such pools can name the same path without colliding -- there is
+ * nothing on the operator listener for them to collide over. Without the flag
+ * both would claim /status on the default address and this would be refused,
+ * which is what makes it a test rather than a restatement. */
+expectAccepted(
+    'status path on two http-direct pools does not reach the operator listener',
+    $head . $direct('one', "pm.status_path = /status")
+          . $direct('two', "pm.status_path = /status")
+);
+
+/* One socket is one process and one identity. Pools sharing an operator address
+ * must agree on it, or the endpoint runs as, and its socket belongs to,
+ * whichever pool the configuration happened to list first. */
+expectRejected(
+    'pools sharing a listener disagree on identity',
+    $head . $direct('one', "listen.mode = 0660
+pm.metrics_listen = {{ADDR[op]}}
+pm.metrics_path = /one")
+          . $direct('two', "listen.mode = 0600
+pm.metrics_listen = {{ADDR[op]}}
+pm.metrics_path = /two"),
+    ['disagree on listen.mode', 'one listener is one process and one socket']
 );
 
 /* pm.metrics_path only means something on a type that serves an operator
@@ -145,6 +183,8 @@ the internal type is not configurable: rejected
 carved-out pm. directive on cron: accepted
 other pm. directive on cron: rejected
 metrics path on http-direct: accepted
+status path on two http-direct pools does not reach the operator listener: accepted
+pools sharing a listener disagree on identity: rejected
 metrics path on a fastcgi pool: rejected
 Done
 --CLEAN--

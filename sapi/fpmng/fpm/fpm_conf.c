@@ -942,9 +942,22 @@ struct fpm_worker_pool_s *fpm_conf_internal_pool_alloc(const char *name, const c
 {
 	struct fpm_worker_pool_config_s *config;
 	struct fpm_worker_pool_s *wp, *saved = current_wp;
+	char *owned_name;
+
+	/* The name is taken before anything is created, because
+	 * fpm_worker_pool_config_alloc() links the new pool into
+	 * fpm_worker_all_pools immediately and both fpm_conf_process_all_pools()'s
+	 * error path and fpm_conf_dump() print wp->config->name without checking
+	 * it. Failing after the link, with the name still NULL, would leave them a
+	 * pool to dereference; failing before it leaves the list untouched. */
+	owned_name = strdup(name);
+	if (!owned_name) {
+		return NULL;
+	}
 
 	config = fpm_worker_pool_config_alloc();
 	if (!config) {
+		free(owned_name);
 		return NULL;
 	}
 	wp = current_wp;
@@ -954,10 +967,10 @@ struct fpm_worker_pool_s *fpm_conf_internal_pool_alloc(const char *name, const c
 	 * parsed looking like the current section. */
 	current_wp = saved;
 
-	config->name = strdup(name);
+	config->name = owned_name;
 	config->type = strdup(type);
 	config->listen_address = strdup(listen_address);
-	if (!config->name || !config->type || !config->listen_address) {
+	if (!config->type || !config->listen_address) {
 		return NULL;
 	}
 

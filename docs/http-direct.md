@@ -868,10 +868,16 @@ pool is carrying on without this one child. A retiring child keeps serving:
   reset;
 - it exits when it holds no connection and no response is still being written,
   or when `http.read_timeout` has passed since the signal -- whichever is
-  first. The deadline is what stops a client that opened a connection and never
-  used it from pinning a child a deploy is waiting for. It is the same
-  directive that already answers "how long may a connection stay silent", so a
-  pool that has tuned one has tuned both.
+  first, and the deadline wins over work still in flight. Nothing else bounds
+  a retiring child: a pool-wide stop is bounded by the master, which kills
+  whatever has not gone by `process_control_timeout`, but the master is not
+  waiting for this one. Past the deadline a client that has not finished
+  reading its response gets it truncated -- the alternative is a client reading
+  a byte a second holding the child, and the deploy, open indefinitely.
+  `http.read_timeout` rather than a knob of its own because it is already this
+  pool's answer to "how long may a connection stay silent", so a pool that has
+  tuned one has tuned both; a pool that serves large responses to slow clients
+  should size it for the download, not for the silence.
 
 A second `SIGUSR1` to a child that is already retiring does nothing: the drain
 it is waiting for is not shortened by asking twice.

@@ -206,6 +206,24 @@ static void fpm_direct_retire_signal(int signo)
 	fpm_direct_retiring = 1;
 }
 
+/* Monotonic, unlike the gettimeofday() this file uses to stamp requests for the
+ * access log: a deadline read off the wall clock moves when NTP steps it, and
+ * the step either stretches a drain or ends it on the spot. Same reason
+ * fpm_pool_status.c:371 gives for its write deadline. */
+static void fpm_direct_now(struct timeval *tv)
+{
+	struct timespec ts;
+
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		/* Cannot fail on Linux with a constant clock id; if it ever does, a
+		 * wall-clock deadline still bounds the drain. */
+		evutil_gettimeofday(tv, NULL);
+		return;
+	}
+	tv->tv_sec = ts.tv_sec;
+	tv->tv_usec = (suseconds_t) (ts.tv_nsec / 1000);
+}
+
 /* Everything that happens once, the first time a tick sees the flag. A second
  * SIGUSR1 lands on a child whose deadline is already stamped and does nothing,
  * which is the idempotence issue #65 asks for: a deploy script that retries is
@@ -233,22 +251,47 @@ static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
 	 * validation guarantees it is positive (fpm_http_direct_request.c:171). */
 	grace.tv_sec = w->wp->config->http_read_timeout / 1000;
 	grace.tv_usec = (w->wp->config->http_read_timeout % 1000) * 1000;
-	evutil_gettimeofday(&now, NULL);
+	fpm_direct_now(&now);
 	evutil_timeradd(&now, &grace, &w->retire_deadline);
 	zlog(ZLOG_NOTICE, "[pool %s] child %d is retiring: no new connections, finishing the ones it "
 		"holds, exiting within %d ms", w->wp->config->name, (int) getpid(),
 		w->wp->config->http_read_timeout);
 }
 
-/* True once there is nothing left worth staying for. Both halves matter: a
- * response handed to libevent is not on the wire yet, and a connection with no
- * response in flight may still be a client about to send its next request --
- * every answer this child gives while retiring carries Connection: close, so
- * each of those connections ends on its own, one request later at worst. */
+/* True once there is nothing left worth staying for -- and true regardless once
+ * the deadline is up.
+ *
+ * That order is the decision. Nothing outside this function bounds a retiring
+ * child: a pool-wide stop is bounded by the master, which SIGKILLs whatever has
+ * not gone by process_control_timeout, but a retiring child is one the master
+ * is not waiting for. And what libevent gives a response in flight is an
+ * inactivity timeout (evhttp_set_timeout_tv above), which every byte the client
+ * takes resets -- so a client reading a large response a byte a second holds
+ * w->pending at 1 for as long as it cares to, and one such client would
+ * otherwise pin the child and the deploy waiting for it indefinitely. Past the
+ * deadline the connections go with the process and a client that has not
+ * finished reading gets a truncated response. That is the price, and it is
+ * smaller than a deploy that never ends.
+ *
+ * Before the deadline both halves matter: a response handed to libevent is not
+ * on the wire yet, and a connection with no response in flight may still be a
+ * client about to send its next request -- every answer this child gives while
+ * retiring carries Connection: close, so each of those connections ends on its
+ * own, one request later at worst. */
 static int fpm_direct_retire_done(struct fpm_direct_worker *w)
 {
 	struct timeval now;
 
+	fpm_direct_now(&now);
+	if (evutil_timercmp(&now, &w->retire_deadline, >=)) {
+		if (w->pending || fpm_http_direct_conns_live(w->conns)) {
+			zlog(ZLOG_NOTICE, "[pool %s] child %d stopped waiting for %u connection(s) and "
+				"%u response(s) in flight after http.read_timeout and is exiting",
+				w->wp->config->name, (int) getpid(),
+				fpm_http_direct_conns_live(w->conns), w->pending);
+		}
+		return 1;
+	}
 	if (w->pending) {
 		return 0;
 	}
@@ -256,17 +299,7 @@ static int fpm_direct_retire_done(struct fpm_direct_worker *w)
 	 * the connections that ended, and exiting is not a decision to take on a
 	 * number that lags. Affordable because it only runs on the ticks of a
 	 * child that is already leaving. */
-	if (!fpm_http_direct_conns_live_exact(w->conns)) {
-		return 1;
-	}
-	evutil_gettimeofday(&now, NULL);
-	if (evutil_timercmp(&now, &w->retire_deadline, >=)) {
-		zlog(ZLOG_NOTICE, "[pool %s] child %d stopped waiting for %u connection(s) after "
-			"http.read_timeout and is exiting", w->wp->config->name, (int) getpid(),
-			fpm_http_direct_conns_live(w->conns));
-		return 1;
-	}
-	return 0;
+	return !fpm_http_direct_conns_live_exact(w->conns);
 }
 
 /* One store per published field, which is cheap enough to do on every path
@@ -312,7 +345,6 @@ static void fpm_direct_retire_now(struct fpm_direct_worker *w)
  * which is what the header already promises. */
 static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
-	struct fpm_http_direct_ops_live live;
 	if (fpm_direct_stopping) {
 		if (w->listener) {
 			evhttp_del_accept_socket(w->http, w->listener);
@@ -1803,6 +1835,14 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
 	action.sa_handler = fpm_direct_stop;
 	sigemptyset(&action.sa_mask);
+	/* SA_RESTART for the same reason upstream's fpm_signals_init_child() sets
+	 * it: in this executor PHP runs inside evhttp's request callback, so a
+	 * signal aimed at a busy child arrives while the script is blocked in
+	 * read() or write() on a database, cache or HTTP socket. Without it that
+	 * syscall returns EINTR, and PHP streams and several extensions report
+	 * that as an I/O failure rather than retrying -- retiring a child would
+	 * fail the very request it was retiring around (issue #65). */
+	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	/* issue #65. Without this SIGUSR1 is SIG_DFL in a child (fpm_signals.c
 	 * resets it there), so the signal an operator would reach for first would

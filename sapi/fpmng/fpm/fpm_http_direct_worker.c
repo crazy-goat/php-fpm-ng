@@ -1600,6 +1600,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	}
 	action.sa_handler = fpm_worker_stop_signal;
 	sigemptyset(&action.sa_mask);
+	/* SA_RESTART, as upstream's fpm_signals_init_child() does: the booted
+	 * script is in userland whenever it is not inside the loop, so a signal
+	 * that arrives mid-syscall would otherwise surface to it as an EINTR I/O
+	 * error instead of a retry. */
+	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}

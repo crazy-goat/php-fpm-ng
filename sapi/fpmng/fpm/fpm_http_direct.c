@@ -26,6 +26,7 @@
 #include "php_variables.h"
 #include "fopen_wrappers.h"
 #include "SAPI.h"
+#include "zend_signal.h"
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
@@ -1950,7 +1951,15 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * read() or write() on a database, cache or HTTP socket. Without it that
 	 * syscall returns EINTR, and PHP streams and several extensions report
 	 * that as an I/O failure rather than retrying -- retiring a child would
-	 * fail the very request it was retiring around (issue #65). */
+	 * fail the very request it was retiring around (issue #65).
+	 *
+	 * It only holds until the child's first request. zend_signal_register()
+	 * installs the deferring handler with sa_flags = SA_SIGINFO and nothing
+	 * else (Zend/zend_signal.c:305), so from then on the kernel-level action
+	 * for these two signals does not restart syscalls; what the snapshot below
+	 * preserves is the handler, not the flag. Nothing at this call site can
+	 * change that -- the first activate() happens long after child_main() has
+	 * returned into the event loop. Tracked by issue #259. */
 	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	/* issue #65. Without this SIGUSR1 is SIG_DFL in a child (fpm_signals.c
@@ -1958,6 +1967,34 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * kill the child outright, dropping the requests it was serving. */
 	action.sa_handler = fpm_direct_retire_signal;
 	if (sigaction(SIGUSR1, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
+	/* Re-snapshot, because the two sigaction() calls above landed after
+	 * fpm_signals_init_child() already took the snapshot (fpm_signals.c:252).
+	 *
+	 * zend_signal_activate() runs per request and starts with
+	 *   memcpy(&SIGG(handlers), &global_orig_handlers, ...)
+	 * (Zend/zend_signal.c:324). global_orig_handlers is whatever was installed
+	 * when zend_signal_init() last ran -- for this child, SIGQUIT =
+	 * sig_soft_quit and SIGUSR1 = SIG_DFL, the dispositions
+	 * fpm_signals_init_child() leaves behind. From the second request on, that
+	 * copy is what an idle child's signal reaches: zend_signal_handler_defer()
+	 * with SIGG(active) == 0 calls zend_signal_handler(), which dispatches
+	 * SIGG(handlers)[signo-1] (:190). The handlers installed here are never
+	 * called, and issue #256 measured the result -- SIGQUIT to an idle child
+	 * that had served two requests set fpm's soft-quit flag, which nothing in
+	 * this loop reads, so the child kept answering; SIGUSR1 found SIG_DFL and
+	 * killed it, dropping the connections #65 exists to drain.
+	 *
+	 * Re-running the snapshot here is the whole fix: the copy every later
+	 * activate makes then names these two functions. Not zend_sigaction(),
+	 * which writes SIGG(handlers) for the current request only and is undone by
+	 * the next activate; not re-installing after every request, which would
+	 * still leave the window between deactivate and the next signal.
+	 *
+	 * Safe to call twice: the only thing it does beyond the snapshot is under
+	 * FPMNG_LIBPHP_BUILD, where it is zend_signal_startup() (fpm_libphp_compat.c),
+	 * and this child has not run a request yet -- the same precondition that
+	 * file documents for the first call. */
+	zend_signal_init();
 	fpm_direct_install_sapi();
 	/* Both of these are per-child: the ACL and the endpoint paths are parsed
 	 * once here rather than on every request, and the access log takes the

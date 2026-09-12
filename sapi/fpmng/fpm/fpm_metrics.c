@@ -29,8 +29,8 @@ int fpm_metrics_init_main(void) /* {{{ */
 	}
 
 	if (!slots) {
-		/* zero pools with processes (the status pool alone is forced to 1) —
-		 * nobody would write metrics, the region is not needed */
+		/* no pool declares a worker — nobody would write metrics, so the
+		 * region is not needed */
 		return 0;
 	}
 

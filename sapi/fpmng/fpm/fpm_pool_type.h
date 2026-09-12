@@ -18,7 +18,7 @@ struct fpm_operator_reply_s;
 /* State for a pool that does NOT handle requests (serves_requests = 0). For
  * fcgi/http pools (serves_requests = 1), the data shape is different
  * (idle/active/requests from the scoreboard) and this enum does not apply —
- * see pool.status in fpm_pool_status.c. */
+ * see fpm_operator_pages.c. */
 enum fpm_pool_state_e {
 	FPM_POOL_STATE_RUNNING = 0,	/* currently running a script */
 	FPM_POOL_STATE_BACKOFF,		/* waiting during backoff before the next attempt (supervisor) */
@@ -28,8 +28,7 @@ enum fpm_pool_state_e {
 };
 
 /* Filled by fpm_pool_type_s.status() for types with serves_requests = 0.
- * Exactly the fields that pool.type = status actually shows — see
- * docs/NOTES.md section 3u. */
+ * Exactly the fields the operator pages show — see docs/NOTES.md section 3u. */
 struct fpm_pool_status_s {
 	enum fpm_pool_state_e state;
 	time_t last_start;		/* epoch, 0 = never started */
@@ -75,16 +74,16 @@ struct fpm_pool_type_s {
 	unsigned serves_requests:1;		/* counted in the request scoreboard */
 
 	/* This type, in its OWN child, reads another pool's FOREIGN scoreboard
-	 * (pool.type = status: idle/active/requests of other serves_requests=1 pools).
-	 * Set only for "status". See fpm_children.c:
+	 * (the operator endpoint: idle/active/requests of the serves_requests = 1
+	 * pool it reports on). See fpm_children.c:
 	 * fpm_child_resources_use() normally releases (munmaps) scoreboards for ALL
 	 * pools except its own immediately after fork, as memory hygiene — safe because
 	 * no type had read a foreign scoreboard until now. This flag disables the
 	 * release ONLY for a child of THIS type (checked through
 	 * fpm_pool_type_of(child->wp) in fpm_children.c); every other pool in the same
 	 * configuration (including ordinary fcgi/http) still releases foreign
-	 * scoreboards exactly as today, whether or not a status pool exists anywhere
-	 * in the configuration. See docs/NOTES.md 3u. */
+	 * scoreboards exactly as today, whether or not an operator listener exists
+	 * anywhere in the configuration. See docs/NOTES.md 3u. */
 	unsigned reads_foreign_scoreboards:1;
 
 	/* This type's own policy runs in the CHILD (supervisor backoff, restart_max,
@@ -189,7 +188,7 @@ struct fpm_pool_type_s {
 
 	/* How this type renders its status page on the operator endpoint. NULL is
 	 * the common case and means the generic per-pool JSON that
-	 * fpm_pool_status_render_json() produces for every type.
+	 * fpm_operator_page_render_json() produces for every type.
 	 *
 	 * It exists for http-direct, whose page is not that summary: it carries
 	 * per-connection counters and, on "?full", a row per child (issue #64), and
@@ -252,12 +251,12 @@ struct fpm_pool_type_s {
 	 * loop. Does not return. */
 	void (*child_main)(struct fpm_worker_pool_s *wp);
 
-	/* How this type appears in pool.type = status when serves_requests = 0.
+	/* How this type appears on the operator pages when serves_requests = 0.
 	 * NULL for serves_requests = 1 types (they have idle/active/requests from the
-	 * scoreboard, read directly by fpm_pool_status.c) and for types without a
-	 * meaningful state to show (for example, status itself). Called from ANOTHER
-	 * process (the status pool), so it must read only shared memory/configuration,
-	 * never process-local memory. */
+	 * scoreboard, read directly by fpm_operator_pages.c) and for types without a
+	 * meaningful state to show. Called from ANOTHER process (the operator
+	 * endpoint's child), so it must read only shared memory/configuration, never
+	 * process-local memory. */
 	void (*status)(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 
 	/* The one counter this type reports whether or not the pool's script ever
@@ -304,6 +303,12 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp);
 
 /* Names of known types for an error message. Buffer belongs to the caller. */
 void fpm_pool_type_list(char *buf, size_t len);
+
+/* What replaced a type name that used to exist, or NULL if the name was never
+ * one of ours. A retired name earns its own error rather than being reported as
+ * unknown: an unknown name is a typo, a retired one is a config file that used
+ * to start. */
+const char *fpm_pool_type_retired(const char *name);
 
 /* Type of the given pool; never NULL after successful configuration validation. */
 const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp);

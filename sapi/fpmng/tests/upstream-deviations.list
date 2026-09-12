@@ -1,0 +1,20 @@
+# Upstream FPM tests that php-fpm-ng deliberately does not pass, one per line:
+#
+#   <file>.phpt   <the behaviour fpm-ng chose not to have, and the issue>
+#
+# The reason is mandatory. The name must be a test build/prepare.sh copied from
+# sapi/fpm -- an fpmng- prefix is refused, because our own tests belong to
+# build/run-fpmng-phpt.sh and are never a deviation from upstream.
+#
+# This is not a to-do list and not a place to park a flake. An entry says
+# "upstream tests a feature we removed on purpose, so this test can only fail";
+# a test that fails for any other reason is a bug to fix or an issue to open.
+# The listed tests still run: the runner fails the job if one of them starts
+# passing, because that means the feature came back or the entry is stale.
+#
+# See docs/fpm-phpt.md.
+
+status-listen.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
+status-listen-expose-php-on.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
+status-listen-expose-php-off.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
+status-ping.phpt	issue #278 removed pm.status_listen and the shared status pool; ping.path stays on the pool's own listener

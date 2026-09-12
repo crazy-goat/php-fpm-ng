@@ -8,6 +8,7 @@ if (!extension_loaded('session')) die('skip requires session');
 --FILE--
 <?php
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 $root = __DIR__;
 $script = '/fpmng-http-direct-session-front-' . getmypid() . '.php';
 $sessionDir = sys_get_temp_dir() . '/fpmng-direct-session-' . getmypid();
@@ -28,9 +29,8 @@ chdir = $root
 http.front_controller = $script
 php_admin_value[session.auto_start] = 1
 php_admin_value[session.save_path] = $sessionDir
-[monitor]
-pool.type = status
-listen = 127.0.0.1:$statusPort
+pm.metrics_listen = 127.0.0.1:$statusPort
+pm.metrics_path = /metrics
 CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
@@ -43,10 +43,22 @@ try {
             if ($body !== "$session:$count") throw new RuntimeException("session: $body");
         }
     }
-    $data = json_decode(file_get_contents("http://127.0.0.1:$statusPort/status"), true, flags: JSON_THROW_ON_ERROR);
-    $direct = array_values(array_filter($data['pools'], fn($pool) => $pool['name'] === 'direct'))[0];
-    if ($direct['requests'] !== 4 || $direct['active'] !== 0 || $direct['idle'] !== 1) {
-        throw new RuntimeException('scoreboard: ' . json_encode($direct));
+    /* Read through the pool's own operator endpoint: issue #278 removed the
+     * pool.type = status that used to aggregate every pool on its own port, so
+     * the scoreboard now comes off this pool's pm.metrics_path. Prometheus
+     * rather than JSON because an http-direct pool's status page is the type's
+     * own text page (issue #275), while the scoreboard series are the same
+     * three numbers under labelled names. */
+    $metrics = fpmng_operator_body("127.0.0.1:$statusPort", '/metrics');
+    $scoreboard = [];
+    foreach (['requests_total', 'workers_active', 'workers_idle'] as $series) {
+        if (!preg_match('/^fpmng_pool_' . $series . '\{pool="direct"\} (\d+)$/m', $metrics, $m)) {
+            throw new RuntimeException("no fpmng_pool_$series for pool direct in:\n$metrics");
+        }
+        $scoreboard[$series] = (int) $m[1];
+    }
+    if ($scoreboard !== ['requests_total' => 4, 'workers_active' => 0, 'workers_idle' => 1]) {
+        throw new RuntimeException('scoreboard: ' . json_encode($scoreboard));
     }
     echo "session-lifecycle/scoreboard: ok\n";
 } finally {

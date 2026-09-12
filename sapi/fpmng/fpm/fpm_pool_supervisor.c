@@ -74,8 +74,8 @@ struct fpm_supervisor_shared_s {
 						 * (planned completion, NOT a failure) */
 	unsigned char fatal_signaled;		/* SIGTERM sent to the master once already (idempotent) */
 
-	/* Fields added solely for pool.type = status (docs/NOTES.md 3u) — exactly
-	 * what status actually shows, not one field more. "failures"/"terminal"/
+	/* Fields added solely for the operator status page (docs/NOTES.md 3u) —
+	 * exactly what that page shows, not one field more. "failures"/"terminal"/
 	 * "gave_up" above already existed and serve both policy and status; the three
 	 * below serve status ONLY, and the policy does not read them. */
 	unsigned char running;			/* 1 = the script is currently running */
@@ -455,8 +455,9 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 
 	if (!shared) {
 		/* Should not happen — init_main allocates this for every supervisor pool
-		 * in the master before anything can fork (including the status pool). A
-		 * zero state is a safe result. */
+		 * in the master before anything can fork, including the operator
+		 * endpoint's child, which is what calls this. A zero state is a safe
+		 * result. */
 		return;
 	}
 

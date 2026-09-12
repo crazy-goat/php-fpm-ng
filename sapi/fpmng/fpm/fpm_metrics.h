@@ -34,8 +34,9 @@ void fpm_metrics_child_init(void);
 /* The Prometheus text of ONE pool's application series (issue #276). The
  * per-pool operator endpoint answers with its own pool's numbers only, so it
  * renders the slot range that pool owns -- the run this file hands out in
- * fpm_metrics_child_init() -- instead of aggregating the whole region the way
- * the aggregate pool.type = status endpoint does.
+ * fpm_metrics_child_init() -- instead of aggregating the whole region, which
+ * since issue #278 nothing in the master does: there is no endpoint left that
+ * reports on a pool other than its own.
  *
  * Called from the operator endpoint's child, which is not one of the pool's
  * workers: everything it reads is the shared region the master allocated, so

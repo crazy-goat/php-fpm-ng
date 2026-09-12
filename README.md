@@ -27,10 +27,10 @@ Verified 2026-09-07 against `sapi/fpmng`:
 - `fastcgi-ng` and `http` accept an optional
   `pool.executor = classic | fiber | async` (default `classic`; `async` is
   currently rejected during configuration validation)
-- metrics: `pool.type = status` exposes a built-in `/metrics` (Prometheus)
-  and `/status` (JSON) for every pool at once, and `pm.metrics_path` /
-  `pm.metrics_listen` expose one pool's series on their own path and port
-  (`docs/operator-endpoint.md`); application metrics from PHP
+- metrics: `pm.status_path` (JSON) and `pm.metrics_path` (Prometheus) expose
+  one pool on an operator listener named by `pm.status_listen` /
+  `pm.metrics_listen`, one target per pool (`docs/operator-endpoint.md`);
+  application metrics from PHP
   (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
   `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
 - the `fiber` executor is experimental and not intended for production, while
@@ -46,6 +46,27 @@ no compiler and no php-src to run `pool.type = fastcgi` or
 `pool.type = http-direct`. The other pool types need patches that apply inside
 `libphp` and still need a build from source. Commands, the supported matrix and
 what happens on a version mismatch: [`docs/install.md`](docs/install.md).
+
+## Upgrading from v0.2.0
+
+Two behaviour changes in the operator surface. Both fail loudly at startup
+rather than being ignored, so an affected configuration does not start with a
+port nobody answers on.
+
+- **`pool.type = status` is gone** (#278). A pool that reported on every other
+  pool from a listener of its own is what the operator endpoint (#274) already
+  is. Put `pm.status_path` and `pm.metrics_path` on the pools you want to
+  watch, pointing `pm.status_listen` at the address the status pool used. The
+  scraper keeps its port and gains one target per pool instead of one target
+  carrying all of them; the JSON body keeps its `{"pools":[…]}` shape, one
+  element long. Worked example:
+  [`docs/operator-endpoint.md`](docs/operator-endpoint.md#replacing-a-pooltype--status-pool).
+- **`pm.status_listen` means something else, and is refused on `fastcgi` and
+  `fastcgi-ng`** (#278). It used to auto-create a second FastCGI pool named
+  `<pool>_status`; it now names where a type's own operator endpoint binds, and
+  the types with a web server in front of them do not have one. On those, keep
+  `pm.status_path` on the pool's own socket and restrict it at that web server,
+  which is where access to a path is already decided.
 
 ## Plan
 

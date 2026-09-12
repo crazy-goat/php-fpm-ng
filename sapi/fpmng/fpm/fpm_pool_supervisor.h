@@ -31,7 +31,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;
 
-/* fpm_pool_type_s.status — state for this pool when read by pool.type = status.
+/* fpm_pool_type_s.status — state for this pool as the operator pages read it.
  * Reads ONLY shared memory allocated by init_main (this is not the same process
  * as supervisor, so no local state is visible). */
 void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);

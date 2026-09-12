@@ -16,7 +16,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_operator_http.h"
-#include "fpm_pool_status.h"
+#include "fpm_operator_pages.h"
 #include "fpm_pool_type.h"
 #include "zlog.h"
 
@@ -395,7 +395,7 @@ static void fpm_operator_endpoint_dispatch(void *ctx, const char *path, const ch
 			/* One exposition format for every pool, by design: a scraper reads
 			 * one endpoint and gets labelled series it can compare across
 			 * pools, which a per-type body would take away. */
-			fpm_pool_status_render_prometheus(&reply->body, r->pool);
+			fpm_operator_page_render_prometheus(&reply->body, r->pool);
 			reply->handled = 1;
 			return;
 		}
@@ -410,7 +410,7 @@ static void fpm_operator_endpoint_dispatch(void *ctx, const char *path, const ch
 			type->operator_status(r->pool, query, reply);
 		} else {
 			reply->content_type = "application/json";
-			fpm_pool_status_render_json(&reply->body, r->pool);
+			fpm_operator_page_render_json(&reply->body, r->pool);
 		}
 		reply->handled = 1;
 		return;

@@ -6,6 +6,15 @@ Investigation only: no production code was changed. The task breakdown in §8 is
 a proposal; nothing in it is filed, and §8's T0 is the decision that gates the
 rest.
 
+**Amended 2026-09-13 (issue #278).** `pool.type = status` no longer exists, so
+§6.1 -- "`status` stays in the CORE, always compiled" -- is moot as written, and
+every count that treats it as a pool type is off by one pool. What it was
+arguing for survives: the status and metrics pages are now `pm.status_path` and
+`pm.metrics_path` on the pool being watched, answered by the operator endpoint
+(`fpm_operator_pages.c`, ex-`fpm_pool_status.c`), and the §6.1 conclusion --
+that a core build must not be unobservable -- applies unchanged to those. The
+rest of the document is left as measured.
+
 Question asked: the product decision is that `pool.type = fastcgi` and
 `pool.type = http-direct` are the CORE, always compiled; everything else
 (`fastcgi-ng`, fiber, async, the `http` gateway, `supervisor`, `cron`,

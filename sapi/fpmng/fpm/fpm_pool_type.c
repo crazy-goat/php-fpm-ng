@@ -20,7 +20,6 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
-#include "fpm_pool_status.h"
 #include "fpm_pool_async.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_pool_coop.h"
@@ -357,16 +356,6 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.status                  = fpm_pool_cron_status,
 	},
 	{
-		.name                     = "status",
-		.requires_listen          = 1,	/* own HTTP port, directly */
-		.requires_pm              = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
-		.serves_requests          = 0,
-		.reads_foreign_scoreboards = 1,
-		.rejects                  = fpm_pool_status_rejects,
-		.validate                 = fpm_pool_status_validate,
-		.child_main               = fpm_pool_status_child_main,
-	},
-	{
 		/* Not configurable: created by fpm_operator_endpoint.c, one per distinct
 		 * operator listen address, and hidden from fpm_pool_type_get() and
 		 * fpm_pool_type_list() by .internal_only. It is an ordinary pool in
@@ -382,9 +371,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects                   = fpm_operator_endpoint_rejects,
 		.validate                  = fpm_operator_endpoint_validate,
 		.child_main                = fpm_operator_endpoint_child_main,
-		/* No .status: it has no state of its own worth reporting, and like
-		 * pool.type = status it is therefore skipped by the collector rather
-		 * than detected there by name. */
+		/* No .status: it has no state of its own worth reporting, so the
+		 * collector skips it on that absence rather than detecting it there by
+		 * name. */
 	},
 };
 
@@ -511,6 +500,40 @@ int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fp
 	}
 
 	return bad ? -1 : 0;
+}
+
+/* Type names that were real and are not any more, with what replaced each.
+ *
+ * A retired name gets its own message rather than "unknown pool.type", because
+ * the two are different mistakes: an unknown name is a typo, and a retired name
+ * is a configuration that used to work. Kept as data, and kept even after the
+ * upgrade it names is old news -- a config file outlives the release that
+ * broke it. */
+static const struct {
+	const char *name;
+	const char *replacement;
+} fpm_pool_types_retired[] = {
+	{ "status",
+	  "set 'pm.status_path' and 'pm.metrics_path' on the pool you want to watch "
+	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
+};
+
+/* NULL when the name is not a retired one. */
+const char *fpm_pool_type_retired(const char *name)
+{
+	size_t i;
+
+	if (!name || !*name) {
+		return NULL;
+	}
+
+	for (i = 0; i < sizeof(fpm_pool_types_retired) / sizeof(fpm_pool_types_retired[0]); i++) {
+		if (!strcmp(fpm_pool_types_retired[i].name, name)) {
+			return fpm_pool_types_retired[i].replacement;
+		}
+	}
+
+	return NULL;
 }
 
 #define FPM_POOL_TYPE_COUNT (sizeof(fpm_pool_types) / sizeof(fpm_pool_types[0]))

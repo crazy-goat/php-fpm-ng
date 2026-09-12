@@ -168,12 +168,11 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 			 * instead, for one of two different reasons:
 			 *   - supervisor, cron: each has its own SIGTERM handler that
 			 *     finishes the current iteration and prevents another one;
-			 *   - status: has no SIGTERM handler and no work to finish
-			 *     (fpm_pool_status.c:435-439) — SIGTERM's default
-			 *     disposition just exits it immediately. Sending SIGTERM
-			 *     directly here also removes a delay that would otherwise be
-			 *     accepted: waiting for the master to escalate SIGQUIT to
-			 *     SIGTERM (fpm_pool_status.c:443-446).
+			 *   - the operator endpoint: no SIGTERM handler and no work to
+			 *     finish, so SIGTERM's default disposition just exits it
+			 *     immediately. Sending SIGTERM directly here also removes a
+			 *     delay that would otherwise be accepted: waiting for the
+			 *     master to escalate SIGQUIT to SIGTERM.
 			 * Keep the ordinary SIGQUIT fan-out unchanged for log rotation
 			 * and an explicit graceful stop. */
 			if (fpm_state == FPM_PCTL_STATE_RELOADING && signo == SIGQUIT) {
@@ -431,7 +430,7 @@ static void fpm_pctl_perform_idle_server_maintenance(struct timeval *now) /* {{{
 
 		if (idle < wp->config->pm_min_spare_servers) {
 			if (wp->running_children >= wp->config->pm_max_children) {
-				if (!wp->warn_max_children && !wp->shared) {
+				if (!wp->warn_max_children) {
 					fpm_scoreboard_update(0, 0, 0, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, wp->scoreboard);
 					zlog(ZLOG_WARNING, "[pool %s] server reached pm.max_children setting (%d), consider raising it", wp->config->name, wp->config->pm_max_children);
 					wp->warn_max_children = 1;
@@ -450,7 +449,7 @@ static void fpm_pctl_perform_idle_server_maintenance(struct timeval *now) /* {{{
 			/* get sure it won't exceed max_children */
 			children_to_fork = MIN(children_to_fork, wp->config->pm_max_children - wp->running_children);
 			if (children_to_fork <= 0) {
-				if (!wp->warn_max_children && !wp->shared) {
+				if (!wp->warn_max_children) {
 					fpm_scoreboard_update(0, 0, 0, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, wp->scoreboard);
 					zlog(ZLOG_WARNING, "[pool %s] server reached pm.max_children setting (%d), consider raising it", wp->config->name, wp->config->pm_max_children);
 					wp->warn_max_children = 1;
@@ -554,7 +553,7 @@ void fpm_pctl_on_socket_accept(struct fpm_event_s *ev, short which, void *arg) /
 /*	zlog(ZLOG_DEBUG, "[pool %s] heartbeat running_children=%d", wp->config->name, wp->running_children);*/
 
 	if (wp->running_children >= wp->config->pm_max_children) {
-		if (!wp->warn_max_children && !wp->shared) {
+		if (!wp->warn_max_children) {
 			fpm_scoreboard_update(0, 0, 0, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, wp->scoreboard);
 			zlog(ZLOG_WARNING, "[pool %s] server reached max_children setting (%d), consider raising it", wp->config->name, wp->config->pm_max_children);
 			wp->warn_max_children = 1;

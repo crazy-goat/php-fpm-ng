@@ -446,25 +446,26 @@ static void fpm_child_resources_use(struct fpm_child_s *child) /* {{{ */
 	struct fpm_worker_pool_s *wp;
 
 	/* fpm-ng: memory hygiene is disabled ONLY for a child whose OWN pool type
-	 * declares reads_foreign_scoreboards (today: status) — this type reads other
-	 * pools' scoreboards from ANOTHER process (see fpm_pool_status.c), so the
-	 * munmap below would kill IT with a segfault on the first foreign-scoreboard
-	 * access (observed: the "status" process died with SIGSEGV less than 1 ms
-	 * after fork, before any of our code could do anything). Until now nobody
-	 * read a foreign scoreboard (every prior consumer read ONLY its own, which is
-	 * why this optimization was never a problem) — see docs/NOTES.md section 3u,
-	 * where this is recorded as a real discovered limitation of the 3h contract.
-	 * The decision is data-driven (the type declares reads_foreign_scoreboards),
-	 * not based on knowing a concrete type.
+	 * declares reads_foreign_scoreboards (today: the operator endpoint) — such a
+	 * child reads other pools' scoreboards from ANOTHER process (see
+	 * fpm_operator_pages.c), so the munmap below would kill IT with a segfault
+	 * on the first foreign-scoreboard access (observed on the pool.type = status
+	 * this mechanism was written for, which died with SIGSEGV less than 1 ms
+	 * after fork, before any of our code could do anything). Until that type
+	 * existed nobody read a foreign scoreboard (every prior consumer read ONLY
+	 * its own, which is why this optimization was never a problem) — see
+	 * docs/NOTES.md section 3u, where this is recorded as a real discovered
+	 * limitation of the 3h contract. The decision is data-driven (the type
+	 * declares reads_foreign_scoreboards), not based on knowing a concrete type.
 	 *
 	 * IMPORTANT: the decision is per CHILD, not per master. An ordinary fcgi/http
-	 * worker in a configuration next to a status pool still releases foreign
-	 * scoreboards exactly as today — this hygiene also protects against a worker
-	 * accidentally writing to foreign memory, and there is no reason to disable it
-	 * for pools that read no foreign scoreboard. */
+	 * worker in a configuration that also has an operator listener still releases
+	 * foreign scoreboards exactly as today — this hygiene also protects against a
+	 * worker accidentally writing to foreign memory, and there is no reason to
+	 * disable it for pools that read no foreign scoreboard. */
 	if (!fpm_pool_type_of(child->wp)->reads_foreign_scoreboards) {
 		for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
-			if (wp == child->wp || wp == child->wp->shared) {
+			if (wp == child->wp) {
 				continue;
 			}
 			fpm_scoreboard_free(wp);

@@ -1,57 +1,125 @@
 --TEST--
-fpm-ng: pool.type = status answers /status and /metrics (docs/NOTES.md §3j/§3u)
+fpm-ng: the status pool is gone, its two pages are per-pool paths (issue #278)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-operator.inc";
 
-function httpLine(string $addr, string $path): string
+/* This test used to start a pool.type = status and read /status and /metrics
+ * off its listener. That pool aggregated every pool in the master from a
+ * listener of its own, which is the one thing the operator endpoint (#274)
+ * also does, so #278 removed it. The two pages did not go with it: the same
+ * two formats are now configured per pool, with pm.status_path and
+ * pm.metrics_path.
+ *
+ * So this asserts what replaced it and, before that, that the old spelling
+ * fails loudly. A config that used to start and now silently reports nothing
+ * is the failure mode worth a test of its own. */
+
+function expectRejected(string $label, string $cfg, array $needles): void
 {
-    $fp = @stream_socket_client("tcp://$addr", $errno, $errstr, 5);
-    if (!$fp) {
-        return '';
+    $tester = new FPM\Tester($cfg, '<?php');
+    $messages = $tester->testConfig(true);
+    if ($messages === null) {
+        echo "FAIL: $label was accepted\n";
+        exit(1);
     }
-    fwrite($fp, "GET $path HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
-    $response = stream_get_contents($fp);
-    fclose($fp);
-    return $response === false ? '' : $response;
+    $text = implode("\n", $messages);
+    foreach ($needles as $needle) {
+        if (!str_contains($text, $needle)) {
+            echo "FAIL: $label missing needle: $needle\ngot:\n$text\n";
+            exit(1);
+        }
+    }
+    echo "$label: rejected\n";
 }
+
+/* A retired type name is not a typo, and the message is the whole difference:
+ * whoever reads it is holding a config file that used to start. */
+expectRejected('pool.type = status', <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+
+[monitor]
+listen = {{ADDR}}
+pool.type = status
+EOT, [
+    "pool.type 'status' no longer exists",
+    "set 'pm.status_path' and 'pm.metrics_path' on the pool you want to watch",
+]);
+
+/* fastcgi has a web server in front of it, which is where a path is
+ * restricted, so it gets no operator listener and the address directives have
+ * nothing to name. Refused rather than ignored, for the same reason. */
+expectRejected('pm.status_listen on fastcgi', <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+
+[www]
+listen = {{ADDR}}
+pm = static
+pm.max_children = 1
+pm.status_path = /status
+pm.status_listen = {{ADDR[operator]}}
+EOT, [
+    "'pm.status_listen' is not supported by pool.type = fastcgi",
+    "keep 'pm.status_path' on the pool's own socket and restrict it there",
+]);
+
+/* And the replacement, on a type whose whole state comes through
+ * fpm_pool_type_s.status() rather than a scoreboard -- so the JSON is the
+ * generic page this file used to read off the aggregate pool, for one pool. */
+$root = sys_get_temp_dir() . '/fpmng-status-endpoints-' . getmypid();
+@mkdir($root, 0700, true);
+file_put_contents($root . '/loop.php', '<?php sleep(30);');
 
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
-[monitor]
-listen = {{ADDR}}
-pool.type = status
+
+[monitored]
+pool.type = supervisor
+supervisor.script = $root/loop.php
+supervisor.processes = 1
+pm.status_listen = {{ADDR}}
+pm.status_path = /status
+pm.metrics_listen = {{ADDR}}
+pm.metrics_path = /metrics
 EOT;
 
-$tester = new FPM\Tester($cfg, '<?php /* unused */');
+$tester = new FPM\Tester($cfg, '<?php');
 $tester->start();
 $tester->expectLogStartNotices();
-$addr = $tester->getAddr('ipv4');
+$operator = $tester->getListen('{{ADDR}}');
 
-$status = httpLine($addr, '/status');
-if (!str_contains($status, 'HTTP/1.1 200') || !str_contains($status, 'application/json')) {
-    echo "FAIL: /status response head=" . substr($status, 0, 120) . "\n";
+[$status, $headers, $body] = fpmng_operator_fetch($operator, '/status');
+if ($status !== 200 || !str_contains($headers['content-type'] ?? '', 'application/json')) {
+    echo "FAIL: /status answered $status " . var_export($headers, true) . "\n";
     exit(1);
 }
-if (!str_contains($status, '"pools"') && !str_contains($status, 'monitor')) {
-    echo "FAIL: /status body missing pool data\n";
+$pools = json_decode($body, true)['pools'] ?? null;
+/* One pool, not every pool: that is what #278 changed. The array it is wrapped
+ * in is the shape the aggregate page had, kept so that a client written
+ * against it still parses. */
+if (!is_array($pools) || count($pools) !== 1 || $pools[0]['name'] !== 'monitored'
+    || $pools[0]['type'] !== 'supervisor') {
+    echo "FAIL: /status body: $body\n";
     exit(1);
 }
 echo "/status: ok\n";
 
-$metrics = httpLine($addr, '/metrics');
-if (!str_contains($metrics, 'HTTP/1.1 200')) {
-    echo "FAIL: /metrics response head=" . substr($metrics, 0, 120) . "\n";
-    exit(1);
-}
-if (!str_contains($metrics, 'fpmng_') && !str_contains($metrics, '# HELP')) {
-    echo "FAIL: /metrics body missing prometheus text\n";
-    exit(1);
+$metrics = fpmng_operator_body($operator, '/metrics');
+foreach (['# HELP fpmng_pool_info', 'fpmng_pool_info{pool="monitored",type="supervisor"} 1'] as $needle) {
+    if (!str_contains($metrics, $needle)) {
+        echo "FAIL: /metrics missing: $needle\ngot:\n$metrics\n";
+        exit(1);
+    }
 }
 echo "/metrics: ok\n";
 
@@ -59,9 +127,14 @@ $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
 
+@unlink($root . '/loop.php');
+@rmdir($root);
+
 ?>
 Done
 --EXPECT--
+pool.type = status: rejected
+pm.status_listen on fastcgi: rejected
 /status: ok
 /metrics: ok
 Done

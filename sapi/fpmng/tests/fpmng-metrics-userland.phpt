@@ -12,8 +12,8 @@ fpm-ng: the fpm_metric_*() functions exist and work inside a worker (issue #216)
  * the static module list, AND on the libphp build, where nothing does and
  * fpm_init() registers the module by hand (fpm_libphp_compat.c). Those are two
  * different ways of arriving at the same five functions, and until now neither
- * was covered from PHP -- the C side had tests through pool.type = status, the
- * PHP side had none.
+ * was covered from PHP -- the C side had tests through the operator endpoint,
+ * the PHP side had none.
  *
  * Every metric type the extension offers is exercised, because the one that is
  * not asked for is the one a registration bug takes away. */

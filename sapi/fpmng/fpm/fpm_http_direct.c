@@ -208,7 +208,7 @@ static void fpm_direct_retire_signal(int signo)
 /* Monotonic, unlike the gettimeofday() this file uses to stamp requests for the
  * access log: a deadline read off the wall clock moves when NTP steps it, and
  * the step either stretches a drain or ends it on the spot. Same reason
- * fpm_pool_status.c:371 gives for its write deadline. */
+ * fpm_operator_http.c gives for its write deadline. */
 static void fpm_direct_now(struct timeval *tv)
 {
 	struct timespec ts;

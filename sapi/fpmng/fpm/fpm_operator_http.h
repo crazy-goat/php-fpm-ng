@@ -1,12 +1,12 @@
 /* fpm-ng: the raw HTTP server behind every operator endpoint.
  *
  * There is exactly one of these in the tree and it is deliberate. It started
- * as the accept loop inside fpm_pool_status.c (pool.type = status), and issue
- * #274 needed the same loop for the per-pool operator endpoint on cron,
- * supervisor, http and http-direct pools. Two raw HTTP servers in one project
- * is a cost nobody wanted to pay, so the loop was lifted here and both callers
- * use it: the only thing that differs between them is which paths they answer,
- * and that is a callback.
+ * as the accept loop inside the old pool.type = status, and issue #274 needed
+ * the same loop for the per-pool operator endpoint on cron, supervisor, http
+ * and http-direct pools. Two raw HTTP servers in one project is a cost nobody
+ * wanted to pay, so the loop was lifted here; issue #278 then removed the pool
+ * it came from, leaving the one caller it was generalised for. What differs
+ * between endpoints is only which paths they answer, and that is a callback.
  *
  * The server is deliberately minimal -- no keep-alive, no chunked encoding, no
  * header parsing. Only the request line is read. This is a monitoring endpoint

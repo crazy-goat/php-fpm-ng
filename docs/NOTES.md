@@ -2047,6 +2047,19 @@ responses, with nothing in the log. Only a custom stderr logger showed
 
 ## 3u. `pool.type = status` — implemented and verified (2026-09-05)
 
+**Superseded 2026-09-13 (issue #278).** The pool type is gone. Everything below
+stays because it records what it did and why, and because the two pages
+survived it unchanged in shape — but they are now per-pool directives
+(`pm.status_path`, `pm.metrics_path`) answered by the operator endpoint
+(issues #274/#275) rather than by a pool of their own, and a configuration that still says
+`pool.type = status` fails to start with a message naming the replacement.
+`fpm_pool_status.c` is `fpm_operator_pages.c`; the two renderers kept their
+bodies and lost the walk over `fpm_worker_all_pools` — a page describes the one
+pool whose directive asked for it. The reason for the removal is that a pool
+reporting on every other pool from a listener of its own is the thing the
+operator endpoint already is, and keeping both meant two configuration
+languages for one listener. See [`docs/operator-endpoint.md`](operator-endpoint.md).
+
 New file `sapi/fpmng/fpm/fpm_pool_status.c`/`.h`, one line in
 `fpm_pool_types[]` (`fpm_pool_type.c`). No new configuration directives —
 `validate()` programmatically enforces `pm = static` + `pm.max_children = 1`
@@ -3561,7 +3574,7 @@ overrides the preset through `PHP_ENABLE_ALL`; see `PHP_REAL_ARG_ENABLE` in
 
 API as in 3k: `fpm_metric_register/inc/set/observe` (bool = problem detection)
 plus `fpm_metric_render()` — returns ready Prometheus text so the same code works
-from CLI without a status pool.
+from CLI without an operator endpoint.
 
 What happened exactly as planned in 3k:
 - per-worker slots, zero atomics: each worker has its OWN series table in shared

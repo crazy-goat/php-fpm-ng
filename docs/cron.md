@@ -67,8 +67,8 @@ stale).
 
 ## Run history
 
-`pool.type = status` shows the last run only: whether it is running right
-now, when it last started, the exit code of the last completed run, and how
+The pool's status page (`pm.status_path`) shows the last run only: whether it
+is running right now, when it last started, the exit code of the last completed run, and how
 many times in a row it has failed. It does not keep a count of total runs,
 and it cannot tell "waiting for a legitimately near scheduled time" apart
 from "should have already run and did not" — `next_run` is always computed

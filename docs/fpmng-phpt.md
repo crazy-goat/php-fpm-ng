@@ -6,7 +6,8 @@ is how the runner finds them, and `run-fpmng-phpt.sh` fails when a file this
 repo owns is not reached by it (issue #95). They use the upstream FPM harness copied by
 `build/prepare.sh` (`tester.inc`, `skipif.inc`, FastCGI client helpers) and
 assert behaviour that upstream's 150-test suite does not cover: `pool.type`,
-`pool.executor`, the HTTP gateway, cron, supervisor, and the status pool.
+`pool.executor`, the HTTP gateway, cron, supervisor, and the operator
+endpoint.
 
 Each test's `--TEST--` title and inline comments name the documented claim they
 protect (`docs/NOTES.md`, `docs/cron.md`, `docs/frameworks.md`, or a finished
@@ -89,6 +90,12 @@ a name without the `fpmng-` prefix — an excluded test keeps the prefix, becaus
 `run-fpm-phpt.sh` reads "not named `fpmng-*`" as "upstream's" and would run it
 in the other job. The list is empty today. It is not an escape hatch for a
 failing test — that gets fixed or gets an issue.
+
+Its counterpart on the upstream side,
+`sapi/fpmng/tests/upstream-deviations.list`, is a different thing: it names
+upstream tests that fail because fpm-ng removed the behaviour they test. Our
+own tests are never a deviation from upstream, so an `fpmng-` name there is
+refused. See [`fpm-phpt.md`](fpm-phpt.md#deliberate-deviations).
 
 ## CI
 

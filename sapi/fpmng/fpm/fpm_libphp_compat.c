@@ -82,7 +82,7 @@ void zend_signal_init(void)
 /* ext/fpmng_metrics on the libphp path (issue #216).
  *
  * The C side of the extension is linked into this binary either way -- fpm_metrics.c
- * calls into it, so `pool.type = status` renders /metrics on both builds. What the
+ * calls into it, so a pool's pm.metrics_path renders on both builds. What the
  * libphp build does not get for free is the PHP MODULE: in a from-source build
  * configure puts the extension in the static module list main/internal_functions.c
  * writes, and php_module_startup() walks that list. Here the list belongs to the

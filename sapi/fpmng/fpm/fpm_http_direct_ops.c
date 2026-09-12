@@ -434,7 +434,7 @@ static void fpm_http_direct_ops_status_workers(const struct fpm_http_direct_ops_
  * wp->scoreboard rather than from fpm_scoreboard_get() and the counters from
  * the registry entry the master filled in before the first fork. Both are
  * shared segments, which is why this works at all, and it is the same foreign
- * read pool.type = status has always done (fpm_pool_status.c). */
+ * read the operator pages do (fpm_operator_pages.c). */
 static void fpm_http_direct_ops_status_body(struct fpm_worker_pool_s *wp, int json, int full,
 	struct fpm_operator_buf_s *out)
 {

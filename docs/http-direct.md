@@ -881,8 +881,9 @@ served at all, because `pm.status_path` is rejected there for the reason below.
 
 The page is rendered by a process that is not one of this pool's children, which
 is why every number on it comes from shared memory: the per-slot counters the
-master allocates before the first fork, and the pool's scoreboard. That is the
-same foreign read `pool.type = status` has always done.
+master allocates before the first fork, and the pool's scoreboard. Reading
+another process's counters is what any operator page does; it is why the page
+can be rendered at all by something that is not a child of this pool.
 
 ### Retiring one child (`SIGUSR1`)
 

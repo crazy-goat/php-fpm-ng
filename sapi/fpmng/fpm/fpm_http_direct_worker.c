@@ -1603,6 +1603,16 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	if (sigaction(SIGQUIT, &action, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
+	/* issue #65 retires one child with SIGUSR1. Here it is the same handler as
+	 * SIGQUIT, and deliberately so: this executor tracks no connections (no
+	 * limits, no gauge -- see limits.track_live at the bottom of this file), so
+	 * it has nothing with which to tell "drain the connections I hold" from
+	 * "drain the requests I hold". What the shared handler does buy is that the
+	 * signal an operator sends to retire a child of any direct pool is never
+	 * the SIG_DFL that would kill this one outright. */
+	if (sigaction(SIGUSR1, &action, NULL) < 0) {
+		exit(FPM_EXIT_SOFTWARE);
+	}
 	fpm_worker_install_sapi();
 	/* The child stays in the ACCEPTING stage for its whole life: it never ends
 	 * a request in the scoreboard sense, so the master's per-request deadlines

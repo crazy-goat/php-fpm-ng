@@ -445,7 +445,7 @@ class Pool:
             if self.process.poll() is not None:
                 return {"started": False, "refused": True,
                         "exit_code": self.process.returncode,
-                        "error": self._refusal_reason()}
+                        "error": self.error_lines()}
             if not probe:
                 # The nginx arm has no HTTP port of its own -- the pool listens on
                 # a unix socket and nginx is not started yet. Readiness here is
@@ -478,7 +478,7 @@ class Pool:
                         "error": f"first request answered {record['outcome']}"}
             time.sleep(0.05)
 
-    def _refusal_reason(self):
+    def error_lines(self):
         lines = []
         for path in (self.log, self.stderr):
             if path.exists():
@@ -1113,7 +1113,24 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
                                     "error": ready["error"],
                                     "nginx_error": nginx.error_lines()}]
         for round_index in range(1, args.rounds + 1):
-            idle_set = IdleSet(port, scenario["idle"], tls_context if scenario["tls"] else None)
+            try:
+                idle_set = IdleSet(port, scenario["idle"],
+                                   tls_context if scenario["tls"] else None)
+            except (OSError, RuntimeError, ValueError, ssl.SSLError) as exc:
+                # Establishing N idle connections is itself a measurement, and
+                # it fails on real cells: worker+ondemand+TLS at N=256 lost the
+                # set three runs out of three (#167), twice as
+                # `closed_without_response`, once as an SSL EOF. Raised, that
+                # took the remaining scenarios of a half-hour grid with it and
+                # the run came back with the failure invisible and 30 of 32
+                # rows. Recorded, the cell says what happened and the grid
+                # finishes.
+                rows.append(row_base | {"round": round_index,
+                                        "result": "idle_set_failed",
+                                        "error": repr(exc),
+                                        "children": len(pool.children()),
+                                        "log": pool.error_lines()})
+                continue
             stream = Stream(port, args.stream_connections,
                             tls_context if scenario["tls"] else None, args.request_sleep_ms,
                             args.stream_mode)

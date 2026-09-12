@@ -192,6 +192,12 @@ never listened", which reads like a broken binary.
   N = 1024 that is a second or so of setup, and which child accepts each
   connection is the kernel's choice, not the harness's — `idle_conns_per_child`
   reports the distribution that actually happened.
+- A round whose idle set cannot be established is recorded as
+  `result: "idle_set_failed"` with the exception and the pool's last
+  ERROR/ALERT lines, and the grid continues. It is a real outcome, not a
+  harness accident: `worker` + `ondemand` + TLS at N = 256 lost the set in
+  three runs out of three. Before this, the exception ended the whole run, so
+  a half-hour grid came back with 30 of 32 scenarios and no record of why.
 - `cpu_seconds` is utime+stime of the processes that existed at both ends of the
   window. A child that was spawned and retired inside it contributes nothing;
   the count of those is in `n_processes_lost_in_window` rather than left out.

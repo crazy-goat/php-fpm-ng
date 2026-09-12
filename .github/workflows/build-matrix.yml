@@ -345,6 +345,15 @@ jobs:
           # still has the unstripped binaries in its own workspace while it
           # runs, so the symbols exist where a crash would actually happen.
           strip stage/bin/php-fpm-ng stage/bin/php
+          # Re-embed, because strip just threw the payload away. It is appended
+          # past the last ELF section, not held in one, so strip(1) rewrites the
+          # file without it -- build/embed-payload.sh:18-19 says so and
+          # fpmng-payload-distribution.phpt caught it when this step first
+          # stripped and stopped there (run 34699384655, FAIL=1 of 72). Running
+          # the embed again afterwards is the whole fix: the script is
+          # idempotent and this is a fresh copy that has lost its entry, so it
+          # appends one.
+          ./build/embed-payload.sh "$PWD/stage/bin/php-fpm-ng" "$PWD/stage/bin/php"
           du -sh stage
 
       - name: upload build (for the phpt job)

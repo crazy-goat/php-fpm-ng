@@ -257,6 +257,21 @@ ${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_N
   exit 1
 }
 
+# --- embed the distribution payload (issue #171) -------------------------------
+# After the link and before anything reads the binary, because this is an
+# append: strip(1) would drop it (it is not an ELF section), so nothing may
+# strip after this point. build/package-apk.sh already builds with `!strip`
+# and build/package-deb.sh never strips.
+#
+# The packer is PHP, and the interpreter comes from the same installation as
+# php-config rather than from PATH: this build already depends on that
+# installation for libphp itself, and a `php` found on PATH could be a
+# different version with a different set of extensions.
+PHP_BIN=$("$PHP_CONFIG" --php-binary 2>/dev/null || true)
+[ -n "$PHP_BIN" ] && [ -x "$PHP_BIN" ] || PHP_BIN=$(command -v php || true)
+[ -n "$PHP_BIN" ] || fail "no PHP interpreter to run build/payload-pack.php; install the cli package next to php-config"
+"$REPO/build/embed-payload.sh" "$BIN" "$PHP_BIN" || fail "the distribution payload could not be embedded"
+
 # --- assert the binary, not the flags ------------------------------------------
 # Same reasoning as build/static-full.sh (issue #77): the flags above are
 # exactly what was wrong when this went wrong, so a check that reads them would

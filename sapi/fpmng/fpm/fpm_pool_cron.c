@@ -83,6 +83,7 @@
 #include "fpm_pool_cron.h"
 #include "fpm_pool_type.h"
 #include "fpm_cron_schedule.h"
+#include "fpm_payload_dist.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_pool_script.h"
 #include "fpm_shm.h"
@@ -183,6 +184,21 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (!c->cron_script || !*c->cron_script) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.type = cron requires cron.script", c->name);
 		return -1;
+	}
+	if (fpm_payload_dist_is_path(c->cron_script)) {
+		/* Issue #171, acceptance criterion 3. An embedded script is checked
+		 * here, in the master, against the payload this binary actually
+		 * carries: a build that embedded nothing, or a name that is not in the
+		 * archive, is a configuration error like any other and has to be one at
+		 * startup. On disk the same check is deliberately NOT made -- a path
+		 * may legitimately appear before the first run (fpm_pool_script.c) --
+		 * but the contents of this binary cannot change while it runs. */
+		const char *why = NULL;
+
+		if (0 > fpm_payload_dist_validate(c->cron_script, &why)) {
+			zlog(ZLOG_ALERT, "[pool %s] cron.script '%s': %s", c->name, c->cron_script, why);
+			return -1;
+		}
 	}
 	if (c->cron_timeout < 0) {
 		c->cron_timeout = 0;

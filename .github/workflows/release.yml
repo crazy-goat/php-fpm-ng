@@ -26,6 +26,12 @@ on:
 
 permissions:
   contents: write
+  # The gate script pulls the package-gate images from ghcr, and they are
+  # private: without this the `docker login` step below gets a token that
+  # cannot read them, and ci-package-gate.sh silently falls back to building
+  # both stages from a bare base image -- slower, and no longer the same
+  # images the pull request was gated with.
+  packages: read
 
 env:
   PHP_SRC_REPO: https://github.com/php/php-src.git
@@ -33,26 +39,21 @@ env:
 
 jobs:
   packages:
-    # poligon-host, like static-musl and package-gate: the script drives
-    # `docker run` with host bind mounts, and -v paths are resolved by the host
-    # daemon, so a containerised copy would mount empty directories.
-    runs-on: poligon-host
+    # Not containerised, like static-musl and package-gate in build-matrix.yml:
+    # the script drives `docker run` with host bind mounts, and -v paths are
+    # resolved by the host daemon, so a containerised copy would mount empty
+    # directories.
+    runs-on: ubuntu-latest
     env:
-      PACKAGE_CACHE: /opt/gh-runner/cache/buildtree-package
+      # A host path the runner user owns; /opt on a hosted image is root's.
+      PACKAGE_CACHE: ${{ runner.temp }}/buildtree-package
     steps:
-      - name: reclaim the workspace from root-owned build output
-        run: |
-          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /w
-      - name: reclaim the prepared tree from root-owned build output
-        run: |
-          mkdir -p "$PACKAGE_CACHE/src"
-          docker run --rm -v "$PACKAGE_CACHE/src:/s" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /s
-
       - uses: actions/checkout@v7
 
-      - name: php-src tree for the package build (reused between runs)
+      - name: log in to ghcr.io for the package-gate images
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: php-src tree for the package build
         env:
           FPMNG_TREE_SKIP_CONFIGURE: "yes"
         run: ./build/ci-build-tree.sh "$PACKAGE_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF"
@@ -98,10 +99,10 @@ jobs:
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
       #
-      # curl, not `gh`: this runs on poligon-host, a self-hosted runner that has
-      # no gh CLI on it, and a release workflow that depends on a tool somebody
-      # installed by hand on one machine is a release workflow that breaks the
-      # day that machine is rebuilt. curl and python3 are both already there.
+      # curl, not `gh`: this was written for a self-hosted runner with no gh
+      # CLI on it. ubuntu-latest does carry gh, but the script is what cut
+      # v0.1.0 and v0.2.0 and it depends on nothing but curl and python3 --
+      # rewriting a working release path to use one more tool buys nothing.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:

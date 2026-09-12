@@ -2,13 +2,9 @@ name: ci-image
 
 # Builds the image that build-matrix.yml runs its jobs in.
 #
-# Runs on the self-hosted runner, not ubuntu-latest: GitHub-hosted minutes for
-# this org are gated behind billing, which is what pushed CI onto poligon in
-# the first place. Building the image there too means the whole pipeline stops
-# depending on that.
-#
-# poligon-host is the bare instance (no container:) -- this job needs the
-# host's docker daemon, and it must not run inside the image it is building.
+# Runs on ubuntu-latest, like the rest of CI since this repository went public.
+# No container: -- this job needs the host's docker daemon, and it must not run
+# inside the image it is building.
 #
 # Only fires when a Dockerfile changes, so a normal PR does not rebuild it --
 # plus a nightly schedule, which exists solely for the package-gate images
@@ -42,27 +38,16 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      # static-musl shares this runner instance and builds through an Alpine
-      # container that writes into the workspace as root. The runner user
-      # cannot delete those files afterwards, so actions/checkout dies with
-      # EACCES before any step of the next job runs. Reclaiming has to happen
-      # from a container too -- chown of a root-owned file is not something
-      # the unprivileged runner can do itself.
-      - name: reclaim the workspace from root-owned build output
-        run: |
-          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /w
-
       - uses: actions/checkout@v7
 
-      # Plain docker build rather than buildx: poligon runs the legacy builder,
-      # and this image is a single apt-get layer that gains nothing from
-      # BuildKit's parallelism.
+      # Plain `docker build`, no buildx setup step: the image is a single
+      # apt-get layer that gains nothing from BuildKit's parallelism, and
+      # ubuntu-latest's daemon builds it either way.
       - name: build
         run: |
           docker build \

@@ -5,49 +5,48 @@ name: build
 # rather than the full ZTS x session x TLS matrix. The static musl build is
 # covered separately below.
 #
-# Runs on pull_request only (not on every push): a full php-src build is slow
-# on GitHub-hosted runners, and only a PR is a candidate for merging into main.
+# Runs on pull_request, and on push to main. The push run builds nothing that
+# a merge needs -- it exists to write the ccache entries that the next pull
+# request restores. A cache written on a PR branch is visible only to that
+# branch; one written on the default branch is visible to every branch, so
+# without a run on main the first run of every new branch compiles php-src
+# from scratch.
 on:
   pull_request:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       php_src_ref:
         description: "php-src commit/tag to build against (overrides the pinned default)"
         required: false
         default: ""
-      runner:
-        description: "where to run: the self-hosted poligon runners, or GitHub-hosted as a fallback when poligon is offline"
-        required: false
-        type: choice
-        default: self-hosted
-        options:
-          - self-hosted
-          - ubuntu-latest
 
 # Every push to a PR branch restarts the whole 13-job matrix; without this the
 # superseded run keeps burning minutes to completion.
 #
-# Every job below except static-musl runs in ghcr.io/crazy-goat/php-fpm-ng-ci
-# (built by ci-image.yml from .github/docker/ci.Dockerfile), which is why none
-# of them apt-get anything any more. The repeated container: block is
-# unavoidable -- GitHub Actions does not expand YAML anchors. Its /ccache
-# volume is the self-hosted runner's own disk, so the compiler cache survives
-# between runs without being tarred to GitHub's cache service; on a
-# GitHub-hosted fallback run that path is empty and ccache starts cold, which
-# is what the hosted runner did anyway.
+# Every job runs on ubuntu-latest. It used to run on the self-hosted `poligon`
+# box, which is off now: this repository is public, and GitHub-hosted minutes
+# are free for public repositories, while a self-hosted runner on a public
+# repository is a machine that a pull request from a stranger can be made to
+# execute code on.
 #
-# The jobs that do not compile run on `poligon`, the label shared by all 13
-# runner instances on the box (3 registered to this repository, 10 to the
-# organisation, whose runner group already grants this repository access).
-# They used to sit on `fpmng`, which is only the 3, so the ten short jobs that
-# wait on `build` queued in waves of three. The three compiling jobs are
-# pinned to one instance each instead -- see the note on each of them.
+# Losing that box cost the two things it kept on its own disk between runs: a
+# ccache directory and a configured php-src tree (issue #196). The ccache is
+# replaced by actions/cache in the three jobs that compile -- see the cache
+# step in each. The reused tree is not replaced: it is a full configured
+# php-src checkout, far too large to tar into the cache service every run, so
+# every job configures from scratch and leans on ccache for the compile.
 #
-# static-musl is the exception: it drives `docker run` with host bind mounts,
-# and -v paths are resolved by the host daemon, so a containerised copy of it
-# would mount empty directories. It runs on poligon-host, a runner instance
-# with its own _work -- kept away from the root-owned workspaces the container
-# jobs leave behind.
+# Every job below except static-musl and package-gate runs in
+# ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from
+# .github/docker/ci.Dockerfile), which is why none of them apt-get anything
+# any more. The repeated container: block is unavoidable -- GitHub Actions
+# does not expand YAML anchors.
+#
+# static-musl and package-gate are the exceptions: they drive `docker run`
+# with host bind mounts, and -v paths are resolved by the host daemon, so a
+# containerised copy of them would mount empty directories.
 # actions: write is only for build/ci-cancel-run.sh (issue #209), the
 # if: failure() step every job ends with: cancelling a run is an Actions API
 # write.
@@ -97,14 +96,12 @@ jobs:
   # Task 014: the comment-content contract in workflow.md stays linked from the
   # contributor entry points. Fast — checkout only.
   comment-content-rule:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -129,14 +126,12 @@ jobs:
   # this repo owns, so a new test file cannot be silently unreachable. Hermetic
   # -- no build, no binary; the runner stops at its own preflight.
   fpmng-phpt-coverage:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -157,14 +152,12 @@ jobs:
   # not apply..." on a genuine failure (build/prepare.sh:144) — this job
   # just needs to run it and let that exit code fail the job.
   patches:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -192,62 +185,58 @@ jobs:
   # release.
   build:
     needs: patches
-    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
-    # the reused php-src tree lives on the runner's own disk. Unpinned, this
-    # job landed on a different one of the three runners on nearly every run
-    # and found a cold tree there (measured on run 34592253321: build reused,
-    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
-    # costs queueing when two pull requests build at once -- which is also
-    # what keeps two jobs off one tree.
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treebuild' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
-        # Issue #196: the php-src build tree, kept between runs.
-        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
     env:
+      # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
+      # self-hosted box's own disk. There is no such mount now, and / is not
+      # writable by uid 1001, so the cache lives in the workspace -- which is
+      # also the only place actions/cache can reach from inside a container job.
+      # 900M rather than the image's 5G: the whole repository gets 10 GB of
+      # cache and three jobs write one of these each, on every run.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 900M
       BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
-      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
-      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
-      # Docker creates the mount point root-owned and this job, running as
-      # 1001, cannot write into it. There is nothing to reuse on a fresh
-      # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
-      # reasons: a job-level value would override what GITHUB_ENV writes, and
-      # the runner context is not available there at all.
+      # What replaces the ccache directory the self-hosted runner kept on its
+      # own disk. The key carries the commit so every run saves a fresh entry;
+      # the restore-key is the prefix, so a run picks up the newest cache of
+      # this job for this php-src pin -- from the pull request itself if it has
+      # one, and otherwise from the last run on main, which is why this
+      # workflow now also runs on push to main.
+      - name: restore the compiler cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-build-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+          restore-keys: |
+            ccache-build-${{ env.PHP_SRC_REF }}-
+
+      # The tree is built in the workspace and thrown away with the runner.
+      # A hosted runner has nothing of the previous run on it, so the reuse
+      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
+      # the script still runs, because it is also what clones, patches and
+      # configures. PHPSRC is exported here rather than in the job's `env:`
+      # because a job-level value would override what GITHUB_ENV writes.
       - name: choose the build tree location
-        run: |
-          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
-          # available in a job-level `env:`, only inside a step.
-          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
-          if mkdir -p "$tree" 2>/dev/null; then
-            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
-          else
-            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
-            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
-          fi
+        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
-      # It reuses the tree the previous run left on this runner as long as the
-      # php-src pin, the configure flags, the patch stack, build/prepare.sh and
-      # the set of files under sapi/fpmng/ are all unchanged, and starts over
-      # otherwise. Measured on the poligon: 3 s instead of 96 s for a push that
-      # only touches sapi/fpmng/. The tree is per-runner because a runner
-      # executes one job at a time, and that is what keeps two jobs off the
-      # same directory.
-      - name: php-src build tree (reused between runs)
+      # On a hosted runner there is never a tree to reuse, so what this buys
+      # here is the four steps in one place and the key file it writes, not the
+      # reuse it was written for.
+      - name: php-src build tree
         env:
           CC: ccache gcc
           CXX: ccache g++
@@ -377,14 +366,12 @@ jobs:
   # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
   phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -418,14 +405,12 @@ jobs:
   # off by default); cron may take up to one minute.
   fpmng-phpt:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -488,27 +473,24 @@ jobs:
   # PASS=58, FAIL/ERROR=0, SKIP=0 of 58.
   fpmng-phpt-fiber:
     needs: patches
-    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
-    # the reused php-src tree lives on the runner's own disk. Unpinned, this
-    # job landed on a different one of the three runners on nearly every run
-    # and found a cold tree there (measured on run 34592253321: build reused,
-    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
-    # costs queueing when two pull requests build at once -- which is also
-    # what keeps two jobs off one tree.
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treefiber' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
-        # Issue #196: the php-src build tree, kept between runs.
-        - /opt/gh-runner/cache/buildtree:/buildtree
       # As root php-fpm refuses to start, so the suite would report PASS=0
       # with everything skipped and still look green. Same note as fpmng-phpt.
       options: --user 1001:1001
     env:
+      # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
+      # self-hosted box's own disk. There is no such mount now, and / is not
+      # writable by uid 1001, so the cache lives in the workspace -- which is
+      # also the only place actions/cache can reach from inside a container job.
+      # 900M rather than the image's 5G: the whole repository gets 10 GB of
+      # cache and three jobs write one of these each, on every run.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 900M
       # A directory of its own: --enable-fpmng-fiber is a different configure,
       # so it cannot share objects with the default build. Sharing one
       # directory would make the two jobs wipe each other's tree on every run.
@@ -516,25 +498,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
-      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
-      # Docker creates the mount point root-owned and this job, running as
-      # 1001, cannot write into it. There is nothing to reuse on a fresh
-      # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
-      # reasons: a job-level value would override what GITHUB_ENV writes, and
-      # the runner context is not available there at all.
+      # What replaces the ccache directory the self-hosted runner kept on its
+      # own disk. The key carries the commit so every run saves a fresh entry;
+      # the restore-key is the prefix, so a run picks up the newest cache of
+      # this job for this php-src pin -- from the pull request itself if it has
+      # one, and otherwise from the last run on main, which is why this
+      # workflow now also runs on push to main.
+      - name: restore the compiler cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+          restore-keys: |
+            ccache-fiber-${{ env.PHP_SRC_REF }}-
+
+      # The tree is built in the workspace and thrown away with the runner.
+      # A hosted runner has nothing of the previous run on it, so the reuse
+      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
+      # the script still runs, because it is also what clones, patches and
+      # configures. PHPSRC is exported here rather than in the job's `env:`
+      # because a job-level value would override what GITHUB_ENV writes.
       - name: choose the build tree location
-        run: |
-          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
-          # available in a job-level `env:`, only inside a step.
-          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
-          if mkdir -p "$tree" 2>/dev/null; then
-            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
-          else
-            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
-            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
-          fi
+        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
       # fpmng-http-direct-request-parity.phpt needs this locale to be
       # discriminating at all -- see the same step on fpmng-phpt (issue #105).
       - name: assert tr_TR.UTF-8 is present (issue #105)
@@ -657,54 +642,56 @@ jobs:
   # lands in a PR that is already about the toolchain rather than on an
   # unrelated one.
   lint:
-    # Issue #196: pinned to one runner, not the shared `fpmng` pool, because
-    # the reused php-src tree lives on the runner's own disk. Unpinned, this
-    # job landed on a different one of the three runners on nearly every run
-    # and found a cold tree there (measured on run 34592253321: build reused,
-    # lint and fpmng-phpt-fiber both cold, all three having moved). Pinning
-    # costs queueing when two pull requests build at once -- which is also
-    # what keeps two jobs off one tree.
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'treelint' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
-        # Issue #196: the php-src build tree, kept between runs.
-        - /opt/gh-runner/cache/buildtree:/buildtree
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
       # runner user on GitHub-hosted images, so it owns the workspace either way.
       options: --user 1001:1001
     env:
-      # The same configure line as `build`, so on a runner that has already run
-      # `build` this job finds the tree ready and skips configure entirely.
+      # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
+      # self-hosted box's own disk. There is no such mount now, and / is not
+      # writable by uid 1001, so the cache lives in the workspace -- which is
+      # also the only place actions/cache can reach from inside a container job.
+      # 900M rather than the image's 5G: the whole repository gets 10 GB of
+      # cache and three jobs write one of these each, on every run.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 900M
+      # The same configure line as `build`. That no longer shares a tree with
+      # it -- each hosted job gets its own machine -- but it does share the
+      # ccache prefix's contents in effect, since the two compile the same
+      # objects from the same sources.
       BUILDTREE_CONFIG: dynamic
     steps:
       - uses: actions/checkout@v7
 
-      # A GitHub-hosted fallback runner (the `runner` input, for when poligon
-      # is offline) has no /opt/gh-runner/cache/buildtree on the host, so
-      # Docker creates the mount point root-owned and this job, running as
-      # 1001, cannot write into it. There is nothing to reuse on a fresh
-      # hosted runner anyway -- build in the workspace, as this job did before
-      # issue #196. PHPSRC is set here rather than in the job's `env:` for two
-      # reasons: a job-level value would override what GITHUB_ENV writes, and
-      # the runner context is not available there at all.
+      # What replaces the ccache directory the self-hosted runner kept on its
+      # own disk. The key carries the commit so every run saves a fresh entry;
+      # the restore-key is the prefix, so a run picks up the newest cache of
+      # this job for this php-src pin -- from the pull request itself if it has
+      # one, and otherwise from the last run on main, which is why this
+      # workflow now also runs on push to main.
+      - name: restore the compiler cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-lint-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+          restore-keys: |
+            ccache-lint-${{ env.PHP_SRC_REF }}-
+
+      # The tree is built in the workspace and thrown away with the runner.
+      # A hosted runner has nothing of the previous run on it, so the reuse
+      # ci-build-tree.sh was written for (issue #196) has nothing to reuse;
+      # the script still runs, because it is also what clones, patches and
+      # configures. PHPSRC is exported here rather than in the job's `env:`
+      # because a job-level value would override what GITHUB_ENV writes.
       - name: choose the build tree location
-        run: |
-          # $RUNNER_NAME, not ${{ runner.name }}: the runner context is not
-          # available in a job-level `env:`, only inside a step.
-          tree="/buildtree/$RUNNER_NAME/$BUILDTREE_CONFIG"
-          if mkdir -p "$tree" 2>/dev/null; then
-            echo "PHPSRC=$tree" >> "$GITHUB_ENV"
-          else
-            echo "$tree is not writable (GitHub-hosted fallback?); building in the workspace"
-            echo "PHPSRC=$PWD/php-src" >> "$GITHUB_ENV"
-          fi
+        run: echo "PHPSRC=$PWD/php-src-$BUILDTREE_CONFIG" >> "$GITHUB_ENV"
 
       # Issue #196: one step in place of clone + prepare + buildconf + configure.
       # It reuses the tree the previous run left on this runner as long as the
@@ -742,56 +729,52 @@ jobs:
   # links statically on musl and serves HTTP when it is the only executable in
   # a scratch image.
   static-musl:
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    runs-on: ubuntu-latest
     env:
       # This job is not containerised -- it drives `docker run` with host bind
-      # mounts -- so it names the host path directly rather than a /buildtree
-      # mount. poligon-host is a runner instance of its own, so nothing else
-      # touches this directory.
-      MUSL_CACHE: /opt/gh-runner/cache/buildtree-musl
+      # mounts, which the host daemon resolves -- so it names a host path. Under
+      # RUNNER_TEMP, not /opt: the runner user does not own /opt on a hosted
+      # image, and the two reclaim-from-root steps that used to stand here are
+      # gone with the box that needed them, because a hosted runner hands the
+      # next job a new machine rather than the workspace this one left behind.
+      MUSL_CACHE: ${{ runner.temp }}/buildtree-musl
     steps:
-      # The Alpine build below writes into the workspace as root, and the
-      # runner user cannot unlink that afterwards -- the next job on this
-      # instance would die in actions/checkout with EACCES. Reclaim first,
-      # from a container, since chowning a root-owned file is exactly what
-      # the unprivileged runner cannot do. Same step as in ci-image.yml,
-      # which shares this instance.
-      - name: reclaim the workspace from root-owned build output
-        run: |
-          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /w
-
-      # Same reason, one directory further (issue #206): build/static-full.sh
-      # runs ./buildconf as root in the bind-mounted /src, so `configure` and
-      # autom4te.cache/ end up root-owned. ci-build-tree.sh below deletes the
-      # tree whenever its key moved -- which is nearly every PR, the key covers
-      # the overlay -- and the unprivileged runner cannot unlink those. Only
-      # /src: /build, /ccache and the apk cache stay root-owned on purpose,
-      # nothing outside a container touches them.
-      - name: reclaim the reused php-src tree from root-owned build output
-        run: |
-          mkdir -p "$MUSL_CACHE/src"
-          docker run --rm -v "$MUSL_CACHE/src:/s" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /s
-
       - uses: actions/checkout@v7
 
-      # Issue #197: the same reused tree as the container jobs get from
+      # Issue #197: the same tree the container jobs get from
       # ci-build-tree.sh, minus configure -- the musl toolchain that has to
       # run it only exists inside the Alpine container below, which
       # configures out of tree and keeps its own key next to /build.
-      - name: php-src tree for the static build (reused between runs)
+      - name: php-src tree for the static build
         env:
           FPMNG_TREE_SKIP_CONFIGURE: "yes"
         run: |
           ( set +e; ./build/ci-build-tree.sh "$MUSL_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF" 2>&1; echo "$?" > tree-musl.rc ) | tee tree-musl.log
           exit "$(cat tree-musl.rc)"
 
+      # The Alpine container below writes its ccache and its downloaded .apk
+      # files into these two host directories. On the self-hosted box they
+      # simply stayed there; here they have to be carried between runs, and
+      # they are what kept this job off the 456 s it cost with no cache at all.
+      # /build is deliberately not cached -- it is object files for a configure
+      # that runs inside the container, and ccache already covers the compile.
+      - name: restore the musl compiler and package caches
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ runner.temp }}/buildtree-musl/ccache
+            ${{ runner.temp }}/buildtree-musl/apk
+          key: musl-${{ env.PHP_SRC_REF }}-${{ github.sha }}
+          restore-keys: |
+            musl-${{ env.PHP_SRC_REF }}-
+
       - name: build static php-fpm-ng on Alpine
-        # /build, /ccache and the apk cache are host directories kept between
-        # runs. This was the only compiling job in the matrix with no compiler
-        # cache at all and a full 25-package apk install every time: 456 s on
-        # run 34594056547, the longest job by a wide margin.
+        # /build, /ccache and the apk cache are host directories. They survive
+        # the run only through the actions/cache step above; /build does not,
+        # and is here because static-full.sh configures out of tree. This was
+        # the only compiling job in the matrix with no compiler cache at all
+        # and a full 25-package apk install every time: 456 s on run
+        # 34594056547, the longest job by a wide margin.
         run: |
           mkdir -p "$MUSL_CACHE/build" "$MUSL_CACHE/ccache" "$MUSL_CACHE/apk" out-static
           docker run --rm \
@@ -825,14 +808,12 @@ jobs:
   # folded into phpt.
   gateway-privileges:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # No --user here, unlike every other job: this one asserts the gateway
       # drops root before accepting a connection, so it has to start with it.
     steps:
@@ -867,14 +848,12 @@ jobs:
   # privileges), so it stays out of the phpt job rather than needing sudo.
   tls-reload:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -906,14 +885,12 @@ jobs:
   # read as a reload failure.
   tls-wait-for-cert:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # As root php-fpm refuses to start and the suite would report success
       # without having tested anything. See the same note on tls-reload.
       options: --user 1001:1001
@@ -940,14 +917,12 @@ jobs:
   # reload failure.
   read-deadline:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -978,14 +953,12 @@ jobs:
   # failure here means one specific thing.
   gateway-write-failure:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -1009,14 +982,12 @@ jobs:
 
   plain-http-listener:
     needs: build
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon' }}
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
-      volumes:
-        - /opt/gh-runner/cache/ccache:/ccache
       # ubuntu-latest ran jobs unprivileged and the suite depends on it: as
       # root php-fpm refuses to start, so the fpmng suite reports PASS=0 with
       # 47 skips and still looks green. uid 1001 is gh-runner here and the
@@ -1064,13 +1035,13 @@ jobs:
   # cell cannot install is worse than waiting -- but the fix may well be in
   # this repository's expectations rather than in the change under review.
   #
-  # On poligon-host, like static-musl and for the same reason: the script drives
-  # `docker run` with host bind mounts, and -v paths are resolved by the host
-  # daemon, so a containerised copy of it would mount empty directories.
+  # Not containerised, like static-musl and for the same reason: the script
+  # drives `docker run` with host bind mounts, and -v paths are resolved by the
+  # host daemon, so a containerised copy of it would mount empty directories.
   #
-  # Both flavours in one job rather than two: poligon-host is a single runner
-  # instance and runs one job at a time, so splitting them would queue rather
-  # than parallelise, and they share the prepared tree set up below.
+  # Both flavours in one job rather than two: they share the prepared tree set
+  # up below, and on a hosted runner two jobs would each clone and patch
+  # php-src again to split a step that costs less than that.
   #
   # WHERE THE TIME GOES (issue #240). Timed on the box, the deb flavour was 328
   # seconds, of which 232 were `apt-get` unpacking the distribution's PHP -- our
@@ -1083,31 +1054,29 @@ jobs:
   # install it exactly as before.
   package-gate:
     needs: patches
-    runs-on: ${{ github.event.inputs.runner == 'ubuntu-latest' && 'ubuntu-latest' || 'poligon-host' }}
+    runs-on: ubuntu-latest
     env:
-      PACKAGE_CACHE: /opt/gh-runner/cache/buildtree-package
+      # Under RUNNER_TEMP for the same reason static-musl is: a host path the
+      # runner user owns. The reclaim-from-root steps that used to precede the
+      # checkout are gone with the shared box -- nothing outside this run will
+      # ever try to unlink what the containers below write as root.
+      PACKAGE_CACHE: ${{ runner.temp }}/buildtree-package
     steps:
-      # Same reclaim steps as static-musl, which shares this instance: the
-      # containers below write as root into paths the unprivileged runner has
-      # to be able to unlink afterwards. Chowning a root-owned file is exactly
-      # what it cannot do, so a container does it.
-      - name: reclaim the workspace from root-owned build output
-        run: |
-          docker run --rm -v "${{ github.workspace }}:/w" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /w
-      - name: reclaim the prepared tree from root-owned build output
-        run: |
-          mkdir -p "$PACKAGE_CACHE/src"
-          docker run --rm -v "$PACKAGE_CACHE/src:/s" alpine:3.22 \
-            chown -R "$(id -u):$(id -g)" /s
-
       - uses: actions/checkout@v7
+
+      # This job is not containerised, so nothing has authenticated its docker
+      # daemon to ghcr -- and the package-gate images are private. Without this
+      # the pull in ci-package-gate.sh:138 fails, the script falls back to
+      # building both stages from a bare base image, and the job goes back to
+      # the 328 seconds issue #240 removed while still passing.
+      - name: log in to ghcr.io for the package-gate images
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
       # The tree is needed for its sources and its tests, never for a build
       # product: build/libphp-build.sh compiles the 54 sources config.m4 names
       # against the distribution's headers, inside the container. Hence
       # FPMNG_TREE_SKIP_CONFIGURE -- there is no configure on this path at all.
-      - name: php-src tree for the package build (reused between runs)
+      - name: php-src tree for the package build
         env:
           FPMNG_TREE_SKIP_CONFIGURE: "yes"
         run: |

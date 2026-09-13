@@ -38,6 +38,44 @@ Verified 2026-09-07 against `sapi/fpmng`:
   the same hardening; limitations are described in `docs/async_errors.md` and
   `docs/NOTES.md`, sections 3t-3u
 
+## Support tiers
+
+Each tier is defined by the promise it **withholds**, not by how finished the
+code feels (decided in issue #269).
+
+| tier | directives | regressions | security reports | may disappear |
+| --- | --- | --- | --- | --- |
+| **supported** | stable within a major release | bugs, fixed with priority | in scope | no |
+| **beta** | may change in a minor release, with a release-note entry | fixed, no response-time commitment | in scope, no response-time commitment | no, but may be redesigned |
+| **experimental** | may change in any release | best effort | best effort, offered as-is | yes, in any release |
+
+Where things stand today:
+
+| | tier |
+| --- | --- |
+| `pool.type = fastcgi`, `fastcgi-ng`, `http`, `supervisor`, `cron` | supported |
+| `pool.type = http-direct` with the default `classic` executor | supported |
+| the operator endpoint (`pm.status_path`, `pm.metrics_path`) | supported |
+| `pool.type = http-direct` with `pool.executor = worker` | beta |
+| TLS termination (`--enable-fpmng-tls`, `http.tls_*`) | beta |
+| ACME certificate issuance (`--enable-fpmng-acme`) | beta |
+| `pool.executor = fiber` (`--enable-fpmng-fiber`) | experimental |
+| `pool.executor = async` (`--enable-fpmng-async`) | experimental |
+
+A pool that is not supported says so in `error_log` once at startup: a `NOTICE`
+for beta, a `WARNING` for experimental, naming the pool and the tier. A
+supported pool says nothing, so the lines that are there are the ones worth
+reading.
+
+**Leaving beta** takes a PR that flips the tier and states which of these it
+claims, with links: tests in CI on every PR covering the failure modes and not
+only the happy path; a measurement on real hardware under a load resembling
+use, recorded in `docs/NOTES.md`; no open correctness issue; every directive
+documented, including what it refuses and why; and, for anything an
+unauthenticated stranger can reach, an adversarial pass and a read by someone
+who did not write it. Leaving *experimental* for *beta* is the first, third and
+fourth of those.
+
 ## Installing
 
 There is a `.deb` and an `.apk` that contain no PHP: they depend on the

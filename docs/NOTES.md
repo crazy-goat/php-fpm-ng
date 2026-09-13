@@ -4059,9 +4059,12 @@ never ask the binary anything, so they keep running everywhere -- a package
 built without ACME is not evidence about them either way.
 
 **The startup NOTICE.** A build made with the flag says once, in the master,
-that ACME is BETA and unaudited. It is not conditional on the configuration
-using ACME: what it reports is a property of the binary, which `-v` does not
-show.
+that ACME is BETA. It is not conditional on the configuration using ACME: what
+it reports is a property of the binary, which `-v` does not show. The line
+started life in `fpm_acme_challenge.c` with wording of its own; issue #295
+moved it to `fpm_run()` and through `fpm_tier_announce()`, so that the log and
+the tier table in `README.md` cannot end up saying different things about the
+same feature. See section 3ah.
 
 ## 3ae. Two flag names reserved for features that do not exist (issue #282, 2026-09-13)
 
@@ -4213,3 +4216,71 @@ child `zlog()` visible: the two client-triggerable NOTICEs in
 `said_*` flag, deliberately, "because a line per dropped client would be a log
 amplifier for the very flood the deadline exists to survive". The rest are
 per-pool or per-child events.
+
+## 3ah. Tiers as data, announced once per pool at startup (issue #295, 2026-09-13)
+
+Issue #269 decided the tier split and what each tier withholds; #295 is the
+implementation, and the whole design question was *where the tier lives*. The
+answer is: on the pool type, as data.
+
+**Not a name comparison.** The tempting shape is a function somewhere that says
+"if the type is called fiber or async, it is experimental". That reads the
+classification off a string, which means the classification and the thing
+classified can drift apart — a new type, or a renamed one, would be silently
+supported. `struct fpm_pool_type_s` now carries `enum fpm_tier tier;` and every
+one of the twelve entries in `fpm_pool_type.c` states it, next to the `.name`
+it applies to. An executor variant is a whole separate struct here (issue #200:
+a variant replaces the struct rather than inheriting fields), so the fiber and
+async variants state their own tier rather than borrowing the classic one's —
+which is exactly right, because `pool.type = http` is supported and
+`pool.type = http` with `pool.executor = fiber` is not.
+
+**`FPM_TIER_EXPERIMENTAL = 0`.** The zero value is the least-promised tier on
+purpose. A type added later whose author forgets the field announces itself as
+experimental and gets noticed; the opposite default would promise support for
+something nobody classified.
+
+**Three places or it does not count.** #269 asked for the tier as data, as a
+line at startup, and as a table in `README.md`. The middle one is
+`fpm_tier_announce()` — one function holding the level, the label and the
+sentence of what the tier withholds, so the wording cannot fork. The ACME
+`BETA and unaudited` NOTICE that `fpm_acme_challenge.c` used to emit on its own
+was deleted and re-emitted through that function from `fpm_run()`: two
+spellings of "this is beta" is how the table and the log stop agreeing.
+
+**Where the line is emitted.** Once per pool, in `fpm_run()`, in the master,
+before the first fork. Not per child (a `pm.max_children = 50` pool would
+announce fifty times, and a respawn would announce again), not per request
+(the fastest way to teach an operator to filter the whole family — which would
+take the two lines that matter with it). The build-flag lines (TLS, ACME) are
+emitted once per process with no pool prefix, because what they report is a
+property of the binary rather than of a configuration.
+
+**Silence is the third level.** Supported announces nothing at all, and
+`fpm_tier_announce()` returns early for it. That is what makes the other two
+readable: a startup log with no tier line in it is a configuration made
+entirely of things this project will not move under you.
+
+**The classification is evidence, not a declaration.** Each entry says why in a
+comment next to it, and the three that are not supported cite something
+checkable: fiber cites the open correctness issues (#79, #80, #82, #84, #85),
+which fail #269's criterion 3; async cites the fact that no CI cell builds
+`--enable-fpmng-async` at all (#87), which fails criterion 1; the http-direct
+*worker* executor cites the unrun spikes #180–#183 and #191. The worker is the
+one judgement here that had to be made rather than read off #269 — it is beta
+and not experimental because it will not disappear: `examples/` ships against
+it.
+
+**A test trap worth recording.** `fpmng-tier-announce.phpt` was first written
+to read the file named by `error_log = {{FILE:LOG}}` and assert on its
+contents. It passed on nothing: the phpt tester runs FPM **non-daemonized**,
+and `tester.inc` only switches its log source to that file when it daemonizes
+(`if ($daemonize) { $this->switchLogSource('{{FILE:LOG}}'); }`) — otherwise it
+reads the master's stdout pipe and the file stays empty. `file_get_contents()`
+on it returns `''`, and every `str_contains($log, ...)` against `''` is false,
+so an inverted assertion passes and a positive one fails for a reason that
+looks like the feature. Both tier tests assert through the tester's own log API
+(`expectLogNotice`, `expectLogWarning`, `expectNoLogPattern`) instead.
+`checkAllLogs: true` is needed for the positive ones, because the tier lines
+are written before `ready to handle connections` and the reader has already
+walked past them by the time `expectLogStartNotices()` returns.

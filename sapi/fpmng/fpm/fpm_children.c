@@ -27,6 +27,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
 #include "fpm_children_extra.h"
+#include "fpm_scale_down_drain.h"
 #include "fpm_child_php_log.h"
 #include "fpm_log.h"
 
@@ -285,6 +286,12 @@ void fpm_children_bury(void)
 
 		child = fpm_child_find(pid);
 
+		/* issue #310: unconditional and before any branch below decides
+		 * restart_child, so a pid the OS reuses can never inherit another
+		 * child's still-pending drain deadline -- tracked or not costs
+		 * nothing to ask (fpm_scale_down_drain.h). */
+		fpm_scale_down_drain_forget(pid);
+
 		if (WIFEXITED(status)) {
 
 			snprintf(buf, sizeof(buf), "with code %d", WEXITSTATUS(status));
@@ -316,8 +323,17 @@ void fpm_children_bury(void)
 
 			/* if it's been killed because of dynamic process management
 			 * don't restart it automatically
+			 *
+			 * Not gated on WTERMSIG(status) == SIGQUIT (issue #310 fix): a
+			 * scale-down that escalated to SIGKILL because the child took
+			 * longer than its grace to drain is exiting for exactly the same
+			 * reason a same-pass SIGQUIT exit is, and the WIFEXITED branch
+			 * above already treats child->idle_kill alone as sufficient. A
+			 * child idle_kill can only ever be set by
+			 * fpm_pctl_kill_idle_child(), so there is no other exit signal
+			 * this could accidentally match.
 			 */
-			if (child && child->idle_kill && WTERMSIG(status) == SIGQUIT) {
+			if (child && child->idle_kill) {
 				restart_child = 0;
 			}
 

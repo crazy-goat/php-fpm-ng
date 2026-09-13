@@ -160,6 +160,20 @@ struct fpm_pool_type_s {
 	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
 	unsigned reuses_request_runtime:1;
 
+	/* This type's own SIGUSR1 handler drains a single child instead of
+	 * treating it as a log-reopen: stop accepting, finish what is already
+	 * open, exit on its own within http.read_timeout (issue #65). Data for
+	 * fpm_pctl_kill_idle_child() (fpm_process_ctl.c), read in the MASTER, not
+	 * the child: a master-driven scale-down of a type that sets this bit
+	 * reaches that drain trigger instead of the pool-wide-shutdown SIGQUIT,
+	 * which this type's "stopping" gate treats as fast-exit-now and answers
+	 * by dropping every connection the child still holds (issue #310). Set
+	 * for both "http-direct" struct literals below (classic and the worker
+	 * executor) since both install the same SIGUSR1 handler; unset (the
+	 * default) for every type with no such handler, where SIGQUIT staying the
+	 * scale-down signal is unchanged. */
+	unsigned scale_down_drains:1;
+
 	/* Status flags are established on the master-side listening socket before
 	 * children are forked. The open file description is shared by the master
 	 * and its children, so a child must not change this after fork. */

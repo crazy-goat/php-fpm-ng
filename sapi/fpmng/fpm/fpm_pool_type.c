@@ -208,6 +208,7 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
 	.listening_socket_nodelay     = 1,
+	.scale_down_drains            = 1,
 	.baseline_counter             = "requests",
 	/* Both, like everything else here, are repeated rather than inherited: an
 	 * executor variant replaces the whole type struct. The renderer has no
@@ -349,6 +350,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests              = 1,
 		.listening_socket_nonblocking = 1,
 		.listening_socket_nodelay     = 1,
+		.scale_down_drains            = 1,
 		.baseline_counter             = "requests",
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,

@@ -20,6 +20,7 @@
 #include "fpm_scoreboard.h"
 #include "fpm_sockets.h"
 #include "fpm_stdio.h"
+#include "fpm_scale_down_drain.h"
 #include "zlog.h"
 
 
@@ -338,13 +339,112 @@ static void fpm_pctl_check_request_timeout(struct timeval *now) /* {{{ */
 }
 /* }}} */
 
+/* issue #310. pid -> when a scale-down first told this child to drain, for
+ * the pool types whose .scale_down_drains says their SIGUSR1 handler already
+ * knows how (fpm_pool_type.h). At most one entry per pool exists at a time:
+ * fpm_pctl_perform_idle_server_maintenance() only ever calls
+ * fpm_pctl_kill_idle_child() on one last_idle_child per pool per pass, so a
+ * plain list costs nothing worth a hash table. fpm_children.c forgets a pid
+ * here as soon as it reaps it (fpm_scale_down_drain.h), so a pid the OS
+ * reuses can never inherit a stale deadline. */
+struct fpm_scale_down_drain_entry {
+	pid_t pid;
+	struct timeval since;
+	struct fpm_scale_down_drain_entry *next;
+};
+
+static struct fpm_scale_down_drain_entry *fpm_scale_down_drain_list;
+
+static void fpm_scale_down_drain_remember(pid_t pid, struct timeval now)
+{
+	struct fpm_scale_down_drain_entry *e = malloc(sizeof *e);
+
+	if (!e) {
+		return; /* best effort: worst case this pid escalates one pass early */
+	}
+	e->pid = pid;
+	e->since = now;
+	e->next = fpm_scale_down_drain_list;
+	fpm_scale_down_drain_list = e;
+}
+
+/* 0 if `pid` is not tracked. The caller treats that as "grace already
+ * elapsed" -- never less conservative than the escalate-next-pass behaviour
+ * this issue changes only for tracked, draining pids. */
+static int fpm_scale_down_drain_elapsed_ms(pid_t pid, struct timeval now, long *elapsed_ms)
+{
+	struct fpm_scale_down_drain_entry *e;
+
+	for (e = fpm_scale_down_drain_list; e; e = e->next) {
+		if (e->pid == pid) {
+			struct timeval diff;
+
+			timersub(&now, &e->since, &diff);
+			*elapsed_ms = diff.tv_sec * 1000 + diff.tv_usec / 1000;
+			return 1;
+		}
+	}
+	return 0;
+}
+
+void fpm_scale_down_drain_forget(pid_t pid)
+{
+	struct fpm_scale_down_drain_entry **link = &fpm_scale_down_drain_list;
+
+	while (*link) {
+		if ((*link)->pid == pid) {
+			struct fpm_scale_down_drain_entry *dead = *link;
+
+			*link = dead->next;
+			free(dead);
+			return;
+		}
+		link = &(*link)->next;
+	}
+}
+
 static void fpm_pctl_kill_idle_child(struct fpm_child_s *child) /* {{{ */
 {
+	const struct fpm_pool_type_s *type = fpm_pool_type_of(child->wp);
+	int drains = type && type->scale_down_drains;
+
 	if (child->idle_kill) {
+		if (drains) {
+			struct timeval now;
+			long elapsed_ms = 0;
+
+			fpm_clock_get(&now);
+			if (fpm_scale_down_drain_elapsed_ms(child->pid, now, &elapsed_ms)
+					&& elapsed_ms < child->wp->config->http_read_timeout) {
+				/* Still within the grace this type's own SIGUSR1 handler
+				 * already promised it (fpm_direct_retire_enter()): it will
+				 * exit on its own by then, without the master's help. */
+				return;
+			}
+			fpm_scale_down_drain_forget(child->pid);
+		}
 		fpm_pctl_kill(child->pid, FPM_PCTL_KILL);
 	} else {
 		child->idle_kill = true;
-		fpm_pctl_kill(child->pid, FPM_PCTL_QUIT);
+		if (drains) {
+			struct timeval now;
+
+			fpm_clock_get(&now);
+			fpm_scale_down_drain_remember(child->pid, now);
+			/* Not fpm_pctl_kill(..., FPM_PCTL_QUIT) (issue #310): SIGQUIT
+			 * lands on this type's "stopping" gate, which this same code
+			 * path used to reach for a live http-direct child and which
+			 * drops every connection it holds once responses in flight hit
+			 * zero -- correct for a pool-wide shutdown, wrong for one child
+			 * stepping out of a pool that carries on. SIGUSR1 is the drain
+			 * trigger issue #65 already gives an operator for exactly that:
+			 * stop accepting, finish what is already open, exit within
+			 * http.read_timeout. A master-driven scale-down asks for the
+			 * same thing, so it gets the same signal. */
+			kill(child->pid, SIGUSR1);
+		} else {
+			fpm_pctl_kill(child->pid, FPM_PCTL_QUIT);
+		}
 	}
 }
 /* }}} */

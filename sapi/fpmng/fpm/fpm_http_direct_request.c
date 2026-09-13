@@ -123,7 +123,17 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	const char *user_ini;
 	char root[PATH_MAX], script[PATH_MAX];
 
-	if (c->pm != PM_STYLE_STATIC) {
+	/* issue #310's fix lives in the master's fpm_pctl_kill_idle_child(),
+	 * which only PM_STYLE_DYNAMIC/PM_STYLE_ONDEMAND ever reach -- unreachable
+	 * for this type today because of the check below. FPMNG_TEST_ALLOW_NONSTATIC_DIRECT
+	 * exists only so a phpt can exercise that one master code path in this
+	 * process tree without lifting the restriction for anyone else: it is read
+	 * from the environment, which every other lever a test config could set
+	 * (php_admin_value, an ini directive) is not, so a production config file
+	 * cannot flip it by accident, only whoever's shell started this master.
+	 * Re-enabling pm = dynamic / pm = ondemand for real is its own decision
+	 * (#310's own "out of scope"), not a side effect of this bypass. */
+	if (c->pm != PM_STYLE_STATIC && !getenv("FPMNG_TEST_ALLOW_NONSTATIC_DIRECT")) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires pm = static", c->name, labels->subject);
 		return -1;
 	}

@@ -95,10 +95,32 @@ static bool fpm_http_direct_declared(const char *set_directives, const char *nam
 	return false;
 }
 
+/* INI value set in the pool, or NULL when only php.ini applies. Same shape and
+ * same admin-before-value order as fpm_worker_pool_ini() in
+ * fpm_http_direct_worker.c; that one is static there and this file is the
+ * shared half, so the lookup is repeated rather than exported. */
+static const char *fpm_http_direct_pool_ini(struct fpm_worker_pool_s *wp, const char *key)
+{
+	struct key_value_s *kv;
+
+	for (kv = wp->config->php_admin_values; kv; kv = kv->next) {
+		if (!strcasecmp(kv->key, key)) {
+			return kv->value;
+		}
+	}
+	for (kv = wp->config->php_values; kv; kv = kv->next) {
+		if (!strcasecmp(kv->key, key)) {
+			return kv->value;
+		}
+	}
+	return NULL;
+}
+
 int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct fpm_http_direct_labels *labels)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
 	const char *p = c->set_directives;
+	const char *user_ini;
 	char root[PATH_MAX], script[PATH_MAX];
 
 	if (c->pm != PM_STYLE_STATIC) {
@@ -122,6 +144,26 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 			return -1; /* fpm_http_acl_parse() already logged which address is bad */
 		}
 		fpm_http_acl_free(tmp);
+	}
+	/* .user.ini for a direct pool is read from the front controller's own
+	 * directory upwards to the document root (fpm_http_direct_user_ini.c), so
+	 * the file name is walked once per directory. A name carrying a path
+	 * separator would make each of those probes name a directory other than
+	 * the one being walked -- "../../etc/evil.ini" from three levels down
+	 * leaves the root entirely -- and the containment the rest of this
+	 * transport is built on would be decided by an ini string. Refused here,
+	 * in the master, so `-t` says so rather than every child exiting in turn.
+	 * The child refuses the same value again (init_child), because php.ini
+	 * could be replaced between the test and the fork. */
+	user_ini = fpm_http_direct_pool_ini(wp, "user_ini.filename");
+	if (!user_ini) {
+		user_ini = zend_ini_string("user_ini.filename", sizeof("user_ini.filename") - 1, 0);
+	}
+	if (user_ini && strchr(user_ini, '/')) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: user_ini.filename must be a bare file name, not '%s': "
+			"a separator in it would let the per-directory ini scan leave the document root",
+			c->name, labels->subject, user_ini);
+		return -1;
 	}
 	/* Gateway options must not silently appear to protect a direct worker.
 	 * Use an allow-list here so future http.* directives are rejected too. */

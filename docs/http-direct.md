@@ -175,8 +175,26 @@ above come from one sitting on one toolchain for that reason.
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
 - `chdir` must be absolute.
-- The FastCGI-specific `.user.ini` / per-host/per-directory php.ini activation
-  hook is not used. Use php.ini and the pool's `php_value` / `php_admin_value`.
+- `.user.ini` **is** read, and the directory that governs is the front
+  controller's — never anything the client sent (issue #60). The pool scans
+  from its document root (the resolved `chdir`) down to the directory holding
+  the resolved `http.front_controller`, exactly the shape the CGI SAPI scans,
+  with the request removed from it. Both ends are pool configuration resolved
+  once per child, so a traversal-style URI, a URI naming some other directory's
+  `.user.ini`, and a URI naming no path at all all produce the same ini set.
+  It is **on by default**, governed by the same php.ini settings as everywhere
+  else: `user_ini.filename` (set it empty to turn `.user.ini` off) and
+  `user_ini.cache_ttl`. Default-on because the surprising pool would be the
+  other one — moving a pool from FastCGI to http-direct with the same php.ini
+  keeps the same `.user.ini` in force. Caching follows the CGI SAPI's TTL, with
+  one addition: on expiry each candidate file is `stat()`ed and re-parsed only
+  if it actually changed, so an unchanged deployment never re-parses.
+  `[PATH=...]` sections from php.ini are activated against the same directory.
+  Per-**host** activation (`[HOST=...]`) is deliberately not done: it is keyed
+  on `SERVER_NAME`, which here is the client's `Host` header.
+  On `pool.executor = worker` one `php_request_startup()` covers the whole
+  worker, so the hook fires once and the `.user.ini` next to the worker script
+  governs every request that worker then serves.
 - Requests have a 64 KiB header limit and a body limit of 32 MiB by default,
   configurable down to one byte. Body size cannot be zero/unlimited or above 32 MiB.
 - By default responses are buffered until PHP shutdown, capped at 8 MiB body and

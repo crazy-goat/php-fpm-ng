@@ -198,6 +198,18 @@ expectConfigFailure(
     ['pool.type = http-direct supports only pool.executor = classic or worker']
 );
 
+/* issue #60. A direct pool reads .user.ini from the front controller's own
+ * directory up to the document root, so user_ini.filename is walked once per
+ * directory on that path; a separator in it would point each probe somewhere
+ * else entirely and the scan could leave the root. The master refuses it so
+ * `-t` says so, instead of every child exiting one after another. */
+expectConfigFailure(
+    'direct-user-ini-filename-separator',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0"
+        . "\nphp_admin_value[user_ini.filename] = ../../etc/evil.ini",
+    ['user_ini.filename must be a bare file name']
+);
+
 unlink("$workerRoot/worker.php");
 rmdir($workerRoot);
 
@@ -225,6 +237,7 @@ direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
+direct-user-ini-filename-separator: rejected
 async-disabled: rejected
 Done
 --CLEAN--

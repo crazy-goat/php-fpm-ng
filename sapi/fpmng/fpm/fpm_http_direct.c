@@ -37,6 +37,7 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_direct_user_ini.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
 #include "fpm_scoreboard.h"
@@ -677,7 +678,11 @@ static void fpm_direct_install_sapi(void)
 {
 	const char *names[] = { "getallheaders", "apache_request_headers", NULL };
 	const char **name;
-	sapi_module.pre_request_init = NULL;
+	/* Issue #60: the .user.ini hook, pointed at the front controller's own
+	 * directory rather than at anything a client sent. The CGI handler this
+	 * replaces casts SG(server_context) to fcgi_request, which is why the
+	 * slot used to be cleared rather than left alone. */
+	sapi_module.pre_request_init = fpm_http_direct_user_ini_pre_request;
 	sapi_module.deactivate = NULL;
 	sapi_module.ub_write = fpm_direct_write;
 	sapi_module.flush = fpm_direct_flush;
@@ -2047,6 +2052,12 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * file documents for the first call. */
 	zend_signal_init();
 	fpm_direct_install_sapi();
+	/* Issue #60. After install_sapi(), which is what arms the hook, and with
+	 * the pair this child resolved above -- never with the configured strings,
+	 * for the same reason resolve_script() re-checks them here. */
+	if (fpm_http_direct_user_ini_init_child(wp->config->name, w.root, w.script) < 0) {
+		exit(FPM_EXIT_CONFIG);
+	}
 	/* Both of these are per-child: the ACL and the endpoint paths are parsed
 	 * once here rather than on every request, and the access log takes the
 	 * descriptor the master opened before the fork. A SIGUSR1 rotation does

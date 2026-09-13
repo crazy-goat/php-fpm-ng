@@ -164,12 +164,13 @@ struct fpm_direct_request {
 static struct fpm_direct_request *fpm_direct_current;
 static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on);
 static volatile sig_atomic_t fpm_direct_stopping;
-/* issue #65. Set by SIGUSR1 on this child alone. Distinct from stopping on
- * purpose: stopping is the pool winding down and refuses what arrives, while
- * retiring is one child stepping out of a pool that carries on, so it keeps
- * answering the connections it already holds and only stops taking new ones.
- * The master's SIGUSR1 (reopen the logs) never reaches a child, so there is no
- * meaning to collide with here. */
+/* issue #65. Set by SIGUSR1 on this child alone, and (issue #313) by
+ * fpm_direct_retire() when pm.max_requests rolls over -- the two ways this
+ * child can decide on its own to step out of a pool that carries on. Distinct
+ * from stopping on purpose: stopping is the pool winding down and refuses
+ * what arrives, while retiring keeps answering the connections it already
+ * holds and only stops taking new ones. The master's SIGUSR1 (reopen the
+ * logs) never reaches a child, so there is no meaning to collide with here. */
 static volatile sig_atomic_t fpm_direct_retiring;
 
 /* http.stream. Defined below, next to the response-completion callbacks they
@@ -1345,7 +1346,20 @@ static void fpm_direct_retire(struct fpm_direct_request *r)
 
 	w->requests++;
 	if (w->wp->config->pm_max_requests && w->requests >= (unsigned) w->wp->config->pm_max_requests) {
-		fpm_direct_stopping = 1;
+		/* Not fpm_direct_stopping (issue #313): that gate is checked first in
+		 * fpm_direct_tick_body() and takes it straight to
+		 * fpm_http_direct_conns_free()/evhttp_free(), dropping every connection
+		 * this child still holds instead of draining them. pm.max_requests is
+		 * this child choosing to step out of a pool that carries on -- exactly
+		 * what fpm_direct_retiring already means (issue #65) -- so it takes the
+		 * same drain path a SIGUSR1 retirement does: keep answering what is
+		 * already open, stop taking new connections, and exit once
+		 * fpm_direct_retire_done() says so or http.read_timeout runs out.
+		 * fpm_direct_retire_now() is safe to call from here, mid-response: it
+		 * is the same synchronous entry point line 1804 already uses from
+		 * inside request dispatch. */
+		fpm_direct_retiring = 1;
+		fpm_direct_retire_now(w);
 	}
 }
 
@@ -1497,11 +1511,11 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 	}
 	fpm_direct_retire(r);
 	/* Both endings of this child, and the only place the buffered path decides:
-	 * fpm_direct_retire() above has already set stopping if pm.max_requests was
-	 * reached, so this one test covers recycling too. Retiring is separate
-	 * because it does not stop the child serving -- it stops it accepting --
-	 * and a keep-alive client that is not told the connection ends would keep
-	 * sending requests to a child on its way out (issue #65). */
+	 * fpm_direct_retire() above has already started retiring if pm.max_requests
+	 * was reached (issue #313), so this one test covers recycling too. Retiring
+	 * is checked alongside stopping because a keep-alive client that is not
+	 * told the connection ends would keep sending requests to a child on its
+	 * way out either way (issue #65). */
 	if (fpm_direct_stopping || fpm_direct_retiring) {
 		fpm_direct_close_header(http);
 	}

@@ -28,6 +28,7 @@
 #   outdir        default ./out-libphp
 #   PHP_CONFIG    php-config binary to build against; autodetected otherwise
 #   FPMNG_TLS     1 to build TLS termination in; default 0 (issue #280)
+#   FPMNG_ACME    1 to build ACME issuance in; default 0, needs FPMNG_TLS=1 (issue #281)
 set -eu
 
 fail() {
@@ -119,6 +120,25 @@ else
   echo "libphp-build.sh: FPMNG_TLS=0, building without TLS termination (set FPMNG_TLS=1 for it)"
 fi
 
+# ACME issuance, the same switch one level up (issue #281). It needs TLS for
+# the reason config.m4 gives -- a certificate this binary could not serve --
+# and asking for one without the other is refused here exactly as `configure`
+# refuses it, so the two build paths cannot disagree about what is buildable.
+FPMNG_ACME=${FPMNG_ACME:-0}
+case "$FPMNG_ACME" in
+0|1) ;;
+*) fail "FPMNG_ACME must be 0 or 1, not '$FPMNG_ACME'" ;;
+esac
+if [ "$FPMNG_ACME" = 1 ]; then
+  [ "$FPMNG_TLS" = 1 ] ||
+    fail "FPMNG_ACME=1 needs FPMNG_TLS=1: ACME obtains a certificate, and a binary built without TLS termination has nothing to serve it with (issue #281)"
+  SUPPLIED="$SUPPLIED
+-DHAVE_FPMNG_ACME=1"
+  echo "libphp-build.sh: FPMNG_ACME=1, building with ACME issuance"
+else
+  echo "libphp-build.sh: FPMNG_ACME=0, building without ACME issuance (set FPMNG_ACME=1 for it)"
+fi
+
 # Deliberately off, with the reason. These are not oversights, and anyone
 # tempted to add one should read the reason first.
 off_reason() {
@@ -132,6 +152,7 @@ off_reason() {
   HAVE_SYSTEMD)                 echo "would add a libsystemd link the packages do not want" ;;
   HAVE_APPARMOR|HAVE_SELINUX)   echo "would add a link-time dependency; not offered by the packages" ;;
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
+  HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
   HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
                                 echo "patches/0007 and 0008 apply inside libphp, which is the distribution's file" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)
@@ -230,6 +251,18 @@ for f in $TLS_SRC; do
 done
 [ "$FPMNG_TLS" = 1 ] || TLS_SRC=
 
+# The ACME group, read and checked the same way.
+acme_sources() {
+  sed -n '/PHP_FPMNG_ACME_FILES="$/,/^[[:space:]]*"[[:space:]]*$/p' "$SRC/sapi/fpmng/config.m4" |
+    grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u
+}
+ACME_SRC=$(acme_sources)
+[ -n "$ACME_SRC" ] || fail "no ACME sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_ACME_FILES block moved"
+for f in $ACME_SRC; do
+  sources | grep -qx "$f" && fail "$f is in both PHP_FPMNG_FILES and PHP_FPMNG_ACME_FILES; an ACME source in the base list ships in every binary"
+done
+[ "$FPMNG_ACME" = 1 ] || ACME_SRC=
+
 : > "$OUT/compile.log"
 OBJS=""
 compile() {
@@ -239,7 +272,7 @@ compile() {
     { echo "=== COMPILE FAILED: $1 ==="; tail -20 "$OUT/compile.log"; exit 1; }
   OBJS="$OBJS $o"
 }
-for f in $(sources) $TLS_SRC; do compile "$SRC/sapi/fpmng/$f" "$f"; done
+for f in $(sources) $TLS_SRC $ACME_SRC; do compile "$SRC/sapi/fpmng/$f" "$f"; done
 # Not in PHP_FPMNG_FILES: config.m4 adds the trace backend conditionally, our
 # patched fastcgi.c belongs to main/, and the ABI guard is a property of this
 # build rather than of the SAPI. The zend_signal_init() stand-in is NOT here:
@@ -310,7 +343,8 @@ ${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_N
 PHP_BIN=$("$PHP_CONFIG" --php-binary 2>/dev/null || true)
 [ -n "$PHP_BIN" ] && [ -x "$PHP_BIN" ] || PHP_BIN=$(command -v php || true)
 [ -n "$PHP_BIN" ] || fail "no PHP interpreter to run build/payload-pack.php; install the cli package next to php-config"
-"$REPO/build/embed-payload.sh" "$BIN" "$PHP_BIN" || fail "the distribution payload could not be embedded"
+FPMNG_ACME="$FPMNG_ACME" "$REPO/build/embed-payload.sh" "$BIN" "$PHP_BIN" ||
+  fail "the distribution payload could not be embedded"
 
 # --- assert the binary, not the flags ------------------------------------------
 # Same reasoning as build/static-full.sh (issue #77): the flags above are
@@ -346,6 +380,25 @@ else
     fail "a default build carries fpm_tls_http_validate: an fpm_tls_*.c source reached the base object list (issue #280)"
   [ "$(tls_linkage)" = 0 ] ||
     fail "a default build links OpenSSL: $(tls_linkage) OpenSSL entries in the dynamic section, and there should be none (issue #280)"
+fi
+
+# ACME, the same two directions, plus the payload. The payload matters as much
+# as the symbol here: the ACME client is PHP, so a binary with no
+# fpm_acme_challenge.c but the scripts still appended would carry the facility
+# as data (issue #281). `list` prints one line per appended entry.
+acme_payload_entries() {
+  "$PHP_BIN" "$REPO/build/payload-pack.php" list --binary="$BIN" 2>/dev/null |
+    grep -c 'kind=1' || true
+}
+if [ "$FPMNG_ACME" = 1 ]; then
+  assert_symbol fpm_acme_challenge_init_main "FPMNG_ACME=1 was asked for, but the ACME sources were not compiled in"
+  [ "$(acme_payload_entries)" -gt 0 ] ||
+    fail "FPMNG_ACME=1 was asked for, but the binary carries no distribution payload, so fpmng-dist://acme/renew.php would not resolve"
+else
+  nm --defined-only "$BIN" 2>/dev/null | grep -qw -- fpm_acme_challenge_init_main &&
+    fail "a default build carries fpm_acme_challenge_init_main: an fpm_acme_*.c source reached the base object list (issue #281)"
+  [ "$(acme_payload_entries)" = 0 ] ||
+    fail "a default build carries a distribution payload, and the only thing the payload holds is the ACME client (issue #281)"
 fi
 
 # --- assert the refusal, not the define ----------------------------------------

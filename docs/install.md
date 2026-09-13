@@ -149,7 +149,8 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 | `http` | **no** | yes | same mechanism as `fastcgi-ng`: both keep a request runtime alive across requests, which is what the persistent signal handlers exist for. |
 | fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
 | async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
-| TLS termination (`http.tls_*`) and the ACME client | **no** | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the packaged build is the one without it. From source: `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the packaged binary terminated TLS. |
+| TLS termination (`http.tls_*`) | **no** | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the packaged build is the one without it. From source: `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the packaged binary terminated TLS. |
+| the ACME client (`fpmng-dist://acme/...`) | **no** | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme`. The packaged binary carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
 
 The packaged binary does not silently degrade: a pool it cannot honour is
 refused before the master forks anything, by name and with the reason.
@@ -217,6 +218,11 @@ For TLS from a `configure` of your own, add `--enable-fpmng-tls`; it needs
 without TLS. A pool with `http.tls_cert` on a binary built without the flag is
 refused at startup, naming the flag to rebuild with -- it never falls back to
 plain HTTP on a port configured as HTTPS.
+
+For the ACME client on top of that, add `--enable-fpmng-acme`. It requires
+`--enable-fpmng-tls` and `configure` errors out if it is missing; see
+[`acme-renewal.md`](acme-renewal.md#the-build-flag) for what a build without
+it does with an ACME configuration.
 
 For the two pool types the package does support, the package is the normal
 case -- building from source to get `fastcgi` or `http-direct` buys nothing.

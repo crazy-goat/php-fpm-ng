@@ -60,6 +60,13 @@ int fpm_acme_challenge_init_main(void)
 		zlog(ZLOG_ERROR, "acme: cannot allocate the shared challenge state");
 		return -1;
 	}
+	/* Said once per master start, in the only place this build reaches that a
+	 * build without --enable-fpmng-acme does not (issue #281, tier from #269).
+	 * It is not conditional on the configuration using ACME: the operator gave
+	 * the flag, and what the line reports is a property of the binary they are
+	 * running, which they cannot read off `-v`. */
+	zlog(ZLOG_NOTICE, "acme: ACME certificate issuance is BETA and unaudited "
+		"(this binary was built with --enable-fpmng-acme)");
 	return 0;
 }
 

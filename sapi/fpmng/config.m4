@@ -467,6 +467,34 @@ if test "$PHP_FPMNG" != "no"; then
     PHP_EVAL_INCLINE([$FPMNG_OPENSSL_CFLAGS])
   ])
 
+  dnl ACME certificate issuance (sapi/fpmng/acme/*.php plus the shared
+  dnl challenge state in fpm_acme_challenge.c) is opt-in and OFF by default
+  dnl for the same reasons as TLS above, with one of its own: this is the
+  dnl only facility in the SAPI that reaches out to a third party -- a
+  dnl certificate authority -- on the operator's behalf, from a process
+  dnl inside their server. Issue #281, part of #279.
+  dnl
+  dnl It requires --enable-fpmng-tls, and that is an error rather than a
+  dnl warning: ACME obtains a certificate, and a binary that cannot terminate
+  dnl TLS has nothing to serve it with, so the combination would build
+  dnl cleanly and do nothing.
+  PHP_ARG_ENABLE([fpmng-acme],
+    [whether to build ACME certificate issuance in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-acme],
+      [Build fpm-ng with ACME certificate issuance (BETA, unaudited; requires --enable-fpmng-tls)])],
+    [no],
+    [no])
+
+  PHP_FPMNG_ACME_FILES=""
+  AS_VAR_IF([PHP_FPMNG_ACME], [no],, [
+    AS_VAR_IF([PHP_FPMNG_TLS], [no], [
+      AC_MSG_ERROR([--enable-fpmng-acme requires --enable-fpmng-tls: ACME obtains a certificate, and a binary built without TLS termination has nothing to serve it with. Add --enable-fpmng-tls, or drop --enable-fpmng-acme.])
+    ])
+    AC_DEFINE([HAVE_FPMNG_ACME], [1],
+      [Define to 1 if fpm-ng carries ACME certificate issuance (--enable-fpmng-acme).])
+    PHP_FPMNG_ACME_FILES="@FPMNG_ACME_SOURCES@"
+  ])
+
   AS_VAR_IF([PHP_FPMNG_ACL], [no],, [
     AC_CHECK_HEADERS([sys/acl.h])
 
@@ -629,7 +657,7 @@ if test "$PHP_FPMNG" != "no"; then
 
   PHP_SELECT_SAPI([fpmng],
     [program],
-    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES $PHP_FPMNG_TLS_FILES],
+    [$PHP_FPMNG_FILES $PHP_FPMNG_TRACE_FILES $PHP_FPMNG_SD_FILES $PHP_FPMNG_FIBER_FILES $PHP_FPMNG_ASYNC_FILES $PHP_FPMNG_TLS_FILES $PHP_FPMNG_ACME_FILES],
     [-I$abs_srcdir/sapi/fpm -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1])
 
   AS_CASE([$host_alias],

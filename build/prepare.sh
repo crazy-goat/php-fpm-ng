@@ -71,10 +71,10 @@ for f in $(cd "$REPO/sapi/fpmng" && find fpm -name '*.c' | sort); do
 $f"
 done
 
-# Split into four groups: fiber (fiber + the whole coop layer, used only by
-# fiber), async (fpm_pool_async.c) and tls go under --enable-fpmng-fiber /
-# --enable-fpmng-async / --enable-fpmng-tls (all default "no"); the rest is
-# always built.
+# Split into five groups: fiber (fiber + the whole coop layer, used only by
+# fiber), async (fpm_pool_async.c), tls and acme go under --enable-fpmng-fiber
+# / --enable-fpmng-async / --enable-fpmng-tls / --enable-fpmng-acme (all
+# default "no"); the rest is always built.
 # The fiber/async split was verified against symbol references — coop.* is not
 # used outside fiber, async does not reference coop.
 # Matching by NAME PREFIX, not by enumerating files. Enumeration would undo
@@ -93,27 +93,37 @@ done
 FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
 ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
 TLS_PATTERN='^fpm/fpm_tls_[A-Za-z0-9_]*\.c$'
+# The ACME group needs no such care: nothing outside it is named fpm_acme_*,
+# and the three callers that reach into it (fpm.c, fpm_pool_script.c,
+# fpm_http.c) go through stubs in fpm_acme_challenge.h when the flag is off
+# (issue #281).
+ACME_PATTERN='^fpm/fpm_acme_[A-Za-z0-9_]*\.c$'
 
 BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN" \
-  | grep -Ev "$TLS_PATTERN")
+  | grep -Ev "$TLS_PATTERN" | grep -Ev "$ACME_PATTERN")
 FIBER_SOURCES=$(echo "$SOURCES" | grep -E "$FIBER_PATTERN")
 ASYNC_SOURCES=$(echo "$SOURCES" | grep -E "$ASYNC_PATTERN")
 TLS_SOURCES=$(echo "$SOURCES" | grep -E "$TLS_PATTERN")
+ACME_SOURCES=$(echo "$SOURCES" | grep -E "$ACME_PATTERN")
 
 [ -n "$FIBER_SOURCES" ] || { echo "no fiber/coop files found in the source list" >&2; exit 1; }
 [ -n "$ASYNC_SOURCES" ] || { echo "fpm_pool_async.c not found in the source list" >&2; exit 1; }
 [ -n "$TLS_SOURCES" ] || { echo "no fpm_tls_*.c files found in the source list" >&2; exit 1; }
+[ -n "$ACME_SOURCES" ] || { echo "no fpm_acme_*.c files found in the source list" >&2; exit 1; }
 
 BASE_LIST=$(echo "$BASE_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 FIBER_LIST=$(echo "$FIBER_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 ASYNC_LIST=$(echo "$ASYNC_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 TLS_LIST=$(echo "$TLS_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
+ACME_LIST=$(echo "$ACME_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 
-awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" -v tls="$TLS_LIST" '{
+awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" -v tls="$TLS_LIST" \
+    -v acme="$ACME_LIST" '{
     gsub(/@FPMNG_SOURCES@/, "\n" base "\n  ");
     gsub(/@FPMNG_FIBER_SOURCES@/, "\n" fiber "\n  ");
     gsub(/@FPMNG_ASYNC_SOURCES@/, "\n" async "\n  ");
     gsub(/@FPMNG_TLS_SOURCES@/, "\n" tls "\n  ");
+    gsub(/@FPMNG_ACME_SOURCES@/, "\n" acme "\n  ");
     print
   }' "$PHPSRC/sapi/fpmng/config.m4" > "$PHPSRC/sapi/fpmng/config.m4.tmp"
 mv "$PHPSRC/sapi/fpmng/config.m4.tmp" "$PHPSRC/sapi/fpmng/config.m4"

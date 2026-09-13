@@ -119,7 +119,12 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * on the configuration using the feature. #269 put both at beta and said
 	 * why: this code terminates connections from unauthenticated strangers and
 	 * nobody has audited it. */
-#ifdef HAVE_FPMNG_TLS
+	/* HAVE_FPM_HTTP_TLS, not HAVE_FPMNG_TLS: the second name is what FPMNG_TLS=1
+	 * is called in build/libphp-build.sh and in configure's flag, and it is not a
+	 * macro anywhere. This line was guarded by it until issue #294 started the
+	 * package it had just built and found the ACME line present and this one
+	 * missing -- which is what fpmng-tier-build-flags.phpt now reads. */
+#ifdef HAVE_FPM_HTTP_TLS
 	fpm_tier_announce(FPM_TIER_BETA, NULL,
 		"TLS termination, unaudited and network-facing "
 		"(this binary was built with --enable-fpmng-tls)");

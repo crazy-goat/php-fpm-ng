@@ -149,10 +149,10 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 | `http` | **no** | yes | same mechanism as `fastcgi-ng`: both keep a request runtime alive across requests, which is what the persistent signal handlers exist for. |
 | fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
 | async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
-| TLS termination (`http.tls_*`) | **no** | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the packaged build is the one without it. From source: `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the packaged binary terminated TLS. |
-| the ACME client (`fpmng-dist://acme/...`) | **no** | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme`. The packaged binary carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
+| TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the single package terminated TLS. |
+| the ACME client (`fpmng-dist://acme/...`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme`. The default package carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
 
-The packaged binary does not silently degrade: a pool it cannot honour is
+The default package's binary does not silently degrade: a pool it cannot honour is
 refused before the master forks anything, by name and with the reason.
 
 ```console
@@ -168,6 +168,62 @@ ERROR: failed to post process the configuration
 
 `-t` runs the same check a start runs, so a configuration can be tested before
 a restart rather than after one.
+
+## The second package: `php-fpm-ng-tls`
+
+From v0.4.0 on every release carries **two** packages per distribution, built
+from the same commit and differing in one thing: the TLS build has
+`--enable-fpmng-tls --enable-fpmng-acme` compiled in, so `http.tls_cert`,
+`http.tls_key` and `cron.script = fpmng-dist://acme/renew.php` work in it and
+are refused by the default one.
+
+```sh
+# instead of php-fpm-ng_v0.4.0_php8.5_amd64.deb
+apt install -y ./php-fpm-ng-tls_v0.4.0_php8.5_amd64.deb
+# instead of php-fpm-ng-v0.4.0-php8.5-x86_64.apk
+apk add --allow-untrusted ./php-fpm-ng-tls-v0.4.0-php8.5-x86_64.apk
+```
+
+Everything else on this page applies unchanged: same paths, same
+`/etc/php-fpm-ng`, same service file, same dependency on the distribution
+`libphp`, same refusal of `pool.type = http` and `fastcgi-ng`.
+
+**The two cannot be co-installed**, and they say so to the package manager
+rather than fighting over `/usr/sbin/php-fpm-ng`: each declares `Conflicts` and
+`Replaces` against the other (`replaces=` on Alpine), and both provide the
+virtual `php-fpm-ng-any` for anything that depends on "either of them".
+Installing one over the other is therefore the normal package-manager
+operation, not a remove-then-install dance -- your `/etc/php-fpm-ng` is
+conffile-protected across it.
+
+**It is beta, and unaudited.** That is not a formality: TLS termination is the
+part of this project that faces the network with the least scrutiny behind it,
+and a beta tier means its directives may change in a minor release and fixes
+carry no response-time commitment. The binary says so itself, once per start,
+in the master, before it forks anything (issue #295):
+
+```
+NOTICE: TLS termination, unaudited and network-facing (this binary was built with
+--enable-fpmng-tls) is BETA: its directives may change in a minor release, and
+fixes carry no response-time commitment -- see "Support tiers" in README.md
+NOTICE: ACME certificate issuance, unaudited (this binary was built with
+--enable-fpmng-acme) is BETA: its directives may change in a minor release, and
+fixes carry no response-time commitment -- see "Support tiers" in README.md
+```
+
+(One line each, wrapped here to fit the page; the log writes each on one line.)
+
+The support tiers table in [`README.md`](../README.md#support-tiers) is what
+those words mean. If you terminate TLS in front of PHP -- in nginx, in a load
+balancer, at a CDN -- the default package is the one to install, and it is the
+default because that is the more common arrangement, not because the TLS build
+is unfinished.
+
+Both packages go through the same gate before they are published: built,
+installed into a container with no compiler in it, and measured against an
+exact PASS/SKIP count (`build/ci-package-gate.sh`, issue #224). The TLS one
+scores more passes, which is the point -- the tests that skip on the default
+package for want of TLS run there.
 
 ## Version skew
 

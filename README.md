@@ -85,6 +85,12 @@ no compiler and no php-src to run `pool.type = fastcgi` or
 `libphp` and still need a build from source. Commands, the supported matrix and
 what happens on a version mismatch: [`docs/install.md`](docs/install.md).
 
+Each release carries **two** of each (#294): `php-fpm-ng`, which terminates no
+TLS, and `php-fpm-ng-tls`, the same commit built with `--enable-fpmng-tls
+--enable-fpmng-acme`. Both of those are beta by the table above, which is why
+they are a package of their own rather than the default one; the two conflict
+and either can be installed over the other.
+
 ## Upgrading from v0.2.0
 
 Two behaviour changes in the operator surface. Both fail loudly at startup

@@ -40,6 +40,25 @@ OUT=$(cd "$OUT" && pwd)
 
 [ -f "$SRC/sapi/fpmng/config.m4" ] || fail "$SRC has no sapi/fpmng: run build/prepare.sh first"
 
+# WHICH PACKAGE THIS RUN GATES (issue #294). The repository publishes two: the
+# default one, built without TLS and without ACME (issues #280, #281), and
+# php-fpm-ng-tls, built with both and described in its own package description
+# as beta and unaudited.
+#
+# FPMNG_PACKAGE_TLS=1 gates the second one. It is OFF by default and the pull
+# request matrix does not set it: this script is the longest job in CI, and
+# doubling it on every pull request to gate a package that only ships on a tag
+# would buy a slower CI and no new information about the change under review.
+# .github/workflows/release.yml sets it, on a tag, next to the default rows --
+# so the TLS package is never published without having been installed into a
+# container with no compiler in it and scored the counts below.
+TLS_PACKAGE=${FPMNG_PACKAGE_TLS:-0}
+case "$TLS_PACKAGE" in
+0) PKGNAME=php-fpm-ng ; BUILD_FLAGS='FPMNG_TLS=0 FPMNG_ACME=0' ;;
+1) PKGNAME=php-fpm-ng-tls ; BUILD_FLAGS='FPMNG_TLS=1 FPMNG_ACME=1' ;;
+*) fail "FPMNG_PACKAGE_TLS must be 0 or 1, not '$TLS_PACKAGE'" ;;
+esac
+
 # What the packages call themselves. Resolved here, on the host, because the
 # containers below mount the repository read-only and have no git in them -- so
 # the package scripts' own fallback would land on "unknown" every single run.
@@ -95,6 +114,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # SKIPIF and the packages are not built with it, so it SKIPs on both -- the
 # fiber cell of build-matrix.yml is where that one is actually run.
 #
+# It moved to 85 with fpmng-tier-build-flags.phpt (issue #294), which reads the
+# two BETA lines a TLS/ACME build prints about itself. It SKIPs on the default
+# packages, which are built with neither, and PASSes on the php-fpm-ng-tls ones
+# below -- so it is one more skip here and one more pass there.
+#
 # Written out here rather than read from anywhere, so that a change in the
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
@@ -117,26 +141,50 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # client, so build/embed-payload.sh embeds nothing when FPMNG_ACME=0 and the
 # test skips instead of asserting on a payload this package deliberately has
 # no reason to carry.
+#
+# THE TLS PACKAGE (issue #294) scores differently, and the difference is the
+# point of building it: the tests that skip above because the artefact has no
+# TLS and no ACME in it run here. TOTAL is the same -- the same suite is
+# selected either way -- and the numbers below were measured on a real gate run
+# of each flavour, not derived from the list.
+#
+# The same four tests move on both distributions: fpmng-http-direct-tls.phpt and
+# fpmng-http-direct-tls-streaming.phpt, which are the two TLS tests whose pool
+# type a distribution libphp supports, and fpmng-payload-distribution.phpt,
+# because FPMNG_ACME=1 is what makes build/embed-payload.sh embed anything.
+# fpmng-tier-build-flags.phpt is the fourth, and it exists because of this
+# package: it reads the two lines the binary prints about its own build flags.
+# So both flavours gain exactly four passes and lose exactly four skips.
+# The rest of the ACME and TLS suite still skips here and for an older reason
+# than the build flags: it needs pool.type = http, which needs patches/0006
+# inside Zend/ (issue #230).
 EXPECT_FAIL=0
-EXPECT_TOTAL=84
+EXPECT_TOTAL=85
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=48
-    EXPECT_SKIP=36
-    # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=52; EXPECT_SKIP=33
+    else EXPECT_PASS=48; EXPECT_SKIP=37; fi
+    # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
+    # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
-    # itself needs -- no libevent_openssl, because the package is built without
-    # TLS (issue #280) and this stage should not be able to link it by accident.
+    # itself needs. The default package gets no OpenSSL headers at all, because
+    # it is built without TLS (issue #280) and this stage should not be able to
+    # link it by accident.
     # dpkg-deb is in dpkg, which is already there -- dpkg-dev is
     # deliberately NOT installed: it pulls in gcc, and a build stage is allowed
     # a compiler but this keeps the two package sets honest about who needs one.
-    BUILD_SETUP='export DEBIAN_FRONTEND=noninteractive
+    # libssl-dev only for the TLS package: libevent-dev ships
+    # libevent_openssl, but linking it needs the OpenSSL headers, and leaving
+    # them out of the default build is what makes "this stage cannot link TLS
+    # by accident" true rather than merely intended.
+    [ "$TLS_PACKAGE" = 1 ] && TLS_DEV=libssl-dev || TLS_DEV=
+    BUILD_SETUP="export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         apt-get install -y -qq binutils php8.5-dev libphp8.5-embed \
-            libevent-dev libacl1-dev >/dev/null'
+            libevent-dev libacl1-dev $TLS_DEV >/dev/null"
     # The negative control, built here because only this stage has the tools:
     # the identical package, claiming a PHP minor that is not installed on the
     # target. package-deb.sh leaves the unpacked tree behind in /out/root.
@@ -150,14 +198,16 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=46
-    EXPECT_SKIP=38
-    # No openssl-dev: the package is built without TLS (issue #280), so the
-    # build stage does not get the headers that would let it link OpenSSL even
-    # by accident. libphp-build.sh asserts the produced binary's dynamic
-    # section, which is the evidence; this is the belt.
-    BUILD_SETUP='apk add --no-cache alpine-sdk php85-dev php85-embed \
-            libevent-dev acl-dev >/dev/null'
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=50; EXPECT_SKIP=35
+    else EXPECT_PASS=46; EXPECT_SKIP=39; fi
+    # openssl-dev only for the TLS package (issue #294). Without it the build
+    # stage does not get the headers that would let it link OpenSSL even by
+    # accident, which is what a default build being TLS-free (issue #280) is
+    # supposed to mean. libphp-build.sh asserts the produced binary's dynamic
+    # section either way, which is the evidence; this is the belt.
+    [ "$TLS_PACKAGE" = 1 ] && TLS_DEV=openssl-dev || TLS_DEV=
+    BUILD_SETUP="apk add --no-cache alpine-sdk php85-dev php85-embed \
+            libevent-dev acl-dev $TLS_DEV >/dev/null"
     # Same negative control on the Alpine side: abuild is re-run over the
     # APKBUILD package-apk.sh generated, with the dependency moved to a minor
     # this image does not have, under a name of its own so the two packages
@@ -209,6 +259,7 @@ warm_image() {
 }
 BUILD_IMAGE=$(warm_image "$FLAVOUR-build")
 TEST_IMAGE=$(warm_image "$FLAVOUR-test")
+echo "ci-package-gate.sh: gating $PKGNAME ($BUILD_FLAGS)"
 echo "ci-package-gate.sh: build stage in $BUILD_IMAGE, install stage in $TEST_IMAGE"
 
 # ---------------------------------------------------------------------------
@@ -216,11 +267,15 @@ echo "ci-package-gate.sh: build stage in $BUILD_IMAGE, install stage in $TEST_IM
 # leaves behind is used by stage 2 except the package itself and the test
 # fixtures staged below.
 # ---------------------------------------------------------------------------
-echo "ci-package-gate.sh: stage 1 -- build the binary and the $FLAVOUR package"
+echo "ci-package-gate.sh: stage 1 -- build the binary and the $FLAVOUR $PKGNAME package"
 cat > "$OUT/stage1-payload.sh" <<EOF
 set -eu
 FPMNG_RELEASE=$RELEASE
 export FPMNG_RELEASE
+# The only difference between the two packages, and it is one line: what the
+# binary is built with. Everything downstream -- the package name, its
+# description, the expected counts -- follows from the artefact this produces.
+export $BUILD_FLAGS
 /repo/build/libphp-build.sh /src /out
 $PACKAGE_CMD
 $NEGATIVE_CONTROL
@@ -258,7 +313,12 @@ docker run --rm -v "$OUT:/out" "$BUILD_IMAGE" chown -R "$(id -u):$(id -g)" /out
 # point of the cell.
 # ---------------------------------------------------------------------------
 echo "ci-package-gate.sh: stage 2 -- install into a clean $TEST_IMAGE and run the owned suite"
-cat > "$OUT/stage2.sh" <<'EOF'
+# The name resolved above, handed to the payload: every heredoc below is
+# quoted, so nothing in them expands on the host.
+cat > "$OUT/stage2.sh" <<EOF
+PKGNAME=$PKGNAME
+EOF
+cat >> "$OUT/stage2.sh" <<'EOF'
 set -eu
 
 # The claim this stage makes about itself. binutils is installed below for
@@ -284,8 +344,8 @@ apt-get update -qq
 # has nothing to do with the package. None of the three is a dependency of what
 # we ship: they belong to the test rig, and naming them here keeps that visible.
 apt-get install -y -qq binutils php8.5-cli openssl >/dev/null
-apt-get install -y -qq /out/php-fpm-ng_*.deb
-dpkg -s php-fpm-ng | grep -E '^(Package|Version|Depends):'
+apt-get install -y -qq "$(find /out -maxdepth 1 -name "${PKGNAME}_*.deb" ! -name 'wrong-minor*' | head -1)"
+dpkg -s "$PKGNAME" | grep -E '^(Package|Version|Depends|Conflicts|Replaces|Provides):'
 ldd /usr/sbin/php-fpm-ng | grep libphp
 PHP_CLI=/usr/bin/php8.5
 
@@ -309,8 +369,8 @@ apk)
 # See the Debian branch: binutils and the CLI are the test rig, not package
 # dependencies.
 apk add --no-cache binutils php85 php85-openssl openssl >/dev/null
-apk add --no-cache --allow-untrusted "$(find /out/repo -name 'php-fpm-ng-*.apk' | head -1)"
-apk info -d php-fpm-ng
+apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
+apk info -d "$PKGNAME"
 ldd /usr/sbin/php-fpm-ng | grep libphp
 PHP_CLI=/usr/bin/php85
 # Alpine ships every PHP extension as a shared module loaded from

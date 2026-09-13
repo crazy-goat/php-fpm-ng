@@ -217,7 +217,6 @@ $tester->expectLogTerminatingNotices();
 
 /* No key material in the log, at any level (issue #49 criterion 7 starts
  * here). */
-$log = (string) @file_get_contents($tester->getPrefixedFile('log'));
 $key = (string) file_get_contents("$dir/privkey.pem");
 /* Strip whatever PEM label this OpenSSL wrote -- 1.1.1 emits "BEGIN RSA
  * PRIVATE KEY", 3.x emits "BEGIN PRIVATE KEY". Matching only one of them
@@ -226,7 +225,13 @@ $key = (string) file_get_contents("$dir/privkey.pem");
  * whether or not key bytes leaked. */
 $keyBody = trim(preg_replace('/-----(?:BEGIN|END)[^-]*-----|\s+/', '', $key));
 check(strlen($keyBody) > 200, 'could not extract the key body to search for: ' . strlen($keyBody));
-check(!str_contains($log, substr($keyBody, 40, 60)), 'the private key appeared in error_log');
+/* Through the tester's log API and not file_get_contents(): the suite runs FPM
+ * in the foreground, and tester.inc only switches its log source to the
+ * error_log file when it daemonizes -- so the file {{FILE:LOG}} names stays
+ * empty and an assertion made against it passes on '' whether or not key bytes
+ * leaked (issue #297). Before close(), because close() reaps the master and
+ * with it the pipe the log reader reads. */
+$tester->expectNoLogPattern('/' . preg_quote(substr($keyBody, 40, 60), '/') . '/', true);
 echo "no-key-material-in-the-log: ok\n";
 
 $tester->close();

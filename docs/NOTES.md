@@ -4284,3 +4284,25 @@ looks like the feature. Both tier tests assert through the tester's own log API
 `checkAllLogs: true` is needed for the positive ones, because the tier lines
 are written before `ready to handle connections` and the reader has already
 walked past them by the time `expectLogStartNotices()` returns.
+
+**And the trap had already been sprung three times (issue #297, 2026-09-13).**
+The sweep the issue asked for found the same shape in
+`fpmng-acme-challenge.phpt`, `fpmng-acme-challenge-plain.phpt` and
+`fpmng-acme-handover.phpt` — each one reading
+`file_get_contents($tester->getPrefixedFile('log'))` and asserting that the key
+authorization, or a slice of the private key, was *not* in it. Two ways wrong
+at once: `'log'` is not even the extension the tester uses (`err.log` is), and
+the file the right name points at is empty anyway. All three assertions were
+passing on `''` and would have gone on passing if the secret had leaked. They
+now call `expectNoLogPattern('/' . preg_quote($secret, '/') . '/', true)`,
+before `close()` rather than after it — `close()` reaps the master and with it
+the pipe the log reader reads. Checked by mutation, which is the only way to
+check a negative assertion: swapping the needle for `fpm is running`, a string
+the log certainly contains, turns `fpmng-acme-challenge.phpt` red. The old
+version stayed green under the same mutation.
+
+The rest of the suite is clean. Every other test that reads a log *file*
+(`fpmng-supervisor-fast-restart.phpt`, the four `fpmng-http-gateway-*log*`
+ones) starts FPM with `start([], false)` — no `-O`, so `error_log` really is
+written — and waits for a pattern it expects to appear, which a vacuous read
+cannot fake.

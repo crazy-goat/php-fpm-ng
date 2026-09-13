@@ -48,17 +48,20 @@ $base = sys_get_temp_dir() . '/fpmng-user-ini';
 @mkdir("$base/ttl/app", 0700, true);
 
 /* The front controller reports the values a .user.ini is allowed to set, plus
- * a per-request counter so a cached ini set can be told from a re-read one. */
+ * its own pid: the TTL case below has to know that the re-read happened inside
+ * the child that already had the file cached, not in a replacement child that
+ * would have read it fresh whatever the TTL said. A per-request counter cannot
+ * answer that -- pool.executor = classic ends the request, so a static resets
+ * every time. */
 $front = <<<'PHP'
 <?php
-class Counter { public static int $n = 0; }
 if (isset($_GET['poison'])) {
     // Issue #60 leakage criterion: a request that changes the value itself
     // must not change what the next request sees.
     ini_set('precision', '3');
 }
 echo json_encode([
-    'n'          => ++Counter::$n,
+    'pid'        => getmypid(),
     'precision'  => ini_get('precision'),
     'charset'    => ini_get('default_charset'),
     'script'     => $_SERVER['SCRIPT_FILENAME'],
@@ -169,7 +172,7 @@ try {
     sleep(2);
     $afterTtl = report($ttl, '/');
     echo "ttl before=", $before['precision'], " after=", $afterTtl['precision'], "\n";
-    echo "same child: ", var_export($afterTtl['n'] > $before['n'], true), "\n";
+    echo "same child: ", var_export($afterTtl['pid'] === $before['pid'], true), "\n";
 
     $tester->terminate();
     $tester->expectLogTerminatingNotices();

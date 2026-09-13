@@ -231,7 +231,7 @@ killing that child takes the connections with it (see #256 and
   [#64](https://github.com/crazy-goat/php-fpm-ng/issues/64). The memory and
   descriptor numbers above do not depend on it.
 - Time-to-capacity when load rises. It needs the accept-driven load shape
-  (`--stream-mode new-connection`) against a pool that can actually grow, so it
+  (`--stream-modes new-connection`) against a pool that can actually grow, so it
   belongs to #165/#167, not here.
 - Any connection count above 1024, and any request workload other than
   `steady`.

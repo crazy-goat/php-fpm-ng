@@ -7,9 +7,33 @@ gateway process. Serving the HTTP-01 challenge is
 certificate against a CA is [`docs/acme-client.md`](acme-client.md)
 (issue #49).
 
-All of it needs a binary built with `--enable-fpmng-tls` (issue #280, see
-[`tls.md`](tls.md#the-build-flag)), which the shipped packages are not: a
-certificate nothing can terminate TLS with has nowhere to go.
+## The build flag
+
+All of it needs a binary built with **both** `--enable-fpmng-tls` (issue #280,
+see [`tls.md`](tls.md#the-build-flag)) and `--enable-fpmng-acme` (issue #281),
+and the shipped `.deb`/`.apk` packages carry neither:
+
+```
+./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme ...
+```
+
+ACME is off by default for the reason TLS is, plus one of its own: it is the
+only facility in this SAPI that reaches out to a third party -- a certificate
+authority -- on the operator's behalf, from a process inside their server.
+`--enable-fpmng-acme` without `--enable-fpmng-tls` is a `configure` **error**,
+not a warning: a certificate nothing can terminate TLS with has nowhere to go.
+
+On a binary built without it:
+
+- `fpm_acme_challenge.c` is not compiled, so there is no shared challenge
+  state, the `fpmng_acme_challenge_*` functions are not registered, and
+  `/.well-known/acme-challenge/...` is a 404 like any other unrouted path;
+- the ACME client itself is not embedded either. It is PHP
+  (`sapi/fpmng/acme/*.php`), shipped inside the binary as the distribution
+  payload (issue #171), and `build/embed-payload.sh` appends nothing to a
+  build without the flag;
+- `cron.script = fpmng-dist://acme/renew.php` is therefore **refused at
+  startup**, naming the flags to rebuild with.
 
 ## The unit of exclusion is a certificate, not a pool
 

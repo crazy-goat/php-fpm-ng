@@ -106,8 +106,11 @@ and the plain `http.plain_listen` companion, from state a `cron` or
 [`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
 renew a given certificate, and the result reaches every gateway through the
 existing no-restart certificate reload —
-[`docs/acme-renewal.md`](docs/acme-renewal.md). Obtaining and renewing
-certificates against a CA is not implemented yet.
+[`docs/acme-renewal.md`](docs/acme-renewal.md). ACME is a build flag of its
+own on top of the TLS one -- `./configure --enable-fpmng-tls
+--enable-fpmng-acme`, off by default and not in the packages (issue #281);
+a build without it carries neither the challenge state nor the client, and
+refuses an ACME `cron.script` at startup.
 
 ## Experimental direct HTTP
 

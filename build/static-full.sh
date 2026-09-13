@@ -63,7 +63,7 @@ echo "static-full.sh: /build reuse=$reuse key=$key"
 if [ "$reuse" = no ]; then
   export PKG_CONFIG="pkg-config --static"
   LDFLAGS="-static-pie" /src/configure \
-    --disable-all --enable-fpmng --enable-fpmng-tls \
+    --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme \
     --enable-opcache --enable-mbstring --disable-mbregex \
     --enable-sockets --enable-pcntl --enable-posix \
     --enable-filter --enable-ctype \
@@ -144,12 +144,21 @@ assert_symbol openssl_encrypt "amphp/socket TLS and the pool's http.tls_* listen
 # The SAPI's own builtins: --enable-fpmng is what this binary exists for, and
 # a worker handler cannot answer a request without this one.
 assert_symbol fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
+# Issue #281: --enable-fpmng-acme is as droppable from the configure line as
+# --enable-fpmng-tls is, and configure would accept the line without it in
+# silence. Asserted on a string from fpm_acme_challenge.c rather than on the
+# symbol name, because this block reads `strings -a` and a symbol table is not
+# something a static artefact is required to keep.
+echo "$symbols" | grep -q 'ACME certificate issuance is BETA' ||
+  fail "--enable-fpmng-acme did not reach this build: no ACME code in the artefact (issue #281)"
 echo "static-full.sh: extension-set assertions ok"
 
 # Issue #171: the ACME client goes in after the link and before the artefact is
 # copied anywhere. Nothing here strips, which is what makes this safe -- strip(1)
 # drops appended data.
-/repo/build/embed-payload.sh "$artifact" /build/sapi/cli/php ||
+# FPMNG_ACME=1 because this build is configured with --enable-fpmng-acme
+# above; the payload is the ACME client and issue #281 keeps the two together.
+FPMNG_ACME=1 /repo/build/embed-payload.sh "$artifact" /build/sapi/cli/php ||
   fail "the distribution payload could not be embedded"
 
 cp "$artifact" /out/php-fpm-ng-full

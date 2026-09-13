@@ -4,6 +4,7 @@ fpm-ng: the gateway answers the HTTP-01 challenge from shared state, before stat
 <?php
 include "fpmng-skipif.inc";
 fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_no_acme();
 ?>
 --FILE--
 <?php

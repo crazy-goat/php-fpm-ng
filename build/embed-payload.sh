@@ -8,6 +8,15 @@
 # in a container, which is the class of bug the whole mechanism exists to end.
 #
 # Usage: embed-payload.sh <binary> <php-interpreter>
+#   FPMNG_ACME  1 when the binary was built with --enable-fpmng-acme; default 0
+#
+# WHAT THE PAYLOAD IS, AND WHY THE FLAG GATES IT. Everything the payload has
+# ever carried is the ACME client (sapi/fpmng/acme/*.php), and ACME is opt-in
+# since issue #281. Embedding it into a binary built without
+# --enable-fpmng-acme would put the one facility that talks to a certificate
+# authority inside the default build as data, after the C half was kept out of
+# it -- so this script embeds nothing there, and fpm_payload_dist_validate()
+# refuses `fpmng-dist://acme/...` in that build by name.
 #
 # Idempotent, which is not a nicety: CI reuses build trees, so a binary that
 # `make` did not relink is still there from the previous run, and appending
@@ -30,6 +39,16 @@ fail() { echo "embed-payload.sh: FAIL: $*" >&2; exit 1; }
 [ -x "$BIN" ] || fail "$BIN is not an executable file"
 [ -x "$PHP" ] || fail "$PHP is not a PHP interpreter"
 [ -d "$DIR" ] || fail "$DIR does not exist"
+
+FPMNG_ACME=${FPMNG_ACME:-0}
+case "$FPMNG_ACME" in
+  0|1) ;;
+  *) fail "FPMNG_ACME must be 0 or 1, not '$FPMNG_ACME'" ;;
+esac
+if [ "$FPMNG_ACME" = 0 ]; then
+  echo "embed-payload.sh: FPMNG_ACME=0, embedding nothing (the payload is the ACME client; issue #281)"
+  exit 0
+fi
 
 want=$("$PHP" "$REPO/build/payload-pack.php" digest --dir="$DIR" --prefix="$PREFIX") ||
   fail "the payload digest could not be computed"

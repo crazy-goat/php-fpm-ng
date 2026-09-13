@@ -3,6 +3,11 @@ fpm-ng: the distribution payload embedded in the binary (issue #171)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
+/* The payload is the ACME client and nothing else, so a build without
+ * --enable-fpmng-acme embeds none (issue #281) and there is nothing here to
+ * test -- build/embed-payload.sh says so at build time, and
+ * fpm_payload_dist_validate() says so at startup. */
+fpmng_skip_if_no_acme();
 ?>
 --FILE--
 <?php

@@ -89,14 +89,28 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # http-direct TLS tests that used to run here now skip on both flavours, which
 # is the regression against v0.2.0 that #279 decided to take; the numbers below
 # moved by exactly that.
+# Issue #281 did the same for ACME (FPMNG_ACME=1), and the packages are built
+# without that too -- which moved the numbers by exactly ONE test, measured on
+# a real gate run rather than reasoned about. The ACME tests that need a pool
+# (the challenge pair, issuance, renew-failure, handover) were already skipping
+# here, and for an older reason: they use pool.type = http, which a binary
+# linked against a distribution libphp refuses, and that check comes first in
+# their SKIPIF. The four that drive sapi/fpmng/acme/*.php through the CLI
+# (jose, state, renew-policy, single-renewer) keep running: they read the
+# scripts out of the source tree and never ask the binary anything, so a
+# package built without ACME is not evidence about them.
+# The one that moved is fpmng-payload-distribution: the payload IS the ACME
+# client, so build/embed-payload.sh embeds nothing when FPMNG_ACME=0 and the
+# test skips instead of asserting on a payload this package deliberately has
+# no reason to carry.
 EXPECT_FAIL=0
 EXPECT_TOTAL=80
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=46
-    EXPECT_SKIP=34
+    EXPECT_PASS=45
+    EXPECT_SKIP=35
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
@@ -122,8 +136,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=44
-    EXPECT_SKIP=36
+    EXPECT_PASS=43
+    EXPECT_SKIP=37
     # No openssl-dev: the package is built without TLS (issue #280), so the
     # build stage does not get the headers that would let it link OpenSSL even
     # by accident. libphp-build.sh asserts the produced binary's dynamic

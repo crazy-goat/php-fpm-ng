@@ -4,6 +4,7 @@ fpm-ng: the plain :80 companion answers the HTTP-01 challenge instead of redirec
 <?php
 include "fpmng-skipif.inc";
 fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_no_acme();
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }

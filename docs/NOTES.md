@@ -4008,3 +4008,57 @@ and/or OpenSSL were not found at build time", which is now the wrong story:
 the libraries may well be there and the operator still gets no TLS. They say
 `rebuild with ./configure --enable-fpmng-tls` instead. The `.phpt` skip probes
 key on the unchanged substring "built with TLS support", so they kept working.
+
+## 3ad. ACME is a build flag too, and it takes the payload with it (issue #281, 2026-09-13)
+
+**The decision** (from #279, after #280): `--enable-fpmng-acme`, default `no`,
+requiring `--enable-fpmng-tls`. Asking for ACME without TLS is a `configure`
+**error**, not a warning -- it would build cleanly and do nothing, because the
+certificate it obtains would have nothing to serve it with. `build/prepare.sh`
+gained an `ACME_PATTERN` group (`fpm_acme_*.c`), matched by name prefix like
+the others, and `build/libphp-build.sh` gained `FPMNG_ACME=0|1` with the same
+dependency check, so the two build paths cannot disagree about what is
+buildable.
+
+**The stubs, not a seam file.** Unlike TLS (§3ac), nothing outside the ACME
+group is named `fpm_acme_*`, so no file had to be split. Three callers reach
+into it with no `#ifdef` of their own -- `fpm.c` allocates the shared challenge
+region before the first fork, `fpm_pool_script.c` registers the writer
+functions, `fpm_http.c` answers `/.well-known/acme-challenge/` -- and they now
+link against `static inline` no-ops in `fpm_acme_challenge.h`. The lookup
+returning -1 makes the challenge URL a 404 like any other unrouted path, which
+is what a build with no challenge state should say.
+
+**The payload is ACME, so it is gated too.** This is the part that a
+symbol-only reading of "contains no ACME code" would have missed: the client
+is PHP (`sapi/fpmng/acme/*.php`), appended to the binary as the distribution
+payload (issue #171), and the payload has never carried anything else. A
+default build with the C half compiled out but the scripts still embedded
+would still ship the facility, as data. `build/embed-payload.sh` therefore
+takes `FPMNG_ACME` and embeds nothing without it, every caller passes it, and
+`build/libphp-build.sh` asserts both directions on the finished binary -- the
+symbol *and* whether a `kind=1` entry is there at all.
+
+**Refusing an ACME configuration.** There are no `acme.*` directives to refuse:
+the only thing a configuration says about ACME is
+`cron.script = fpmng-dist://acme/renew.php`. So the refusal lives in
+`fpm_payload_dist_validate()`, which answers that path by name in a build
+without the flag -- "this build carries no ACME client: rebuild with
+./configure --enable-fpmng-tls --enable-fpmng-acme" -- rather than leaving it
+to the generic "no such file in the embedded distribution payload". The
+difference between "you misspelled it" and "you need a different build" is the
+whole message. `fpmng_skip_if_no_acme()` in `fpmng-skipif.inc` probes exactly
+that, the same way every other skip here asks the binary rather than keeping a
+list.
+
+**Which tests skip.** The five that need the BINARY to carry ACME: the two
+challenge tests, issuance, renew-failure, and `fpmng-payload-distribution`.
+The four that drive `sapi/fpmng/acme/*.php` through the CLI (jose, state,
+renew-policy, single-renewer) read the scripts out of the source tree and
+never ask the binary anything, so they keep running everywhere -- a package
+built without ACME is not evidence about them either way.
+
+**The startup NOTICE.** A build made with the flag says once, in the master,
+that ACME is BETA and unaudited. It is not conditional on the configuration
+using ACME: what it reports is a property of the binary, which `-v` does not
+show.

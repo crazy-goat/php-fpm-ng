@@ -31,8 +31,9 @@ What that means in practice:
   port the operator configured as HTTPS.
 
 The same applies to `pool.type = http-direct`'s TLS
-([`http-direct.md`](http-direct.md)) and to the ACME client
-([`acme-renewal.md`](acme-renewal.md)), which is TLS with extra steps.
+([`http-direct.md`](http-direct.md)). The ACME client has a flag of its own on
+top of this one, `--enable-fpmng-acme` (issue #281), which requires
+`--enable-fpmng-tls` -- see [`acme-renewal.md`](acme-renewal.md).
 
 ## Directives
 

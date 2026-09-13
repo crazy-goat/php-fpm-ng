@@ -4,6 +4,7 @@ fpm-ng: a certificate is obtained end to end over ACME HTTP-01, answered by the 
 <?php
 include "fpmng-skipif.inc";
 fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_no_acme();
 if (!extension_loaded('openssl')) {
     die('skip requires the openssl extension');
 }

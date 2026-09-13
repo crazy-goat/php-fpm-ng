@@ -42,8 +42,24 @@
 #ifndef FPM_ACME_CHALLENGE_H
 #define FPM_ACME_CHALLENGE_H 1
 
+#include "fpm_config.h"
+
 #include <stddef.h>
 #include <sys/types.h>	/* ssize_t */
+
+/* ACME is opt-in and off by default (--enable-fpmng-acme, issue #281, part of
+ * #279), and fpm_acme_challenge.c is compiled only when it was given --
+ * build/prepare.sh keeps every fpm_acme_*.c in its own source list. Three
+ * files call in here without an #ifdef of their own (fpm.c allocates the
+ * region before the first fork, fpm_pool_script.c registers the writer
+ * functions, fpm_http.c answers /.well-known/acme-challenge/), so the
+ * stand-ins below are what they link against in a default build.
+ *
+ * They are no-ops rather than errors on purpose: a build without ACME does
+ * not fail to start, it simply has no challenge state, so the lookup finds
+ * nothing and the challenge URL is a 404 like any other unrouted path. What
+ * DOES refuse, loudly and by name, is a configuration that asks for ACME --
+ * see fpm_conf_post_process() and docs/acme-renewal.md. */
 
 /* An HTTP-01 token is base64url of at least 128 bits of entropy (RFC 8555
  * section 8.3); a key authorization is that token, a dot, and the base64url
@@ -56,6 +72,16 @@
 /* More than one name may be validated in one order, and an order may be
  * retried while a previous authorization is still valid, so this is not 1. */
 #define FPM_ACME_CHALLENGE_MAX 8
+
+#ifndef HAVE_FPMNG_ACME
+static inline int fpm_acme_challenge_init_main(void) { return 0; }
+static inline ssize_t fpm_acme_challenge_lookup(const char *token, char *out, size_t out_len)
+{
+	(void) token; (void) out; (void) out_len;
+	return -1;
+}
+static inline int fpm_acme_challenge_register_functions(void) { return 0; }
+#else
 
 /* Master, before the first fork. Idempotent. 0 or -1. */
 int fpm_acme_challenge_init_main(void);
@@ -84,5 +110,7 @@ size_t fpm_acme_challenge_tokens(char (*out)[FPM_ACME_CHALLENGE_TOKEN_MAX], size
  * pool type whose publishes_acme_challenges flag is set. Call once per
  * process. 0 or -1. */
 int fpm_acme_challenge_register_functions(void);
+
+#endif	/* HAVE_FPMNG_ACME */
 
 #endif

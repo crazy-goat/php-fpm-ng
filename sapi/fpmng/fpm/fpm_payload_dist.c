@@ -172,6 +172,19 @@ int fpm_payload_dist_validate(const char *path, const char **why)
 		*why = "not an embedded path";
 		return -1;
 	}
+#ifndef HAVE_FPMNG_ACME
+	/* The only thing the payload has ever carried is the ACME client, and a
+	 * build made without --enable-fpmng-acme (issue #281) does not embed it.
+	 * Answered here, by name, rather than leaving it to the "no such file"
+	 * below: the operator asked for a script this binary was built not to
+	 * have, and the difference between "you misspelled it" and "you need a
+	 * different build" is the whole message. */
+	if (strncmp(fpm_payload_dist_member_name(path), "acme/", 5) == 0) {
+		*why = "this build carries no ACME client: rebuild with "
+			"./configure --enable-fpmng-tls --enable-fpmng-acme";
+		return -1;
+	}
+#endif
 	if (fpm_payload_dist_load(why) < 0) {
 		return -1;
 	}

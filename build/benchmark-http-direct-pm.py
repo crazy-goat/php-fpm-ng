@@ -1074,7 +1074,7 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
     row_base = {k: scenario[k] for k in
                 ("executor", "pm", "tls", "idle", "max_children", "max_requests",
                  "min_spare", "max_spare", "workload", "read_timeout_ms")}
-    row_base["stream_mode"] = args.stream_mode
+    row_base["stream_mode"] = scenario["stream_mode"]
     row_base["stack"] = "nginx+fastcgi" if baseline else "http-direct"
     if baseline:
         row_base["fastcgi_keep_conn"] = "on" if args.fastcgi_keep_conn else "off"
@@ -1133,7 +1133,7 @@ def run_scenario(args, root, scenario, tls_context, port, ports=None):
                 continue
             stream = Stream(port, args.stream_connections,
                             tls_context if scenario["tls"] else None, args.request_sleep_ms,
-                            args.stream_mode)
+                            scenario["stream_mode"])
             stream.start()
             # Let the pool settle before RSS is read: a child that is still
             # accepting its share of the idle set has not paid for it yet.
@@ -1259,18 +1259,23 @@ def main():
     parser.add_argument("--workloads", nargs="+", default=["steady"],
                         choices=["steady", "retire"])
     parser.add_argument("--max-children", type=int, default=4)
-    parser.add_argument("--max-requests", type=int, default=0)
+    parser.add_argument("--max-requests", type=int, nargs="+", default=[0],
+                        help="pm.max_requests values to sweep. A list, because issue "
+                             "#169 needs the two independent retirement triggers -- the "
+                             "master's scale-down and the child's own request budget -- "
+                             "in one run and therefore in one results.json")
     parser.add_argument("--start-servers", type=int, default=2)
     parser.add_argument("--min-spare", type=int, default=1)
     parser.add_argument("--max-spare", type=int, default=3)
     parser.add_argument("--idle-timeout", type=int, default=10)
     parser.add_argument("--stream-connections", type=int, default=8)
     parser.add_argument("--request-sleep-ms", type=int, default=0)
-    parser.add_argument("--stream-mode", default="keepalive",
+    parser.add_argument("--stream-modes", nargs="+", default=["keepalive"],
                         choices=["keepalive", "new-connection"],
                         help="new-connection drives the load by accepts rather than by "
                              "requests on connections already open; a scale-up cannot "
-                             "help the latter at all, see issue #53")
+                             "help the latter at all, see issue #53. A list for the same "
+                             "reason as --max-requests: #169 is one run")
     parser.add_argument("--read-timeout-ms", type=int, default=5000,
                         help="http.read_timeout; also the grace a retiring child "
                              "gives the connections it holds (fpm_http_direct.c:245-253)")
@@ -1315,18 +1320,23 @@ def main():
             for tls in args.tls_modes:
                 for idle in args.idle:
                     for workload in args.workloads:
-                        scenarios.append({
-                            "index": index, "executor": executor, "pm": pm,
-                            "tls": tls == "tls", "tls_cert": tls_cert, "tls_key": tls_key,
-                            "idle": idle, "workload": workload,
-                            "max_children": args.max_children,
-                            "max_requests": args.max_requests,
-                            "start_servers": args.start_servers,
-                            "min_spare": args.min_spare, "max_spare": args.max_spare,
-                            "idle_timeout": args.idle_timeout,
-                            "read_timeout_ms": args.read_timeout_ms,
-                        })
-                        index += 1
+                        for max_requests in args.max_requests:
+                            for stream_mode in args.stream_modes:
+                                scenarios.append({
+                                    "index": index, "executor": executor, "pm": pm,
+                                    "tls": tls == "tls", "tls_cert": tls_cert,
+                                    "tls_key": tls_key,
+                                    "idle": idle, "workload": workload,
+                                    "max_children": args.max_children,
+                                    "max_requests": max_requests,
+                                    "stream_mode": stream_mode,
+                                    "start_servers": args.start_servers,
+                                    "min_spare": args.min_spare,
+                                    "max_spare": args.max_spare,
+                                    "idle_timeout": args.idle_timeout,
+                                    "read_timeout_ms": args.read_timeout_ms,
+                                })
+                                index += 1
 
     ports = PortRange(range(args.base_port, args.base_port + len(scenarios)))
 

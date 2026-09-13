@@ -156,12 +156,19 @@ The binary must carry the http-direct marker and its sha256 is recorded in
 `metadata.json`; pointing the harness at a stock `php-fpm` makes it refuse
 rather than produce numbers for a different program.
 
-`--stream-mode new-connection` drives the load by accepts instead of by requests
+`--stream-modes new-connection` drives the load by accepts instead of by requests
 on connections that are already open. It matters for any scale-up question: all
 children accept on the same inherited listening socket, so a child spawned now
 receives no share of the connections already established (#53), and a "time to
 capacity" number taken under keep-alive would show dynamic as useless by
 construction.
+
+`--stream-modes` and `--max-requests` take lists, so both become rows of the
+same grid rather than reasons to run the harness twice. Issue #169 asks for one
+run, one box, one binary and one `results.json`: the moment a dimension can only
+be changed by a second invocation, half the rows come from a different run and
+the comparison the spike is built on is gone. Every row carries its own
+`stream_mode` and `max_requests`.
 
 `--idle 1024` needs 1024 descriptors on the client side too; the harness raises
 its own `RLIMIT_NOFILE` soft limit towards the hard limit and refuses to start

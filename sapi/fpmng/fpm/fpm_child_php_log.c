@@ -107,7 +107,10 @@ static void fpm_child_php_log_ini_default(struct fpm_worker_pool_s *wp,
 
 void fpm_child_php_log_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	if (!fpm_pool_type_of(wp)->child_logs_via_master) {
+	/* Issue #260 split this from child_logs_via_master: a type can want the
+	 * log channel for its own lifecycle lines and still have a response to put
+	 * PHP's errors in, which is exactly http-direct. See fpm_pool_type.h. */
+	if (!fpm_pool_type_of(wp)->child_php_log_via_master) {
 		return;
 	}
 

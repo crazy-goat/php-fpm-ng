@@ -57,6 +57,22 @@ immediate EOF. `echo` has always taken that same route in a worker. A line
 that must reach the error log regardless of `catch_workers_output`, and with a
 severity, still belongs in `error_log()` (issue #124).
 
+The daemon's **own** lines are a different matter and do not depend on that
+setting. A direct child owns the accept socket, so it is the only process that
+knows it has stopped accepting: retiring (issue #65), the end of a drain, and
+the once-per-child limit NOTICEs are narrated by the child or by nobody. Since
+issue #260 those go to the master over the per-pool channel of issue #121 and
+land in `error_log` at their own level with `(child N)` appended, with
+`catch_workers_output` left at its default. What the setting still governs is
+what the *application* writes to its own stdout and stderr, which is what its
+documentation says it is for.
+
+PHP's own diagnostics deliberately do **not** change here. An http-direct child
+has a response to display errors in, so `display_errors` from `php.ini` means
+in this pool type what it has always meant. (A `pool.type = supervisor` or
+`cron` child has no response, which is why those two types also take the INI
+half of issue #124 — see `fpm_pool_type.h`.)
+
 Bodies (including chunked requests) are buffered by libevent and supplied through
 SAPI, supporting forms, raw `php://input`, and PHP's normal POST handling. PHP
 supplies response status, headers (including repeated Set-Cookie), and body through
@@ -183,8 +199,8 @@ above come from one sitting on one toolchain for that reason.
   than a malformed header line on the wire or a header the application asked
   for silently missing. How the 500 is reported does differ: `pool.type =
   http-direct` names the cause in the response body and logs the offending
-  header as a `WARNING`, which needs `catch_workers_output = yes` to reach the
-  error log at all (issue #73), while under `pool.executor = worker`
+  header as a `WARNING`, which since issue #260 reaches `error_log` like any
+  other line the child writes, while under `pool.executor = worker`
   `fpmng_worker_respond()` returns `false` — the handler is the one that
   learns — and the client gets libevent's bare 500 page.
 - There are at most 16 pending PHP response writes per worker; further ready

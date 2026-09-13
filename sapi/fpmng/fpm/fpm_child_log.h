@@ -39,6 +39,12 @@
  *   because the channel is per pool — with supervisor.processes > 1 the text of
  *   the lines is identical.
  *
+ * pool.type = http-direct opts in as well, for a different reason (issue #260):
+ * its child owns the accept socket, so the child is the only process that knows
+ * it has stopped accepting, and retirement -- the #65 feature a deploy is built
+ * on -- was invisible without catch_workers_output = yes. It takes this channel
+ * and NOT the PHP-diagnostics half of it, which is why those are two bits.
+ *
  * Nothing here knows what a supervisor is: a pool type opts in with
  * fpm_pool_type_s.child_logs_via_master (see fpm_pool_type.h).
  *

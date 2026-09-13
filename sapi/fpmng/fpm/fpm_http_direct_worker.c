@@ -64,6 +64,7 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_direct_user_ini.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_conn.h"
 #include "fpm_http_acl.h"
@@ -1455,7 +1456,12 @@ static zend_result fpm_worker_register_functions(HashTable *function_table)
 
 static void fpm_worker_install_sapi(void)
 {
-	sapi_module.pre_request_init = NULL;
+	/* Issue #60, with this executor's twist: one php_request_startup() covers
+	 * the whole worker, so the hook fires once and the .user.ini next to the
+	 * worker script governs every request the worker then serves from its own
+	 * loop. That is the only meaning the file can have here -- there is no
+	 * per-request ini stage to revert to -- and docs/http-direct.md says so. */
+	sapi_module.pre_request_init = fpm_http_direct_user_ini_pre_request;
 	sapi_module.deactivate = NULL;
 	sapi_module.ub_write = fpm_worker_ub_write;
 	sapi_module.flush = fpm_worker_flush;
@@ -1620,6 +1626,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	fpm_worker_install_sapi();
+	/* Issue #60: the directory of the worker script this child actually
+	 * resolved, never the configured string and never anything a client sends. */
+	if (fpm_http_direct_user_ini_init_child(wp->config->name, fw.root, fw.script) < 0) {
+		exit(FPM_EXIT_CONFIG);
+	}
 	/* The child stays in the ACCEPTING stage for its whole life: it never ends
 	 * a request in the scoreboard sense, so the master's per-request deadlines
 	 * would have nothing to measure — which is why this type rejects them

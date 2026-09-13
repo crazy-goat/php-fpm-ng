@@ -205,6 +205,51 @@ static void fpm_direct_retire_signal(int signo)
 	fpm_direct_retiring = 1;
 }
 
+/* Issue #259. php_request_startup() -> zend_signal_activate() reinstalls an
+ * action for every signal in zend_sigs[], SIGQUIT and SIGUSR1 among them, with
+ *   sa.sa_flags = SA_SIGINFO;
+ * (Zend/zend_signal.c:305) -- so the SA_RESTART child_main() asked for is gone
+ * from the first request's startup onwards, and the kernel action that decides
+ * whether an interrupted syscall restarts says "do not restart".
+ *
+ * This puts the flag back without touching the handler: the action is read
+ * back, SA_RESTART is OR'd in, and the same struct goes in again. What Zend
+ * installed still runs; it just no longer interrupts the script's I/O.
+ *
+ * It is called after php_request_startup() returns, which is the only place
+ * with no window: activate() is inside that call, and nothing between its
+ * return and this line executes a line of PHP. Re-installing the handler
+ * instead (the shape issue #258 rejected) would also undo Zend's deferral.
+ *
+ * MEASURED, 2026-09-13 (the repro issue #259 asked for and did not have).
+ * An http-direct classic child blocked in read() on a FIFO, SIGUSR1 sent
+ * while it was blocked:
+ *   one signal   -> fread() returns 'hello' even unpatched. main/streams/
+ *                   plain_wrapper.c:459 retries a read that returns EINTR
+ *                   exactly once, which absorbs it.
+ *   two signals  -> fread() returns false, unpatched. The second EINTR falls
+ *                   through to the "TODO: Should this be treated as a proper
+ *                   error" branch (:470) and the read fails.
+ *   two signals  -> fread() returns 'hello' with this function in place: the
+ *                   read is restarted by the kernel and never sees EINTR.
+ * So the exposure is real but narrower than the issue assumed: PHP's own
+ * stream layer absorbs a single interruption, and a socket read absorbs any
+ * number (xp_socket.c:145-156 loops on EINTR around poll()). What it does not
+ * absorb is repeated signals, or an extension that does its own read(). */
+void fpm_http_direct_restore_sa_restart(int signo)
+{
+	struct sigaction current;
+
+	if (sigaction(signo, NULL, &current) < 0) {
+		return;
+	}
+	if (current.sa_flags & SA_RESTART) {
+		return;
+	}
+	current.sa_flags |= SA_RESTART;
+	(void) sigaction(signo, &current, NULL);
+}
+
 /* Monotonic, unlike the gettimeofday() this file uses to stamp requests for the
  * access log: a deadline read off the wall clock moves when NTP steps it, and
  * the step either stretches a drain or ends it on the spot. Same reason
@@ -1804,6 +1849,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	sigaction(SIGTERM, &term_before, NULL);
+	/* Issue #259: and put back the SA_RESTART that request startup just took
+	 * off SIGQUIT and SIGUSR1, for the same reason the line above puts back
+	 * SIGTERM's disposition. */
+	fpm_http_direct_restore_sa_restart(SIGQUIT);
+	fpm_http_direct_restore_sa_restart(SIGUSR1);
 	EG(exit_status) = 0;
 	zend_first_try {
 		if (fpm_php_limit_extensions(w->script)) {
@@ -1953,13 +2003,14 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	 * that as an I/O failure rather than retrying -- retiring a child would
 	 * fail the very request it was retiring around (issue #65).
 	 *
-	 * It only holds until the child's first request. zend_signal_register()
-	 * installs the deferring handler with sa_flags = SA_SIGINFO and nothing
-	 * else (Zend/zend_signal.c:305), so from then on the kernel-level action
-	 * for these two signals does not restart syscalls; what the snapshot below
-	 * preserves is the handler, not the flag. Nothing at this call site can
-	 * change that -- the first activate() happens long after child_main() has
-	 * returned into the event loop. Tracked by issue #259. */
+	 * This call alone only holds until the child's first request.
+	 * zend_signal_activate() reinstalls the deferring handler with
+	 * sa_flags = SA_SIGINFO and nothing else (Zend/zend_signal.c:305), so from
+	 * then on the kernel-level action for these two signals would not restart
+	 * syscalls; what the snapshot below preserves is the handler, not the flag.
+	 * Issue #259: the flag is put back after every php_request_startup() in
+	 * this file by fpm_http_direct_restore_sa_restart(), which is where the
+	 * measurement lives. */
 	action.sa_flags = SA_RESTART;
 	if (sigaction(SIGQUIT, &action, NULL) < 0) exit(FPM_EXIT_SOFTWARE);
 	/* issue #65. Without this SIGUSR1 is SIG_DFL in a child (fpm_signals.c

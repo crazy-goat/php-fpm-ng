@@ -131,12 +131,23 @@ def verify_binary(binary):
     A stock php-fpm would answer every request in this harness perfectly well
     over its own listener and the numbers would look plausible, which is the
     failure mode worth an explicit check.
+
+    Both halves of the identity are returned, not just the digest: `php-fpm -v`
+    prints the stock PHP banner on an fpm-ng build too, so a metadata.json
+    carrying only the banner and a hash says nothing about *which* build was
+    measured to a reader who does not have that exact binary any more. The
+    marker that made this one acceptable is recorded alongside it.
     """
     data = binary.read_bytes()
-    strings = subprocess.check_output(["strings", str(binary)], text=True)
+    strings = subprocess.check_output(["strings", "-a", str(binary)], text=True)
     if DIRECT_MARKER not in strings:
         raise SystemExit(f"refusing {binary}: no http-direct marker ({DIRECT_MARKER!r}) in the binary")
-    return hashlib.sha256(data).hexdigest()
+    symbols = sorted({line.strip() for line in strings.splitlines()
+                      if line.strip().startswith("fpmng_")})
+    marker = {"direct_marker": DIRECT_MARKER,
+              "fpmng_symbol_count": len(symbols),
+              "fpmng_symbols_sample": symbols[:12]}
+    return hashlib.sha256(data).hexdigest(), marker
 
 
 class PortRange:
@@ -1299,7 +1310,7 @@ def main():
     args.binary = args.binary.resolve()
     # Before the scratch directory is created, so a refused binary leaves
     # nothing behind to clean up.
-    sha256 = verify_binary(args.binary)
+    sha256, fpmng_marker = verify_binary(args.binary)
     # Same reason: a descriptor limit too low to hold the idle set is a refusal
     # before anything exists, not a half-made directory the rerun trips over.
     raise_nofile(max(args.idle) + args.stream_connections + 64)
@@ -1343,6 +1354,7 @@ def main():
     metadata = {
         "binary": str(args.binary),
         "sha256": sha256,
+        "fpmng_marker": fpmng_marker,
         "version": subprocess.check_output([str(args.binary), "-v"], text=True).strip(),
         # signal.Signals stringifies to its number under str(); record the name,
         # because a metadata.json saying "3" is not a reproducible run record.

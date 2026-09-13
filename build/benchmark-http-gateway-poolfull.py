@@ -46,6 +46,11 @@ What it reports per cell, which is #54's list:
                              timed from the client's first attempt rather than
                              from the attempt that happened to work
 
+  upstreams                  who holds the shared budget, sampled per gateway
+                             process while the window runs (issue #157), so a
+                             two-gateway result can be attributed instead of
+                             guessed at
+
 The goodput block exists because a 503 is the fastest thing this gateway can
 produce. A client that fires the next request the instant a response arrives
 is rewarded for being rejected, which flatters the status quo by construction
@@ -77,6 +82,21 @@ directory under `~/rd/`, its own port range (21000-21099 by default), and
 teardown by the pid file this process wrote. Nothing is ever matched by binary
 name.
 
+`--think-time-ms` exists for the same kind of reason, one level down. Under a
+closed loop `gw->waiting` is never empty, `fpm_http_pump_once()` hands every
+freed upstream straight to the next queued request, and no upstream is ever
+idle -- so `http.idle_timeout` cannot fire, and comparing it at 500 ms and at 0
+would produce two columns of noise. A think time with more connections than
+workers is the condition under which that comparison means anything, which is
+what issue #157 has to settle before the measurement run includes the variant.
+
+`--sample-ms` samples, per gateway process, how many connections to the pool's
+FastCGI socket it holds -- one per unit of the shared budget it has taken. The
+budget counter itself is in shared memory the status-quo binary does not
+expose; this decomposes it from outside, which is more than reading it would
+give. Per-gateway *503* counts are not available that way and the row says so
+rather than leaving the column silently absent.
+
 The decision rule these numbers are judged against belongs to #159/#160 and is
 not in this file; this file only has to produce numbers that can be judged.
 """
@@ -87,6 +107,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import resource
 import selectors
 import shutil
@@ -269,6 +290,136 @@ def descendants_of(pid):
         seen.append(current)
         stack.extend(children_of(current))
     return seen
+
+
+def unix_socket_inodes(path):
+    """Inodes of every AF_UNIX socket currently bound to or connected via `path`.
+
+    /proc/net/unix names the path on the listening socket and on every accepted
+    peer, which is exactly what is needed here: the pool's FastCGI socket, and
+    an inode per open connection to it.
+    """
+    inodes = set()
+    try:
+        lines = Path("/proc/net/unix").read_text().splitlines()[1:]
+    except OSError:
+        return inodes
+    for line in lines:
+        fields = line.split()
+        if len(fields) >= 8 and fields[-1] == str(path):
+            inodes.add(fields[6])
+    return inodes
+
+
+def socket_inodes_of(pid):
+    """Inodes of the sockets one process has open, from its fd table."""
+    inodes = set()
+    try:
+        entries = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return inodes
+    for entry in entries:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{entry}")
+        except OSError:
+            continue
+        if target.startswith("socket:["):
+            inodes.add(target[8:-1])
+    return inodes
+
+
+def gateway_pids(master):
+    """The gateway processes of the pool under measurement.
+
+    Recognised by the process title fpm_http_gateway_run() sets, "http gateway
+    <pool> [n]", and not by the binary name: this box is shared, and issue #154
+    is explicit that nothing here may be matched by binary name. The title is
+    read from the master's own descendants, so another run's gateways cannot be
+    picked up even if they share the title.
+    """
+    found = []
+    for pid in descendants_of(master):
+        try:
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        if "http gateway" in cmdline:
+            found.append((pid, cmdline.strip()))
+    return found
+
+
+class UpstreamSampler(threading.Thread):
+    """Samples who holds the shared budget, while the window is running.
+
+    Issue #157: a two-gateway 503 count mixes "the pool is genuinely full" with
+    "the budget is stranded in the other gateway process", and those two have
+    opposite implications for which variant of #54 wins. The budget counter
+    itself (`gw->upstreams_used`, shared memory) is not exposed by the
+    status-quo binary, but what it counts is: one open connection from a
+    gateway process to the pool's FastCGI socket per unit of budget taken.
+    Counting those per gateway pid decomposes the counter instead of merely
+    reading it.
+
+    Sampled rather than integrated: this costs a directory listing per gateway
+    per tick, against a gateway that is meant to be the thing under load, so
+    the tick is deliberately coarse (--sample-ms, default 250).
+    """
+
+    def __init__(self, master, listen_path, interval_ms):
+        super().__init__(daemon=True)
+        self.master = master
+        self.listen_path = str(listen_path)
+        self.interval = interval_ms / 1000.0
+        self.samples = []
+        self._stop = threading.Event()
+
+    def stop(self):
+        self._stop.set()
+
+    def run(self):
+        while not self._stop.is_set():
+            inodes = unix_socket_inodes(self.listen_path)
+            per_pid = {}
+            for pid, _ in gateway_pids(self.master):
+                per_pid[pid] = len(socket_inodes_of(pid) & inodes)
+            self.samples.append({"at": time.monotonic(), "per_gateway": per_pid,
+                                 "total": sum(per_pid.values())})
+            self._stop.wait(self.interval)
+
+
+def upstream_report(samples):
+    """What the samples say about where the budget was."""
+    if not samples:
+        return None
+    totals = [s["total"] for s in samples]
+    pids = sorted({pid for s in samples for pid in s["per_gateway"]})
+    per_gateway = {}
+    for pid in pids:
+        series = [s["per_gateway"].get(pid, 0) for s in samples]
+        per_gateway[str(pid)] = {
+            "mean": statistics.fmean(series),
+            "max": max(series),
+            # How often this gateway sat on a connection it was not using is
+            # not directly visible -- an open upstream is busy or idle and the
+            # binary does not say which -- so this is the count, not the idle
+            # count, and the write-up has to say so.
+            "samples_at_zero": sum(1 for v in series if v == 0),
+        }
+    return {
+        "n_samples": len(samples),
+        "budget_held_total": {"mean": statistics.fmean(totals), "max": max(totals),
+                              "p50": percentile(totals, 0.5), "p99": percentile(totals, 0.99)},
+        "per_gateway": per_gateway,
+        # Both of these are what issue #157 asks to be able to attribute. The
+        # 503s themselves cannot be: the status-quo binary logs no gateway
+        # identity with a response, so a per-gateway 503 count would need a
+        # change to the binary under measurement, which this spike does not
+        # make. Stated here rather than left as an absent column.
+        "per_gateway_503": None,
+        "per_gateway_503_note": ("not observable in the status-quo binary: the access log carries "
+                                 "no gateway identity, so a rejection cannot be attributed to the "
+                                 "process that sent it"),
+    }
 
 
 def rss_bytes(pid):
@@ -627,7 +778,8 @@ class Load:
     what the server does measures the server's queue, not its policy.
     """
 
-    def __init__(self, port, concurrency, threads, query, timeout, retry=None):
+    def __init__(self, port, concurrency, threads, query, timeout, retry=None,
+                 think_ms=0.0, think_jitter=0.0):
         self.port = port
         self.concurrency = concurrency
         self.threads = max(1, min(threads, concurrency))
@@ -639,6 +791,14 @@ class Load:
         # _plan() for what "honours" means and RETRY_POLICY_HELP for why the
         # exact shape of it is written into the results file.
         self.retry = retry
+        # Issue #157: time a client spends NOT asking for anything. Without it
+        # a closed loop keeps gw->waiting non-empty, fpm_http_pump_once() hands
+        # every freed upstream straight to the next queued request, and no
+        # upstream is ever idle -- so http.idle_timeout cannot fire and a run
+        # that varied it would be measuring nothing.
+        self.think_ms = think_ms
+        self.think_jitter = think_jitter
+        self.paced = bool(retry) or think_ms > 0
         self.records = []
         self.logical = []
         self.in_flight_at_end = 0
@@ -668,6 +828,15 @@ class Load:
             wait = (self.retry["base_ms"] / 1000.0) * (2 ** max(0, attempt - 2))
         return min(wait, cap)
 
+    def _think(self):
+        """How long this client sits on its hands before wanting anything else."""
+        if self.think_ms <= 0:
+            return 0.0
+        if self.think_jitter <= 0:
+            return self.think_ms / 1000.0
+        spread = self.think_ms * self.think_jitter
+        return max(0.0, random.uniform(self.think_ms - spread, self.think_ms + spread)) / 1000.0
+
     def _finish(self, state, logical, outcome, now, collect_from):
         """Close one logical request -- the thing the client actually wanted."""
         if now >= collect_from:
@@ -677,7 +846,10 @@ class Load:
                 "e2e_ms": (now - state["start"]) * 1000,
                 "at": now,
             })
-        state["start"] = now
+        # Cleared, not set to `now`: the next logical request is timed from
+        # the moment it is actually sent, so a think time does not land in the
+        # end-to-end latency of a request that had not been asked for yet.
+        state["start"] = None
         state["attempts"] = 1
 
     def _plan(self, state, record, logical, collect_from):
@@ -695,12 +867,12 @@ class Load:
             return 0.0
         if record["outcome"] == "ok":
             self._finish(state, logical, "ok", now, collect_from)
-            return 0.0
+            return self._think()
         if record["outcome"] == "error":
             # A fault on this side of the socket. Counted, but not charged to
             # the policy under test as a rejection.
             self._finish(state, logical, "error", now, collect_from)
-            return 0.0
+            return self._think()
         # A rejection: a 503, any other non-2xx, or a close with the request in
         # flight. All three cost the client another attempt, which is the cost
         # issue #158 exists to put on the clock.
@@ -711,9 +883,20 @@ class Load:
         max_attempts = self.retry["max_attempts"] if self.retry else 1
         if state["attempts"] >= max_attempts:
             self._finish(state, logical, "giveup", now, collect_from)
-            return 0.0
+            return self._think()
         state["attempts"] += 1
         return self._retry_delay(record, state["attempts"])
+
+    def _send(self, client, state):
+        """One attempt. The logical clock starts here when this is attempt 1."""
+        if state["start"] is None:
+            state["start"] = time.monotonic()
+        state["due"] = None
+        try:
+            client.send(self.query)
+        except OSError as exc:
+            with self._lock:
+                self.errors.append(f"send: {exc}")
 
     def _worker(self, count, stop_at, collect_from):
         local = []
@@ -731,10 +914,9 @@ class Load:
             if not clients:
                 return
             selector = selectors.DefaultSelector()
-            now = time.monotonic()
             for client in clients:
-                state[client] = {"start": now, "attempts": 1, "due": None}
-                client.send(self.query)
+                state[client] = {"start": None, "attempts": 1, "due": None}
+                self._send(client, state[client])
                 selector.register(client.sock, selectors.EVENT_READ, client)
 
             while time.monotonic() < stop_at:
@@ -742,7 +924,7 @@ class Load:
                 # the loop also has to wake up to send requests whose wait has
                 # expired, and a 50 ms floor under a 5 ms backoff would be the
                 # backoff.
-                for key, _ in selector.select(timeout=0.005 if self.retry else 0.05):
+                for key, _ in selector.select(timeout=0.005 if self.paced else 0.05):
                     client = key.data
                     try:
                         record = client.recv()
@@ -777,20 +959,18 @@ class Load:
                     if time.monotonic() >= stop_at:
                         continue
                     if delay > 0:
-                        # The client is honouring the rejection. Its next
-                        # attempt is sent by the sweep below, and the wait is
-                        # part of the end-to-end time of the request it is
-                        # still trying to get answered.
+                        # Either the client is honouring the rejection -- and
+                        # that wait is part of the end-to-end time of the
+                        # request it is still trying to get answered -- or it
+                        # is thinking between two requests, which is not. Which
+                        # of the two it is has already been settled by
+                        # _finish(); the sweep below just sends when the time
+                        # comes.
                         state[client]["due"] = time.monotonic() + delay
                         continue
-                    state[client]["due"] = None
-                    try:
-                        client.send(self.query)
-                    except OSError as exc:
-                        with self._lock:
-                            self.errors.append(f"send: {exc}")
+                    self._send(client, state[client])
 
-                if self.retry:
+                if self.paced:
                     now = time.monotonic()
                     if now >= stop_at:
                         break
@@ -798,12 +978,7 @@ class Load:
                         due = state[client]["due"]
                         if due is None or due > now or client.in_flight:
                             continue
-                        state[client]["due"] = None
-                        try:
-                            client.send(self.query)
-                        except OSError as exc:
-                            with self._lock:
-                                self.errors.append(f"send: {exc}")
+                        self._send(client, state[client])
             # Logical requests still unanswered when the window closed are
             # neither successes nor give-ups; they are reported separately so
             # that successes + give-ups + errors is exactly the number of
@@ -991,6 +1166,11 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
         # below mean nothing without it, and a row is what gets pasted into a
         # comment. None means the closed loop -- the client of task 054.
         "retry_policy": retry_policy(args),
+        # Issue #157: recorded in the row for the same reason as the retry
+        # policy -- an idle_timeout comparison means nothing without the think
+        # time that lets an upstream go idle in the first place.
+        "think_time_ms": args.think_time_ms,
+        "think_jitter": args.think_jitter,
     }
 
     pool = Pool(arm["binary"], directory,
@@ -1019,10 +1199,18 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
 
     master = pool.master_pid()
     load = Load(port, concurrency, threads, WORKLOADS[workload], args.request_timeout,
-                retry=retry_policy(args))
+                retry=retry_policy(args),
+                think_ms=args.think_time_ms, think_jitter=args.think_jitter)
 
     cpu_before = tree_cpu_seconds(master)
+    # Issue #157: who holds the shared budget, sampled while the window runs.
+    sampler = UpstreamSampler(master, listen_path, args.sample_ms) if args.sample_ms > 0 else None
+    if sampler:
+        sampler.start()
     timing = load.run(args.warmup_seconds, args.seconds)
+    if sampler:
+        sampler.stop()
+        sampler.join(timeout=5)
     cpu_after = tree_cpu_seconds(master)
     memory = tree_memory(master)
 
@@ -1056,6 +1244,10 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
         # one attempt per logical request, which makes the two latency columns
         # agree and is itself worth being able to show.
         "goodput": goodput_report(load.logical, window, load.in_flight_at_end),
+        # Issue #157. Includes the warmup, deliberately: a budget slot taken
+        # during the warmup and still held at the start of the window is the
+        # situation the issue is about.
+        "upstreams": upstream_report(sampler.samples) if sampler else None,
         "cpu_seconds_window": cpu_after - cpu_before,
         "cpu_us_per_2xx": ((cpu_after - cpu_before) * 1e6 / n_ok) if n_ok else None,
         "memory_end": memory,
@@ -1107,6 +1299,19 @@ def main():
                              "1 second and a measurement window is ten, so the cap is what keeps "
                              "the window measuring the server rather than the sleep; it is "
                              "recorded with the results")
+    # Issue #157: the workload in which http.idle_timeout can fire at all.
+    parser.add_argument("--think-time-ms", type=float, default=0.0,
+                        help="time a client waits after a request is settled before wanting the "
+                             "next one (issue #157). 0, the default, is the closed loop. With "
+                             "more connections than workers and a think time, upstreams go "
+                             "genuinely idle, which is the only condition under which "
+                             "http.idle_timeout can change anything")
+    parser.add_argument("--think-jitter", type=float, default=0.5, metavar="FRACTION",
+                        help="uniform jitter around --think-time-ms, as a fraction of it; keeps "
+                             "the connections from marching in step after the first round")
+    parser.add_argument("--sample-ms", type=float, default=250.0,
+                        help="how often to sample which gateway process holds how much of the "
+                             "shared budget (issue #157); 0 turns the sampling off")
     parser.add_argument("--retry-ignore-retry-after", action="store_true",
                         help="back off on the schedule above even when the response carried a "
                              "Retry-After, for showing what honouring it costs")

@@ -293,11 +293,14 @@ def descendants_of(pid):
 
 
 def unix_socket_inodes(path):
-    """Inodes of every AF_UNIX socket currently bound to or connected via `path`.
+    """Inodes of the AF_UNIX sockets that carry `path` in /proc/net/unix.
 
-    /proc/net/unix names the path on the listening socket and on every accepted
-    peer, which is exactly what is needed here: the pool's FastCGI socket, and
-    an inode per open connection to it.
+    That is the listening socket plus one accepted socket per open connection
+    -- and every one of them lives in the *server*: the pool's master and its
+    workers. The connecting side, which is the gateway, is anonymous there: its
+    socket has no path and /proc/net/unix does not say what it is connected to.
+    So this set is not what a gateway holds; it is what a gateway's sockets must
+    be shown to be *connected to*, which is what unix_peer_map() below supplies.
     """
     inodes = set()
     try:
@@ -309,6 +312,39 @@ def unix_socket_inodes(path):
         if len(fields) >= 8 and fields[-1] == str(path):
             inodes.add(fields[6])
     return inodes
+
+
+def unix_peer_map():
+    """local AF_UNIX socket inode -> the inode of the socket it is connected to.
+
+    /proc/net/unix has no peer column, and a connected client socket appears
+    there with no path at all, so nothing under /proc alone can say that a
+    given gateway fd is a connection to the pool's FastCGI socket rather than
+    one of the socketpairs FPM keeps to its master. `ss -x` does say it: for
+    every unix socket it prints the local inode and the peer inode, and the
+    pairing is what turns an anonymous client fd into "one unit of the shared
+    budget, held by this pid".
+
+    Run without -p on purpose: the process column makes ss walk every fd table
+    on the box, and this runs on a tick against a gateway that is supposed to
+    be the thing under load. The pids come from the master's own descendants
+    instead (gateway_pids()), which is also the rule this harness works under --
+    nothing on a shared box is matched by binary name.
+    """
+    peers = {}
+    try:
+        out = subprocess.run(["ss", "-xH"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return peers
+    for line in out.splitlines():
+        fields = line.split()
+        # ... <local addr> <local inode> <peer addr> <peer inode>
+        if len(fields) < 4:
+            continue
+        local_inode, peer_inode = fields[-3], fields[-1]
+        if local_inode.isdigit() and peer_inode.isdigit():
+            peers[local_inode] = peer_inode
+    return peers
 
 
 def socket_inodes_of(pid):
@@ -379,9 +415,15 @@ class UpstreamSampler(threading.Thread):
     def run(self):
         while not self._stop.is_set():
             inodes = unix_socket_inodes(self.listen_path)
+            peers = unix_peer_map()
             per_pid = {}
             for pid, _ in gateway_pids(self.master):
-                per_pid[pid] = len(socket_inodes_of(pid) & inodes)
+                # A gateway fd counts when the socket on the other end of it is
+                # one of the pool's -- not when the fd is itself one of them,
+                # which it never is and which made this count zero in every
+                # sample of the first validation run.
+                per_pid[pid] = sum(1 for ino in socket_inodes_of(pid)
+                                   if peers.get(ino) in inodes)
             self.samples.append({"at": time.monotonic(), "per_gateway": per_pid,
                                  "total": sum(per_pid.values())})
             self._stop.wait(self.interval)

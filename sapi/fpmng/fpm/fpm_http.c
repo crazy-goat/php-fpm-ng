@@ -175,6 +175,90 @@ struct {								\
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
 #define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
 
+/* ------------------------------------------------------------------ issue #156
+ * THROWAWAY. Not for merge -- #54 puts merging a policy change out of scope.
+ *
+ * "Reclaim before rejecting": with http.gateways > 1 the shared budget can be
+ * held by an upstream that is merely IDLE in a sibling gateway process while
+ * this one answers 503. The only thing that frees it today is
+ * http.idle_timeout, which is an eternity at the rates #54 measures.
+ *
+ * The policy here is off unless FPMNG_GW_RECLAIM=1, so an unmodified build of
+ * this branch behaves exactly like main -- which is how the criterion "the
+ * http.gateways = 1 behaviour is unchanged" is checked with the unmodified
+ * fpmng-http-pool-full-503.phpt.
+ *
+ * Knobs, all settable without a rebuild:
+ *   FPMNG_GW_RECLAIM=1    turn the policy on
+ *   FPMNG_GW_RECLAIM_MS   how long to give a sibling to let go, default 5 ms;
+ *                         when it expires the request is answered 503 exactly
+ *                         as it would have been without this patch.
+ *
+ * The cross-process arrangement is deliberately the cheapest one that works:
+ * a small shared-memory table in which every gateway process publishes its pid
+ * and its current idle-upstream count, plus SIGUSR2 as the "please let one go"
+ * doorbell. Nothing is queued, nothing waits on a lock, and a gateway that
+ * finds no sibling advertising an idle upstream -- the genuinely saturated
+ * case, and every http.gateways = 1 case -- takes the unmodified 503 path with
+ * no delay at all.
+ *
+ * SIGUSR2 is free in a gateway process: the master only ever sends it SIGTERM,
+ * and its "master reopened the logs" wakeup comes over the issue #134 pipe,
+ * not over a signal. A merged version would not spend a process-wide signal on
+ * this. */
+#define FPM_HTTP_RECLAIM_MAX_SLOTS 64
+#define FPM_HTTP_RECLAIM_DEFAULT_MS 5
+
+struct fpm_http_reclaim_shm_s {
+	atomic_t asked;				/* reclaims requested, all gateways of this pool */
+	atomic_t done;				/* idle upstreams actually released on request */
+	struct {
+		pid_t pid;			/* 0 = this slot has no live gateway process */
+		atomic_t idle;		/* upstreams held by that process and not busy */
+	} slot[FPM_HTTP_RECLAIM_MAX_SLOTS];
+};
+
+static int fpm_http_reclaim_ms = -1;
+
+static int fpm_http_reclaim_on(void)
+{
+	if (fpm_http_reclaim_ms < 0) {
+		const char *on = getenv("FPMNG_GW_RECLAIM");
+		const char *ms = getenv("FPMNG_GW_RECLAIM_MS");
+
+		if (!(on && *on && atoi(on) != 0)) {
+			fpm_http_reclaim_ms = 0;
+		} else {
+			fpm_http_reclaim_ms = ms && *ms ? atoi(ms) : FPM_HTTP_RECLAIM_DEFAULT_MS;
+			if (fpm_http_reclaim_ms <= 0) {
+				zlog(ZLOG_ALERT, "http: FPMNG_GW_RECLAIM_MS must be positive; the reclaim policy stays OFF "
+					"(throwaway build for issue #156)");
+				fpm_http_reclaim_ms = 0;
+			} else {
+				zlog(ZLOG_WARNING, "http: THROWAWAY build for issue #156: pool-full policy is RECLAIM, "
+					"a sibling gateway gets %d ms to release an idle upstream before the 503",
+					fpm_http_reclaim_ms);
+			}
+		}
+	}
+	return fpm_http_reclaim_ms > 0;
+}
+
+/* atomic_cmp_set is all fpm_atomic.h offers on every branch, so the two
+ * counters below are incremented the same way fpm_http_budget_take() claims a
+ * slot. They are diagnostics, not budget: nothing reads them to make a
+ * decision. */
+static void fpm_http_reclaim_bump(atomic_t *counter)
+{
+	while (1) {
+		unsigned long v = *counter;
+
+		if (atomic_cmp_set(counter, v, v + 1)) {
+			return;
+		}
+	}
+}
+
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
 
@@ -292,6 +376,13 @@ struct fpm_http_gateway_s {
 	/* how many persistent connections all the gateways of this pool may hold together */
 	unsigned max_upstreams;
 	atomic_t *upstreams_used;		/* shared between the gateway processes */
+
+	/* issue #156 throwaway, all NULL/0 unless FPMNG_GW_RECLAIM is on */
+	struct fpm_http_reclaim_shm_s *reclaim;	/* shared, allocated by the master before the first fork */
+	unsigned reclaim_self;			/* gateway process only: which slot[] is ours */
+	struct event *reclaim_doorbell;		/* gateway process only: SIGUSR2 -> fpm_http_reclaim_asked() */
+	struct event *reclaim_retry;		/* gateway process only: one-shot, re-pumps after the grace period */
+	int reclaim_pending;			/* a sibling has been asked and the grace period is running */
 
 	/* gateway process only */
 	struct event_base *base;
@@ -432,6 +523,7 @@ struct _fpm_http_upstream {
 };
 
 static void fpm_http_pump(struct fpm_http_gateway_s *gw);
+static void fpm_http_reclaim_publish(struct fpm_http_gateway_s *gw);	/* issue #156 throwaway */
 static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl);
 static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg);
@@ -1061,6 +1153,7 @@ static void fpm_http_upstream_detach(fpm_http_upstream *up)
 	up->fd = -1;
 	smart_str_free(&up->pending);
 	fpm_http_budget_give_back(gw);
+	fpm_http_reclaim_publish(gw);
 }
 
 static void fpm_http_upstream_free(fpm_http_upstream *up)
@@ -1376,6 +1469,148 @@ static fpm_http_upstream *fpm_http_upstream_new(struct fpm_http_gateway_s *gw)
 
 /* One dispatch round. Never called directly -- fpm_http_pump() below owns the
  * re-entrancy rules. */
+/* ---------------------------------------------------------------- issue #156 throwaway */
+
+/* Publishes how many upstreams this process holds that a sibling could have.
+ * Single writer per slot -- only the owning process ever stores here -- so a
+ * plain store is enough; the readers are other processes deciding whom to ring,
+ * and a stale count costs at most one wasted SIGUSR2. */
+static void fpm_http_reclaim_publish(struct fpm_http_gateway_s *gw)
+{
+	fpm_http_upstream *up;
+	unsigned long idle = 0;
+
+	if (!gw->reclaim) {
+		return;
+	}
+	TAILQ_FOREACH(up, &gw->upstreams, link) {
+		if (!up->busy && !up->connecting && !up->dead) {
+			idle++;
+		}
+	}
+	gw->reclaim->slot[gw->reclaim_self].idle = idle;
+}
+
+/* SIGUSR2 from a sibling that could not take budget. Delivered as a libevent
+ * signal event, i.e. from the event loop and not from a real signal handler,
+ * so dropping an upstream here is as safe as dropping one from any other
+ * callback -- and safer than most, because an idle upstream has active == 0
+ * and is freed on the spot, outside the callback of the event being freed
+ * (which is the open question of issue #132, not this).
+ *
+ * Only an IDLE upstream is ever released, which is what keeps "a request in
+ * flight on a busy upstream is never disturbed" true by construction: a busy
+ * upstream is not a candidate at any point in this function.
+ *
+ * fpm_http_pump() is deliberately NOT called here. The budget just returned is
+ * meant for the sibling that rang; this process takes it straight back if it
+ * has a queue of its own, and the caller would have gained nothing. */
+static void fpm_http_reclaim_asked(evutil_socket_t sig, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	fpm_http_upstream *up, *idle = NULL;
+
+	(void) sig; (void) what;
+
+	TAILQ_FOREACH(up, &gw->upstreams, link) {
+		if (!up->busy && !up->connecting && !up->dead) {
+			idle = up;
+			break;
+		}
+	}
+	if (!idle) {
+		/* The advertised idle upstream went busy between the sibling's read
+		 * and this wakeup. Republish so the next decision is taken on a
+		 * truer count; the sibling's grace period expires into the 503 it
+		 * would have sent anyway. */
+		fpm_http_reclaim_publish(gw);
+		return;
+	}
+	fpm_http_upstream_drop(idle);		/* detach gives the budget back */
+	fpm_http_reclaim_bump(&gw->reclaim->done);
+	/* Observable from outside the process without inferring it from the 503
+	 * count, which is the third acceptance criterion of issue #156. */
+	zlog(ZLOG_NOTICE, "[pool %s] http: released an idle upstream on a sibling's request (issue #156 throwaway; "
+		"%lu asked, %lu released)", gw->pool, (unsigned long) gw->reclaim->asked, (unsigned long) gw->reclaim->done);
+	fpm_http_reclaim_publish(gw);
+}
+
+static void fpm_http_reclaim_expired(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+
+	(void) fd; (void) what;
+
+	/* The flag stays set: fpm_http_reclaim_try() below clears it and refuses a
+	 * second round, so this pump either dispatches or falls through to the
+	 * unmodified 503 drain. */
+	fpm_http_pump(gw);
+}
+
+/* Called with the budget already refused. Returns 1 when a sibling has been
+ * asked to let an idle upstream go and the answer should wait for the grace
+ * period, 0 when the caller should send its 503 right now.
+ *
+ * Returns 0 immediately -- no signal, no timer, no delay -- when the policy is
+ * off, when this is the second time round for the same queue, or when no
+ * sibling advertises an idle upstream. The last case covers both
+ * http.gateways = 1 and a genuinely saturated pool, which is why neither gets
+ * slower here. */
+static int fpm_http_reclaim_try(struct fpm_http_gateway_s *gw)
+{
+	unsigned i;
+
+	if (!gw->reclaim || !gw->reclaim_retry) {
+		return 0;
+	}
+	if (gw->reclaim_pending) {
+		gw->reclaim_pending = 0;
+		return 0;
+	}
+	for (i = 0; i < gw->nproc && i < FPM_HTTP_RECLAIM_MAX_SLOTS; i++) {
+		struct timeval grace;
+		pid_t pid = gw->reclaim->slot[i].pid;
+
+		if (i == gw->reclaim_self || pid <= 0 || gw->reclaim->slot[i].idle == 0) {
+			continue;
+		}
+		if (kill(pid, SIGUSR2) != 0) {
+			continue;			/* the slot's process is gone; the master will respawn it */
+		}
+		fpm_http_reclaim_bump(&gw->reclaim->asked);
+		grace.tv_sec = fpm_http_reclaim_ms / 1000;
+		grace.tv_usec = (fpm_http_reclaim_ms % 1000) * 1000;
+		evtimer_add(gw->reclaim_retry, &grace);
+		gw->reclaim_pending = 1;
+		return 1;
+	}
+	return 0;
+}
+
+/* Gateway process, once it has an event_base: claim a slot, publish the pid,
+ * and hang the doorbell. */
+static void fpm_http_reclaim_child_init(struct fpm_http_gateway_s *gw, unsigned index)
+{
+	if (!gw->reclaim) {
+		return;
+	}
+	if (index >= FPM_HTTP_RECLAIM_MAX_SLOTS) {
+		gw->reclaim = NULL;
+		return;
+	}
+	gw->reclaim_self = index;
+	gw->reclaim->slot[index].idle = 0;
+	gw->reclaim->slot[index].pid = getpid();
+	gw->reclaim_doorbell = evsignal_new(gw->base, SIGUSR2, fpm_http_reclaim_asked, gw);
+	gw->reclaim_retry = evtimer_new(gw->base, fpm_http_reclaim_expired, gw);
+	if (!gw->reclaim_doorbell || !gw->reclaim_retry || event_add(gw->reclaim_doorbell, NULL) != 0) {
+		zlog(ZLOG_ALERT, "[pool %s] http: cannot arm the issue #156 reclaim policy in gateway %u; "
+			"this process answers 503 the unmodified way", gw->pool, index);
+		gw->reclaim->slot[index].pid = 0;
+		gw->reclaim = NULL;
+	}
+}
+
 static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 {
 	while (!TAILQ_EMPTY(&gw->waiting)) {
@@ -1393,6 +1628,15 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 			idle = fpm_http_upstream_new(gw);
 		}
 		if (!idle) {
+			/* Issue #156 throwaway: before the 503, give a sibling gateway
+			 * that is sitting on an IDLE upstream a few milliseconds to let
+			 * it go. Returns 0 with nothing done when the policy is off, when
+			 * this queue has already had its round, or when no sibling
+			 * advertises one -- so everything below is reached exactly as it
+			 * is on main. */
+			if (fpm_http_reclaim_try(gw)) {
+				return;
+			}
 			/* The pool is FULL for this gateway: every upstream connection it
 			 * holds is busy, and the shared budget says no new one may be
 			 * opened. Answer 503 + Retry-After instead of queueing towards a
@@ -1448,6 +1692,9 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 		c = TAILQ_FIRST(&gw->waiting);
 		TAILQ_REMOVE(&gw->waiting, c, link);
 		c->queued = 0;
+		/* Issue #156 throwaway: a dispatch ends the episode, so the next
+		 * refusal gets its own reclaim round. */
+		gw->reclaim_pending = 0;
 		c->upstream = idle;
 		idle->busy = 1;
 		idle->req_written = idle->reply_seen = 0;
@@ -1485,6 +1732,7 @@ static void fpm_http_pump(struct fpm_http_gateway_s *gw)
 		fpm_http_pump_once(gw);
 	} while (gw->pump_again);
 	gw->pumping = 0;
+	fpm_http_reclaim_publish(gw);		/* issue #156 throwaway */
 }
 
 /* the client went away: stop writing to it, but let the pool finish so the connection stays usable */
@@ -2396,6 +2644,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	gw->base = event_base_new();
 	gw->http = evhttp_new(gw->base);
 	fpm_http_log_follow_init(gw);
+	fpm_http_reclaim_child_init(gw, index);		/* issue #156 throwaway */
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls || gw->tls_wait_for_cert) {
 		/* Own SSL_CTX per gateway process, built from cert/key bytes the
@@ -2704,6 +2953,9 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		}
 		if (gw->upstreams_used) {
 			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
+		}
+		if (gw->reclaim) {			/* issue #156 throwaway */
+			fpm_shm_free(gw->reclaim, sizeof(*gw->reclaim));
 		}
 #ifdef HAVE_FPM_HTTP_TLS
 		if (gw->reload) {
@@ -3064,6 +3316,21 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return -1;
 		}
 		*gw->upstreams_used = 0;
+		/* Issue #156 throwaway. Allocated here, before the first fork, so
+		 * every gateway process inherits the mapping; a fixed slot array
+		 * keeps this one allocation the whole of it. */
+		if (fpm_http_reclaim_on()) {
+			if (gw->nproc > FPM_HTTP_RECLAIM_MAX_SLOTS) {
+				zlog(ZLOG_ALERT, "[pool %s] http: %u gateways is more than the issue #156 throwaway "
+					"publishes (%d); the reclaim policy stays OFF",
+					wp->config->name, gw->nproc, FPM_HTTP_RECLAIM_MAX_SLOTS);
+			} else if (!(gw->reclaim = fpm_shm_alloc(sizeof(*gw->reclaim)))) {
+				zlog(ZLOG_ALERT, "[pool %s] http: cannot allocate the issue #156 reclaim table; "
+					"the reclaim policy stays OFF", wp->config->name);
+			} else {
+				memset(gw->reclaim, 0, sizeof(*gw->reclaim));
+			}
+		}
 		gw->pids = calloc(gw->nproc, sizeof(pid_t));
 		/* array of pointers — sizeof(void *) is intentional */
 		gw->slots = calloc(gw->nproc, sizeof(void *));

@@ -40,6 +40,23 @@ What it reports per cell, which is #54's list:
   queue_wait_ms              percentiles of the `X-Fpmng-Queue-Wait` header if
                              the arm's binary emits one (#155's throwaway), and
                              absent rather than zero if it does not
+  goodput                    the same window counted the client's way (issue
+                             #158): successes per second per *logical* request,
+                             attempts each one took, and end-to-end latency
+                             timed from the client's first attempt rather than
+                             from the attempt that happened to work
+
+The goodput block exists because a 503 is the fastest thing this gateway can
+produce. A client that fires the next request the instant a response arrives
+is rewarded for being rejected, which flatters the status quo by construction
+-- so `--retry-attempts N` turns the client into one that honours the
+rejection, waits (Retry-After first, capped, exponential backoff otherwise) and
+tries again, and counts a client that runs out of attempts as a failure rather
+than dropping it from the denominator. The policy is recorded in
+`metadata.json` and in every row, because the number depends on it entirely.
+The default is one attempt, which is exactly the closed-loop client task 054
+measured with -- a harness whose default client differed from the one behind
+the published numbers would make every comparison with them wrong.
 
 What is kept from `build/benchmark-http-direct.py`, because it was right there:
 binary marker and sha256 identity check, a response-body check before anything
@@ -572,6 +589,27 @@ class Pool:
             self._log_handle = None
 
 
+def retry_policy(args):
+    """The retry policy as it goes into the results file, or None.
+
+    Issue #158 leaves the shape of the retry to the implementer and requires
+    that it be recorded, because the goodput number depends on it entirely.
+    This dict IS the record: it is written into metadata.json and into every
+    row, and it is the only thing run_cell() passes to the load generator.
+    """
+    if args.retry_attempts <= 1:
+        return None
+    return {
+        "max_attempts": args.retry_attempts,
+        "honour_retry_after": not args.retry_ignore_retry_after,
+        "base_ms": args.retry_base_ms,
+        "cap_ms": args.retry_cap_ms,
+        "backoff": "exponential, doubling per attempt, capped at cap_ms",
+        "retry_on": ["non2xx", "closed_without_response"],
+        "giveup_is": "a failure, counted in the denominator",
+    }
+
+
 class Load:
     """The load generator: `threads` threads, `concurrency` keep-alive clients.
 
@@ -589,19 +627,100 @@ class Load:
     what the server does measures the server's queue, not its policy.
     """
 
-    def __init__(self, port, concurrency, threads, query, timeout):
+    def __init__(self, port, concurrency, threads, query, timeout, retry=None):
         self.port = port
         self.concurrency = concurrency
         self.threads = max(1, min(threads, concurrency))
         self.query = query
         self.timeout = timeout
+        # Issue #158. None keeps the closed loop above exactly as it was: every
+        # response, whatever it says, is followed at once by the next request.
+        # A dict turns the client into one that honours a rejection -- see
+        # _plan() for what "honours" means and RETRY_POLICY_HELP for why the
+        # exact shape of it is written into the results file.
+        self.retry = retry
         self.records = []
+        self.logical = []
+        self.in_flight_at_end = 0
         self._lock = threading.Lock()
         self.errors = []
 
+    def _retry_delay(self, record, attempt):
+        """How long this client waits before attempt number `attempt`.
+
+        Retry-After first, because that is the gateway telling the client what
+        it thinks -- and the whole point of issue #158 is that ignoring it is
+        what made rejection look free. It is capped: the gateway says 1 second
+        (FPM_HTTP_RETRY_AFTER), and a 10-second window spent mostly asleep
+        would measure the cap and nothing else. The cap is a measurement
+        decision and it is recorded in the row.
+        """
+        cap = self.retry["cap_ms"] / 1000.0
+        wait = None
+        if self.retry["honour_retry_after"] and record.get("retry_after"):
+            try:
+                wait = float(record["retry_after"])
+            except ValueError:
+                # An HTTP-date rather than a delta. Not produced by this
+                # gateway; if it ever is, the backoff below covers it.
+                wait = None
+        if wait is None:
+            wait = (self.retry["base_ms"] / 1000.0) * (2 ** max(0, attempt - 2))
+        return min(wait, cap)
+
+    def _finish(self, state, logical, outcome, now, collect_from):
+        """Close one logical request -- the thing the client actually wanted."""
+        if now >= collect_from:
+            logical.append({
+                "outcome": outcome,
+                "attempts": state["attempts"],
+                "e2e_ms": (now - state["start"]) * 1000,
+                "at": now,
+            })
+        state["start"] = now
+        state["attempts"] = 1
+
+    def _plan(self, state, record, logical, collect_from):
+        """Returns how long to wait before this client's next send.
+
+        Without a retry policy the answer is always 0 -- the closed loop this
+        harness had before issue #158 -- but the logical-request bookkeeping
+        still runs, so the goodput columns exist for both clients and can be
+        compared.
+        """
+        now = record["at"]
+        if record["outcome"] == "closed_idle":
+            # Nothing was answered: the connection was idle when it went away.
+            # The attempt in progress, if any, is still the same one.
+            return 0.0
+        if record["outcome"] == "ok":
+            self._finish(state, logical, "ok", now, collect_from)
+            return 0.0
+        if record["outcome"] == "error":
+            # A fault on this side of the socket. Counted, but not charged to
+            # the policy under test as a rejection.
+            self._finish(state, logical, "error", now, collect_from)
+            return 0.0
+        # A rejection: a 503, any other non-2xx, or a close with the request in
+        # flight. All three cost the client another attempt, which is the cost
+        # issue #158 exists to put on the clock.
+        # No retry policy is the same statement with max_attempts = 1: the
+        # closed-loop client never comes back for the request it was refused,
+        # so that request is a give-up on its first and only attempt. Saying it
+        # that way is what lets one goodput column describe both clients.
+        max_attempts = self.retry["max_attempts"] if self.retry else 1
+        if state["attempts"] >= max_attempts:
+            self._finish(state, logical, "giveup", now, collect_from)
+            return 0.0
+        state["attempts"] += 1
+        return self._retry_delay(record, state["attempts"])
+
     def _worker(self, count, stop_at, collect_from):
         local = []
+        logical = []
         clients = []
+        state = {}
+        in_flight_at_end = 0
         try:
             for _ in range(count):
                 try:
@@ -612,12 +731,18 @@ class Load:
             if not clients:
                 return
             selector = selectors.DefaultSelector()
+            now = time.monotonic()
             for client in clients:
+                state[client] = {"start": now, "attempts": 1, "due": None}
                 client.send(self.query)
                 selector.register(client.sock, selectors.EVENT_READ, client)
 
             while time.monotonic() < stop_at:
-                for key, _ in selector.select(timeout=0.05):
+                # Shorter than the 50 ms this used to be: with a retry policy
+                # the loop also has to wake up to send requests whose wait has
+                # expired, and a 50 ms floor under a 5 ms backoff would be the
+                # backoff.
+                for key, _ in selector.select(timeout=0.005 if self.retry else 0.05):
                     client = key.data
                     try:
                         record = client.recv()
@@ -648,18 +773,50 @@ class Load:
                             with self._lock:
                                 self.errors.append(f"reconnect: {exc}")
                             continue
-                    if time.monotonic() < stop_at:
+                    delay = self._plan(state[client], record, logical, collect_from)
+                    if time.monotonic() >= stop_at:
+                        continue
+                    if delay > 0:
+                        # The client is honouring the rejection. Its next
+                        # attempt is sent by the sweep below, and the wait is
+                        # part of the end-to-end time of the request it is
+                        # still trying to get answered.
+                        state[client]["due"] = time.monotonic() + delay
+                        continue
+                    state[client]["due"] = None
+                    try:
+                        client.send(self.query)
+                    except OSError as exc:
+                        with self._lock:
+                            self.errors.append(f"send: {exc}")
+
+                if self.retry:
+                    now = time.monotonic()
+                    if now >= stop_at:
+                        break
+                    for client in clients:
+                        due = state[client]["due"]
+                        if due is None or due > now or client.in_flight:
+                            continue
+                        state[client]["due"] = None
                         try:
                             client.send(self.query)
                         except OSError as exc:
                             with self._lock:
                                 self.errors.append(f"send: {exc}")
+            # Logical requests still unanswered when the window closed are
+            # neither successes nor give-ups; they are reported separately so
+            # that successes + give-ups + errors is exactly the number of
+            # logical requests that finished inside the window.
+            in_flight_at_end = sum(1 for c in clients if c.in_flight or state[c]["due"] is not None)
             reconnects = sum(c.reconnects for c in clients)
         finally:
             for client in clients:
                 client.close()
         with self._lock:
             self.records.extend(local)
+            self.logical.extend(logical)
+            self.in_flight_at_end += in_flight_at_end
             self.reconnects = getattr(self, "reconnects", 0) + reconnects
 
     def run(self, warmup_seconds, window_seconds):
@@ -731,6 +888,45 @@ def latency_report(records):
     return report
 
 
+def goodput_report(logical, window, in_flight_at_end):
+    """What the client got, counted the client's way (issue #158).
+
+    A 503 is the fastest thing this gateway can produce, so a client that fires
+    the next request the instant one arrives rewards a rejection. Everything
+    here is per *logical* request instead: one thing the client wanted, however
+    many attempts it took, timed from the first attempt.
+
+    A client that ran out of attempts is a `giveup` and stays in the
+    denominator. Dropping it would be the same mistake one level up: the run
+    would report the latency of the requests that happened to get through and
+    call it the service's latency.
+    """
+    ok = [r for r in logical if r["outcome"] == "ok"]
+    giveup = [r for r in logical if r["outcome"] == "giveup"]
+    error = [r for r in logical if r["outcome"] == "error"]
+    attempts_ok = sum(r["attempts"] for r in ok)
+    return {
+        "n_logical_completed": len(logical),
+        "n_success": len(ok),
+        "n_giveup": len(giveup),
+        "n_error": len(error),
+        # Criterion 4 of issue #158, stated in the file rather than trusted:
+        # nothing the client started and finished inside the window is missing
+        # from the counts above.
+        "counts_add_up": len(ok) + len(giveup) + len(error) == len(logical),
+        "n_in_flight_at_window_end": in_flight_at_end,
+        "attempts_total": sum(r["attempts"] for r in logical),
+        "attempts_per_success": (attempts_ok / len(ok)) if ok else None,
+        "success_per_sec": (len(ok) / window) if window else None,
+        "giveup_per_sec": (len(giveup) / window) if window else None,
+        # From the client's FIRST attempt. Next to the per-attempt latency in
+        # the same row, these two being far apart is the finding.
+        "end_to_end_ms": summarize([r["e2e_ms"] for r in ok]),
+        "end_to_end_including_giveups_ms": summarize([r["e2e_ms"] for r in ok + giveup]),
+        "giveup_ms": summarize([r["e2e_ms"] for r in giveup]),
+    }
+
+
 def config_text(arm, gateways, directory, port, listen_path, max_children, extra):
     """The pool under measurement, written out in full.
 
@@ -791,6 +987,10 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
         "generator_threads": threads,
         "max_children": args.max_children,
         "port": port,
+        # Recorded in every row, not only in the metadata: the goodput numbers
+        # below mean nothing without it, and a row is what gets pasted into a
+        # comment. None means the closed loop -- the client of task 054.
+        "retry_policy": retry_policy(args),
     }
 
     pool = Pool(arm["binary"], directory,
@@ -818,7 +1018,8 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
     row["body_check"] = {"ok": True, "worker_pid": int(body)}
 
     master = pool.master_pid()
-    load = Load(port, concurrency, threads, WORKLOADS[workload], args.request_timeout)
+    load = Load(port, concurrency, threads, WORKLOADS[workload], args.request_timeout,
+                retry=retry_policy(args))
 
     cpu_before = tree_cpu_seconds(master)
     timing = load.run(args.warmup_seconds, args.seconds)
@@ -851,6 +1052,10 @@ def run_cell(args, root, arm, gateways, concurrency, workload, threads, port, po
         # does not queue has no queue wait, and a 0.0 in that column would read
         # as "it queued instantly".
         "queue_wait_ms": summarize(queue_waits),
+        # Issue #158. Present for every run; without a retry policy it counts
+        # one attempt per logical request, which makes the two latency columns
+        # agree and is itself worth being able to show.
+        "goodput": goodput_report(load.logical, window, load.in_flight_at_end),
         "cpu_seconds_window": cpu_after - cpu_before,
         "cpu_us_per_2xx": ((cpu_after - cpu_before) * 1e6 / n_ok) if n_ok else None,
         "memory_end": memory,
@@ -885,6 +1090,26 @@ def main():
     parser.add_argument("--warmup-seconds", type=float, default=3.0)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--request-timeout", type=float, default=30.0)
+    # Issue #158: the retrying client. Off by default -- one attempt per
+    # request is the closed loop task 054 measured, and a harness whose default
+    # client differs from the one the published numbers came from would make
+    # every comparison with them wrong.
+    parser.add_argument("--retry-attempts", type=int, default=1, metavar="N",
+                        help="attempts a client makes before it gives up on a request (issue "
+                             "#158). 1, the default, is the closed-loop client: a rejection is "
+                             "simply the end of that request. Anything above 1 makes the client "
+                             "honour the rejection and pay for it")
+    parser.add_argument("--retry-base-ms", type=float, default=5.0,
+                        help="first backoff when the rejection carried no Retry-After; doubles "
+                             "per attempt")
+    parser.add_argument("--retry-cap-ms", type=float, default=250.0,
+                        help="ceiling on any single wait, Retry-After included. The gateway says "
+                             "1 second and a measurement window is ten, so the cap is what keeps "
+                             "the window measuring the server rather than the sleep; it is "
+                             "recorded with the results")
+    parser.add_argument("--retry-ignore-retry-after", action="store_true",
+                        help="back off on the schedule above even when the response carried a "
+                             "Retry-After, for showing what honouring it costs")
     parser.add_argument("--base-port", type=int, default=21000)
     parser.add_argument("--port-span", type=int, default=100,
                         help="ports reserved from --base-port; the default keeps this harness "
@@ -908,6 +1133,9 @@ def main():
     root.mkdir(parents=True, exist_ok=True)
 
     raise_nofile(max(args.concurrency) * 2 + 256)
+
+    if args.retry_attempts < 1:
+        raise SystemExit("--retry-attempts is a number of attempts, so it cannot be below 1")
 
     thread_counts = [args.generator_threads]
     if args.thread_sweep:
@@ -938,6 +1166,7 @@ def main():
         "argv": sys.argv,
         "settings": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
         "arms": [{**a, "binary": str(a["binary"])} for a in arms],
+        "retry_policy": retry_policy(args),
         "platform": subprocess.run(["uname", "-a"], capture_output=True, text=True).stdout.strip(),
         "load_before": os.getloadavg(),
     }
@@ -962,8 +1191,11 @@ def main():
                 # Written after every cell: a run that dies in hour two still
                 # leaves behind everything it measured in hour one.
                 results_path.write_text(json.dumps(results, indent=2) + "\n")
+                goodput = row.get("goodput") or {}
                 print(f"{row['cell']} round={round_index} status={row['status']} "
                       f"rps_2xx={row.get('rps_2xx')} "
+                      f"goodput={goodput.get('success_per_sec')} "
+                      f"attempts_per_success={goodput.get('attempts_per_success')} "
                       f"p99_ok={(row.get('latency') or {}).get('successful_only_ms', {}) or {}}",
                       flush=True)
     finally:

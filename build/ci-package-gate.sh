@@ -81,6 +81,10 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # that does nothing needs no extension from either distribution, so it runs on
 # both.
 #
+# It moved to 81 with the SA_RESTART repair (issue #259), which added
+# fpmng-http-direct-sa-restart.phpt. It drives an http-direct pool through a
+# FIFO and needs no extension from either distribution, so it runs on both.
+#
 # Written out here rather than read from anywhere, so that a change in the
 # suite has to be a change in this file too, made by someone who looked at why
 # the number moved.
@@ -104,12 +108,12 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # test skips instead of asserting on a payload this package deliberately has
 # no reason to carry.
 EXPECT_FAIL=0
-EXPECT_TOTAL=80
+EXPECT_TOTAL=81
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=45
+    EXPECT_PASS=46
     EXPECT_SKIP=35
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -136,7 +140,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=43
+    EXPECT_PASS=44
     EXPECT_SKIP=37
     # No openssl-dev: the package is built without TLS (issue #280), so the
     # build stage does not get the headers that would let it link OpenSSL even

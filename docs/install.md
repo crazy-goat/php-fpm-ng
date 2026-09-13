@@ -224,6 +224,18 @@ For the ACME client on top of that, add `--enable-fpmng-acme`. It requires
 [`acme-renewal.md`](acme-renewal.md#the-build-flag) for what a build without
 it does with an ACME configuration.
 
+`--enable-fpmng-http2` and `--enable-fpmng-quic` are **reserved names, not
+features**. Neither protocol exists in this tree, and `configure` refuses both
+flags with a message naming the issue that is deciding them (#186/#187 for
+HTTP/2, #188 for QUIC) rather than accepting a flag that switches nothing on.
+The names are settled early so they are settled once; that is not a commitment
+that either feature will arrive. #188 in particular may return "no": QUIC has
+no `accept()`, connection IDs have to be routed in userland, and this project
+hands each child a listening socket the kernel demultiplexes for it. Both
+would require `--enable-fpmng-tls` if they existed -- HTTP/2 is negotiated over
+ALPN, and QUIC carries TLS 1.3 inside the transport; there is no plaintext
+QUIC.
+
 For the two pool types the package does support, the package is the normal
 case -- building from source to get `fastcgi` or `http-direct` buys nothing.
 

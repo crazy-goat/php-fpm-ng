@@ -107,7 +107,13 @@ function workers(string $ops, string $path): array
 
 $root = sys_get_temp_dir() . '/fpmng-scale-down-drain-' . getmypid();
 @mkdir($root);
-file_put_contents($root . '/front.php', '<?php echo getmypid();');
+file_put_contents($root . '/front.php', <<<'PHP'
+<?php
+if (isset($_GET['sleep'])) {
+    usleep((int) $_GET['sleep'] * 1000);
+}
+echo getmypid();
+PHP);
 
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $port = $base + 51;
@@ -121,7 +127,7 @@ listen = 127.0.0.1:$port
 pool.type = http-direct
 pm = dynamic
 pm.max_children = 2
-pm.start_servers = 2
+pm.start_servers = 1
 pm.min_spare_servers = 1
 pm.max_spare_servers = 1
 chdir = $root
@@ -141,19 +147,27 @@ try {
 
     until(function () use ($ops) {
         $w = workers($ops, '/status');
-        return count($w) === 2 ? $w : null;
-    }, 15, 'both children to appear on the status page');
-    echo "two children started: ok\n";
+        return count($w) === 1 ? $w : null;
+    }, 15, 'the one start_servers child to appear on the status page');
+    echo "pool started: ok\n";
 
-    /* Both connections accepted and answered once, then left open with no
-     * further request on them -- an idle-but-open connection, which is what
-     * a spare child the master is about to retire is holding. Written back
-     * to back, before either response is read, so both children (both
-     * already blocked in accept()) get a chance to take one each. */
+    /* pm.start_servers = 1 is the only value valid alongside
+     * min/max_spare_servers = 1 (fpm requires start_servers to sit between
+     * them), so the second child has to be earned rather than assumed: two
+     * requests in flight at once, long enough to still be running a second
+     * or so later when idle-server-maintenance next looks for 0 idle
+     * children and forks one to reach min_spare_servers = 1. Written back to
+     * back, before either response is read, so both land while the pool
+     * still has only the one child busy -- which is exactly the demand that
+     * earns the fork. */
     $connA = connect($port);
     $connB = connect($port);
-    fwrite($connA, "GET / HTTP/1.1\r\nHost: test\r\n\r\n");
-    fwrite($connB, "GET / HTTP/1.1\r\nHost: test\r\n\r\n");
+    fwrite($connA, "GET /?sleep=1500 HTTP/1.1\r\nHost: test\r\n\r\n");
+    fwrite($connB, "GET /?sleep=1500 HTTP/1.1\r\nHost: test\r\n\r\n");
+    until(function () use ($ops) {
+        $w = workers($ops, '/status');
+        return count($w) === 2 ? $w : null;
+    }, 15, 'a second child to be forked under load');
     [$statusA, $pidA, $closeA] = fetch($connA, '/');
     [$statusB, $pidB, $closeB] = fetch($connB, '/');
     verify($statusA === 200 && $statusB === 200, "warm-up requests: $statusA / $statusB");
@@ -215,7 +229,7 @@ try {
 }
 ?>
 --EXPECT--
-two children started: ok
+pool started: ok
 both children answered: ok
 one child picked to retire: ok
 held connection drained, not dropped: ok

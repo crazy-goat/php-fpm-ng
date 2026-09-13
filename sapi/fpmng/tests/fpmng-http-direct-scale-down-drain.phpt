@@ -49,9 +49,8 @@ function connect(int $port)
     throw new RuntimeException("connect $port: $error");
 }
 
-function fetch($fp, string $path): array
+function read_response($fp): array
 {
-    fwrite($fp, "GET $path HTTP/1.1\r\nHost: test\r\n\r\n");
     $line = fgets($fp);
     if (!$line || !preg_match('#^HTTP/1\.1 (\d+) #', $line, $m)) {
         throw new RuntimeException('bad status line: ' . var_export($line, true));
@@ -76,6 +75,12 @@ function fetch($fp, string $path): array
         $body .= $chunk;
     }
     return [$status, $body, $close];
+}
+
+function fetch($fp, string $path): array
+{
+    fwrite($fp, "GET $path HTTP/1.1\r\nHost: test\r\n\r\n");
+    return read_response($fp);
 }
 
 function until(callable $done, float $seconds, string $what)
@@ -168,8 +173,14 @@ try {
         $w = workers($ops, '/status');
         return count($w) === 2 ? $w : null;
     }, 15, 'a second child to be forked under load');
-    [$statusA, $pidA, $closeA] = fetch($connA, '/');
-    [$statusB, $pidB, $closeB] = fetch($connB, '/');
+    /* Reading, not fetch(): the sleep request is already on the wire, so
+     * fetch() here would write a second, pipelined request on top of it and
+     * then read the sleep response back as if it were the answer to that one
+     * -- leaving the pipelined request's own response unread in the socket
+     * buffer for the next fetch() on this connection to pick up instead of
+     * its own. */
+    [$statusA, $pidA, $closeA] = read_response($connA);
+    [$statusB, $pidB, $closeB] = read_response($connB);
     verify($statusA === 200 && $statusB === 200, "warm-up requests: $statusA / $statusB");
     verify(!$closeA && !$closeB, 'a fresh child answered its warm-up request with Connection: close');
     verify((int) $pidA !== (int) $pidB, "both warm-up requests landed on the same child: $pidA");

@@ -4155,3 +4155,61 @@ against an unpatched binary and proves nothing. A FIFO, not a socket, for the
 `xp_socket.c` reason above. Verified in both directions on real hardware —
 `read='hello'` with the fix, `read=false` against the binary built from the
 commit before it.
+
+## 3ag. A direct child narrates its own lifecycle, so it gets the log channel (issue #260, 2026-09-13)
+
+Upstream FPM takes the error_log away from a child — `fpm_stdio_init_child()`
+does `close(error_log_fd)` + `zlog_set_fd(-1, 0)`, commented "child cannot use
+master error_log because not aware when being reopen" — on the premise that the
+master narrates everything worth narrating about a child. `zlog()` in a child
+then writes to `STDERR_FILENO`, which under the default
+`catch_workers_output = no` is `/dev/null` (`fpm_stdio.c:375-393`).
+
+**That premise is false for a direct pool.** The child owns the accept socket,
+so the child is the only process that knows it has stopped accepting. Retiring —
+the issue #65 feature a deploy is built on — is narrated by the child or by
+nobody. MEASURED on 2026-09-12 while working on #256: the line
+
+    [pool P] child N is retiring: no new connections, finishing the ones it holds, ...
+
+appeared in no log file in any of the eight rows of that issue's before/after
+matrix. The child had in fact retired; the behaviour was confirmed through the
+socket. Only the record of it was missing. Reaching it required
+`catch_workers_output = yes` — a setting whose documented purpose is capturing
+*application* output, which is not what a daemon's own lifecycle is.
+
+The fix is the channel that already exists for exactly this shape of problem:
+`fpm_pool_type_s.child_logs_via_master` (issue #121, `fpm_child_log.h`), one
+AF_UNIX SOCK_DGRAM socketpair per pool, with the master re-emitting each record
+through its own `zlog()` at the child's level and `(child N)` appended. Both
+http-direct executors now set it. Nothing was written for this beyond the flag
+and the bit split below.
+
+**The bit split, which is the part worth reading.** `child_logs_via_master` used
+to do two things: carry the child's `zlog()` lines, *and* redirect PHP's own
+diagnostics into the same channel while forcing `log_errors = 1`,
+`display_errors = 0`, `html_errors = 0` on the child (issue #124,
+`fpm_child_php_log.h`). Those two rest on different premises. The channel is for
+"the policy runs in the child", true of any type with its own child loop. The
+INI half is for "the child has nowhere else to put a PHP error" — true of
+`supervisor` and `cron`, which serve no request and so have neither a response
+nor a front end's FastCGI stderr, and **false** of http-direct, which has a
+response. Taking `display_errors` away from a request-serving pool because it
+wanted its lifecycle lines logged would be an unrelated behaviour change hidden
+inside a logging fix. So the second half is now its own bit,
+`child_php_log_via_master`, set by `supervisor` and `cron` only.
+
+One consequence worth stating: PHP's `sapi_module.log_message` in a direct child
+goes through `zlog()` (upstream's `sapi_cgi_log_message()`, fixed at NOTICE), so
+with `log_errors = 1` a PHP error now reaches `error_log` from a direct pool
+where it previously went to `/dev/null`. That is the hole closing, not a new
+route: the INI defaults are untouched, so whether `log_errors` is on is still
+the operator's `php.ini`.
+
+Log volume was checked before flipping the flag, since the channel makes every
+child `zlog()` visible: the two client-triggerable NOTICEs in
+`fpm_http_direct_conn.c` (the first-request deadline and
+`http.max_connections_per_client`) are both already "once per child" behind a
+`said_*` flag, deliberately, "because a line per dropped client would be a log
+amplifier for the very flood the deadline exists to survive". The rest are
+per-pool or per-child events.

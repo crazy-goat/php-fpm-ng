@@ -18,7 +18,10 @@
  * display_errors = 1, html_errors = 1 and log_errors = 0 (main/main.c) — so the
  * fatal was displayed, in HTML, on a stdout nobody reads, and logged nowhere.
  *
- * Two changes, both only for a type with child_logs_via_master:
+ * Two changes, both only for a type with child_php_log_via_master
+ * (issue #260 split that bit out of child_logs_via_master: a request-serving
+ * type can want the log channel and still have a response to display errors
+ * in -- see fpm_pool_type.h):
  *
  * - INI defaults for the child: log_errors on, display_errors and html_errors
  *   off. Applied through fpm_php_apply_defines_ex() — the same call that

@@ -94,13 +94,28 @@ struct fpm_pool_type_s {
 	 * child then lands in error_log at its own level. Costs one socketpair per
 	 * pool of this type, and nothing at all for any other pool.
 	 *
-	 * The same flag routes PHP's OWN diagnostics — errors, warnings, uncaught
-	 * exceptions, error_log() from the script — into that channel instead of
-	 * leaving them on a stdout nobody reads (issue #124,
-	 * fpm_child_php_log.h): a child of such a type serves no request, so it has
-	 * neither a response nor a front end's FastCGI stderr to put them in, which
-	 * is the same premise as the log channel itself. */
+	 * This is about the pool type's own zlog() lines, nothing else. PHP's own
+	 * diagnostics are a separate bit below, because they rest on a narrower
+	 * premise (issue #260). */
 	unsigned child_logs_via_master:1;
+
+	/* PHP's OWN diagnostics -- errors, warnings, uncaught exceptions,
+	 * error_log() from the script -- go through that channel too, and the
+	 * child's INI defaults become log_errors = 1, display_errors = 0,
+	 * html_errors = 0 (issue #124, fpm_child_php_log.h). Requires
+	 * child_logs_via_master, since the channel is what it writes into.
+	 *
+	 * A separate bit from the one above, and the difference is the premise.
+	 * The channel is for "the policy runs in the child", which is true of any
+	 * type that has its own child loop. This one is for "the child has nowhere
+	 * else to put a PHP error": a supervisor or cron child serves no request,
+	 * so it has neither a response nor a front end's FastCGI stderr, and taking
+	 * display_errors away from it costs nothing an operator asked for. A
+	 * request-serving type fails that premise -- an http-direct child has a
+	 * response to display errors in, and display_errors from php.ini means
+	 * there what it has always meant -- so it takes the channel (issue #260)
+	 * and leaves this alone. */
+	unsigned child_php_log_via_master:1;
 
 	/* A child of this type may publish HTTP-01 challenge answers, so it gets
 	 * the fpmng_acme_challenge_* builtins (fpm_acme_challenge.h). Set for the

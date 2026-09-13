@@ -185,6 +185,12 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	 * reject to discover it missing. */
 	.operator_endpoint            = 1,
 	.operator_status              = fpm_http_direct_ops_render_status,
+	/* Issue #260, same as the base type above: this child owns the accept
+	 * socket and narrates its own lifecycle, so its zlog() lines need the
+	 * channel back to the master. Repeated rather than inherited, like
+	 * everything else in an executor variant. Not .child_php_log_via_master,
+	 * for the same reason -- a worker answers requests. */
+	.child_logs_via_master        = 1,
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above. An executor variant
@@ -297,6 +303,15 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.baseline_counter             = "requests",
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,
+		/* Issue #260: the child owns the accept socket, so the child is the only
+		 * process that knows it has stopped accepting. Its lifecycle lines --
+		 * retiring, the drain deadline, the once-per-child limit NOTICEs -- are
+		 * emitted where upstream takes the error_log away, so without the channel
+		 * they reach an operator only if the pool also sets catch_workers_output,
+		 * a setting whose documented purpose is capturing APPLICATION output.
+		 * Deliberately not .child_php_log_via_master: this type serves requests
+		 * and has a response to display errors in. */
+		.child_logs_via_master        = 1,
 		.operator_endpoint            = 1,
 		/* Not the generic per-pool summary: this type's own page, moved onto
 		 * the operator listener unchanged by issue #275. */
@@ -317,6 +332,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * nothing counted them. */
 		.baseline_counter        = "restarts",
 		.child_logs_via_master   = 1,	/* the whole policy runs in the child; see fpm_child_log.h */
+		.child_php_log_via_master = 1,	/* serves no request, so PHP errors have nowhere else to go; issue #124 */
 		.publishes_acme_challenges = 1,	/* see the same flag on "cron" below */
 		.operator_endpoint       = 1,
 		.rejects                 = fpm_pool_supervisor_rejects,
@@ -339,6 +355,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * says the pool is alive is how many times the schedule fired. */
 		.baseline_counter        = "runs",
 		.child_logs_via_master   = 1,	/* same as supervisor: fpm_pool_cron_child_main() is where the policy lives */
+		.child_php_log_via_master = 1,	/* serves no request, so PHP errors have nowhere else to go; issue #124 */
 		/* docs/NOTES.md section 3l puts the dedicated ACME process in a cron
 		 * pool, and "supervisor" above carries the same flag: both are
 		 * script-running types that serve no request, which is the property

@@ -61,6 +61,7 @@
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_http_direct.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_tls.h"
@@ -1638,6 +1639,13 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	sigaction(SIGTERM, &term_before, NULL);
+	/* Issue #259: request startup also took SA_RESTART off the SIGQUIT and
+	 * SIGUSR1 handlers installed above -- zend_signal_activate() reinstalls
+	 * every signal in zend_sigs[] with SA_SIGINFO alone. This executor is the
+	 * one that needs it most: the booted script keeps running between loop
+	 * turns, so a retire signal can land in the middle of any syscall it makes. */
+	fpm_http_direct_restore_sa_restart(SIGQUIT);
+	fpm_http_direct_restore_sa_restart(SIGUSR1);
 	if (fpm_worker_register_functions(CG(function_table)) == FAILURE) {
 		zlog(ZLOG_ERROR, "[pool %s] http-direct worker: failed to register the fpmng_worker_* functions",
 			wp->config->name);

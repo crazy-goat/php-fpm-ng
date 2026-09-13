@@ -4099,3 +4099,59 @@ tree with `./configure` in it -- five seconds, because the refusal is reached
 before any library check. Whoever implements HTTP/2 or QUIC has to delete a
 failing assertion, which is a decision someone makes, rather than being able
 to leave the refusal behind and wonder why their flag does nothing.
+
+## 3af. `SA_RESTART` is lost on every request startup, and put back after it (issue #259, 2026-09-13)
+
+An http-direct child installs its stop (SIGQUIT) and retire (SIGUSR1) handlers
+with `SA_RESTART` on purpose: in both direct executors PHP runs with the event
+loop stopped — inside evhttp's request callback in the classic one, inside the
+booted script in the worker one — so a signal aimed at a busy child arrives
+while the script is blocked in `read()` or `write()` on a database, cache or
+HTTP socket. Without the flag that syscall returns `EINTR`, and the request the
+retire was meant to protect is the one that fails. That is the failure mode
+issue #65 was built to avoid.
+
+**Every `php_request_startup()` takes the flag off again.** It calls
+`zend_signal_activate()`, which reinstalls an action for every signal in
+`zend_sigs[]` — SIGQUIT and SIGUSR1 among them — with
+
+```c
+sa.sa_flags = SA_SIGINFO; /* we'll use a siginfo handler */
+```
+
+(`Zend/zend_signal.c:305`). `SA_RESTART` is not carried over. Zend does save the
+queried flags in `SIGG(handlers)[signo-1].flags`, but `zend_signal_handler()`
+reads them only for `SA_SIGINFO` and `SA_RESETHAND`; the kernel action is what
+decides whether an interrupted syscall restarts, and from the first request on
+it says "do not restart". This is the same class of damage as the SIGTERM
+disposition both executors already snapshot around request startup — the fix is
+the same shape: `fpm_http_direct_restore_sa_restart()` re-reads the action and
+ORs `SA_RESTART` back in, immediately after `php_request_startup()` returns, for
+both signals, in both executors. It never installs a handler of its own, so
+Zend's deferring handler stays exactly where Zend put it.
+
+**MEASURED, on a child blocked in `fread()` on a FIFO** (the repro issue #259
+said nobody had produced). What the measurement changed is the size of the
+claim:
+
+| signals while blocked | unpatched | patched |
+| --- | --- | --- |
+| one `SIGUSR1` | `fread()` returns `'hello'` | `'hello'` |
+| two `SIGUSR1` | `fread()` returns `false` | `'hello'` |
+
+One interruption is absorbed by PHP itself: `main/streams/plain_wrapper.c:459`
+retries an `EINTR`'d `read()` exactly once. The second falls through to the
+`TODO: Should this be treated as a proper error` branch at `:470` and the read
+fails. And a *socket* read absorbs any number of them — `main/streams/
+xp_socket.c:145-156` loops on `EINTR` around `poll()` by itself. So the real
+exposure is narrower than the issue assumed: it needs repeated signals, a
+non-socket stream, or an extension doing its own `read()`. Narrower, not
+absent — a deploy script that sends SIGUSR1 twice is not unusual, and neither
+is a PDO driver reading its own socket.
+
+`sapi/fpmng/tests/fpmng-http-direct-sa-restart.phpt` is that repro as a test.
+Two signals, not one, is the whole shape of it: with one signal the test passes
+against an unpatched binary and proves nothing. A FIFO, not a socket, for the
+`xp_socket.c` reason above. Verified in both directions on real hardware —
+`read='hello'` with the fix, `read=false` against the binary built from the
+commit before it.

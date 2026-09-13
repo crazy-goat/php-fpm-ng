@@ -349,6 +349,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests              = 1,
 		.listening_socket_nonblocking = 1,
 		.listening_socket_nodelay     = 1,
+		/* Issue #166 (THROWAWAY). This type's child already answers the per-child
+		 * SIGUSR1 of issue #65 by closing its accept socket and staying alive
+		 * until its connections are gone or its own http.read_timeout expires,
+		 * so the master has something real to wait for. */
+		.retires_by_draining          = 1,
 		.baseline_counter             = "requests",
 		.executors                    = fpm_http_direct_executors,
 		.executors_type_specific      = 1,

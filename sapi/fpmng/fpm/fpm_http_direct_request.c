@@ -102,8 +102,12 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	char root[PATH_MAX], script[PATH_MAX];
 
 	if (c->pm != PM_STYLE_STATIC) {
-		zlog(ZLOG_ALERT, "[pool %s] %s requires pm = static", c->name, labels->subject);
-		return -1;
+		/* Issue #166 (THROWAWAY, NOT FOR MERGE). The rule stands in main; it is
+		 * relaxed on this branch only, because scale-down is what the spike
+		 * measures and pm = static never scales down. Carried over from the
+		 * #165 throwaway, which needed exactly the same hole. */
+		zlog(ZLOG_WARNING, "[pool %s] %s: throwaway build for issue #166, the rule that it "
+			"requires pm = static is not enforced", c->name, labels->subject);
 	}
 	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller || c->http_front_controller[0] != '/' ||
 		strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')) {

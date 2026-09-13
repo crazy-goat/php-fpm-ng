@@ -3,6 +3,7 @@
 #include "fpm_config.h"
 
 #include <sys/types.h>
+#include <sys/time.h>		/* timeradd, timercmp */
 #include <signal.h>
 #include <unistd.h>
 #include <stdlib.h>
@@ -13,6 +14,7 @@
 #include "fpm_signals.h"
 #include "fpm_events.h"
 #include "fpm_process_ctl.h"
+#include "fpm_pctl_retire.h"
 #include "fpm_cleanup.h"
 #include "fpm_request.h"
 #include "fpm_pool_type.h"
@@ -338,8 +340,171 @@ static void fpm_pctl_check_request_timeout(struct timeval *now) /* {{{ */
 }
 /* }}} */
 
+/* Issue #166 (THROWAWAY). The bound the master grants a retiring child, kept
+ * here rather than on struct fpm_child_s, which is upstream's. Capacity is
+ * pm.max_children's own ceiling on a sane configuration; a table that fills is
+ * reported once and then falls back to the unmodified escalation, because
+ * losing the bound is better than losing the scale-down. */
+#define FPM_PCTL_RETIRE_MAX 4096
+
+/* How much longer than the child's own drain deadline the master waits before
+ * it starts escalating. The child's deadline is http.read_timeout measured
+ * from the tick on which it noticed the signal (fpm_http_direct.c,
+ * fpm_direct_retire_enter); the master's is measured from the tick on which it
+ * sent the signal. The slack covers the difference plus one 10 ms child tick,
+ * so that an expiry recorded here means the child really did not leave rather
+ * than that the two clocks were started a few milliseconds apart. */
+#define FPM_PCTL_RETIRE_SLACK_MS 250
+
+/* And how long after SIGQUIT the master waits before SIGKILL, once the bound
+ * has expired and escalation has begun. One maintenance pass, which is what
+ * the unmodified code gives (the pass rate is the escalation delay there). */
+#define FPM_PCTL_RETIRE_QUIT_MS 1000
+
+/* The bound for a pool that set http.read_timeout = 0. Not infinity, and not
+ * one pass either: it is the directive's own documented default, which is the
+ * only number in the configuration that says how long this deployment thinks a
+ * client may reasonably take. */
+#define FPM_PCTL_RETIRE_NO_TIMEOUT_MS 30000
+
+struct fpm_pctl_retire_s {
+	pid_t pid;
+	struct timeval deadline;
+	int quit_sent;
+};
+
+static struct fpm_pctl_retire_s fpm_pctl_retire_tbl[FPM_PCTL_RETIRE_MAX];
+static int fpm_pctl_retire_used;
+static int fpm_pctl_retire_full_warned;
+
+static struct fpm_pctl_retire_s *fpm_pctl_retire_find(pid_t pid)
+{
+	int i;
+
+	for (i = 0; i < fpm_pctl_retire_used; i++) {
+		if (fpm_pctl_retire_tbl[i].pid == pid) {
+			return &fpm_pctl_retire_tbl[i];
+		}
+	}
+	return NULL;
+}
+
+static void fpm_pctl_retire_deadline_in(struct fpm_pctl_retire_s *e, int ms)
+{
+	struct timeval now, add;
+
+	fpm_clock_get(&now);
+	add.tv_sec = ms / 1000;
+	add.tv_usec = (ms % 1000) * 1000;
+	timeradd(&now, &add, &e->deadline);
+}
+
+static struct fpm_pctl_retire_s *fpm_pctl_retire_add(pid_t pid, int ms)
+{
+	struct fpm_pctl_retire_s *e;
+
+	if (fpm_pctl_retire_used >= FPM_PCTL_RETIRE_MAX) {
+		if (!fpm_pctl_retire_full_warned) {
+			fpm_pctl_retire_full_warned = 1;
+			zlog(ZLOG_WARNING, "issue #166 throwaway: more than %d children are retiring at once; "
+				"the rest are scaled down the unmodified way", FPM_PCTL_RETIRE_MAX);
+		}
+		return NULL;
+	}
+	e = &fpm_pctl_retire_tbl[fpm_pctl_retire_used++];
+	e->pid = pid;
+	e->quit_sent = 0;
+	fpm_pctl_retire_deadline_in(e, ms);
+	return e;
+}
+
+void fpm_pctl_retire_forget(pid_t pid)
+{
+	struct fpm_pctl_retire_s *e = fpm_pctl_retire_find(pid);
+
+	if (!e) {
+		return;
+	}
+	*e = fpm_pctl_retire_tbl[--fpm_pctl_retire_used];
+}
+
+/* Issue #166 (THROWAWAY). Unmodified FPM tells a scale-down victim to quit and
+ * kills it on the next maintenance pass, one second later. For a pool type
+ * whose child owns its own connections that is strategy (b) -- in-flight
+ * responses finish, idle keep-alive connections are dropped with the process.
+ *
+ * Strategy (a) is this: ask the child to RETIRE (the per-child SIGUSR1 of
+ * issue #65, which the child already answers by closing the accept socket and
+ * staying alive until its live-connection count reaches zero or its own
+ * http.read_timeout deadline expires), and do not escalate until that bound
+ * has passed. The child's half of strategy (a) was already in main when this
+ * branch was cut -- #165's measurement is what showed that the missing half
+ * was here, in the master, which would not wait.
+ *
+ * Which types get this is data on the type (.retires_by_draining), never a
+ * name comparison: a type that does not drain has nothing to wait for and
+ * SIGUSR1 would mean whatever its child makes of it.
+ *
+ * Known hole, and acceptable for a throwaway whose question is a number: the
+ * escalation below only runs on a pass that calls this function again, and the
+ * caller only calls it for a child that still reads idle. A child that picked
+ * up traffic again after being asked to retire would therefore keep its
+ * deadline unexamined until it went idle once more. Nothing leaks in practice,
+ * because the child's own drain deadline makes it exit regardless -- the
+ * master's bound exists to stop the master from shooting first, not to be the
+ * thing that ends the child. A merged version would have to tick the table
+ * from the maintenance pass itself. */
 static void fpm_pctl_kill_idle_child(struct fpm_child_s *child) /* {{{ */
 {
+	const struct fpm_pool_type_s *type = child->wp ? fpm_pool_type_of(child->wp) : NULL;
+
+	if (type && type->retires_by_draining && child->wp->config) {
+		struct fpm_pctl_retire_s *e = fpm_pctl_retire_find(child->pid);
+		struct timeval now;
+
+		if (!e && !child->idle_kill) {
+			/* http.read_timeout = 0 means the pool has no client read timeout at
+			 * all, so the child has no deadline of its own to bound this with.
+			 * The master still grants one -- an unbounded wait would turn a
+			 * scale-down into a leak -- and takes the directive's own default. */
+			int budget = child->wp->config->http_read_timeout;
+			int bound = (budget > 0 ? budget : FPM_PCTL_RETIRE_NO_TIMEOUT_MS) + FPM_PCTL_RETIRE_SLACK_MS;
+
+			e = fpm_pctl_retire_add(child->pid, bound);
+			if (e) {
+				child->idle_kill = true;
+				zlog(ZLOG_NOTICE, "[pool %s] child %d asked to retire and drain, "
+					"escalating in %d ms at the earliest (issue #166 throwaway)",
+					child->wp->config->name, (int) child->pid, bound);
+				kill(child->pid, SIGUSR1);
+				return;
+			}
+			/* Table full: fall through to the unmodified escalation. */
+		}
+
+		if (e) {
+			fpm_clock_get(&now);
+			if (timercmp(&now, &e->deadline, <)) {
+				return;		/* inside the bound the master granted */
+			}
+			if (!e->quit_sent) {
+				e->quit_sent = 1;
+				fpm_pctl_retire_deadline_in(e, FPM_PCTL_RETIRE_QUIT_MS);
+				zlog(ZLOG_WARNING, "[pool %s] child %d did not drain within its bound; "
+					"sending SIGQUIT (issue #166 throwaway)",
+					child->wp->config->name, (int) child->pid);
+				fpm_pctl_kill(child->pid, FPM_PCTL_QUIT);
+			} else {
+				zlog(ZLOG_WARNING, "[pool %s] child %d survived SIGQUIT after its bound; "
+					"sending SIGKILL (issue #166 throwaway)",
+					child->wp->config->name, (int) child->pid);
+				fpm_pctl_retire_forget(child->pid);
+				fpm_pctl_kill(child->pid, FPM_PCTL_KILL);
+			}
+			return;
+		}
+	}
+
 	if (child->idle_kill) {
 		fpm_pctl_kill(child->pid, FPM_PCTL_KILL);
 	} else {

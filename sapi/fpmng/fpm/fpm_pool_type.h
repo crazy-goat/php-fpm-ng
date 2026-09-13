@@ -160,6 +160,24 @@ struct fpm_pool_type_s {
 	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
 	unsigned reuses_request_runtime:1;
 
+	/* Issue #166 (THROWAWAY). A child of this type owns the connections it is
+	 * serving, so asking it to go away is not the same thing as asking a
+	 * FastCGI worker to go away: the FastCGI worker's connection belongs to a
+	 * front end that will simply dial in again, while this one's belongs to a
+	 * client whose keep-alive connection is about to be closed under it.
+	 *
+	 * Setting this tells the master that a scale-down victim of this type will
+	 * RETIRE when signalled -- stop accepting, finish what it has, and exit on
+	 * its own -- and that the master should grant it a bound before escalating
+	 * to SIGQUIT and SIGKILL. The bound is the pool's own http.read_timeout;
+	 * fpm_process_ctl.c holds it.
+	 *
+	 * Data on the type, not a name comparison at the call site, for the reason
+	 * every other bit here exists: a type that does NOT drain has nothing to
+	 * wait for, and the signal would mean whatever its child happens to make
+	 * of it. */
+	unsigned retires_by_draining:1;
+
 	/* Status flags are established on the master-side listening socket before
 	 * children are forked. The open file description is shared by the master
 	 * and its children, so a child must not change this after fork. */

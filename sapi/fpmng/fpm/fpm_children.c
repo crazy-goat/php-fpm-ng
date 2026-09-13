@@ -15,6 +15,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_sockets.h"
 #include "fpm_process_ctl.h"
+#include "fpm_pctl_retire.h"
 #include "fpm_php.h"
 #include "fpm_conf.h"
 #include "fpm_cleanup.h"
@@ -284,6 +285,13 @@ void fpm_children_bury(void)
 		int restart_child = 1;
 
 		child = fpm_child_find(pid);
+
+		/* Issue #166 (THROWAWAY): the master may be holding a retirement
+		 * deadline for this pid. Drop it here, where the pid stops belonging to
+		 * this child, so that a pid the kernel hands out again cannot inherit
+		 * the bound of its predecessor. A no-op for every pid that was not
+		 * retiring, which is almost all of them. */
+		fpm_pctl_retire_forget(pid);
 
 		if (WIFEXITED(status)) {
 

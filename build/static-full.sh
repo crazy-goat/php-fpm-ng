@@ -146,11 +146,17 @@ assert_symbol openssl_encrypt "amphp/socket TLS and the pool's http.tls_* listen
 assert_symbol fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
 # Issue #281: --enable-fpmng-acme is as droppable from the configure line as
 # --enable-fpmng-tls is, and configure would accept the line without it in
-# silence. Asserted on a string from fpm_acme_challenge.c rather than on the
-# symbol name, because this block reads `strings -a` and a symbol table is not
-# something a static artefact is required to keep.
-echo "$symbols" | grep -q 'ACME certificate issuance is BETA' ||
-  fail "--enable-fpmng-acme did not reach this build: no ACME code in the artefact (issue #281)"
+# silence.
+#
+# This used to grep for the startup NOTICE's wording, 'ACME certificate
+# issuance is BETA'. Issue #295 moved that line into fpm_tier_announce() and
+# reworded it, and the assertion failed on a build that had ACME in it -- an
+# assertion that a change in prose can break is an assertion about the prose.
+# The builtin name is the thing the flag actually adds, and it is a string in
+# the function table, which is why this reads `strings -a` and not a symbol
+# table (a static artefact is not required to keep one).
+assert_symbol fpmng_acme_challenge_set \
+  "--enable-fpmng-acme did not reach this build: no ACME builtins in the artefact (issue #281)"
 echo "static-full.sh: extension-set assertions ok"
 
 # Issue #171: the ACME client goes in after the link and before the artefact is

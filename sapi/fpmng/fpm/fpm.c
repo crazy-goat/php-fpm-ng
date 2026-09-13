@@ -14,6 +14,7 @@
 #include "fpm_php.h"
 #include "fpm_sockets.h"
 #include "fpm_pool_type.h"
+#include "fpm_tier.h"
 #include "fpm_unix.h"
 #include "fpm_process_ctl.h"
 #include "fpm_conf.h"
@@ -110,6 +111,25 @@ int fpm_run(int *max_requests) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
 
+	/* Issue #295: the two BETA features that are not pool types, announced
+	 * where the pool tiers are announced and through the same function, so
+	 * that the wording and the level cannot drift from each other. What is
+	 * reported is a property of the BINARY -- the operator gave the configure
+	 * flag and cannot read it back off `-v` -- so neither line is conditional
+	 * on the configuration using the feature. #269 put both at beta and said
+	 * why: this code terminates connections from unauthenticated strangers and
+	 * nobody has audited it. */
+#ifdef HAVE_FPMNG_TLS
+	fpm_tier_announce(FPM_TIER_BETA, NULL,
+		"TLS termination, unaudited and network-facing "
+		"(this binary was built with --enable-fpmng-tls)");
+#endif
+#ifdef HAVE_FPMNG_ACME
+	fpm_tier_announce(FPM_TIER_BETA, NULL,
+		"ACME certificate issuance, unaudited "
+		"(this binary was built with --enable-fpmng-acme)");
+#endif
+
 	/* The shared HTTP-01 challenge state is global to the process tree, not
 	 * a property of any one pool: the process that publishes a token (a
 	 * pool.type = cron ACME process) is never the process that answers the
@@ -124,6 +144,13 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * same final stdio state as workers. */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+		/* Issue #295: the tier of what this pool is about to run, said once,
+		 * here. In the master and before the fork, so it costs one line per
+		 * pool per start rather than one per child or -- worse -- one per
+		 * request, which an operator would learn to filter and then miss.
+		 * Nothing is printed for a supported pool; see fpm_tier.h. */
+		fpm_pool_type_announce_tier(wp);
 
 		if (0 > fpm_pool_type_prepare_listening_socket(wp)) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to prepare listening socket for pool type '%s'",

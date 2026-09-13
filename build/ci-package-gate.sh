@@ -88,6 +88,12 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # It moved to 82 with the child log channel for http-direct (issue #260), which
 # added fpmng-http-direct-child-log.phpt. It is an http-direct pool and one
 # signal, so it too runs on both distributions.
+# It moved to 84 with the tier announcements (issue #295), which added two
+# tests, and they do not move the same counter. fpmng-tier-announce.phpt is two
+# http-direct pools and needs nothing this build lacks, so it PASSes on both.
+# fpmng-tier-experimental.phpt asks the binary for --enable-fpmng-fiber in its
+# SKIPIF and the packages are not built with it, so it SKIPs on both -- the
+# fiber cell of build-matrix.yml is where that one is actually run.
 #
 # Written out here rather than read from anywhere, so that a change in the
 # suite has to be a change in this file too, made by someone who looked at why
@@ -112,13 +118,13 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # test skips instead of asserting on a payload this package deliberately has
 # no reason to carry.
 EXPECT_FAIL=0
-EXPECT_TOTAL=82
+EXPECT_TOTAL=84
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    EXPECT_PASS=47
-    EXPECT_SKIP=35
+    EXPECT_PASS=48
+    EXPECT_SKIP=36
     # binutils for objdump (package-deb.sh resolves NEEDED sonames with it),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
     # package for the library it links, and libevent/libacl for what the SAPI
@@ -144,8 +150,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_PASS=45
-    EXPECT_SKIP=37
+    EXPECT_PASS=46
+    EXPECT_SKIP=38
     # No openssl-dev: the package is built without TLS (issue #280), so the
     # build stage does not get the headers that would let it link OpenSSL even
     # by accident. libphp-build.sh asserts the produced binary's dynamic

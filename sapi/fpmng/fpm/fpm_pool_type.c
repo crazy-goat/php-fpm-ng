@@ -99,6 +99,12 @@ static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.name                         = "fastcgi-ng",
+	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
+	 * #82, #84 and #85 are open correctness bugs against this executor's
+	 * request isolation, and criterion 3 of the bar in #269 ("no open
+	 * correctness issue") is therefore not met. It is also behind a
+	 * default-off configure flag, so nobody is running it by accident. */
+	.tier                         = FPM_TIER_EXPERIMENTAL,
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
 	.serves_requests              = 1,
@@ -112,6 +118,12 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 
 static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.name                         = "http",
+	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
+	 * #82, #84 and #85 are open correctness bugs against this executor's
+	 * request isolation, and criterion 3 of the bar in #269 ("no open
+	 * correctness issue") is therefore not met. It is also behind a
+	 * default-off configure flag, so nobody is running it by accident. */
+	.tier                         = FPM_TIER_EXPERIMENTAL,
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
 	.serves_requests              = 1,
@@ -129,6 +141,11 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 #ifdef HAVE_FPMNG_ASYNC
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
 	.name                   = "fastcgi-ng",
+	/* Issue #295. Experimental, one criterion short of beta in a way that is
+	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
+	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
+	 * on every PR -- has nothing behind it here. */
+	.tier                   = FPM_TIER_EXPERIMENTAL,
 	.requires_listen        = 1,
 	.requires_pm            = 1,
 	.serves_requests        = 1,
@@ -141,6 +158,11 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
 
 static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.name                   = "http",
+	/* Issue #295. Experimental, one criterion short of beta in a way that is
+	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
+	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
+	 * on every PR -- has nothing behind it here. */
+	.tier                   = FPM_TIER_EXPERIMENTAL,
 	.requires_listen        = 1,
 	.requires_pm            = 1,
 	.serves_requests        = 1,
@@ -170,6 +192,17 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
  * diagnostics keep naming the type the operator actually configured. */
 static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.name                         = "http-direct",
+	/* Issue #295, and the one judgement in this file that needed making rather
+	 * than reading off #269. Beta, not supported: it is covered by CI on every
+	 * PR, it is documented, and nothing is open against its correctness -- but
+	 * its long-lived-connection behaviour is the open question of spikes #180
+	 * to #183, the cross-worker primitive it is missing is #191, and a spike
+	 * that has not run yet may well change a directive. Beta is exactly the
+	 * tier that reserves that, and criterion 2 of #269's bar -- measured under
+	 * a load resembling use -- is what those spikes will produce.
+	 *
+	 * Not experimental: it will not disappear. The examples ship against it. */
+	.tier                         = FPM_TIER_BETA,
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
 	.serves_requests              = 1,
@@ -264,6 +297,8 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
+		/* Issue #295: upstream FPM's own type, unchanged by this project. */
+		.tier            = FPM_TIER_SUPPORTED,
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
@@ -272,6 +307,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                   = "fastcgi-ng",
+		/* Issue #295: the same transport as "fastcgi" with patches 0004-0006
+		 * under it, covered by the phpt suite on every PR since v0.1.0. */
+		.tier                   = FPM_TIER_SUPPORTED,
 		.requires_listen        = 1,
 		.requires_pm            = 1,
 		.serves_requests        = 1,
@@ -282,6 +320,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                   = "http",
+		/* Issue #295: the gateway has shipped since v0.1.0 and CI drives it on
+		 * every PR (the gateway-* cells in build-matrix.yml). TLS termination
+		 * in front of it is beta, but that is a property of the TLS code and
+		 * is announced by it -- see fpm_tls_http.c. */
+		.tier                   = FPM_TIER_SUPPORTED,
 		.requires_listen        = 1,
 		.requires_pm            = 1,
 		.serves_requests        = 1,
@@ -295,6 +338,12 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                         = "http-direct",
+		/* Issue #295: the classic executor, which is what this entry is. The
+		 * worker executor is a variant with a tier of its own (beta, see
+		 * fpm_http_direct_worker above) -- an executor variant replaces the
+		 * whole struct, so the two are classified separately, which is the
+		 * point of #269 asking for the worker surfaces one by one. */
+		.tier                         = FPM_TIER_SUPPORTED,
 		.requires_listen              = 1,
 		.requires_pm                  = 1,
 		.serves_requests              = 1,
@@ -323,6 +372,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                    = "supervisor",
+		/* Issue #295: directives frozen since v0.2.0, failure modes covered by
+		 * the fpmng-supervisor-* tests on every PR. */
+		.tier                    = FPM_TIER_SUPPORTED,
 		.requires_listen         = 0,
 		.requires_pm             = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
 		.serves_requests         = 0,
@@ -348,6 +400,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                    = "cron",
+		/* Issue #295: as supervisor above, and the ACME process runs on it. */
+		.tier                    = FPM_TIER_SUPPORTED,
 		.requires_listen         = 0,
 		.requires_pm             = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
 		.serves_requests         = 0,
@@ -380,6 +434,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * child and a place in reload without a second supervision path being
 		 * invented for it. */
 		.name                      = "operator-endpoint",
+		/* Issue #295: supported, and therefore silent -- which is what an
+		 * internal pool an operator did not write has to be. A tier line
+		 * naming a pool nobody configured would be a line with no action
+		 * behind it. */
+		.tier                      = FPM_TIER_SUPPORTED,
 		.internal_only             = 1,
 		.requires_listen           = 1,	/* its whole purpose */
 		.requires_pm               = 0,	/* validate() sets static + 1 */
@@ -834,4 +893,28 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void)
 	}
 
 	return NULL;
+}
+
+/* Issue #295. Spelled the way the operator wrote it, not the way the code
+ * resolved it: "pool.executor = worker" and not the name of the variant
+ * struct, because the line has to be findable in the configuration the
+ * operator is reading while they read the log. */
+void fpm_pool_type_announce_tier(struct fpm_worker_pool_s *wp)
+{
+	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+	const char *executor = wp->config->executor;
+	char subject[128];
+
+	if (!type) {
+		return;
+	}
+
+	if (executor && *executor && strcmp(executor, "classic") != 0) {
+		snprintf(subject, sizeof(subject), "pool.type = %s with pool.executor = %s",
+			type->name, executor);
+	} else {
+		snprintf(subject, sizeof(subject), "pool.type = %s", type->name);
+	}
+
+	fpm_tier_announce(type->tier, wp->config->name, subject);
 }

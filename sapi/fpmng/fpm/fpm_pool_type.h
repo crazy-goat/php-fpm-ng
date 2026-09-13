@@ -12,6 +12,8 @@
 
 #include <time.h>
 
+#include "fpm_tier.h"
+
 struct fpm_worker_pool_s;
 struct fpm_operator_reply_s;
 
@@ -67,6 +69,18 @@ struct fpm_pool_executor_s {
 
 struct fpm_pool_type_s {
 	const char *name;
+
+	/* What this type promises, and therefore what it withholds (issue #269,
+	 * implemented in #295). Data on the type like everything else here, so
+	 * that nothing anywhere compares a type NAME to decide how loudly to
+	 * announce it. The default, FPM_TIER_EXPERIMENTAL, is 0: a type added
+	 * without a thought about this field announces itself as the least
+	 * promised of the three, which is the honest reading of code nobody has
+	 * classified. Every type below states its tier explicitly all the same,
+	 * so that the value is a decision someone made rather than a field left
+	 * alone. Announced once per pool at startup by fpm_run(); see
+	 * fpm_tier.h. */
+	enum fpm_tier tier;
 
 	/* Configuration requirements — read by fpm_conf.c, which does not know types. */
 	unsigned requires_listen:1;		/* pool must have a listening address */
@@ -315,6 +329,11 @@ const struct fpm_pool_type_s *fpm_pool_type_resolve(struct fpm_worker_pool_s *wp
 
 /* Check whether pool.executor is allowed and known. */
 int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp);
+
+/* One line at startup naming this pool's tier, or nothing at all when the tier
+ * is supported. Called once per pool from fpm_run(), in the master and before
+ * the first fork -- see fpm_tier.h for why it is there and not per child. */
+void fpm_pool_type_announce_tier(struct fpm_worker_pool_s *wp);
 
 /* Names of known types for an error message. Buffer belongs to the caller. */
 void fpm_pool_type_list(char *buf, size_t len);

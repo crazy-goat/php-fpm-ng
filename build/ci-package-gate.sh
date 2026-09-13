@@ -159,18 +159,24 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # than the build flags: it needs pool.type = http, which needs patches/0006
 # inside Zend/ (issue #230).
 #
-# fpmng-http-direct-user-ini.phpt (issue #60) is the one test added since the
+# fpmng-http-direct-user-ini.phpt (issue #60) is the test added since the
 # count above was measured: it needs neither TLS nor ACME, so it passes on
 # every flavour, and TOTAL and the four PASS counts below each carry a plain
 # +1 for it.
+#
+# fpmng-http-direct-max-requests-drain.phpt (issue #313) is a second, later
+# addition on top of that: it also needs neither TLS nor ACME (pool.type =
+# http-direct, pm = static, no libevent_openssl involved), so it too passes
+# on every flavour, and TOTAL and the four PASS counts below carry a further
+# +1 for it.
 EXPECT_FAIL=0
-EXPECT_TOTAL=86
+EXPECT_TOTAL=87
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=53; EXPECT_SKIP=33
-    else EXPECT_PASS=49; EXPECT_SKIP=37; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=54; EXPECT_SKIP=33
+    else EXPECT_PASS=50; EXPECT_SKIP=37; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -203,8 +209,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=51; EXPECT_SKIP=35
-    else EXPECT_PASS=47; EXPECT_SKIP=39; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=52; EXPECT_SKIP=35
+    else EXPECT_PASS=48; EXPECT_SKIP=39; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -121,11 +121,13 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * nobody has audited it. */
 #ifdef HAVE_FPMNG_TLS
 	fpm_tier_announce(FPM_TIER_BETA, NULL,
-		"TLS termination (this binary was built with --enable-fpmng-tls)");
+		"TLS termination, unaudited and network-facing "
+		"(this binary was built with --enable-fpmng-tls)");
 #endif
 #ifdef HAVE_FPMNG_ACME
 	fpm_tier_announce(FPM_TIER_BETA, NULL,
-		"ACME certificate issuance (this binary was built with --enable-fpmng-acme)");
+		"ACME certificate issuance, unaudited "
+		"(this binary was built with --enable-fpmng-acme)");
 #endif
 
 	/* The shared HTTP-01 challenge state is global to the process tree, not

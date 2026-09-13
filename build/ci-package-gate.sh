@@ -441,14 +441,39 @@ grep -q '^measurement_status=MEASURED$' "$SUMMARY" \
 
 get() { sed -n "s/^$1=\([0-9]*\)\$/\1/p" "$SUMMARY"; }
 GOT_PASS=$(get PASS); GOT_FAIL=$(get 'FAIL\/ERROR'); GOT_SKIP=$(get SKIP); GOT_TOTAL=$(get TOTAL)
+GOT_WARN=$(get WARN)
 
-if [ "$GOT_PASS" != "$EXPECT_PASS" ] || [ "$GOT_FAIL" != "$EXPECT_FAIL" ] \
+# Issue #301. run-tests.php has a third outcome between PASS and FAIL: a test
+# that failed once and passed when it was retried is reported as WARNED, and it
+# leaves the PASS column to do it. The expectations below are counts of what the
+# package CAN DO, and a test that produced a correct result on the second
+# attempt did it -- so a WARN is counted here as a pass, and the retried tests
+# are named instead. The alternative, an EXPECT_WARN=0 of its own, is what this
+# script did by accident before the issue: it failed the longest job in the
+# matrix for a reason the failure message never mentioned.
+#
+# What this does NOT do is hide the flake. Every retried test is printed by
+# name, on every run, green or red. A test that appears here run after run is a
+# finding about that test, and the job log of the job that ran it is where an
+# operator looks for it.
+if [ "${GOT_WARN:-0}" -gt 0 ]; then
+    echo "ci-package-gate.sh: NOTICE: $GOT_WARN test(s) failed once and passed on retry."
+    echo "  Counted as passes below (issue #301). One that keeps appearing here deserves"
+    echo "  an issue of its own:"
+    awk -F '\t' 'NR > 1 && $2 == "WARN" {print "    " $1}' "$OUT/results/results.tsv" 2>/dev/null \
+        || echo "    (no per-test rows; see $OUT/results/run.log)"
+fi
+GOT_OK=$(( ${GOT_PASS:-0} + ${GOT_WARN:-0} ))
+
+if [ "$GOT_OK" != "$EXPECT_PASS" ] || [ "$GOT_FAIL" != "$EXPECT_FAIL" ] \
    || [ "$GOT_SKIP" != "$EXPECT_SKIP" ] || [ "$GOT_TOTAL" != "$EXPECT_TOTAL" ]; then
-    fail "the packaged binary scored PASS=$GOT_PASS FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL,
-  expected PASS=$EXPECT_PASS FAIL=$EXPECT_FAIL SKIP=$EXPECT_SKIP of $EXPECT_TOTAL.
-  A number that moved in either direction is a finding: more skips usually means
-  the pool stopped starting, more passes means these expectations are stale.
+    fail "the packaged binary scored PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL,
+  expected PASS+WARN=$EXPECT_PASS FAIL=$EXPECT_FAIL SKIP=$EXPECT_SKIP of $EXPECT_TOTAL.
+  PASS and WARN are added together on purpose (issue #301): a test retried into a
+  pass still ran. A number that moved in either direction is a finding: more skips
+  usually means the pool stopped starting, more passes means these expectations
+  are stale.
   Per-test results are in $OUT/results/results.tsv."
 fi
 
-echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL)"
+echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL)"

@@ -4372,3 +4372,27 @@ an `#ifdef` on a macro that does not exist compiles cleanly and silently to
 nothing. `fpmng-tier-build-flags.phpt` now starts a TLS/ACME build and asserts
 both lines with the flag names in them; it runs in the `fpmng-phpt` cell of the
 matrix, which configures with both flags, and in the TLS package gate.
+## 3aj. A retried test is a pass in the package gate (issue #301, 2026-09-13)
+
+`build/ci-package-gate.sh` gates the package on an exact score: hand-written
+`EXPECT_PASS`/`EXPECT_SKIP`/`EXPECT_FAIL`/`EXPECT_TOTAL` per flavour, compared
+against what the suite reported inside the clean container. Exactness is the
+point of the file -- the numbers are the evidence that the build flags reached
+the artefact, and a drift in either direction is a finding.
+
+`run-tests.php` has a third outcome that the comparison did not know about. A
+test that fails once and passes when the runner retries it is reported as
+**WARNED**, and it leaves the `PASS` column to do so. So one retried flake --
+`fpmng-http-direct-lifecycle.phpt` on the Alpine arm of run 34749059901 --
+scored `PASS=45 SKIP=38 WARN=1` against an expectation of `PASS=46 SKIP=38` and
+failed the gate. Nothing had failed. The message said only that a number had
+moved, and the job it failed is the longest one in the matrix.
+
+The fix is a decision, not arithmetic: the expectations count what the package
+**can do**, and a test that produced a correct result on the second attempt did
+it. `PASS + WARN` is what is compared now, `EXPECT_FAIL=0` stays exact, and
+every retried test is printed by name on every run -- green or red -- so that a
+test which warns here run after run is visible as the flake it is rather than
+absorbed into a total. The rejected alternative was an `EXPECT_WARN=0` of its
+own, which is what the script was doing by accident; it turns a flake into a
+six-minute rerun and says nothing about which test caused it.

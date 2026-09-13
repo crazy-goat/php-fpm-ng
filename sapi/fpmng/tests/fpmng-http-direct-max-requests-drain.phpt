@@ -133,7 +133,7 @@ try {
 
     /* The status page must show the child retiring, not gone: a child that
      * hit fpm_direct_stopping instead would already have exited by now. */
-    until(function () use ($ops) {
+    until(function () use ($ops, $pid) {
         $body = fpmng_operator_body($ops, '/status?json&full');
         $decoded = json_decode($body, true);
         verify(is_array($decoded), "status is not JSON: $body");

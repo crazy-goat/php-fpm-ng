@@ -24,9 +24,27 @@ request_terminate_timeout = 30s
 ```
 
 `pool.executor` may be omitted (classic). Other executors and `pm = dynamic` /
-`ondemand` fail configuration validation. No fibers, persistent application
-container, or shared request state: every request runs PHP startup, the script,
-and PHP shutdown, including extension RINIT/RSHUTDOWN.
+`ondemand` fail configuration validation
+(`sapi/fpmng/fpm/fpm_http_direct_request.c:126-127`). No fibers, persistent
+application container, or shared request state: every request runs PHP
+startup, the script, and PHP shutdown, including extension RINIT/RSHUTDOWN.
+
+**Decision (2026-09-13, spike #66, measurement #169, write-up #170):** this
+restriction stays. It is not because a retired direct child would cost more
+memory than it saves — `--enable-fpmng-fiber` was not the question here, and
+this build's children were too small (~2 MB PSS per child) for the saving to
+matter either way. It stays because retiring a direct child today drops any
+request that was in flight on its socket: every measured retirement with a
+request in flight lost it (`n_conn_closed_without_response ==
+inflight_requests_at_t0` in all 24 such rows, #169). `pm = dynamic` and
+`ondemand` retire children routinely as load falls; `pm = static` does not.
+Making the routine case exercise a path that already drops in-flight requests
+is not something the gate should allow yet. The condition that reopens this:
+#310 and #311 (the two mechanisms behind that drop, per
+`docs/spike-direct-pool-pm-report.md`) both land, clearing rule 3 in
+`build/benchmark-http-direct-pm.md` — see that report for the full reasoning
+and for what would still need measuring even then (rules 1/2/4, not evaluated
+here for lack of a legal `dynamic`/`ondemand` row to compare).
 
 ## Routing and PHP I/O
 

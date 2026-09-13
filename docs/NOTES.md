@@ -4062,3 +4062,40 @@ built without ACME is not evidence about them either way.
 that ACME is BETA and unaudited. It is not conditional on the configuration
 using ACME: what it reports is a property of the binary, which `-v` does not
 show.
+
+## 3ae. Two flag names reserved for features that do not exist (issue #282, 2026-09-13)
+
+**The decision** (the last part of #279): `--enable-fpmng-http2` and
+`--enable-fpmng-quic` exist in `configure` and both are **errors**. Neither
+protocol is implemented -- #186 and #187 are still deciding whether an nghttp2
+session layer is worth what it costs, and #188 is still deciding whether a UDP
+listener can fit the fork-N-children model at all.
+
+**Why reserve a name for something that may never be built.** Not to promise
+it. The naming is the cheap part of the work and the part that gets argued at
+the worst possible moment, when someone is in the middle of writing the code;
+settling it now costs two `PHP_ARG_ENABLE` blocks. The help text carries the
+dependency on `--enable-fpmng-tls` for the same reason: HTTP/2 is negotiated
+over ALPN and QUIC carries TLS 1.3 inside the transport, so there is no
+plaintext form of either, and that is better written down now than discovered
+by whoever implements it.
+
+**A reserved name is not a decision that the feature will exist.** #188 may
+return "no", and the flag being spelled must not be read as evidence that it
+will not. QUIC has no `accept()`: connection IDs have to be routed in
+userland, and the whole model here is the kernel demultiplexing a listening
+socket that each child holds.
+
+**Refusal, not acceptance.** A flag that is accepted and switches nothing on
+produces a binary the operator believes speaks HTTP/2. That is strictly worse
+than having no flag: it converts a build-time question into a production
+surprise. So `configure` stops, names the feature as not implemented, and
+points at the issue deciding it.
+
+**The test is an obstacle on purpose.**
+`build/test-reserved-configure-flags.sh` asserts both refusals and both help
+lines, and it runs in the matrix's build job because that job already has a
+tree with `./configure` in it -- five seconds, because the refusal is reached
+before any library check. Whoever implements HTTP/2 or QUIC has to delete a
+failing assertion, which is a decision someone makes, rather than being able
+to leave the refusal behind and wonder why their flag does nothing.

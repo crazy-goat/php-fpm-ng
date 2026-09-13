@@ -281,6 +281,14 @@ jobs:
           ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree.rc ) | tee tree.log
           exit "$(cat tree.rc)"
 
+      # Issue #282: the two reserved flag names refuse, and say why. Five
+      # seconds: the refusals are at the top of sapi/fpmng/config.m4's own
+      # block and no library check is reached, so this is cheaper than the
+      # `make` below by three orders of magnitude. It runs here because this
+      # is the job that already has a tree with ./configure in it.
+      - name: reserved flag names are refused (issue #282)
+        run: ./build/test-reserved-configure-flags.sh "$PHPSRC"
+
       - name: build
         # The steps here run under `sh -e` -- this container has no bash, so
         # GitHub's usual `bash -e` default falls back to dash, where

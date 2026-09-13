@@ -495,6 +495,51 @@ if test "$PHP_FPMNG" != "no"; then
     PHP_FPMNG_ACME_FILES="@FPMNG_ACME_SOURCES@"
   ])
 
+  dnl HTTP/2 and HTTP/3/QUIC: the flag NAMES are reserved here, and nothing
+  dnl else. Neither protocol exists in this tree -- issues #186 and #187 are
+  dnl still deciding whether an nghttp2 session layer is worth what it costs,
+  dnl and #188 is still deciding whether a UDP listener can be made to fit the
+  dnl fork-N-children model at all, given that QUIC has no accept() and
+  dnl connection IDs have to be routed in userland.
+  dnl
+  dnl A RESERVED NAME IS NOT A DECISION THAT THE FEATURE WILL EXIST. #188 may
+  dnl return "no". What is settled is only the spelling, settled once here
+  dnl instead of being argued again at the moment someone is in the middle of
+  dnl writing the code (issue #282, part of #279).
+  dnl
+  dnl Passing either flag is an ERROR, not a warning that builds anyway: a
+  dnl flag that is accepted and does nothing produces a binary the operator
+  dnl believes speaks HTTP/2, which is worse than having no flag at all.
+  dnl Whoever implements one of these deletes the refusal below -- and
+  dnl build/test-reserved-configure-flags.sh, which asserts it, so the flag
+  dnl cannot be forgotten on the way in.
+  dnl
+  dnl Both will require --enable-fpmng-tls when they exist: HTTP/2 is
+  dnl negotiated over ALPN, a TLS handshake extension, and QUIC carries
+  dnl TLS 1.3 inside the transport -- there is no plaintext QUIC. That is in
+  dnl the help text now so it is not discovered later.
+  PHP_ARG_ENABLE([fpmng-http2],
+    [whether to build HTTP/2 support in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-http2],
+      [Build fpm-ng with HTTP/2 (NOT IMPLEMENTED; requires --enable-fpmng-tls)])],
+    [no],
+    [no])
+
+  AS_VAR_IF([PHP_FPMNG_HTTP2], [no],, [
+    AC_MSG_ERROR([--enable-fpmng-http2 is a reserved flag name: HTTP/2 is NOT IMPLEMENTED in fpm-ng. Whether it will be is being decided in https://github.com/crazy-goat/php-fpm-ng/issues/186 and .../issues/187. Drop the flag; the binary speaks HTTP/1.1.])
+  ])
+
+  PHP_ARG_ENABLE([fpmng-quic],
+    [whether to build HTTP/3 and QUIC support in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-quic],
+      [Build fpm-ng with HTTP/3 over QUIC (NOT IMPLEMENTED; requires --enable-fpmng-tls)])],
+    [no],
+    [no])
+
+  AS_VAR_IF([PHP_FPMNG_QUIC], [no],, [
+    AC_MSG_ERROR([--enable-fpmng-quic is a reserved flag name: HTTP/3 over QUIC is NOT IMPLEMENTED in fpm-ng. Whether it can be at all is being decided in https://github.com/crazy-goat/php-fpm-ng/issues/188 -- QUIC has no accept(), and connection IDs would have to be routed in userland. Drop the flag; the binary speaks HTTP/1.1.])
+  ])
+
   AS_VAR_IF([PHP_FPMNG_ACL], [no],, [
     AC_CHECK_HEADERS([sys/acl.h])
 

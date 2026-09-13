@@ -171,10 +171,17 @@ echo "prefix-decoding: ok\n";
 touch("$root/stop");
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
-$tester->close();
 
-$log = (string) @file_get_contents($tester->getPrefixedFile('log'));
-check(!str_contains($log, KEYAUTH), 'the key authorization appeared in error_log');
+/* No key authorization anywhere in the log, at any level. Through the tester's
+ * log API and not file_get_contents(): the suite runs FPM in the foreground,
+ * and tester.inc only switches its log source to the error_log file when it
+ * daemonizes -- so the file {{FILE:LOG}} names stays empty and an assertion
+ * made against it passes on '' whether or not anything leaked (issue #297).
+ * Before close(), because close() reaps the master and with it the pipe the
+ * log reader reads. */
+$tester->expectNoLogPattern('/' . preg_quote(KEYAUTH, '/') . '/', true);
+
+$tester->close();
 
 foreach (['tls.crt', 'tls.key', 'index.php', 'publisher.php', 'publisher.state', 'stop'] as $file) {
     @unlink("$root/$file");

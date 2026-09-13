@@ -4306,3 +4306,69 @@ The rest of the suite is clean. Every other test that reads a log *file*
 ones) starts FPM with `start([], false)` — no `-O`, so `error_log` really is
 written — and waits for a pattern it expects to appear, which a vacuous read
 cannot fake.
+
+## 3ai. Two packages, and the second one is built where it ships (issue #294, 2026-09-13)
+
+Issues #280 and #281 moved TLS termination and ACME behind build flags that
+default to `no`, which made the published `.deb` and `.apk` unable to do either
+-- a regression against v0.2.0 for anyone terminating TLS in the pool. #279 left
+open what the remedy is, and #294 is the answer: a second package,
+`php-fpm-ng-tls`, the same commit built `--enable-fpmng-tls
+--enable-fpmng-acme`, described in its own package description as beta and
+unaudited.
+
+The alternative was "build it from source". It was rejected on who the people
+asking are: someone terminating TLS on a small box is the least likely person to
+have a toolchain on it, and the answer would have sent them to an unpinned local
+build that nothing in this repository tests.
+
+**The package names itself off the binary, not off the environment.**
+`build/package-deb.sh` and `build/package-apk.sh` ask the artefact whether
+`fpm_tls_http_validate` and `fpm_acme_challenge_init_main` are defined in it --
+the same two symbols `build/libphp-build.sh` asserts on after the link -- and
+choose the name, the description and the conflict relationship from that.
+Reading `FPMNG_TLS` instead would have been shorter and would have produced a
+package that calls itself something its contents are not: the variable is read
+two scripts earlier, by a different process, and nothing downstream would ever
+compare the two. Only the two combinations that ship have a name; TLS without
+ACME is refused rather than published under a description that is wrong about
+it.
+
+**They conflict, because they are the same path built differently.** Both own
+`/usr/sbin/php-fpm-ng` and `/etc/php-fpm-ng`, so each declares `Conflicts` and
+`Replaces` against the other on the Debian side and `replaces=` on the Alpine
+one, and both `Provides: php-fpm-ng-any` -- a virtual name, because neither can
+provide "php-fpm-ng" when that is the real name of one of them. The effect is
+that installing one over the other is an ordinary package-manager operation and
+co-installing them is refused before any file is touched.
+
+**Built and gated on a tag, not on every pull request.** This is the cost
+decision, and it is the one thing #294 asked that the code could have got wrong
+quietly. `build/ci-package-gate.sh` is the longest job in CI; a second row in
+`.github/workflows/build-matrix.yml` would have put a full second build,
+install and suite run on every pull request in order to gate an artefact that
+only exists on a tag. So `FPMNG_PACKAGE_TLS=1` is off by default and
+`.github/workflows/release.yml` sets it, next to the rows that build the default
+package -- the TLS package goes through the identical script, the identical
+clean-container install, the identical negative control and an exact count
+assertion of its own, and pull-request CI does not grow by a minute.
+
+**The counts are the evidence that the flags reached the artefact.** The TLS
+package scores 52 PASS / 33 SKIP on Debian and 50 / 35 on Alpine against the
+default package's 48/37 and 46/39, and the difference is exactly the four tests
+that skip on a binary with no TLS and no ACME in it. Measured on a real gate run
+of each flavour rather than derived from the list of tests, for the same reason
+every other number in that file was.
+
+**And the first thing the second package found was a dead `#ifdef`.** Issue
+#295 gave the two build flags a BETA announcement each, in `fpm_run()`. The
+ACME one was guarded by `HAVE_FPMNG_ACME`, which `config.m4` defines; the TLS
+one by `HAVE_FPMNG_TLS`, which nothing defines anywhere -- the macro is called
+`HAVE_FPM_HTTP_TLS`. So a TLS build announced ACME and said nothing about TLS,
+in every build, and the way it surfaced was mundane: this issue built the
+package, started it, and read the log. Nothing else could have caught it. The
+#295 tests cover the per-pool tier lines, which are a different call site, and
+an `#ifdef` on a macro that does not exist compiles cleanly and silently to
+nothing. `fpmng-tier-build-flags.phpt` now starts a TLS/ACME build and asserts
+both lines with the flag names in them; it runs in the `fpmng-phpt` cell of the
+matrix, which configures with both flags, and in the TLS package gate.

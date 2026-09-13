@@ -82,6 +82,28 @@ jobs:
       - name: build, install and test the .apk
         run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk"
 
+      # The second package (issue #294): the same release built
+      # --enable-fpmng-tls --enable-fpmng-acme, so that the remedy for the TLS
+      # regression of issues #280 and #281 is "install php-fpm-ng-tls" rather
+      # than "get a compiler". Beta and unaudited, and its package description
+      # says so.
+      #
+      # Built HERE and not in .github/workflows/build-matrix.yml, on purpose.
+      # package-gate is the longest job in CI; a second row would put its whole
+      # cost on every pull request to gate an artefact that only ships on a
+      # tag. This workflow runs on a tag and on a manual rehearsal, which is
+      # exactly when the artefact exists -- and it is gated by the same script
+      # with the same count assertion as the default package, so nothing here
+      # is published less tested than what the matrix checks.
+      - name: build, install and test the TLS .deb
+        env:
+          FPMNG_PACKAGE_TLS: "1"
+        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb-tls"
+      - name: build, install and test the TLS .apk
+        env:
+          FPMNG_PACKAGE_TLS: "1"
+        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk-tls"
+
       # The asset names carry both halves: our release and the PHP minor the
       # binary is a SAPI for. A user with 8.4 and 8.5 installed has to be able
       # to tell two of these apart before installing either, and the file name
@@ -89,13 +111,21 @@ jobs:
       - name: collect the assets
         run: |
           mkdir -p assets
-          deb=$(find out-package-deb -maxdepth 1 -name 'php-fpm-ng_*.deb' ! -name 'wrong-minor*' | head -1)
-          apk=$(find out-package-apk/repo -name 'php-fpm-ng-*.apk' | head -1)
-          [ -n "$deb" ] && [ -n "$apk" ] || { echo "an expected package is missing" >&2; exit 1; }
-          php_deb=$(dpkg-deb -f "$deb" Depends | sed -n 's/.*libphp\([0-9.]*\)-embed.*/\1/p')
-          php_apk=$(basename "$apk" | sed -n 's/^php-fpm-ng-\([0-9]*\.[0-9]*\)\..*/\1/p')
-          cp "$deb" "assets/php-fpm-ng_${FPMNG_RELEASE}_php${php_deb}_$(dpkg --print-architecture).deb"
-          cp "$apk" "assets/php-fpm-ng-${FPMNG_RELEASE}-php${php_apk}-$(uname -m).apk"
+          # Both packages, named the same way, so that the one difference
+          # between them -- TLS and ACME compiled in -- is in the file name and
+          # not only in a description the user reads after downloading.
+          collect() {
+            name=$1 debdir=$2 apkdir=$3
+            deb=$(find "$debdir" -maxdepth 1 -name "${name}_*.deb" ! -name 'wrong-minor*' | head -1)
+            apk=$(find "$apkdir/repo" -name "$name-[0-9]*.apk" | head -1)
+            [ -n "$deb" ] && [ -n "$apk" ] || { echo "an expected $name package is missing" >&2; exit 1; }
+            php_deb=$(dpkg-deb -f "$deb" Depends | sed -n 's/.*libphp\([0-9.]*\)-embed.*/\1/p')
+            php_apk=$(basename "$apk" | sed -n "s/^$name-\\([0-9]*\\.[0-9]*\\)\\..*/\\1/p")
+            cp "$deb" "assets/${name}_${FPMNG_RELEASE}_php${php_deb}_$(dpkg --print-architecture).deb"
+            cp "$apk" "assets/${name}-${FPMNG_RELEASE}-php${php_apk}-$(uname -m).apk"
+          }
+          collect php-fpm-ng out-package-deb out-package-apk
+          collect php-fpm-ng-tls out-package-deb-tls out-package-apk-tls
           ( cd assets && sha256sum ./*.deb ./*.apk > SHA256SUMS )
           cat assets/SHA256SUMS
 

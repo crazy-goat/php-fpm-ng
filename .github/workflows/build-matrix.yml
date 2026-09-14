@@ -1169,6 +1169,36 @@ jobs:
       - name: the .apk, installed on a machine with no compiler
         run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk"
 
+      # The TLS/ACME package (issue #294), on a pull request too now. It used
+      # to be built and gated only by .github/workflows/release.yml, on a tag
+      # -- the reasoning there was that this job is already the longest one in
+      # CI (issue #240) and a second row would double that cost on every pull
+      # request to gate an artefact that only ships on a tag. That reasoning
+      # is what let the regression this comment is a response to ship
+      # undetected all the way to a v0.5.0 tag: fpmng-http-direct-connection-
+      # info.phpt's own SKIPIF checked for a TLS-capable binary but not for
+      # pool.type = http support, so it FAILed instead of skipping the moment
+      # a real --enable-fpmng-tls build met a distribution libphp without
+      # patches/0006 -- a combination only release.yml's tag-only run ever
+      # produced. A wrong assertion in the suite is exactly the kind of bug a
+      # pull request should have caught before it could reach a tag.
+      #
+      # The compromise: one more flavour, not a second job. The tree above is
+      # already fetched and prepared for this run, so a deb-only TLS row costs
+      # this job the same ~88 seconds release.yml's own TLS .deb step measures
+      # (16s build + 72s suite -- issue #240's 232-second apt-get unpack is
+      # what the warm images below already remove), not a second checkout, a
+      # second tree, and a second apk run on top of it. apk stays release-only
+      # for now: the deb and apk flavours build and gate the same source
+      # against the same suite, so a regression that is specific to which
+      # packaging format Alpine uses rather than to TLS/ACME being compiled in
+      # is not the risk this row exists to catch, and release.yml still gates
+      # the apk TLS package on every tag before it is published.
+      - name: the TLS .deb, installed on a machine with no compiler
+        env:
+          FPMNG_PACKAGE_TLS: "1"
+        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb-tls"
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
@@ -1176,6 +1206,7 @@ jobs:
           path: |
             out-package-deb/results
             out-package-apk/results
+            out-package-deb-tls/results
           retention-days: 14
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()

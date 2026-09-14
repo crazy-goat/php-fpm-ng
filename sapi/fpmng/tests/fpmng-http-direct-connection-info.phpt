@@ -90,10 +90,18 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
+/* pool.type = http would need patches/0006 (fpmng_skip_if_pool_type_unsupported's
+ * FPMNG_MISSING_PATCH_0006), which a package built against a distribution
+ * libphp does not carry -- unlike this test's TLS assertions, which that
+ * build DOES support. A supervisor pool needs no patch and no listener at
+ * all, and answers the same question this case is actually asking (does a
+ * pool that is not pool.type = http-direct see the function): it runs once
+ * (supervisor.restart = never) and drops its answer in a file instead of
+ * serving it over a socket. */
 file_put_contents("$root/gateway.php", <<<'PHP'
 <?php
-header('Content-Type: application/json');
-echo json_encode(['exists' => function_exists('fpm_connection_info')]);
+file_put_contents(__DIR__ . '/gateway-result.json',
+    json_encode(['exists' => function_exists('fpm_connection_info')]));
 PHP);
 
 function tlsContext(?string $localCertPem = null): mixed
@@ -196,8 +204,6 @@ $portNone = (int) (getenv('FPMNG_DIRECT_CONNINFO_PORT') ?: 28094);
 $portOptional = $portNone + 1;
 $portRequire = $portNone + 2;
 $portWorker = $portNone + 3;
-$fcgiListen = $portNone + 4;
-$portGateway = $portNone + 5;
 
 $config = <<<CFG
 [global]
@@ -256,13 +262,9 @@ http.tls_client_ca = $root/ca.crt
 php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
 [gateway]
-listen = 127.0.0.1:$fcgiListen
-pool.type = http
-pm = static
-pm.max_children = 1
-chdir = $root
-http.listen = 127.0.0.1:$portGateway
-php_admin_value[display_errors] = 0
+pool.type = supervisor
+supervisor.script = $root/gateway.php
+supervisor.restart = never
 CFG;
 
 $tester = new FPM\Tester($config, '<?php');
@@ -365,16 +367,18 @@ try {
     check($info === false, 'worker executor should answer false, got: ' . var_export($info, true));
     echo "worker-executor-unsupported: ok\n";
 
-    /* 8. pool.type = http (the FastCGI gateway): fpm_connection_info() does
-     * not exist at all -- the defined "unsupported" answer for a pool type
-     * this API was never wired into, so function_exists() tells the truth
-     * rather than opcache folding a call that would fatal. */
+    /* 8. A non-direct pool (a supervisor script, standing in for any pool
+     * that is not pool.type = http-direct): fpm_connection_info() does not
+     * exist at all -- the defined "unsupported" answer for a pool type this
+     * API was never wired into, so function_exists() tells the truth rather
+     * than opcache folding a call that would fatal. */
+    $resultFile = "$root/gateway-result.json";
     $body = '';
     for ($i = 0; $i < 50 && $body === ''; $i++) {
-        $body = (string) @file_get_contents("http://127.0.0.1:$portGateway/gateway.php");
+        $body = (string) @file_get_contents($resultFile);
         if ($body === '') usleep(100000);
     }
-    check($body !== '', 'no response from the [gateway] pool');
+    check($body !== '', 'the [gateway] supervisor script never ran');
     $data = json_decode($body, true, flags: JSON_THROW_ON_ERROR);
     check($data['exists'] === false, 'fpm_connection_info() exists on a non-direct pool');
     echo "non-direct-pool-unsupported: ok\n";

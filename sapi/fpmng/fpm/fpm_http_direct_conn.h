@@ -63,6 +63,8 @@
 #ifndef FPM_HTTP_DIRECT_CONN_H
 #define FPM_HTTP_DIRECT_CONN_H 1
 
+#include <sys/time.h>
+
 struct event_base;
 struct bufferevent;
 struct fpm_http_direct_conns;
@@ -107,8 +109,20 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
  *
  * The cap is enforced here, at the last moment before the answer, because the
  * alternative (the pickup pass, which is a zero-delay timer) races the
- * connection's own read callback and sometimes loses. */
-int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev);
+ * connection's own read callback and sometimes loses.
+ *
+ * accepted_out/requests_out (issue #62, fpm_connection_info()) are filled
+ * with this connection's accept time and the number of requests served on it
+ * so far (including this one) BEFORE any forgetting happens -- a
+ * pool.executor = worker node is dropped the moment this call returns 0, so
+ * the caller must capture these here, not read them back later. Either
+ * pointer may be NULL for a caller that does not need it; both are left
+ * untouched when the connection is not tracked at all (conns is NULL, or
+ * neither a limit nor track_live is configured and http.read_timeout already
+ * fired the deadline before this request arrived -- the accept-time node was
+ * never created). */
+int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev,
+	struct timeval *accepted_out, unsigned *requests_out);
 
 /* False while this worker is at http.max_connections. The caller keeps its
  * listener disabled for as long as this says so. Not const: it sweeps first,

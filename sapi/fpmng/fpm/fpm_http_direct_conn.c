@@ -7,6 +7,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <netinet/in.h>
 
 #include <event2/event.h>
@@ -27,6 +28,11 @@ struct fpm_direct_conn {
 	socklen_t peer_len;
 	int checked;	/* the per-client cap has already passed judgement on this one */
 	int served;			/* the first request arrived: only the limits keep this node */
+	/* issue #62 (fpm_connection_info()): when this node was created (the
+	 * bevcb, i.e. accept time) and how many requests have completed
+	 * fpm_http_direct_conns_request() on it so far. */
+	struct timeval accepted;
+	unsigned requests;
 	/* Doubly linked, with a tail, so that unlinking one node is O(1). It used
 	 * to be a singly linked list walked from the head, which was fine while
 	 * the list only held connections waiting for their first request; since
@@ -412,6 +418,7 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 	c->conns = conns;
 	c->bev = bev;
 	c->fd = -1;
+	gettimeofday(&c->accepted, NULL);
 	/* The reference everything else in this file rests on. See the header. */
 	bufferevent_incref(bev);
 	c->watch = event_new(conns->base, -1, EV_TIMEOUT, fpm_direct_conn_pickup, c);
@@ -451,7 +458,8 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 	}
 }
 
-int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev)
+int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev,
+	struct timeval *accepted_out, unsigned *requests_out)
 {
 	struct fpm_direct_conn *c;
 
@@ -461,6 +469,13 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 	for (c = conns->list; c; c = c->next) {
 		if (c->bev != bev) {
 			continue;
+		}
+		c->requests++;
+		if (accepted_out) {
+			*accepted_out = c->accepted;
+		}
+		if (requests_out) {
+			*requests_out = c->requests;
 		}
 		/* The per-client cap is settled here and not left to the pickup pass,
 		 * because the pickup is a zero-delay timer and this is the request

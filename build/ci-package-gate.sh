@@ -187,14 +187,25 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # refused, issue #214), so all three skip on every flavour regardless of TLS.
 # TOTAL carries a further +3 and each flavour's SKIP count carries a further
 # +3; the four PASS counts are unaffected.
+#
+# fpmng-http-direct-connection-info.phpt (issue #62) is a sixth addition: a
+# pool.type = http-direct pool with http.tls_cert configured, which needs no
+# patches/0006 support, so it is not one of the tests that skip for that
+# reason. What it does need is a binary built with --enable-fpmng-tls: its
+# SKIPIF probes that directly and skips naming issue #280 when it is missing.
+# The default packages are built without the flag (FPMNG_TLS=0), so it joins
+# the skips there; the php-fpm-ng-tls packages have it, so it passes there
+# instead. TOTAL carries a further +1, the two default-flavour SKIP counts
+# carry a further +1 each, and the two TLS-flavour PASS counts carry a
+# further +1 each.
 EXPECT_FAIL=0
-EXPECT_TOTAL=92
+EXPECT_TOTAL=93
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=56; EXPECT_SKIP=36
-    else EXPECT_PASS=52; EXPECT_SKIP=40; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=57; EXPECT_SKIP=36
+    else EXPECT_PASS=52; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -227,8 +238,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=54; EXPECT_SKIP=38
-    else EXPECT_PASS=50; EXPECT_SKIP=42; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=55; EXPECT_SKIP=38
+    else EXPECT_PASS=50; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

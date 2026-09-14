@@ -19,6 +19,11 @@
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 #include <event2/listener.h>
+#ifdef HAVE_FPM_HTTP_TLS
+#include <event2/bufferevent_ssl.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#endif
 
 #include "php.h"
 #include "php_main.h"
@@ -159,6 +164,21 @@ struct fpm_direct_request {
 	size_t bytes_sent;
 	struct timeval started;
 	time_t started_epoch;
+	/* issue #62, fpm_connection_info(): the transport-level facts a proxy
+	 * layer cannot vouch for, captured once here rather than read back from
+	 * evcon/the connection-tracking node later -- the tracking node for
+	 * pool.executor = worker is gone by the time PHP runs (see
+	 * fpm_http_direct_conns_request()'s accepted_out/requests_out). peer/
+	 * peer_port are evhttp_connection_get_peer()'s own strings/value, not a
+	 * copy: they live exactly as long as `http`, which outlives this
+	 * request. bev is the connection's bufferevent, used only to reach its
+	 * SSL* (bufferevent_openssl_get_ssl()) for the TLS fields -- never
+	 * handed to PHP itself. */
+	const char *conn_peer;
+	unsigned conn_peer_port;
+	struct bufferevent *conn_bev;
+	struct timeval conn_accepted;
+	unsigned conn_requests;
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -1694,8 +1714,217 @@ static ZEND_FUNCTION(fpmng_respond)
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_respond, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+#ifdef HAVE_FPM_HTTP_TLS
+/* SSL_get1_peer_certificate() (OpenSSL 3.0+; the older SSL_get_peer_certificate
+ * name is a macro alias for it as of 3.0, so this compiles against either
+ * header, but the non-deprecated spelling is used here since the build
+ * targets 3.x, see build/ci-build-tree.sh). Formats one X509_NAME the same
+ * way `openssl x509 -noout -subject` does (XN_FLAG_ONELINE minus the
+ * pointless leading space RFC2253 would add), so a test cross-checking this
+ * output against `openssl s_client` output has something directly
+ * comparable. Returns a request-pool-allocated string, or NULL on failure --
+ * never a truncated one: the 512-byte buffer here is generous for any real
+ * certificate, and a name that does not fit is reported as unavailable
+ * rather than silently cut. */
+static char *fpm_direct_x509_name(X509_NAME *name)
+{
+	char buf[512];
+	if (!name || X509_NAME_oneline(name, buf, sizeof(buf)) == NULL) {
+		return NULL;
+	}
+	return estrdup(buf);
+}
+
+/* YYYY-MM-DDTHH:MM:SSZ, always UTC -- X509 validity times are defined to be.
+ * ASN1_TIME_to_generalizedtime() normalizes both the ASN1_UTCTIME (2-digit
+ * year, pre-2050 certs) and ASN1_GENERALIZEDTIME (4-digit year) encodings
+ * X509_get0_notBefore()/notAfter() can return into the one shape this
+ * function then reformats with dashes/colons for readability. */
+static char *fpm_direct_x509_time(const ASN1_TIME *t)
+{
+	ASN1_GENERALIZEDTIME *gt = NULL;
+	char *out = NULL;
+
+	if (!t || !ASN1_TIME_to_generalizedtime(t, &gt) || gt->length < 14) {
+		if (gt) {
+			ASN1_GENERALIZEDTIME_free(gt);
+		}
+		return NULL;
+	}
+	/* gt->data is "YYYYMMDDHHMMSSZ" (15 bytes incl. the trailing Z). */
+	out = emalloc(21);
+	snprintf(out, 21, "%.4s-%.2s-%.2sT%.2s:%.2s:%.2sZ",
+		gt->data, gt->data + 4, gt->data + 6, gt->data + 8, gt->data + 10, gt->data + 12);
+	ASN1_GENERALIZEDTIME_free(gt);
+	return out;
+}
+
+/* Lowercase hex SHA-256 of the DER encoding, the same value
+ * `openssl x509 -noout -fingerprint -sha256` reports (modulo case and the
+ * colons, which this omits since nothing here needs them split). */
+static char *fpm_direct_x509_fingerprint(X509 *cert)
+{
+	unsigned char digest[EVP_MAX_MD_SIZE];
+	unsigned int len = 0;
+	char *out;
+	unsigned int i;
+
+	if (!X509_digest(cert, EVP_sha256(), digest, &len)) {
+		return NULL;
+	}
+	out = emalloc(len * 2 + 1);
+	for (i = 0; i < len; i++) {
+		snprintf(out + i * 2, 3, "%02x", digest[i]);
+	}
+	return out;
+}
+#endif /* HAVE_FPM_HTTP_TLS */
+
+/* fpm_connection_info() -- issue #62.
+ *
+ * Facts about the CURRENT connection that only the worker holding the real
+ * socket can vouch for: through FastCGI these would be, at best, whatever an
+ * intermediary chose to forward as request variables, and at worst a client
+ * -controlled header the intermediary forgot to strip. Here they come
+ * straight from the bufferevent and its SSL object, so there is no
+ * intermediary whose honesty this API has to assume.
+ *
+ * Deliberately NOT exposed: the raw socket/fd (fpm_direct_current->conn_bev
+ * and its descriptor stay inside this file; a script gets facts, never a
+ * handle it could use to bypass the SAPI), the server's own certificate or
+ * key material, and anything about a DIFFERENT connection than the one
+ * currently executing -- there is no connection id parameter, on purpose:
+ * see docs/http-direct.md for the isolation argument this rests on (task
+ * 054).
+ *
+ * Returns false when there is no current connection to report on (no
+ * request in flight, e.g. called from a CLI script during a tier check) --
+ * the same "false means nothing to report" convention fpmng_respond() uses.
+ * Returns an array unconditionally on pool.executor = classic, http-direct's
+ * default: transport/peer_addr/peer_port/age/requests are always present;
+ * the tls_* and client_cert_* keys exist only when the connection actually
+ * is TLS, respectively when http.tls_verify_client is not "none" AND the
+ * client's handshake presented a certificate (SSL_VERIFY_PEER without
+ * SSL_VERIFY_FAIL_IF_NO_PEER_CERT lets a handshake complete without one --
+ * "optional" -- so a caller checking client_cert_verified without first
+ * checking the key exists would see a warning, not a wrong answer). */
+static ZEND_FUNCTION(fpm_connection_info)
+{
+	struct fpm_direct_request *r = fpm_direct_current;
+	struct timeval now;
+	double age;
+#ifdef HAVE_FPM_HTTP_TLS
+	SSL *ssl = NULL;
+#endif
+
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	if (!r || !r->http) {
+		RETURN_FALSE;
+	}
+
+	array_init(return_value);
+
+	gettimeofday(&now, NULL);
+	age = (double) (now.tv_sec - r->conn_accepted.tv_sec)
+		+ (double) (now.tv_usec - r->conn_accepted.tv_usec) / 1000000.0;
+	if (age < 0) {
+		/* Only reachable if the wall clock stepped backwards between accept
+		 * and here (NTP correction); reported as 0 rather than a negative
+		 * age no caller can sensibly act on. */
+		age = 0;
+	}
+
+	add_assoc_string(return_value, "peer_addr", r->conn_peer ? r->conn_peer : "");
+	add_assoc_long(return_value, "peer_port", r->conn_peer_port);
+	add_assoc_double(return_value, "age", age);
+	add_assoc_long(return_value, "requests", r->conn_requests);
+
+#ifdef HAVE_FPM_HTTP_TLS
+	if (r->conn_bev) {
+		ssl = bufferevent_openssl_get_ssl(r->conn_bev);
+	}
+#endif
+
+#ifdef HAVE_FPM_HTTP_TLS
+	if (ssl) {
+		const unsigned char *alpn = NULL;
+		unsigned int alpn_len = 0;
+		const char *sni;
+		X509 *cert;
+
+		add_assoc_string(return_value, "transport", "tls");
+		add_assoc_string(return_value, "tls_protocol", (char *) SSL_get_version(ssl));
+		add_assoc_string(return_value, "tls_cipher", (char *) SSL_get_cipher_name(ssl));
+
+		SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
+		if (alpn && alpn_len > 0) {
+			add_assoc_stringl(return_value, "tls_alpn", (char *) alpn, alpn_len);
+		} else {
+			add_assoc_null(return_value, "tls_alpn");
+		}
+
+		sni = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+		if (sni) {
+			add_assoc_string(return_value, "tls_sni", (char *) sni);
+		} else {
+			add_assoc_null(return_value, "tls_sni");
+		}
+
+		/* Client certificate fields, issue #62's "meaningless without it":
+		 * present only when this pool asked for one at all. SSL_VERIFY_PEER
+		 * without FAIL_IF_NO_PEER_CERT ("optional") lets the handshake
+		 * complete with none presented -- SSL_get1_peer_certificate() then
+		 * returns NULL, which is reported as client_cert_verified = false
+		 * with every other client_cert_* key null, not as the keys being
+		 * absent: a script that only checks http.tls_verify_client once
+		 * (e.g. from a pool-wide constant) still gets a consistent shape. */
+		if (SSL_get_verify_mode(ssl) & SSL_VERIFY_PEER) {
+			cert = SSL_get1_peer_certificate(ssl);
+			if (cert) {
+				char *subject = fpm_direct_x509_name(X509_get_subject_name(cert));
+				char *issuer = fpm_direct_x509_name(X509_get_issuer_name(cert));
+				char *not_before = fpm_direct_x509_time(X509_get0_notBefore(cert));
+				char *not_after = fpm_direct_x509_time(X509_get0_notAfter(cert));
+				char *fingerprint = fpm_direct_x509_fingerprint(cert);
+
+				add_assoc_bool(return_value, "client_cert_verified",
+					SSL_get_verify_result(ssl) == X509_V_OK);
+				if (subject) { add_assoc_string(return_value, "client_cert_subject", subject); efree(subject); }
+				else { add_assoc_null(return_value, "client_cert_subject"); }
+				if (issuer) { add_assoc_string(return_value, "client_cert_issuer", issuer); efree(issuer); }
+				else { add_assoc_null(return_value, "client_cert_issuer"); }
+				if (not_before) { add_assoc_string(return_value, "client_cert_not_before", not_before); efree(not_before); }
+				else { add_assoc_null(return_value, "client_cert_not_before"); }
+				if (not_after) { add_assoc_string(return_value, "client_cert_not_after", not_after); efree(not_after); }
+				else { add_assoc_null(return_value, "client_cert_not_after"); }
+				if (fingerprint) { add_assoc_string(return_value, "client_cert_fingerprint_sha256", fingerprint); efree(fingerprint); }
+				else { add_assoc_null(return_value, "client_cert_fingerprint_sha256"); }
+
+				X509_free(cert);
+			} else {
+				add_assoc_bool(return_value, "client_cert_verified", 0);
+				add_assoc_null(return_value, "client_cert_subject");
+				add_assoc_null(return_value, "client_cert_issuer");
+				add_assoc_null(return_value, "client_cert_not_before");
+				add_assoc_null(return_value, "client_cert_not_after");
+				add_assoc_null(return_value, "client_cert_fingerprint_sha256");
+			}
+		}
+	} else {
+		add_assoc_string(return_value, "transport", "plain");
+	}
+#else
+	add_assoc_string(return_value, "transport", "plain");
+#endif
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_connection_info, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry fpm_direct_functions[] = {
 	ZEND_FE(fpmng_respond, arginfo_fpmng_respond)
+	ZEND_FE(fpm_connection_info, arginfo_fpm_connection_info)
 	ZEND_FE_END
 };
 
@@ -1724,7 +1953,7 @@ static void fpm_direct_register_functions(const char *pool)
 	result = zend_register_functions(NULL, fpm_direct_functions, CG(function_table), MODULE_PERSISTENT);
 	EG(current_module) = saved_module;
 	if (result != SUCCESS) {
-		zlog(ZLOG_ERROR, "[pool %s] http-direct: cannot register fpmng_respond()", pool);
+		zlog(ZLOG_ERROR, "[pool %s] http-direct: cannot register fpmng_respond()/fpm_connection_info()", pool);
 	}
 }
 
@@ -1823,6 +2052,8 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	int local_status = 0;
 	size_t local_bytes = 0;
 	int over_client_cap = 0;
+	struct timeval conn_accepted = {0, 0};
+	unsigned conn_requests = 0;
 
 	gettimeofday(&started, NULL);
 	if (evcon) {
@@ -1850,7 +2081,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		 * has to get the same 403 whatever else is true of it, or the pool's
 		 * per-client cap becomes something an excluded address can probe. */
 		over_client_cap = fpm_http_direct_conns_request(w->conns,
-			evhttp_connection_get_bufferevent(evcon)) < 0;
+			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
 	/* listen.allowed_clients, issue #59. Before anything else this function
@@ -1911,6 +2142,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	r.http = http;
 	r.w = w;
 	r.pool = w->wp->config->name;
+	r.conn_peer = peer;
+	r.conn_peer_port = peer_port;
+	r.conn_bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
+	r.conn_accepted = conn_accepted;
+	r.conn_requests = conn_requests;
 	r.status = 200;
 	r.env.tqh_last = &r.env.tqh_first;
 	r.output = evbuffer_new();

@@ -197,6 +197,10 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_min_version") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_sni_cert") ||
 			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_reload_check") ||
+			/* issue #62: client certificate verification, meaningless without
+			 * a direct pool's own TLS termination. */
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_verify_client") ||
+			FPM_HTTP_DIRECT_DIRECTIVE(p, len, "http.tls_client_ca") ||
 			fpm_http_direct_directive_extra(labels, p, len))) {
 			zlog(ZLOG_ALERT, "[pool %s] '%.*s' is not supported by %s",
 				c->name, (int) len, p, labels->type_label);

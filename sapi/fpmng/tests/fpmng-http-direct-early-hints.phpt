@@ -190,7 +190,7 @@ try {
     $fp = connect($port);
     fwrite($fp, "GET /front.php?mode=http10 HTTP/1.0\r\nHost: test\r\n\r\n");
     $line = fgets($fp);
-    check(str_starts_with((string) $line, 'HTTP/1.1 200 '), "HTTP/1.0 request got a stray 103: " . var_export($line, true));
+    check(str_starts_with((string) $line, 'HTTP/1.0 200 '), "HTTP/1.0 request got a stray 103: " . var_export($line, true));
     fclose($fp);
     echo "early-hints-refused-on-http10: ok\n";
 

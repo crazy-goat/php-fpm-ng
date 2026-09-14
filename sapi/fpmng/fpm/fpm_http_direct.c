@@ -2003,7 +2003,7 @@ static ZEND_FUNCTION(fpm_send_early_hints)
 	HashTable *headers;
 	zend_string *key;
 	zval *value;
-	struct evkeyvalq validated;
+	struct evkeyvalq validated = {0};
 	struct evkeyval *kv;
 	struct evbuffer *out;
 	size_t total = 0;
@@ -2022,7 +2022,7 @@ static ZEND_FUNCTION(fpm_send_early_hints)
 		RETURN_FALSE;
 	}
 
-	TAILQ_INIT(&validated);
+	validated.tqh_last = &validated.tqh_first;
 	ZEND_HASH_FOREACH_STR_KEY_VAL(headers, key, value) {
 		if (!key) {
 			continue;

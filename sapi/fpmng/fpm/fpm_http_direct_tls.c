@@ -7,6 +7,8 @@
  */
 #include "fpm_config.h"
 
+#include <string.h>
+
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
@@ -45,6 +47,10 @@ int fpm_http_direct_tls_validate_pairing(struct fpm_worker_pool_s *wp)
 	if ((c->http_tls_sni_cert && *c->http_tls_sni_cert) || c->http_tls_min_version) {
 		zlog(ZLOG_ALERT, "[pool %s] http.tls_min_version and http.tls_sni_cert require http.tls_cert",
 			c->name);
+		return -1;
+	}
+	if (c->http_tls_verify_client && *c->http_tls_verify_client && strcmp(c->http_tls_verify_client, "none") != 0) {
+		zlog(ZLOG_ALERT, "[pool %s] http.tls_verify_client requires http.tls_cert", c->name);
 		return -1;
 	}
 	return 0;

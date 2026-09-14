@@ -427,7 +427,7 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	 * value cannot be anything but 0 here: it reports
 	 * http.max_connections_per_client, which this executor rejects. */
 	(void) fpm_http_direct_conns_request(fw.conns,
-		evhttp_connection_get_bufferevent(evhttp_request_get_connection(http)));
+		evhttp_connection_get_bufferevent(evhttp_request_get_connection(http)), NULL, NULL);
 	/* Before the saturation check below: a client that may not be here learns
 	 * nothing about how busy the worker is. */
 	if (fw.acl) {
@@ -1366,6 +1366,31 @@ static ZEND_FUNCTION(fpmng_worker_loop_break)
 	event_base_loopbreak(fw.base);
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_connection_info, 0, 0, IS_MIXED, 0)
+ZEND_END_ARG_INFO()
+
+/* issue #62's defined "unsupported" answer for pool.executor = worker: this
+ * executor runs several requests concurrently against one PHP engine (a
+ * script identifies which one it means by the id fpmng_worker_next_request()
+ * handed it), so there is no single "current connection" for a zero-argument
+ * call to report on the way there is on the classic executor
+ * (fpm_direct_current in fpm_http_direct.c). Worse, this executor has no
+ * periodic tick (see fpm_http_direct_conn.h's track_live), so even the
+ * accept-time connection-tracking node this API would read from on the
+ * classic executor is deliberately dropped the moment the first request
+ * arrives, to avoid leaking one fd per connection. Both are structural, not
+ * missing plumbing -- extending this to the worker executor needs an
+ * explicit connection/request id parameter and a place to keep per-connection
+ * facts alive across requests, which is future work, not this issue's scope.
+ * `false` is the same defined answer fpmng_respond() gives for "nothing to
+ * report", so a script that checks the return value the same way for both
+ * functions already does the right thing here. */
+static ZEND_FUNCTION(fpm_connection_info)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+	RETURN_FALSE;
+}
+
 static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_notify_stream, arginfo_fpmng_worker_notify_stream)
 	ZEND_FE(fpmng_worker_stopping, arginfo_fpmng_worker_stopping)
@@ -1381,6 +1406,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_event_free, arginfo_fpmng_worker_event_free)
 	ZEND_FE(fpmng_worker_loop, arginfo_fpmng_worker_loop)
 	ZEND_FE(fpmng_worker_loop_break, arginfo_fpmng_worker_loop_break)
+	ZEND_FE(fpm_connection_info, arginfo_fpm_connection_info)
 	ZEND_FE_END
 };
 

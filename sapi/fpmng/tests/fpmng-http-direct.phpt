@@ -60,6 +60,7 @@ echo json_encode([
     'alias' => apache_request_headers(),
     'env' => getenv('REQUEST_URI'),
     'finish' => function_exists('fastcgi_finish_request'),
+    'conn' => fpm_connection_info(),
 ]);
 PHP);
 $port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
@@ -84,6 +85,7 @@ try {
     $tester->start();
     $tester->expectLogStartNotices();
     $fp = connectDirect("127.0.0.1:$port");
+    $prevAge = -1.0;
     for ($i = 0; $i < 3; $i++) {
         $body = 'field=value' . $i;
         $uri = '/arbitrary/../route?q=' . $i;
@@ -101,6 +103,18 @@ try {
         check($data['server']['PHP_AUTH_USER'] === 'user' && $data['server']['PHP_AUTH_PW'] === 'pass', 'basic auth');
         check($data['headers']['X-Probe'] === 'custom' && $data['alias'] === $data['headers'], 'header functions');
         check(!$data['finish'], 'unsafe FastCGI function exposed');
+        /* fpm_connection_info() (issue #62): plain transport, no TLS/client
+         * cert keys, and the request count/age track THIS connection, never
+         * resetting across keep-alive requests on it. */
+        $conn = $data['conn'];
+        check($conn['transport'] === 'plain', 'plain transport: ' . var_export($conn['transport'], true));
+        check(!array_key_exists('tls_protocol', $conn) && !array_key_exists('client_cert_verified', $conn),
+            'plain connection exposed TLS/client-cert keys');
+        check($conn['peer_addr'] === '127.0.0.1', 'peer_addr: ' . var_export($conn['peer_addr'], true));
+        check(is_int($conn['peer_port']) && $conn['peer_port'] > 0, 'peer_port: ' . var_export($conn['peer_port'], true));
+        check($conn['requests'] === $i + 1, "requests should be " . ($i + 1) . ", got " . var_export($conn['requests'], true));
+        check(is_float($conn['age']) && $conn['age'] >= $prevAge, 'age did not advance: ' . var_export($conn['age'], true));
+        $prevAge = $conn['age'];
     }
     fwrite($fp, "HEAD / HTTP/1.1\r\nHost: example.test\r\n\r\n");
     [$status, $headers] = response($fp, true);
@@ -120,6 +134,11 @@ try {
     fwrite($fp, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n3\r\nabc\r\n0\r\n\r\n");
     $data = json_decode(response($fp)[2], true, flags: JSON_THROW_ON_ERROR);
     check($data['raw'] === 'abc' && $data['server']['CONTENT_LENGTH'] === '3', 'chunked request');
+    /* Isolation (issue #62): a brand new connection on the very worker that
+     * just served 3 requests on the previous one starts back at requests=1,
+     * not 4 -- nothing about the old connection's fpm_connection_info()
+     * state leaked into this one. */
+    check($data['conn']['requests'] === 1, 'requests leaked across connections: ' . var_export($data['conn']['requests'], true));
     fclose($fp);
     $fp = connectDirect("127.0.0.1:$port");
     fwrite($fp, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 2048\r\nConnection: close\r\n\r\n" . str_repeat('x', 2048));

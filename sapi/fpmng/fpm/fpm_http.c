@@ -2992,7 +2992,8 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0))) {
 		gw->tls = fpm_tls_http_load(gw->pool, wp->config->http_tls_cert,
 			wp->config->http_tls_key, wp->config->http_tls_min_version,
-			wp->config->http_tls_sni_cert);
+			wp->config->http_tls_sni_cert,
+			wp->config->http_tls_verify_client, wp->config->http_tls_client_ca);
 	}
 	/* The certificate was there all along, so there is nothing to wait for:
 	 * drop the opt-in and let every gate below behave exactly as it does for
@@ -3392,7 +3393,8 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 				(access(wp->config->http_tls_cert, R_OK) != 0 ||
 				 !wp->config->http_tls_key || access(wp->config->http_tls_key, R_OK) != 0)) &&
 				fpm_tls_http_validate(wp->config->name, wp->config->http_tls_cert, wp->config->http_tls_key,
-				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert) != 0) {
+				wp->config->http_tls_min_version, wp->config->http_tls_sni_cert,
+				wp->config->http_tls_verify_client, wp->config->http_tls_client_ca) != 0) {
 			return -1; /* fpm_tls_http_validate() already logged what is wrong */
 		}
 #else
@@ -3403,6 +3405,10 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 #endif
 	} else if (wp->config->http_tls_key && *wp->config->http_tls_key) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_key without http.tls_cert has nothing to attach the key to", wp->config->name);
+		return -1;
+	} else if (wp->config->http_tls_verify_client && *wp->config->http_tls_verify_client &&
+			strcmp(wp->config->http_tls_verify_client, "none") != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_verify_client without http.tls_cert has no TLS handshake to request a client certificate on", wp->config->name);
 		return -1;
 	}
 	return 0;

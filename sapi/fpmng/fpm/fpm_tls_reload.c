@@ -118,6 +118,15 @@ struct fpm_tls_reload_s {
 	struct fpm_tls_http_sni_s *sni;
 	size_t sni_count;
 
+	/* mTLS (issue #62): same borrow-from-`initial` treatment as sni/sni_count
+	 * above and for the same reason -- http.tls_verify_client/tls_client_ca
+	 * are not part of the hot-reload/mtime-check machinery (only the primary
+	 * cert/key are), so a reload must not silently rebuild the ctx with
+	 * client-certificate verification turned off. */
+	int verify_client;
+	char *client_ca_pem;
+	size_t client_ca_len;
+
 	/* child-only: private per gateway process after fork(), never read or
 	 * written by the master or by any sibling gateway process. */
 	unsigned long last_seen_generation;
@@ -314,7 +323,7 @@ static void fpm_tls_reload_master_tick(struct fpm_event_s *ev, short which, void
 	 * http.tls_sni_cert's paths (task 041's scope cut, see
 	 * fpm_tls_reload_s.sni/sni_count below): SNI certificates are not
 	 * hot-reloaded, only the primary cert/key are. */
-	if (fpm_tls_http_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL) != 0) {
+	if (fpm_tls_http_validate(r->pool, r->cert_path, r->key_path, r->min_version, NULL, "none", NULL) != 0) {
 		/* fpm_tls_http_validate() already logged what's wrong. Remember
 		 * these digests anyway so a persistently broken pair (operator
 		 * hasn't fixed it yet) does not re-log every tick; the next actual
@@ -326,7 +335,7 @@ static void fpm_tls_reload_master_tick(struct fpm_event_s *ev, short which, void
 		return;
 	}
 
-	fresh = fpm_tls_http_load(r->pool, r->cert_path, r->key_path, r->min_version, NULL);
+	fresh = fpm_tls_http_load(r->pool, r->cert_path, r->key_path, r->min_version, NULL, "none", NULL);
 	if (!fresh) {
 		/* fpm_tls_http_load() already logged (re-read failed between the
 		 * validate above and here, or RAND_bytes() failed) -- do not update
@@ -430,6 +439,9 @@ struct fpm_tls_reload_s *fpm_tls_reload_master_init(const char *pool,
 	/* Borrowed, not copied -- see the fields' declaration above. */
 	r->sni = initial ? initial->sni : NULL;
 	r->sni_count = initial ? initial->sni_count : 0;
+	r->verify_client = initial ? initial->verify_client : 0;
+	r->client_ca_pem = initial ? initial->client_ca_pem : NULL;
+	r->client_ca_len = initial ? initial->client_ca_len : 0;
 
 	/* Baseline: the bytes the gateway is about to start serving. A failure
 	 * here leaves the digest all-zero, which no file matches, so the first
@@ -530,6 +542,12 @@ static unsigned long fpm_tls_reload_snapshot(struct fpm_tls_reload_s *r,
 	 * cert does not silently rebuild the ctx with zero SNI certificates. */
 	tmp->sni = r->sni;
 	tmp->sni_count = r->sni_count;
+
+	/* mTLS (issue #62): same borrow, same reason -- not part of the
+	 * reload/mtime-check machinery. */
+	tmp->verify_client = r->verify_client;
+	tmp->client_ca_pem = r->client_ca_pem;
+	tmp->client_ca_len = r->client_ca_len;
 
 	return gen;
 }

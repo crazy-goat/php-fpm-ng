@@ -1132,14 +1132,139 @@ What this means in practice:
   port, and quietly serving plain HTTP there instead is the one outcome that
   must not happen.
 
-Not covered here: client-certificate verification and exposing the peer
-certificate to PHP (issue #62), OCSP stapling, session-ticket rotation beyond
-the shared key generated at startup, and ACME issuance/renewal (issue #46).
+Not covered here: OCSP stapling, session-ticket rotation beyond the shared key
+generated at startup, and ACME issuance/renewal (issue #46). Client-certificate
+verification and exposing connection facts to PHP are covered below.
 
 Covered by `sapi/fpmng/tests/fpmng-http-direct-tls.phpt`: a handshake and a
 request on each executor, the CGI variables, plain HTTP refused on the TLS
 port, a reload picked up by new connections while one open across the swap
 keeps working, and the master not restarting.
+
+## Client certificate verification (`http.tls_verify_client`)
+
+```ini
+[app]
+listen = 0.0.0.0:8443
+pool.type = http-direct
+http.tls_cert = /etc/ssl/app/fullchain.pem
+http.tls_key = /etc/ssl/app/privkey.pem
+http.tls_verify_client = optional     ; none (default) | optional | require
+http.tls_client_ca = /etc/ssl/app/client-ca.pem
+```
+
+- `none` (default): no `CertificateRequest` is sent; the handshake never asks
+  the client for a certificate.
+- `optional`: the client is asked for a certificate but the handshake still
+  completes if none is presented, or if the presented one does not chain to
+  `http.tls_client_ca` — `fpm_connection_info()` (below) is how a script finds
+  out which case it got.
+- `require`: the handshake fails outright — no request is ever delivered, not
+  even to `fpm_connection_info()` — unless a certificate chaining to
+  `http.tls_client_ca` is presented. This is OpenSSL's own default verification
+  (`SSL_VERIFY_PEER`, plus `SSL_VERIFY_FAIL_IF_NO_PEER_CERT` for `require`),
+  with no custom callback: an untrusted or self-signed client certificate is
+  rejected during the handshake itself, by OpenSSL, before any FPM-level code
+  runs.
+
+`http.tls_client_ca` is required whenever `http.tls_verify_client` is not
+`none`; a pool with one and not the other fails to start, naming the problem.
+
+## `fpm_connection_info()` (issue #62)
+
+A direct pool's worker holds the real socket, so it can report connection
+facts a FastCGI intermediary can only ever forward secondhand (or not at
+all): the `http`/`fastcgi` gateway pools do not change what they put in
+`$_SERVER` for this reason (out of scope for issue #62; see the isolation
+argument below for why this is fine). `fpm_connection_info()` is that
+report, straight from the bufferevent and its SSL object.
+
+```php
+$info = fpm_connection_info();
+```
+
+Returns `false` when there is nothing to report — no request currently in
+flight (e.g. called outside of the direct-request lifecycle), or on a pool
+where the API does not apply at all: `pool.executor = worker` (the facts
+belong to a specific accepted connection, which this executor's model does
+not expose to the script the same way), and any pool that is not
+`pool.type = http-direct` in the first place — `function_exists
+('fpm_connection_info')` is `false` there, since the function is registered
+per-pool at startup, not globally.
+
+Otherwise returns an array, always with:
+
+| key | type | meaning |
+|---|---|---|
+| `transport` | string | `"tls"` or `"plain"` |
+| `peer_addr` | string | client IP address |
+| `peer_port` | int | client source port |
+| `age` | float | seconds since this connection was accepted |
+| `requests` | int | requests served on this connection so far, including the current one |
+
+When `transport` is `"tls"`, four more keys are always present:
+
+| key | type | meaning |
+|---|---|---|
+| `tls_protocol` | string | e.g. `TLSv1.3` |
+| `tls_cipher` | string | negotiated cipher name |
+| `tls_alpn` | string\|null | ALPN protocol the client negotiated, if any |
+| `tls_sni` | string\|null | SNI hostname the client sent, if any |
+
+`client_cert_*` keys exist only when this pool's `http.tls_verify_client` is
+not `none` — checking `http.tls_verify_client` once (e.g. against a pool-wide
+constant) is enough to know whether to expect them, without inspecting
+`array_key_exists()` per request:
+
+| key | type | meaning |
+|---|---|---|
+| `client_cert_verified` | bool | `true` iff a certificate was presented and chains to `http.tls_client_ca` |
+| `client_cert_subject` | string\|null | `X509_NAME_oneline()`, e.g. `/CN=client.test` |
+| `client_cert_issuer` | string\|null | same format |
+| `client_cert_not_before` | string\|null | `YYYY-MM-DDTHH:MM:SSZ` |
+| `client_cert_not_after` | string\|null | `YYYY-MM-DDTHH:MM:SSZ` |
+| `client_cert_fingerprint_sha256` | string\|null | lowercase hex SHA-256 of the DER encoding, no separators |
+
+Under `http.tls_verify_client = optional`, a connection whose client
+presented no certificate at all still gets all six `client_cert_*` keys —
+`client_cert_verified` is `false` and the rest are `null`, rather than the
+keys being absent, so a script does not have to special-case "no keys" versus
+"keys present but empty."
+
+**Deliberately not exposed**: the raw socket/file descriptor (a script gets
+facts about the connection, never a handle it could use to touch the socket
+directly, bypassing the SAPI); the server's own certificate or private key
+material; and anything about a connection other than the one currently
+executing — there is no connection-id parameter, on purpose. This keeps the
+API's trust model simple: everything it returns describes facts the worker
+itself observed on the wire for *this* request, not a query interface over
+other clients' state.
+
+**Trust model**: these are the worker's own observations of its own TLS
+session, not values a request could inject or a proxy could have rewritten in
+transit — there is no intermediary between the client and this code, unlike
+FastCGI where equivalent-looking `$_SERVER` values would only be as
+trustworthy as whatever sits in front of PHP. `client_cert_verified` reflects
+OpenSSL's own chain validation against `http.tls_client_ca`
+(`SSL_get_verify_result() == X509_V_OK`), the same validation that decides
+whether `require` accepts the handshake at all.
+
+**Read-only and per-request isolation**: `fpm_connection_info()` takes no
+arguments and has no corresponding setter; it cannot be used to affect the
+connection, only to observe it. Task 054's cross-request isolation guarantees
+extend to it: a connection's fields (`age`, `requests`, TLS session state)
+never leak into a different connection's requests, and a worker that has
+served no request in the current call sees `false`.
+
+Covered by `sapi/fpmng/tests/fpmng-http-direct-connection-info.phpt`: a plain
+pool returning transport facts with no TLS keys; `tls_verify_client = none`
+never exposing `client_cert_*` even when the client offers a certificate;
+`optional` with no client certificate, with a CA-trusted one (cross-checked
+against `openssl s_client`'s own view of the same handshake), and with an
+untrusted one (handshake proceeds, `client_cert_verified` is `false`);
+`require` rejecting both a missing and an untrusted client certificate at the
+handshake layer; `pool.executor = worker` returning `false`; and a
+`pool.type = http` gateway pool never defining the function at all.
 
 ## Performance experiment
 

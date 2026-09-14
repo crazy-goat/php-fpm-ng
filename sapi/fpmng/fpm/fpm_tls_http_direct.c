@@ -107,7 +107,8 @@ int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 	 * first child forks, rather than as a crash or a silent plain-HTTP
 	 * fallback on an accepted connection. */
 	return fpm_tls_http_validate(c->name, c->http_tls_cert, c->http_tls_key,
-		c->http_tls_min_version, c->http_tls_sni_cert);
+		c->http_tls_min_version, c->http_tls_sni_cert,
+		c->http_tls_verify_client, c->http_tls_client_ca);
 }
 
 int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
@@ -126,7 +127,8 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 	}
 	st->pool = strdup(c->name);
 	st->tls = fpm_tls_http_load(c->name, c->http_tls_cert, c->http_tls_key,
-		c->http_tls_min_version, c->http_tls_sni_cert);
+		c->http_tls_min_version, c->http_tls_sni_cert,
+		c->http_tls_verify_client, c->http_tls_client_ca);
 	if (!st->pool || !st->tls) {
 		/* fpm_tls_http_load() already said what went wrong. Refusing to start
 		 * is the point: validation passed a moment ago, so a failure here is

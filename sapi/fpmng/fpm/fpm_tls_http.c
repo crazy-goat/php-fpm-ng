@@ -81,6 +81,22 @@ static int fpm_tls_http_resolve_min_version(const char *min_version)
 	return -1;
 }
 
+/* "" or NULL -> 0 ("none", default, today's behavior). Unknown name -> -1;
+ * the caller logs it. */
+static int fpm_tls_http_resolve_verify_client(const char *verify_client)
+{
+	if (!verify_client || !*verify_client || strcmp(verify_client, "none") == 0) {
+		return 0;
+	}
+	if (strcmp(verify_client, "optional") == 0) {
+		return 1;
+	}
+	if (strcmp(verify_client, "require") == 0) {
+		return 2;
+	}
+	return -1;
+}
+
 /* Installs every X.509 block found in cert_pem into ctx, in file order: the
  * first block as the leaf (SSL_CTX_use_certificate(), same as before this
  * fix), every block after it as a chain certificate
@@ -333,18 +349,53 @@ static int fpm_tls_http_sni_parse(const char *spec, struct fpm_tls_http_sni_spec
 }
 
 int fpm_tls_http_validate(const char *pool, const char *cert_path, const char *key_path,
-	const char *min_version, const char *sni_spec)
+	const char *min_version, const char *sni_spec,
+	const char *verify_client, const char *client_ca_path)
 {
 	char *cert_pem, *key_pem;
 	size_t cert_len, key_len;
 	const char *what = NULL;
 	int ret;
+	int verify_client_mode;
 	struct fpm_tls_http_sni_spec_s *specs = NULL;
 	size_t spec_count = 0, i;
 
 	if (fpm_tls_http_resolve_min_version(min_version) < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_min_version '%s' is not one of TLSv1.2, TLSv1.3", pool, min_version);
 		return -1;
+	}
+
+	verify_client_mode = fpm_tls_http_resolve_verify_client(verify_client);
+	if (verify_client_mode < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_verify_client '%s' is not one of none, optional, require", pool, verify_client);
+		return -1;
+	}
+	if (verify_client_mode != 0 && (!client_ca_path || !*client_ca_path)) {
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_verify_client requires http.tls_client_ca: there would be nothing to verify a presented certificate against", pool);
+		return -1;
+	}
+	if (client_ca_path && *client_ca_path) {
+		X509 *ca;
+		BIO *bio;
+		char *ca_pem;
+		size_t ca_len;
+
+		ca_pem = fpm_tls_http_read_file(client_ca_path, &ca_len);
+		if (!ca_pem) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_client_ca: cannot read '%s'", pool, client_ca_path);
+			return -1;
+		}
+		bio = BIO_new_mem_buf(ca_pem, (int) ca_len);
+		ca = bio ? PEM_read_bio_X509(bio, NULL, NULL, NULL) : NULL;
+		if (bio) {
+			BIO_free(bio);
+		}
+		free(ca_pem);
+		if (!ca) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_client_ca: '%s' does not parse as a PEM certificate", pool, client_ca_path);
+			return -1;
+		}
+		X509_free(ca);
 	}
 
 	cert_pem = fpm_tls_http_read_file(cert_path, &cert_len);
@@ -405,7 +456,8 @@ int fpm_tls_http_validate(const char *pool, const char *cert_path, const char *k
 }
 
 struct fpm_tls_http_s *fpm_tls_http_load(const char *pool, const char *cert_path,
-	const char *key_path, const char *min_version, const char *sni_spec)
+	const char *key_path, const char *min_version, const char *sni_spec,
+	const char *verify_client, const char *client_ca_path)
 {
 	struct fpm_tls_http_s *tls;
 	const char *what = NULL;
@@ -424,6 +476,21 @@ struct fpm_tls_http_s *fpm_tls_http_load(const char *pool, const char *cert_path
 		zlog(ZLOG_ERROR, "[pool %s] http.tls_min_version '%s' is not one of TLSv1.2, TLSv1.3", pool, min_version);
 		free(tls);
 		return NULL;
+	}
+
+	tls->verify_client = fpm_tls_http_resolve_verify_client(verify_client);
+	if (tls->verify_client < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.tls_verify_client '%s' is not one of none, optional, require", pool, verify_client);
+		free(tls);
+		return NULL;
+	}
+	if (client_ca_path && *client_ca_path) {
+		tls->client_ca_pem = fpm_tls_http_read_file(client_ca_path, &tls->client_ca_len);
+		if (!tls->client_ca_pem) {
+			zlog(ZLOG_ERROR, "[pool %s] http.tls_client_ca: cannot re-read '%s' at startup", pool, client_ca_path);
+			fpm_tls_http_free(tls);
+			return NULL;
+		}
 	}
 
 	tls->cert_pem = fpm_tls_http_read_file(cert_path, &tls->cert_len);
@@ -508,6 +575,7 @@ void fpm_tls_http_free(struct fpm_tls_http_s *tls)
 	}
 	free(tls->cert_pem);
 	free(tls->key_pem);
+	free(tls->client_ca_pem);
 	for (i = 0; i < tls->sni_count; i++) {
 		free(tls->sni[i].servername);
 		free(tls->sni[i].cert_pem);
@@ -562,7 +630,8 @@ static int fpm_tls_http_alpn_select_cb(SSL *ssl, const unsigned char **out, unsi
  * message: the pool name for the default ctx, "pool %s, http.tls_sni_cert
  * %s" for a per-SNI one. */
 static SSL_CTX *fpm_tls_http_build_ctx(const char *log_name, const char *cert_pem, size_t cert_len,
-	const char *key_pem, size_t key_len, int min_version, const unsigned char ticket_key[80])
+	const char *key_pem, size_t key_len, int min_version, const unsigned char ticket_key[80],
+	int verify_client, const char *client_ca_pem, size_t client_ca_len)
 {
 	SSL_CTX *ctx;
 	BIO *bio;
@@ -610,6 +679,55 @@ static SSL_CTX *fpm_tls_http_build_ctx(const char *log_name, const char *cert_pe
 		return NULL;
 	}
 	SSL_CTX_set_alpn_select_cb(ctx, fpm_tls_http_alpn_select_cb, NULL);
+
+	/* mTLS (issue #62). verify_client == 0 ("none", default) leaves the
+	 * listener exactly as it was before this feature existed: no
+	 * SSL_CTX_set_verify() call at all, so OpenSSL never sends a
+	 * CertificateRequest. Non-zero builds an X509_STORE from the CA bytes
+	 * already loaded in the master (fpm_tls_http_load()) and installs it
+	 * with SSL_CTX_set_cert_store(), which takes ownership -- the store must
+	 * not be freed separately. SSL_VERIFY_FAIL_IF_NO_PEER_CERT is what turns
+	 * "optional" into "require": OpenSSL only consults that flag when
+	 * SSL_VERIFY_PEER is also set, and its absence is exactly "optional". */
+	if (verify_client != 0) {
+		X509_STORE *store;
+		BIO *ca_bio;
+		X509 *ca;
+		int mode;
+
+		store = X509_STORE_new();
+		if (!store) {
+			zlog(ZLOG_ERROR, "[%s] http.tls_verify_client: X509_STORE_new() failed", log_name);
+			SSL_CTX_free(ctx);
+			return NULL;
+		}
+		ca_bio = BIO_new_mem_buf(client_ca_pem, (int) client_ca_len);
+		if (!ca_bio) {
+			zlog(ZLOG_ERROR, "[%s] http.tls_client_ca: out of memory", log_name);
+			X509_STORE_free(store);
+			SSL_CTX_free(ctx);
+			return NULL;
+		}
+		while ((ca = PEM_read_bio_X509(ca_bio, NULL, NULL, NULL)) != NULL) {
+			if (X509_STORE_add_cert(store, ca) != 1) {
+				X509_free(ca);
+				BIO_free(ca_bio);
+				zlog(ZLOG_ERROR, "[%s] http.tls_client_ca: X509_STORE_add_cert() failed", log_name);
+				X509_STORE_free(store);
+				SSL_CTX_free(ctx);
+				return NULL;
+			}
+			X509_free(ca);
+		}
+		BIO_free(ca_bio);
+
+		SSL_CTX_set_cert_store(ctx, store);
+		mode = SSL_VERIFY_PEER;
+		if (verify_client == 2) {
+			mode |= SSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+		}
+		SSL_CTX_set_verify(ctx, mode, NULL);
+	}
 
 	return ctx;
 }
@@ -665,7 +783,8 @@ SSL_CTX *fpm_tls_http_ctx_new(const char *pool, struct fpm_tls_http_s *tls)
 	size_t i;
 
 	ctx = fpm_tls_http_build_ctx(pool, tls->cert_pem, tls->cert_len, tls->key_pem, tls->key_len,
-		tls->min_version, tls->ticket_key);
+		tls->min_version, tls->ticket_key,
+		tls->verify_client, tls->client_ca_pem, tls->client_ca_len);
 	if (!ctx) {
 		return NULL;
 	}
@@ -695,7 +814,8 @@ SSL_CTX *fpm_tls_http_ctx_new(const char *pool, struct fpm_tls_http_s *tls)
 
 		snprintf(log_name, sizeof(log_name), "pool %s, http.tls_sni_cert %s", pool, tls->sni[i].servername);
 		sni_ctx = fpm_tls_http_build_ctx(log_name, tls->sni[i].cert_pem, tls->sni[i].cert_len,
-			tls->sni[i].key_pem, tls->sni[i].key_len, tls->min_version, tls->ticket_key);
+			tls->sni[i].key_pem, tls->sni[i].key_len, tls->min_version, tls->ticket_key,
+			tls->verify_client, tls->client_ca_pem, tls->client_ca_len);
 		if (!sni_ctx) {
 			/* fpm_tls_http_build_ctx() already logged which one failed.
 			 * Reaching here should be impossible -- fpm_tls_http_load()

@@ -199,6 +199,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
 	{ "http.tls_sni_cert",         &fpm_conf_set_string,      WPO(http_tls_sni_cert) },
+	{ "http.tls_verify_client",    &fpm_conf_set_string,      WPO(http_tls_verify_client) },
+	{ "http.tls_client_ca",        &fpm_conf_set_string,      WPO(http_tls_client_ca) },
 	{ "http.tls_reload_check",     &fpm_conf_set_time,        WPO(http_tls_reload_check) },
 	{ "http.tls_wait_for_cert",    &fpm_conf_set_boolean,     WPO(http_tls_wait_for_cert) },
 	{ "http.stream",               &fpm_conf_set_boolean,     WPO(http_stream) },

@@ -162,6 +162,15 @@ struct fpm_worker_pool_config_s {
 	 * connection with no SNI, or an unrecognized servername, falls back to
 	 * the default http.tls_cert/http.tls_key pair -- see fpm_tls_http.c. */
 	char *http_tls_sni_cert;
+	/* mTLS (issue #62): "none" (default), "optional" or "require". "none"
+	 * leaves the listener exactly as it is today -- no CertificateRequest is
+	 * sent, and fpm_connection_info() reports no client certificate fields.
+	 * "optional" requests a client certificate but completes the handshake
+	 * without one; "require" fails the handshake when none is presented.
+	 * Either non-"none" value needs http.tls_client_ca, since there would
+	 * otherwise be nothing to verify a presented certificate against. */
+	char *http_tls_verify_client;
+	char *http_tls_client_ca;		/* PEM file of trusted CA certificates for http.tls_verify_client */
 	int http_tls_reload_check;		/* seconds between cert/key mtime checks on disk, without restarting the gateway (task 040);
 						 * unset -> FPM_TLS_RELOAD_CHECK_DEFAULT (fpm_tls_reload.h), 0 = disabled */
 	/* fpm-ng: start this pool before its certificate exists (issue #172).

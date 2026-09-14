@@ -204,11 +204,13 @@ try {
      * been in flight when it was picked, is still answered rather than
      * reset: the same "drain, don't sever" contract issue #313 gave
      * pm.max_requests, now reached from the master's own scale-down instead
-     * of from the child itself. */
+     * of from the child itself. Not Connection: close, since issue #311: see
+     * the comment on fpm_direct_last_request() in fpm_http_direct.c for why
+     * bare retiring stopped adding it. */
     [$status2, $body2, $close2] = fetch($pids[$victim], '/');
     verify($status2 === 200, "held connection on the retiring child: $status2");
     verify((int) $body2 === $victim, "held connection answered by a different child: $body2 vs $victim");
-    verify($close2, 'the retiring child answered without Connection: close');
+    verify(!$close2, 'a retiring child added Connection: close on its own account (issue #311)');
     fclose($pids[$victim]);
     echo "held connection drained, not dropped: ok\n";
 

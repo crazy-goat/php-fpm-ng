@@ -1391,6 +1391,35 @@ static ZEND_FUNCTION(fpm_connection_info)
 	RETURN_FALSE;
 }
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_send_early_hints, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* issue #63's defined "unsupported" answer for pool.executor = worker, for
+ * the same structural reason fpm_connection_info() gives just above: writing
+ * a 103 straight to the connection's bufferevent (see fpm_http_direct.c's
+ * fpm_send_early_hints()) needs a single "current connection" to target, and
+ * this executor answers by request id, with several requests in flight
+ * against one PHP engine and no per-connection state kept once the first
+ * request off a connection has been dispatched (fpm_worker_pending_get()
+ * knows only the pending evhttp_request, never the raw bufferevent it
+ * arrived on). Extending this needs the same new design fpm_connection_info()
+ * would: a connection/request id parameter and a place to keep the
+ * bufferevent alive across requests, future work rather than this issue's
+ * scope. `false` for the same reason: a script that checks the return value
+ * of every one of this API family the same way already does the right thing
+ * here. */
+static ZEND_FUNCTION(fpm_send_early_hints)
+{
+	HashTable *headers;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ARRAY_HT(headers)
+	ZEND_PARSE_PARAMETERS_END();
+	(void) headers;
+	RETURN_FALSE;
+}
+
 static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_notify_stream, arginfo_fpmng_worker_notify_stream)
 	ZEND_FE(fpmng_worker_stopping, arginfo_fpmng_worker_stopping)
@@ -1407,6 +1436,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_loop, arginfo_fpmng_worker_loop)
 	ZEND_FE(fpmng_worker_loop_break, arginfo_fpmng_worker_loop_break)
 	ZEND_FE(fpm_connection_info, arginfo_fpm_connection_info)
+	ZEND_FE(fpm_send_early_hints, arginfo_fpm_send_early_hints)
 	ZEND_FE_END
 };
 

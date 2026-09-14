@@ -198,14 +198,20 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # instead. TOTAL carries a further +1, the two default-flavour SKIP counts
 # carry a further +1 each, and the two TLS-flavour PASS counts carry a
 # further +1 each.
+#
+# fpmng-http-direct-early-hints.phpt (issue #63) is a seventh addition: two
+# pool.type = http-direct pools (one classic, one pool.executor = worker), no
+# TLS and no ACME involved, so it passes on every flavour like the
+# max-requests-drain/scale-down-drain/retire-continuous additions above.
+# TOTAL and the four PASS counts below each carry a further +1 for it.
 EXPECT_FAIL=0
-EXPECT_TOTAL=93
+EXPECT_TOTAL=94
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=57; EXPECT_SKIP=36
-    else EXPECT_PASS=52; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=58; EXPECT_SKIP=36
+    else EXPECT_PASS=53; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -238,8 +244,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=55; EXPECT_SKIP=38
-    else EXPECT_PASS=50; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=56; EXPECT_SKIP=38
+    else EXPECT_PASS=51; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

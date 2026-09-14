@@ -1922,9 +1922,142 @@ static ZEND_FUNCTION(fpm_connection_info)
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_connection_info, 0, 0, IS_MIXED, 0)
 ZEND_END_ARG_INFO()
 
+/* fpm_send_early_hints() -- issue #63.
+ *
+ * 103 Early Hints (RFC 8297) lets a client start fetching linked resources
+ * before the application has finished computing the final response. evhttp
+ * has no interim-response API in the libevent this project links (system
+ * 2.1.x, never vendored or patched -- see patches/README.md, which covers
+ * php-src only): its whole reply path is evhttp_send_reply()/
+ * evhttp_send_reply_start(), and each frames whatever status it is given as
+ * THE response. fpm_http_direct_status_final() exists precisely because a
+ * 1xx fed through either one would be framed as if it were final (see its
+ * comment) -- corrupting the wire for the real response that is still to
+ * come. So this writes the interim response as raw bytes straight to the
+ * connection's bufferevent, the same one fpm_connection_info() reaches for
+ * its TLS fields, and never touches evhttp's request/reply state at all: the
+ * eventual real response still goes out through the normal path exactly as
+ * if this had never been called.
+ *
+ * Header validation reuses the final response's own chain
+ * (fpm_http_direct_header_dropped(), fpm_http_direct_header_name_ok(),
+ * fpm_http_direct_header_charge(), and evhttp_add_header() as the actual
+ * CRLF/injection backstop -- see fpm_http_direct_header_name_ok()'s comment
+ * for why that backstop still matters after the token check) by building a
+ * throwaway evkeyvalq and letting evhttp validate/store into it, then
+ * serializing that validated set, rather than re-deriving "is this safe to
+ * put on the wire" from scratch for a second code path. Framing-owned
+ * headers (Content-Length, Connection, ...) are silently dropped, same as
+ * the final response: a 103 has no body and must not claim a
+ * connection-management semantic of its own. A header that fails validation
+ * is dropped rather than failing the whole call -- the response has not
+ * committed to anything yet, so losing one hint header costs less than
+ * losing the ability to send hints at all over one bad key in the array.
+ *
+ * Returns false, writing nothing to the wire: when there is no current
+ * connection to write to (fpm_direct_current or ->http is NULL -- same
+ * "nothing to report" convention as fpm_connection_info()/fpmng_respond());
+ * once the final response has started going out (r->responded, r->streaming,
+ * or SG(headers_sent) -- any of the three means a status line may already be
+ * on the wire, and a 103 after that would land mid-response, which a client
+ * parsing strictly in order would misread as part of it); and for an
+ * HTTP/1.0 client, which has no notion of a 1xx interim response and would
+ * read these bytes as leading garbage before the one status line it expects.
+ * Can be called more than once per request -- RFC 8297 allows several 103
+ * responses before the final one, and nothing here consumes state that
+ * would prevent it. */
+/* Same recursion fpm_worker_add_header() (fpm_http_direct_worker.c) uses for
+ * a multi-valued header (e.g. several Link values): an array value repeats
+ * the header once per element rather than being stringified as a whole.
+ * Silently skips (does not fail the caller's whole array) a name that is
+ * dropped/not a token, a value that has no string form, or a value/budget
+ * evhttp/fpm_http_direct_header_charge() refuses -- see
+ * fpm_send_early_hints()'s own comment for why a partial 103 beats none. */
+static void fpm_direct_early_hint_add(struct evkeyvalq *out, const char *name, zval *value, size_t *total)
+{
+	zend_string *str;
+
+	if (Z_TYPE_P(value) == IS_ARRAY) {
+		zval *item;
+		ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(value), item) {
+			fpm_direct_early_hint_add(out, name, item, total);
+		} ZEND_HASH_FOREACH_END();
+		return;
+	}
+	if (fpm_http_direct_header_dropped(name) || !fpm_http_direct_header_name_ok(name)) {
+		return;
+	}
+	str = zval_try_get_string(value);
+	if (!str) {
+		return;
+	}
+	if (fpm_http_direct_header_charge(total, name, ZSTR_LEN(str))) {
+		evhttp_add_header(out, name, ZSTR_VAL(str));
+	}
+	zend_string_release(str);
+}
+
+static ZEND_FUNCTION(fpm_send_early_hints)
+{
+	struct fpm_direct_request *r = fpm_direct_current;
+	HashTable *headers;
+	zend_string *key;
+	zval *value;
+	struct evkeyvalq validated;
+	struct evkeyval *kv;
+	struct evbuffer *out;
+	size_t total = 0;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_ARRAY_HT(headers)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (!r || !r->http) {
+		RETURN_FALSE;
+	}
+	if (r->responded || r->streaming || SG(headers_sent)) {
+		RETURN_FALSE;
+	}
+	if (r->http->major != 1 || r->http->minor < 1) {
+		RETURN_FALSE;
+	}
+
+	TAILQ_INIT(&validated);
+	ZEND_HASH_FOREACH_STR_KEY_VAL(headers, key, value) {
+		if (!key) {
+			continue;
+		}
+		fpm_direct_early_hint_add(&validated, ZSTR_VAL(key), value, &total);
+	} ZEND_HASH_FOREACH_END();
+
+	out = evbuffer_new();
+	if (!out) {
+		evhttp_clear_headers(&validated);
+		RETURN_FALSE;
+	}
+	evbuffer_add_printf(out, "HTTP/1.1 103 Early Hints\r\n");
+	for (kv = validated.tqh_first; kv; kv = kv->next.tqe_next) {
+		evbuffer_add_printf(out, "%s: %s\r\n", kv->key, kv->value);
+	}
+	evbuffer_add_printf(out, "\r\n");
+	evhttp_clear_headers(&validated);
+
+	if (!r->conn_bev || bufferevent_write_buffer(r->conn_bev, out) < 0) {
+		evbuffer_free(out);
+		RETURN_FALSE;
+	}
+	evbuffer_free(out);
+	RETURN_TRUE;
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_send_early_hints, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
 static const zend_function_entry fpm_direct_functions[] = {
 	ZEND_FE(fpmng_respond, arginfo_fpmng_respond)
 	ZEND_FE(fpm_connection_info, arginfo_fpm_connection_info)
+	ZEND_FE(fpm_send_early_hints, arginfo_fpm_send_early_hints)
 	ZEND_FE_END
 };
 
@@ -1953,7 +2086,8 @@ static void fpm_direct_register_functions(const char *pool)
 	result = zend_register_functions(NULL, fpm_direct_functions, CG(function_table), MODULE_PERSISTENT);
 	EG(current_module) = saved_module;
 	if (result != SUCCESS) {
-		zlog(ZLOG_ERROR, "[pool %s] http-direct: cannot register fpmng_respond()/fpm_connection_info()", pool);
+		zlog(ZLOG_ERROR, "[pool %s] http-direct: cannot register fpmng_respond()/fpm_connection_info()/"
+			"fpm_send_early_hints()", pool);
 	}
 }
 

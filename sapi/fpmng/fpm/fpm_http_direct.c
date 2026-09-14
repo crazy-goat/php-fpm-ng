@@ -300,8 +300,39 @@ static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
 	fpm_direct_now(&now);
 	evutil_timeradd(&now, &grace, &w->retire_deadline);
 	zlog(ZLOG_NOTICE, "[pool %s] child %d is retiring: no new connections, finishing the ones it "
-		"holds, exiting within %d ms", w->wp->config->name, (int) getpid(),
-		w->wp->config->http_read_timeout);
+		"holds, exiting within %d ms of its last completed response", w->wp->config->name,
+		(int) getpid(), w->wp->config->http_read_timeout);
+}
+
+/* Every response the drain delivers is proof the child is not stuck, so it
+ * earns the connection another http.read_timeout rather than being charged
+ * against a single wall-clock deadline stamped once at retire_enter() (issue
+ * #311). A client that keeps a keep-alive connection continuously busy at
+ * idle = 0 looks, one exchange at a time, exactly like the client
+ * fpm_direct_retire_done()'s own comment already excuses -- "a client reading
+ * a large response a byte at a time" -- and was being killed mid-response for
+ * it: the old deadline had no way to tell "busy" from "stuck" apart, so it
+ * bounded both the same way, and idle = 0 in the benchmark's retire workload
+ * hit that every time. Only extending, never shortening: a call that lands
+ * with less of the grace left than the deadline already promises must not
+ * take any of it back. No cap of its own beyond that: a connection that never
+ * stops finishing requests is a connection this child is not stuck on, and
+ * what still bounds a truly wedged deploy is unchanged -- an operator who
+ * wants the harder stop already has SIGQUIT. */
+static void fpm_direct_retire_extend(struct fpm_direct_worker *w)
+{
+	struct timeval now, grace, candidate;
+
+	if (!fpm_direct_retiring || !(w->retire_deadline.tv_sec || w->retire_deadline.tv_usec)) {
+		return;
+	}
+	grace.tv_sec = w->wp->config->http_read_timeout / 1000;
+	grace.tv_usec = (w->wp->config->http_read_timeout % 1000) * 1000;
+	fpm_direct_now(&now);
+	evutil_timeradd(&now, &grace, &candidate);
+	if (evutil_timercmp(&candidate, &w->retire_deadline, >)) {
+		w->retire_deadline = candidate;
+	}
 }
 
 /* True once there is nothing left worth staying for -- and true regardless once
@@ -314,16 +345,22 @@ static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
  * inactivity timeout (evhttp_set_timeout_tv above), which every byte the client
  * takes resets -- so a client reading a large response a byte a second holds
  * w->pending at 1 for as long as it cares to, and one such client would
- * otherwise pin the child and the deploy waiting for it indefinitely. Past the
- * deadline the connections go with the process and a client that has not
- * finished reading gets a truncated response. That is the price, and it is
- * smaller than a deploy that never ends.
+ * otherwise pin the child and the deploy waiting for it indefinitely.
+ *
+ * The deadline itself is not the one fpm_direct_retire_enter() stamped:
+ * fpm_direct_retire_extend() pushes it out by another http.read_timeout every
+ * time a response finishes, so it is really "how long since this child last
+ * finished something", not "how long since it started retiring" (issue #311).
+ * A client that keeps a keep-alive connection continuously busy never lets the
+ * deadline arrive; one that goes silent, or that is still reading a single
+ * response a byte at a time, gets no more extensions and is bounded exactly as
+ * before -- past the deadline the connections go with the process and a
+ * client that has not finished reading gets a truncated response. That is the
+ * price, and it is smaller than a deploy that never ends.
  *
  * Before the deadline both halves matter: a response handed to libevent is not
  * on the wire yet, and a connection with no response in flight may still be a
- * client about to send its next request -- every answer this child gives while
- * retiring carries Connection: close, so each of those connections ends on its
- * own, one request later at worst. */
+ * client about to send its next request. */
 static int fpm_direct_retire_done(struct fpm_direct_worker *w)
 {
 	struct timeval now;
@@ -735,6 +772,7 @@ static void fpm_direct_response_closed(struct evhttp_connection *connection, voi
 	struct fpm_direct_worker *w = arg;
 	(void) connection;
 	w->pending--;
+	fpm_direct_retire_extend(w);
 	if (fpm_direct_stopping && !w->pending) event_base_loopbreak(w->base);
 }
 
@@ -743,6 +781,7 @@ static void fpm_direct_response_done(struct evhttp_request *request, void *arg)
 	struct fpm_direct_worker *w = arg;
 	evhttp_connection_set_closecb(evhttp_request_get_connection(request), NULL, NULL);
 	w->pending--;
+	fpm_direct_retire_extend(w);
 	if (fpm_direct_stopping && !w->pending) event_base_loopbreak(w->base);
 }
 
@@ -788,6 +827,7 @@ static void fpm_direct_stream_closed(struct evhttp_connection *connection, void 
 	(void) connection;
 	r->http = NULL;
 	r->w->pending--;
+	fpm_direct_retire_extend(r->w);
 	if (fpm_direct_stopping && !r->w->pending) event_base_loopbreak(r->w->base);
 }
 
@@ -805,22 +845,63 @@ static void fpm_direct_close_header(struct evhttp_request *http)
 	evhttp_add_header(headers, "Connection", "close");
 }
 
+/* Not used to gate retiring's Connection: close any more -- see the comment on
+ * fpm_direct_last_request() for why -- but fpm_direct_stopping still uses it:
+ * a keep-alive client that sends its next request as soon as it has read the
+ * previous response's headers can win that race against this process, and
+ * evhttp does not hand fpm-ng a chance to notice: a response carrying
+ * Connection: close makes libevent's evhttp_send_done() free the connection
+ * outright (need_close, http.c) the moment this one is written, without ever
+ * associating a new request with it first, so bytes already sitting in the
+ * bufferevent's input buffer are discarded rather than answered. A pool-wide
+ * stop is bounded by the master's SIGKILL floor regardless, so this is a best
+ * effort there, not the guarantee issue #311 asks for from retiring. */
+static int fpm_direct_conn_has_buffered_request(struct evhttp_request *http)
+{
+	struct evhttp_connection *evcon = evhttp_request_get_connection(http);
+	struct bufferevent *bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
+
+	return bev && evbuffer_get_length(bufferevent_get_input(bev)) > 0;
+}
+
 /* Whether this response is the last one this child will serve, decided before
  * the headers go out because a streamed response cannot gain a Connection
  * header afterwards. Mirrors the two triggers the buffered tail applies after
  * w->requests++.
  *
- * The known gap: a SIGQUIT that arrives while the script is still producing
- * output sets fpm_direct_stopping too late to be answered with
- * Connection: close, so a client on that one connection learns the child is
- * gone from the close rather than from the header. The buffered path has the
- * whole response in hand when it decides and does not. Documented in
- * docs/http-direct.md rather than papered over: the header cannot be recalled
- * once it is on the wire. */
+ * fpm_direct_retiring is deliberately not one of them (issue #311). It used
+ * to be: every answer given while retiring got Connection: close, on the
+ * theory that a connection with no response in flight is at worst a client
+ * about to send one more request, and evhttp closing right under it would
+ * cost nothing read_timeout was not already going to bound. That theory holds
+ * for a client that reads the header and stops -- it does not hold for one
+ * that pipelines its next request the moment it has read this response's
+ * body, which evhttp's need_close path (http.c: evhttp_send_done()) frees the
+ * connection for outright, with no chance to associate a new request with it
+ * first. Measured on the test box with build/benchmark-http-direct-pm.py's
+ * retire workload at --idle 0 (idle=0 puts every connection on the child in
+ * exactly this shape, continuously): every response that carried the header
+ * cost the client on that connection a dropped request, 1:1, not a rare race.
+ * A retiring child now answers a live connection exactly as it would if it
+ * were not retiring and leaves it for the mechanisms that already close a
+ * connection without anything of the client's in flight: it going idle (the
+ * existing read-timeout path) or, at worst, http.read_timeout's deadline in
+ * fpm_direct_retire_done(), which every retiring child is bounded by either
+ * way. fpm_direct_stopping keeps the old behaviour: a pool-wide shutdown is
+ * bounded by the master's SIGKILL floor regardless, so there is no equivalent
+ * guarantee to protect there and no reason to give up the faster drain.
+ *
+ * The known gap this leaves for fpm_direct_stopping: a SIGQUIT that arrives
+ * while the script is still producing output sets fpm_direct_stopping too
+ * late to be answered with Connection: close, so a client on that one
+ * connection learns the child is gone from the close rather than from the
+ * header. The buffered path has the whole response in hand when it decides
+ * and does not. Documented in docs/http-direct.md rather than papered over:
+ * the header cannot be recalled once it is on the wire. */
 static bool fpm_direct_last_request(const struct fpm_direct_worker *w)
 {
 	int max = w->wp->config->pm_max_requests;
-	return fpm_direct_stopping || fpm_direct_retiring || (max > 0 && w->requests + 1 >= (unsigned) max);
+	return fpm_direct_stopping || (max > 0 && w->requests + 1 >= (unsigned) max);
 }
 
 static void fpm_direct_stream_begin(struct fpm_direct_request *r)
@@ -859,7 +940,7 @@ static void fpm_direct_stream_begin(struct fpm_direct_request *r)
 		r->stream_declined = 1;
 		return;
 	}
-	if (fpm_direct_last_request(w)) {
+	if (fpm_direct_last_request(w) && !fpm_direct_conn_has_buffered_request(r->http)) {
 		fpm_direct_close_header(r->http);
 	}
 	/* Counted from here rather than from the tail: from this point a client
@@ -1512,11 +1593,11 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 	fpm_direct_retire(r);
 	/* Both endings of this child, and the only place the buffered path decides:
 	 * fpm_direct_retire() above has already started retiring if pm.max_requests
-	 * was reached (issue #313), so this one test covers recycling too. Retiring
-	 * is checked alongside stopping because a keep-alive client that is not
-	 * told the connection ends would keep sending requests to a child on its
-	 * way out either way (issue #65). */
-	if (fpm_direct_stopping || fpm_direct_retiring) {
+	 * was reached (issue #313), so fpm_direct_last_request() covers recycling
+	 * too. Not fpm_direct_retiring on its own (issue #311) -- see the comment
+	 * on fpm_direct_last_request() for why a plain SIGUSR1 retirement no longer
+	 * closes a connection that is still answering requests. */
+	if (fpm_direct_last_request(w) && !fpm_direct_conn_has_buffered_request(http)) {
 		fpm_direct_close_header(http);
 	}
 	w->pending++;
@@ -1807,14 +1888,13 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	 * of PHP, and after the 503 gate: a pool that has stopped accepting work
 	 * is not healthy, so answering "pong" there would be the one wrong answer
 	 * this endpoint can give. */
-	/* Every answer a retiring child gives says the connection ends, and the two
-	 * endings below -- the status page and the static server -- answer without
-	 * reaching a PHP path that could decide for itself, so the decision is made
-	 * once, here, for all of them. The PHP endings re-set it rather than
-	 * inherit it: pm.max_requests is only reached at the end of a request, so
-	 * they have a reason of their own that is not known yet (issue #65). */
+	/* Enters retiring and republishes the status page for the two endings below
+	 * -- the status page and the static server -- that answer without reaching
+	 * a PHP path that could decide for itself. No Connection: close here on
+	 * fpm_direct_retiring's account any more (issue #311): see the comment on
+	 * fpm_direct_last_request() for why a connection still being used does not
+	 * get told to close just because this child is retiring. */
 	if (fpm_direct_retiring) {
-		fpm_direct_close_header(http);
 		fpm_direct_retire_now(w);
 	}
 	if (fpm_http_direct_ops_try_local(w->ops, http, &local_status, &local_bytes)) {

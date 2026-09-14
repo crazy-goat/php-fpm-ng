@@ -15,9 +15,10 @@ require_once "fpmng-operator.inc";
  * 503 to whatever arrives, while a retiring child keeps serving the
  * connections it already holds and only stops taking new ones. What this test
  * has to show is that the difference is real -- that a request in flight is
- * finished rather than dropped, that the client is told the connection ends
- * (Connection: close, so a keep-alive client moves to a sibling of its own
- * accord), and that the master puts a replacement back. */
+ * finished rather than dropped, that a live keep-alive connection is left
+ * open rather than told to close under it (issue #311: see fpm_direct_
+ * last_request()'s comment for why retiring alone no longer adds Connection:
+ * close), and that the master puts a replacement back. */
 $root = sys_get_temp_dir() . '/fpmng-retire-' . getmypid();
 @mkdir($root);
 file_put_contents($root . '/front.php', <<<'PHP'
@@ -214,7 +215,7 @@ try {
     }
     fclose($slow);
     verify((int) $body === $busy, "the slow request was answered by $body, not by the retiring $busy");
-    verify($close, 'a retiring child answered without Connection: close');
+    verify(!$close, 'a retiring child added Connection: close on its own account (issue #311)');
     echo "in-flight request finished: ok\n";
 
     /* 3. And the master puts a replacement in that slot. Nothing new had to be
@@ -264,11 +265,14 @@ try {
     $tester->signal('USR1', (int) $pid);
     $tester->signal('USR1', (int) $pid);
     /* A request the retiring child does answer, on the connection it is
-     * draining: the answer arrives and it says the connection ends, which is
-     * how a keep-alive client is moved to a sibling of its own accord. */
+     * draining -- and, since issue #311, without Connection: close: adding it
+     * here is what used to race a client that pipelines its next request the
+     * moment it has read this one's body. The connection is left for the
+     * mechanisms that already reclaim it without anything in flight: going
+     * idle, or at worst http.read_timeout's deadline. */
     [$status, , $close] = fetch($reader, '/');
     verify($status === 200, "solo request during retire: $status");
-    verify($close, 'a retiring child answered without Connection: close');
+    verify(!$close, 'a retiring child added Connection: close on its own account (issue #311)');
     $body = fpmng_operator_body($ops, '/solo-status?json&full');
     $decoded = json_decode($body, true);
     verify(is_array($decoded), "solo status is not JSON: $body");

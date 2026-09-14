@@ -127,7 +127,12 @@ function tlsConnect(int $port, ?string $localCertPem = null, float $timeout = 5.
 
 function tlsRequest($client, int $port): string
 {
-    fwrite($client, "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
+    /* Suppressed like the fread() below and for the same race (see
+     * tlsHandshakeRejected()): a rejected cert's post-Finished fatal alert
+     * can tear the connection down before this write ever reaches the
+     * socket, which throws E_WARNING "Broken pipe" instead of the silent
+     * truncated write the caller already treats as "no response". */
+    @fwrite($client, "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
     $response = '';
     $deadline = microtime(true) + 5.0;
     while (microtime(true) < $deadline) {
@@ -371,10 +376,22 @@ try {
      * that is not pool.type = http-direct): fpm_connection_info() does not
      * exist at all -- the defined "unsupported" answer for a pool type this
      * API was never wired into, so function_exists() tells the truth rather
-     * than opcache folding a call that would fatal. */
+     * than opcache folding a call that would fatal.
+     *
+     * A 50 * 100ms budget is what every other socket-connect retry in this
+     * suite uses, but this is not a socket accept on an already-open
+     * listener: it is one supervisor pool's fork, exec and PHP bootstrap,
+     * queued behind starting the four TLS pools and the worker-executor pool
+     * this same config also declares, on whatever CPU share the host gives a
+     * package-gate container under load. Observed flaking under exactly that
+     * contention on the apk+TLS package-gate flavour (retried into a pass by
+     * ci-package-gate.sh's issue #301 retry, but still a wait worth widening
+     * rather than relying on the retry to paper over): 150 * 100ms matches
+     * the 15s budget this suite's own async pool-state polls already use
+     * elsewhere (e.g. fpmng-http-direct-scale-down-drain.phpt's until()). */
     $resultFile = "$root/gateway-result.json";
     $body = '';
-    for ($i = 0; $i < 50 && $body === ''; $i++) {
+    for ($i = 0; $i < 150 && $body === ''; $i++) {
         $body = (string) @file_get_contents($resultFile);
         if ($body === '') usleep(100000);
     }

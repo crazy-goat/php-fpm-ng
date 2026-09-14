@@ -88,13 +88,15 @@ jobs:
       # than "get a compiler". Beta and unaudited, and its package description
       # says so.
       #
-      # Built HERE and not in .github/workflows/build-matrix.yml, on purpose.
-      # package-gate is the longest job in CI; a second row would put its whole
-      # cost on every pull request to gate an artefact that only ships on a
-      # tag. This workflow runs on a tag and on a manual rehearsal, which is
-      # exactly when the artefact exists -- and it is gated by the same script
-      # with the same count assertion as the default package, so nothing here
-      # is published less tested than what the matrix checks.
+      # Also gated in .github/workflows/build-matrix.yml's package-gate job on
+      # every pull request, not just here: a TLS-only regression that slipped
+      # past pull request CI is exactly what shipped in the v0.5.0 tag (issue
+      # tracked in PR #320) and what a second flake, apk-flavoured this time,
+      # repeated for v0.5.1. Both rows now run there too. This workflow still
+      # runs its own copy on the tag, because it is what actually produces the
+      # asset that gets published -- a rehearsal that only trusted the pull
+      # request's run would be publishing a binary this workflow itself never
+      # built.
       - name: build, install and test the TLS .deb
         env:
           FPMNG_PACKAGE_TLS: "1"

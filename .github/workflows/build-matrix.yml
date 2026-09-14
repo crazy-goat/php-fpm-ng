@@ -1183,21 +1183,33 @@ jobs:
       # produced. A wrong assertion in the suite is exactly the kind of bug a
       # pull request should have caught before it could reach a tag.
       #
-      # The compromise: one more flavour, not a second job. The tree above is
-      # already fetched and prepared for this run, so a deb-only TLS row costs
-      # this job the same ~88 seconds release.yml's own TLS .deb step measures
-      # (16s build + 72s suite -- issue #240's 232-second apt-get unpack is
-      # what the warm images below already remove), not a second checkout, a
-      # second tree, and a second apk run on top of it. apk stays release-only
-      # for now: the deb and apk flavours build and gate the same source
-      # against the same suite, so a regression that is specific to which
-      # packaging format Alpine uses rather than to TLS/ACME being compiled in
-      # is not the risk this row exists to catch, and release.yml still gates
-      # the apk TLS package on every tag before it is published.
+      # The compromise: two more flavours, not two more jobs. The tree above
+      # is already fetched and prepared for this run, so each TLS row costs
+      # about what release.yml's own TLS steps measure (tens of seconds of
+      # build plus the suite run -- issue #240's 232-second apt-get/apk unpack
+      # is what the warm images below already remove), not a second checkout
+      # or a second tree fetch.
+      #
+      # "apk stays release-only" was this job's original call here, reasoned
+      # as: deb and apk build and gate the same source against the same
+      # suite, so a regression specific to which packaging format Alpine uses
+      # is not the risk a TLS row exists to catch. The v0.5.1 release attempt
+      # proved that reasoning incomplete: the TLS .apk flavour flaked on
+      # fpmng-http-direct-connection-info.phpt's supervisor-result poll (a
+      # budget of 5s for a fork+exec+PHP-bootstrap, tight enough that CPU
+      # contention on a package-gate container -- exactly what this job's
+      # own multi-flavour run creates -- could exceed it) in a way the .deb
+      # flavour, on the same commit, did not. That is evidence a TLS-flavoured
+      # regression can be format-specific after all, so both TLS rows now run
+      # on every pull request rather than waiting for a tag to find out.
       - name: the TLS .deb, installed on a machine with no compiler
         env:
           FPMNG_PACKAGE_TLS: "1"
         run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb-tls"
+      - name: the TLS .apk, installed on a machine with no compiler
+        env:
+          FPMNG_PACKAGE_TLS: "1"
+        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk-tls"
 
       - uses: actions/upload-artifact@v7
         if: always()
@@ -1207,6 +1219,7 @@ jobs:
             out-package-deb/results
             out-package-apk/results
             out-package-deb-tls/results
+            out-package-apk-tls/results
           retention-days: 14
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()

@@ -132,6 +132,12 @@ struct fpm_worker_pool_config_s {
 						 * directive and not an environment variable. */
 	int http_idle_timeout;			/* ms, releases an attached connection after this many idle ms; 0 = never */
 	int http_read_timeout;			/* ms, one budget for the whole client-side read (headers + body); 0 = no client read timeout */
+	int http_pool_full_policy;		/* FPM_HTTP_POOL_FULL_REJECT (default) or _WAIT; see fpm_http.c and docs/http-gateway-pool-full.md.
+						 * "wait" is only a sane trade for IO-light pools -- opt in per pool, never globally. */
+	int http_pool_full_queue_max;		/* wait policy only: bound on how many requests may sit on gw->waiting at once;
+						 * a full queue rejects immediately rather than growing further (issue #309) */
+	int http_pool_full_wait_ms;		/* wait policy only: bound on how long one request may sit on gw->waiting;
+						 * an expired wait is rejected the same as a full queue (issue #309) */
 	size_t http_max_body;			/* bytes, hard cap on a request body the gateway buffers whole; see fpm_http.c */
 	int http_max_connections;		/* http-direct: connections one worker will hold at a time; 0 = unlimited. See fpm_http_direct_conn.h */
 	int http_max_connections_per_client;	/* http-direct: connections one peer address may hold on one worker; 0 = unlimited */
@@ -218,6 +224,15 @@ enum {
 	PM_STYLE_STATIC = 1,
 	PM_STYLE_DYNAMIC = 2,
 	PM_STYLE_ONDEMAND = 3
+};
+
+/* http.pool_full_policy, see fpm_http.c. Default is FPM_HTTP_POOL_FULL_REJECT
+ * (0) so a zeroed config struct -- the state before validate() runs a
+ * directive at all -- is the safe, existing behavior, not a silently-enabled
+ * queue. */
+enum {
+	FPM_HTTP_POOL_FULL_REJECT = 0,
+	FPM_HTTP_POOL_FULL_WAIT = 1
 };
 
 /* fpm-ng: allocate a pool that fpm-ng creates for itself rather than one the

@@ -327,7 +327,13 @@ try {
         . "-CAfile $root/ca.crt 2>&1");
     check(preg_match('/Verify return code:\s*0\s*\(ok\)/', $sOut) === 1,
         "openssl s_client did not confirm the server accepted our CA-signed cert:\n$sOut");
-    check(preg_match('/Protocol\s*:\s*(\S+)/', $sOut, $m) === 1 && $m[1] === $info['tls_protocol'],
+    /* Two output shapes for the negotiated protocol, depending on the openssl
+     * CLI's own version: older releases print a "Protocol  : TLSv1.3" line,
+     * newer ones (openssl 3.x observed in practice) print it instead as
+     * "New, TLSv1.3, Cipher is ..." -- match whichever this box's CLI uses. */
+    check((preg_match('/^\s*Protocol\s*:\s*(\S+)/m', $sOut, $m) === 1
+            || preg_match('/^\s*New,\s*(\S+),/m', $sOut, $m) === 1)
+        && $m[1] === $info['tls_protocol'],
         "protocol mismatch between PHP ({$info['tls_protocol']}) and s_client ($sOut)");
     echo "tls-optional-valid-client-cert-cross-checked: ok\n";
 

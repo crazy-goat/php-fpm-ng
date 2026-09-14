@@ -1266,6 +1266,137 @@ untrusted one (handshake proceeds, `client_cert_verified` is `false`);
 handshake layer; `pool.executor = worker` returning `false`; and a
 `pool.type = http` gateway pool never defining the function at all.
 
+## Protocol passthrough: early hints, status codes, and methods (issue #63)
+
+A direct pool's script *is* the server, so nothing between it and the wire
+filters what it can say the way nginx or the `http` gateway does — this
+section covers the three protocol features issue #63 asked about, one of
+which turned out to already be there, one of which is new, and one of which
+is not supported and, on the libevent this project links, cannot be added
+without a much larger change.
+
+### Custom response status codes: already unrestricted
+
+`fpm_http_direct_status_final()` accepts any status 200–599 the application
+sets, via `http_response_code()` or a raw `header('Status: ...')` line — a
+non-standard code (e.g. `Status: 299`) reaches the wire exactly as PHP built
+it, unmodified. The only statuses this SAPI refuses are outside 200–599:
+1xx (see [`fpm_send_early_hints()`](#fpm_send_early_hintsarray-headers-bool)
+below for why), and anything above 599, which is not a valid status line at
+all. No code change was needed for this — it is existing behavior,
+documented here because issue #63 asked for it explicitly.
+
+### `fpm_send_early_hints(array $headers): bool`
+
+Sends a 103 Early Hints response (RFC 8297) immediately, ahead of the final
+response this request will eventually send — the same idea as
+`Link: </style.css>; rel=preload` today, except the client can start
+fetching it before PHP has finished computing anything.
+
+```php
+fpm_send_early_hints(['Link' => '</style.css>; rel=preload']);
+// ... the application keeps computing ...
+header('Content-Type: text/html');
+echo $html;
+```
+
+Each array value may be a string or an array of strings (repeats the header,
+same convention `header()` and the worker executor's `fpmng_worker_respond()`
+use for a multi-valued header, e.g. multiple `Link` values). Returns `true`
+once the interim response has been written; `false`, having written nothing,
+when:
+
+- there is no request currently in flight (same convention as
+  `fpm_connection_info()`/`fpmng_respond()`);
+- the final response has already started going out — headers already sent,
+  `fpmng_respond()` already called, or (`http.stream`) streaming already
+  began. A 103 has to precede the final status line; once that line may be on
+  the wire, sending more bytes ahead of it would corrupt framing a client
+  reads strictly in order;
+- the client is HTTP/1.0, which has no notion of a 1xx interim response and
+  would read these bytes as garbage before the one status line it expects;
+- `pool.executor = worker` — see below.
+
+Can be called more than once per request; RFC 8297 allows several 103
+responses before the final one. Header validation is the same chain the
+final response uses (a name that is not an RFC 9110 token, or
+`evhttp_add_header()`'s own CRLF/injection check), but a rejected header is
+silently dropped from the 103 rather than failing the whole call — unlike
+the final response, which answers 500 on the same failure, since the 103 is
+optional by nature and the final response is still to come. Each call gets
+its own fresh 64 KiB header budget (`fpm_http_direct_header_charge()`),
+independent of whatever the final response separately spends its own budget
+on — a large 103 cannot starve the final response's header allowance, or the
+other way around. Framing-owned headers (`Content-Length`, `Connection`,
+...) are dropped the same way the final response drops them — a 103 has no
+body and must not claim a connection-management semantic.
+
+**Why this needs its own code path rather than reusing the final response's
+plumbing**: evhttp (this project's HTTP layer, from libevent) has no
+interim-response API — its reply functions
+(`evhttp_send_reply()`/`evhttp_send_reply_start()`) each frame whatever
+status they are given as *the* response, which is exactly why
+`fpm_http_direct_status_final()` excludes 1xx: routing a 103 through either
+of them would be read by libevent itself as the final answer, with body and
+connection-management framing implications, corrupting the wire for the real
+response still to come. `fpm_send_early_hints()` instead writes the interim
+response as literal bytes straight to the connection's `bufferevent` (the
+same one `fpm_connection_info()` reaches for its TLS fields), never touching
+evhttp's request/reply state — the real response afterwards goes out through
+the normal path exactly as if this had never been called.
+
+**`pool.executor = worker`**: not supported, `false` unconditionally, for the
+same structural reason `fpm_connection_info()` gives on this executor — see
+[`fpm_connection_info()`](#fpm_connection_info-issue-62) above. Writing a 103
+needs a single "current connection" to target; this executor answers by
+request id with several requests in flight against one PHP engine, and does
+not keep the accepting connection's `bufferevent` reachable once the first
+request off it has been dispatched. Extending this needs the same new design
+`fpm_connection_info()` would on this executor — a connection/request id
+parameter and a place to keep per-connection state alive across requests —
+future work, not this issue's scope.
+
+Covered by `sapi/fpmng/tests/fpmng-http-direct-early-hints.phpt`: a raw-socket
+client observing the exact wire order and byte-for-byte framing of a 103
+followed by the final response (headers included); early hints ahead of a
+bodyless (HEAD/204) final response, checked for keep-alive correctness on the
+same connection afterwards; a malformed header name dropped from the 103
+without failing the call; and `pool.executor = worker` returning `false`.
+
+### Custom / arbitrary request methods: not supported (infeasible on this libevent)
+
+Issue #63 asked for arbitrary methods (e.g. `REPORT`) to reach PHP in
+`$_SERVER['REQUEST_METHOD']`, "cheap to support once" if the transport can
+pass them through. It cannot, without a change well beyond this issue's
+scope: `evhttp_set_allowed_methods()` and `evhttp_request_get_command()` — the
+only API this project's HTTP layer offers for restricting or reading a
+request's method — operate on `enum evhttp_cmd_type`
+(`event2/http.h`), a **closed, fixed bitmask of exactly nine values** (`GET`,
+`POST`, `HEAD`, `PUT`, `DELETE`, `OPTIONS`, `TRACE`, `CONNECT`, `PATCH`).
+There is no `EVHTTP_REQ_CUSTOM` or equivalent escape hatch in libevent 2.1.x
+(confirmed against the installed `event2/http.h`, and stable across the
+2.1.x series this project's supported distributions ship). evhttp parses the
+request line and rejects any method token outside that set before this
+codebase's request callback ever runs — the restriction is enforced inside
+evhttp itself, not by anything in `fpm_http_direct.c`/`fpm_http_direct_worker.c`
+that could simply be relaxed.
+
+Reaching a truly arbitrary method would mean either patching libevent itself
+or bypassing its HTTP request-line parser entirely for a raw
+`bufferevent`-level implementation. This project patches php-src for its own
+worker/fiber transport needs (`patches/0001`–`0008`) but has never carried a
+libevent patch, and vendoring or patching a system HTTP parsing library is a
+materially larger commitment (a new patch surface to track across
+distributions' own libevent updates, plus request-line parsing security
+review) than this issue's "cheap to support once" framing anticipated. This
+is left unimplemented and documented here rather than forced through with a
+hand-rolled request-line parser; TRACE and CONNECT, which *do* exist in
+evhttp's enum, remain deliberately unmapped too (see
+[Deliberate limits](#deliberate-limits)) — TRACE for the same reason most
+HTTP servers refuse it by default (cross-site tracing, RFC 9110 §9.3.8's own
+security note), CONNECT because this transport has no tunnel to offer one
+through.
+
 ## Performance experiment
 
 Run on a private directory and port range on the shared Linux test box:

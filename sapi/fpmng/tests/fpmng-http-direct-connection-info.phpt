@@ -127,7 +127,12 @@ function tlsConnect(int $port, ?string $localCertPem = null, float $timeout = 5.
 
 function tlsRequest($client, int $port): string
 {
-    fwrite($client, "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
+    /* Suppressed like the fread() below and for the same race (see
+     * tlsHandshakeRejected()): a rejected cert's post-Finished fatal alert
+     * can tear the connection down before this write ever reaches the
+     * socket, which throws E_WARNING "Broken pipe" instead of the silent
+     * truncated write the caller already treats as "no response". */
+    @fwrite($client, "GET / HTTP/1.1\r\nHost: 127.0.0.1:$port\r\nConnection: close\r\n\r\n");
     $response = '';
     $deadline = microtime(true) + 5.0;
     while (microtime(true) < $deadline) {

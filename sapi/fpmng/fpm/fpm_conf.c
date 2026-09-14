@@ -57,6 +57,7 @@ static char *fpm_conf_set_string(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
 #ifdef HAVE_SYSLOG_H
 static char *fpm_conf_set_syslog_facility(zval *value, void **config, intptr_t offset);
 #endif
@@ -184,6 +185,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
+	{ "http.pool_full_policy",     &fpm_conf_set_pool_full_policy, WPO(http_pool_full_policy) },
+	{ "http.pool_full_queue_max",  &fpm_conf_set_integer,     WPO(http_pool_full_queue_max) },
+	{ "http.pool_full_wait_ms",    &fpm_conf_set_integer,     WPO(http_pool_full_wait_ms) },
 	{ "http.max_body",             &fpm_conf_set_bytes,       WPO(http_max_body) },
 	{ "http.max_connections",      &fpm_conf_set_integer,     WPO(http_max_connections) },
 	{ "http.max_connections_per_client", &fpm_conf_set_integer, WPO(http_max_connections_per_client) },
@@ -652,6 +656,27 @@ static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset) /* {{{
 }
 /* }}} */
 
+/* http.pool_full_policy: reject (default, the status quo fast-fail 503) or
+ * wait (issue #309 -- opt-in per pool, only a good trade for IO-light work;
+ * see docs/http-gateway-pool-full.md). Anything else is refused rather than
+ * silently taken as "reject", the same way fpm_conf_set_pm() refuses an
+ * unrecognized pm value instead of guessing. */
+static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s  *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "reject")) {
+		c->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;
+	} else if (zend_string_equals_literal_ci(val, "wait")) {
+		c->http_pool_full_policy = FPM_HTTP_POOL_FULL_WAIT;
+	} else {
+		return "invalid http.pool_full_policy (reject or wait)";
+	}
+	return NULL;
+}
+/* }}} */
+
 static char *fpm_conf_set_array(zval *key, zval *value, void **config, int convert_to_bool) /* {{{ */
 {
 	struct key_value_s *kv;
@@ -738,6 +763,9 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_static = 1;
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */
 	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
+	wp->config->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;	/* fpm-ng: issue #309, off by default for every pool */
+	wp->config->http_pool_full_queue_max = 32;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
+	wp->config->http_pool_full_wait_ms = 500;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
 	wp->config->http_max_body = 32 * 1024 * 1024;	/* fpm-ng: FPM_HTTP_MAX_BODY in fpm_http.c */
 	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: see the field comment in fpm_conf.h */
 	wp->config->http_stream_write_timeout = 10000;	/* fpm-ng: ten seconds, see http.stream in docs/http-direct.md */

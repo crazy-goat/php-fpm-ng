@@ -216,6 +216,17 @@ struct fpm_http_gateway_s {
 	struct timeval idle_timeout;			/* idle_ms split into {sec, usec} for event_add() */
 	int read_timeout_ms;				/* http.read_timeout, milliseconds; 0 = no client-side read deadline */
 	struct timeval read_timeout;			/* read_timeout_ms split into {sec, usec} for evhttp_set_timeout_tv() */
+	/* http.pool_full_policy, issue #309. wait_policy is FPM_HTTP_POOL_FULL_REJECT
+	 * (the default, unchanged behavior: fpm_http_pump_once() drains gw->waiting
+	 * to a 503 the instant the budget is exhausted) or FPM_HTTP_POOL_FULL_WAIT,
+	 * gated per pool to workloads the operator has judged IO-light -- see
+	 * docs/http-gateway-pool-full.md. wait_queue_max and wait_ms are read only
+	 * when wait_policy is on; fpm_http_validate_pool() has already refused a
+	 * wait policy with either bound at zero. */
+	int wait_policy;
+	int wait_queue_max;
+	int wait_ms;
+	struct timeval wait_bound;			/* wait_ms split into {sec, usec} for evtimer_add() */
 	size_t max_body;					/* http.max_body, bytes; evhttp buffers a whole body in memory before dispatch (task 031) */
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
@@ -389,6 +400,17 @@ struct _fpm_http_conn {
 	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
 	int status;						/* HTTP status finally sent, -1 until known; for the access log */
 	size_t bytes_out;					/* body bytes sent to the client, for the access log */
+
+	/* http.pool_full_policy = wait (issue #309). All three are dead unless
+	 * the pool opted in: when this request was put on gw->waiting, the
+	 * one-shot timer that bounds how long it may stay there (freed the
+	 * moment it leaves the queue, by whichever path -- dispatch, an expired
+	 * wait, or a client that disconnects while still queued), and how long
+	 * it actually waited (-1 until dispatched, matching how fpm_http_pump()
+	 * reports queue_wait_ms in the access log). */
+	struct timeval wait_since;
+	struct event *wait_timer;
+	long queue_wait_ms;
 };
 
 /* One persistent FastCGI connection to the pool, serving one request at a time.
@@ -911,6 +933,14 @@ static void fpm_http_conn_free(fpm_http_conn *c)
 	if (c->queued) {
 		TAILQ_REMOVE(&c->gw->waiting, c, link);
 	}
+	/* http.pool_full_policy = wait (issue #309): freed here and nowhere else,
+	 * so every path out of the queue -- dispatch, the reject-drain, an
+	 * expired wait, and a client that disconnects while queued -- releases
+	 * the timer exactly once. */
+	if (c->wait_timer) {
+		event_free(c->wait_timer);
+		c->wait_timer = NULL;
+	}
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);
@@ -957,6 +987,15 @@ static void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_
 		line = next;
 	}
 
+	/* http.pool_full_policy = wait (issue #309): observable from outside the
+	 * process, added after the CGI headers were copied so a script cannot
+	 * overwrite this with a header of its own. */
+	if (c->queue_wait_ms >= 0) {
+		char waited[32];
+
+		snprintf(waited, sizeof(waited), "%ld", c->queue_wait_ms);
+		evhttp_add_header(out, "X-Fpmng-Queue-Wait", waited);
+	}
 	evhttp_send_reply_start(c->req, code, reason && *reason ? reason : NULL);
 	free(reason);
 	c->headers_sent = 1;
@@ -1376,6 +1415,72 @@ static fpm_http_upstream *fpm_http_upstream_new(struct fpm_http_gateway_s *gw)
 
 /* One dispatch round. Never called directly -- fpm_http_pump() below owns the
  * re-entrancy rules. */
+/* Answers one queued request 503 + Retry-After and frees it. Lifted out of
+ * the drain loop below without changing a byte of what it sends, so that
+ * loop and the wait policy's two rejection sites (a full queue, an expired
+ * wait) share one implementation. `c` must already be unlinked from
+ * gw->waiting -- see the drain loop's own comment for why that order and not
+ * the other one. */
+static void fpm_http_reject_queued(fpm_http_conn *c)
+{
+	c->status = FPM_HTTP_SERVICE_UNAVAIL;
+	if (c->evcon) {
+		struct evbuffer *body = evbuffer_new();
+
+		evhttp_add_header(evhttp_request_get_output_headers(c->req), "Retry-After", FPM_HTTP_RETRY_AFTER);
+		if (body) {
+			evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
+				"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
+			evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", body);
+			evbuffer_free(body);
+		} else {
+			evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", NULL);
+		}
+	}
+	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+		c->remote_user, c->status, c->bytes_out);
+	fpm_http_conn_free(c);
+}
+
+/* http.pool_full_policy = wait (issue #309): this request has been queued for
+ * http.pool_full_wait_ms. The bound is on the wait, not on the request -- a
+ * request already handed to an upstream has left gw->waiting and had its
+ * timer freed, so this only ever fires for a connection still linked into
+ * the queue.
+ *
+ * This does free the timer from inside the timer's own callback, by way of
+ * fpm_http_conn_free(). That is the case libevent documents as safe -- a
+ * non-persistent event is already non-pending by the time its callback runs
+ * -- not the case issue #132 is open about, which is a persistent socket
+ * event freed from its own read callback. */
+static void fpm_http_wait_expired(evutil_socket_t fd, short what, void *arg)
+{
+	fpm_http_conn *c = arg;
+
+	(void) fd;
+	(void) what;
+	TAILQ_REMOVE(&c->gw->waiting, c, link);
+	c->queued = 0;
+	fpm_http_reject_queued(c);
+}
+
+/* http.pool_full_policy = wait (issue #309): how many requests are on
+ * gw->waiting right now. Walked rather than counted in a field: the walk is
+ * bounded by the cap it is compared against, it only runs when the pool is
+ * already full, and a counter would have to be kept correct at every removal
+ * site instead of at this one call site (see issue #107 about exactly that
+ * kind of bookkeeping going wrong). */
+static unsigned fpm_http_waiting_len(struct fpm_http_gateway_s *gw)
+{
+	fpm_http_conn *c;
+	unsigned n = 0;
+
+	TAILQ_FOREACH(c, &gw->waiting, link) {
+		n++;
+	}
+	return n;
+}
+
 static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 {
 	while (!TAILQ_EMPTY(&gw->waiting)) {
@@ -1419,28 +1524,24 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 			 * evhttp_send_reply() below can drive the connection close
 			 * callback, and fpm_http_client_closed() -> fpm_http_conn_free()
 			 * would otherwise remove and free an entry this loop still holds
-			 * a pointer to. */
+			 * a pointer to.
+			 *
+			 * http.pool_full_policy = wait (issue #309): the one branch that
+			 * makes this gateway a fast-fail, and "wait" is this branch not
+			 * taken. The queue stays exactly as it is -- every entry on it
+			 * already carries the timer that bounds its own stay, and this
+			 * function runs again the moment an upstream is released (see
+			 * fpm_http_pump()), which is what eventually empties it. Nothing
+			 * else about the queue cap changes: it was already applied when
+			 * the request was enqueued, not here. */
+			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
+				return;
+			}
 			while (!TAILQ_EMPTY(&gw->waiting)) {
 				c = TAILQ_FIRST(&gw->waiting);
 				TAILQ_REMOVE(&gw->waiting, c, link);
 				c->queued = 0;
-				c->status = FPM_HTTP_SERVICE_UNAVAIL;
-				if (c->evcon) {
-					struct evbuffer *body = evbuffer_new();
-
-					evhttp_add_header(evhttp_request_get_output_headers(c->req), "Retry-After", FPM_HTTP_RETRY_AFTER);
-					if (body) {
-						evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
-							"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
-						evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", body);
-						evbuffer_free(body);
-					} else {
-						evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", NULL);
-					}
-				}
-				fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
-					c->remote_user, c->status, c->bytes_out);
-				fpm_http_conn_free(c);
+				fpm_http_reject_queued(c);
 			}
 			return;
 		}
@@ -1448,6 +1549,19 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 		c = TAILQ_FIRST(&gw->waiting);
 		TAILQ_REMOVE(&gw->waiting, c, link);
 		c->queued = 0;
+		/* http.pool_full_policy = wait (issue #309): measured here, at the
+		 * moment the request stops waiting, and reported in
+		 * fpm_http_start_reply() -- not at the end of the request, which
+		 * would fold the script's own runtime into the wait figure. */
+		if (c->wait_timer) {
+			struct timeval now, spent;
+
+			event_free(c->wait_timer);
+			c->wait_timer = NULL;
+			evutil_gettimeofday(&now, NULL);
+			evutil_timersub(&now, &c->wait_since, &spent);
+			c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+		}
 		c->upstream = idle;
 		idle->busy = 1;
 		idle->req_written = idle->reply_seen = 0;
@@ -1897,6 +2011,7 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		c->req = req;
 		c->evcon = evcon;
 		c->status = -1;
+		c->queue_wait_ms = -1;		/* "never waited"; http.pool_full_policy = wait may still set it, issue #309 */
 		c->fwd = fwd;
 		c->peer_port = peer_port;
 		if (peer_addr) {
@@ -1915,8 +2030,31 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	}
 
 	evhttp_connection_set_closecb(c->evcon, fpm_http_client_closed, c);
+	/* http.pool_full_policy = wait (issue #309): the queue cap, applied
+	 * before the insert rather than left to the next pump. Before, because
+	 * the answer this gives has to be immediate -- a client at the cap gets
+	 * the ordinary 503 straight away, it does not wait its own wait bound
+	 * out only to be rejected anyway -- and because a request that is never
+	 * enqueued needs no timer and nothing to unlink. */
+	if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT && fpm_http_waiting_len(gw) >= (unsigned) gw->wait_queue_max) {
+		fpm_http_reject_queued(c);
+		return;
+	}
 	TAILQ_INSERT_TAIL(&gw->waiting, c, link);
 	c->queued = 1;
+	if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
+		evutil_gettimeofday(&c->wait_since, NULL);
+		c->wait_timer = evtimer_new(gw->base, fpm_http_wait_expired, c);
+		if (c->wait_timer) {
+			evtimer_add(c->wait_timer, &gw->wait_bound);
+		}
+		/* No timer means no bound on how long this request could wait, which
+		 * is the one thing this policy is not allowed to be -- but leaving it
+		 * queued with no timer (evtimer_new() only fails on OOM) is still
+		 * safer than rejecting a request that is otherwise fine: the next
+		 * successful fpm_http_pump() still dispatches it normally, same as
+		 * any other queued entry. */
+	}
 	fpm_http_pump(gw);
 }
 
@@ -2790,6 +2928,12 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->read_timeout.tv_usec = (wp->config->http_read_timeout % 1000) * 1000;
 	gw->max_body = wp->config->http_max_body;
 
+	gw->wait_policy = wp->config->http_pool_full_policy;
+	gw->wait_queue_max = wp->config->http_pool_full_queue_max;
+	gw->wait_ms = wp->config->http_pool_full_wait_ms;
+	gw->wait_bound.tv_sec = gw->wait_ms / 1000;
+	gw->wait_bound.tv_usec = (gw->wait_ms % 1000) * 1000;
+
 	if (fpm_conf_directive_was_set(wp->config, "http.listen") && wp->config->http_listen && *wp->config->http_listen) {
 		gw->http_listen_override = strdup(wp->config->http_listen);
 	} else if ((env = getenv("FPM_HTTP_LISTEN")) && *env) {
@@ -3121,6 +3265,25 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (wp->config->http_read_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.read_timeout must not be negative", wp->config->name);
 		return -1;
+	}
+	/* http.pool_full_policy = wait (issue #309): both bounds are mandatory
+	 * whenever the policy is on, the same rule the throwaway spike (#155)
+	 * enforced by silently falling back to reject. Refused loudly here
+	 * instead: an unbounded queue is the hoarding hazard the 503 exists to
+	 * avoid, and an unbounded wait is the invisible one. Checked regardless
+	 * of whether the two integer directives were explicitly set, because the
+	 * shipped defaults (32 / 500ms, see docs/http-gateway-pool-full.md) are
+	 * only sane in combination -- a pool that zeroes one out while turning
+	 * the policy on must not end up with the other silently unbounded too. */
+	if (wp->config->http_pool_full_policy == FPM_HTTP_POOL_FULL_WAIT) {
+		if (wp->config->http_pool_full_queue_max <= 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http.pool_full_policy = wait requires http.pool_full_queue_max > 0", wp->config->name);
+			return -1;
+		}
+		if (wp->config->http_pool_full_wait_ms <= 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http.pool_full_policy = wait requires http.pool_full_wait_ms > 0", wp->config->name);
+			return -1;
+		}
 	}
 	if (wp->listen_address_domain != FPM_AF_INET) {
 		int has_directive = fpm_conf_directive_was_set(wp->config, "http.listen")

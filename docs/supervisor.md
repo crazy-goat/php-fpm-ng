@@ -96,6 +96,18 @@ Jitter never changes `supervisor.restart_max` accounting: it is added to the
 delay that is applied, after the consecutive-failures counter and the
 give-up decision have already been made from the deterministic delay alone.
 
+The random component is drawn **independently by each copy**, at the moment
+that copy is about to wait, rather than computed once (by whichever copy's
+failure happened to be most recent) and shared. The deterministic part of the
+delay (`restart_delay`/`restart_delay_max`, and the failure count that decides
+`restart_max`) is pool-wide state shared by every copy, same as before this
+directive existed — but a *random* value stored the same way could only hold
+one copy's draw at a time, so every other copy would wait exactly that long
+too, collapsing straight back into the lockstep this directive exists to
+break. Per-copy jitter draws mean the same shared backoff window is still
+respected, but each copy's actual wake-up instant, inside that window, differs
+from its siblings'.
+
 **`supervisor.start_jitter = <seconds>`** adds a random extra delay, in
 `[0, jitter]` seconds inclusive, before the very first script execution of
 each of the pool's `supervisor.processes` copies — spreading the fork+exec+PHP

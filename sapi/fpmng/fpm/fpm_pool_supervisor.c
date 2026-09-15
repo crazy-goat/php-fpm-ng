@@ -119,6 +119,23 @@ struct fpm_supervisor_shared_s {
 	 * cold-start slots" must survive the child dying and being respawned. */
 	unsigned long cold_starts_issued;
 
+	/* issue #323: the DETERMINISTIC part of the delay the most recent failure
+	 * computed (restart_delay, doubled per consecutive failure, capped at
+	 * restart_delay_max) -- excluding any jitter. next_allowed_start above is
+	 * pool-wide (every copy of this pool shares the same shared memory, so
+	 * whichever copy fails most recently overwrites it for all of them,
+	 * exactly like "failures" already does); if restart_jitter's random
+	 * component were folded into that single shared value the way the
+	 * deterministic part is, every copy would still wake at the identical
+	 * instant -- last jitter draw wins, same lockstep the directive exists to
+	 * break. So jitter is NOT stored here: each copy draws its OWN jitter,
+	 * independently, at the moment it is about to wait (see the top of the
+	 * loop in fpm_pool_supervisor_child_main()), and adds it on top of the
+	 * shared deterministic wait. This field is what a percentage-form jitter
+	 * needs to know "a percentage of what" without recomputing the backoff
+	 * doubling itself. */
+	unsigned long last_deterministic_delay;
+
 	/* Issue #122: the fast-restart warning. With restart = always an exit 0 is
 	 * the end of one work unit and the next one starts at once -- the script
 	 * sets the pace, deliberately (see the exit_code == 0 branch below). A
@@ -397,7 +414,15 @@ static unsigned fpm_pool_supervisor_jitter(unsigned max_value) /* {{{ */
 		return 0;
 	}
 
-	clock_gettime(CLOCK_MONOTONIC, &ts);
+	/* Matches fpm_pool_supervisor_now_ms()'s handling of the same call: on the
+	 * (practically unreachable, but ts is otherwise read uninitialized)
+	 * failure of clock_gettime(), fall back to an all-zero reading rather than
+	 * mixing in garbage stack contents -- getpid() alone still keeps two
+	 * concurrently-forked siblings from hashing to the same value. */
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+		ts.tv_sec = 0;
+		ts.tv_nsec = 0;
+	}
 	mix = (unsigned long) ts.tv_sec ^ ((unsigned long) ts.tv_nsec << 1) ^ (unsigned long) getpid();
 	for (i = 0; i < sizeof(mix); i++) {
 		hash ^= (unsigned char) (mix >> (i * 8));
@@ -497,8 +522,6 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 	} else {
 		time_t delay = c->supervisor_restart_delay;
 		unsigned i;
-		unsigned jitter_max;
-		unsigned jitter;
 
 		for (i = 1; i < shared->failures; i++) {
 			if (delay >= c->supervisor_restart_delay_max) {
@@ -511,25 +534,24 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 			delay = c->supervisor_restart_delay_max;
 		}
 
-		/* issue #323: additive on top of the deterministic delay computed
-		 * above, so several copies of this pool (or several supervisor pools)
-		 * sharing the same dependency do not all wake up and retry in the
-		 * same second. A percentage is of THIS delay (post-doubling,
-		 * post-cap) rather than of restart_delay alone, so the proportion of
-		 * spread stays the same whether this is the first failure or the
-		 * tenth. */
-		if (c->supervisor_restart_jitter_is_percent) {
-			jitter_max = (unsigned) (((unsigned long) delay * (unsigned long) c->supervisor_restart_jitter_percent) / 100UL);
-		} else {
-			jitter_max = (unsigned) c->supervisor_restart_jitter;
-		}
-		jitter = fpm_pool_supervisor_jitter(jitter_max);
-		delay += (time_t) jitter;
-
+		/* issue #323: restart_jitter is deliberately NOT added here. This
+		 * delay, like "failures" above, is pool-wide shared state -- every
+		 * copy of this pool reads the SAME shared->next_allowed_start, so
+		 * whichever copy's jitter draw was folded in last would apply to all
+		 * of them, and every copy would wake at that one identical instant:
+		 * exactly the lockstep restart_jitter exists to break. Instead, only
+		 * the deterministic delay is stored (both in next_allowed_start and,
+		 * for the percentage form, in last_deterministic_delay so a waiter
+		 * can compute "N% of it" later); each copy draws its own jitter
+		 * independently at the moment it is about to wait, in
+		 * fpm_pool_supervisor_child_main(). */
+		shared->last_deterministic_delay = (unsigned long) delay;
 		shared->next_allowed_start = time(NULL) + delay;
-		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script exited (code %d) after %lds, restarting in %lds (failure %u%s)",
-			c->name, exit_code, (long) duration, (long) delay, shared->failures,
-			c->supervisor_restart_max > 0 ? "" : "/unlimited");
+		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script exited (code %d) after %lds, restarting in %lds"
+			"%s (failure %u%s)",
+			c->name, exit_code, (long) duration, (long) delay,
+			(c->supervisor_restart_jitter > 0 || c->supervisor_restart_jitter_is_percent) ? " + this copy's own jitter" : "",
+			shared->failures, c->supervisor_restart_max > 0 ? "" : "/unlimited");
 	}
 }
 /* }}} */
@@ -596,7 +618,25 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 		now = time(NULL);
 		if (shared->next_allowed_start > now) {
-			fpm_pool_supervisor_wait(shared->next_allowed_start - now);
+			time_t wait_for = shared->next_allowed_start - now;
+
+			/* issue #323: restart_jitter is drawn HERE, independently by
+			 * each copy about to wait, rather than once in apply_policy()
+			 * and folded into the shared next_allowed_start -- see the
+			 * comment on shared->last_deterministic_delay for why: a value
+			 * shared by every copy of this pool can only hold one random
+			 * draw, and whichever copy's failure wrote it last would apply
+			 * to all of them, collapsing straight back into the lockstep
+			 * this directive exists to break. */
+			if (c->supervisor_restart_jitter > 0 || c->supervisor_restart_jitter_is_percent) {
+				unsigned jitter_max = c->supervisor_restart_jitter_is_percent
+					? (unsigned) ((shared->last_deterministic_delay * (unsigned long) c->supervisor_restart_jitter_percent) / 100UL)
+					: (unsigned) c->supervisor_restart_jitter;
+
+				wait_for += (time_t) fpm_pool_supervisor_jitter(jitter_max);
+			}
+
+			fpm_pool_supervisor_wait(wait_for);
 			if (supervisor_term_requested) {
 				break;
 			}

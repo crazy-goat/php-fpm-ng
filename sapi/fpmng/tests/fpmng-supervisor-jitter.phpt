@@ -12,7 +12,7 @@ require_once "fpmng-operator.inc";
 /* Three pools, one FPM instance, run concurrently so this test pays FPM's
  * startup/shutdown cost once:
  *
- *   cold   -- supervisor.processes = 4, supervisor.start_jitter = 3, restart =
+ *   cold   -- supervisor.processes = 4, supervisor.start_jitter = 9, restart =
  *             on-failure, script always exits 1. restart = never is
  *             deliberately NOT used here: shared->terminal (the "stop
  *             restarting this pool" flag apply_policy sets) is pool-wide, not
@@ -83,7 +83,12 @@ file_put_contents("$work/cold.php", $markerScript($logs['cold'], 1));
 file_put_contents("$work/rjsec.php", $markerScript($logs['rjsec'], 1));
 file_put_contents("$work/rjpct.php", $markerScript($logs['rjpct'], 1));
 
-$startJitter = 3;
+/* 10 possible integer draws (0..9), not 4 (0..3): with only 4 copies and 4
+ * possible values, all 4 landing on the same draw is a 1-in-64 event -- too
+ * likely for a check that runs on every PR (the same standard applied to
+ * rjsec's variation check below). With 10 values the same coincidence is
+ * 1-in-1000. */
+$startJitter = 9;
 $rjSecDelay = 2;
 $rjSecJitter = 6;
 $rjPctDelay = 4;

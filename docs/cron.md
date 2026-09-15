@@ -27,6 +27,40 @@ overlap: the next run cannot start until the previous one has exited.
 - **`cron.log`** (optional, default: unset = no extra log) — a file path. One
   line is appended per completed run: start time (UTC, ISO 8601), exit code,
   duration. See "Run history" below.
+- **`cron.jitter`** (optional, seconds, default: unset = `0` = no jitter) —
+  the maximum delay added *after* the scheduled time is already due. See
+  "Jitter: avoiding a thundering herd" below.
+- **`cron.jitter_mode`** (optional, `random` or `stable`, default: `random`) —
+  only meaningful when `cron.jitter` is set. `random` picks a new delay
+  within `[0, cron.jitter]` on every run; `stable` derives one fixed delay
+  from the pool's name, so the same pool always lands at the same offset.
+
+## Jitter: avoiding a thundering herd
+
+Every pool sharing a schedule (e.g. `*/5 * * * *`) is due at the exact same
+wall-clock second by default — with several such pools that is a small spike
+of simultaneous script starts every interval. `cron.jitter` spreads that out
+by adding a delay, modeled on systemd's `RandomizedDelaySec=`/
+`FixedRandomDelay=`:
+
+- **`cron.jitter_mode = random`** (default once `cron.jitter` is set) — a
+  fresh random delay in `[0, cron.jitter]` seconds is picked each time the
+  pool's process starts. Two consecutive runs of the same pool can land at
+  different offsets from the scheduled time.
+- **`cron.jitter_mode = stable`** — the delay is derived only from the pool's
+  `name`, so it is the same on every run of that pool (no jitter between
+  consecutive runs of the *same* pool), while pools with different names
+  still spread apart from each other.
+
+Jitter never changes `cron.schedule` semantics: the next due minute is still
+computed exactly as described above, with no catch-up of missed runs (see
+below) — jitter only adds a delay *after* that decision, it never causes a
+run to be skipped or deferred to the next scheduled slot. Leaving
+`cron.jitter` unset (the default) is exactly today's exact-time-fire
+behavior. Keep `cron.jitter` well below the schedule's own interval — a
+jitter comparable to or larger than the interval between runs defeats the
+purpose, since a delayed run can then land close to (or past) the next
+scheduled tick.
 
 ## Time zone and DST
 

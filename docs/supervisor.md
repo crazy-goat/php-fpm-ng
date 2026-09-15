@@ -60,3 +60,58 @@ then settles down says it once rather than every second. Afterwards, the
 `restarts` counter on the pool's status and metrics pages
 ([`operator-endpoint.md`](operator-endpoint.md#the-baseline-counter)) is the
 number to watch; the warning is only what tells you to go look.
+
+## Spreading multiple copies apart: `supervisor.restart_jitter`, `supervisor.start_jitter`
+
+(issue #323) Both are **additive on top of** the deterministic behaviour
+described above and **default to unset (0)**, which is exactly today's
+behaviour: no randomization anywhere, every copy of a pool restarts or cold
+starts at the same instant as its siblings.
+
+That lockstep is fine for one process, but `supervisor.processes` > 1 (or
+several supervisor pools that happen to depend on the same thing) makes it a
+problem: every copy fails at the same instant a shared dependency (a database,
+a queue) blips, every copy backs off by the same deterministic
+`supervisor.restart_delay`, and every copy retries at the same instant again —
+a self-inflicted thundering herd against whatever it was that just recovered.
+The same applies to cold start: `supervisor.processes` copies forked together
+at master startup all pay their fork+exec+bootstrap cost in the same instant.
+
+**`supervisor.restart_jitter = <seconds>` or `<percentage>%`** adds a random
+extra delay, in `[0, jitter]` seconds inclusive, on top of the backoff delay
+that `supervisor.restart_delay`/`supervisor.restart_delay_max` already
+computed for this failure (including the doubling described above — jitter is
+the LAST step, not folded into the doubling itself). Two forms:
+
+- A plain number (`supervisor.restart_jitter = 3`, with the same `s`/`m`/`h`/`d`
+  suffixes every other time-shaped directive accepts) adds up to that many
+  seconds, regardless of how large the computed delay is.
+- A percentage (`supervisor.restart_jitter = 20%`) adds up to that percentage
+  of the delay that failure just computed — so the spread grows in proportion
+  as backoff itself grows from one consecutive failure to the next, rather
+  than becoming negligible next to a delay that has doubled a few times, or
+  dominant next to the very first, smallest one.
+
+Jitter never changes `supervisor.restart_max` accounting: it is added to the
+delay that is applied, after the consecutive-failures counter and the
+give-up decision have already been made from the deterministic delay alone.
+
+**`supervisor.start_jitter = <seconds>`** adds a random extra delay, in
+`[0, jitter]` seconds inclusive, before the very first script execution of
+each of the pool's `supervisor.processes` copies — spreading the fork+exec+PHP
+bootstrap cost across the startup window instead of paying all of it at once.
+It applies only to that first execution per copy; every later restart of that
+process (or of any process) is `supervisor.restart_jitter`'s job instead. The
+pool tracks how many of its `supervisor.processes` cold-start slots have
+already been handed out, and consumes one the moment a process decides to
+apply (or skip) the delay — not after that process's script has run — so a
+process that crashes immediately and is respawned does not draw a second
+cold-start allowance just because a slower sibling has not started yet.
+
+Neither directive is seeded from `rand()`/`srand()`: that state is process-wide
+and survives `fork()`, so every process forked from the master without an
+intervening call in the master would sample the identical "random" value and
+collapse straight back into the lockstep these directives exist to break.
+Each sample instead comes from the monotonic clock and the calling process's
+pid at the moment it is needed, which two calls a nanosecond apart, in any
+process, already disagree on.

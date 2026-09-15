@@ -58,6 +58,7 @@ static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset)
 static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
 #ifdef HAVE_SYSLOG_H
 static char *fpm_conf_set_syslog_facility(zval *value, void **config, intptr_t offset);
 #endif
@@ -177,6 +178,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
 	{ "cron.timezone",             &fpm_conf_set_string,      WPO(cron_timezone) },
 	{ "cron.log",                  &fpm_conf_set_string,      WPO(cron_log) },
+	{ "cron.jitter",               &fpm_conf_set_time,        WPO(cron_jitter) },
+	{ "cron.jitter_mode",          &fpm_conf_set_cron_jitter_mode, WPO(cron_jitter_mode) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
 	{ "http.plain_listen",         &fpm_conf_set_string,      WPO(http_plain_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
@@ -679,6 +682,30 @@ static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t 
 }
 /* }}} */
 
+/* cron.jitter_mode (issue #322): random (default) picks a new delay each run;
+ * stable derives one fixed per-pool delay from the pool name, so consecutive
+ * runs of the SAME pool never show jitter between each other while DIFFERENT
+ * pools sharing a cron.schedule still spread apart — see the naming rationale
+ * next to FPM_CRON_JITTER_RANDOM in fpm_conf.h and the delay calculation in
+ * fpm_pool_cron.c. An unrecognized value is refused rather than silently
+ * taken as "random", the same way fpm_conf_set_pool_full_policy() above
+ * refuses an unrecognized policy instead of guessing. */
+static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "random")) {
+		c->cron_jitter_mode = FPM_CRON_JITTER_RANDOM;
+	} else if (zend_string_equals_literal_ci(val, "stable")) {
+		c->cron_jitter_mode = FPM_CRON_JITTER_STABLE;
+	} else {
+		return "invalid cron.jitter_mode (random or stable)";
+	}
+	return NULL;
+}
+/* }}} */
+
 static char *fpm_conf_set_array(zval *key, zval *value, void **config, int convert_to_bool) /* {{{ */
 {
 	struct key_value_s *kv;
@@ -766,6 +793,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */
 	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;	/* fpm-ng: issue #309, off by default for every pool */
+	wp->config->cron_jitter_mode = FPM_CRON_JITTER_RANDOM;	/* fpm-ng: issue #322, matters only once cron.jitter > 0 */
 	wp->config->http_pool_full_queue_max = 32;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
 	wp->config->http_pool_full_wait_ms = 500;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
 	wp->config->http_max_body = 32 * 1024 * 1024;	/* fpm-ng: FPM_HTTP_MAX_BODY in fpm_http.c */

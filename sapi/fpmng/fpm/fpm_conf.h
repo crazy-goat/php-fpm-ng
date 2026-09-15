@@ -119,6 +119,9 @@ struct fpm_worker_pool_config_s {
 	struct fpm_cron_schedule_s *cron_parsed_schedule;	/* filled in by validate() */
 	char *cron_timezone;			/* IANA name, e.g. "Europe/Warsaw"; empty/NULL = UTC (default), see fpm_pool_cron.c */
 	char *cron_log;			/* optional: one line per run (start, exit code, duration) appended here; see fpm_pool_cron.c */
+	int cron_jitter;			/* seconds, max delay added AFTER the scheduled time is due; 0 = no jitter (default),
+						 * preserving today's exact-time fire. See fpm_pool_cron.c (issue #322). */
+	int cron_jitter_mode;			/* FPM_CRON_JITTER_RANDOM (default) or _STABLE; only meaningful when cron_jitter > 0 */
 	/* fpm-ng: pool.type = http, see fpm_http.c. The gateway starts ONLY when
 	 * pool.type = http (see fpm_pool_type.c) — these directives merely tune it,
 	 * they never enable it by themselves on another pool type. */
@@ -242,6 +245,15 @@ enum {
 enum {
 	FPM_HTTP_POOL_FULL_REJECT = 0,
 	FPM_HTTP_POOL_FULL_WAIT = 1
+};
+
+/* cron.jitter_mode, see fpm_pool_cron.c (issue #322). Default is
+ * FPM_CRON_JITTER_RANDOM (0) -- naming follows systemd's
+ * RandomizedDelaySec=/FixedRandomDelay=, where "random" (a fresh delay every
+ * run) is the default and "stable" (one fixed per-pool delay) is the opt-in. */
+enum {
+	FPM_CRON_JITTER_RANDOM = 0,
+	FPM_CRON_JITTER_STABLE = 1
 };
 
 /* fpm-ng: allocate a pool that fpm-ng creates for itself rather than one the

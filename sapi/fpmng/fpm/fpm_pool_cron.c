@@ -56,6 +56,19 @@
  * (see the comment next to fpm_cron_shared_s) — appending to a file needs no
  * control state and works even across master restarts.
  *
+ * cron.jitter/cron.jitter_mode (issue #322): every pool sharing a schedule
+ * (e.g. "*\/5 * * * *") is otherwise due at the exact same wall-clock second --
+ * with several such pools that is a thundering herd every interval. jitter adds
+ * up to cron_jitter seconds AFTER the due time computed above, never changing
+ * which minute was selected (see fpm_pool_cron_jitter_delay()) -- the
+ * no-catch-up guarantee above is about THAT decision and is untouched. This is
+ * NOT the same as "no schedule tick is ever lost": the respawned child still
+ * computes its own next-due-minute from the clock once the delayed run exits,
+ * with no memory of what was due while it was sleeping/running, so a
+ * cron_jitter comparable to or larger than the schedule's own interval can
+ * make intervening ticks disappear in practice (see docs/cron.md). Off (0) by
+ * default, which is exactly today's behavior.
+ *
  * cron.timeout uses EXACTLY the same mechanism as supervisor.stop_timeout
  * (fpm_pool_watchdog_arm(), factored into fpm_pool_watchdog.c) — pidfd, watchdog
  * fork, SIGKILL after the limit. Script execution uses the same machinery as
@@ -208,6 +221,9 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (c->cron_timeout < 0) {
 		c->cron_timeout = 0;
 	}
+	if (c->cron_jitter < 0) {
+		c->cron_jitter = 0;
+	}
 
 	/* Bad schedule = reject the configuration NOW, at startup, with a clear
 	 * message — never silently and never "approximately" at runtime. */
@@ -318,6 +334,70 @@ static int fpm_pool_cron_sleep_until(time_t next) /* {{{ */
 }
 /* }}} */
 
+/* cron.jitter/cron.jitter_mode (issue #322): the delay added AFTER a run is
+ * already due, in [0, cron_jitter] seconds inclusive. Deliberately computed as
+ * a separate step from fpm_cron_schedule_next() rather than folded into it --
+ * the schedule's "what is the next due minute" decision must stay exactly as
+ * it was (docs/cron.md's no-catch-up guarantee is about THAT decision), and
+ * jitter only pushes the sleep target later, it never changes which minute was
+ * selected. Returns 0 (no jitter, today's exact-time behavior) whenever
+ * cron_jitter is unset -- the default. */
+static unsigned fpm_pool_cron_jitter_delay(const struct fpm_worker_pool_config_s *c) /* {{{ */
+{
+	if (c->cron_jitter <= 0) {
+		return 0;
+	}
+
+	if (c->cron_jitter_mode == FPM_CRON_JITTER_STABLE) {
+		/* Deterministic per pool name: FNV-1a, chosen only because it is a
+		 * few lines of dependency-free libc-only code with reasonable
+		 * distribution for the handful of pool names a config file has --
+		 * not chosen for any cryptographic property, none is needed here.
+		 * Two pools with the same name would collide, but two pools in one
+		 * config already cannot share a name (see fpm_conf.c's duplicate-name
+		 * check), so that case does not arise. */
+		unsigned long hash = 2166136261UL;
+		const char *p = c->name;
+
+		while (p && *p) {
+			hash ^= (unsigned char) *p++;
+			hash *= 16777619UL;
+		}
+		return (unsigned) (hash % ((unsigned long) c->cron_jitter + 1));
+	}
+
+	/* random (default mode once cron.jitter > 0): a fresh delay on EVERY call,
+	 * in EVERY process. Deliberately NOT libc's rand()/srand(): that state is
+	 * process-wide and SURVIVES fork() (the child inherits the exact sequence
+	 * position the parent had at fork time). A "seed once, in whichever
+	 * process calls this first" guard is therefore not enough -- if the
+	 * MASTER calls this first (fpm_pool_cron_status(), reachable from the
+	 * status page, runs here too), it seeds and advances rand() once; every
+	 * cron child forked afterwards, without an intervening rand() call in the
+	 * master, inherits that identical state and produces the identical
+	 * "random" delay as every other such child -- silently collapsing back to
+	 * the exact thundering herd this directive exists to prevent. Hashing a
+	 * monotonic clock reading with the pid instead has no shared state to
+	 * inherit: two calls a nanosecond apart, in any process, already differ.
+	 * FNV-1a again, same non-cryptographic rationale as the stable branch
+	 * above. */
+	{
+		struct timespec ts;
+		unsigned long hash = 2166136261UL;
+		unsigned long mix;
+		size_t i;
+
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		mix = (unsigned long) ts.tv_sec ^ ((unsigned long) ts.tv_nsec << 1) ^ (unsigned long) getpid();
+		for (i = 0; i < sizeof(mix); i++) {
+			hash ^= (unsigned char) (mix >> (i * 8));
+			hash *= 16777619UL;
+		}
+		return (unsigned) (hash % ((unsigned long) c->cron_jitter + 1));
+	}
+}
+/* }}} */
+
 /* cron.log: appends one line per completed run. No rotation, no reopen on
  * reload — this is a plain append-only file, the operator's own job to
  * rotate (same expectation as any other file this project writes to), kept
@@ -403,6 +483,10 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			c->name, c->cron_schedule);
 		exit(FPM_EXIT_SOFTWARE);
 	}
+	/* issue #322: jitter is added AFTER the due time is already decided, never
+	 * folded into fpm_cron_schedule_next() itself — see the comment next to
+	 * fpm_pool_cron_jitter_delay(). */
+	next += (time_t) fpm_pool_cron_jitter_delay(c);
 
 	if (!fpm_pool_cron_sleep_until(next)) {
 		/* SIGTERM during sleep — exit cleanly without starting the script.
@@ -472,6 +556,17 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	 * docs/NOTES.md 3u and 3r. */
 	if (wp->config->cron_parsed_schedule) {
 		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL), wp->config->cron_timezone);
+
+		if (n != (time_t) -1) {
+			/* issue #322: same jitter formula as the child that will actually
+			 * run it. Exact for cron.jitter_mode = stable (derived only from
+			 * the pool name); for = random this is one fresh sample and the
+			 * page may show a slightly different instant on every reload --
+			 * the same kind of estimate next_run already was before jitter
+			 * existed (see the comment above: no memory of what actually
+			 * happened, calculated fresh every time). */
+			n += (time_t) fpm_pool_cron_jitter_delay(wp->config);
+		}
 		out->has_next_run = 1;
 		out->next_run = (n == (time_t) -1) ? 0 : n;
 	}

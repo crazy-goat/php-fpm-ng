@@ -60,10 +60,14 @@
  * (e.g. "*\/5 * * * *") is otherwise due at the exact same wall-clock second --
  * with several such pools that is a thundering herd every interval. jitter adds
  * up to cron_jitter seconds AFTER the due time computed above, never changing
- * which minute was selected (see fpm_pool_cron_jitter_delay()), so the
- * no-catch-up guarantee above is untouched: jitter only delays an already-due
- * run, it never defers one to the next scheduled slot. Off (0) by default,
- * which is exactly today's behavior.
+ * which minute was selected (see fpm_pool_cron_jitter_delay()) -- the
+ * no-catch-up guarantee above is about THAT decision and is untouched. This is
+ * NOT the same as "no schedule tick is ever lost": the respawned child still
+ * computes its own next-due-minute from the clock once the delayed run exits,
+ * with no memory of what was due while it was sleeping/running, so a
+ * cron_jitter comparable to or larger than the schedule's own interval can
+ * make intervening ticks disappear in practice (see docs/cron.md). Off (0) by
+ * default, which is exactly today's behavior.
  *
  * cron.timeout uses EXACTLY the same mechanism as supervisor.stop_timeout
  * (fpm_pool_watchdog_arm(), factored into fpm_pool_watchdog.c) — pidfd, watchdog
@@ -362,19 +366,35 @@ static unsigned fpm_pool_cron_jitter_delay(const struct fpm_worker_pool_config_s
 		return (unsigned) (hash % ((unsigned long) c->cron_jitter + 1));
 	}
 
-	/* random (default mode once cron.jitter > 0): a fresh delay every run.
-	 * rand() is seeded once per process below -- good enough to spread load,
-	 * no cryptographic property is needed for "don't all fire in the same
-	 * second". */
+	/* random (default mode once cron.jitter > 0): a fresh delay on EVERY call,
+	 * in EVERY process. Deliberately NOT libc's rand()/srand(): that state is
+	 * process-wide and SURVIVES fork() (the child inherits the exact sequence
+	 * position the parent had at fork time). A "seed once, in whichever
+	 * process calls this first" guard is therefore not enough -- if the
+	 * MASTER calls this first (fpm_pool_cron_status(), reachable from the
+	 * status page, runs here too), it seeds and advances rand() once; every
+	 * cron child forked afterwards, without an intervening rand() call in the
+	 * master, inherits that identical state and produces the identical
+	 * "random" delay as every other such child -- silently collapsing back to
+	 * the exact thundering herd this directive exists to prevent. Hashing a
+	 * monotonic clock reading with the pid instead has no shared state to
+	 * inherit: two calls a nanosecond apart, in any process, already differ.
+	 * FNV-1a again, same non-cryptographic rationale as the stable branch
+	 * above. */
 	{
-		static int seeded = 0;
+		struct timespec ts;
+		unsigned long hash = 2166136261UL;
+		unsigned long mix;
+		size_t i;
 
-		if (!seeded) {
-			srand((unsigned) (getpid() ^ time(NULL)));
-			seeded = 1;
+		clock_gettime(CLOCK_MONOTONIC, &ts);
+		mix = (unsigned long) ts.tv_sec ^ ((unsigned long) ts.tv_nsec << 1) ^ (unsigned long) getpid();
+		for (i = 0; i < sizeof(mix); i++) {
+			hash ^= (unsigned char) (mix >> (i * 8));
+			hash *= 16777619UL;
 		}
+		return (unsigned) (hash % ((unsigned long) c->cron_jitter + 1));
 	}
-	return (unsigned) (rand() % (c->cron_jitter + 1));
 }
 /* }}} */
 

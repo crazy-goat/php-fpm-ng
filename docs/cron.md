@@ -52,15 +52,23 @@ by adding a delay, modeled on systemd's `RandomizedDelaySec=`/
   consecutive runs of the *same* pool), while pools with different names
   still spread apart from each other.
 
-Jitter never changes `cron.schedule` semantics: the next due minute is still
-computed exactly as described above, with no catch-up of missed runs (see
-below) — jitter only adds a delay *after* that decision, it never causes a
-run to be skipped or deferred to the next scheduled slot. Leaving
-`cron.jitter` unset (the default) is exactly today's exact-time-fire
-behavior. Keep `cron.jitter` well below the schedule's own interval — a
-jitter comparable to or larger than the interval between runs defeats the
-purpose, since a delayed run can then land close to (or past) the next
-scheduled tick.
+Jitter never changes how the *next due minute itself* is computed: that
+decision is still made exactly as described above, with no catch-up of
+missed runs (see below) — jitter only adds a delay *after* that decision was
+made. Leaving `cron.jitter` unset (the default) is exactly today's
+exact-time-fire behavior.
+
+This does **not** mean a large `cron.jitter` is free: the delayed run still
+has to finish and exit before its process is respawned for the *next*
+schedule check, and that next check computes its own due minute from
+whatever the clock reads at that point — same as always, no memory of what
+was "supposed" to happen earlier. So a `cron.jitter` comparable to or larger
+than the interval between scheduled ticks (e.g. `cron.jitter = 120` on
+`* * * * *`) can make intervening ticks disappear in practice: the pool
+simply runs less often than the un-jittered schedule implies, exactly as if
+the missing ticks had never been due. **Keep `cron.jitter` well below the
+schedule's own interval** — this is not a corner case to reason carefully
+about, it is the entire point of the "well below" guidance.
 
 ## Time zone and DST
 

@@ -537,7 +537,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * detects it through pidfd (POLLIN when the PROCESS ends, not the script — see
 	 * fpm_pool_watchdog.h) and does nothing. Otherwise: SIGKILL. */
 	if (c->cron_timeout > 0) {
-		fpm_pool_watchdog_arm(getpid(), (unsigned) c->cron_timeout);
+		fpm_pool_watchdog_arm(getpid(), (unsigned) c->cron_timeout, SIGKILL);
 	}
 
 	started = time(NULL);

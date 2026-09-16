@@ -32,6 +32,17 @@ through the normal PHP shutdown path.
 pool in the file. `supervisor.stop_timeout`, `cron.timeout`, and
 `request_terminate_timeout` are **per-pool**.
 
+`supervisor.max_runtime` (issue #326; see
+[`supervisor.md`](supervisor.md#supervisormax_runtime-a-cap-on-a-single-iteration-issue-326))
+is not in this table: it is not a shutdown timeout, it never fires because the
+pool is being stopped. It caps how long ONE iteration of `supervisor.script`
+may run while the pool is otherwise healthy, and when it fires it reuses
+`supervisor.stop_timeout`'s own watchdog (`SIGTERM`/`stop_signal`, then
+`SIGKILL`) as its fallback — so a `supervisor.max_runtime` overrun still needs
+the same `supervisor.stop_timeout` grace period to actually end the process,
+and is subject to the same "the master's escalation on `docker stop` can win
+first" caveat this page describes, if the two happen to be running at once.
+
 ## What the default combination does on `docker stop`
 
 Stock settings: `process_control_timeout = 0` (escalate to `SIGKILL` after

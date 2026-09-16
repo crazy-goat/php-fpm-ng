@@ -46,4 +46,12 @@ struct fpm_pool_status_s;
  * as supervisor, so no local state is visible). */
 void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 
+/* fpm_pool_type_s.reload_spare_child — issue #329: on a reload's first signal
+ * pass, detach and spare one already-running child (if wp has at least two)
+ * instead of letting it be signalled with the rest, so the script has at
+ * least one running copy for the whole reload instead of a window with zero.
+ * See the field's own doc comment in fpm_pool_type.h for the full contract,
+ * and fpm_pool_supervisor.c for the handoff-across-execvp() mechanism. */
+void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp);
+
 #endif

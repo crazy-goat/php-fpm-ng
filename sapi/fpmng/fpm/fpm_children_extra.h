@@ -18,6 +18,9 @@
 
 #include <sys/types.h>
 
+struct fpm_worker_pool_s;
+struct fpm_child_s;
+
 /* Registers `pid`: when fpm_children_bury() reaps it, `on_exit(arg, pid, status)`
  * is called instead of the "unknown child" log line. Called from the master
  * only, right after fork() returns the child's pid to the parent. */
@@ -33,5 +36,32 @@ void fpm_children_extra_forget(pid_t pid);
  * (and un-registers it — on_exit is expected to register the replacement
  * process's new pid itself, if any), 0 if `pid` was not being watched. */
 int fpm_children_extra_handle_exit(pid_t pid, int status);
+
+/* Issue #329: detach the OLDEST of wp's still-running struct fpm_child_s
+ * (smallest ->started) from the pool's own pm.*-counted bookkeeping
+ * (wp->children, wp->running_children, fpm_globals.running_children) and
+ * return it -- WITHOUT signalling it, closing its fds, or freeing it. The
+ * caller becomes responsible for the returned struct: typically it hands the
+ * pid straight to fpm_children_extra_watch() above (so its eventual exit,
+ * whenever that comes, is still reaped instead of logged as "unknown child")
+ * and keeps the struct itself around until then, to free with
+ * fpm_children_free() once the pid is confirmed dead.
+ *
+ * Oldest, not newest or arbitrary: a supervisor pool's rolling reload
+ * (fpm_pool_supervisor_reload_spare_child(), fpm_pool_supervisor.c) wants to
+ * keep exactly one live copy of the script running across a reload's
+ * kill-everyone-then-execvp() cycle, and the copy that has been up longest is
+ * the one least likely to be moments from crashing or self-recycling
+ * (supervisor.max_memory/max_runtime) on its own -- keeping IT alive gives the
+ * survivor window its best chance of actually covering the gap.
+ *
+ * Returns NULL if wp has no children at all (nothing to detach) -- the
+ * caller is expected to have already checked wp->running_children >= 2
+ * before calling, since detaching the pool's LAST child would defeat the
+ * purpose (no replacement is coming without an execvp() first) and is
+ * therefore never done: fpm_pool_supervisor_reload_spare_child() enforces
+ * that, this function does not duplicate the check, it merely tolerates the
+ * degenerate wp->children == NULL case defensively. */
+struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp);
 
 #endif

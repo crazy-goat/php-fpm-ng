@@ -367,3 +367,97 @@ This is purely observational, exactly like `cron.expect_within`
 decision. A stale or missing heartbeat is visible on the status/metrics pages
 for a human or an alerting rule to act on; fpm-ng itself never restarts,
 kills, or otherwise reacts to one.
+
+## Rolling restart across a reload (issue #329)
+
+A reload in fpm-ng (`SIGUSR2`/`SIGHUP` to the master, or the same signal a
+config-file change triggers) is `execvp()`-based: the master signals every
+child of every pool, waits for `fpm_globals.running_children` to reach zero
+**across the whole master, not per pool**, and only then re-execs itself.
+Before this issue, that meant a supervisor pool with `supervisor.processes >
+1` — N copies of the same long-running script, kept up for exactly that
+redundancy — went through a whole reload with **zero** copies running,
+however briefly: every copy got the same signal in the same pass, and the
+replacements only started to exist after the master's `execvp()` returned.
+
+Fixing that properly — reload only the pools whose configuration actually
+changed, leave the rest running through their own `execvp()`-free lifetime —
+is a different, much bigger change (selective reload, tracked separately;
+see `docs/NOTES.md`, "Hot-reload scope"). It fights the exec-based
+architecture: the master itself is one process image, so "leave pool A alone"
+still has to survive that same image being replaced. This issue does not
+attempt it. What it does instead is narrower and works within today's
+architecture: **keep exactly one already-running copy of the script alive
+across the reload**, so the pool's redundancy never drops to zero, even
+though every *other* copy still restarts together, the same way the whole
+pool always has.
+
+**Mechanism.** On a reload's first signal pass, before the master's normal
+per-child signal loop reaches a supervisor pool's children, the pool detaches
+one of them — the one that has been running longest, on the theory that the
+copy least likely to be moments from crashing or self-recycling
+(`supervisor.max_memory`/`supervisor.max_runtime`) on its own gives the
+survivor window its best chance of actually covering the gap — from the
+ordinary `pm.*`-counted bookkeeping the reload's "wait for zero, then exec"
+gate watches. That detached process is never signalled by this reload; it
+keeps running the *old* generation's script, untouched, while everything else
+goes through the signal-then-`execvp()` sequence as before.
+
+`execvp()` keeps the master's environment (`environ` survives; the
+`mmap(MAP_ANONYMOUS)` shared memory this pool type otherwise uses for all its
+other state, per `docs/NOTES.md` section 3p, does not), so the survivor's pid
+is handed to the new generation through a single environment variable, one
+`pool-name:pid` pair per pool that spared a child. The new generation reads
+its own pool's entry back out on startup, confirms the pid is still alive,
+and starts watching it — it is not a child this generation ever forked, so it
+is tracked the same way `pool.type = http`'s gateway processes are (a
+generic master-side "notice this pid's exit, but it is not a `pm.*` child"
+registry), not through the normal worker-respawn path.
+
+**Retiring the survivor.** The new generation's own fresh copies are already
+running by the time it reaches this point — `fpm_children_create_initial()`
+runs earlier in startup — so the survivor is redundant capacity from the
+moment the new generation exists at all; the only question is when it is safe
+to stop it. "Safe" here means *a replacement has actually started*, not just
+*been forked*: the new generation polls its own shared `starts` counter
+(bumped at the top of each script iteration, before the script itself runs —
+the same counter the pool's own restart/backoff accounting already
+maintains) and retires the survivor, with `supervisor.stop_signal`, the first
+time it sees that counter move. If nothing ever does — a broken script that
+never gets past its own startup — the survivor is retired unconditionally
+after 30 seconds anyway, so a stuck new generation cannot leak the old one
+forever.
+
+**What this does not cover:**
+
+- **`supervisor.processes = 1` still has a real gap.** With exactly one copy,
+  "spare one and keep going" would leave the pool running the *old*
+  generation's script for the entire reload and never start the new one at
+  all — worse than today's brief gap, not better. This mechanism only
+  activates when the pool has at least two running children at the moment of
+  reload; a single-process pool reloads exactly as before.
+- **The survivor's own stdout/stderr stop being forwarded once the old
+  master execs away** — that forwarding is master-side plumbing
+  (`fpm_stdio.c`), and the old master is gone. `supervisor.output_log`
+  (issue #328) is unaffected, since that file descriptor belongs to the
+  child process itself, not to the master's pipe.
+- **A pool renamed or removed in the very same reload that spared one of its
+  children** leaves that pid's entry in the environment variable with no pool
+  left to claim it on the next startup — `fpm_pool_supervisor_reload_survivor_env_take()`
+  is only ever called with the name of a pool that still exists in the new
+  config, so a stale entry for a name nobody asks for is never read, never
+  tracked, and therefore never reaches the 30-second unconditional-retirement
+  path either: that path only starts once `fpm_pool_supervisor_reload_survivor_track()`
+  has registered the poll timer for it. The leftover process keeps running the
+  old generation's script until something external notices and kills it — a
+  real, known gap, not one this issue closes. It needs the rename/removal and
+  a reload to land in the exact same config change, which is narrow enough
+  that a follow-up (a startup-time sweep that kills any env-var entry no pool
+  claimed) was left for a separate issue rather than built speculatively here
+  (see `findings.md`).
+- **Selective reload** — skipping *unrelated* pools entirely on a reload that
+  only changed one of them — is issue #330's scope, not this one's. This
+  issue is useful on its own even without it, per the original request: it
+  closes the zero-copies window for a supervisor pool's own
+  `supervisor.processes` change or an ordinary reload, regardless of whether
+  selective reload ever lands.

@@ -34,6 +34,11 @@ overlap: the next run cannot start until the previous one has exited.
   only meaningful when `cron.jitter` is set. `random` picks a new delay
   within `[0, cron.jitter]` on every run; `stable` derives one fixed delay
   from the pool's name, so the same pool always lands at the same offset.
+- **`cron.stop_signal`** (optional, default: `TERM`) — which signal the
+  master sends to an actively-running cron child on shutdown or reload,
+  instead of the hardcoded `SIGTERM` every other non-request-serving pool
+  still gets. One of `TERM`, `QUIT`, `USR1` or `USR2`. See "Shutdown and
+  `docker stop`" below.
 
 ## Jitter: avoiding a thundering herd
 
@@ -154,9 +159,43 @@ a short script in a loop that is a large amount of log (measured: 52 MB in
 
 When the master receives `SIGTERM` (e.g. `docker stop`), a cron child that is
 **sleeping** before the next run exits immediately and skips that run. A child
-that is **already running a script** is stopped through the master's
-`process_control_timeout` escalation unless you raise that global value; when
-you set `cron.timeout`, it must be **≤** `process_control_timeout` or the
-master kills the run before `cron.timeout` can act. See
+that is **already running a script** is asked to stop with `cron.stop_signal`
+(default `TERM`, unchanged from before this directive existed) through the
+master's `process_control_timeout` escalation unless you raise that global
+value; when you set `cron.timeout`, it must be **≤** `process_control_timeout`
+or the master kills the run before `cron.timeout` can act. See
 [`docs/shutdown-timeouts.md`](shutdown-timeouts.md) for the full table,
 defaults, and startup warnings.
+
+### `cron.stop_signal`
+
+Every other non-request-serving pool type is asked to stop with a hardcoded
+`SIGTERM` by the master's own shutdown/reload escalation
+(`fpm_pctl_kill_all()` in `fpm_process_ctl.c`, unchanged for those types).
+`cron.stop_signal` gives a cron pool a way to ask for something softer
+instead — `QUIT`, `USR1` or `USR2` — so a script that traps that signal
+(`pcntl_signal()`) can flush a buffer, checkpoint progress, or otherwise wind
+down cleanly before `cron.timeout` (or, in its absence,
+`process_control_timeout`) forces a `SIGKILL`.
+
+Unlike `supervisor.stop_signal` (issue #324), which the master cannot honor
+directly (a self-triggered recycle sends the configured signal to itself, but
+`fpm_pctl_kill_all()` still hardcodes `SIGTERM` for that type), a cron pool's
+`stop_signal` **is** what the master sends on `docker stop` or a config
+reload that removes or changes this pool — the substitution happens in
+`fpm_pctl_kill_all()` itself, driven by `fpm_pool_type_s.stop_signal`
+(`fpm_pool_cron_stop_signal()` in `fpm_pool_cron.c`). This only ever replaces
+a plan that was already "send `SIGTERM`" for a non-request-serving pool: the
+first `SIGQUIT` a request-serving pool gets, and the final `SIGKILL`
+escalation for every pool type, are both untouched — `cron.timeout`'s
+watchdog remains the hard fallback regardless of this directive.
+
+`fpm_pool_cron_child_main()` always keeps its own `SIGTERM` handler
+installed regardless of `cron.stop_signal`, for the same reason
+`supervisor.stop_signal` does (`docs/supervisor.md`): an operator sending
+`SIGTERM` directly to the child (unusual outside manual debugging) must
+still get a clean stop, not the process default's immediate kill. Setting
+`cron.stop_signal` to something other than `TERM` installs a SECOND handler
+for that signal, in addition to `SIGTERM`'s — it does not replace it.
+
+Leaving `cron.stop_signal` unset is exactly today's behavior: `SIGTERM`.

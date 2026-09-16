@@ -25,7 +25,7 @@ through the normal PHP shutdown path.
 |---|---|---|---|
 | `fastcgi`, `fastcgi-ng`, `http` (+ `fiber`/`async` executors) | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
 | `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
-| `cron` | `cron.timeout` (default 0 = no limit on a running script) | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
+| `cron` | `cron.timeout` (default 0 = no limit on a running script) — the master sends `cron.stop_signal` (default `SIGTERM`, issue #325) to the child first | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
 | `status` | none (no PHP work to finish) | `process_control_timeout` only | none |
 
 `process_control_timeout` is a **`[global]`** directive. It applies to every

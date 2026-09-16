@@ -427,6 +427,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.init_main               = fpm_pool_cron_init_main,
 		.child_main              = fpm_pool_cron_child_main,
 		.status                  = fpm_pool_cron_status,
+		/* Issue #325: cron.stop_signal (default SIGTERM, in which case this is
+		 * a no-op) -- fpm_pctl_kill_all() reads it back through this callback
+		 * instead of hardcoding SIGTERM for this type the way it still does for
+		 * every other non-request-serving type. */
+		.stop_signal             = fpm_pool_cron_stop_signal,
 	},
 	{
 		/* Not configurable: created by fpm_operator_endpoint.c, one per distinct

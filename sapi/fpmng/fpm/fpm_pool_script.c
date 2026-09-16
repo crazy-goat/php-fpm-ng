@@ -132,8 +132,8 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 	/* Whether stop_signal names one of the OTHER signals Zend's zend_sigs[]
 	 * touches (Zend/zend_signal.c: TIMEOUT_SIG, SIGHUP, SIGINT, SIGQUIT,
 	 * SIGTERM, SIGUSR1, SIGUSR2), and therefore needs its OWN save/restore in
-	 * addition to SIGTERM's below. When stop_signal IS SIGTERM (the default,
-	 * and cron's only option), the SIGTERM handling already covers it and this
+	 * addition to SIGTERM's below. When stop_signal IS SIGTERM (the default for
+	 * both current callers), the SIGTERM handling already covers it and this
 	 * stays 0 so nothing is saved/restored twice. */
 	int stop_is_extra = (stop_signal != SIGTERM);
 
@@ -155,16 +155,16 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 	 * if the caller installed nothing of its own; restoring SIG_DFL is then a
 	 * no-op, so this is always safe).
 	 *
-	 * supervisor.stop_signal (issue #324) can also be QUIT/USR1/USR2, and Zend
-	 * touches those exactly the same way it touches SIGTERM (zend_sigs[] above
-	 * lists all four) — an earlier version of this function protected ONLY
-	 * SIGTERM on the theory that Zend left the others alone, which is false: a
-	 * pool configured with supervisor.stop_signal = USR1, for example, would
-	 * lose its own USR1 handler starting on the SECOND iteration exactly the
-	 * way SIGTERM would without the protection below, and a signal delivered
-	 * after that point kills the process outright (or dumps core, for QUIT)
-	 * with no stop_timeout grace period at all. Protect stop_signal the same
-	 * way, in addition to (never instead of) SIGTERM. */
+	 * supervisor.stop_signal/cron.stop_signal (issues #324/#325) can also be
+	 * QUIT/USR1/USR2, and Zend touches those exactly the same way it touches
+	 * SIGTERM (zend_sigs[] above lists all four) — an earlier version of this
+	 * function protected ONLY SIGTERM on the theory that Zend left the others
+	 * alone, which is false: a pool configured with a non-default stop_signal,
+	 * for example, would lose its own handler starting on the SECOND iteration
+	 * exactly the way SIGTERM would without the protection below, and a signal
+	 * delivered after that point kills the process outright (or dumps core,
+	 * for QUIT) with no stop_timeout/cron.timeout grace period at all. Protect
+	 * stop_signal the same way, in addition to (never instead of) SIGTERM. */
 	sigaction(SIGTERM, NULL, &term_before);
 	if (stop_is_extra) {
 		sigaction(stop_signal, NULL, &stop_before);

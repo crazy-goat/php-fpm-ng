@@ -28,12 +28,21 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp);
 int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp);
 
 /* fpm_pool_type_s.child_main — calculates the next due time, sleeps until it
- * (interruptibly by SIGTERM), runs the script once, and exits. Does not return.
- * Respawn for the next run is the ordinary unconditional fpm_children.c respawn
- * (pm = static, max_children = 1); cron policy itself still does not depend on
- * shared memory, unlike supervisor (see init_main above: the added state is
- * ONLY for status, not control). */
+ * (interruptibly by SIGTERM and, when configured, cron.stop_signal — issue
+ * #325), runs the script once, and exits. Does not return. Respawn for the
+ * next run is the ordinary unconditional fpm_children.c respawn (pm = static,
+ * max_children = 1); cron policy itself still does not depend on shared
+ * memory, unlike supervisor (see init_main above: the added state is ONLY for
+ * status, not control). */
 void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp);
+
+/* fpm_pool_type_s.stop_signal (issue #325) — this pool's cron.stop_signal
+ * (default SIGTERM, set in fpm_pool_cron_validate()), read back by
+ * fpm_pctl_kill_all() (fpm_process_ctl.c) so the master's own shutdown/reload
+ * escalation asks THIS type's child to stop with the configured signal
+ * instead of the hardcoded SIGTERM it still uses for every other
+ * non-request-serving type. */
+int fpm_pool_cron_stop_signal(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;
 

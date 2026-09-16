@@ -176,11 +176,29 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 			 *     master to escalate SIGQUIT to SIGTERM.
 			 * Keep the ordinary SIGQUIT fan-out unchanged for log rotation
 			 * and an explicit graceful stop. */
-			if (fpm_state == FPM_PCTL_STATE_RELOADING && signo == SIGQUIT) {
-				const struct fpm_pool_type_s *type = fpm_pool_type_of(child->wp);
+			const struct fpm_pool_type_s *type = fpm_pool_type_of(child->wp);
 
+			if (fpm_state == FPM_PCTL_STATE_RELOADING && signo == SIGQUIT) {
 				if (type && !type->serves_requests && type->child_main) {
 					child_signo = SIGTERM;
+				}
+			}
+
+			/* Issue #325: whenever the plan for this child (either branch
+			 * above) was the plain SIGTERM every non-request-serving type has
+			 * always gotten, give the type a chance to ask for something else
+			 * instead -- cron.stop_signal is the first directive that answers
+			 * (fpm_pool_cron_stop_signal()); every other type's .stop_signal is
+			 * still NULL, so this is a no-op there. Never applied to SIGQUIT
+			 * itself (a request-serving pool's first, drain-the-request
+			 * notice) or to the final SIGKILL escalation a few lines up in
+			 * fpm_pctl_action_next() -- both stay exactly what they always
+			 * were. */
+			if (child_signo == SIGTERM && type && type->stop_signal) {
+				int override = type->stop_signal(child->wp);
+
+				if (override > 0) {
+					child_signo = override;
 				}
 			}
 

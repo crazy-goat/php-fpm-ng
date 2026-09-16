@@ -142,6 +142,14 @@ struct fpm_worker_pool_config_s {
 	int cron_jitter;			/* seconds, max delay added AFTER the scheduled time is due; 0 = no jitter (default),
 						 * preserving today's exact-time fire. See fpm_pool_cron.c (issue #322). */
 	int cron_jitter_mode;			/* FPM_CRON_JITTER_RANDOM (default) or _STABLE; only meaningful when cron_jitter > 0 */
+	/* issue #325: the signal a shutdown/reload asks an actively-running (or
+	 * sleeping) cron child to stop with, instead of the hardcoded SIGTERM
+	 * every other non-request-serving pool still gets from
+	 * fpm_pctl_kill_all() -- see fpm_pool_type_s.stop_signal and
+	 * fpm_pool_cron_stop_signal() in fpm_pool_cron.c. Defaults to SIGTERM
+	 * (today's behavior) in fpm_pool_cron_validate(). cron.timeout remains the
+	 * hard fallback (SIGKILL) regardless of this directive. */
+	int cron_stop_signal;
 	/* fpm-ng: pool.type = http, see fpm_http.c. The gateway starts ONLY when
 	 * pool.type = http (see fpm_pool_type.c) — these directives merely tune it,
 	 * they never enable it by themselves on another pool type. */

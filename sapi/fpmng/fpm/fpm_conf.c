@@ -63,6 +63,7 @@ static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t 
 static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_cron_stop_signal(zval *value, void **config, intptr_t offset);
 #ifdef HAVE_SYSLOG_H
 static char *fpm_conf_set_syslog_facility(zval *value, void **config, intptr_t offset);
 #endif
@@ -188,6 +189,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.log",                  &fpm_conf_set_string,      WPO(cron_log) },
 	{ "cron.jitter",               &fpm_conf_set_time,        WPO(cron_jitter) },
 	{ "cron.jitter_mode",          &fpm_conf_set_cron_jitter_mode, WPO(cron_jitter_mode) },
+	{ "cron.stop_signal",          &fpm_conf_set_cron_stop_signal, WPO(cron_stop_signal) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
 	{ "http.plain_listen",         &fpm_conf_set_string,      WPO(http_plain_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
@@ -852,6 +854,33 @@ static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, int
 }
 /* }}} */
 
+/* cron.stop_signal (issue #325): which signal a shutdown/reload asks THIS
+ * cron pool's child to stop with, in place of the hardcoded SIGTERM every
+ * other non-request-serving pool still gets (fpm_pctl_kill_all(), which reads
+ * this back through fpm_pool_type_s.stop_signal -- see fpm_pool_cron.c).
+ * Same four names, same restriction, as supervisor.stop_signal (issue #324):
+ * SIGCHLD/SIGALRM are deliberately not offered here either, for the same
+ * reason (fpm_pool_cron_sigterm()'s comment on Zend's own use of SIGALRM). */
+static char *fpm_conf_set_cron_stop_signal(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "TERM") || zend_string_equals_literal_ci(val, "SIGTERM")) {
+		c->cron_stop_signal = SIGTERM;
+	} else if (zend_string_equals_literal_ci(val, "QUIT") || zend_string_equals_literal_ci(val, "SIGQUIT")) {
+		c->cron_stop_signal = SIGQUIT;
+	} else if (zend_string_equals_literal_ci(val, "USR1") || zend_string_equals_literal_ci(val, "SIGUSR1")) {
+		c->cron_stop_signal = SIGUSR1;
+	} else if (zend_string_equals_literal_ci(val, "USR2") || zend_string_equals_literal_ci(val, "SIGUSR2")) {
+		c->cron_stop_signal = SIGUSR2;
+	} else {
+		return "invalid cron.stop_signal (must be TERM, QUIT, USR1 or USR2)";
+	}
+	return NULL;
+}
+/* }}} */
+
 static char *fpm_conf_set_array(zval *key, zval *value, void **config, int convert_to_bool) /* {{{ */
 {
 	struct key_value_s *kv;
@@ -935,6 +964,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->supervisor_restart_delay_max = 60;
 	wp->config->supervisor_stop_timeout = 10;
 	wp->config->supervisor_stop_signal = SIGTERM;	/* issue #324: today's behavior until overridden */
+	wp->config->cron_stop_signal = SIGTERM;	/* issue #325: today's behavior until overridden */
 	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT in fpm_http.c */
 	wp->config->http_static = 1;
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */

@@ -21,6 +21,9 @@
 #include "fpm_sockets.h"
 #include "fpm_stdio.h"
 #include "fpm_scale_down_drain.h"
+#include "fpm_conf.h"
+#include "fpm_conf_diff.h"
+#include "fpm_reload_selective.h"
 #include "zlog.h"
 
 
@@ -155,10 +158,40 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
 	int alive_children = 0;
+	int selective_pass = 0;
+
+	/* Issue #330: on a reload's first signal pass, and only when the operator
+	 * opted in (reload.selective = yes), diff the config file this reload
+	 * will re-read against what THIS generation is running (fpm_conf_diff.h)
+	 * -- once here, not once per pool below, since it means reading and
+	 * splitting the file(s) again. `selective_pass` gates the per-pool check
+	 * further down; it is 0 (default off, or the diff could not be trusted --
+	 * see fpm_conf_diff_begin_reload_pass()'s own safety-bias comment) on
+	 * every path that must behave exactly like today. */
+	if (fpm_state == FPM_PCTL_STATE_RELOADING && fpm_signal_sent == 0 &&
+			fpm_global_config.reload_selective) {
+		selective_pass = fpm_conf_diff_begin_reload_pass(fpm_globals.config);
+	}
 
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		struct fpm_child_s *child;
 		const struct fpm_pool_type_s *wp_type = fpm_pool_type_of(wp);
+
+		/* Issue #330: an unchanged pool is not restarted at all -- not
+		 * signalled here, not forked fresh after execvp() (see
+		 * fpm_reload_selective_spare_pool()/fpm_reload_selective_adopt()).
+		 * This is strictly the FIRST thing considered for a pool on a
+		 * reload's first pass: it must win over #329's reload_spare_child
+		 * below (an unchanged pool has nothing to gracefully hand off --
+		 * every one of its children is staying) and over the ordinary
+		 * signal fan-out (there is nothing to signal). Later passes
+		 * (fpm_signal_sent != 0) never reach here for this pool: it was
+		 * never added to the running-children-being-escalated set to begin
+		 * with, since its children were detached, not signalled. */
+		if (selective_pass && fpm_conf_diff_pool_unchanged(wp->config->name)) {
+			fpm_reload_selective_spare_pool(wp);
+			continue;
+		}
 
 		/* Issue #329: give the pool's type first refusal on ONE of its
 		 * children, before the ordinary signal fan-out below ever sees it --

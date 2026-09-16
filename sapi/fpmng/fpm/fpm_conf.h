@@ -45,6 +45,10 @@ struct fpm_global_config_s {
 	int systemd_watchdog;
 	int systemd_interval;
 #endif
+	/* issue #330: opt-in switch for selective reload -- default 0 (off)
+	 * preserves today's all-pools-restart-together SIGUSR2 behaviour exactly.
+	 * See fpm_conf_diff.h/fpm_reload_selective.h for what "on" changes. */
+	int reload_selective;
 };
 
 extern struct fpm_global_config_s fpm_global_config;

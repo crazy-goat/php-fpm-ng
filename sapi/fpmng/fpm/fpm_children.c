@@ -28,6 +28,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
 #include "fpm_children_extra.h"
+#include "fpm_reload_selective.h"
 #include "fpm_scale_down_drain.h"
 #include "fpm_child_php_log.h"
 #include "fpm_log.h"
@@ -167,6 +168,38 @@ struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp) /* 
 	}
 
 	return oldest;
+}
+/* }}} */
+
+/* Issue #330: see the doc comment in fpm_children_extra.h. The mirror image
+ * of fpm_children_detach_oldest() above: builds a struct fpm_child_s for a
+ * pid this process never forked and links it into wp->children as if it
+ * had -- fpm_scoreboard_proc_alloc() is the same allocation
+ * fpm_resources_prepare() performs before an ordinary fork() below, and
+ * fpm_child_link() is the same linking fpm_parent_resources_use() performs
+ * after one; no stdio pipes are set up (see the header comment for why). */
+struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, struct timeval started) /* {{{ */
+{
+	struct fpm_child_s *child = fpm_child_alloc();
+
+	if (!child) {
+		return NULL;
+	}
+
+	child->wp = wp;
+	child->pid = pid;
+	child->started = started;
+	child->fd_stdout = -1;
+	child->fd_stderr = -1;
+
+	if (0 > fpm_scoreboard_proc_alloc(child)) {
+		fpm_child_free(child);
+		return NULL;
+	}
+
+	fpm_child_link(child);
+
+	return child;
 }
 /* }}} */
 
@@ -611,6 +644,14 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 
 int fpm_children_create_initial(struct fpm_worker_pool_s *wp) /* {{{ */
 {
+	/* Issue #330: adopt any children a selective reload carried over for this
+	 * pool BEFORE the ordinary fork loop below runs, so that loop's own
+	 * running_children < max check (fpm_children_make()) naturally forks only
+	 * the shortfall -- zero, for a pool reload.selective correctly judged
+	 * unchanged. A no-op (env var unset, or this pool has no entry) on every
+	 * ordinary start and on a non-selective reload. */
+	fpm_reload_selective_adopt(wp);
+
 	if (wp->config->pm == PM_STYLE_ONDEMAND) {
 		wp->ondemand_event = (struct fpm_event_s *)malloc(sizeof(struct fpm_event_s));
 

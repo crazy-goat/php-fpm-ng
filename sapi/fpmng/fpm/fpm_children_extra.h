@@ -17,6 +17,7 @@
 #define FPM_CHILDREN_EXTRA_H 1
 
 #include <sys/types.h>
+#include <sys/time.h>
 
 struct fpm_worker_pool_s;
 struct fpm_child_s;
@@ -63,5 +64,22 @@ int fpm_children_extra_handle_exit(pid_t pid, int status);
  * that, this function does not duplicate the check, it merely tolerates the
  * degenerate wp->children == NULL case defensively. */
 struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp);
+
+/* Issue #330: the mirror image of fpm_children_detach_oldest() above --
+ * registers an already-running pid (one this master did NOT just fork -- a
+ * selective reload's carried-over child, see fpm_reload_selective.h) as an
+ * ordinary member of wp->children, counted in wp->running_children and
+ * fpm_globals.running_children exactly like a forked one, with a fresh
+ * scoreboard slot. `started` is the caller's best estimate of when the
+ * process actually started; see fpm_reload_selective.c for why "now" is an
+ * accepted approximation there. No stdout/stderr pipes are set up
+ * (fd_stdout/fd_stderr = -1, same as #329's reload survivor in
+ * fpm_pool_supervisor.c and for the same reason: this generation never had
+ * pipes open to a pid it did not fork).
+ *
+ * Returns NULL, doing nothing, if scoreboard registration fails -- the
+ * caller treats that exactly like "this pid could not be adopted" and lets
+ * the ordinary fork loop that runs right after cover the shortfall. */
+struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, struct timeval started);
 
 #endif

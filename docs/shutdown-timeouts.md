@@ -24,7 +24,7 @@ through the normal PHP shutdown path.
 | pool type | pool-level limit | global limit on `docker stop` | hard cap (pool type) |
 |---|---|---|---|
 | `fastcgi`, `fastcgi-ng`, `http` (+ `fiber`/`async` executors) | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
-| `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `SIGTERM` to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
+| `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
 | `cron` | `cron.timeout` (default 0 = no limit on a running script) | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
 | `status` | none (no PHP work to finish) | `process_control_timeout` only | none |
 

@@ -124,6 +124,14 @@ struct fpm_worker_pool_config_s {
 	 * a later restart -- restart_jitter above already covers those. 0 = no jitter
 	 * (default), preserving today's simultaneous cold start. */
 	int supervisor_start_jitter;
+	/* issue #324: memory-triggered recycle, the supervisor.* equivalent of
+	 * pm.max_requests. 0 = disabled (default) -- see fpm_pool_supervisor.c. */
+	size_t supervisor_max_memory;		/* bytes; ru_maxrss high-water mark, checked after every iteration */
+	/* issue #324: the signal used to ask the current script execution to stop
+	 * cleanly before supervisor.stop_timeout's SIGKILL -- both on an external
+	 * termination request and on a memory-triggered recycle. Defaults to
+	 * SIGTERM (today's behavior) in fpm_pool_supervisor_validate(). */
+	int supervisor_stop_signal;
 	/* fpm-ng: pool.type = cron, see fpm_pool_cron.c */
 	char *cron_schedule;
 	char *cron_script;

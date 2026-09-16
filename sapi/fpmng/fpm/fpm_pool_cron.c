@@ -513,7 +513,11 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->runs++;
 	}
 
-	exit_code = fpm_pool_script_run(c->name, c->cron_script);
+	/* cron has no equivalent of supervisor.stop_signal (issue #324 is scoped to
+	 * pool.type = supervisor) -- SIGTERM, same as always; passing it here too
+	 * is what tells fpm_pool_script_run() there is no SECOND signal to
+	 * separately save/restore around the request. */
+	exit_code = fpm_pool_script_run(c->name, c->cron_script, SIGTERM);
 
 	if (shared) {
 		shared->running = 0;

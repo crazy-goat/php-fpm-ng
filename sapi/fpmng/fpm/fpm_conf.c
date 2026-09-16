@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stddef.h>
@@ -61,6 +62,7 @@ static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, intptr_t offset);
 #ifdef HAVE_SYSLOG_H
 static char *fpm_conf_set_syslog_facility(zval *value, void **config, intptr_t offset);
 #endif
@@ -177,6 +179,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.fatal",          &fpm_conf_set_boolean,     WPO(supervisor_fatal) },
 	{ "supervisor.restart_jitter", &fpm_conf_set_supervisor_restart_jitter, WPO(supervisor_restart_jitter) },
 	{ "supervisor.start_jitter",   &fpm_conf_set_time,        WPO(supervisor_start_jitter) },
+	{ "supervisor.max_memory",     &fpm_conf_set_bytes,       WPO(supervisor_max_memory) },
+	{ "supervisor.stop_signal",    &fpm_conf_set_supervisor_stop_signal, WPO(supervisor_stop_signal) },
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
@@ -821,6 +825,33 @@ static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, 
 }
 /* }}} */
 
+/* supervisor.stop_signal (issue #324): which signal asks the CURRENT script
+ * execution to stop cleanly -- on an external termination request and on a
+ * memory-triggered recycle alike -- before supervisor.stop_timeout's SIGKILL.
+ * Restricted to the four signals a script can reasonably trap without also
+ * being able to accidentally ask for something this codebase treats specially
+ * elsewhere (SIGCHLD, SIGALRM -- see fpm_pool_supervisor_sigterm()'s comment on
+ * why a raw sigaction() for SIGALRM would collide with Zend's own use of it). */
+static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "TERM") || zend_string_equals_literal_ci(val, "SIGTERM")) {
+		c->supervisor_stop_signal = SIGTERM;
+	} else if (zend_string_equals_literal_ci(val, "QUIT") || zend_string_equals_literal_ci(val, "SIGQUIT")) {
+		c->supervisor_stop_signal = SIGQUIT;
+	} else if (zend_string_equals_literal_ci(val, "USR1") || zend_string_equals_literal_ci(val, "SIGUSR1")) {
+		c->supervisor_stop_signal = SIGUSR1;
+	} else if (zend_string_equals_literal_ci(val, "USR2") || zend_string_equals_literal_ci(val, "SIGUSR2")) {
+		c->supervisor_stop_signal = SIGUSR2;
+	} else {
+		return "invalid supervisor.stop_signal (must be TERM, QUIT, USR1 or USR2)";
+	}
+	return NULL;
+}
+/* }}} */
+
 static char *fpm_conf_set_array(zval *key, zval *value, void **config, int convert_to_bool) /* {{{ */
 {
 	struct key_value_s *kv;
@@ -903,6 +934,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->supervisor_restart_delay = 1;
 	wp->config->supervisor_restart_delay_max = 60;
 	wp->config->supervisor_stop_timeout = 10;
+	wp->config->supervisor_stop_signal = SIGTERM;	/* issue #324: today's behavior until overridden */
 	wp->config->http_gateways = 2;		/* fpm-ng: FPM_HTTP_GATEWAYS_DEFAULT in fpm_http.c */
 	wp->config->http_static = 1;
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */

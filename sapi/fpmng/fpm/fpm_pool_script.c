@@ -123,29 +123,52 @@ static void fpm_pool_script_register_acme_builtins(const char *pool_name)
 	}
 }
 
-int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ */
+int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop_signal) /* {{{ */
 {
 	zend_file_handle file_handle;
 	int exit_code;
 	struct sigaction term_before;
+	struct sigaction stop_before;
+	/* Whether stop_signal names one of the OTHER signals Zend's zend_sigs[]
+	 * touches (Zend/zend_signal.c: TIMEOUT_SIG, SIGHUP, SIGINT, SIGQUIT,
+	 * SIGTERM, SIGUSR1, SIGUSR2), and therefore needs its OWN save/restore in
+	 * addition to SIGTERM's below. When stop_signal IS SIGTERM (the default,
+	 * and cron's only option), the SIGTERM handling already covers it and this
+	 * stays 0 so nothing is saved/restored twice. */
+	int stop_is_extra = (stop_signal != SIGTERM);
 
 	/* MEASURED (docs/NOTES.md, "graceful stopping"): php_request_startup()
 	 * and php_request_shutdown() REPLACE the process's SIGTERM disposition with
-	 * Zend's own handler (ZEND_SIGNALS includes SIGTERM in zend_sigs[], not only
-	 * SIGALRM used for max_execution_time) — and they do so on EVERY call, not
-	 * only once. The caller (pool.type = supervisor/cron) installs its OWN
-	 * SIGTERM handler before the first iteration, BEFORE entering the loop —
-	 * without restoring it here, it works only until the FIRST iteration ends:
-	 * every subsequent iteration (restart = always/on-failure, many runs in the
-	 * same process) gets the default disposition back and SIGTERM kills the
-	 * process immediately, with no chance for a graceful stop and without
+	 * Zend's own handler (ZEND_SIGNALS: zend_sigs[] in Zend/zend_signal.c lists
+	 * TIMEOUT_SIG, SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGUSR1 and SIGUSR2 --
+	 * NOT only SIGALRM used for max_execution_time) — and they do so on EVERY
+	 * call, not only once. The caller (pool.type = supervisor/cron) installs
+	 * its OWN SIGTERM handler before the first iteration, BEFORE entering the
+	 * loop — without restoring it here, it works only until the FIRST iteration
+	 * ends: every subsequent iteration (restart = always/on-failure, many runs
+	 * in the same process) gets the default disposition back and SIGTERM kills
+	 * the process immediately, with no chance for a graceful stop and without
 	 * arming the stop_timeout/cron.timeout watchdog. Save the disposition from
-	 * BEFORE php_request_startup() (that is, the one the caller actually wanted)
-	 * and restore it immediately after every point where PHP may replace it —
-	 * without knowing ANYTHING about the caller (it may be SIG_DFL if the caller
-	 * installed nothing of its own; restoring SIG_DFL is then a no-op, so this is
-	 * always safe). */
+	 * BEFORE php_request_startup() (that is, the one the caller actually
+	 * wanted) and restore it immediately after every point where PHP may
+	 * replace it — without knowing ANYTHING about the caller (it may be SIG_DFL
+	 * if the caller installed nothing of its own; restoring SIG_DFL is then a
+	 * no-op, so this is always safe).
+	 *
+	 * supervisor.stop_signal (issue #324) can also be QUIT/USR1/USR2, and Zend
+	 * touches those exactly the same way it touches SIGTERM (zend_sigs[] above
+	 * lists all four) — an earlier version of this function protected ONLY
+	 * SIGTERM on the theory that Zend left the others alone, which is false: a
+	 * pool configured with supervisor.stop_signal = USR1, for example, would
+	 * lose its own USR1 handler starting on the SECOND iteration exactly the
+	 * way SIGTERM would without the protection below, and a signal delivered
+	 * after that point kills the process outright (or dumps core, for QUIT)
+	 * with no stop_timeout grace period at all. Protect stop_signal the same
+	 * way, in addition to (never instead of) SIGTERM. */
 	sigaction(SIGTERM, NULL, &term_before);
+	if (stop_is_extra) {
+		sigaction(stop_signal, NULL, &stop_before);
+	}
 
 	SG(server_context) = NULL;
 	SG(request_info).path_translated = estrdup(script_path);
@@ -165,10 +188,16 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 		efree(SG(request_info).path_translated);
 		SG(request_info).path_translated = NULL;
 		sigaction(SIGTERM, &term_before, NULL);
+		if (stop_is_extra) {
+			sigaction(stop_signal, &stop_before, NULL);
+		}
 		return 255;
 	}
 	/* See the comment next to term_before at the top of the function. */
 	sigaction(SIGTERM, &term_before, NULL);
+	if (stop_is_extra) {
+		sigaction(stop_signal, &stop_before, NULL);
+	}
 	/* As with '-v'/phpinfo in fpm_main.c: set this AFTER startup because RINIT
 	 * resets no_headers. There is nowhere to send headers, so the send_headers
 	 * path is skipped entirely (see sapi_send_headers()). */
@@ -246,11 +275,15 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path) /* {{{ *
 	SG(request_info).path_translated = NULL;
 
 	php_request_shutdown((void *) 0);
-	/* php_request_shutdown() may replace the SIGTERM disposition just like
+	/* php_request_shutdown() may replace SIGTERM's (and stop_signal's, when it
+	 * is one of the other signals Zend touches) disposition just like
 	 * php_request_startup() (see the comment next to term_before) — restore it
 	 * once more so the window BETWEEN iterations (backoff, park(), waiting for
 	 * the next cron due time) also has the caller's handler active. */
 	sigaction(SIGTERM, &term_before, NULL);
+	if (stop_is_extra) {
+		sigaction(stop_signal, &stop_before, NULL);
+	}
 	fpm_stdio_flush_child();
 
 	return exit_code;

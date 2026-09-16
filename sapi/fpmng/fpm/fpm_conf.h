@@ -132,6 +132,10 @@ struct fpm_worker_pool_config_s {
 	 * termination request and on a memory-triggered recycle. Defaults to
 	 * SIGTERM (today's behavior) in fpm_pool_supervisor_validate(). */
 	int supervisor_stop_signal;
+	/* issue #326: cap on a SINGLE iteration of supervisor.script, the
+	 * supervisor.* equivalent of cron.timeout. 0 = disabled (default) -- see
+	 * fpm_pool_supervisor.c for how it is armed/canceled around each iteration. */
+	int supervisor_max_runtime;
 	/* fpm-ng: pool.type = cron, see fpm_pool_cron.c */
 	char *cron_schedule;
 	char *cron_script;

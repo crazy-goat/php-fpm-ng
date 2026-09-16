@@ -182,6 +182,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.start_jitter",   &fpm_conf_set_time,        WPO(supervisor_start_jitter) },
 	{ "supervisor.max_memory",     &fpm_conf_set_bytes,       WPO(supervisor_max_memory) },
 	{ "supervisor.stop_signal",    &fpm_conf_set_supervisor_stop_signal, WPO(supervisor_stop_signal) },
+	{ "supervisor.max_runtime",    &fpm_conf_set_time,        WPO(supervisor_max_runtime) },
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },

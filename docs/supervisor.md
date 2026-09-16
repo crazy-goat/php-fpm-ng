@@ -202,3 +202,82 @@ not trap.
 
 Both directives are opt-in. Leaving both unset is exactly today's behavior:
 no memory bound, `stop_signal = TERM`.
+
+## `supervisor.max_runtime`: a cap on a single iteration (issue #326)
+
+"The script sets the pace" (above) is about *how often* the script runs, not
+*how long one run may take* — nothing bounded that, on purpose:
+`supervisor.stop_timeout` only ever applies while the pool is being asked to
+stop (shutdown, or a `supervisor.max_memory` recycle — see below), never while
+it is otherwise healthy and simply taking longer than expected on one pass.
+
+`supervisor.max_runtime = <seconds>` (default: unset/`0`, no cap — the "the
+script sets the pace" philosophy is unchanged unless you opt in) closes that
+gap the same way `cron.timeout` already does for `pool.type = cron`: it caps a
+single execution of `supervisor.script`, not the pool's lifetime or its restart
+rate.
+
+Mechanically it reuses the existing pidfd watchdog
+(`fpm_pool_watchdog_arm()`, `fpm_pool_watchdog.c`) rather than inventing a
+second kill path: right before an iteration starts, a watchdog is armed for
+`supervisor.max_runtime` seconds with `supervisor.stop_signal` (`TERM` by
+default — see above) as the signal to send if it fires. If the iteration
+returns on time, that watchdog is explicitly canceled — unlike `cron.timeout`
+(one script run per process) a supervisor process does not end between
+iterations, so a stale, un-canceled watchdog from a slow iteration could
+otherwise fire during a later, well-behaved one. If instead the watchdog
+*does* fire, the stop signal it sends is caught by the exact same handler
+already installed for an externally requested stop, which in turn arms
+`supervisor.stop_timeout`'s own watchdog with hard `SIGKILL` as the fallback
+— so a script that traps the stop signal gets the same grace period an
+operator's `docker stop` already gives it, and a script that does not gets
+killed outright once `supervisor.stop_timeout` elapses. `fpm_children.c`
+(untouched) respawns a fresh process either way, exactly like any other pool
+death.
+
+```
+[pool q's script overruns supervisor.max_runtime = 5s, ignores the stop
+signal, and is SIGKILLed once supervisor.stop_timeout = 10s also elapses —
+no log line of its own beyond the two general shutdown-timeout notices,
+since the kill happens through the same code path as an external stop.]
+```
+
+### Restart-accounting decision
+
+Unlike `supervisor.max_memory` (issue #324), which is *explicitly* exempted
+from `supervisor.restart_max`/`restart_delay` — it never sends anything to an
+otherwise-finished script, so `fpm_pool_supervisor_apply_policy()` always sees
+the script's *own* exit code first and only recycles afterward —
+`supervisor.max_runtime` is **not** given that exemption, on purpose:
+
+- If the killed iteration is one `fpm_pool_script_run()` still manages to
+  *return from* (the script traps the stop signal and calls `exit()`, with any
+  code, before `supervisor.stop_timeout` elapses), `apply_policy()` runs
+  completely unmodified with that real exit code — a non-zero exit counts as
+  an ordinary failure against `supervisor.restart_max`/`restart_delay`, exactly
+  as it would if the script had failed for any other reason. This is the
+  intended common case for a script that wants to notice its own timeouts and
+  fail loudly.
+- If the script neither traps the stop signal nor exits before
+  `supervisor.stop_timeout`'s hard `SIGKILL`, the process is gone — there is no
+  code left running to call `apply_policy()`, so nothing about that death is
+  ever recorded in `supervisor.restart_max`'s counter. This is not a deliberate
+  exemption the way `max_memory`'s is (there is no code path that skips the
+  check on purpose); it is the same structural fact that already applies to
+  *any* process ended by a signal it does not catch — an operator's own
+  `docker kill -9`, an OOM kill, a crash — none of which ever reached
+  `apply_policy()` either, because that function only ever runs in a process
+  that is still alive to call it.
+
+The practical difference from `max_memory`: a script that reliably notices
+`supervisor.max_runtime` overruns and fails loudly will correctly trip
+`supervisor.restart_max`/`supervisor.fatal` if it keeps timing out — a runaway
+script is a real, repeating failure and this cap is meant to surface that, not
+hide it behind a free respawn. A script that never notices simply keeps being
+killed and respawned outside that accounting, the same as it always would be
+if killed by any other uncaught signal; `supervisor.max_runtime` does not
+change that pre-existing behavior, it only makes the timeout the *reason* for
+this particular kill instead of an operator or the kernel.
+
+Both directives are opt-in. Leaving `supervisor.max_runtime` unset is exactly
+today's behavior: no per-iteration cap.

@@ -9,7 +9,8 @@
  * per pool and is checked BY THE CHILD at startup and between script executions,
  * rather than by changing fpm_children.c.
  *
- * The pidfd watchdog (stop_timeout) and script execution outside a FastCGI
+ * The pidfd watchdog (stop_timeout, and supervisor.max_runtime — issue #326,
+ * a cap on a single script iteration) and script execution outside a FastCGI
  * request are shared with pool.type = cron — see fpm_pool_watchdog.[ch] and
  * fpm_pool_script.[ch].
  *
@@ -44,9 +45,11 @@
 
 #include "fpm_config.h"
 
+#include <errno.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/resource.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -219,7 +222,7 @@ static void fpm_pool_supervisor_sigterm(int signo)
 		 * waits for stop_timeout and, if we (the supervisor process) are still
 		 * alive, kills us. Safe here in the handler — see the comment in
 		 * fpm_pool_watchdog.h. */
-		fpm_pool_watchdog_arm(getpid(), (unsigned) supervisor_stop_timeout);
+		fpm_pool_watchdog_arm(getpid(), (unsigned) supervisor_stop_timeout, SIGKILL);
 	}
 }
 
@@ -285,6 +288,9 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * this is the one place every pool's config is guaranteed to pass
 		 * through before use. */
 		c->supervisor_stop_signal = SIGTERM;
+	}
+	if (c->supervisor_max_runtime < 0) {
+		c->supervisor_max_runtime = 0;
 	}
 
 	/* Design decision (see NOTES.md): supervisor.processes maps to pm = static +
@@ -684,6 +690,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		time_t now, started, duration;
 		unsigned long started_ms, duration_ms;
 		int exit_code;
+		pid_t max_runtime_watchdog = -1;
 
 		if (supervisor_term_requested) {
 			break;
@@ -748,7 +755,44 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->starts++;
 		shared->last_start = started;
 		shared->running = 1;
+
+		/* supervisor.max_runtime (issue #326): caps a SINGLE iteration, the
+		 * supervisor.* equivalent of cron.timeout -- but unlike cron (one script
+		 * run per process, see fpm_pool_cron_child_main()), THIS process does not
+		 * end between iterations, so the watchdog armed for one iteration must be
+		 * explicitly canceled once that iteration returns on time; otherwise it
+		 * would keep counting from the WRONG start time and could fire during a
+		 * later, well-behaved iteration (see fpm_pool_watchdog.h). signo =
+		 * supervisor.stop_signal (issue #324), not SIGKILL directly: firing
+		 * re-enters fpm_pool_supervisor_sigterm() below through the same handler
+		 * already installed for external termination, which arms its OWN SIGKILL
+		 * watchdog for supervisor_stop_timeout -- exactly the same two-stage
+		 * "stop_signal, then hard SIGKILL" an external `docker stop` already
+		 * gets, reused rather than reinvented. */
+		if (c->supervisor_max_runtime > 0) {
+			max_runtime_watchdog = fpm_pool_watchdog_arm(getpid(), (unsigned) c->supervisor_max_runtime, c->supervisor_stop_signal);
+		}
+
 		exit_code = fpm_pool_script_run(c->name, c->supervisor_script, c->supervisor_stop_signal);
+
+		if (max_runtime_watchdog > 0) {
+			/* The iteration returned -- on time or because it caught SIGTERM and
+			 * exited on its own -- before the watchdog's timer fired. Cancel it:
+			 * kill() first (it may already have exited quietly on its own if the
+			 * timer JUST fired, in which case this is a harmless ESRCH), then
+			 * waitpid() to reap it rather than leaving a zombie behind for every
+			 * iteration this pool ever runs. Retry on EINTR -- our own SIGTERM
+			 * handler (sa_flags = 0, no SA_RESTART) can otherwise cut this wait
+			 * short and leave that one watchdog unreaped; harmless (the loop
+			 * breaks right after on a real stop), but not reaping it if a
+			 * signal just happens to land here costs nothing to avoid. */
+			kill(max_runtime_watchdog, SIGKILL);
+			while (waitpid(max_runtime_watchdog, NULL, 0) < 0 && errno == EINTR) {
+				continue;
+			}
+			max_runtime_watchdog = -1;
+		}
+
 		shared->running = 0;
 		shared->last_exit_code = exit_code;
 		shared->has_last_exit_code = 1;
@@ -770,7 +814,14 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * run again parks (fpm_pool_supervisor_park() at the top of this
 		 * function on the next respawn) instead of being kept alive by a memory
 		 * recycle that exits and gets it immediately restarted regardless of
-		 * the configured policy. */
+		 * the configured policy.
+		 *
+		 * issue #326: unlike max_memory above, a supervisor.max_runtime kill is
+		 * deliberately NOT exempted from this same accounting -- see
+		 * docs/supervisor.md "supervisor.max_runtime" for the reasoning.
+		 * apply_policy() below runs unmodified with whatever exit_code the
+		 * script actually returned (including one set by a script that trapped
+		 * the max_runtime stop signal and exited on its own). */
 		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms);
 
 		if (shared->terminal) {

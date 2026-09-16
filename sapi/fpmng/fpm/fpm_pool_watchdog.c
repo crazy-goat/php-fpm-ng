@@ -47,7 +47,7 @@ static int fpm_pool_watchdog_pidfd_send_signal(int pidfd, int sig) /* {{{ */
 }
 /* }}} */
 
-pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ */
+pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds, int signo) /* {{{ */
 {
 	int pidfd;
 	pid_t watchdog;
@@ -68,7 +68,7 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 
 			if (poll(&pfd, 1, (int) timeout_seconds * 1000) == 0) {
 				/* timeout, not POLLIN: the target is still alive */
-				fpm_pool_watchdog_pidfd_send_signal(pidfd, SIGKILL);
+				fpm_pool_watchdog_pidfd_send_signal(pidfd, signo);
 			}
 			/* POLLIN: the target already finished by itself, nothing to do */
 		} else {
@@ -76,7 +76,7 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 			 * the target platform): check once per second instead of blindly sleeping
 			 * for the whole timeout, so we do not leave a visible "tail" after a
 			 * target that finished by itself after a fraction of a second. The narrow
-			 * PID-reuse race window between kill(pid,0) and kill(pid,SIGKILL) is
+			 * PID-reuse race window between kill(pid,0) and kill(pid,signo) is
 			 * documented. */
 			int remaining = (int) timeout_seconds;
 
@@ -88,7 +88,7 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds) /* {{{ *
 				remaining--;
 			}
 			if (kill(target_pid, 0) == 0) {
-				kill(target_pid, SIGKILL);
+				kill(target_pid, signo);
 			}
 		}
 		_exit(0);

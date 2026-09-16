@@ -5,7 +5,8 @@
  * KEY SIMPLIFYING DECISION: no timers on the master side. After starting, a
  * child of this pool:
  *   1. calculates the next due time from the schedule (fpm_cron_schedule_next()),
- *   2. sleeps until then, interruptibly — SIGTERM wakes it and it exits cleanly,
+ *   2. sleeps until then, interruptibly — SIGTERM (or cron.stop_signal, issue
+ *      #325) wakes it and it exits cleanly,
  *   3. runs the script ONCE,
  *   4. exits.
  * FPM respawns it through the existing machinery (pm = static,
@@ -184,8 +185,23 @@ static void fpm_pool_cron_sigterm(int signo) /* {{{ */
 	 * script is RUNNING the limit is cron.timeout (armed separately, see
 	 * fpm_pool_cron_run()), not SIGTERM. Normal master escalation
 	 * (process_control_timeout, see docs/NOTES.md 3p) applies to this type just
-	 * as it does to every other type. */
+	 * as it does to every other type.
+	 *
+	 * Issue #325: the SAME handler is installed for both SIGTERM and (when it
+	 * differs) cron.stop_signal below — whichever one actually arrives, it
+	 * means the same thing to this loop ("stop before the next run"), so there
+	 * is only one flag, not one per signal. */
 	cron_term_requested = 1;
+}
+/* }}} */
+
+/* fpm_pool_type_s.stop_signal (issue #325). See the field comment in
+ * fpm_pool_type.h for why fpm_pctl_kill_all() reads this back instead of the
+ * type name, and fpm_pool_cron_validate() for where 0 is turned into
+ * SIGTERM. */
+int fpm_pool_cron_stop_signal(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	return wp->config->cron_stop_signal;
 }
 /* }}} */
 
@@ -223,6 +239,14 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (c->cron_jitter < 0) {
 		c->cron_jitter = 0;
+	}
+	if (c->cron_stop_signal == 0) {
+		/* Belt and braces alongside the default set at config-struct allocation
+		 * time (fpm_worker_pool_config_alloc()): sigaction(0, ...) is not a
+		 * valid call, and this is the one place every pool's config is
+		 * guaranteed to pass through before use — same reasoning as
+		 * supervisor.stop_signal's identical guard (issue #324). */
+		c->cron_stop_signal = SIGTERM;
 	}
 
 	/* Bad schedule = reject the configuration NOW, at startup, with a clear
@@ -471,7 +495,20 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = fpm_pool_cron_sigterm;
 	sigemptyset(&sa.sa_mask);
+	/* SIGTERM is ALWAYS handled, regardless of cron.stop_signal: an operator
+	 * sending it directly to this child (unusual outside manual debugging,
+	 * see docs/shutdown-timeouts.md) must still get a clean stop rather than
+	 * the default disposition's immediate kill, exactly like
+	 * supervisor.stop_signal's identical reasoning (issue #324). The MASTER's
+	 * own escalation, unlike supervisor's, does NOT always send SIGTERM here —
+	 * fpm_pctl_kill_all() reads cron.stop_signal back through
+	 * fpm_pool_cron_stop_signal() (fpm_pool_type_s.stop_signal) and sends that
+	 * instead, so the second sigaction() below is what actually matters for
+	 * the "master shutdown/reload" trigger the directive documents. */
 	sigaction(SIGTERM, &sa, NULL);
+	if (c->cron_stop_signal != SIGTERM) {
+		sigaction(c->cron_stop_signal, &sa, NULL);
+	}
 
 	fpm_pool_script_install_sapi_overrides();
 
@@ -513,11 +550,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->runs++;
 	}
 
-	/* cron has no equivalent of supervisor.stop_signal (issue #324 is scoped to
-	 * pool.type = supervisor) -- SIGTERM, same as always; passing it here too
-	 * is what tells fpm_pool_script_run() there is no SECOND signal to
-	 * separately save/restore around the request. */
-	exit_code = fpm_pool_script_run(c->name, c->cron_script, SIGTERM);
+	exit_code = fpm_pool_script_run(c->name, c->cron_script, c->cron_stop_signal);
 
 	if (shared) {
 		shared->running = 0;

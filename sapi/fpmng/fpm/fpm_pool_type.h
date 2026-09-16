@@ -302,6 +302,19 @@ struct fpm_pool_type_s {
 	 * process-local memory. */
 	void (*status)(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 
+	/* The signal fpm_pctl_kill_all() (fpm_process_ctl.c) sends to a child of
+	 * this type instead of the hardcoded SIGTERM it otherwise uses for every
+	 * non-request-serving pool on shutdown/reload -- NULL means "no override",
+	 * i.e. today's plain SIGTERM. Never consulted for the final SIGKILL
+	 * escalation (that stays lethal and unconditional) or for the SIGQUIT a
+	 * request-serving pool gets first; only for the point where the master had
+	 * already decided this child gets SIGTERM. Issue #325: cron.stop_signal is
+	 * the first (and, for now, only) directive that gives a per-pool answer
+	 * here, through fpm_pool_cron_stop_signal() -- see fpm_pool_cron.c. Data,
+	 * not a name comparison in fpm_process_ctl.c, which must not learn which
+	 * type "cron" is. */
+	int (*stop_signal)(struct fpm_worker_pool_s *wp);
+
 	/* The one counter this type reports whether or not the pool's script ever
 	 * touches fpm_metric_*() (issue #277). The answer to "is this pool doing
 	 * anything", which before this had no answer on a pool whose code registers

@@ -127,3 +127,78 @@ collapse straight back into the lockstep these directives exist to break.
 Each sample instead comes from the monotonic clock and the calling process's
 pid at the moment it is needed, which two calls a nanosecond apart, in any
 process, already disagree on.
+
+## `supervisor.max_memory`: a memory-triggered recycle (issue #324)
+
+Classic FastCGI pools bound a worker's memory growth with `pm.max_requests` —
+run N requests, then exit and let the master start a fresh copy. A supervisor
+pool had no equivalent: the same OS process runs `supervisor.script` over and
+over, in the same address space, for as long as `supervisor.restart = always`
+keeps deciding to try again, and nothing ever bounded what it accumulated.
+
+`supervisor.max_memory = <size>` (for example `256M`, same K/M/G suffix as
+`http.max_body`) closes that gap. After every iteration — right after
+`supervisor.script` returns — fpm-ng first runs the normal restart decision
+(`fpm_pool_supervisor_apply_policy()`, with the script's real exit code) and
+only then, if that decision was "run it again", checks the process's own peak
+resident set size (`getrusage(RUSAGE_SELF).ru_maxrss`, converted to bytes; see
+the platform-unit comment in `fpm_pool_supervisor.c` for why it does not just
+read `ru_maxrss` as bytes on every OS). If that high-water mark has reached the
+configured limit, fpm-ng logs one line and exits — `fpm_children.c` (untouched)
+respawns a fresh process the same way it always has, which then picks the
+script back up (including any `supervisor.restart_delay` backoff already in
+effect, since that state lives in shared memory and survives the respawn).
+
+```
+NOTICE: [pool q] supervisor: memory usage 268501120 bytes reached
+supervisor.max_memory = 268435456 bytes, recycling (not counted as a failure)
+```
+
+That "not counted as a failure" is the important part, and it is a property of
+*when* the check runs, not of skipping the policy: `fpm_pool_supervisor_apply_policy()`
+already treats a run that exited 0 as no failure at all — no touch of the
+consecutive-failure counter, no `supervisor.restart_delay` backoff, nothing for
+`supervisor.restart_max` to count — regardless of memory. A memory recycle
+therefore adds nothing to that accounting in the common case (a script that
+keeps completing normally but has grown too big), the same way `pm.max_requests`
+recycling a classic worker is not treated as an error either. A run that
+*both* exits non-zero *and* is over budget still counts as a real failure —
+the memory limit recycles the process either way, but it does not launder a
+failing exit code, and `supervisor.restart_max` still means "this many
+*actual* failures in a row", not "this many total recycles of any kind".
+
+Running the check only after a "run it again" decision also means
+`supervisor.restart = never` and `restart = on-failure` keep their existing
+contract: a script this pool has decided not to run again parks (instead of
+exiting and being handed straight back to `fpm_children.c`, which
+would otherwise turn every respawn into another attempt regardless of
+`supervisor.restart`) rather than being kept alive by the memory recycle.
+
+The default is `0` (disabled) — a stock configuration keeps today's unbounded
+behavior.
+
+## `supervisor.stop_signal`
+
+`supervisor.stop_timeout` (see [`shutdown-timeouts.md`](shutdown-timeouts.md))
+was always paired with an implicit choice of *which* signal starts that grace
+period — SIGTERM, hardcoded. `supervisor.stop_signal` makes that a directive:
+`TERM` (default, unchanged), `QUIT`, `USR1` or `USR2`. Whichever one is
+configured is what a script can additionally `pcntl_signal()` a trap onto to
+flush a buffer or close a handle before it exits, and what a memory-triggered
+recycle above sends to itself when it decides to stop.
+
+fpm-ng always keeps its own SIGTERM handler installed, regardless of this
+directive: `fpm_pctl_kill_all()` (the master's own shutdown escalation,
+reference code, unchanged) sends every non-request-serving pool a hardcoded
+SIGTERM — it has no notion of a per-pool `stop_signal` and cannot be taught
+one without touching that file, so losing this handler whenever
+`stop_signal != TERM` would silently turn an ordinary `docker stop`/systemd
+stop into an unhandled kill with no `stop_timeout` grace period at all. Setting
+`supervisor.stop_signal` to something other than `TERM` installs a SECOND
+handler for that signal, in addition to SIGTERM's — it does not replace it. In
+every case, `supervisor.stop_timeout` is still the outer bound: if the process
+is not gone by then, `SIGKILL` ends it regardless of what the script did or did
+not trap.
+
+Both directives are opt-in. Leaving both unset is exactly today's behavior:
+no memory bound, `stop_signal = TERM`.

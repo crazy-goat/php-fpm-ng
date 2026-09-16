@@ -21,12 +21,32 @@
  * See fpm_pool_supervisor_jitter(), the restart_jitter application inside
  * fpm_pool_supervisor_apply_policy(), and the start_jitter application at the
  * top of the loop in fpm_pool_supervisor_child_main().
+ *
+ * supervisor.max_memory/supervisor.stop_signal (issue #324): a memory-triggered
+ * recycle, the supervisor.* equivalent of pm.max_requests -- checked right
+ * after fpm_pool_script_run() returns (see fpm_pool_supervisor_memory_bytes()
+ * and the check in fpm_pool_supervisor_child_main()), but only AFTER
+ * fpm_pool_supervisor_apply_policy() has run with the script's real exit code
+ * and decided the pool is not done for good (supervisor.restart = never/
+ * on-failure still park the process exactly as before -- a memory recycle
+ * never overrides that decision). Given that, it is a healthy recycle, not a
+ * failure, in the one sense that matters: apply_policy() already treats
+ * exit_code == 0 as "no failure" regardless of memory, so the common case
+ * (a script that keeps completing normally but has grown too big) consumes
+ * neither supervisor.restart_max nor supervisor.restart_delay. A script that
+ * both fails AND is over budget still counts as a real failure -- the memory
+ * limit recycles the process either way, it does not launder a failing exit
+ * code. supervisor.stop_signal generalizes the signal used to ask the current
+ * script to stop cleanly (default SIGTERM, today's behavior) -- reused for
+ * both an external termination request and a memory-triggered recycle, so
+ * both give the script the same stop_timeout grace period before SIGKILL.
  */
 
 #include "fpm_config.h"
 
 #include <signal.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -173,6 +193,10 @@ static int supervisor_cleanup_registered = 0;
 static volatile sig_atomic_t supervisor_term_requested = 0;
 static volatile sig_atomic_t supervisor_stop_timeout = 10;
 
+/* Handler for supervisor.stop_signal (issue #324; SIGTERM before that, always).
+ * Installed for whichever signal number that directive resolves to -- the name
+ * stays "sigterm" in spirit only: this is the ONE stop signal this pool reacts
+ * to, whatever it is configured as. */
 static void fpm_pool_supervisor_sigterm(int signo)
 {
 	(void) signo;
@@ -254,6 +278,13 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (c->supervisor_start_jitter < 0) {
 		c->supervisor_start_jitter = 0;
+	}
+	if (c->supervisor_stop_signal == 0) {
+		/* Belt and braces alongside the default set at config-struct allocation
+		 * time (fpm_conf_alloc()): sigaction(0, ...) is not a valid call, and
+		 * this is the one place every pool's config is guaranteed to pass
+		 * through before use. */
+		c->supervisor_stop_signal = SIGTERM;
 	}
 
 	/* Design decision (see NOTES.md): supervisor.processes maps to pm = static +
@@ -556,6 +587,31 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 }
 /* }}} */
 
+/* This process's own peak resident set size, in bytes, for supervisor.max_memory
+ * (issue #324). getrusage(RUSAGE_SELF).ru_maxrss is a monotonically
+ * non-decreasing high-water mark -- exactly what a one-way "has this process
+ * outgrown its budget" check needs, and unlike /proc/self/status it is
+ * portable to non-Linux dev builds. The one thing it is NOT portable about is
+ * its unit: Linux (the target platform, .github/workflows/build-matrix.yml
+ * runs ubuntu-latest) reports kilobytes; Darwin/macOS (a local dev build,
+ * never the target container) reports bytes. Both are converted to bytes here
+ * so supervisor.max_memory (parsed by fpm_conf_set_bytes(), also bytes) never
+ * has to know which platform it is running on. */
+static size_t fpm_pool_supervisor_memory_bytes(void) /* {{{ */
+{
+	struct rusage ru;
+
+	if (getrusage(RUSAGE_SELF, &ru) != 0) {
+		return 0;
+	}
+#ifdef __APPLE__
+	return (size_t) ru.ru_maxrss;
+#else
+	return (size_t) ru.ru_maxrss * 1024;
+#endif
+}
+/* }}} */
+
 void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
@@ -575,7 +631,24 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = fpm_pool_supervisor_sigterm;
 	sigemptyset(&sa.sa_mask);
+	/* SIGTERM is ALWAYS handled, regardless of supervisor.stop_signal:
+	 * fpm_pctl_kill_all() (fpm_process_ctl.c, reference code, untouched) sends
+	 * every non-request-serving pool a hardcoded SIGTERM on a graceful master
+	 * shutdown (see its comment: "supervisor, cron: each has its own SIGTERM
+	 * handler") -- an operator has no way to change what the MASTER sends, so
+	 * losing this handler whenever stop_signal != TERM would silently turn
+	 * `docker stop`/systemd shutdown into an unhandled kill with no
+	 * stop_timeout grace period at all. */
 	sigaction(SIGTERM, &sa, NULL);
+	/* issue #324: supervisor.stop_signal (default SIGTERM, in which case this
+	 * is a harmless repeat of the sigaction() above) is what THIS pool sends
+	 * to itself when IT decides to recycle (memory-triggered today) and what a
+	 * script may pcntl_signal() a trap onto for the SAME grace period as an
+	 * external SIGTERM gets — additive to, never instead of, the SIGTERM
+	 * handler above. */
+	if (c->supervisor_stop_signal != SIGTERM) {
+		sigaction(c->supervisor_stop_signal, &sa, NULL);
+	}
 
 	fpm_pool_script_install_sapi_overrides();
 
@@ -675,17 +748,52 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->starts++;
 		shared->last_start = started;
 		shared->running = 1;
-		exit_code = fpm_pool_script_run(c->name, c->supervisor_script);
+		exit_code = fpm_pool_script_run(c->name, c->supervisor_script, c->supervisor_stop_signal);
 		shared->running = 0;
 		shared->last_exit_code = exit_code;
 		shared->has_last_exit_code = 1;
 		duration = time(NULL) - started;
 		duration_ms = fpm_pool_supervisor_now_ms() - started_ms;
 
+		/* issue #324: apply_policy() runs FIRST, with the script's REAL exit
+		 * code -- max_memory must recycle the process without disturbing that
+		 * decision, not skip it. apply_policy() already treats exit_code == 0
+		 * as "not a failure" (resets the counter, no restart_delay, no
+		 * restart_max accounting) regardless of memory, which is exactly the
+		 * "not counted as a failure" contract this directive promises for the
+		 * common case; a script that both FAILS and is over budget still counts
+		 * as a real failure here, on purpose (supervisor.restart_max means "this
+		 * many actual failures", not "this many total recycles" -- see
+		 * docs/supervisor.md). Checking max_memory only when apply_policy() did
+		 * NOT set shared->terminal also means supervisor.restart = never/
+		 * on-failure keep their contract: a script this pool has decided not to
+		 * run again parks (fpm_pool_supervisor_park() at the top of this
+		 * function on the next respawn) instead of being kept alive by a memory
+		 * recycle that exits and gets it immediately restarted regardless of
+		 * the configured policy. */
 		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms);
 
 		if (shared->terminal) {
 			break;
+		}
+
+		/* The self-signal below cannot interrupt anything
+		 * (fpm_pool_script_run() has already fully returned by this point,
+		 * including php_request_shutdown()) -- it exists so a memory-triggered
+		 * recycle arms the exact same stop_timeout watchdog as any other
+		 * recycle and so "continue" below reaches the loop's own
+		 * "if (supervisor_term_requested) break" through the one path that
+		 * already exists for it, instead of a second, parallel exit route. */
+		if (c->supervisor_max_memory > 0) {
+			size_t memory_bytes = fpm_pool_supervisor_memory_bytes();
+
+			if (memory_bytes >= c->supervisor_max_memory) {
+				zlog(ZLOG_NOTICE, "[pool %s] supervisor: memory usage %zu bytes reached "
+					"supervisor.max_memory = %zu bytes, recycling (not counted as a failure)",
+					c->name, memory_bytes, c->supervisor_max_memory);
+				kill(getpid(), c->supervisor_stop_signal);
+				continue;
+			}
 		}
 	}
 

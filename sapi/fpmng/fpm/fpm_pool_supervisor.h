@@ -4,6 +4,13 @@
  * (in particular: why processes map onto pm=static + pm.max_children, and
  * why "give up" is a per-pool shared-memory state instead of a change to
  * fpm_children.c).
+ *
+ * issue #324: supervisor.max_memory (0 = disabled, default) recycles the
+ * process — a plain, policy-exempt exit, same as pm.max_requests for a
+ * classic worker — once its getrusage() RSS high-water mark reaches the
+ * configured size. supervisor.stop_signal (default SIGTERM) is the signal
+ * used both for that self-recycle and for an externally requested stop; see
+ * docs/supervisor.md.
  */
 
 #ifndef FPM_POOL_SUPERVISOR_H

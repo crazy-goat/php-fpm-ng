@@ -22,10 +22,28 @@ void fpm_pool_script_install_sapi_overrides(void);
  * descriptors point in such a child, and why the streams are request-scoped
  * here and process-scoped in CLI.
  *
+ * php_request_startup() and php_request_shutdown() REPLACE several signals'
+ * dispositions with Zend's own handler on every call (ZEND_SIGNALS, zend_sigs[]
+ * in Zend/zend_signal.c: TIMEOUT_SIG, SIGHUP, SIGINT, SIGQUIT, SIGTERM,
+ * SIGUSR1, SIGUSR2 -- NOT only SIGTERM) — this function saves and restores the
+ * disposition of SIGTERM, always, and of stop_signal as well when it names one
+ * of the OTHER signals Zend touches (QUIT/USR1/USR2), so the caller's own
+ * handler (installed before its loop) stays in effect between iterations
+ * rather than silently reverting to the process default the moment Zend's
+ * per-request signal snapshot/restore machinery resets it (see the long
+ * comment next to term_before in fpm_pool_script.c for exactly how that
+ * reset happens on the SECOND iteration onward, and issue #324's
+ * supervisor.stop_signal for the caller that needs this).
+ *
+ * stop_signal is the signal name the caller cares about beyond SIGTERM itself
+ * -- pass SIGTERM here too when there is no other one (cron; a supervisor pool
+ * left at the default supervisor.stop_signal = TERM) and this is a no-op
+ * repeat of the SIGTERM handling, not a second, different save/restore.
+ *
  * Returns EG(exit_status) of the script (0 = normal end / exit(0), != 0 =
  * exit($n) or a fatal error) — this is the script's own exit status, not a
  * process exit code (the process does not necessarily end after this call).
  */
-int fpm_pool_script_run(const char *pool_name, const char *script_path);
+int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop_signal);
 
 #endif

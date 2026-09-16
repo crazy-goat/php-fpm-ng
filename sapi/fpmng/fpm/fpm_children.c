@@ -3,6 +3,7 @@
 #include "fpm_config.h"
 
 #include <sys/types.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -144,6 +145,28 @@ static void fpm_child_unlink(struct fpm_child_s *child) /* {{{ */
 	if (child->next) {
 		child->next->prev = child->prev;
 	}
+}
+/* }}} */
+
+/* Issue #329: see the doc comment in fpm_children_extra.h. Exported wrapper
+ * around fpm_child_unlink() (static, just below) -- the unlink itself is the
+ * whole of what this needs from fpm_child_unlink: decrement the counters and
+ * splice out of wp->children, nothing else. */
+struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_child_s *child, *oldest = NULL;
+
+	for (child = wp->children; child; child = child->next) {
+		if (!oldest || timercmp(&child->started, &oldest->started, <)) {
+			oldest = child;
+		}
+	}
+
+	if (oldest) {
+		fpm_child_unlink(oldest);
+	}
+
+	return oldest;
 }
 /* }}} */
 

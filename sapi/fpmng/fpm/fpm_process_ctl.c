@@ -158,6 +158,18 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		struct fpm_child_s *child;
+		const struct fpm_pool_type_s *wp_type = fpm_pool_type_of(wp);
+
+		/* Issue #329: give the pool's type first refusal on ONE of its
+		 * children, before the ordinary signal fan-out below ever sees it --
+		 * only on the reload's first pass (fpm_signal_sent == 0; the escalation
+		 * passes that may follow are for children that are still alive despite
+		 * being signalled, which a detached child was deliberately not). See
+		 * fpm_pool_type_s.reload_spare_child's doc comment. */
+		if (fpm_state == FPM_PCTL_STATE_RELOADING && fpm_signal_sent == 0 &&
+				wp_type && wp_type->reload_spare_child) {
+			wp_type->reload_spare_child(wp);
+		}
 
 		for (child = wp->children; child; child = child->next) {
 			int child_signo = signo;

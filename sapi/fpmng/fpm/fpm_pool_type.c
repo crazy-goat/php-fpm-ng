@@ -399,6 +399,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.init_main               = fpm_pool_supervisor_init_main,
 		.child_main              = fpm_pool_supervisor_child_main,
 		.status                  = fpm_pool_supervisor_status,
+		/* Issue #329: rolling restart across a reload -- see the field's own
+		 * doc comment in fpm_pool_type.h and fpm_pool_supervisor.c. */
+		.reload_spare_child      = fpm_pool_supervisor_reload_spare_child,
 	},
 	{
 		.name                    = "cron",

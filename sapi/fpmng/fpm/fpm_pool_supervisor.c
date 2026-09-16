@@ -47,6 +47,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -65,6 +66,9 @@
 #include "fpm_pool_output_log.h"
 #include "fpm_cleanup.h"
 #include "fpm_shm.h"
+#include "fpm_children.h"
+#include "fpm_children_extra.h"
+#include "fpm_events.h"
 #include "zlog.h"
 
 /* Rejected, not allowed, directives — see fpm_pool_type_check_directives().
@@ -196,9 +200,49 @@ struct fpm_supervisor_shared_s {
  * enough that an operator mistake is reported within a second of starting. */
 #define FPM_SUPERVISOR_FAST_RUN_STREAK 1000
 
+/* Issue #329: how long a reload survivor (see fpm_pool_supervisor_reload_spare_child()
+ * below) is allowed to sit unsignalled, waiting for this generation's
+ * replacement to confirm it started, before this pool retires it
+ * unconditionally. Not tied to process_control_timeout -- that directive
+ * defaults to 0 ("escalate the reload's own kill fan-out immediately"), which
+ * would retire the survivor before its replacement ever got a chance, the
+ * opposite of what it exists for. A fixed constant instead: generous enough to
+ * cover fork + exec + PHP bootstrap + a configured supervisor.start_jitter of
+ * ordinary size, bounded enough that a broken new generation (bad script,
+ * crash loop) does not leave the survivor running indefinitely. A pool whose
+ * supervisor.start_jitter is configured well past this is a documented edge
+ * case (docs/supervisor.md) rather than something this reacts to dynamically. */
+#define FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S 30
+
+/* How often the retirement check below polls this generation's shared->starts.
+ * Small enough that the survivor is retired promptly once a replacement is
+ * confirmed (the whole point is to keep the OLD generation's process count
+ * from outliving the NEW one's first success by any meaningful amount), cheap
+ * enough that polling it costs nothing worth measuring. */
+#define FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS 200
+
+/* State for ONE child of ONE pool that a reload spared from the kill fan-out
+ * (fpm_pool_supervisor_reload_spare_child()) and that THIS generation
+ * (fpm_pool_supervisor_init_main(), after execvp()) is now watching for
+ * retirement. `child` is the detached struct this generation never forked --
+ * fpm_children_detach_oldest() handed it to the OLD generation, which passed
+ * only its pid across the execvp() (see the env var in
+ * fpm_pool_supervisor_reload_spare_child()); this generation reconstructs a
+ * fresh struct fpm_child_s around that bare pid purely as the vehicle
+ * fpm_children_free() expects at retirement time -- see
+ * fpm_pool_supervisor_reload_survivor_track(). */
+struct fpm_supervisor_reload_survivor_s {
+	struct fpm_worker_pool_s *wp;
+	struct fpm_child_s *child;
+	struct fpm_supervisor_shared_s *new_shared;	/* this generation's shared struct */
+	struct fpm_event_s poll_ev;
+	time_t deadline;				/* epoch; retire unconditionally past this */
+};
+
 struct fpm_supervisor_registry_s {
 	struct fpm_worker_pool_s *wp;
 	struct fpm_supervisor_shared_s *shared;
+	struct fpm_supervisor_reload_survivor_s *reload_survivor;	/* issue #329; NULL = none pending */
 	struct fpm_supervisor_registry_s *next;
 };
 
@@ -401,6 +445,321 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
+/* Issue #329: the single env var a reload's OLD generation uses to hand a
+ * spared child's pid to the NEW one across execvp() -- shared memory cannot
+ * do this (fpm_shm_alloc()'s MAP_ANONYMOUS mapping does not survive
+ * execve(), see fpm_pool_type.h's reload_spare_child doc comment), but
+ * execvp() keeps the calling process's environment, which is exactly the
+ * "surviving state" this needs and nothing more.
+ *
+ * One var for every pool rather than one var per pool (which would need
+ * turning a pool name into an env-var-safe identifier, and de-duplicating
+ * that against another pool's sanitized name): "name:pid" pairs,
+ * comma-separated. fpm-ng pool names are the section header between '['
+ * and ']' in the config (fpm_conf.c, untouched) and in every configuration
+ * this project ships or tests contain neither ':' nor ',' -- a name that did
+ * would collide with this format, so fpm_pool_supervisor_reload_spare_child()
+ * below refuses to spare a child for such a pool rather than risk producing
+ * an unparsable var (see its own comment). */
+#define FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV "FPMNG_RELOAD_SURVIVORS"
+
+/* Appends "wp->config->name:pid" to FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV's
+ * current value (creating it if unset). Master only, called right after
+ * detaching the child that pid belongs to. */
+static void fpm_pool_supervisor_reload_survivor_env_add(const char *name, pid_t pid) /* {{{ */
+{
+	const char *existing = getenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+	size_t len = (existing ? strlen(existing) : 0) + strlen(name) + 32;
+	char *next = malloc(len);
+
+	if (!next) {
+		return; /* best-effort: worst case this pool's reload is not staggered this time */
+	}
+	if (existing && *existing) {
+		snprintf(next, len, "%s,%s:%d", existing, name, (int) pid);
+	} else {
+		snprintf(next, len, "%s:%d", name, (int) pid);
+	}
+	setenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV, next, 1);
+	free(next);
+}
+/* }}} */
+
+/* Finds and removes THIS pool's "name:pid" pair from
+ * FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV, returning the pid or 0 if there was
+ * none. Removes it (rewrites the var without it) rather than leaving it in
+ * place so a LATER reload -- one this pool's own execvp() chain lives through
+ * without ever restarting the whole binary from init(1) -- does not read a
+ * pid some unrelated process has been recycled into by then; this generation
+ * consumes its own entry once, here, during its own init_main(). */
+static pid_t fpm_pool_supervisor_reload_survivor_env_take(const char *name) /* {{{ */
+{
+	const char *existing = getenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+	char *copy, *rest, *kept;
+	size_t name_len = strlen(name);
+	pid_t found = 0;
+
+	if (!existing || !*existing) {
+		return 0;
+	}
+
+	copy = strdup(existing);
+	kept = malloc(strlen(existing) + 1);
+	if (!copy || !kept) {
+		free(copy);
+		free(kept);
+		return 0;
+	}
+	kept[0] = '\0';
+
+	rest = copy;
+	while (rest && *rest) {
+		char *comma = strchr(rest, ',');
+		char *pair = rest;
+
+		if (comma) {
+			*comma = '\0';
+			rest = comma + 1;
+		} else {
+			rest = NULL;
+		}
+
+		if (!found && strncmp(pair, name, name_len) == 0 && pair[name_len] == ':') {
+			found = (pid_t) strtol(pair + name_len + 1, NULL, 10);
+			continue; /* drop this pair from `kept` */
+		}
+
+		if (*pair) {
+			if (*kept) {
+				strcat(kept, ",");
+			}
+			strcat(kept, pair);
+		}
+	}
+
+	if (found > 0) {
+		if (*kept) {
+			setenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV, kept, 1);
+		} else {
+			unsetenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+		}
+	}
+
+	free(copy);
+	free(kept);
+	return found;
+}
+/* }}} */
+
+/* fpm_pool_type_s.reload_spare_child -- issue #329. Called from
+ * fpm_pctl_kill_all() (fpm_process_ctl.c) in the OLD generation, once per
+ * pool, only on a reload's first signal pass. See the field's doc comment in
+ * fpm_pool_type.h for the full contract. */
+void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_child_s *spared;
+	struct fpm_supervisor_registry_s *e;
+
+	/* No spare capacity: with exactly one copy, detaching it would leave the
+	 * script with zero running copies for the ENTIRE reload instead of just
+	 * the tail of it -- worse, not better. supervisor.processes == 1 keeps
+	 * today's behavior (a real gap; see docs/supervisor.md). */
+	if (wp->running_children < 2) {
+		return;
+	}
+
+	/* A reload landing before THIS generation's own reload_survivor (spared by
+	 * the reload before this one) has retired: FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV
+	 * holds one "name:pid" pair per pool, and fpm_pool_supervisor_reload_survivor_env_take()
+	 * only ever consumes the first match for a given name -- a second pair
+	 * appended here would sit in the env var forever, unconsumed, leaking its
+	 * process past even the 30s safety timeout (which only bounds a survivor
+	 * that IS being tracked). Simplest safe answer: skip sparing this time and
+	 * take the ordinary brief reload gap instead -- back-to-back reloads faster
+	 * than one confirmed restart apart are rare, and this pool has already
+	 * spared a child once very recently. */
+	for (e = supervisor_registry; e; e = e->next) {
+		if (e->wp == wp) {
+			if (e->reload_survivor) {
+				zlog(ZLOG_NOTICE, "[pool %s] supervisor: a previous reload's spared child is still "
+					"being retired; not sparing another one for this reload (issue #329)",
+					wp->config->name);
+				return;
+			}
+			break;
+		}
+	}
+
+	if (strchr(wp->config->name, ':') || strchr(wp->config->name, ',')) {
+		zlog(ZLOG_DEBUG, "[pool %s] supervisor: pool name contains ':' or ',', "
+			"cannot stage a reload survivor handoff for it (issue #329) -- reloading without one",
+			wp->config->name);
+		return;
+	}
+
+	spared = fpm_children_detach_oldest(wp);
+	if (!spared) {
+		return;
+	}
+
+	fpm_pool_supervisor_reload_survivor_env_add(wp->config->name, spared->pid);
+
+	zlog(ZLOG_NOTICE, "[pool %s] supervisor: sparing child %d from this reload's signal -- "
+		"it keeps running the current generation's script until a replacement copy is confirmed "
+		"running after execvp() (issue #329)",
+		wp->config->name, (int) spared->pid);
+
+	/* Reaping it (whenever that happens -- deliberate retirement after
+	 * execvp(), or it exits on its own for any of the usual supervisor
+	 * reasons while still spared) must not fall into fpm_children_bury()'s
+	 * "unknown child" branch, and this OLD generation is about to exec away
+	 * without ever finding out either way -- so there is nothing useful this
+	 * process itself could do with the notification. Forgetting it here
+	 * (rather than watching it) is deliberate: fpm_children_extra's registry
+	 * is this process's own heap, which the execvp() below discards exactly
+	 * like everything else non-shared; the NEW generation re-establishes its
+	 * own watch on this pid via fpm_pool_supervisor_reload_survivor_track()
+	 * once it reads the pid back out of the env var above. */
+}
+/* }}} */
+
+static void fpm_pool_supervisor_reload_survivor_free(struct fpm_supervisor_reload_survivor_s *surv) /* {{{ */
+{
+	struct fpm_supervisor_registry_s *e;
+
+	for (e = supervisor_registry; e; e = e->next) {
+		if (e->wp == surv->wp) {
+			e->reload_survivor = NULL;
+			break;
+		}
+	}
+
+	surv->child->next = NULL;
+	fpm_children_free(surv->child);
+	free(surv);
+}
+/* }}} */
+
+/* fpm_children_extra_watch()'s on_exit: the survivor has actually exited,
+ * whether from retire() below asking it to (replacement confirmed, or the
+ * safety timeout) or on its own (crash, supervisor.max_memory/max_runtime
+ * recycling it, restart=never/on-failure parking it -- all of which apply to
+ * it completely normally: it is an ordinary already-running supervisor child
+ * that simply has not been signalled by THIS reload yet). Either way the pid
+ * is gone and must not be signalled again -- fpm_event_del() first,
+ * unconditionally, so a timer tick already queued cannot fire kill() against
+ * a pid the OS may since have reused for something unrelated. */
+static void fpm_pool_supervisor_reload_survivor_exited(void *arg, pid_t pid, int status) /* {{{ */
+{
+	struct fpm_supervisor_reload_survivor_s *surv = arg;
+
+	(void) status;
+	fpm_event_del(&surv->poll_ev);
+	zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d reaped",
+		surv->wp->config->name, (int) pid);
+	fpm_pool_supervisor_reload_survivor_free(surv);
+}
+/* }}} */
+
+static void fpm_pool_supervisor_reload_survivor_retire(struct fpm_supervisor_reload_survivor_s *surv, const char *why) /* {{{ */
+{
+	zlog(ZLOG_NOTICE, "[pool %s] supervisor: retiring reload survivor pid %d (%s)",
+		surv->wp->config->name, (int) surv->child->pid, why);
+	fpm_event_del(&surv->poll_ev);
+	kill(surv->child->pid, surv->wp->config->supervisor_stop_signal);
+	/* Do not free surv/surv->child here -- the process has only been ASKED to
+	 * exit. fpm_children_bury() reaps the real exit later and calls
+	 * fpm_pool_supervisor_reload_survivor_exited() above, which frees it. */
+}
+/* }}} */
+
+static void fpm_pool_supervisor_reload_survivor_poll(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
+{
+	struct fpm_supervisor_reload_survivor_s *surv = arg;
+
+	(void) ev;
+	if (which != FPM_EV_TIMEOUT) {
+		return;
+	}
+
+	/* shared->starts is bumped at the top of this generation's loop, before
+	 * the script itself runs (see the for(;;) below) -- so this is true the
+	 * moment a replacement copy has committed to running, not only once it
+	 * has completed anything, which matters for a script that is meant to
+	 * exit almost immediately. */
+	if (surv->new_shared->starts >= 1) {
+		fpm_pool_supervisor_reload_survivor_retire(surv, "replacement confirmed running");
+		return;
+	}
+
+	if (time(NULL) >= surv->deadline) {
+		zlog(ZLOG_WARNING, "[pool %s] supervisor: no replacement copy had started %ds after reload; "
+			"retiring reload survivor pid %d unconditionally to avoid an indefinite orphan",
+			surv->wp->config->name, FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S, (int) surv->child->pid);
+		fpm_pool_supervisor_reload_survivor_retire(surv, "safety timeout");
+		return;
+	}
+
+	/* Still waiting: FPM_EV_PERSIST re-arms this timer on its own (see
+	 * fpm_tls_reload_master_tick() for the same idiom), nothing to do here. */
+}
+/* }}} */
+
+/* Called once from fpm_pool_supervisor_init_main() (the NEW generation, right
+ * after execvp()), for a pool whose entry in FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV
+ * named a still-alive pid. Registers the retirement poll and the
+ * fpm_children_extra watch that reaps it whichever way it eventually exits. */
+static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *wp,
+		struct fpm_supervisor_registry_s *entry, pid_t pid) /* {{{ */
+{
+	struct fpm_supervisor_reload_survivor_s *surv = calloc(1, sizeof(*surv));
+	struct fpm_child_s *child;
+
+	if (!surv) {
+		zlog(ZLOG_WARNING, "[pool %s] supervisor: cannot track reload survivor pid %d, "
+			"retiring it immediately instead", wp->config->name, (int) pid);
+		kill(pid, wp->config->supervisor_stop_signal);
+		return;
+	}
+
+	/* This generation never forked `pid` -- it is a bare number carried
+	 * across execvp() in an env var (see fpm_pool_supervisor_reload_spare_child()).
+	 * A minimal struct fpm_child_s built here is purely the shape
+	 * fpm_children_free()/fpm_child_close() expect at retirement time; fd_stdout
+	 * and fd_stderr are -1 (this generation owns no pipe to it -- the OLD
+	 * generation's master-side forwarding for it ended when THAT master
+	 * execvp()'d away, which is also why any output the survivor produces
+	 * between being spared and being retired no longer reaches error_log via
+	 * master-side forwarding; supervisor.output_log, issue #328, is unaffected,
+	 * since that fd belongs to the child process itself, not the master). */
+	child = calloc(1, sizeof(*child));
+	if (!child) {
+		free(surv);
+		kill(pid, wp->config->supervisor_stop_signal);
+		return;
+	}
+	child->pid = pid;
+	child->fd_stdout = -1;
+	child->fd_stderr = -1;
+
+	surv->wp = wp;
+	surv->child = child;
+	surv->new_shared = entry->shared;
+	surv->deadline = time(NULL) + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
+
+	entry->reload_survivor = surv;
+
+	fpm_children_extra_watch(pid, fpm_pool_supervisor_reload_survivor_exited, surv);
+
+	fpm_event_set_timer(&surv->poll_ev, FPM_EV_PERSIST, fpm_pool_supervisor_reload_survivor_poll, surv);
+	fpm_event_add(&surv->poll_ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS);
+
+	zlog(ZLOG_NOTICE, "[pool %s] supervisor: reload survivor pid %d is still running the previous "
+		"generation's script; watching for this generation's first start to retire it (issue #329)",
+		wp->config->name, (int) pid);
+}
+/* }}} */
+
 static void fpm_pool_supervisor_exit_main(int which, void *arg) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *e;
@@ -471,6 +830,25 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1;
 		}
 		supervisor_cleanup_registered = 1;
+	}
+
+	/* Issue #329: init_main() runs in every generation, including the very
+	 * first one this master ever starts (no FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV
+	 * set at all -- take() below is then a no-op returning 0) as well as after
+	 * every execvp()-triggered reload. If the OLD generation spared a child of
+	 * THIS pool, its pid is in the env var now; take() both finds it and
+	 * removes it so a later reload doesn't see a stale/reused pid. */
+	{
+		pid_t survivor_pid = fpm_pool_supervisor_reload_survivor_env_take(wp->config->name);
+
+		if (survivor_pid > 0) {
+			if (0 == kill(survivor_pid, 0)) {
+				fpm_pool_supervisor_reload_survivor_track(wp, entry, survivor_pid);
+			} else {
+				zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d from the previous "
+					"generation is already gone", wp->config->name, (int) survivor_pid);
+			}
+		}
 	}
 
 	return 0;

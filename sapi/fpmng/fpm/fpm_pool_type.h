@@ -345,6 +345,34 @@ struct fpm_pool_type_s {
 	 * type "cron" is. */
 	int (*stop_signal)(struct fpm_worker_pool_s *wp);
 
+	/* Issue #329: called from fpm_pctl_kill_all() (fpm_process_ctl.c) exactly
+	 * once per pool, only on the FIRST signal pass of a RELOADING transition
+	 * (fpm_state == FPM_PCTL_STATE_RELOADING and fpm_signal_sent == 0 there --
+	 * see the call site) and only for a type that sets this. NULL = no
+	 * override, i.e. today's behavior: every child of the pool is signalled in
+	 * the same pass, same as any other reload/shutdown.
+	 *
+	 * A type that sets this may detach up to ONE of wp's children from the
+	 * pool's own pm.*-counted bookkeeping (fpm_children_detach_oldest(),
+	 * fpm_children_extra.h) instead of leaving it for the signal loop that
+	 * follows immediately after this call returns. The master's "wait for
+	 * zero running children across every pool, then execvp()" reload gate
+	 * (fpm_pctl_action_next()) then does not wait on that child -- it survives
+	 * the execvp() still running, unsignalled, the OLD generation's code,
+	 * until the type's own post-reload logic decides to retire it.
+	 *
+	 * Exists because a php-fpm-ng reload is execvp()-based (docs/NOTES.md
+	 * 2562-2566: a real per-pool selective reload is issue #330, "several
+	 * weeks of work", not this) and fpm_shm_alloc()'s MAP_ANONYMOUS mapping
+	 * does not survive execve() (NOTES.md 3p) -- so without this, a pool with
+	 * more than one copy of the same long-running script
+	 * (supervisor.processes >= 2) goes through a whole reload with ZERO live
+	 * copies at once, however briefly. Implemented only for "supervisor" (see
+	 * fpm_pool_supervisor_reload_spare_child()); every other type leaves this
+	 * NULL and reloads exactly as before. Data, not a name comparison here or
+	 * in fpm_process_ctl.c, which must not learn which type "supervisor" is. */
+	void (*reload_spare_child)(struct fpm_worker_pool_s *wp);
+
 	/* The one counter this type reports whether or not the pool's script ever
 	 * touches fpm_metric_*() (issue #277). The answer to "is this pool doing
 	 * anything", which before this had no answer on a pool whose code registers

@@ -39,6 +39,9 @@ overlap: the next run cannot start until the previous one has exited.
   instead of the hardcoded `SIGTERM` every other non-request-serving pool
   still gets. One of `TERM`, `QUIT`, `USR1` or `USR2`. See "Shutdown and
   `docker stop`" below.
+- **`cron.expect_within`** (optional, seconds, default: unset = disabled) —
+  surfaces an overrunning or stuck run as stale. See "`cron.expect_within`
+  (issue #327)" below.
 
 ## Jitter: avoiding a thundering herd
 
@@ -111,6 +114,56 @@ from "it ran on time"), account for that when deciding whether `pool.type =
 cron` is the right tool, or build a compensating check into the script
 itself (e.g. verify the last successful backup's age and warn if it is
 stale).
+
+## `cron.expect_within` (issue #327)
+
+This does **not** change the "no catch-up" decision above — it makes an
+overrunning or stuck run *visible*, nothing more. Once at least one run has
+started, fpm-ng knows what the schedule's next occurrence after that run
+should have been (`fpm_cron_schedule_next()`, the same computation
+`next_run` on the status page uses). `cron.expect_within = <seconds>` says
+how far past that next occurrence is still "normal" — e.g. the previous run
+overran a little, or the machine was briefly busy. Once that grace period is
+also gone (the schedule's next run was due more than `cron.expect_within`
+seconds ago and the pool has not started a fresh run since), the pool is
+"stale":
+
+- One line is logged at `WARNING` level, once per stale episode — it re-arms
+  the next time the pool goes stale again, the same convention the
+  fast-restart warning ([`supervisor.md`](supervisor.md#the-fast-restart-warning))
+  uses, so a schedule that recovers and later slips again is reported each
+  time rather than only the first.
+- The status page (`pm.status_path`) gains a `stale` field (`true`/`false`,
+  plus `stale_since` — the schedule's due time — while `stale` is `true`), and
+  the metrics page gains `fpmng_pool_stale` (`1`/`0`, plus
+  `fpmng_pool_stale_since_seconds` while it is `1`). Both are present as soon
+  as `cron.expect_within` is set, even before the pool's first run — a pool
+  that never asked for staleness detection reports neither field, rather than
+  an always-`false` one that looks like a check that ran and passed; a pool
+  that did ask always reports at least `stale`, never only sometimes.
+
+**Staleness is computed when the status/metrics page is rendered, not on a
+timer of its own.** There is no independent master-side clock ticking away
+checking every cron pool's schedule; the check above (and the `WARNING` log
+line) only runs as part of answering a request to `pm.status_path` or the
+metrics endpoint. A pool with `cron.expect_within` set but nothing ever
+scraping its operator endpoint can sit stale, undetected, indefinitely — the
+directive makes staleness *visible to whoever looks*, it does not make fpm-ng
+notice on its own. In practice this means: point something (even an
+occasional cron-job-watching-the-cron-job, or your existing metrics scraper)
+at the pool's status or metrics page if you want the `WARNING` line and the
+`stale` field to actually appear when they should.
+
+What "stale" does **not** do: it never starts a run, never touches
+`cron_term_requested`, the pool's own sleep loop, or `fpm_children.c`'s
+respawn logic. A stale pool keeps running (or waiting for its current run to
+finish) exactly as it would with `cron.expect_within` unset — the only
+difference is that the condition is now visible to a human reading the log
+or a status/metrics scrape, instead of silently indistinguishable from "the
+schedule just hasn't come around yet." Pick a value comfortably larger than
+the job's normal run time and the schedule's own period combined — too small
+and every ordinary run overlapping the next tick logs a spurious warning; too
+large and a genuinely stuck job goes unnoticed for that much longer.
 
 ## Run history
 

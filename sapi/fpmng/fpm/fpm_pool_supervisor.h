@@ -33,7 +33,10 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp);
 int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp);
 
 /* fpm_pool_type_s.child_main — child loop over script executions instead of
- * returning to the FastCGI accept loop. Does not return. */
+ * returning to the FastCGI accept loop. Does not return. Also registers
+ * fpmng_supervisor_heartbeat() (issue #327) once for the process, the same way
+ * fpm_http_direct.c registers fpm_connection_info() for its own pool type --
+ * see the function's own comment in fpm_pool_supervisor.c. */
 void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp);
 
 struct fpm_pool_status_s;

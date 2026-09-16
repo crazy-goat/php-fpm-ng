@@ -180,6 +180,35 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 		fpm_operator_buf_appendf(b, "fpmng_pool_backoff_seconds{pool=\"%s\"} %ld\n", row->name,
 			(long) (row->st.backoff_until > now ? row->st.backoff_until - now : 0));
 	}
+	/* cron.expect_within (issue #327): 0/1 gauge rather than omitting the
+	 * series when not stale, for the same reason fpmng_pool_state above is one
+	 * line per possible state instead of only the active one -- a scraper can
+	 * alert on "this series is absent" only if it is never absent while the
+	 * directive is configured. Omitted entirely (not "always 0") when
+	 * cron.expect_within is unset, exactly like has_next_run/has_backoff_until:
+	 * a scrape target that never asked for staleness detection reports
+	 * nothing about it, not a manufactured zero.
+	 *
+	 * has_expect_within is set as soon as the directive is configured (see
+	 * fpm_pool_cron_status()), not gated on a run having happened yet, which is
+	 * what makes the "never absent while configured" claim above actually
+	 * true: a freshly started pool with cron.expect_within set reports
+	 * fpmng_pool_stale = 0 immediately, rather than omitting the series until
+	 * its first run. */
+	if (row->st.has_expect_within) {
+		fpm_operator_buf_appendf(b, "fpmng_pool_stale{pool=\"%s\"} %d\n", row->name, row->st.stale ? 1 : 0);
+		if (row->st.stale) {
+			fpm_operator_buf_appendf(b, "fpmng_pool_stale_since_seconds{pool=\"%s\"} %ld\n",
+				row->name, (long) row->st.stale_since);
+		}
+	}
+	/* fpmng_supervisor_heartbeat() (issue #327): age in seconds since the last
+	 * call, the same derived-at-render-time shape as uptime/backoff_seconds
+	 * above. Absent until the script has called it at least once. */
+	if (row->st.has_heartbeat) {
+		fpm_operator_buf_appendf(b, "fpmng_pool_heartbeat_age_seconds{pool=\"%s\"} %ld\n", row->name,
+			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
+	}
 }
 /* }}} */
 
@@ -211,7 +240,13 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 		"# HELP fpmng_pool_next_run_seconds Unix time of the next scheduled run, cron only.\n"
 		"# TYPE fpmng_pool_next_run_seconds gauge\n"
 		"# HELP fpmng_pool_backoff_seconds Seconds remaining in supervisor backoff.\n"
-		"# TYPE fpmng_pool_backoff_seconds gauge\n");
+		"# TYPE fpmng_pool_backoff_seconds gauge\n"
+		"# HELP fpmng_pool_stale 1 if a scheduled run is overdue past cron.expect_within, cron only.\n"
+		"# TYPE fpmng_pool_stale gauge\n"
+		"# HELP fpmng_pool_stale_since_seconds Unix time the overdue run was due; present only while fpmng_pool_stale is 1.\n"
+		"# TYPE fpmng_pool_stale_since_seconds gauge\n"
+		"# HELP fpmng_pool_heartbeat_age_seconds Seconds since fpmng_supervisor_heartbeat() was last called, supervisor only.\n"
+		"# TYPE fpmng_pool_heartbeat_age_seconds gauge\n");
 	fpm_operator_page_collect(b, fpm_operator_page_row_prometheus, wp);
 
 	/* Application metrics (NOTES 3k): the time-series tables written by workers
@@ -282,6 +317,16 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 	if (row->st.has_backoff_until) {
 		fpm_operator_buf_appendf(b, ",\"backoff_seconds\":%ld",
 			(long) (row->st.backoff_until > now ? row->st.backoff_until - now : 0));
+	}
+	if (row->st.has_expect_within) {
+		fpm_operator_buf_appendf(b, ",\"stale\":%s", row->st.stale ? "true" : "false");
+		if (row->st.stale) {
+			fpm_operator_buf_appendf(b, ",\"stale_since\":%ld", (long) row->st.stale_since);
+		}
+	}
+	if (row->st.has_heartbeat) {
+		fpm_operator_buf_appendf(b, ",\"heartbeat_age\":%ld",
+			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
 	}
 	fpm_operator_buf_appendf(b, "}");
 }

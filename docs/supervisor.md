@@ -281,3 +281,58 @@ this particular kill instead of an operator or the kernel.
 
 Both directives are opt-in. Leaving `supervisor.max_runtime` unset is exactly
 today's behavior: no per-iteration cap.
+
+## `fpmng_supervisor_heartbeat()` (issue #327)
+
+The status page only ever shows when the *current* iteration started
+(`last_start`) — that tells you nothing once a script does not naturally
+return between units of work (a queue-consuming loop, say): "still working"
+and "stuck" look identical from the outside for as long as that iteration
+runs. `fpmng_supervisor_heartbeat()` lets such a script report its own
+liveness periodically, from inside the loop:
+
+```php
+fpmng_supervisor_heartbeat();
+```
+
+Call it as often as makes sense for your loop — once per unit of work, once
+per batch, on a timer, whatever fits. Returns `true` on a successful call.
+
+Returns `false`, doing nothing, when there is no current supervisor context
+to record into — the same "nothing to report" convention
+[`fpm_connection_info()`](http-direct.md#fpm_connection_info-issue-62) uses.
+In practice that means: called outside a `pool.type = supervisor` process.
+Like `fpm_connection_info()`, the function only exists in the pool type it
+was built for — `function_exists('fpmng_supervisor_heartbeat')` is `false` in
+a `cron` pool, an `http`/`http-direct` worker, or a plain FastCGI child, since
+it is registered per-pool at startup, not globally. Calling it there is not
+possible in the first place; calling it from a supervisor pool before/after
+that registration (a saved callable reference, some other code path) still
+gets the safe `false` from the runtime guard rather than a crash.
+
+The pool's status page and metrics page expose the result: `heartbeat_age`
+(status page) / `fpmng_pool_heartbeat_age_seconds` (metrics page) is the
+number of seconds since the last call, present only once the script has
+called `fpmng_supervisor_heartbeat()` at least once (a script that never
+calls it reports no heartbeat fields at all, rather than a misleading age of
+zero or since process start). It lives in the same shared memory as the
+fast-restart streak above, so it survives the script returning and being
+restarted, *and* survives the process itself being replaced by a new one on
+the next restart — it is pool-lifetime state, not process-lifetime state.
+
+That shared memory is keyed by **pool**, not by child: with
+`supervisor.processes` > 1, every child of the pool reports into, and reads
+back, the same `last_heartbeat` — the age shown is "seconds since any child of
+this pool last called `fpmng_supervisor_heartbeat()`", not a separate age per
+child. A single stuck child among several healthy ones can therefore still
+show a fresh `heartbeat_age`, as long as a sibling keeps calling the function.
+Per-child granularity is a real gap, not a documentation nuance — tracked
+separately, since it needs its own per-child slot in shared memory rather than
+the one pool-wide field this issue added.
+
+This is purely observational, exactly like `cron.expect_within`
+([`cron.md`](cron.md#cronexpect_within-issue-327)): nothing here changes
+`supervisor.restart`, `supervisor.restart_delay`, or any other control
+decision. A stale or missing heartbeat is visible on the status/metrics pages
+for a human or an alerting rule to act on; fpm-ng itself never restarts,
+kills, or otherwise reacts to one.

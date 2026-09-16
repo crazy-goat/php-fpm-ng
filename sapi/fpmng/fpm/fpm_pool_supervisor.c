@@ -172,6 +172,17 @@ struct fpm_supervisor_shared_s {
 	unsigned long fast_runs;		/* consecutive runs shorter than FPM_SUPERVISOR_FAST_RUN_MS */
 	unsigned long fast_started_ms;		/* monotonic ms at the start of the current streak */
 	unsigned char fast_warned;		/* 1 = already warned about this streak */
+
+	/* fpmng_supervisor_heartbeat() (issue #327). Purely observational, exactly
+	 * like last_start/last_exit_code above: nothing in this file ever reads
+	 * last_heartbeat back to decide anything about restart/backoff policy.
+	 * Epoch of the most recent call, 0 = the script has never called it in this
+	 * pool's lifetime (not "in the current process" -- shared memory survives a
+	 * respawn, same reasoning as `starts`). What the status page derives from
+	 * it (an "age" since the last call) is computed where it is rendered, not
+	 * stored here, so a clock step does not have to be reconciled against a
+	 * cached duration. */
+	time_t last_heartbeat;
 };
 
 /* A run this short did no useful work of its own: it is one PHP startup and
@@ -192,6 +203,91 @@ struct fpm_supervisor_registry_s {
 
 static struct fpm_supervisor_registry_s *supervisor_registry = NULL;
 static int supervisor_cleanup_registered = 0;
+
+/* This process's own shared state, set once by fpm_pool_supervisor_child_main()
+ * before the loop starts. fpmng_supervisor_heartbeat() (below) needs it and has
+ * no `wp` to look it up with -- it is a PHP-callable function, called from deep
+ * inside the script with no argument of its own (issue #327 asks for exactly
+ * that shape, mirroring fpm_metric_*()). A process-local static rather than a
+ * registry walk keyed by getpid(): each supervisor CHILD process is its own
+ * process image with its own copy of this variable, so there is no cross-child
+ * ambiguity to resolve in the first place. */
+static struct fpm_supervisor_shared_s *supervisor_current_shared = NULL;
+
+/* fpmng_supervisor_heartbeat() -- issue #327. A long-running supervisor script
+ * that does not naturally return between units of work (the case the fast-run
+ * warning above assumes is rare) has otherwise no way to distinguish "still
+ * working" from "stuck" on the status page, which only ever shows when the
+ * CURRENT iteration started. Calling this periodically records a liveness
+ * timestamp; fpm_pool_supervisor_status() exposes it and the age since it, and
+ * that is the entire feature -- no restart, no kill, no backoff reacts to a
+ * stale or a missing heartbeat (see the file-level comment: purely
+ * observational, no new control behaviour).
+ *
+ * Returns false, doing nothing, when there is no current supervisor context to
+ * record into -- the same "nothing to report" convention fpm_connection_info()
+ * uses (fpm_http_direct.c). This is deliberately a runtime guard rather than
+ * relying only on "the function is not registered outside a supervisor child"
+ * (see fpm_pool_supervisor_register_heartbeat_builtin() below): a script that
+ * saved a callable reference before some future refactor, or is run through a
+ * code path this file cannot see, gets a safe false instead of a NULL
+ * dereference. */
+static ZEND_FUNCTION(fpmng_supervisor_heartbeat)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	if (!supervisor_current_shared) {
+		RETURN_FALSE;
+	}
+	supervisor_current_shared->last_heartbeat = time(NULL);
+	RETURN_TRUE;
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_supervisor_heartbeat, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry fpm_supervisor_functions[] = {
+	ZEND_FE(fpmng_supervisor_heartbeat, arginfo_fpmng_supervisor_heartbeat)
+	ZEND_FE_END
+};
+
+/* MODULE_TEMPORARY for the same reason fpm_http_direct.c's
+ * fpm_direct_register_functions() documents at length (and fpm_acme_challenge.c
+ * before it): zend_register_functions() stamps EG(current_module) into every
+ * entry, MODULE_PERSISTENT would let opcache's function_exists() folding bake
+ * "this function exists" into an SHM entry keyed only on the script path, which
+ * is wrong for something registered per fork in one pool type only. */
+static zend_module_entry fpm_supervisor_module_entry = {
+	.size = sizeof(zend_module_entry),
+	.zend_api = ZEND_MODULE_API_NO,
+	.zend_debug = ZEND_DEBUG,
+	.zts = USING_ZTS,
+	.name = "fpmng_supervisor_builtins",
+	.type = MODULE_TEMPORARY,
+	.build_id = ZEND_MODULE_BUILD_ID,
+};
+
+/* Registered once per supervisor child, mirroring fpm_direct_register_functions()
+ * (fpm_http_direct.c): the function exists ONLY in a process running this pool
+ * type, so `function_exists('fpmng_supervisor_heartbeat')` is false everywhere
+ * else -- a cron pool, an http/http-direct worker, a plain FastCGI child -- the
+ * same way fpm_connection_info() is absent outside http-direct. That is the
+ * "non-supervisor pool context" case issue #327 asks to be safe; the runtime
+ * guard in the function body above covers the rest (a supervisor child calling
+ * it before/after this registration could, in principle, reach it through some
+ * other path). */
+static void fpm_pool_supervisor_register_heartbeat_builtin(const char *pool_name)
+{
+	zend_module_entry *saved_module = EG(current_module);
+	zend_result result;
+
+	EG(current_module) = &fpm_supervisor_module_entry;
+	result = zend_register_functions(NULL, fpm_supervisor_functions, CG(function_table), MODULE_PERSISTENT);
+	EG(current_module) = saved_module;
+	if (result != SUCCESS) {
+		zlog(ZLOG_ERROR, "[pool %s] supervisor: cannot register fpmng_supervisor_heartbeat()", pool_name);
+	}
+}
 
 static volatile sig_atomic_t supervisor_term_requested = 0;
 static volatile sig_atomic_t supervisor_stop_timeout = 10;
@@ -633,6 +729,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	supervisor_stop_timeout = c->supervisor_stop_timeout;
+	supervisor_current_shared = shared;
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = fpm_pool_supervisor_sigterm;
@@ -657,6 +754,12 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	fpm_pool_script_install_sapi_overrides();
+	/* Once per process, like fpm_direct_register_functions() -- CG(function_table)
+	 * outlives a request, and this pool runs its script many times over. Before
+	 * the loop, not inside fpm_pool_script_run(), for the same reason as
+	 * fpm_pool_script_register_acme_builtins(): a script that calls it from its
+	 * very first line must already find it there. */
+	fpm_pool_supervisor_register_heartbeat_builtin(c->name);
 
 	if (shared->terminal) {
 		/* fpm_children.c respawned us after a previous process of this pool had
@@ -898,5 +1001,14 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 	out->backoff_until = shared->next_allowed_start;
 	/* next_run is not marked as available — a scheduled due time makes sense
 	 * only for cron. */
+
+	/* fpmng_supervisor_heartbeat() (issue #327): has_heartbeat is "the script
+	 * has ever called it", not "recently" -- a renderer computes the age
+	 * itself against time(NULL), exactly like uptime/backoff_seconds above,
+	 * rather than this file deciding what counts as stuck. */
+	if (shared->last_heartbeat != 0) {
+		out->has_heartbeat = 1;
+		out->last_heartbeat = shared->last_heartbeat;
+	}
 }
 /* }}} */

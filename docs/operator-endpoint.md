@@ -157,7 +157,12 @@ purpose — a scraper reads one endpoint and compares labelled series across poo
 A pool that serves requests (`http`, `http-direct`) reports its worker counts
 and request total. A pool that does not (`cron`, `supervisor`) reports its state,
 when it last started, how many consecutive failures it has had, its last exit
-code, and — for `cron` — when it next runs.
+code, and — for `cron` — when it next runs. A `cron` pool with
+`cron.expect_within` set also reports `stale`, and a `supervisor` pool whose
+script has called `fpmng_supervisor_heartbeat()` also reports `heartbeat_age`
+— both purely observational (issue #327); see
+[`cron.md`](cron.md#cronexpect_within-issue-327) and
+[`supervisor.md`](supervisor.md#fpmng_supervisor_heartbeat-issue-327).
 
 ### The baseline counter
 

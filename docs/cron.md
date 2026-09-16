@@ -208,6 +208,19 @@ it carries every line the child writes, and for a `supervisor` pool restarting
 a short script in a loop that is a large amount of log (measured: 52 MB in
 15 s, see the comment in `sapi/fpmng/tests/fpmng-supervisor-restart.phpt`).
 
+For exactly that case — output that is not yours to change, so `error_log()`
+is not an option, but you still do not want to pay `catch_workers_output`'s
+per-line master round trip — set **`cron.output_log`** to a file path.
+`STDOUT` and `STDERR` are then redirected straight to that file (append,
+`O_CREAT`, no truncation) once, before the script runs, bypassing
+`catch_workers_output`'s pipe and the master's reader thread entirely,
+whether or not `catch_workers_output` is also set on the same pool. It is a
+plain append-only file with no size limit or rotation built in, the same
+expectation as `cron.log` above — the operator's own job to rotate. It is
+also a different file from `cron.log`: `cron.log` is run history (start time,
+exit code, duration) written by FPM itself; `cron.output_log` is whatever the
+script itself writes to `STDOUT`/`STDERR` (issue #328).
+
 ## Shutdown and `docker stop`
 
 When the master receives `SIGTERM` (e.g. `docker stop`), a cron child that is

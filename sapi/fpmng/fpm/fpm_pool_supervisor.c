@@ -62,6 +62,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_pool_script.h"
+#include "fpm_pool_output_log.h"
 #include "fpm_cleanup.h"
 #include "fpm_shm.h"
 #include "zlog.h"
@@ -754,6 +755,15 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	fpm_pool_script_install_sapi_overrides();
+	/* issue #328: once per process, before the loop below and before anything
+	 * might write to stdout/stderr -- see fpm_pool_output_log.h. A no-op when
+	 * supervisor.output_log is not set. Also a respawn after a park() below
+	 * gets its own fresh call: this is a NEW process, with its own
+	 * fpm_stdio_init_child() having already set stdout/stderr to whatever
+	 * catch_workers_output/dev-null default it uses, and that has to be
+	 * overridden again exactly like the sigaction() calls above are redone on
+	 * every respawn. */
+	fpm_pool_output_log_redirect(c->name, c->supervisor_output_log);
 	/* Once per process, like fpm_direct_register_functions() -- CG(function_table)
 	 * outlives a request, and this pool runs its script many times over. Before
 	 * the loop, not inside fpm_pool_script_run(), for the same reason as

@@ -113,6 +113,7 @@
 #include "fpm_payload_dist.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_pool_script.h"
+#include "fpm_pool_output_log.h"
 #include "fpm_shm.h"
 #include "zlog.h"
 
@@ -536,6 +537,11 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	fpm_pool_script_install_sapi_overrides();
+
+	/* issue #328: once per process, before anything might write to stdout/
+	 * stderr -- see fpm_pool_output_log.h. A no-op when cron.output_log is
+	 * not set. */
+	fpm_pool_output_log_redirect(c->name, c->cron_output_log);
 
 	next = fpm_cron_schedule_next(c->cron_parsed_schedule, time(NULL), c->cron_timezone);
 	if (next == (time_t) -1) {

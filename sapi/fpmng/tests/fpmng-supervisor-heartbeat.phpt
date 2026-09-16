@@ -2,6 +2,8 @@
 fpm-ng: fpmng_supervisor_heartbeat() reports liveness on the status page, and a stalled script shows growing staleness (issue #327)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+TEST_TIMEOUT=90
 --FILE--
 <?php
 
@@ -22,8 +24,11 @@ require_once "fpmng-operator.inc";
  *   crashed, not restarted -- just quiet).
  *
  * No minute-granularity schedule is involved here (unlike cron.expect_within),
- * so this test only needs a handful of seconds, comfortably inside
- * TEST_FPM_TIMEOUT=120. */
+ * so this test only needs a handful of seconds. The --ENV-- override above
+ * still raises TEST_TIMEOUT a bit past the harness-wide default: the
+ * pre-flight port wait below (up to 30s, no stdout) stacked on top of the
+ * ~20s startup poll and ~6s sampling loop (also silent) leaves little slack
+ * under run-tests.php's idle-timeout accounting otherwise. */
 $work = sys_get_temp_dir() . '/fpmng-supervisor-heartbeat-' . getmypid();
 @mkdir($work, 0700, true);
 file_put_contents("$work/beating.php", '<?php fpmng_supervisor_heartbeat(); usleep(200000);');
@@ -58,6 +63,24 @@ function pool_row(string $address, string $path): array
 
 $tester = new FPM\Tester($cfg, '<?php');
 try {
+    /* FPM\Tester::getPort() is deterministic (9008 for the first "operator"
+     * pool any test asks for -- see tester.inc), so this address may still be
+     * held by an earlier test's master that has not quite finished shutting
+     * down. fpm-ng does not retry a failed bind() (see the longer comment in
+     * fpmng-cron-expect-within.phpt, which hits this same race): wait for a
+     * plain bind() of the address to succeed -- and release it again -- before
+     * asking fpm-ng's own master to bind it for real. */
+    [$operatorHost, $operatorPort] = explode(':', $tester->getListen('{{ADDR[operator]}}'));
+    $waitUntil = time() + 30;
+    do {
+        $probe = @stream_socket_server("tcp://$operatorHost:$operatorPort", $errno, $errstr);
+        if ($probe !== false) {
+            fclose($probe);
+            break;
+        }
+        usleep(200000);
+    } while (time() < $waitUntil);
+
     $tester->start(extraArgs: ['-R'], forceStderr: true, daemonize: false);
     $tester->expectLogStartNotices();
 

@@ -2,6 +2,8 @@
 fpm-ng: cron.expect_within surfaces an overrunning cron job as stale, without touching no-catch-up (issue #327)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+TEST_TIMEOUT=180
 --FILE--
 <?php
 
@@ -27,17 +29,17 @@ require_once "fpmng-operator.inc";
  * schedule-driven overrun, and no sub-minute cron.schedule to shorten either
  * leg (fpm_cron_schedule.c parses plain 5-field crontab syntax only).
  *
- * TEST_FPM_TIMEOUT=120 (.github/workflows/build-matrix.yml) sounds like a hard
- * cap that number could exceed, but it is not one: run-tests.php's
- * system_with_timeout() drives the whole --FILE-- script through
- * stream_select() with that number of seconds and only kills it on an IDLE
- * stream -- no output at all for that long -- not on total wall time. This
- * test's own poll loop below produces no stdout while it waits, but the whole
- * run (up to ~150s of wall time in the worst case) has been run repeatedly
- * under the real harness/run-tests.php with TEST_FPM_TIMEOUT=120 and never
- * once hit "process timed out" -- only genuine pass/fail outcomes -- so
- * whatever exact accounting run-tests.php's system_with_timeout() does here,
- * it does not treat this loop's silence as fatal in practice. */
+ * TEST_FPM_TIMEOUT=120 (.github/workflows/build-matrix.yml) is an IDLE
+ * timeout, not a wall-clock one: run-tests.php's system_with_timeout() drives
+ * the whole --FILE-- script through stream_select() and only kills it once
+ * NEITHER stdout nor stderr has produced any output for that many seconds in
+ * a row. The pre-flight port wait below and the schedule-driven poll loop
+ * further down both produce no stdout while they wait, and their combined
+ * worst case (up to ~30s + ~150s) can exceed 120s of pure silence -- so this
+ * test overrides TEST_TIMEOUT to 180 via the --ENV-- section above (run_test()
+ * in run-tests.php applies a test's own --ENV-- on top of the harness-wide
+ * default, and only for this one test) rather than relying on the global
+ * TEST_FPM_TIMEOUT=120 default being enough. */
 $work = sys_get_temp_dir() . '/fpmng-cron-expect-within-' . getmypid();
 @mkdir($work, 0700, true);
 /* set_time_limit(0): this pool has no max_execution_time override, and the
@@ -63,6 +65,34 @@ EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');
 try {
+    /* FPM\Tester::getPort() is deterministic (9008 for the first "operator"
+     * pool any test asks for -- see tester.inc), so this pool's listen
+     * address is the same one an earlier test in the suite (or an earlier,
+     * still-shutting-down attempt of THIS test, if run-tests.php retried it)
+     * may only just have stopped using. Unlike a plain fastcgi/http pool,
+     * nothing about that address is randomized per test, so a master that
+     * has not quite finished releasing it yet produces exactly one kind of
+     * failure here: bind() -> EADDRINUSE, logged and fatal to startup, no
+     * retry inside fpm-ng itself (fpm_sockets_new_listening_socket() returns
+     * -1 straight to the caller -- see sapi/fpm/fpm/fpm_sockets.c). Waiting
+     * here for a plain, unprivileged bind() of that same address to succeed
+     * -- and immediately releasing it again -- confirms the address is
+     * actually free before asking fpm-ng's own master to bind it for real,
+     * which is the only reliable way to avoid that race: retrying
+     * $tester->start() itself is not an option, since a master that already
+     * failed to bind has already logged the ERROR line that would break the
+     * --EXPECT-- diff below regardless of what a later attempt does. */
+    [$operatorHost, $operatorPort] = explode(':', $tester->getListen('{{ADDR[operator]}}'));
+    $waitUntil = time() + 30;
+    do {
+        $probe = @stream_socket_server("tcp://$operatorHost:$operatorPort", $errno, $errstr);
+        if ($probe !== false) {
+            fclose($probe);
+            break;
+        }
+        usleep(200000);
+    } while (time() < $waitUntil);
+
     $tester->start(extraArgs: ['-R'], forceStderr: true, daemonize: false);
     $tester->expectLogStartNotices();
 

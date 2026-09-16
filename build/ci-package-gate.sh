@@ -245,14 +245,21 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # pool.type = supervisor pool going through a reload, no TLS or ACME involved
 # (--SKIPIF-- is the plain skipif.inc), so it too passes on every flavour.
 # TOTAL and the four PASS counts below each carry a further +1 for it.
+#
+# fpmng-reload-selective-off.phpt and fpmng-reload-selective-on.phpt (issue
+# #330) are a sixteenth addition, two tests together: pool.type = supervisor
+# pools going through a reload with reload.selective off and on respectively,
+# neither needing TLS or ACME (--SKIPIF-- is the plain skipif.inc for both),
+# so both pass on every flavour like the additions above. TOTAL and the four
+# PASS counts below each carry a further +2 for the pair.
 EXPECT_FAIL=0
-EXPECT_TOTAL=103
+EXPECT_TOTAL=105
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=67; EXPECT_SKIP=36
-    else EXPECT_PASS=62; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=69; EXPECT_SKIP=36
+    else EXPECT_PASS=64; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -285,8 +292,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=65; EXPECT_SKIP=38
-    else EXPECT_PASS=60; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=67; EXPECT_SKIP=38
+    else EXPECT_PASS=62; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

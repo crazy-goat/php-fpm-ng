@@ -36,6 +36,7 @@
 #include "fpm_log.h"
 #include "fpm_events.h"
 #include "fpm_unix.h"
+#include "fpm_conf_diff.h"
 #include "zlog.h"
 #ifdef HAVE_SYSTEMD
 #include "fpm_systemd.h"
@@ -113,6 +114,8 @@ static const struct ini_value_parser_s ini_fpm_global_options[] = {
 #ifdef HAVE_SYSTEMD
 	{ "systemd_interval",            &fpm_conf_set_time,            GO(systemd_interval) },
 #endif
+	/* issue #330: see fpm_conf.h's field comment */
+	{ "reload.selective",            &fpm_conf_set_boolean,         GO(reload_selective) },
 	{ 0, 0, 0 }
 };
 
@@ -2401,6 +2404,16 @@ int fpm_conf_init_main(int test_conf, int force_daemon) /* {{{ */
 	if (0 > fpm_cleanup_add(FPM_CLEANUP_ALL, fpm_conf_cleanup, 0)) {
 		return -1;
 	}
+
+	/* issue #330: record what THIS generation actually loaded, so that if a
+	 * later reload turns out to be a plain re-exec (reload.selective = no, the
+	 * default, or the snapshot cannot be taken) nothing changes, and if
+	 * reload.selective = yes the OLD generation (this process, right before it
+	 * execvp()s away) has something to diff the newly-read file against. Taken
+	 * here rather than lazily on the first reload: fpm_globals.config and the
+	 * working directory a relative include= is resolved against are both only
+	 * guaranteed to still be exactly what they were at load time right now. */
+	fpm_conf_diff_snapshot_current(fpm_globals.config);
 
 	return 0;
 }

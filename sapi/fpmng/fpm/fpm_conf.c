@@ -4,6 +4,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <stdlib.h>
@@ -59,6 +60,7 @@ static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offse
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset);
 #ifdef HAVE_SYSLOG_H
 static char *fpm_conf_set_syslog_facility(zval *value, void **config, intptr_t offset);
 #endif
@@ -173,6 +175,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.restart_max",    &fpm_conf_set_integer,     WPO(supervisor_restart_max) },
 	{ "supervisor.stop_timeout",   &fpm_conf_set_time,        WPO(supervisor_stop_timeout) },
 	{ "supervisor.fatal",          &fpm_conf_set_boolean,     WPO(supervisor_fatal) },
+	{ "supervisor.restart_jitter", &fpm_conf_set_supervisor_restart_jitter, WPO(supervisor_restart_jitter) },
+	{ "supervisor.start_jitter",   &fpm_conf_set_time,        WPO(supervisor_start_jitter) },
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
@@ -701,6 +705,117 @@ static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t 
 		c->cron_jitter_mode = FPM_CRON_JITTER_STABLE;
 	} else {
 		return "invalid cron.jitter_mode (random or stable)";
+	}
+	return NULL;
+}
+/* }}} */
+
+/* supervisor.restart_jitter (issue #323): the only directive in this codebase
+ * that takes EITHER a plain time value ("3", "3s") OR a percentage ("20%") --
+ * a percentage because the deterministic backoff it rides on
+ * (supervisor.restart_delay/_delay_max) already grows with every consecutive
+ * failure, so a fixed-seconds jitter that is comfortable at the first retry
+ * is either negligible or dominant once the backoff has doubled a few times;
+ * a percentage keeps the SAME proportion of spread at every step. Parsed here
+ * rather than reusing fpm_conf_set_time(): that helper only understands a
+ * trailing s/m/h/d time suffix, and would treat "20%" as an "unknown suffix"
+ * error. Storing which form was given (rather than converting a percentage to
+ * a seconds figure up front) is required BECAUSE the percentage is of the
+ * computed backoff delay, a value that is not known until
+ * fpm_pool_supervisor_apply_policy() runs -- see fpm_pool_supervisor.c. */
+static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	char *val = Z_STRVAL_P(value);
+	int len = strlen(val);
+	struct fpm_worker_pool_config_s *c = *config;
+	char *p;
+
+	(void) offset;
+
+	if (!len) {
+		return "invalid supervisor.restart_jitter value";
+	}
+
+	if (val[len - 1] == '%') {
+		char saved = val[len - 1];
+		long percent;
+		char *end;
+
+		val[len - 1] = '\0';
+		/* At least one digit required: "%" alone truncates to an empty string,
+		 * which the digit-scan loop below would accept vacuously (it never
+		 * runs), and strtol("", ...) would report success with a value of 0 --
+		 * silently turning a typo into "no jitter" instead of a config error. */
+		if (!*val) {
+			val[len - 1] = saved;
+			return "supervisor.restart_jitter percentage must have at least one digit before '%'";
+		}
+		for (p = val; *p; p++) {
+			if (*p < '0' || *p > '9') {
+				val[len - 1] = saved;
+				return "supervisor.restart_jitter percentage must be a non-negative integer followed by '%'";
+			}
+		}
+		/* strtol(), not atoi(): atoi()'s overflow behavior is undefined, and a
+		 * value like "4294967296%" must be rejected as out of range rather than
+		 * silently wrapping to something below the 100 check below. *end must be
+		 * read before val[len-1] is restored -- restoring first overwrites the
+		 * '\0' that end points to with the saved '%', making *end != '\0' true
+		 * for every input, valid or not. */
+		errno = 0;
+		percent = strtol(val, &end, 10);
+		if (errno == ERANGE || *end != '\0' || percent > 100) {
+			val[len - 1] = saved;
+			return "supervisor.restart_jitter percentage must be between 0 and 100";
+		}
+		val[len - 1] = saved;
+		c->supervisor_restart_jitter_is_percent = 1;
+		c->supervisor_restart_jitter_percent = (int) percent;
+		c->supervisor_restart_jitter = 0;
+		return NULL;
+	}
+
+	{
+		/* Same suffix handling as fpm_conf_set_time(), duplicated rather than
+		 * called: that function writes straight into an int field at a fixed
+		 * offset and has no percent branch to fall back into, and threading a
+		 * "did this look like a percentage" result back out through its
+		 * existing return-value-is-the-error-string contract would need its own
+		 * change to a directive every other pool type also relies on. */
+		char suffix = val[len - 1];
+		int seconds;
+
+		switch (suffix) {
+			case 'm':
+				val[len - 1] = '\0';
+				seconds = 60 * atoi(val);
+				break;
+			case 'h':
+				val[len - 1] = '\0';
+				seconds = 60 * 60 * atoi(val);
+				break;
+			case 'd':
+				val[len - 1] = '\0';
+				seconds = 24 * 60 * 60 * atoi(val);
+				break;
+			case 's':
+				val[len - 1] = '\0';
+				suffix = '0';
+				ZEND_FALLTHROUGH;
+			default:
+				if (suffix < '0' || suffix > '9') {
+					return "unknown suffix used in supervisor.restart_jitter value";
+				}
+				seconds = atoi(val);
+				break;
+		}
+
+		if (seconds < 0) {
+			return "supervisor.restart_jitter must not be negative";
+		}
+		c->supervisor_restart_jitter_is_percent = 0;
+		c->supervisor_restart_jitter_percent = 0;
+		c->supervisor_restart_jitter = seconds;
 	}
 	return NULL;
 }

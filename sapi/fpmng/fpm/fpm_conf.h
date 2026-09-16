@@ -112,6 +112,18 @@ struct fpm_worker_pool_config_s {
 	int supervisor_restart_max;		/* 0 = no limit, never give up */
 	int supervisor_stop_timeout;
 	int supervisor_fatal;			/* exhausting restart_max kills the entire master */
+	/* issue #323: additive on top of the restart_delay/restart_delay_max backoff
+	 * above, so several copies of the same pool (or several supervisor pools)
+	 * do not retry in lockstep after a shared dependency blips. 0 (both fields
+	 * unset) preserves today's exact backoff -- see fpm_pool_supervisor.c. */
+	int supervisor_restart_jitter;		/* seconds, used when supervisor_restart_jitter_is_percent == 0 */
+	int supervisor_restart_jitter_percent;	/* 0-100, used when supervisor_restart_jitter_is_percent == 1 */
+	int supervisor_restart_jitter_is_percent;
+	/* issue #323: applied only to the cold start of each of the supervisor.processes
+	 * copies (see shared->cold_starts_issued in fpm_pool_supervisor.c), never to
+	 * a later restart -- restart_jitter above already covers those. 0 = no jitter
+	 * (default), preserving today's simultaneous cold start. */
+	int supervisor_start_jitter;
 	/* fpm-ng: pool.type = cron, see fpm_pool_cron.c */
 	char *cron_schedule;
 	char *cron_script;

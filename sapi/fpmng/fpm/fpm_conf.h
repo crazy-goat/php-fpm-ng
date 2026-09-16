@@ -136,6 +136,13 @@ struct fpm_worker_pool_config_s {
 	 * supervisor.* equivalent of cron.timeout. 0 = disabled (default) -- see
 	 * fpm_pool_supervisor.c for how it is armed/canceled around each iteration. */
 	int supervisor_max_runtime;
+	/* issue #328: redirects this pool's stdout/stderr straight to a file,
+	 * bypassing catch_workers_output's shared pipe/reader thread entirely --
+	 * see fpm_pool_output_log.c. Empty/NULL (default) = unchanged behavior:
+	 * stdout/stderr are the catch_workers_output pipe when that is set, and
+	 * /dev/null otherwise. Plain append, no rotation -- same expectation as
+	 * cron_log below. */
+	char *supervisor_output_log;
 	/* fpm-ng: pool.type = cron, see fpm_pool_cron.c */
 	char *cron_schedule;
 	char *cron_script;
@@ -155,6 +162,9 @@ struct fpm_worker_pool_config_s {
 	 * hard fallback (SIGKILL) regardless of this directive. */
 	int cron_stop_signal;
 	int cron_expect_within;			/* seconds, 0 = disabled (default); see fpm_pool_cron.c (issue #327) */
+	/* issue #328: same as supervisor_output_log above, see fpm_pool_output_log.c
+	 * and fpm_pool_cron_child_main(). */
+	char *cron_output_log;
 	/* fpm-ng: pool.type = http, see fpm_http.c. The gateway starts ONLY when
 	 * pool.type = http (see fpm_pool_type.c) — these directives merely tune it,
 	 * they never enable it by themselves on another pool type. */

@@ -282,6 +282,37 @@ this particular kill instead of an operator or the kernel.
 Both directives are opt-in. Leaving `supervisor.max_runtime` unset is exactly
 today's behavior: no per-iteration cap.
 
+## `supervisor.output_log`: the script's own stdout/stderr, without `catch_workers_output` (issue #328)
+
+`docs/cron.md` covers where `STDOUT`/`STDERR` lead by default (`/dev/null`,
+or the master's `catch_workers_output` pipe if that directive is set) and why
+the latter is expensive for this pool type specifically: restarting a short
+script in a loop is measured at 52 MB of master-side log in 15 seconds (see
+the comment in `fpmng-supervisor-restart.phpt`) — every line goes through
+`catch_workers_output`'s reader thread on the master, and `supervisor.restart
+= always` can mean thousands of restarts a second (the fast-restart warning,
+above). `error_log()` is the answer for a script you control; it is not an
+answer for a script whose output format is not yours to change, such as a
+wrapped third-party binary.
+
+`supervisor.output_log = <path>` is that answer instead: `STDOUT` and
+`STDERR` are redirected straight to that file (append, `O_CREAT`, never
+truncated) once per process, before the first iteration, bypassing
+`catch_workers_output`'s pipe entirely — whether or not `catch_workers_output`
+is also set on the same pool. The redirect is process-level, not
+per-iteration: the same open file descriptor stays in place across every
+`supervisor.restart = always` loop iteration in that process, exactly as a
+shell's own `command >>file 2>&1` would, and a fresh one is opened again only
+when `fpm_children.c` respawns the process (crash, `supervisor.max_memory`
+recycle, backoff-then-retry).
+
+Plain append, no rotation, no size limit — the same expectation as `cron.log`
+and any other file this project writes to; rotating it is the operator's own
+job. It is also unrelated to any per-run history: unlike `cron.log`,
+`pool.type = supervisor` keeps no such log of its own today, so
+`supervisor.output_log` is purely the script's raw stdout/stderr, interleaved
+across iterations exactly as it was written.
+
 ## `fpmng_supervisor_heartbeat()` (issue #327)
 
 The status page only ever shows when the *current* iteration started

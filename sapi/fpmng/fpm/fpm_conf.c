@@ -183,6 +183,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "supervisor.max_memory",     &fpm_conf_set_bytes,       WPO(supervisor_max_memory) },
 	{ "supervisor.stop_signal",    &fpm_conf_set_supervisor_stop_signal, WPO(supervisor_stop_signal) },
 	{ "supervisor.max_runtime",    &fpm_conf_set_time,        WPO(supervisor_max_runtime) },
+	{ "supervisor.output_log",     &fpm_conf_set_string,      WPO(supervisor_output_log) },
 	{ "cron.schedule",             &fpm_conf_set_string,      WPO(cron_schedule) },
 	{ "cron.script",               &fpm_conf_set_string,      WPO(cron_script) },
 	{ "cron.timeout",              &fpm_conf_set_time,        WPO(cron_timeout) },
@@ -192,6 +193,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.jitter_mode",          &fpm_conf_set_cron_jitter_mode, WPO(cron_jitter_mode) },
 	{ "cron.stop_signal",          &fpm_conf_set_cron_stop_signal, WPO(cron_stop_signal) },
 	{ "cron.expect_within",        &fpm_conf_set_time,        WPO(cron_expect_within) },
+	{ "cron.output_log",           &fpm_conf_set_string,      WPO(cron_output_log) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
 	{ "http.plain_listen",         &fpm_conf_set_string,      WPO(http_plain_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
@@ -1065,11 +1067,13 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->security_limit_extensions);
 	free(wpc->supervisor_script);
 	free(wpc->supervisor_restart);
+	free(wpc->supervisor_output_log);
 	free(wpc->cron_schedule);
 	free(wpc->cron_script);
 	free(wpc->cron_parsed_schedule);
 	free(wpc->cron_timezone);
 	free(wpc->cron_log);
+	free(wpc->cron_output_log);
 	free(wpc->http_listen);
 	free(wpc->http_plain_listen);
 	free(wpc->http_allowed_clients);

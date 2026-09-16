@@ -204,14 +204,18 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # TLS and no ACME involved, so it passes on every flavour like the
 # max-requests-drain/scale-down-drain/retire-continuous additions above.
 # TOTAL and the four PASS counts below each carry a further +1 for it.
+#
+# fpmng-cron-jitter.phpt (issue #322) is an eighth addition: pool.type = cron,
+# no TLS or ACME involved, so it too passes on every flavour. TOTAL and the
+# four PASS counts below each carry a further +1 for it.
 EXPECT_FAIL=0
-EXPECT_TOTAL=94
+EXPECT_TOTAL=95
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=58; EXPECT_SKIP=36
-    else EXPECT_PASS=53; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=59; EXPECT_SKIP=36
+    else EXPECT_PASS=54; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -244,8 +248,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=56; EXPECT_SKIP=38
-    else EXPECT_PASS=51; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=57; EXPECT_SKIP=38
+    else EXPECT_PASS=52; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

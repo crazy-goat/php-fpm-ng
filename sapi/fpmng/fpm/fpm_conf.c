@@ -191,6 +191,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "cron.jitter",               &fpm_conf_set_time,        WPO(cron_jitter) },
 	{ "cron.jitter_mode",          &fpm_conf_set_cron_jitter_mode, WPO(cron_jitter_mode) },
 	{ "cron.stop_signal",          &fpm_conf_set_cron_stop_signal, WPO(cron_stop_signal) },
+	{ "cron.expect_within",        &fpm_conf_set_time,        WPO(cron_expect_within) },
 	{ "http.listen",               &fpm_conf_set_string,      WPO(http_listen) },
 	{ "http.plain_listen",         &fpm_conf_set_string,      WPO(http_plain_listen) },
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },

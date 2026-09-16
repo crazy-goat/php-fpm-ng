@@ -451,6 +451,19 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm               = 0,	/* validate() sets static + 1 */
 		.serves_requests           = 0,
 		.reads_foreign_scoreboards = 1,	/* it reports on the pools it serves, not on itself */
+		/* Issue #327: rendering a status/metrics page runs ->status() for every
+		 * pool it reports on (fpm_operator_pages.c), and cron's status() can
+		 * zlog() a "stale" WARNING (fpm_pool_cron_status()) right there, in THIS
+		 * child -- not in the reported-on pool's own child. Without this flag
+		 * that zlog() call falls all the way back to fpm_stdio_init_child()'s
+		 * default (fd closed, zlog_set_fd(-1) -> STDERR_FILENO -> the master's
+		 * stdout -> /dev/null; see fpm_child_log.h) and the warning is silently
+		 * lost. Same channel supervisor/cron already use for their own
+		 * in-child policy messages; this child's messages already carry their
+		 * own "[pool %s]" prefix naming the POOL THEY ARE ABOUT, same
+		 * convention, so the relayed line still reads correctly even though it
+		 * is not this pool's own name. */
+		.child_logs_via_master     = 1,
 		.rejects                   = fpm_operator_endpoint_rejects,
 		.validate                  = fpm_operator_endpoint_validate,
 		.child_main                = fpm_operator_endpoint_child_main,

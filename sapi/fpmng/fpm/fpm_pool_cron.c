@@ -76,6 +76,19 @@
  * supervisor (fpm_pool_script.c) — no SG(request_info) from FastCGI; sapi_module
  * overrides are safe for the same reason (this process never returns to the
  * accept loop).
+ *
+ * cron.expect_within (issue #327): purely observational staleness detection,
+ * NOT a second control path next to "no catch-up" above. A run is "stale" when
+ * the schedule's next occurrence AFTER the last completed/started run is
+ * further in the past than cron.expect_within — i.e. a run that should already
+ * have happened (by the schedule's own clock) has not been seen yet. Computed
+ * on demand in fpm_pool_cron_status(), exactly like next_run, from
+ * shared->last_run and the parsed schedule; no additional state is needed to
+ * decide "stale", only to avoid re-logging the same episode on every operator
+ * page hit (shared->stale_warned). Never touches cron_term_requested, the
+ * sleep loop, or fpm_children.c respawn — a stale pool keeps running (or
+ * failing to) exactly as it would without this directive; the only effect is
+ * what gets logged and what the status page shows.
  */
 
 #include "fpm_config.h"
@@ -135,10 +148,9 @@ const char *const fpm_pool_cron_rejects[] = {
 /* State read ONLY by the operator pages (docs/NOTES.md 3u). Unlike supervisor,
  * cron still has no policy that reads this back — every new process calculates
  * the due time only from the current clock and schedule (see the comment at the
- * top of the file), regardless of what is stored here. Exactly three fields,
- * as many as status actually shows: next_run is NOT stored here because it can
- * be calculated at any time from c->cron_parsed_schedule + time(NULL), without
- * any state — see fpm_pool_cron_status(). */
+ * top of the file), regardless of what is stored here. next_run is NOT stored
+ * here because it can be calculated at any time from c->cron_parsed_schedule +
+ * time(NULL), without any state — see fpm_pool_cron_status(). */
 struct fpm_cron_shared_s {
 	unsigned char running;		/* 1 = the script is currently running */
 	time_t last_run;		/* epoch start of the last run, 0 = none yet */
@@ -151,6 +163,16 @@ struct fpm_cron_shared_s {
 					 * because a cron child runs once and exits and
 					 * the master respawns it -- a counter anywhere
 					 * else would read 1 for ever. */
+
+	/* cron.expect_within (issue #327): whether the CURRENT staleness episode
+	 * has already been logged once. Reset to 0 as soon as the pool is no
+	 * longer stale (fpm_pool_cron_status()), so the NEXT time it goes stale is
+	 * a fresh episode and gets its own log line, instead of either spamming
+	 * once per operator-page hit or staying silent after the first time
+	 * forever. Mutated from fpm_pool_cron_status(), which the operator
+	 * endpoint's child calls -- safe because it is a plain flag, not a
+	 * counter, and losing a rare concurrent write races only against itself. */
+	unsigned char stale_warned;
 };
 
 struct fpm_cron_registry_s {
@@ -247,6 +269,9 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * guaranteed to pass through before use — same reasoning as
 		 * supervisor.stop_signal's identical guard (issue #324). */
 		c->cron_stop_signal = SIGTERM;
+	}
+	if (c->cron_expect_within < 0) {
+		c->cron_expect_within = 0;
 	}
 
 	/* Bad schedule = reject the configuration NOW, at startup, with a clear
@@ -619,5 +644,49 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	out->has_last_exit_code = shared->has_last_exit_code;
 	out->consecutive_failures = shared->consecutive_failures;
 	out->baseline = shared->runs;
+
+	/* cron.expect_within (issue #327): staleness is a fact about the schedule
+	 * and the last run, not about "running" — a run that overruns into (and
+	 * past) the next scheduled slot is exactly the case worth surfacing, and
+	 * checking it regardless of `running` catches that alongside "no run
+	 * started at all".
+	 *
+	 * has_expect_within is set as soon as the directive itself is set and the
+	 * schedule parsed -- deliberately NOT gated on shared->last_run != 0, so
+	 * the JSON/Prometheus field is never absent while the directive is
+	 * configured (the same contract the Prometheus HELP text above states).
+	 * With last_run == 0 there is no "next occurrence after the last run" to
+	 * test yet, so `stale` simply reports false (its memset(0) default) --
+	 * "has not had time to run yet" is not what this directive is for (see
+	 * docs/cron.md's no-catch-up section, which this does not touch), it is
+	 * just not stale, not "unknown". */
+	if (wp->config->cron_expect_within > 0 && wp->config->cron_parsed_schedule) {
+		out->has_expect_within = 1;
+	}
+	if (wp->config->cron_expect_within > 0 && wp->config->cron_parsed_schedule && shared->last_run != 0) {
+		time_t expected_next = fpm_cron_schedule_next(wp->config->cron_parsed_schedule,
+			shared->last_run, wp->config->cron_timezone);
+
+		if (expected_next != (time_t) -1) {
+			time_t threshold = expected_next + wp->config->cron_expect_within;
+
+			if (time(NULL) > threshold) {
+				out->stale = 1;
+				out->stale_since = expected_next;
+				if (!shared->stale_warned) {
+					shared->stale_warned = 1;
+					zlog(ZLOG_WARNING,
+						"[pool %s] cron: stale -- the schedule's next run after the last one "
+						"was due at %ld, and it is now more than cron.expect_within = %ds past that",
+						wp->config->name, (long) expected_next, wp->config->cron_expect_within);
+				}
+			} else {
+				/* No longer stale (or never was): the next episode, if any,
+				 * gets its own warning rather than staying silent because of
+				 * one logged long ago. */
+				shared->stale_warned = 0;
+			}
+		}
+	}
 }
 /* }}} */

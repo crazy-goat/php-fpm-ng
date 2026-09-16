@@ -43,6 +43,36 @@ struct fpm_pool_status_s {
 	unsigned has_last_exit_code:1;
 	unsigned has_next_run:1;
 	unsigned has_backoff_until:1;
+
+	/* cron.expect_within (issue #327), cron only. has_expect_within = the
+	 * directive is set and the schedule parsed -- true from the pool's very
+	 * first render, independent of whether a run has happened yet, so the
+	 * series is never absent while the directive is configured (see
+	 * fpm_pool_cron_status()). `stale` is meaningful only once has_expect_within
+	 * is set; with no run yet to compare against it simply reads false (not
+	 * "unknown"), so a renderer must still gate on has_expect_within before
+	 * reading `stale`, but must not read "false" as "there has been a run". */
+	unsigned has_expect_within:1;
+	unsigned stale:1;		/* 1 = a scheduled run is overdue past cron.expect_within */
+	time_t stale_since;		/* the schedule's due time this is stale against; 0 if not stale */
+
+	/* fpmng_supervisor_heartbeat() (issue #327), supervisor only.
+	 * has_heartbeat = the script has called it at least once in this process's
+	 * lifetime (shared memory, so it also survives this process being
+	 * respawned -- the shared struct is keyed by pool, not by process, see
+	 * fpm_pool_supervisor_shared_for()). last_heartbeat is the raw timestamp;
+	 * the age an operator cares about ("stuck since...") is
+	 * time(NULL) - last_heartbeat, computed where it is rendered rather than
+	 * stored, exactly like next_run/uptime.
+	 *
+	 * NOTE: the shared struct this is stored in is allocated once per POOL, not
+	 * per child, so with supervisor.processes > 1 every child of the pool
+	 * shares and overwrites the same has_heartbeat/last_heartbeat pair --
+	 * "last call from any child in this pool", not "per child". Tracking it per
+	 * child would need a per-child key into shared memory that does not exist
+	 * today; see the supervisor heartbeat granularity follow-up issue. */
+	unsigned has_heartbeat:1;
+	time_t last_heartbeat;
 };
 
 /* One pool.executor value accepted by a pool type, and what it resolves to.

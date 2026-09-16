@@ -154,6 +154,7 @@ struct fpm_worker_pool_config_s {
 	 * (today's behavior) in fpm_pool_cron_validate(). cron.timeout remains the
 	 * hard fallback (SIGKILL) regardless of this directive. */
 	int cron_stop_signal;
+	int cron_expect_within;			/* seconds, 0 = disabled (default); see fpm_pool_cron.c (issue #327) */
 	/* fpm-ng: pool.type = http, see fpm_http.c. The gateway starts ONLY when
 	 * pool.type = http (see fpm_pool_type.c) — these directives merely tune it,
 	 * they never enable it by themselves on another pool type. */

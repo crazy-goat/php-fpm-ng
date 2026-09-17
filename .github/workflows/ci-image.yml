@@ -8,12 +8,21 @@ name: ci-image
 #
 # Only fires when a Dockerfile changes, so a normal PR does not rebuild it --
 # plus a nightly schedule, which exists solely for the package-gate images
-# (issue #240). Those carry the distribution's PHP, and package-gate is the one
-# cell in the matrix whose job is to notice when a distribution moves under us.
-# Baking that PHP into an image and never rebuilding it would silently turn the
-# cell into a test of a frozen 8.5.4. The schedule keeps the drift arriving, one
-# day late instead of on the pull request that happened to be open -- which is
-# the better place for it anyway, since it is not that PR's fault.
+# (issue #240). Those carry the distribution's PHP, and the package gate is
+# what notices when a distribution moves under us. Baking that PHP into an
+# image and never rebuilding it would silently turn the gate into a test of a
+# frozen 8.5.4.
+#
+# The schedule matters MORE since issue #393 moved the package gate out of
+# build-matrix.yml: the gate itself now runs only in release.yml, on a tag, so
+# nothing gates distribution drift day to day. What is left daily is this
+# workflow's own `report the PHP each image carries` step below -- it is now
+# the early warning, and a version moving there is the thing to look at before
+# cutting a tag rather than after the tag fails. That is a weaker signal than
+# a gating cell and it is the known cost of #393; the alternative was keeping
+# a 32-minute job on every pull request that, measured, caught neither of the
+# two packaging failures it existed to catch (v0.5.0 and v0.5.1 are tagged
+# with no release).
 on:
   push:
     branches: [main]

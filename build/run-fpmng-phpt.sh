@@ -129,8 +129,9 @@ RUN_LOG=$RESULTS_DIR/run.log
 OUTPUT_LOG=$RESULTS_DIR/test-output.log
 METADATA=$RESULTS_DIR/metadata.txt
 SUMMARY=$RESULTS_DIR/summary.txt
+SLOW=$RESULTS_DIR/slow.tsv
 
-rm -f "$DISCOVERED" "$SELECTED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY"
+rm -f "$DISCOVERED" "$SELECTED" "$STATUS_RAW" "$RESULTS" "$FAILED" "$RUN_LOG" "$OUTPUT_LOG" "$METADATA" "$SUMMARY" "$SLOW"
 
 if ! (
     cd "$PHPSRC"
@@ -382,6 +383,24 @@ case "$TIMEOUT" in
     0) preflight_fail 'TEST_FPM_TIMEOUT must be greater than zero' ;;
 esac
 
+# Per-test durations (--show-slow, run-tests.php:116). The suite is serial (no
+# -j: upstream's Tester::getPort() bases every instance at the same port, see
+# issue #394), so its wall clock is the sum of its tests and a handful of them
+# dominate it -- without this the log says only how long all 124 took together.
+# 1000 ms rather than 0: at 0 every test is "slow" and the table stops ranking
+# anything. Set TEST_FPM_SHOW_SLOW_MS=0 to turn the table off entirely.
+SHOW_SLOW_MS=${TEST_FPM_SHOW_SLOW_MS-1000}
+case "$SHOW_SLOW_MS" in
+    ''|*[!0-9]*) preflight_fail "TEST_FPM_SHOW_SLOW_MS must be a non-negative integer: $SHOW_SLOW_MS" ;;
+esac
+# Unquoted on purpose below (word splitting is what turns this into two argv
+# entries); empty when the table is off, and run-tests.php then never sees the
+# flag -- passing --show-slow 0 would mark every test slow instead.
+SHOW_SLOW_ARGS=
+if [ "$SHOW_SLOW_MS" -gt 0 ]; then
+    SHOW_SLOW_ARGS="--show-slow $SHOW_SLOW_MS"
+fi
+
 # On $FILTERED, not on "$FILTER_DESC" = none: "none" is a legal filter word, and
 # a filtered run must never describe itself as a full one. (It would die at the
 # no-match check above today, since no test name contains "none" -- but that is
@@ -397,6 +416,11 @@ printf '%s\n' "Binary: $FPM_BIN" >&2
 TEST_FILES=$(tr '\n' ' ' < "$SELECTED")
 
 set +e
+# $SHOW_SLOW_ARGS and $TEST_FILES are both meant to word-split into separate
+# argv entries, which is what SC2086 would otherwise stop. (The reason is on
+# its own line: shellcheck does not parse a "disable=CODE -- reason" directive,
+# which is where this repository's six existing SC1072/SC1073 errors come from.)
+# shellcheck disable=SC2086
 (
     cd "$PHPSRC" || exit 1
     TEST_PHP_EXECUTABLE="$HARNESS_CLI" \
@@ -408,6 +432,7 @@ set +e
         -W "$STATUS_RAW" \
         -w "$FAILED" \
         -s "$OUTPUT_LOG" \
+        $SHOW_SLOW_ARGS \
         $TEST_FILES
 ) > "$RUN_LOG" 2>&1
 RUN_STATUS=$?
@@ -468,7 +493,40 @@ fi
     write_counts
 } > "$SUMMARY"
 
+# run-tests.php prints its SLOW TEST SUMMARY only into the summary it writes
+# with -s, already sorted longest-first, as "(12.345 s) <name> [<file>]".
+# Reshape it into a two-column TSV (seconds, test file) so the numbers can be
+# diffed between runs, and echo the table to stderr so it is readable in the CI
+# log without downloading the artifact.
+: > "$SLOW"
+if [ "$SHOW_SLOW_MS" -gt 0 ] && [ -f "$OUTPUT_LOG" ]; then
+    awk '
+        /^SLOW TEST SUMMARY$/ { inblock = 1; next }
+        inblock && /^====/ { inblock = 0; next }
+        inblock && /^----/ { next }
+        inblock && /^\([0-9.]+ s\) / {
+            line = $0
+            secs = substr(line, 2, index(line, " s) ") - 2)
+            file = substr(line, index(line, " s) ") + 4)
+            # The name ends in " [sapi/fpmng/tests/x.phpt]"; keep just the path.
+            if (match(file, /\[[^]]*\]$/)) {
+                file = substr(file, RSTART + 1, RLENGTH - 2)
+            }
+            printf "%s\t%s\n", secs, file
+        }
+    ' "$OUTPUT_LOG" > "$SLOW" 2>/dev/null || : > "$SLOW"
+fi
+
+if [ -s "$SLOW" ]; then
+    printf '%s\n' "Tests slower than ${SHOW_SLOW_MS}ms, longest first:" >&2
+    awk -F '\t' '{ total += $1; printf "  %8.1fs  %s\n", $1, $2 }
+                  END { printf "  %8.1fs  = these %d tests together\n", total, NR }' "$SLOW" >&2
+fi
+
 cat "$SUMMARY" >&2
 printf '%s\n' "Raw run log: $RUN_LOG" >&2
 printf '%s\n' "Per-test results: $RESULTS" >&2
+if [ -s "$SLOW" ]; then
+    printf '%s\n' "Per-test durations: $SLOW" >&2
+fi
 exit "$RUN_STATUS"

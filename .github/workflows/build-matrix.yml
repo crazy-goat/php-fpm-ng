@@ -111,6 +111,23 @@ on:
 # the account gets at that moment, and the warm run of the pair happened to
 # queue behind another.
 #
+# WHAT INVALIDATES ALL OF IT AT ONCE: A NEW AC_DEFINE. autoconf writes every
+# AC_DEFINE in sapi/fpmng/config.m4 into main/php_config.h, and practically
+# every translation unit in php-src includes that header. So adding or removing
+# one define changes the preprocessed input of the whole tree, ccache misses on
+# every object, and the branch compiles php-src from scratch however warm the
+# cache it restored was. Measured on issue #396, which added
+# --enable-fpmng-debug-clock: the `build` step took 30-33 s on main (runs
+# 35266355232 and 35276934325) and 134 s on the branch carrying the new define.
+#
+# It is a one-off per define, not a standing cost. A cache written on a branch
+# is visible only to that branch, so the branch keeps paying until it merges;
+# the first run on main afterwards writes an entry that has the define in it,
+# and every branch restoring from main is warm again. Worth knowing before
+# reading a slow `build` on a flag-adding pull request as a regression -- it is
+# the expected price, and there is no way around it while a configure flag has
+# to reach the C code through php_config.h.
+#
 # Every job below except static-musl runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from
 # .github/docker/ci.Dockerfile), which is why none of them apt-get anything

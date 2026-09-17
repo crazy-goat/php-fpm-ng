@@ -202,6 +202,10 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 static const char *const fpm_http_direct_worker_accepts[] = {
 	"worker.max_pending",
 	"worker.request_timeout",
+	/* issue #332: worker.send_buffer_limit bounds the per-connection output
+	 * queue fpmng_worker_respond_chunk() may build up; meaningless anywhere
+	 * else, same reasoning as the two directives above it. */
+	"worker.send_buffer_limit",
 	NULL
 };
 

@@ -230,6 +230,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 	{ "worker.max_pending",        &fpm_conf_set_integer,     WPO(worker_max_pending) },
 	{ "worker.request_timeout",    &fpm_conf_set_integer,     WPO(worker_request_timeout) },
+	{ "worker.send_buffer_limit",  &fpm_conf_set_bytes,       WPO(worker_send_buffer_limit) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -988,6 +989,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_stream_write_timeout = 10000;	/* fpm-ng: ten seconds, see http.stream in docs/http-direct.md */
 	wp->config->worker_max_pending = FPM_WORKER_PENDING_MAX;	/* fpm-ng: issue #331, see fpm_http_direct_worker.h */
 	wp->config->worker_request_timeout = 0;	/* fpm-ng: issue #331, 0 = off (today's behavior) */
+	wp->config->worker_send_buffer_limit = 0;	/* fpm-ng: issue #332, 0 = off (no backpressure bound) */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif

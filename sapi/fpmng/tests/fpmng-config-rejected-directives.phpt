@@ -212,6 +212,17 @@ expectConfigFailure(
     ["'worker.request_timeout' is not supported by pool.type = http"]
 );
 
+/* issue #332. worker.send_buffer_limit bounds fpmng_worker_respond_chunk()'s
+ * backpressure and, like the two directives above, means nothing outside
+ * pool.executor = worker: the classic executor of the same pool.type rejects
+ * it too. */
+expectConfigFailure(
+    'direct-classic-worker-send-buffer-limit',
+    str_replace('pool.executor = worker', 'pool.executor = classic', $workerBase)
+        . "\nworker.send_buffer_limit = 64K",
+    ["'worker.send_buffer_limit' is not supported by pool.type = http-direct with pool.executor = classic"]
+);
+
 expectConfigFailure(
     'direct-worker-missing-script',
     str_replace('/worker.php', '/absent.php', $workerBase) . "\nphp_admin_value[max_execution_time] = 0",
@@ -267,6 +278,7 @@ direct-worker-max-execution-time: rejected
 direct-worker-max-pending-zero: rejected
 direct-classic-worker-max-pending: rejected
 http-worker-directive-on-classic: rejected
+direct-classic-worker-send-buffer-limit: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected

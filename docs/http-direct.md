@@ -385,6 +385,103 @@ and its follow-ups, not to this limit.
   `worker.max_pending` saturation, a timeout answers and frees exactly the
   request that overstayed, and everything else keeps running.
 
+### Streaming responses under `pool.executor = worker` (issue #332)
+
+`fpmng_worker_respond()` takes one complete body: nothing reaches the wire
+until the handler has the whole response in hand. Three more builtins mirror
+classic's `http.stream` for this executor, adapted to its cooperative
+event-loop model — `fpmng_worker_loop()` already drives the base between calls
+into PHP, so there is no need for `http.stream`'s busy-pump writer:
+
+```php
+fpmng_worker_respond_start(int $id, int $status, array $headers): bool;
+fpmng_worker_respond_chunk(int $id, string $data): bool;
+fpmng_worker_respond_end(int $id): bool;
+```
+
+- **`fpmng_worker_respond_start()`** puts the status line and headers on the
+  wire with `Transfer-Encoding: chunked` framing and marks the pending entry as
+  streaming. It refuses (returns `false`, never throws for a refusal reason —
+  only a malformed `$status` throws, the same `fpm_http_direct_status_final()`
+  check `fpmng_worker_respond()` already uses) when:
+  - the id is unknown, its connection is already gone, or it is already
+    streaming (a second `_start()` on the same id would be a second status
+    line for one request);
+  - the client is **HTTP/1.0** — there is no chunked framing to give it, the
+    same reason classic refuses to stream to one;
+  - the status is bodyless (`204`, `205`, `304`, or the request was `HEAD`) —
+    `fpm_http_direct_status_bodyless()`, the same check classic uses.
+
+  A malformed header name is refused the same way `fpmng_worker_respond()`
+  refuses one: the connection's headers are dropped, the client gets a bare 500
+  from libevent, and the pending entry is reaped — `_start()` reports `false`.
+  A caller-supplied `Content-Length`, `Transfer-Encoding`, `Connection`, etc. is
+  not one of the refusal reasons above — like `fpmng_worker_respond()`, this
+  transport owns framing and silently drops those headers rather than refusing
+  the whole call (`fpm_http_direct_header_dropped()`).
+- **`fpmng_worker_respond_chunk()`** writes one piece of the body. It returns
+  `false`, and queues nothing, when the id was never started (or already
+  ended), the connection is gone, or `worker.send_buffer_limit` (below) is set
+  and the piece would push the connection's queued-but-unwritten output past
+  it. An empty string is a no-op that still returns `true` — calling libevent's
+  chunk writer with zero bytes would send the terminating chunk early.
+- **`fpmng_worker_respond_end()`** writes the terminating chunk, then does
+  exactly the bookkeeping `fpmng_worker_respond()`'s tail already does: drop
+  the close callback, count the reply so a shutting-down worker waits for it to
+  reach the wire, reap the pending entry (freeing its `worker.max_pending`
+  slot), and recycle the worker if this answer reached `pm.max_requests`. It
+  returns `false` under the same conditions as `_chunk()`.
+
+**Backpressure: `worker.send_buffer_limit`.** Bytes (`64K`, `1M`, … or a plain
+byte count, parsed the same way as `http.max_body`), default `0` (off, no
+bound). Once more than this many bytes are queued but not yet written to a
+connection's socket, `fpmng_worker_respond_chunk()` refuses to queue more —
+returning `false` rather than throwing, or blocking, or growing the queue
+without limit. Unlike `http.stream`'s synchronous high-water write (which
+blocks the whole worker until the client catches up), a refusal here is just a
+signal: the handler decides what to do with it — retry later, drop the
+connection itself, or apply its own flow control. Only valid under
+`pool.executor = worker`; every other pool type and executor of
+`pool.type = http-direct` rejects it, the same way `worker.max_pending` and
+`worker.request_timeout` are rejected outside this executor.
+
+```ini
+[pool]
+pool.type = http-direct
+pool.executor = worker
+worker.send_buffer_limit = 256K
+```
+
+**Interaction with `worker.request_timeout`.** That directive means "never got
+its first byte of response", not "streaming took a while": once
+`fpmng_worker_respond_start()` has run, `worker.request_timeout`'s sweep
+(`fpm_worker_sweep_expired()`) skips the entry, and a stream may legitimately
+run for as long as the client keeps reading. The one remaining backstop is
+`http.read_timeout` — already the transport's per-connection libevent
+read+write inactivity timeout for every request on this executor, and, until
+this issue, undocumented for `pool.executor = worker` specifically: a
+connection that stops reading (or writing) entirely for that long is dropped
+by libevent regardless of `worker.send_buffer_limit`, the same as any other
+connection this executor holds.
+
+**Interaction with `worker.max_pending`.** A streaming request still counts as
+one held pending entry for its whole duration, from `_start()` to `_end()` (or
+until its connection closes): it occupies the same slot an unanswered
+`fpmng_worker_respond()` request would. A handler that streams
+`worker.max_pending` responses at once and keeps them all open saturates the
+worker exactly as a long poll would.
+
+**Interaction with `pm.max_requests` and graceful shutdown.** A stream in
+progress when the worker is asked to stop (`pm.max_requests` reached, or
+SIGQUIT/reload) cannot be answered `503`: its status line — and possibly some
+chunks — are already on the wire, and `evhttp_send_error()`'s second status
+line is not an option once that has happened. `fpm_worker_finish_output()`
+instead shuts the connection down without its terminating chunk (mirroring
+classic's `fpm_direct_stream_abort()`), logs how many streams it cut short, and
+still waits for every other queued reply the normal way. A client mid-stream
+therefore sees a truncated chunked message rather than a hung connection or a
+buffered error page it cannot parse as one.
+
 ## Connection limits (`http.max_connections`)
 
 Three policies, added by issue #61, all of them **per worker**. A pool with

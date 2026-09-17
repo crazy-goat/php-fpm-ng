@@ -27,10 +27,13 @@
  * POC limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
- * streaming (fpmng_worker_respond() takes one complete body); no per-request
- * scoreboard accounting (fpm_request_accepting(false) once at :1512). TLS is
- * NOT a limit here: this executor terminates it like the classic one since
- * issue #55, see the fpm_http_direct_tls_child_attach() call at :1483.
+ * per-request scoreboard accounting (fpm_request_accepting(false) once at
+ * :1512). TLS is NOT a limit here: this executor terminates it like the
+ * classic one since issue #55, see the fpm_http_direct_tls_child_attach()
+ * call at :1483. Streaming is no longer one either: fpmng_worker_respond()
+ * still takes one complete body, but fpmng_worker_respond_start()/_chunk()/
+ * _end() (issue #332) push bytes as the handler produces them, with
+ * worker.send_buffer_limit for backpressure.
  */
 #include "fpm_config.h"
 
@@ -126,6 +129,16 @@ struct fpm_worker_pending {
 	 * already makes to stamp a connection's accept time -- this file has no
 	 * cached libevent clock of its own to reuse instead. */
 	struct timeval accepted_at;
+	/* issue #332: true from fpmng_worker_respond_start() until
+	 * fpmng_worker_respond_end() (or fpm_worker_stream_abort()) reaps this
+	 * entry. Exempts it from worker.request_timeout's sweep
+	 * (fpm_worker_sweep_expired()) -- that directive means "never got its
+	 * first byte of response", not "streaming took a while", and a stream can
+	 * legitimately run for as long as the client keeps the connection open.
+	 * Also what makes fpmng_worker_respond() on the same id, or a second
+	 * fpmng_worker_respond_start(), fail cleanly instead of sending two status
+	 * lines for one request. */
+	bool streaming;
 };
 
 struct fpm_worker_watcher {
@@ -427,14 +440,63 @@ static void fpm_worker_reap(struct fpm_worker_pending *p)
 	zend_hash_index_del(&fw.pending, p->id);
 }
 
+/* issue #332: the streaming counterpart of the 503 fpm_worker_finish_output()
+ * sends an unanswered request. Once fpmng_worker_respond_start() has put a
+ * status line on the wire there is no clean way to say "actually, no" --
+ * evhttp_send_reply() cannot be called a second time, and evhttp_send_error()
+ * would try to write a second status line to a connection that already has
+ * one. A chunked body cut short of its terminator is the only truthful thing
+ * left to send, exactly as classic's fpm_direct_stream_abort()
+ * (fpm_http_direct.c) explains: shutdown() the connection from inside a
+ * callback so the event loop discovers the failure on its next pass and frees
+ * the request there, not on this stack.
+ *
+ * Does not reap `p`: the caller decides when that happens (immediately for a
+ * connection discovered dead from a later builtin call; left for
+ * zend_hash_destroy(&fw.pending) to free during teardown when called from
+ * fpm_worker_finish_output(), which walks that very table). */
+static void fpm_worker_stream_abort(struct fpm_worker_pending *p, const char *why)
+{
+	struct evhttp_connection *connection;
+	struct bufferevent *bev;
+	evutil_socket_t fd;
+
+	if (!p->http) {
+		return;
+	}
+	zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %s; the streamed response is cut short and the "
+		"connection closed without its terminating chunk", fw.wp->config->name, why);
+	connection = evhttp_request_get_connection(p->http);
+	evhttp_request_set_on_complete_cb(p->http, NULL, NULL);
+	if (connection) {
+		evhttp_connection_set_closecb(connection, NULL, NULL);
+		bev = evhttp_connection_get_bufferevent(connection);
+		fd = bev ? bufferevent_getfd(bev) : -1;
+		if (fd >= 0) {
+			shutdown(fd, SHUT_RDWR);
+		}
+	}
+	p->http = NULL;
+}
+
 static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *arg)
 {
 	struct fpm_worker_pending *p = arg;
 
 	(void) connection;
-	/* libevent frees the request with the connection, so only the id survives
-	 * here. A later fpmng_worker_respond() on it reports false rather than
-	 * writing to a dead connection. */
+	/* libevent frees the request together with the connection when it was
+	 * already answered outright (fpmng_worker_respond()'s "userdone" case).
+	 * Mid-stream -- fpmng_worker_respond_start() called, _end() not yet --
+	 * it instead detaches the request from the dying connection
+	 * (evhttp_request_get_connection() reads back NULL) and leaves it for
+	 * whoever holds the pointer to free; nothing here did, which leaked the
+	 * request's headers/uri/input buffer on every stream a client walked away
+	 * from mid-flight (issue #332 self-review). evhttp_send_reply_end() on a
+	 * request whose connection is already gone just frees it, the same as
+	 * fpmng_worker_respond_end() completing normally would have. */
+	if (p->http && p->streaming && !evhttp_request_get_connection(p->http)) {
+		evhttp_send_reply_end(p->http);
+	}
 	p->http = NULL;
 	fpm_worker_notify();
 }
@@ -524,6 +586,10 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	p = pemalloc(sizeof(*p), 1);
 	p->http = http;
 	p->id = fw.next_id++;
+	/* pemalloc() does not zero: every fresh entry starts life not streaming,
+	 * set explicitly rather than left to whatever garbage this allocation
+	 * happened to contain (issue #332). */
+	p->streaming = false;
 	gettimeofday(&p->accepted_at, NULL);
 	zend_hash_index_add_new_ptr(&fw.pending, p->id, p);
 	fw.ready[(fw.ready_head + fw.ready_count) % fw.ready_max] = p->id;
@@ -573,6 +639,7 @@ static void fpm_worker_finish_output(void)
 {
 	struct fpm_worker_pending *p;
 	unsigned abandoned = 0;
+	unsigned streams_cut_short = 0;
 	struct event *deadline;
 	struct timeval budget = {FPM_WORKER_FLUSH_BUDGET, 0};
 
@@ -588,6 +655,14 @@ static void fpm_worker_finish_output(void)
 	ZEND_HASH_FOREACH_PTR(&fw.pending, p) {
 		if (!p->http) {
 			continue;	/* the client is already gone: fpm_worker_conn_closed() cleared it */
+		}
+		if (p->streaming) {
+			/* issue #332: a status line (and possibly some chunks) are already
+			 * on the wire, so evhttp_send_error()'s second status line is not
+			 * an option here -- see fpm_worker_stream_abort(). */
+			fpm_worker_stream_abort(p, "the worker script stopped while a response was still streaming");
+			streams_cut_short++;
+			continue;
 		}
 		/* Same shape as the saturation 503 in fpm_worker_accept(), including
 		 * dropping the close callback first: libevent owns and frees the
@@ -605,6 +680,11 @@ static void fpm_worker_finish_output(void)
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u accepted "
 			"request(s) unanswered; answering 503 rather than closing the connection silently",
 			fw.wp->config->name, abandoned);
+	}
+	if (streams_cut_short) {
+		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u streamed "
+			"response(s) still in progress; those connections are closed without their terminating chunk",
+			fw.wp->config->name, streams_cut_short);
 	}
 	if (!fw.unflushed) {
 		return;
@@ -672,6 +752,15 @@ static void fpm_worker_sweep_expired(evutil_socket_t fd, short events, void *arg
 		 * leaves an entry for a later reader to skip rather than assuming it
 		 * is still live. */
 		if (!p || !p->http) {
+			continue;
+		}
+		/* issue #332: worker.request_timeout means "never got its first byte
+		 * of response", not "streaming took a while" -- a stream can
+		 * legitimately run for as long as the client keeps reading. Once
+		 * fpmng_worker_respond_start() has run, this sweep has nothing left
+		 * to bound: the response side is now the client's http.read_timeout
+		 * and worker.send_buffer_limit's backpressure, not this timer. */
+		if (p->streaming) {
 			continue;
 		}
 		elapsed_ms = (now.tv_sec - p->accepted_at.tv_sec) * 1000L +
@@ -1231,6 +1320,13 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 		fpm_worker_reap(p);
 		RETURN_FALSE;
 	}
+	/* issue #332: a stream already put its status line (and possibly some
+	 * chunks) on the wire; a second, buffered response for the same id would
+	 * be a second status line. The entry stays pending -- it is not this
+	 * function's place to abort someone else's stream. */
+	if (p->streaming) {
+		RETURN_FALSE;
+	}
 	ZEND_HASH_FOREACH_STR_KEY_VAL(headers, key, value) {
 		if (!key || !fpm_worker_add_header(evhttp_request_get_output_headers(p->http), ZSTR_VAL(key),
 				value, &total)) {
@@ -1264,6 +1360,236 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 	evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
 	fpm_worker_send_reply(p->http, (int) status, out);
 	evbuffer_free(out);
+	fpm_worker_reap(p);
+
+	fw.answered++;
+	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
+		!fpm_worker_stopping) {
+		/* Recycling is the master's contract with pm.max_requests; the worker
+		 * script sees it as an ordinary stop request and drains. */
+		fpm_worker_stopping = 1;
+		fpm_worker_notify();
+	}
+	RETURN_TRUE;
+}
+
+/* --- Streaming responses (issue #332) -------------------------------------
+ *
+ * fpmng_worker_respond() takes one complete body; a handler that wants to push
+ * bytes as it produces them (SSE, long-poll, a slow database cursor) has no
+ * way to do that without buffering the whole thing in userland first, capped
+ * by FPM_WORKER_BODY_MAX anyway. These three builtins are the streaming
+ * counterpart, keyed by the same request id fpmng_worker_next_request() hands
+ * out, mirroring http.stream's evhttp_send_reply_start()/_chunk()/_end() in
+ * fpm_http_direct.c (classic can only stream because it decides to on its own,
+ * from http.stream; here the script decides, per request, by calling _start).
+ *
+ * Unlike classic, this executor never needs to pump the connection's
+ * bufferevent by hand: fpmng_worker_loop() already drives the event base
+ * between calls into PHP, so libevent's own writer drains whatever
+ * evhttp_send_reply_chunk() queues without this file doing anything special.
+ * The backpressure problem classic solves with fpm_direct_stream_pump()'s
+ * poll()-and-block loop is solved here instead by worker.send_buffer_limit:
+ * fpmng_worker_respond_chunk() refuses to queue past it and returns false, so
+ * a driver that wants to keep up with a slow client awaits drain (a write
+ * watcher, a timer, whatever its own event loop offers) instead of the worker
+ * blocking on one connection while every other request it holds waits behind
+ * it -- the whole point of this executor's concurrency model. */
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_respond_start, 0, 3, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, status, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Puts a status line and headers on the wire and switches the request to
+ * chunked framing, without sending a body yet. false means: the id is
+ * unknown or already reaped, the client is already gone, the stream was
+ * already started (or the id was already answered outright by
+ * fpmng_worker_respond()), a header could not be emitted (the request is then
+ * answered 500 and reaped, the same contract fpmng_worker_respond() has), the
+ * client speaks HTTP/1.0 (no chunked framing exists there), or the status
+ * carries no body (HEAD/204/205/304 -- fpm_http_direct_status_bodyless()).
+ * A caller-supplied Content-Length, Transfer-Encoding, Connection, etc. is
+ * silently dropped rather than refused, same as fpmng_worker_respond() already
+ * does for the one-shot path (fpm_http_direct_header_dropped(), called from
+ * fpm_worker_add_header() below) -- this transport owns framing either way.
+ * None of these throws: like fpmng_worker_respond(), "the client can't have
+ * this" is reported through the return value, not an exception. */
+static ZEND_FUNCTION(fpmng_worker_respond_start)
+{
+	zend_long id, status;
+	HashTable *headers;
+	struct fpm_worker_pending *p;
+	zend_string *key;
+	zval *value;
+	size_t total = 0;
+	bool headers_ok = true;
+
+	ZEND_PARSE_PARAMETERS_START(3, 3)
+		Z_PARAM_LONG(id)
+		Z_PARAM_LONG(status)
+		Z_PARAM_ARRAY_HT(headers)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (!fpm_http_direct_status_final(status)) {
+		zend_argument_value_error(2, "must be a final HTTP status between 200 and 599");
+		RETURN_THROWS();
+	}
+	p = fpm_worker_pending_get(id);
+	if (!p) {
+		RETURN_FALSE;
+	}
+	if (!p->http) {
+		fpm_worker_reap(p);
+		RETURN_FALSE;
+	}
+	if (p->streaming) {
+		/* Not idempotent: a second status line for the same request is not a
+		 * thing evhttp_send_reply_start() can be asked for, so this is
+		 * refused rather than silently repeated. */
+		RETURN_FALSE;
+	}
+	/* HTTP/1.0 has no chunked framing: libevent would answer with the output
+	 * buffer empty (Content-Length: 0, since nothing has been queued yet) and
+	 * then write chunks after it, which a keep-alive HTTP/1.0 client has no
+	 * way to tell apart from the start of a second response. Same check
+	 * classic's fpm_direct_stream_begin() makes (fpm_http_direct.c). */
+	if (p->http->major != 1 || p->http->minor < 1) {
+		RETURN_FALSE;
+	}
+	/* HEAD/204/205/304 carry no body: nothing to stream, and the buffered path
+	 * drops the bytes for the same statuses. */
+	if (fpm_http_direct_status_bodyless(p->http, (int) status)) {
+		RETURN_FALSE;
+	}
+	ZEND_HASH_FOREACH_STR_KEY_VAL(headers, key, value) {
+		if (!key || !fpm_worker_add_header(evhttp_request_get_output_headers(p->http), ZSTR_VAL(key),
+				value, &total)) {
+			headers_ok = false;
+		}
+	} ZEND_HASH_FOREACH_END();
+	if (!headers_ok) {
+		evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
+		fpm_worker_send_error(p->http, 500, NULL);
+		fpm_worker_reap(p);
+		RETURN_FALSE;
+	}
+	/* Same "Connection: close" the buffered path adds in fpmng_worker_respond():
+	 * must be on the wire before the status line goes out, so it belongs here
+	 * and not in fpmng_worker_respond_end() -- by the time _end() runs, the
+	 * headers this stream is going to send have already been flushed. */
+	if (fpm_worker_stopping) {
+		evhttp_add_header(evhttp_request_get_output_headers(p->http), "Connection", "close");
+	}
+	/* libevent picks chunked itself for an HTTP/1.1 client with no
+	 * Content-Length, exactly as it does from fpm_direct_stream_begin(); no
+	 * caller-supplied Content-Length reaches here to disagree with it, see the
+	 * function comment. */
+	evhttp_send_reply_start(p->http, (int) status, NULL);
+	p->streaming = true;
+	RETURN_TRUE;
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_respond_chunk, 0, 2, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, data, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+/* Queues one chunk on the connection's own bufferevent -- fpmng_worker_loop()
+ * writes it out on a later iteration, the same as any other reply this file
+ * hands to libevent. false means: the id is unknown, was never started, or is
+ * already finished; the client is already gone (discovered here, which reaps
+ * the entry so the caller does not have to notice on its own); or queuing this
+ * much more would push the connection's already-queued output past
+ * worker.send_buffer_limit -- the backpressure lever, refusing to buffer
+ * without bound what fpmng_worker_respond()'s FPM_WORKER_BODY_MAX already
+ * bounds for a single-body reply. An empty string is accepted and queues
+ * nothing: evhttp_send_reply_chunk() with an empty buffer would write the
+ * terminating zero-length chunk, ending the stream early, so this file never
+ * calls it with one. */
+static ZEND_FUNCTION(fpmng_worker_respond_chunk)
+{
+	zend_long id;
+	zend_string *data;
+	struct fpm_worker_pending *p;
+	struct bufferevent *bev;
+	struct evbuffer *out;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_LONG(id)
+		Z_PARAM_STR(data)
+	ZEND_PARSE_PARAMETERS_END();
+
+	p = fpm_worker_pending_get(id);
+	if (!p || !p->streaming) {
+		RETURN_FALSE;
+	}
+	if (!p->http) {
+		fpm_worker_reap(p);
+		RETURN_FALSE;
+	}
+	if (fw.wp->config->worker_send_buffer_limit > 0 && ZSTR_LEN(data)) {
+		bev = evhttp_connection_get_bufferevent(evhttp_request_get_connection(p->http));
+		if (bev && evbuffer_get_length(bufferevent_get_output(bev)) + ZSTR_LEN(data) >
+				fw.wp->config->worker_send_buffer_limit) {
+			RETURN_FALSE;
+		}
+	}
+	if (ZSTR_LEN(data)) {
+		out = evbuffer_new();
+		if (!out) {
+			RETURN_FALSE;
+		}
+		/* A fresh evbuffer per call, freed right after it drains into the
+		 * connection: the same convention fpmng_worker_respond() uses for its
+		 * one-shot body, not a buffer kept across calls. */
+		evbuffer_add(out, ZSTR_VAL(data), ZSTR_LEN(data));
+		evhttp_send_reply_chunk(p->http, out);
+		evbuffer_free(out);
+	}
+	RETURN_TRUE;
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_respond_end, 0, 1, _IS_BOOL, 0)
+	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+/* Sends the terminating chunk and does the same bookkeeping
+ * fpmng_worker_respond()'s tail does: drop the close callback, count the
+ * reply so fpm_worker_finish_output() waits for it to reach the wire, reap the
+ * pending entry, and apply pm.max_requests recycling. false means the id is
+ * unknown, was never started, was already ended, or the client is already
+ * gone (reaped here, same as fpmng_worker_respond_chunk()). */
+static ZEND_FUNCTION(fpmng_worker_respond_end)
+{
+	zend_long id;
+	struct fpm_worker_pending *p;
+
+	ZEND_PARSE_PARAMETERS_START(1, 1)
+		Z_PARAM_LONG(id)
+	ZEND_PARSE_PARAMETERS_END();
+
+	p = fpm_worker_pending_get(id);
+	if (!p || !p->streaming) {
+		RETURN_FALSE;
+	}
+	if (!p->http) {
+		fpm_worker_reap(p);
+		RETURN_FALSE;
+	}
+	/* No "Connection: close" of our own here: for a stream the headers are
+	 * long gone by _end() time (evhttp_send_reply_start() already flushed
+	 * them from fpmng_worker_respond_start()), which is where that header, if
+	 * any, was already added. */
+	/* Drop the close callback before handing the request back: libevent owns
+	 * and frees it from here on, and a later close on this connection must not
+	 * reach a reaped pending entry. fpm_worker_count_reply() installs its own
+	 * closecb/on_complete_cb right after, same as fpm_worker_send_reply()'s
+	 * callers do for the one-shot path. */
+	evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
+	fpm_worker_count_reply(p->http);
+	evhttp_send_reply_end(p->http);
 	fpm_worker_reap(p);
 
 	fw.answered++;
@@ -1557,6 +1883,9 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_request_env, arginfo_fpmng_worker_request_env)
 	ZEND_FE(fpmng_worker_request_body, arginfo_fpmng_worker_request_body)
 	ZEND_FE(fpmng_worker_respond, arginfo_fpmng_worker_respond)
+	ZEND_FE(fpmng_worker_respond_start, arginfo_fpmng_worker_respond_start)
+	ZEND_FE(fpmng_worker_respond_chunk, arginfo_fpmng_worker_respond_chunk)
+	ZEND_FE(fpmng_worker_respond_end, arginfo_fpmng_worker_respond_end)
 	ZEND_FE(fpmng_worker_event_create, arginfo_fpmng_worker_event_create)
 	ZEND_FE(fpmng_worker_event_enable, arginfo_fpmng_worker_event_enable)
 	ZEND_FE(fpmng_worker_event_disable, arginfo_fpmng_worker_event_disable)

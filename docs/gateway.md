@@ -291,7 +291,7 @@ worker.max_lifetime = 12h
 
 operator.metrics = on
 operator.status  = on                   ; reduced page: no per-request stage (#387)
-                                        ; ping.path on this executor: open, below
+ping.path = /ping                       ; 503 while the worker's queue is full (#387)
 
 ; ===========================================================================
 ; No HTTP endpoint of their own at all. The operator listener is their ONLY
@@ -374,24 +374,32 @@ beside the gateway, with `/ping` and `/_fpm_status` in their upstream meaning.
   scrape is `/metrics/cronjobs`, so the check depends on Prometheus asking for
   that exact path.
 
-## Open question
+## The worker executor catches up (#387)
 
-One, about `pool.type = http-direct` with `pool.executor = worker`, tracked in
-#387.
+`pool.type = http-direct` with `pool.executor = worker` refuses `ping.path`
+and `pm.status_path` today, both under one comment about the scoreboard having
+no per-request stage, duration or CPU to report. Decided 2026-09-17: that
+reason covers the access log, and only half of status.
 
-- **`ping.path`.** The executor refuses it (`fpm_http_direct_worker.c`) with a
-  reason that is about status -- no per-request stage, duration or CPU to
-  report. Ping needs none of that: it is a literal path match in the
-  connection handler (`fpm_http_direct_ops_try_local()`), which the classic
-  executor calls before queueing a request and which the worker executor could
-  call from the same place in `fpm_worker_accept()`, with no PHP and no
-  scoreboard involved. The open point is only *where*: after the saturation
-  check (ping answers `503` when the worker would refuse a real request --
-  proposed) or before it (ping says "alive" while every request gets `503`).
-- **`operator.status`** -- decided 2026-09-17: supported, as a *reduced* page
-  showing only what the executor records honestly (requests answered per
-  #333, `worker_pending`, `worker_watchers`, the http-direct totals, per-child
-  rows without stage/duration/CPU/memory). `access.*` stays refused.
+- **`ping.path` is answered.** It is a literal whole-path match in the
+  connection handler (`fpm_http_direct_ops_try_local()`), with no PHP and no
+  scoreboard involved; the worker executor already shares that file and
+  `ops->ping_path` is populated for it. It is answered from
+  `fpm_worker_accept()` **after** the ACL and **after** the saturation check,
+  so a worker whose queue is full answers `503` on the ping path as well: ping
+  means "would a real request be accepted right now", which is what it means
+  on the classic executor and what a load balancer needs. Pings do not consume
+  `pm.max_requests`.
+- **`operator.status` is a reduced page** -- only what the executor records
+  honestly: requests answered (#333), `worker_pending`, `worker_watchers`, the
+  http-direct totals, and per-child rows without stage, duration, CPU or peak
+  memory. The renderer is already wired on the worker struct
+  (`fpm_pool_type.c:262`); only the reject list keeps it dark.
+- **`access.log` / `access.format` stay refused.** There is no per-request
+  timing to log, and that was the honest half of the original comment.
+
+Rule 1 then holds on every type that has a request listener, and the gateway's
+`/status/<pool>` table has no gap.
 
 ## Issues
 
@@ -404,7 +412,7 @@ One, about `pool.type = http-direct` with `pool.executor = worker`, tracked in
 | #388 (v0.10.0) | `pool.type = gateway`; `http` retired; target 0 gone; supersedes #345 |
 | #389 (v0.10.0) | `http.operator`, `http.operator_allowed_clients`, the `<base>/<pool>` map |
 | #390 (v0.10.0) | shm counters rendered by the operator child; the `/metrics` index |
-| #387 (v0.10.0) | worker executor: reduced status page (decided); `ping.path` placement (open) |
+| #387 (v0.10.0) | worker executor: `ping.path` answered after the saturation check; reduced status page |
 | #383 (v0.11.0) | `fastcgi` on the operator listener -- simplified by the rename |
 | #385 (v0.11.0) | fold this page into `operator-endpoint.md` once the above has landed |
 

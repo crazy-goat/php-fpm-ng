@@ -1201,9 +1201,29 @@ What differs from a fastcgi pool:
 Under `pool.executor = worker` all three of `ping.path`, `pm.status_path` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
 that executor calls `fpm_request_accepting(false)` once for the life of the
-child, so there is no per-request stage, duration, CPU or peak memory to report
-and no request to count. Refusing the directive is better than answering it
-with placeholders.
+child, so there is no per-request stage, duration, CPU or peak memory to
+report. Refusing the directive is better than answering it with placeholders.
+
+That does not make `pm.metrics_path` (which this executor does not reject)
+untruthful. Since issue #333 its `requests` total is a real count, incremented
+once per request this executor actually answers — both through the buffered
+`fpmng_worker_respond()` and through the streaming completion of
+`fpmng_worker_respond_end()` (issue #332) — rather than the field it used to
+report by never touching it at all. Two gauges sit alongside it on the same
+endpoint: `fpmng_pool_worker_pending` (requests accepted but not yet answered,
+mid-handler or mid-stream) and `fpmng_pool_worker_watchers` (libevent watchers
+this pool's workers currently have registered via
+`fpmng_worker_event_create()`). Both are sums across every child of the pool,
+published synchronously on every change rather than on a tick, and both drop
+back down — pending on every `fpm_worker_reap()` path (answered, timed out by
+`worker.request_timeout`, or the connection going away), watchers on
+`fpmng_worker_event_free()` — so neither one only grows. What `pm.metrics_path`
+still cannot say for this executor is the same thing `pm.status_path` cannot:
+idle vs. active per request, a request's duration, or its CPU/peak memory —
+the scoreboard's `idle`/`active` pair for a worker pool therefore keeps reading
+`idle=N, active=0` regardless of how many requests are actually in flight,
+because that pair is written from `fpm_request_accepting()`, called once per
+child rather than once per request.
 
 ### `listen.allowed_clients`
 

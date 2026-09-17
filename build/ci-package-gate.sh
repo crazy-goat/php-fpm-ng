@@ -274,14 +274,20 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # expectConfigFailure() case for worker.send_buffer_limit added to the
 # existing fpmng-config-rejected-directives.phpt does not change any count,
 # same reasoning as worker.max_pending/worker.request_timeout above.)
+#
+# fpmng-http-direct-worker-metrics.phpt (issue #333) is a nineteenth addition:
+# a single test, pool.type = http-direct with pool.executor = worker, needing
+# neither TLS nor ACME (--SKIPIF-- is the plain skipif.inc), so it passes on
+# every flavour like the additions above. TOTAL and the four PASS counts below
+# each carry a further +1 for it.
 EXPECT_FAIL=0
-EXPECT_TOTAL=110
+EXPECT_TOTAL=111
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=74; EXPECT_SKIP=36
-    else EXPECT_PASS=69; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=75; EXPECT_SKIP=36
+    else EXPECT_PASS=70; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -314,8 +320,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=72; EXPECT_SKIP=38
-    else EXPECT_PASS=67; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=73; EXPECT_SKIP=38
+    else EXPECT_PASS=68; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

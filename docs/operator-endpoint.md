@@ -155,7 +155,12 @@ described here. The metrics page is the same exposition format on every type, on
 purpose — a scraper reads one endpoint and compares labelled series across pools.
 
 A pool that serves requests (`http`, `http-direct`) reports its worker counts
-and request total. A pool that does not (`cron`, `supervisor`) reports its state,
+and request total. On `pool.type = http-direct` with `pool.executor = worker`
+that request total is a real, per-request count since issue #333 — see
+[`http-direct.md`](http-direct.md#pingpath-and-pmstatus_path) for what else
+that executor does and does not report, including the two extra gauges
+(`fpmng_pool_worker_pending`, `fpmng_pool_worker_watchers`) it adds on top of
+the shape below. A pool that does not serve requests (`cron`, `supervisor`) reports its state,
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs. A `cron` pool with
 `cron.expect_within` set also reports `stale`, and a `supervisor` pool whose

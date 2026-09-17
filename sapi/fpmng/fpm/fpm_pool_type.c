@@ -17,6 +17,7 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_worker.h"
+#include "fpm_http_direct_worker_metrics.h"
 #include "fpm_http_direct_ops.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
@@ -69,6 +70,22 @@ static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
 		return -1;
 	}
 	return fpm_http_direct_ops_init_main(wp);
+}
+
+/* The worker executor only (issue #333): the shared slots behind
+ * fpmng_pool_worker_pending/fpmng_pool_worker_watchers (fpm_pool_type_s.
+ * live_gauges below) need to exist before the first child forks, same
+ * reasoning as fpm_pool_type_http_direct_classic_init() above for
+ * pm.status_path's segment -- and the same reason this is its own function
+ * rather than a branch in either of those: an executor variant repeats
+ * everything the master must do before fork instead of overriding a shared
+ * one. */
+static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
+{
+	if (fpm_pool_type_http_direct_init(wp) < 0) {
+		return -1;
+	}
+	return fpm_http_direct_worker_metrics_init_main(wp);
 }
 
 #ifdef HAVE_FPMNG_FIBER
@@ -247,13 +264,23 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.rejects                      = fpm_http_direct_worker_rejects,
 	.reject_exceptions            = fpm_http_direct_worker_accepts,
 	.validate                     = fpm_http_direct_worker_validate,
-	/* Same master-side TLS setup as the base type above. An executor variant
-	 * replaces the whole type struct rather than overriding fields of it, so
-	 * anything the master must do before the first fork has to be repeated
-	 * here -- leaving it out made a TLS worker pool fork children that found
-	 * no certificate loaded, exit, and be respawned forever (issue #55). */
-	.init_main                    = fpm_pool_type_http_direct_init,
+	/* Same master-side TLS setup as the base type above, plus this executor's
+	 * OWN shared segment behind live_gauges below (issue #333) -- an executor
+	 * variant replaces the whole type struct rather than overriding fields of
+	 * it, so anything the master must do before the first fork has to be
+	 * repeated here. Leaving the TLS half out made a TLS worker pool fork
+	 * children that found no certificate loaded, exit, and be respawned
+	 * forever (issue #55); leaving the new half out would make live_gauges
+	 * below always report zero, the exact placeholder this issue exists to
+	 * avoid. */
+	.init_main                    = fpm_pool_type_http_direct_worker_init,
 	.child_main                   = fpm_http_direct_worker_child_main,
+	/* issue #333: fpmng_pool_worker_pending / fpmng_pool_worker_watchers,
+	 * additive on top of the idle/active/requests this type already reports
+	 * through serves_requests above. NOT a stage/duration claim -- see the
+	 * comment on fpm_http_direct_worker_rejects for why this type has none of
+	 * those to give. */
+	.live_gauges                  = fpm_http_direct_worker_live_gauges,
 };
 
 /* pool.executor values, as data. "classic" is spelled out here like any other

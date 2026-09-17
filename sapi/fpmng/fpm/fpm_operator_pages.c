@@ -83,6 +83,15 @@ struct fpm_operator_page_row_s {
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
+
+	/* fpm_pool_type_s.live_gauges() (issue #333): extra per-pool gauges no
+	 * other field above has room for, additive on top of whichever shape
+	 * serves_requests picked. live_count may be 0 even when the type sets
+	 * live_gauges (nothing to report right now); it is NEVER consulted when
+	 * live_count is 0, so a type that leaves live_gauges NULL needs no
+	 * special-casing here -- the memset() below already leaves live_count 0. */
+	struct fpm_pool_live_gauge_s live[FPM_POOL_LIVE_GAUGES_MAX];
+	int live_count;
 };
 
 typedef void (*fpm_operator_page_row_cb)(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row);
@@ -129,7 +138,46 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		return;
 	}
 
+	/* Issue #333: orthogonal to the branch above -- a type may set
+	 * live_gauges whether or not it serves_requests, since it reports
+	 * something neither idle/active/baseline_counter nor fpm_pool_status_s
+	 * has a field for. Clamped defensively; every implementation today fills
+	 * exactly what it declares, but a future one returning too many is a
+	 * truncated page, not a buffer overrun. */
+	if (type->live_gauges) {
+		row.live_count = type->live_gauges(wp, row.live);
+		if (row.live_count < 0) {
+			row.live_count = 0;
+		} else if (row.live_count > FPM_POOL_LIVE_GAUGES_MAX) {
+			row.live_count = FPM_POOL_LIVE_GAUGES_MAX;
+		}
+	}
+
 	cb(b, &row);
+}
+/* }}} */
+
+/* Issue #333: HELP/TYPE inline with the value rather than pre-declared in
+ * fpm_operator_page_render_prometheus() below, unlike every other series
+ * there. Those are fixed for every build; live_gauges' names are per-type
+ * (today: worker only) and this file must not learn which type that is, so
+ * it cannot pre-declare a name it does not know at compile time. Prometheus's
+ * text format allows HELP/TYPE anywhere before the first sample of a series,
+ * and a single-pool page never repeats a series, so this is still valid
+ * output. */
+static void fpm_operator_page_row_prometheus_live(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
+{
+	int i;
+
+	for (i = 0; i < row->live_count; i++) {
+		fpm_operator_buf_appendf(b,
+			"# HELP fpmng_pool_%s %s\n"
+			"# TYPE fpmng_pool_%s gauge\n"
+			"fpmng_pool_%s{pool=\"%s\"} %ld\n",
+			row->live[i].json_key, row->live[i].help,
+			row->live[i].json_key,
+			row->live[i].json_key, row->name, row->live[i].value);
+	}
 }
 /* }}} */
 
@@ -152,6 +200,7 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 			fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
 				row->counter, row->name, row->counter_value);
 		}
+		fpm_operator_page_row_prometheus_live(b, row);
 		return;
 	}
 
@@ -209,6 +258,7 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 		fpm_operator_buf_appendf(b, "fpmng_pool_heartbeat_age_seconds{pool=\"%s\"} %ld\n", row->name,
 			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
 	}
+	fpm_operator_page_row_prometheus_live(b, row);
 }
 /* }}} */
 
@@ -276,6 +326,20 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 }
 /* }}} */
 
+/* Issue #333: same live_gauges array the Prometheus renderer's
+ * fpm_operator_page_row_prometheus_live() reads, emitted before the object's
+ * closing brace rather than as a nested object -- flat keys, same shape
+ * row->counter's single extra key already uses above. */
+static void fpm_operator_page_row_json_live(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
+{
+	int i;
+
+	for (i = 0; i < row->live_count; i++) {
+		fpm_operator_buf_appendf(b, ",\"%s\":%ld", row->live[i].json_key, row->live[i].value);
+	}
+}
+/* }}} */
+
 static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
 {
 	time_t now = time(NULL);
@@ -292,6 +356,7 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		if (row->counter) {
 			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
 		}
+		fpm_operator_page_row_json_live(b, row);
 		fpm_operator_buf_appendf(b, "}");
 		return;
 	}
@@ -328,6 +393,7 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		fpm_operator_buf_appendf(b, ",\"heartbeat_age\":%ld",
 			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
 	}
+	fpm_operator_page_row_json_live(b, row);
 	fpm_operator_buf_appendf(b, "}");
 }
 /* }}} */

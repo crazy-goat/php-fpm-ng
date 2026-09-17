@@ -110,6 +110,7 @@
 #include "fpm_pool_cron.h"
 #include "fpm_pool_type.h"
 #include "fpm_cron_schedule.h"
+#include "fpm_debug_clock.h"
 #include "fpm_payload_dist.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_pool_script.h"
@@ -374,13 +375,13 @@ static int fpm_pool_cron_sleep_until(time_t next) /* {{{ */
 			return 0;
 		}
 
-		now = time(NULL);
+		now = FPM_NOW();
 		if (now >= next) {
 			return 1;
 		}
 
 		remaining = next - now;
-		sleep((unsigned) remaining);
+		FPM_SLEEP(remaining);
 	}
 }
 /* }}} */
@@ -438,6 +439,8 @@ static unsigned fpm_pool_cron_jitter_delay(const struct fpm_worker_pool_config_s
 		unsigned long mix;
 		size_t i;
 
+		/* Deliberately clock_gettime() and not FPM_MONOTONIC() (issue #396):
+		 * hash entropy, not a measurement -- see fpm_debug_clock.h. */
 		clock_gettime(CLOCK_MONOTONIC, &ts);
 		mix = (unsigned long) ts.tv_sec ^ ((unsigned long) ts.tv_nsec << 1) ^ (unsigned long) getpid();
 		for (i = 0; i < sizeof(mix); i++) {
@@ -544,7 +547,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * not set. */
 	fpm_pool_output_log_redirect(c->name, c->cron_output_log);
 
-	next = fpm_cron_schedule_next(c->cron_parsed_schedule, time(NULL), c->cron_timezone);
+	next = fpm_cron_schedule_next(c->cron_parsed_schedule, FPM_NOW(), c->cron_timezone);
 	if (next == (time_t) -1) {
 		/* Last safety net — validate() accepts syntax, not "whether the schedule
 		 * can ever occur". See fpm_cron_schedule.h. */
@@ -572,7 +575,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		fpm_pool_watchdog_arm(getpid(), (unsigned) c->cron_timeout, SIGKILL);
 	}
 
-	started = time(NULL);
+	started = FPM_NOW();
 	if (shared) {
 		shared->last_run = started;
 		shared->running = 1;
@@ -592,7 +595,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	if (c->cron_log && *c->cron_log) {
-		fpm_pool_cron_log_run(c->cron_log, started, time(NULL), exit_code);
+		fpm_pool_cron_log_run(c->cron_log, started, FPM_NOW(), exit_code);
 	}
 
 	/* exit_code != 0 must be visible at warning level, not debug — a single
@@ -624,7 +627,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 	 * is the only reason next_run needs no shared-memory state — see
 	 * docs/NOTES.md 3u and 3r. */
 	if (wp->config->cron_parsed_schedule) {
-		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, time(NULL), wp->config->cron_timezone);
+		time_t n = fpm_cron_schedule_next(wp->config->cron_parsed_schedule, FPM_NOW(), wp->config->cron_timezone);
 
 		if (n != (time_t) -1) {
 			/* issue #322: same jitter formula as the child that will actually
@@ -677,7 +680,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 		if (expected_next != (time_t) -1) {
 			time_t threshold = expected_next + wp->config->cron_expect_within;
 
-			if (time(NULL) > threshold) {
+			if (FPM_NOW() > threshold) {
 				out->stale = 1;
 				out->stale_since = expected_next;
 				if (!shared->stale_warned) {

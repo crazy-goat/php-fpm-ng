@@ -62,8 +62,9 @@ struct fpm_pool_status_s {
 	 * respawned -- the shared struct is keyed by pool, not by process, see
 	 * fpm_pool_supervisor_shared_for()). last_heartbeat is the raw timestamp;
 	 * the age an operator cares about ("stuck since...") is
-	 * time(NULL) - last_heartbeat, computed where it is rendered rather than
-	 * stored, exactly like next_run/uptime.
+	 * FPM_NOW() - last_heartbeat, computed where it is rendered rather than
+	 * stored, exactly like next_run/uptime. FPM_NOW() on both sides, never
+	 * time(NULL) on one of them: see issue #396 and fpm_debug_clock.h.
 	 *
 	 * NOTE: the shared struct this is stored in is allocated once per POOL, not
 	 * per child, so with supervisor.processes > 1 every child of the pool

@@ -4,8 +4,20 @@ signal instead of the hardcoded SIGTERM every other non-request-serving pool
 still gets (issue #325)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+FPMNG_DEBUG_CLOCK_RATE=10
 --FILE--
 <?php
+/* FPMNG_DEBUG_CLOCK_RATE (issue #396). The wait below is driven by a
+ * five-field cron schedule, whose finest resolution is one minute, so it
+ * cannot be shortened in the test. A master built with
+ * --enable-fpmng-debug-clock runs both its clocks -- and the blocking waits
+ * derived from them -- this many times faster, which is why the ENV section
+ * above sets the rate. Every deadline in this test stays in REAL seconds and
+ * stays generous on purpose: with a binary built WITHOUT that flag the
+ * variable is ignored, and the test must still pass at real speed rather than
+ * skip. That is what keeps it running in the release package gate, where the
+ * suite executes on Alpine. */
 
 require_once "tester.inc";
 

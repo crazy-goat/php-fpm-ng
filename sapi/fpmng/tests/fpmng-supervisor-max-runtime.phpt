@@ -3,8 +3,22 @@ fpm-ng: supervisor.max_runtime kills an iteration that overruns it and the
 pool respawns (issue #326)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+FPMNG_DEBUG_CLOCK_RATE=10
 --FILE--
 <?php
+/* FPMNG_DEBUG_CLOCK_RATE (issue #396). What this test waits for is
+ * supervisor.max_runtime followed by a further supervisor.stop_timeout, and
+ * the assertion below reads the duration the MASTER logged, which is measured
+ * on the same clock -- so scaling it keeps "~4s, not just max_runtime alone"
+ * true while costing a tenth of the wall clock. A master built with
+ * --enable-fpmng-debug-clock runs both its clocks -- and the blocking waits
+ * derived from them -- this many times faster, which is why the ENV section
+ * above sets the rate. Every deadline in this test stays in REAL seconds and
+ * stays generous on purpose: with a binary built WITHOUT that flag the
+ * variable is ignored, and the test must still pass at real speed rather than
+ * skip. That is what keeps it running in the release package gate, where the
+ * suite executes on Alpine. */
 
 require_once "tester.inc";
 

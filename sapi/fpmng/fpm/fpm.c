@@ -26,6 +26,7 @@
 #include "fpm_metrics.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
+#include "fpm_debug_clock.h"
 #include "fastcgi.h"
 #include "zend_signal.h"
 #include "zlog.h"
@@ -61,6 +62,14 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	fpm_globals.pid = pid;
 	fpm_globals.run_as_root = run_as_root;
 	fpm_globals.force_stderr = force_stderr;
+
+	/* Before anything forks, and before any pool reads the clock: the master and
+	 * every child it forks must agree on the same virtual clock, so the anchor is
+	 * taken exactly once, here (issue #396). A no-op in every build without
+	 * --enable-fpmng-debug-clock, and a no-op with the flag unless
+	 * FPMNG_DEBUG_CLOCK_RATE is set to something above 1 -- which is what keeps
+	 * the rest of the test suite unaffected. */
+	fpm_debug_clock_init();
 
 	/* Before anything forks: a module registered here is inherited by every
 	 * child, and its INI entries exist before fpm_conf_init_main() parses the

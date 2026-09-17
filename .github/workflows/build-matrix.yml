@@ -187,7 +187,17 @@ env:
   # and needs the TLS flag; without it the ACME tests and
   # fpmng-payload-distribution.phpt would SKIP here as they do in the package
   # gate, and nothing in CI would exercise the code at all.
-  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme --enable-session --with-openssl
+  #
+  # --enable-fpmng-debug-clock: the test-suite virtual clock (issue #396). Three
+  # tests wait on a five-field cron schedule or on a supervisor timeout, which
+  # they cannot shorten themselves, and they set FPMNG_DEBUG_CLOCK_RATE in their
+  # own ENV section; without this flag the variable is ignored and they run at
+  # real speed instead, which is roughly 175 extra seconds of a serial suite.
+  # Deliberately NOT in build/ci-package-gate.sh: the shipped packages must not
+  # carry a clock an environment variable can speed up, and those same tests
+  # pass there at real speed. Same deliberate difference as --enable-fpmng-tls
+  # above, and asserted on both sides rather than assumed.
+  FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme --enable-session --with-openssl --enable-fpmng-debug-clock
 
 jobs:
 

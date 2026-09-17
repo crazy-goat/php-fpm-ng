@@ -2,9 +2,28 @@
 fpm-ng: cron pool runs its script on schedule (docs/cron.md, docs/NOTES.md §3r)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+FPMNG_DEBUG_CLOCK_RATE=10
 --FILE--
 <?php
 
+/* FPMNG_DEBUG_CLOCK_RATE above (issue #396): the schedule below is "* * * * *"
+ * and cron's granularity is one minute, so this test used to spend a whole
+ * real minute -- 40.0 s of the owned suite's 266, the second-largest single
+ * entry in slow.tsv -- waiting for a tick. At rate 10 that tick arrives in
+ * about six real seconds.
+ *
+ * Safe here because the only assertion is that the marker exists and is not
+ * empty. The job script does write gmdate('c') into it, and PHP's clock in
+ * that script is the REAL one -- only the master's C code is scaled -- but
+ * nothing ever compares that timestamp to anything. A test that did compare it
+ * against a configured interval could not be accelerated this way; see the
+ * virtual clock section of docs/fpmng-phpt.md, and fpmng-cron-jitter.phpt,
+ * which is exactly that case and is deliberately left at real speed.
+ *
+ * The 75-second deadline below stays in REAL seconds and stays untouched, so a
+ * binary built without --enable-fpmng-debug-clock ignores the variable and this
+ * test still passes, one real minute at a time. */
 require_once "tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-cron-' . getmypid();

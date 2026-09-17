@@ -153,6 +153,7 @@ off_reason() {
   HAVE_APPARMOR|HAVE_SELINUX)   echo "would add a link-time dependency; not offered by the packages" ;;
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
+  HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; it exists for the test suite and must never be in a shipped package, so this one has no FPMNG_* toggle to turn it on (issue #396)" ;;
   HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
                                 echo "patches/0007 and 0008 apply inside libphp, which is the distribution's file" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)

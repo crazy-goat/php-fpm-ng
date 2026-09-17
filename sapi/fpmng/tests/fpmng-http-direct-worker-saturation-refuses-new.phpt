@@ -118,6 +118,13 @@ http.read_timeout = 10000
 http.max_body = 1M
 catch_workers_output = yes
 worker.max_pending = 1
+; issue #338: this test needs both /hold connections accepted in the same
+; event-loop wakeup, so that the saturation window is already open when the
+; request queued on the idle connection below is dispatched. The default
+; worker.accept_threshold = 1 rate-limits accepts and would let that request be
+; answered 200 before the second hold is even accepted -- a different, and
+; correct, ordering, but not the one this test is about.
+worker.accept_threshold = 0
 php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
 CFG;

@@ -59,6 +59,9 @@
 #include <event2/keyvalq_struct.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
+/* issue #338: evconnlistener_enable()/_disable() for the accept ceiling -- the
+ * same libevent API classic's accept gate uses. */
+#include <event2/listener.h>
 
 #ifdef HAVE_FPM_HTTP_TLS
 /* fpm_connection_info()'s TLS fields (issue #335): the same SSL and X509
@@ -235,6 +238,21 @@ static struct {
 	unsigned ready_head;
 	unsigned ready_count;
 	unsigned answered;
+	/* issue #338: worker.accept_threshold, copied once in child_main(). 0 means
+	 * the ceiling is off and accept_taken/accept_closed stay untouched. */
+	unsigned accept_threshold;
+	/* Connections accepted in the current accept window: incremented by
+	 * fpm_worker_accept_hook(), reset when the gate reopens. */
+	unsigned accept_taken;
+	/* True while this file has the listener disabled, so that the re-enable only
+	 * ever undoes a disable this file did -- a retiring worker's
+	 * evhttp_del_accept_socket() must not be reversed. */
+	bool accept_closed;
+	/* The cooldown the gate owes its siblings: a one-shot timer armed whenever
+	 * the gate closes (NULL when the ceiling is off), and the flag that is true
+	 * from the arming until it fires. */
+	struct event *accept_cooldown;
+	bool accept_cooling;
 	/* Replies handed to libevent whose bytes are not on the socket yet. Only
 	 * the shutdown path reads it; see fpm_worker_finish_output(). */
 	unsigned unflushed;
@@ -582,15 +600,115 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	fpm_worker_notify();
 }
 
+/* THE ACCEPT CEILING (issue #338)
+ *
+ * Every child of an http-direct pool accepts from the one listening socket the
+ * master opened, and libevent's listener_read_cb() accepts until the queue is
+ * empty -- so the child that wakes first takes the whole backlog, and on a
+ * keep-alive workload it then owns those connections for their whole life. On
+ * pool.executor = classic issue #53 answered that with a gate that stays shut
+ * for the whole of a request. That policy cannot transfer verbatim: this
+ * executor holds many requests at once by design, so "shut while busy" would be
+ * shut for good, which is the reason this file used to install no gate at all.
+ *
+ * What this executor gets instead is a rate, not a gate: a worker accepts at
+ * most worker.accept_threshold connections, and then stops accepting for
+ * FPM_WORKER_ACCEPT_COOLDOWN_MS. Two halves, each of them measured rather than
+ * assumed (build/benchmark-http-direct-fairness.py --executor worker, 8 workers
+ * and 64 keep-alive connections, numbers in docs/http-direct.md):
+ *
+ *   1. Stop the drain. listener_read_cb() re-checks the listener's enabled flag
+ *      after every accept callback, so a callback that disables the listener
+ *      ends that drain there. On its own this changes nothing at all: the
+ *      backlog is still readable when the listener comes back on the next
+ *      fpmng_worker_loop() iteration microseconds later, and the same child
+ *      wins the next wakeup too -- measured, the busiest worker's share went
+ *      from 0.51 to 0.56, which is noise.
+ *   2. Owe the siblings the cooldown. A worker that answers in microseconds is
+ *      idle again long before the kernel has scheduled any sibling that the
+ *      same connection woke, so without a delay step 1 is a race the incumbent
+ *      wins every time. With it, the connections this worker did not take are
+ *      still queued for a sibling that is doing nothing. Classic has the same
+ *      shape in its 10 ms fpm_direct_tick safety timer.
+ *
+ * What this deliberately does NOT do is count the requests the worker is
+ * holding. An in-flight ceiling was the first thing tried, and it is what
+ * classic's gate amounts to -- but here it caps concurrency inside one worker,
+ * which is this executor's whole point: with worker.accept_threshold = 1 a
+ * single-child pool stopped overlapping its own long requests, and
+ * fpmng-http-direct-worker.phpt said so. Fairness between workers must not be
+ * bought with concurrency inside one. A worker that is blocked in PHP already
+ * stops accepting on its own -- its event loop is not running.
+ *
+ * worker.accept_threshold = 0 disables all of it, and then no listener state is
+ * ever touched and no cooldown timer exists. */
+static void fpm_worker_accept_enable(bool on)
+{
+	struct evconnlistener *l = fw.listener ? evhttp_bound_socket_get_listener(fw.listener) : NULL;
+
+	if (!l) {
+		return;
+	}
+	if (on) {
+		evconnlistener_enable(l);
+	} else {
+		evconnlistener_disable(l);
+	}
+}
+
+/* Closes the gate once this window's accepts have reached the ceiling, and
+ * starts the cooldown that has to pass before it can open again. */
+static void fpm_worker_accept_maybe_close(void)
+{
+	struct timeval tv = {0, FPM_WORKER_ACCEPT_COOLDOWN_MS * 1000};
+
+	if (!fw.accept_threshold || fw.accept_closed ||
+		fw.accept_taken < fw.accept_threshold) {
+		return;
+	}
+	fw.accept_closed = true;
+	fpm_worker_accept_enable(false);
+	/* The timer is the only thing that can end the cooldown, and it is also what
+	 * guarantees a worker with nothing else to wait for still wakes up to reopen
+	 * its own listener rather than sleeping through the rest of the backlog. */
+	fw.accept_cooling = true;
+	evtimer_add(fw.accept_cooldown, &tv);
+}
+
+/* Reopens once the cooldown has passed. Called at the top of every
+ * fpmng_worker_loop() iteration and from the cooldown timer itself, so a worker
+ * that stays in PHP across several iterations does not need a timer wakeup to
+ * notice that its window is over. */
+static void fpm_worker_accept_reopen(void)
+{
+	if (!fw.accept_closed || fw.accept_cooling) {
+		return;
+	}
+	fw.accept_taken = 0;
+	fw.accept_closed = false;
+	fpm_worker_accept_enable(true);
+}
+
+static void fpm_worker_accept_tick(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	(void) arg;
+	fw.accept_cooling = false;
+	fpm_worker_accept_reopen();
+}
+
 /* evhttp's only per-accepted-connection hook, and therefore the only place
- * the first-request deadline of issue #61 can be armed. Shared by the plain
- * bevcb below and, through fpm_http_direct_tls_child_attach(), by the TLS one.
- * This executor's hook counts nothing and gates nothing: it hands the
- * bufferevent to the tracker and returns. */
+ * the first-request deadline of issue #61 can be armed and the only place this
+ * executor can count an accept. Shared by the plain bevcb below and, through
+ * fpm_http_direct_tls_child_attach(), by the TLS one -- so the ceiling covers a
+ * TLS pool too, and a certificate reload cannot drop it. */
 static void fpm_worker_accept_hook(void *arg, struct bufferevent *bev)
 {
 	(void) arg;
 	fpm_http_direct_conns_accepted(fw.conns, bev);
+	fw.accept_taken++;
+	fpm_worker_accept_maybe_close();
 }
 
 static struct bufferevent *fpm_worker_bevcb(struct event_base *base, void *arg)
@@ -2006,6 +2124,10 @@ static ZEND_FUNCTION(fpmng_worker_loop)
 	 * stream_cast() method, and that userland must hit the guard above rather
 	 * than reach a nested event_base_loop() on this base. */
 	fw.running = true;
+	/* issue #338: a listener this worker disabled comes back here if its cooldown
+	 * has passed, before libevent is given the chance to sleep -- so a worker
+	 * that keeps looping does not need the timer wakeup to reopen. */
+	fpm_worker_accept_reopen();
 	fpm_worker_activate_buffered();
 	if (EG(exception)) {
 		fw.running = false;
@@ -2471,13 +2593,10 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		EVHTTP_REQ_PUT | EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
 	evhttp_set_gencb(fw.http, fpm_worker_accept, NULL);
 	/* See the same call in fpm_http_direct.c: before the listener, so no
-	 * connection is ever accepted in the plain. The on-accept hook here is not
-	 * the accept gate of issue #53 -- that gate is the classic executor's, where
-	 * the loop is blocked for the whole of every request; here the loop is
-	 * driven by userland, which can hold several requests in flight, so the same
-	 * gate would be a throughput cost against a different -- and unmeasured --
-	 * fairness problem. It arms the first-request deadline of issue #61 and
-	 * nothing else. */
+	 * connection is ever accepted in the plain. The on-accept hook here arms the
+	 * first-request deadline of issue #61 and counts the accept for the ceiling
+	 * of issue #338 -- which is not the accept gate of issue #53, see "THE
+	 * ACCEPT CEILING" above. */
 	if (fpm_http_direct_tls_child_attach(wp, fw.base, fw.http, fpm_worker_accept_hook, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}
@@ -2504,6 +2623,21 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * this child. */
 	fw.ready_max = (unsigned) wp->config->worker_max_pending;
 	fw.ready = pemalloc(fw.ready_max * sizeof(*fw.ready), 1);
+	/* issue #338: worker.accept_threshold, 0 = off. fpm_conf_set_integer()
+	 * already refuses a negative value, so there is nothing to clamp; read
+	 * once here for the same reason ready_max is. */
+	fw.accept_threshold = (unsigned) wp->config->worker_accept_threshold;
+	if (fw.accept_threshold) {
+		/* One-shot, armed by fpm_worker_accept_maybe_close() and never pending
+		 * while the gate is open, so a pool that never reaches its ceiling pays
+		 * no wakeups for it. */
+		fw.accept_cooldown = evtimer_new(fw.base, fpm_worker_accept_tick, NULL);
+		if (!fw.accept_cooldown) {
+			zlog(ZLOG_ERROR, "[pool %s] http-direct worker: failed to create the "
+				"worker.accept_threshold cooldown timer", wp->config->name);
+			exit(FPM_EXIT_SOFTWARE);
+		}
+	}
 	/* issue #331: worker.request_timeout, 0 = off. No timer at all in that
 	 * case -- see the field comment on fw.request_timeout_sweep for why this
 	 * is one periodic sweep rather than one timer per pending request. The
@@ -2707,6 +2841,14 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	if (fw.health_sweep) {
 		event_free(fw.health_sweep);
 		fw.health_sweep = NULL;
+	}
+	/* issue #338: likewise. The listener this timer would have reopened is
+	 * already gone by now (evhttp_del_accept_socket() in fpm_worker_stop()), so
+	 * there is nothing left for a late tick to do. */
+	if (fw.accept_cooldown) {
+		event_free(fw.accept_cooldown);
+		fw.accept_cooldown = NULL;
+		fw.accept_cooling = false;
 	}
 	/* Strictly before zend_hash_destroy(&fw.pending). evhttp_free() closes the
 	 * still-open server connections and *does* fire their close callbacks;

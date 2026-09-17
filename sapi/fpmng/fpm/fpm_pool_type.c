@@ -228,6 +228,13 @@ static const char *const fpm_http_direct_worker_accepts[] = {
 	 * anywhere else, same reasoning as the directives above them. */
 	"worker.max_memory",
 	"worker.max_lifetime",
+	/* issue #338: worker.accept_threshold bounds how much of the kernel's
+	 * accept queue one worker takes at a time. The classic
+	 * executor solves the same problem with a gate of its own (issue #53) that
+	 * is not configurable, and no other pool type accepts from a shared socket
+	 * this way -- meaningless anywhere else, same reasoning as the directives
+	 * above it. */
+	"worker.accept_threshold",
 	NULL
 };
 

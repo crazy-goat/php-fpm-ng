@@ -271,6 +271,17 @@ struct fpm_worker_pool_config_s {
 	 * the scoreboard never leaves the ACCEPTING stage for this executor
 	 * (issue #331). */
 	int worker_request_timeout;
+	/* fpm-ng: pool.executor = worker, see fpm_http_direct_worker.c. How much work
+	 * one worker may take on -- accepted-but-unanswered requests plus the
+	 * connections it has just accepted -- before it disables its own listener and
+	 * leaves the rest of the kernel's accept queue to its siblings. It reopens
+	 * once it has drained below this number and a short cooldown has passed.
+	 * 0 = off (accept the whole backlog, the behaviour measured as hoarding in
+	 * issue #338). Related to classic's accept gate (issue #53) but not the same:
+	 * that one is unconditionally shut for a whole request, which would be
+	 * permanent here, because this executor legitimately holds many requests at
+	 * once. FPM_WORKER_ACCEPT_THRESHOLD is the compile-time default. */
+	int worker_accept_threshold;
 	/* fpm-ng: pool.executor = worker, see fpm_http_direct_worker.c. Bytes of
 	 * queued-but-unwritten output libevent may hold on one connection's
 	 * bufferevent before fpmng_worker_respond_chunk() refuses to queue more

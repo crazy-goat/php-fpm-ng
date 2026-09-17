@@ -95,7 +95,7 @@ Some behaviour can only be observed after real time passes, and the test cannot
 shorten the wait. `cron.schedule` is plain five-field crontab syntax, so its
 finest resolution is one minute; `cron.expect_within` is only meaningful once the
 schedule's *next* occurrence has passed, which is one tick plus a further minute.
-Three tests were spending about 175 seconds of the suite's wall clock this way.
+Four tests were spending about 150 seconds of the suite's wall clock this way.
 
 A binary configured with `--enable-fpmng-debug-clock` honours
 `FPMNG_DEBUG_CLOCK_RATE`, an integer from 1 to 600, and runs **both**
@@ -121,11 +121,38 @@ Three rules this facility lives by:
   and the test passes at real speed rather than skipping. That is what keeps
   these tests running in the release package gate, which executes the suite on
   Alpine.
-- **An assertion may only read a duration the master measured.** A duration the
-  *test process* measures with its own `time()` is real, and comparing the two
-  would fail. `fpmng-supervisor-max-runtime.phpt` is the worked example: it
+- **Only the master's C code is scaled, so an assertion may only read a time
+  the master measured.** This is the rule that decides whether a given test can
+  be converted at all, and it excludes more tests than it admits.
+  `fpmng-supervisor-max-runtime.phpt` is the worked example of the good case: it
   parses the "exited on signal 9 ... after N seconds" figure out of the error
   log, which the master computed on the scaled clock.
+
+  PHP's own `time()`, `gmdate()` and `microtime()` are **not** scaled -- neither
+  in the test process nor in a cron job script or a supervisor iteration script,
+  which are ordinary PHP processes. So a test that compares a timestamp one of
+  those recorded against a configured interval cannot be accelerated: at rate 10
+  a 20-virtual-second jitter bound is two real seconds, while the job script
+  writes a real second-of-minute, and the comparison becomes meaningless.
+
+  Measured on run 35274092140, these are the suite's remaining slow tests and
+  why each one is or is not converted:
+
+  | test | s | converted | why |
+  |---|---|---|---|
+  | `fpmng-cron-jitter` | 67.1 | no | the job script records `gmdate('s')` and the test checks it against `cron.jitter`: a real reading against a virtual bound |
+  | `fpmng-cron-schedule` | 40.0 | **yes** | asserts only that the marker exists; the `gmdate('c')` it writes is never compared |
+  | `fpmng-supervisor-jitter` | 25.1 | no | same as cron-jitter, on `microtime(true)` deltas written by the iteration script |
+  | `fpmng-supervisor-max-memory` | 14.7 | no | waits for a worker to grow, not for the clock; nothing to scale |
+  | `fpmng-supervisor-reload-rolling` | 12.5 | no | the settling window is measured by the test process with `microtime(true)` |
+  | `fpmng-cron-expect-within` | 12.3 | **yes** | asserts on master log patterns only |
+  | `fpmng-cron-stop-signal` | 6.0 | **yes** | asserts on master log patterns only |
+  | `fpmng-supervisor-heartbeat` | 5.9 | no | its `heartbeat_age` threshold is calibrated against a script whose own `usleep()` is real |
+
+  Accelerating any of the four "no" rows needs the assertion rewritten to read a
+  master-measured figure first -- the way `fpmng-cron-jitter` already cross-checks
+  the operator status page against the child's recorded offset. That is a
+  separate piece of work, not a rate in an `--ENV--` section.
 
 At rate 1, or with the variable unset, every reading is the plain libc call and
 nothing is logged -- so a debug-clock build behaves identically to one without

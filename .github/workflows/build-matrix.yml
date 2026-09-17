@@ -129,9 +129,10 @@ on:
 # pull request's `build` step still took 138 s at 22:04.
 #
 # So after merging a pull request that adds or removes an AC_DEFINE, dispatch
-# this workflow on main by hand, the same as after a pin bump. Then the entry
-# every new branch restores has the define in it and `build` is back to about
-# half a minute.
+# this workflow on main by hand, the same as after a pin bump. That was measured
+# too, on this very branch: three `build` steps before the dispatch took 134,
+# 138 and 139 s, and the first one after it (run 35280483951 wrote the entry at
+# 22:11:56) took 43 s.
 #
 # Every job below except static-musl runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from

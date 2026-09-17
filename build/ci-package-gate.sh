@@ -322,8 +322,17 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # pool.executor = worker AND http.tls_cert/http.tls_key configured (mirroring
 # fpmng-http-direct-tls.phpt's own --SKIPIF-- probe for "built with TLS
 # support"), so it only runs where TLS is actually linked in. TOTAL carries a
-# further +1; the PASS counts carry +1 only where TLS_PACKAGE=1, and the SKIP
-# counts carry +1 only where TLS_PACKAGE=0.
+# further +1. But its --SKIPIF-- also carries the same "-n CLI has no openssl
+# (shared ext loaded via ini here)" probe as
+# fpmng-http-direct-worker-buffered-streams.phpt and
+# fpmng-http-direct-session-status.phpt above, because its outbound-client-TLS
+# half spawns the origin as PHP_BINARY -n too -- so like those two, it PASSes
+# on deb (TLS linked in via php8.5-embed's own build, openssl loaded either
+# way) but SKIPs on apk even with TLS_PACKAGE=1 (alpine's package image loads
+# openssl as a shared ext through php.ini, which -n does not read). The PASS
+# count carries +1 only for deb with TLS_PACKAGE=1; the SKIP counts carry +1
+# everywhere else (apk regardless of TLS_PACKAGE, and deb/apk with
+# TLS_PACKAGE=0).
 EXPECT_FAIL=0
 EXPECT_TOTAL=124
 
@@ -364,7 +373,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=38
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=85; EXPECT_SKIP=39
     else EXPECT_PASS=80; EXPECT_SKIP=44; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by

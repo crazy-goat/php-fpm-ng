@@ -280,6 +280,13 @@ For the ACME client on top of that, add `--enable-fpmng-acme`. It requires
 [`acme-renewal.md`](acme-renewal.md#the-build-flag) for what a build without
 it does with an ACME configuration.
 
+`--enable-fpmng-debug-clock` is **for running the test suite, not for a
+server**. It makes the master honour `FPMNG_DEBUG_CLOCK_RATE` and run its clocks
+faster than real time, so that tests waiting on a one-minute cron schedule or on
+a supervisor timeout do not have to wait in real seconds. No shipped package is
+built with it, and `configure` prints a warning when it is used. See
+[`fpmng-phpt.md`](fpmng-phpt.md#the-virtual-clock).
+
 `--enable-fpmng-http2` and `--enable-fpmng-quic` are **reserved names, not
 features**. Neither protocol exists in this tree, and `configure` refuses both
 flags with a message naming the issue that is deciding them (#186/#187 for

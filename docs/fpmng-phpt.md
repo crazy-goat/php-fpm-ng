@@ -81,6 +81,61 @@ Identical layout to the upstream runner (`discovered.tsv`, `results.tsv`,
 no filter is given. `results.tsv` covers exactly the selected tests.
 Categories are the same strict mapping documented in `fpm-phpt.md`.
 
+`slow.tsv` is ours: two columns, seconds and test file, longest first, for every
+test above `TEST_FPM_SHOW_SLOW_MS` (default 1000; `0` turns the table off). The
+same table is echoed to stderr at the end of the run, so the CI log shows where
+the time went without downloading the artifact. The suite is serial -- no `-j`,
+because upstream's `Tester::getPort()` bases every instance at the same port
+(issue #394) -- so its wall clock is the sum of its tests, and this is the one
+number that tells you which ones to look at.
+
+## The virtual clock
+
+Some behaviour can only be observed after real time passes, and the test cannot
+shorten the wait. `cron.schedule` is plain five-field crontab syntax, so its
+finest resolution is one minute; `cron.expect_within` is only meaningful once the
+schedule's *next* occurrence has passed, which is one tick plus a further minute.
+Three tests were spending about 175 seconds of the suite's wall clock this way.
+
+A binary configured with `--enable-fpmng-debug-clock` honours
+`FPMNG_DEBUG_CLOCK_RATE`, an integer from 1 to 600, and runs **both**
+`CLOCK_REALTIME` and `CLOCK_MONOTONIC` -- and the blocking waits derived from
+them -- that many times faster. The anchor is taken once in `fpm_init()`, before
+anything forks, so the master and every child agree. Issue #396;
+`sapi/fpmng/fpm/fpm_debug_clock.h` carries the full rationale, including why a
+constant time offset cannot work and why `libfaketime` was rejected.
+
+```sh
+./configure --enable-fpmng --enable-fpmng-debug-clock ...
+```
+
+Three rules this facility lives by:
+
+- **Off by default and never in a shipped package.** With the flag off the code
+  is not in the binary, so there is no variable to set and no way to speed up a
+  production master's clock. `build/ci-package-gate.sh` deliberately does not
+  pass it.
+- **A test opts in, and still passes without it.** The rate goes in the test's
+  own `--ENV--` section. Every deadline inside the test stays in *real* seconds
+  and stays generous, so a binary built without the flag ignores the variable
+  and the test passes at real speed rather than skipping. That is what keeps
+  these tests running in the release package gate, which executes the suite on
+  Alpine.
+- **An assertion may only read a duration the master measured.** A duration the
+  *test process* measures with its own `time()` is real, and comparing the two
+  would fail. `fpmng-supervisor-max-runtime.phpt` is the worked example: it
+  parses the "exited on signal 9 ... after N seconds" figure out of the error
+  log, which the master computed on the scaled clock.
+
+At rate 1, or with the variable unset, every reading is the plain libc call and
+nothing is logged -- so a debug-clock build behaves identically to one without
+the flag, which is what keeps the rest of the suite unaffected. A value that is
+not an integer in range logs a `WARNING` and falls back to real speed.
+
+Two clock readings are deliberately **not** scaled: the `clock_gettime()` calls
+in `fpm_pool_cron.c` and `fpm_pool_supervisor.c` that exist only as hash entropy
+mixed with `getpid()`. They measure nothing.
+
 ## Excluding a test from the runner
 
 `sapi/fpmng/tests/not-run-in-ci.list` holds, one per line, a test file name

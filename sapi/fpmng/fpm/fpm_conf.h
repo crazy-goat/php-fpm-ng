@@ -271,6 +271,18 @@ struct fpm_worker_pool_config_s {
 	 * the scoreboard never leaves the ACCEPTING stage for this executor
 	 * (issue #331). */
 	int worker_request_timeout;
+	/* fpm-ng: pool.executor = worker, see fpm_http_direct_worker.c. Bytes of
+	 * queued-but-unwritten output libevent may hold on one connection's
+	 * bufferevent before fpmng_worker_respond_chunk() refuses to queue more
+	 * and returns false instead (issue #332) -- the backpressure lever a
+	 * streamed response needs and a one-shot fpmng_worker_respond() never did,
+	 * because FPM_WORKER_BODY_MAX already bounds that whole body in memory
+	 * before it is ever handed to libevent. 0 = off (no bound, today's
+	 * behavior for the one-shot path; a streaming handler that never checks
+	 * this directive's absence is its own risk, documented in
+	 * docs/http-direct.md). size_t, not int: fpm_conf_set_bytes() (the same
+	 * setter http.max_body uses) always stores a size_t at this offset. */
+	size_t worker_send_buffer_limit;
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

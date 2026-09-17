@@ -495,6 +495,35 @@ if test "$PHP_FPMNG" != "no"; then
     PHP_FPMNG_ACME_FILES="@FPMNG_ACME_SOURCES@"
   ])
 
+  dnl A virtual clock for the test suite (issue #396). Four tests wait on the
+  dnl real clock for ~200 of the owned suite's ~340 seconds, and cannot be
+  dnl written tighter: cron.schedule is five-field crontab syntax, so the
+  dnl shortest schedule is one minute. With this flag the master honours
+  dnl FPMNG_DEBUG_CLOCK_RATE and runs both CLOCK_REALTIME and CLOCK_MONOTONIC
+  dnl -- and the blocking waits derived from them -- that many times faster.
+  dnl
+  dnl OFF by default and never enabled for a shipped package: with the flag off
+  dnl the code is not in the binary, so there is no variable to set and no way
+  dnl to skew a production master's sense of time. The full rationale, including
+  dnl why libfaketime was rejected (it does not work on musl, and the release
+  dnl package gate runs this suite on Alpine), is in fpm/fpm_debug_clock.h.
+  dnl
+  dnl No source list of its own: fpm/fpm_debug_clock.c is compiled in every
+  dnl build and its whole body is inside the #ifdef, which keeps
+  dnl build/prepare.sh's "a new file needs no edit" property intact.
+  PHP_ARG_ENABLE([fpmng-debug-clock],
+    [whether to build the test-suite virtual clock in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-debug-clock],
+      [Build fpm-ng with FPMNG_DEBUG_CLOCK_RATE, a faster-than-real clock for the test suite (TESTING ONLY, never for a shipped build)])],
+    [no],
+    [no])
+
+  AS_VAR_IF([PHP_FPMNG_DEBUG_CLOCK], [no],, [
+    AC_DEFINE([HAVE_FPMNG_DEBUG_CLOCK], [1],
+      [Define to 1 if fpm-ng honours FPMNG_DEBUG_CLOCK_RATE (--enable-fpmng-debug-clock).])
+    AC_MSG_WARN([--enable-fpmng-debug-clock: this binary's clock can be made to run faster than real time by an environment variable. It is for running the test suite, not for a server.])
+  ])
+
   dnl HTTP/2 and HTTP/3/QUIC: the flag NAMES are reserved here, and nothing
   dnl else. Neither protocol exists in this tree -- issues #186 and #187 are
   dnl still deciding whether an nghttp2 session layer is worth what it costs,

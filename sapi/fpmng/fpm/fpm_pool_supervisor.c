@@ -69,6 +69,7 @@
 #include "fpm_children.h"
 #include "fpm_children_extra.h"
 #include "fpm_events.h"
+#include "fpm_debug_clock.h"
 #include "zlog.h"
 
 /* Rejected, not allowed, directives — see fpm_pool_type_check_directives().
@@ -285,7 +286,7 @@ static ZEND_FUNCTION(fpmng_supervisor_heartbeat)
 	if (!supervisor_current_shared) {
 		RETURN_FALSE;
 	}
-	supervisor_current_shared->last_heartbeat = time(NULL);
+	supervisor_current_shared->last_heartbeat = FPM_NOW();
 	RETURN_TRUE;
 }
 
@@ -693,7 +694,7 @@ static void fpm_pool_supervisor_reload_survivor_poll(struct fpm_event_s *ev, sho
 		return;
 	}
 
-	if (time(NULL) >= surv->deadline) {
+	if (FPM_NOW() >= surv->deadline) {
 		zlog(ZLOG_WARNING, "[pool %s] supervisor: no replacement copy had started %ds after reload; "
 			"retiring reload survivor pid %d unconditionally to avoid an indefinite orphan",
 			surv->wp->config->name, FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S, (int) surv->child->pid);
@@ -746,7 +747,7 @@ static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *
 	surv->wp = wp;
 	surv->child = child;
 	surv->new_shared = entry->shared;
-	surv->deadline = time(NULL) + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
+	surv->deadline = FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
 
 	entry->reload_survivor = surv;
 
@@ -872,7 +873,7 @@ static struct fpm_supervisor_shared_s *fpm_pool_supervisor_shared_for(struct fpm
 static void fpm_pool_supervisor_wait(time_t seconds) /* {{{ */
 {
 	while (seconds-- > 0 && !supervisor_term_requested) {
-		sleep(1);
+		FPM_SLEEP(1);
 	}
 }
 /* }}} */
@@ -897,7 +898,7 @@ static unsigned long fpm_pool_supervisor_now_ms(void) /* {{{ */
 {
 	struct timespec ts;
 
-	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+	if (FPM_MONOTONIC(&ts) != 0) {
 		return 0;
 	}
 	return (unsigned long) ts.tv_sec * 1000UL + (unsigned long) (ts.tv_nsec / 1000000L);
@@ -931,7 +932,11 @@ static unsigned fpm_pool_supervisor_jitter(unsigned max_value) /* {{{ */
 	 * (practically unreachable, but ts is otherwise read uninitialized)
 	 * failure of clock_gettime(), fall back to an all-zero reading rather than
 	 * mixing in garbage stack contents -- getpid() alone still keeps two
-	 * concurrently-forked siblings from hashing to the same value. */
+	 * concurrently-forked siblings from hashing to the same value.
+	 *
+	 * Deliberately clock_gettime() and not FPM_MONOTONIC() (issue #396): this
+	 * reading is hash entropy, not a measurement, so scaling it would only
+	 * narrow the input range. */
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
 		ts.tv_sec = 0;
 		ts.tv_nsec = 0;
@@ -1059,7 +1064,7 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		 * independently at the moment it is about to wait, in
 		 * fpm_pool_supervisor_child_main(). */
 		shared->last_deterministic_delay = (unsigned long) delay;
-		shared->next_allowed_start = time(NULL) + delay;
+		shared->next_allowed_start = FPM_NOW() + delay;
 		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script exited (code %d) after %lds, restarting in %lds"
 			"%s (failure %u%s)",
 			c->name, exit_code, (long) duration, (long) delay,
@@ -1188,7 +1193,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			break;
 		}
 
-		now = time(NULL);
+		now = FPM_NOW();
 		if (shared->next_allowed_start > now) {
 			time_t wait_for = shared->next_allowed_start - now;
 
@@ -1242,7 +1247,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			}
 		}
 
-		started = time(NULL);
+		started = FPM_NOW();
 		started_ms = fpm_pool_supervisor_now_ms();
 		shared->starts++;
 		shared->last_start = started;
@@ -1288,7 +1293,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		shared->running = 0;
 		shared->last_exit_code = exit_code;
 		shared->has_last_exit_code = 1;
-		duration = time(NULL) - started;
+		duration = FPM_NOW() - started;
 		duration_ms = fpm_pool_supervisor_now_ms() - started_ms;
 
 		/* issue #324: apply_policy() runs FIRST, with the script's REAL exit

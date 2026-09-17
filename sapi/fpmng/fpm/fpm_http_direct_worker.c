@@ -53,6 +53,15 @@
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
 
+#ifdef HAVE_FPM_HTTP_TLS
+/* fpm_connection_info()'s TLS fields (issue #335): the same SSL and X509
+ * access fpm_http_direct.c's classic implementation uses, reached the same
+ * way -- bufferevent_openssl_get_ssl() on the connection's bufferevent. */
+#include <event2/bufferevent_ssl.h>
+#include <openssl/ssl.h>
+#include <openssl/x509.h>
+#endif
+
 #include "php.h"
 #include "php_main.h"
 #include "php_ini.h"
@@ -151,8 +160,19 @@ struct fpm_worker_pending {
 	 * legitimately run for as long as the client keeps the connection open.
 	 * Also what makes fpmng_worker_respond() on the same id, or a second
 	 * fpmng_worker_respond_start(), fail cleanly instead of sending two status
-	 * lines for one request. */
+	 * lines for one request. fpm_send_early_hints() (issue #335) reuses this
+	 * same flag as its "final response already started" guard: a buffered
+	 * fpmng_worker_respond() needs no flag of its own for that check because
+	 * it reaps the entry outright (fpm_worker_reap()), so a reaped id already
+	 * answers NULL from fpm_worker_pending_get() -- streaming is the only case
+	 * where the entry is still there but a status line may already be on the
+	 * wire. */
 	bool streaming;
+	/* issue #335: caches fpmng_worker_request_body()'s drained result so a
+	 * second call for the same id sees the body it already read instead of an
+	 * empty evbuffer. NULL until the first call; released in
+	 * fpm_worker_pending_dtor(). */
+	zend_string *body_cache;
 };
 
 struct fpm_worker_watcher {
@@ -393,7 +413,16 @@ static void fpm_worker_stop_signal(int signo)
  * the dtor also means every removal path frees exactly once. */
 static void fpm_worker_pending_dtor(zval *zv)
 {
-	pefree(Z_PTR_P(zv), 1);
+	struct fpm_worker_pending *p = Z_PTR_P(zv);
+
+	/* issue #335: the only dynamically allocated field this struct owns
+	 * besides itself -- released here rather than by every caller of
+	 * fpm_worker_reap(), the same "one place frees it" reasoning the comment
+	 * above this dtor already gives for the struct itself. */
+	if (p->body_cache) {
+		zend_string_release(p->body_cache);
+	}
+	pefree(p, 1);
 }
 
 static void fpm_worker_watcher_dtor(zval *zv)
@@ -633,8 +662,10 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	p->id = fw.next_id++;
 	/* pemalloc() does not zero: every fresh entry starts life not streaming,
 	 * set explicitly rather than left to whatever garbage this allocation
-	 * happened to contain (issue #332). */
+	 * happened to contain (issue #332). Same for body_cache (issue #335): NULL
+	 * until fpmng_worker_request_body()'s first call for this id. */
 	p->streaming = false;
+	p->body_cache = NULL;
 	gettimeofday(&p->accepted_at, NULL);
 	zend_hash_index_add_new_ptr(&fw.pending, p->id, p);
 	/* issue #333: see the matching call in fpm_worker_reap(). */
@@ -1320,8 +1351,16 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_request_body, 0, 1,
 	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
 ZEND_END_ARG_INFO()
 
-/* Drains the request body: a second call returns "". http.max_body already
- * bounds it in libevent (evhttp_set_max_body_size). */
+/* Drains the request body on the first call and caches it in
+ * p->body_cache (issue #335): every later call for the same id returns a
+ * fresh reference to that same cached string instead of touching the evbuffer
+ * again, which by the first call's own doing has nothing left in it. Before
+ * this fix, a second call returned "" — indistinguishable from "the request
+ * genuinely had no body" — which made the drain-once behavior a trap for any
+ * caller that read the body more than once (e.g. once to check
+ * Content-Length against what actually arrived, once to hand it to the
+ * handler). http.max_body already bounds the drain in libevent
+ * (evhttp_set_max_body_size). */
 static ZEND_FUNCTION(fpmng_worker_request_body)
 {
 	zend_long id;
@@ -1337,10 +1376,18 @@ static ZEND_FUNCTION(fpmng_worker_request_body)
 	if (!p || !p->http) {
 		RETURN_EMPTY_STRING();
 	}
+	if (p->body_cache) {
+		RETURN_STR_COPY(p->body_cache);
+	}
 	in = evhttp_request_get_input_buffer(p->http);
 	len = evbuffer_get_length(in);
 	if (!len) {
-		RETURN_EMPTY_STRING();
+		/* Cache the empty string too: a request with no body must keep
+		 * answering "" on a second call, the same as one with a body
+		 * answers its cached bytes, rather than re-checking an evbuffer
+		 * that will never gain anything for this request. */
+		p->body_cache = ZSTR_EMPTY_ALLOC();
+		RETURN_STR_COPY(p->body_cache);
 	}
 	zend_string *body = zend_string_alloc(len, 0);
 	if (evbuffer_remove(in, ZSTR_VAL(body), len) < 0) {
@@ -1348,7 +1395,8 @@ static ZEND_FUNCTION(fpmng_worker_request_body)
 		RETURN_EMPTY_STRING();
 	}
 	ZSTR_VAL(body)[len] = '\0';
-	RETURN_NEW_STR(body);
+	p->body_cache = body;
+	RETURN_STR_COPY(p->body_cache);
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_respond, 0, 4, _IS_BOOL, 0)
@@ -1963,57 +2011,232 @@ static ZEND_FUNCTION(fpmng_worker_loop_break)
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_connection_info, 0, 0, IS_MIXED, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, id, IS_LONG, 0, "0")
 ZEND_END_ARG_INFO()
 
-/* issue #62's defined "unsupported" answer for pool.executor = worker: this
- * executor runs several requests concurrently against one PHP engine (a
- * script identifies which one it means by the id fpmng_worker_next_request()
- * handed it), so there is no single "current connection" for a zero-argument
- * call to report on the way there is on the classic executor
- * (fpm_direct_current in fpm_http_direct.c). Worse, this executor has no
- * periodic tick (see fpm_http_direct_conn.h's track_live), so even the
- * accept-time connection-tracking node this API would read from on the
- * classic executor is deliberately dropped the moment the first request
- * arrives, to avoid leaking one fd per connection. Both are structural, not
- * missing plumbing -- extending this to the worker executor needs an
- * explicit connection/request id parameter and a place to keep per-connection
- * facts alive across requests, which is future work, not this issue's scope.
- * `false` is the same defined answer fpmng_respond() gives for "nothing to
- * report", so a script that checks the return value the same way for both
- * functions already does the right thing here. */
+/* issue #335: fpm_connection_info() on pool.executor = worker, keyed by the
+ * same request id fpmng_worker_next_request() hands out -- unlike the classic
+ * executor, this one runs several requests concurrently against one PHP
+ * engine, so there is no single ambient "current connection"
+ * (fpm_direct_current in fpm_http_direct.c) for a zero-argument call to mean
+ * anything: the entire point of the id parameter is "which of several
+ * in-flight requests do you mean", and there is no sensible default for that.
+ * `id = 0` (the omitted-argument default) therefore answers `false`
+ * unconditionally, the same "nothing to report" convention every other
+ * builtin in this file uses, rather than picking an arbitrary in-flight
+ * request to report on. An unknown or already-answered id -- fpm_worker_pending_get()
+ * returns NULL, or p->http is NULL because the client is already gone --
+ * answers `false` the same way.
+ *
+ * age/requests are omitted, not present as false/null/0: this executor never
+ * runs fpm_http_direct_conn.c's periodic tick (track_live) to keep a
+ * per-connection node alive between requests -- doing that per connection
+ * here would leak one fd's worth of bookkeeping for the life of the worker,
+ * the very leak that tracking exists to avoid on the classic executor. There
+ * is therefore no accept time and no served-request count this executor can
+ * honestly report for the connection an id's request arrived on, and it says
+ * so by leaving the keys out rather than inventing a value -- the same
+ * "report honestly, omit what genuinely cannot be known" convention issue
+ * #333's fpm_worker_count_scoreboard_request() documents for the scoreboard. */
 static ZEND_FUNCTION(fpm_connection_info)
 {
-	ZEND_PARSE_PARAMETERS_NONE();
-	RETURN_FALSE;
+	zend_long id = 0;
+	struct fpm_worker_pending *p;
+	struct evhttp_connection *conn;
+	char *address = NULL;
+	ev_uint16_t port = 0;
+#ifdef HAVE_FPM_HTTP_TLS
+	SSL *ssl = NULL;
+	struct bufferevent *bev;
+#endif
+
+	ZEND_PARSE_PARAMETERS_START(0, 1)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_LONG(id)
+	ZEND_PARSE_PARAMETERS_END();
+
+	if (id == 0) {
+		RETURN_FALSE;
+	}
+	p = fpm_worker_pending_get(id);
+	if (!p || !p->http) {
+		RETURN_FALSE;
+	}
+
+	array_init(return_value);
+
+	conn = evhttp_request_get_connection(p->http);
+	if (conn) {
+		evhttp_connection_get_peer(conn, &address, &port);
+	}
+	add_assoc_string(return_value, "peer_addr", address ? address : "");
+	add_assoc_long(return_value, "peer_port", port);
+	/* No "age"/"requests" keys -- see the function comment above. */
+
+#ifdef HAVE_FPM_HTTP_TLS
+	bev = conn ? evhttp_connection_get_bufferevent(conn) : NULL;
+	if (bev) {
+		ssl = bufferevent_openssl_get_ssl(bev);
+	}
+	if (ssl) {
+		const unsigned char *alpn = NULL;
+		unsigned int alpn_len = 0;
+		const char *sni;
+		X509 *cert;
+
+		add_assoc_string(return_value, "transport", "tls");
+		add_assoc_string(return_value, "tls_protocol", (char *) SSL_get_version(ssl));
+		add_assoc_string(return_value, "tls_cipher", (char *) SSL_get_cipher_name(ssl));
+
+		SSL_get0_alpn_selected(ssl, &alpn, &alpn_len);
+		if (alpn && alpn_len > 0) {
+			add_assoc_stringl(return_value, "tls_alpn", (char *) alpn, alpn_len);
+		} else {
+			add_assoc_null(return_value, "tls_alpn");
+		}
+
+		sni = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
+		if (sni) {
+			add_assoc_string(return_value, "tls_sni", sni);
+		} else {
+			add_assoc_null(return_value, "tls_sni");
+		}
+
+		/* Client certificate fields: same "meaningless without it" gate
+		 * classic's fpm_connection_info() uses -- present only when this
+		 * pool's http.tls_verify_client asked the client for one at all. */
+		if (SSL_get_verify_mode(ssl) & SSL_VERIFY_PEER) {
+			cert = SSL_get1_peer_certificate(ssl);
+			if (cert) {
+				char *subject = fpm_http_direct_x509_name(X509_get_subject_name(cert));
+				char *issuer = fpm_http_direct_x509_name(X509_get_issuer_name(cert));
+				char *not_before = fpm_http_direct_x509_time(X509_get0_notBefore(cert));
+				char *not_after = fpm_http_direct_x509_time(X509_get0_notAfter(cert));
+				char *fingerprint = fpm_http_direct_x509_fingerprint(cert);
+
+				add_assoc_bool(return_value, "client_cert_verified",
+					SSL_get_verify_result(ssl) == X509_V_OK);
+				if (subject) { add_assoc_string(return_value, "client_cert_subject", subject); efree(subject); }
+				else { add_assoc_null(return_value, "client_cert_subject"); }
+				if (issuer) { add_assoc_string(return_value, "client_cert_issuer", issuer); efree(issuer); }
+				else { add_assoc_null(return_value, "client_cert_issuer"); }
+				if (not_before) { add_assoc_string(return_value, "client_cert_not_before", not_before); efree(not_before); }
+				else { add_assoc_null(return_value, "client_cert_not_before"); }
+				if (not_after) { add_assoc_string(return_value, "client_cert_not_after", not_after); efree(not_after); }
+				else { add_assoc_null(return_value, "client_cert_not_after"); }
+				if (fingerprint) { add_assoc_string(return_value, "client_cert_fingerprint_sha256", fingerprint); efree(fingerprint); }
+				else { add_assoc_null(return_value, "client_cert_fingerprint_sha256"); }
+
+				X509_free(cert);
+			} else {
+				add_assoc_bool(return_value, "client_cert_verified", 0);
+				add_assoc_null(return_value, "client_cert_subject");
+				add_assoc_null(return_value, "client_cert_issuer");
+				add_assoc_null(return_value, "client_cert_not_before");
+				add_assoc_null(return_value, "client_cert_not_after");
+				add_assoc_null(return_value, "client_cert_fingerprint_sha256");
+			}
+		}
+	} else {
+		add_assoc_string(return_value, "transport", "plain");
+	}
+#else
+	add_assoc_string(return_value, "transport", "plain");
+#endif
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpm_send_early_hints, 0, 1, _IS_BOOL, 0)
 	ZEND_ARG_TYPE_INFO(0, headers, IS_ARRAY, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, id, IS_LONG, 0, "0")
 ZEND_END_ARG_INFO()
 
-/* issue #63's defined "unsupported" answer for pool.executor = worker, for
- * the same structural reason fpm_connection_info() gives just above: writing
- * a 103 straight to the connection's bufferevent (see fpm_http_direct.c's
- * fpm_send_early_hints()) needs a single "current connection" to target, and
- * this executor answers by request id, with several requests in flight
- * against one PHP engine and no per-connection state kept once the first
- * request off a connection has been dispatched (fpm_worker_pending_get()
- * knows only the pending evhttp_request, never the raw bufferevent it
- * arrived on). Extending this needs the same new design fpm_connection_info()
- * would: a connection/request id parameter and a place to keep the
- * bufferevent alive across requests, future work rather than this issue's
- * scope. `false` for the same reason: a script that checks the return value
- * of every one of this API family the same way already does the right thing
- * here. */
+/* issue #335: fpm_send_early_hints() on pool.executor = worker. Same id
+ * parameter and same no-id/unknown-id -> false rationale as
+ * fpm_connection_info() just above -- there is no ambient "current
+ * connection" to default to when several requests are in flight against one
+ * PHP engine.
+ *
+ * "Already responded" guard: p->streaming is true from fpmng_worker_respond_start()
+ * until fpmng_worker_respond_end()/fpm_worker_stream_abort() reaps the entry,
+ * so it is exactly "a status line may already be on the wire" for a request
+ * that is still in fw.pending. A request answered outright by the buffered
+ * fpmng_worker_respond() needs no flag of its own: fpm_worker_reap() removes
+ * it from fw.pending on that path, so fpm_worker_pending_get() already
+ * returns NULL for it, caught by the `!p` check below. Together these two
+ * checks are the worker-executor equivalent of classic's
+ * `r->responded || r->streaming || SG(headers_sent)`.
+ *
+ * Header validation, serialization and the wire write mirror
+ * fpm_http_direct.c's fpm_send_early_hints() exactly: the same
+ * fpm_http_direct_header_dropped()/fpm_http_direct_header_name_ok()/
+ * fpm_http_direct_header_charge()/evhttp_add_header() validation chain
+ * fpm_worker_add_header() already reuses for the final response, the same
+ * "HTTP/1.1 103 Early Hints\r\n" + headers + "\r\n" byte layout, written to
+ * the connection's bufferevent with bufferevent_write_buffer() rather than
+ * through evhttp's request/reply state -- evhttp has no interim-response API
+ * (see the classic function's comment for why). */
 static ZEND_FUNCTION(fpm_send_early_hints)
 {
 	HashTable *headers;
+	zend_long id = 0;
+	struct fpm_worker_pending *p;
+	struct evhttp_connection *conn;
+	struct bufferevent *bev;
+	zend_string *key;
+	zval *value;
+	struct evkeyvalq validated = {0};
+	struct evkeyval *kv;
+	struct evbuffer *out;
+	size_t total = 0;
 
-	ZEND_PARSE_PARAMETERS_START(1, 1)
+	ZEND_PARSE_PARAMETERS_START(1, 2)
 		Z_PARAM_ARRAY_HT(headers)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_LONG(id)
 	ZEND_PARSE_PARAMETERS_END();
-	(void) headers;
-	RETURN_FALSE;
+
+	if (id == 0) {
+		RETURN_FALSE;
+	}
+	p = fpm_worker_pending_get(id);
+	if (!p || !p->http) {
+		RETURN_FALSE;
+	}
+	if (p->streaming) {
+		RETURN_FALSE;
+	}
+	if (p->http->major != 1 || p->http->minor < 1) {
+		RETURN_FALSE;
+	}
+
+	validated.tqh_last = &validated.tqh_first;
+	ZEND_HASH_FOREACH_STR_KEY_VAL(headers, key, value) {
+		if (!key) {
+			continue;
+		}
+		fpm_worker_add_header(&validated, ZSTR_VAL(key), value, &total);
+	} ZEND_HASH_FOREACH_END();
+
+	out = evbuffer_new();
+	if (!out) {
+		evhttp_clear_headers(&validated);
+		RETURN_FALSE;
+	}
+	evbuffer_add_printf(out, "HTTP/1.1 103 Early Hints\r\n");
+	for (kv = validated.tqh_first; kv; kv = kv->next.tqe_next) {
+		evbuffer_add_printf(out, "%s: %s\r\n", kv->key, kv->value);
+	}
+	evbuffer_add_printf(out, "\r\n");
+	evhttp_clear_headers(&validated);
+
+	conn = evhttp_request_get_connection(p->http);
+	bev = conn ? evhttp_connection_get_bufferevent(conn) : NULL;
+	if (!bev || bufferevent_write_buffer(bev, out) < 0) {
+		evbuffer_free(out);
+		RETURN_FALSE;
+	}
+	evbuffer_free(out);
+	RETURN_TRUE;
 }
 
 static const zend_function_entry fpm_worker_functions[] = {

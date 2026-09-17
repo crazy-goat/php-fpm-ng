@@ -120,13 +120,18 @@ on:
 # --enable-fpmng-debug-clock: the `build` step took 30-33 s on main (runs
 # 35266355232 and 35276934325) and 134 s on the branch carrying the new define.
 #
-# It is a one-off per define, not a standing cost. A cache written on a branch
-# is visible only to that branch, so the branch keeps paying until it merges;
-# the first run on main afterwards writes an entry that has the define in it,
-# and every branch restoring from main is warm again. Worth knowing before
-# reading a slow `build` on a flag-adding pull request as a regression -- it is
-# the expected price, and there is no way around it while a configure flag has
-# to reach the C code through php_config.h.
+# A NEW DEFINE WANTS THE SAME MANUAL RUN AS A PHP_SRC_REF BUMP, for exactly the
+# reason given above for that case: merging does not warm anything any more.
+# With the push-on-main trigger gone, the default branch's entry is rewritten
+# only by the weekly schedule, so between Mondays every branch keeps restoring
+# a pre-define entry and keeps paying the full rebuild -- the merge itself
+# changes nothing. Measured the hard way: #397 merged at 22:01 and the very next
+# pull request's `build` step still took 138 s at 22:04.
+#
+# So after merging a pull request that adds or removes an AC_DEFINE, dispatch
+# this workflow on main by hand, the same as after a pin bump. Then the entry
+# every new branch restores has the define in it and `build` is back to about
+# half a minute.
 #
 # Every job below except static-musl runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from

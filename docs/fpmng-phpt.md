@@ -142,12 +142,19 @@ Three rules this facility lives by:
   |---|---|---|---|
   | `fpmng-cron-jitter` | 67.1 | no | the job script records `gmdate('s')` and the test checks it against `cron.jitter`: a real reading against a virtual bound |
   | `fpmng-cron-schedule` | 40.0 | **yes** | asserts only that the marker exists; the `gmdate('c')` it writes is never compared |
+  | `fpmng-baseline-counters-cron` | 2.0 / 40.1 | **yes** | asserts only on master-produced figures (the `fpmng_pool_runs_total` series and the status page) |
   | `fpmng-supervisor-jitter` | 25.1 | no | same as cron-jitter, on `microtime(true)` deltas written by the iteration script |
   | `fpmng-supervisor-max-memory` | 14.7 | no | waits for a worker to grow, not for the clock; nothing to scale |
   | `fpmng-supervisor-reload-rolling` | 12.5 | no | the settling window is measured by the test process with `microtime(true)` |
   | `fpmng-cron-expect-within` | 12.3 | **yes** | asserts on master log patterns only |
   | `fpmng-cron-stop-signal` | 6.0 | **yes** | asserts on master log patterns only |
   | `fpmng-supervisor-heartbeat` | 5.9 | no | its `heartbeat_age` threshold is calibrated against a script whose own `usleep()` is real |
+
+  The two figures for `fpmng-baseline-counters-cron` are the same passing test in
+  the canonical and the fiber suite of the same run. Nothing differs but where in
+  the minute it started: waiting for a `* * * * *` tick is a 0-60 s lottery, so
+  these tests add variance to the suite's duration and not just time. At rate 10
+  the lottery is 0-6 s.
 
   Accelerating any of the four "no" rows needs the assertion rewritten to read a
   master-measured figure first -- the way `fpmng-cron-jitter` already cross-checks

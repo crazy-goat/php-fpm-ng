@@ -2,9 +2,25 @@
 fpm-ng: a cron pool counts its runs without any fpm_metric_* call (issue #277)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
+--ENV--
+FPMNG_DEBUG_CLOCK_RATE=10
 --FILE--
 <?php
 
+/* FPMNG_DEBUG_CLOCK_RATE above (issue #396): this test waits for one
+ * "* * * * *" tick, and how long that takes is a lottery on where in the minute
+ * the test happened to start. Run 35274092140 shows both ends of it -- the same
+ * test, passing, took 2.0 s in the canonical suite and 40.1 s in the fiber one.
+ * At rate 10 the whole lottery shrinks to 0-6 real seconds, which takes the
+ * variance out of the suite's duration as well as the mean.
+ *
+ * Safe here because every assertion reads a figure the MASTER produced: the
+ * fpmng_pool_runs_total series and the status page's runs count. Nothing
+ * compares a timestamp, so there is no real-versus-virtual reading to get
+ * wrong -- see the virtual clock section of docs/fpmng-phpt.md.
+ *
+ * The 75-second deadline below stays in REAL seconds, so a binary built without
+ * --enable-fpmng-debug-clock ignores the variable and this test still passes. */
 require_once "tester.inc";
 require_once "fpmng-operator.inc";
 

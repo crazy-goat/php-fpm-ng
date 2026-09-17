@@ -239,6 +239,17 @@ expectConfigFailure(
     ["'worker.max_lifetime' is not supported by pool.type = http"]
 );
 
+/* issue #338. worker.accept_threshold bounds how much of the kernel's accept
+ * queue one worker takes at a time; the classic executor of the
+ * same pool.type has its own, non-configurable gate (issue #53) and rejects
+ * this one, the same reasoning as worker.max_memory just above. */
+expectConfigFailure(
+    'direct-classic-worker-accept-threshold',
+    str_replace('pool.executor = worker', 'pool.executor = classic', $workerBase)
+        . "\nworker.accept_threshold = 1",
+    ["'worker.accept_threshold' is not supported by pool.type = http-direct with pool.executor = classic"]
+);
+
 expectConfigFailure(
     'direct-worker-missing-script',
     str_replace('/worker.php', '/absent.php', $workerBase) . "\nphp_admin_value[max_execution_time] = 0",
@@ -297,6 +308,7 @@ http-worker-directive-on-classic: rejected
 direct-classic-worker-send-buffer-limit: rejected
 direct-classic-worker-max-memory: rejected
 http-worker-max-lifetime-directive-on-classic: rejected
+direct-classic-worker-accept-threshold: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected

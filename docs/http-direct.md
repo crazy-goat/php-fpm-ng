@@ -449,6 +449,97 @@ close it for `pool.type = supervisor` — see `docs/supervisor.md`.
   other graceful stop of this executor — `worker.max_pending` saturation,
   `pm.max_requests`, SIGQUIT, or a reload all drain and recycle the same way.
 
+#### `worker.accept_threshold` (issue #338)
+
+Every child of an `http-direct` pool accepts from the one listening socket the
+master opened, and libevent accepts until the kernel's queue is empty — so the
+child that wakes first takes the whole backlog. For `pool.executor = classic`
+issue #53 answered that with an accept gate that stays shut for the whole of a
+request. This executor never had one, on the grounds that a gate shaped like
+classic's would be shut for good here: a worker holds many requests at once by
+design. What it got instead was a ceiling.
+
+- **Default:** `1` (`FPM_WORKER_ACCEPT_THRESHOLD`). `0` disables it and restores
+  the "accept the whole backlog" behaviour measured below.
+- **What it does:** a worker accepts at most this many connections, then
+  disables its own listener for `FPM_WORKER_ACCEPT_COOLDOWN_MS` (5 ms) — so the
+  rest of the accept queue stays there for a sibling that is doing nothing. It
+  is a rate on the accept path, one connection per 5 ms by default, and nothing
+  else: a worker at its ceiling keeps serving every connection it already has,
+  including new requests arriving on them.
+- **It does not cap what a worker holds.** An in-flight ceiling — refuse to
+  accept while holding N unanswered requests, which is what classic's gate
+  amounts to — was tried first and rejected: it caps concurrency *inside* one
+  worker, which is this executor's whole point.
+  `fpmng-http-direct-worker.phpt`'s four overlapping one-second requests
+  serialised under it. Fairness between workers is not worth buying with
+  concurrency inside one. Use `worker.max_pending` for how much a worker may
+  hold.
+- **Why the cooldown.** It is not decoration, it is the half that works. A
+  worker that answers in microseconds is idle again long before the kernel has
+  scheduled any sibling the same connection woke, so a gate that reopens as soon
+  as the worker is free loses the race to its own incumbency every time. The
+  first implementation of this directive did exactly that — accept at most N per
+  `fpmng_worker_loop()` iteration, reopen on the next one — and moved the
+  busiest worker's share of a 64-connection keep-alive run from 0.51 to 0.56,
+  which is noise. Classic's gate has the same shape in its 10 ms
+  `fpm_direct_tick` safety timer.
+- **Only valid under `pool.executor = worker`,** rejected everywhere else the
+  same way `worker.max_pending` is.
+- **Example:**
+
+  ```ini
+  [pool]
+  pool.type = http-direct
+  pool.executor = worker
+  worker.accept_threshold = 1
+  ```
+
+- **Measured.** `build/benchmark-http-direct-fairness.py --executor worker`,
+  8 workers, 64 keep-alive connections, 60 s, three repeats — the shape issue
+  #53 used for classic. `busiest` is the share of all requests served by the
+  busiest worker (`0.125` is a perfect split over eight), `used` how many of the
+  eight workers served anything at all:
+
+  | run | `worker.accept_threshold` | busiest | least busy | workers used | requests |
+  | --- | --- | --- | --- | --- | --- |
+  | keep-alive | unset (`0`) | 0.640 / 0.359 / 0.812 | 0.000 / 0.000 / 0.000 | 5 / 3 / 3 | 1 322 479 / 1 442 354 / 1 449 420 |
+  | keep-alive | `1` (the default) | 0.125 / 0.125 / 0.125 | 0.125 / 0.125 / 0.125 | 8 / 8 / 8 | 1 413 020 / 1 421 417 / 1 439 925 |
+  | keep-alive | `pool.executor = classic`, for reference | 0.172 / 0.171 / 0.156 | 0.078 / 0.094 / 0.094 | 8 / 8 / 8 | 1 044 018 / 1 017 030 / 1 067 921 |
+
+  A perfectly even split over eight workers is what the default measured, three
+  runs out of three — with the directive unset, three to five workers carried
+  the whole pool and the rest never saw a connection.
+
+  Throughput is not the cost here that it was for classic (issue #53 measured
+  −1.9 %): the mean of the three keep-alive runs went from 1 404 751 to
+  1 424 787 requests, +1.4 %, because eight workers sharing the load evenly beat
+  three workers carrying it. The same shape at 4 workers and 8 connections moves
+  from busiest 0.500 / 0.875 / 0.503 over 4 / 2 / 2 workers to 0.376 / 0.251 /
+  0.251 over 4 / 4 / 4, and from 59 864 requests to 121 018.
+- **Why `1` is the default.** Measured over the same shape (20 s runs) at `0` /
+  `2` / `8`, the busiest share on the keep-alive workload was 0.62 / 0.141 /
+  0.141 against the default's 0.125: what spreads the load is the cooldown, not
+  the size of the ceiling, so every non-zero value measured fair and the
+  differences between them are small. `1` is the default because it is the most
+  conservative of them and the only one that measured the ideal split exactly;
+  raise it for a pool whose connections are short-lived enough that a
+  one-connection-per-5 ms accept rate per worker is the binding constraint.
+- **Interaction:** this is a per-worker, per-process decision only. No shared
+  memory, no cross-worker wakeup, and the listening socket is still the single
+  one the master opened — `SO_REUSEPORT` is deliberately not used, since it
+  would break the retire contract documented above. A worker blocked in PHP
+  stops accepting anyway, because its event loop is not running; the ceiling is
+  about the worker that is *not* blocked and would otherwise take everything.
+  The rate it imposes is per worker, so a pool of N children still accepts
+  N × `worker.accept_threshold` connections per 5 ms; raise the directive for a
+  pool whose connections are short-lived enough that new-connection latency
+  matters more than keep-alive pinning does.
+  `fpmng-http-direct-worker-saturation-refuses-new.phpt` sets it to `0` for the
+  one thing the rate does change: which event-loop iteration a connection is
+  accepted in, and therefore the order two nearly simultaneous connections are
+  served in.
+
 ### Streaming responses under `pool.executor = worker` (issue #332)
 
 `fpmng_worker_respond()` takes one complete body: nothing reaches the wire

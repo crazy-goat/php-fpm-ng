@@ -31,6 +31,15 @@ Every request's response carries the worker pid that served it, so the
 distribution is measured rather than inferred. Raw per-request records are kept
 next to the summary so a rerun can be compared against this one.
 
+`--executor worker` runs the same three workloads against `pool.executor =
+worker` (issue #338), which accepts from the same shared socket. It is what
+measured the hoarding that executor's own accept ceiling now answers, and
+`--accept-threshold` sets that ceiling (`0` turns it off, which is the
+before-the-fix baseline). Both executors answer with the pid that served the
+request and honour the same `sleep` query parameter, so the numbers are directly
+comparable; only the script the pool runs differs (FRONT_CONTROLLER vs
+WORKER_DRIVER below).
+
 Uses only its own scratch directory and its own port range; it starts one FPM
 per pool size and stops it by the pid file it wrote. Nothing is matched by
 process name, because the poligon box is shared.
@@ -60,6 +69,40 @@ if ($sleep > 0) {
 }
 header('Content-Type: text/plain');
 echo getmypid(), "\\n";
+"""
+
+# The worker executor's equivalent of FRONT_CONTROLLER (issue #338). Same
+# contract towards the harness -- the body is the pid that served the request,
+# `sleep` is in milliseconds and is spent inside usleep() -- so every number
+# this script computes means the same thing on both executors.
+#
+# The blocking sleep is deliberate and is not a flaw of the driver: the question
+# is whether requests that arrived on OTHER workers stay unblocked, so what this
+# one does while it holds a request only has to be realistic, not async. A
+# driver that yielded instead would measure its own scheduler rather than the
+# accept path.
+#
+# The shape (notify stream, one read watcher, drain fpmng_worker_next_request()
+# until it returns null, fpmng_worker_loop(true) until fpmng_worker_may_exit())
+# is the one sapi/fpmng/tests/fpmng-http-direct-worker*.phpt use.
+WORKER_DRIVER = """<?php
+$notify = fpmng_worker_notify_stream();
+$watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use ($notify): void {
+    fread($notify, 65536);
+    while (($id = fpmng_worker_next_request()) !== null) {
+        $env = fpmng_worker_request_env($id);
+        parse_str($env['QUERY_STRING'] ?? '', $query);
+        $sleep = (int) ($query['sleep'] ?? 0);
+        if ($sleep > 0) {
+            usleep($sleep * 1000);
+        }
+        fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], getmypid() . "\\n");
+    }
+});
+fpmng_worker_event_enable($watcher);
+while (!fpmng_worker_may_exit()) {
+    fpmng_worker_loop(true);
+}
 """
 
 
@@ -279,6 +322,16 @@ def main():
     # to is not ours to choose -- so a single run cannot distinguish a policy
     # from a coin toss. Every number below is reported per repeat.
     parser.add_argument("--repeats", type=int, default=3)
+    # issue #338: the same three workloads against the other executor. The
+    # worker executor accepts from the very same shared, non-REUSEPORT socket --
+    # so this flag is what makes the hoarding question measurable rather than
+    # assumed, on both sides of worker.accept_threshold.
+    parser.add_argument("--executor", choices=["classic", "worker"], default="classic")
+    # Only emitted for --executor worker, and only when given, so a run against
+    # a binary that predates the directive still works. Negative means "leave
+    # the directive out entirely" (i.e. take the built-in default), and 0 is the
+    # no-ceiling baseline.
+    parser.add_argument("--accept-threshold", type=int, default=-1)
     args = parser.parse_args()
 
     binary = args.binary.resolve()
@@ -294,7 +347,12 @@ def main():
     if "requires pm = static" not in strings:
         raise RuntimeError("wrong binary: missing direct transport marker")
 
-    (root / "index.php").write_text(FRONT_CONTROLLER)
+    worker_mode = args.executor == "worker"
+    front_controller = "/worker.php" if worker_mode else "/index.php"
+    if worker_mode:
+        (root / "worker.php").write_text(WORKER_DRIVER)
+    else:
+        (root / "index.php").write_text(FRONT_CONTROLLER)
     metadata = {
         "binary": str(binary),
         "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -311,6 +369,9 @@ def main():
         directory = root / f"workers-{workers}"
         directory.mkdir()
         config = directory / "fpm.conf"
+        extra = ""
+        if worker_mode and args.accept_threshold >= 0:
+            extra = f"worker.accept_threshold = {args.accept_threshold}\n"
         config.write_text(f"""[global]
 error_log = {directory}/fpm.log
 pid = {directory}/fpm.pid
@@ -318,9 +379,9 @@ daemonize = no
 [fairness]
 listen = 127.0.0.1:{port}
 pool.type = http-direct
-pool.executor = classic
-http.front_controller = /index.php
-pm = static
+pool.executor = {args.executor}
+http.front_controller = {front_controller}
+{extra}pm = static
 pm.max_children = {workers}
 pm.max_requests = 0
 chdir = {root}
@@ -339,7 +400,8 @@ php_admin_value[opcache.enable] = 0
                 ("keepalive", keepalive(port, args.connections, args.seconds)),
                 ("slow-peer", slow_peer(port, args.connections, args.slow_ms)),
               ]:
-                entry = {"workload": name, "workers": workers, "repeat": repeat + 1} | summarise(records)
+                entry = {"workload": name, "executor": args.executor, "workers": workers,
+                         "repeat": repeat + 1} | summarise(records)
                 entry["idle_workers"] = workers - entry["workers_used"]
                 if name == "slow-peer":
                     entry |= slow_peer_verdict(records, args.slow_ms)

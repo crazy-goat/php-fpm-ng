@@ -1,8 +1,15 @@
-/* fpm-ng: worker-mode HTTP-direct — experimental POC, task 073.
+/* fpm-ng: worker-mode HTTP-direct.
+ *
+ * Started as an experimental POC (task 073); v0.7.0 hardened it toward
+ * production use (worker metrics, worker.max_memory/worker.max_lifetime,
+ * fpm_connection_info()/fpm_send_early_hints() parity with the classic
+ * executor, TLS, a full .phpt suite) and it now carries FPM_TIER_BETA
+ * (fpm_pool_type.c) rather than POC status. Some rough edges remain, listed
+ * below as "current limits" rather than POC ones.
  *
  * pool.type = http-direct (fpm_http_direct.c) runs one script per request from
- * inside an evhttp callback: evhttp_set_gencb (fpm_http_direct.c:893) fires
- * under event_base_dispatch (:907) and php_execute_script runs there (:801).
+ * inside an evhttp callback: evhttp_set_gencb (fpm_http_direct.c:2451) fires
+ * under event_base_dispatch (:2546) and php_execute_script runs there (:2343).
  * pool.executor = worker inverts that ownership on the same transport: the
  * worker boots ONE script for its whole lifetime and that script pumps the
  * libevent base itself through fpmng_worker_loop(). It is an executor rather
@@ -24,13 +31,13 @@
  * queue; the event-loop driver is userland PHP, see
  * examples/http-direct-worker/ and docs/http-direct-revolt-integration.md.
  *
- * POC limits, all documented rather than worked around: no per-request
+ * Current limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
  * per-request scoreboard accounting (fpm_request_accepting(false) once at
- * :1512). TLS is NOT a limit here: this executor terminates it like the
+ * :2580). TLS is NOT a limit here: this executor terminates it like the
  * classic one since issue #55, see the fpm_http_direct_tls_child_attach()
- * call at :1483. Streaming is no longer one either: fpmng_worker_respond()
+ * call at :2474. Streaming is no longer one either: fpmng_worker_respond()
  * still takes one complete body, but fpmng_worker_respond_start()/_chunk()/
  * _end() (issue #332) push bytes as the handler produces them, with
  * worker.send_buffer_limit for backpressure.
@@ -1493,7 +1500,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 		RETURN_THROWS();
 	}
 	if (ZSTR_LEN(body) > FPM_WORKER_BODY_MAX) {
-		zend_argument_value_error(4, "must not exceed %d bytes in this POC", FPM_WORKER_BODY_MAX);
+		zend_argument_value_error(4, "must not exceed %d bytes", FPM_WORKER_BODY_MAX);
 		RETURN_THROWS();
 	}
 	p = fpm_worker_pending_get(id);

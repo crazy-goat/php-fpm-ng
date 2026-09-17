@@ -1,5 +1,11 @@
 # The per-pool operator endpoint
 
+> **Planned change (v0.10.0):** the four `pm.*` directives on this page are
+> being renamed to an `operator.*` namespace, and a new `pool.type = gateway`
+> will expose every pool's pages under `<base>/<pool name>` on its public port.
+> This page describes what runs today; the target is in
+> [`gateway.md`](gateway.md).
+
 A `cron`, `supervisor`, `http` or `http-direct` pool has nothing in front of it
 that could answer a monitoring scrape. A `fastcgi` pool does — the web server
 that speaks FastCGI to it — which is why upstream FPM answers `pm.status_path`

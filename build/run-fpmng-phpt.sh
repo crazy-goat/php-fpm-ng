@@ -498,22 +498,42 @@ fi
 # Reshape it into a two-column TSV (seconds, test file) so the numbers can be
 # diffed between runs, and echo the table to stderr so it is readable in the CI
 # log without downloading the artifact.
+#
+# Two things about that block that a first version of this got wrong, both
+# visible in the artifact from run 35274092140:
+#
+#   1. run-tests.php writes the whole summary TWICE into the -s file, so a naive
+#      parse produced 70 rows for 35 tests and a total of 501.8 s for a step
+#      that took 266.4. Only the first block is read.
+#   2. An entry is NOT always one line. The name comes from the test's --TEST--
+#      section verbatim, and several of ours are long enough to have been
+#      written across two lines -- which puts the " [<file>]" on the
+#      continuation, so those rows were labelled with a sentence fragment
+#      instead of a path. Lines are accumulated until the bracket closes.
 : > "$SLOW"
 if [ "$SHOW_SLOW_MS" -gt 0 ] && [ -f "$OUTPUT_LOG" ]; then
     awk '
-        /^SLOW TEST SUMMARY$/ { inblock = 1; next }
-        inblock && /^====/ { inblock = 0; next }
-        inblock && /^----/ { next }
-        inblock && /^\([0-9.]+ s\) / {
-            line = $0
-            secs = substr(line, 2, index(line, " s) ") - 2)
-            file = substr(line, index(line, " s) ") + 4)
+        function flush() {
+            if (rec == "") return
+            secs = substr(rec, 2, index(rec, " s) ") - 2)
+            file = substr(rec, index(rec, " s) ") + 4)
             # The name ends in " [sapi/fpmng/tests/x.phpt]"; keep just the path.
+            # No bracket means the entry was cut off -- keep the name, so the row
+            # is still readable, rather than dropping the measurement.
             if (match(file, /\[[^]]*\]$/)) {
                 file = substr(file, RSTART + 1, RLENGTH - 2)
             }
             printf "%s\t%s\n", secs, file
+            rec = ""
         }
+        /^SLOW TEST SUMMARY$/ { if (seen) { done = 1 } ; seen = 1; inblock = !done; next }
+        done { next }
+        inblock && /^====/ { flush(); inblock = 0; next }
+        inblock && /^----/ { next }
+        inblock && /^\([0-9.]+ s\) / { flush(); rec = $0; next }
+        inblock && rec != "" && NF > 0 { rec = rec " " $0; next }
+        inblock && NF == 0 { flush(); next }
+        END { flush() }
     ' "$OUTPUT_LOG" > "$SLOW" 2>/dev/null || : > "$SLOW"
 fi
 

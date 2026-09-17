@@ -143,6 +143,7 @@ const char *const fpm_pool_cron_rejects[] = {
 	"supervisor.",
 	"http.",
 	"fiber.",
+	"worker.",
 	NULL
 };
 

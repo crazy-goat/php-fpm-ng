@@ -257,6 +257,20 @@ struct fpm_worker_pool_config_s {
 	 * Class\Name::property (declaring class, PHP property syntax without the
 	 * '$'); empty = mechanism off, see FPM_COOP_STATICS_MAX. */
 	char *fiber_isolate_statics;
+	/* fpm-ng: pool.executor = worker, see fpm_http_direct_worker.c. Ceiling on
+	 * requests accepted but not yet answered (fw.pending / fw.ready[]); past it
+	 * the worker answers 503 and asks to stop so the master respawns it
+	 * (issue #184's contract, made configurable by issue #331). Validated > 0
+	 * in fpm_http_direct_worker_validate(); FPM_WORKER_PENDING_MAX is the
+	 * compile-time default used when the directive is unset. */
+	int worker_max_pending;
+	/* fpm-ng: pool.executor = worker, milliseconds a request may sit accepted
+	 * but unanswered before the worker gives up on it, answers 504 and frees
+	 * its slot; 0 = off (no bound, today's behavior). request_terminate_timeout
+	 * cannot do this job here -- see fpm_http_direct_worker_rejects -- because
+	 * the scoreboard never leaves the ACCEPTING stage for this executor
+	 * (issue #331). */
+	int worker_request_timeout;
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

@@ -252,14 +252,25 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # neither needing TLS or ACME (--SKIPIF-- is the plain skipif.inc for both),
 # so both pass on every flavour like the additions above. TOTAL and the four
 # PASS counts below each carry a further +2 for the pair.
+#
+# fpmng-http-direct-worker-max-pending.phpt and
+# fpmng-http-direct-worker-request-timeout.phpt (issue #331) are a
+# seventeenth addition, two tests together: both are pool.type = http-direct
+# with pool.executor = worker pools, neither needing TLS or ACME (--SKIPIF--
+# is the plain skipif.inc for both), so both pass on every flavour like the
+# additions above. TOTAL and the four PASS counts below each carry a further
+# +2 for the pair. (The new expectConfigFailure() cases for worker.max_pending
+# and worker.request_timeout added to the existing
+# fpmng-config-rejected-directives.phpt do not change any count: that is
+# still one test file, one PASS/FAIL/SKIP outcome.)
 EXPECT_FAIL=0
-EXPECT_TOTAL=105
+EXPECT_TOTAL=107
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=69; EXPECT_SKIP=36
-    else EXPECT_PASS=64; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=71; EXPECT_SKIP=36
+    else EXPECT_PASS=66; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -292,8 +303,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=67; EXPECT_SKIP=38
-    else EXPECT_PASS=62; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=69; EXPECT_SKIP=38
+    else EXPECT_PASS=64; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

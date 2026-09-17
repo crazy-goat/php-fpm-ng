@@ -28,6 +28,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
 #include "fpm_operator_endpoint.h"
+#include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
 #include "fpm_php.h"
 #include "fpm_sockets.h"
@@ -227,6 +228,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.stream_write_timeout", &fpm_conf_set_integer,     WPO(http_stream_write_timeout) },
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
+	{ "worker.max_pending",        &fpm_conf_set_integer,     WPO(worker_max_pending) },
+	{ "worker.request_timeout",    &fpm_conf_set_integer,     WPO(worker_request_timeout) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -983,6 +986,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_max_body = 32 * 1024 * 1024;	/* fpm-ng: FPM_HTTP_MAX_BODY in fpm_http.c */
 	wp->config->http_front_controller = strdup("/index.php");	/* fpm-ng: see the field comment in fpm_conf.h */
 	wp->config->http_stream_write_timeout = 10000;	/* fpm-ng: ten seconds, see http.stream in docs/http-direct.md */
+	wp->config->worker_max_pending = FPM_WORKER_PENDING_MAX;	/* fpm-ng: issue #331, see fpm_http_direct_worker.h */
+	wp->config->worker_request_timeout = 0;	/* fpm-ng: issue #331, 0 = off (today's behavior) */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif

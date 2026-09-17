@@ -62,6 +62,7 @@ const char *const fpm_pool_async_rejects[] = {
 	"slowlog",
 	"ping.",				/* ping is handled by the fpm_main.c loop, not us */
 	"fiber.",				/* worker replacement after file changes lives in the Fiber scheduler */
+	"worker.",				/* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
 	NULL
 };
 

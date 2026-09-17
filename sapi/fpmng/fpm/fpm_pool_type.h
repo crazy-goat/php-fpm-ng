@@ -75,6 +75,25 @@ struct fpm_pool_status_s {
 	time_t last_heartbeat;
 };
 
+/* One extra Prometheus/JSON gauge from fpm_pool_type_s.live_gauges() below
+ * (issue #333). json_key doubles as the Prometheus series' suffix: the
+ * rendered name is fpmng_pool_<json_key>{pool="..."}, and the same string is
+ * the JSON object's key, so the two formats can never drift apart the way two
+ * separately-spelled names could. */
+struct fpm_pool_live_gauge_s {
+	const char *json_key;
+	const char *help;
+	long value;
+};
+
+/* fpm_pool_type_s.live_gauges() fills at most this many entries of the out[]
+ * array per call. Fixed rather than a dynamic count: every implementation
+ * today (fpm_http_direct_worker_live_gauges(), issue #333) fills 2, and a
+ * type that ever needs more than a handful of ad hoc gauges belongs in
+ * fpm_metrics.h's application-metrics path instead, not in the operator
+ * page's fixed per-pool row. */
+#define FPM_POOL_LIVE_GAUGES_MAX 4
+
 /* One pool.executor value accepted by a pool type, and what it resolves to.
  * The list a type carries is complete in every build: an executor behind a
  * configure flag that is off keeps its entry, with .type NULL and .build_flag
@@ -396,6 +415,21 @@ struct fpm_pool_type_s {
 	 * lives in shared memory the master allocated, so a child dying and being
 	 * respawned does not touch it. */
 	const char *baseline_counter;
+
+	/* Extra per-pool gauges the fixed row shape above has no field for --
+	 * issue #333, the worker executor's currently-pending and watcher counts.
+	 * Orthogonal to serves_requests: unlike .status(), which is the WHOLE
+	 * shape for a serves_requests = 0 type, this is additive on top of
+	 * whichever shape the type already has (idle/active/baseline_counter for
+	 * serves_requests = 1, or the fpm_pool_status_s fields otherwise) -- a
+	 * type reports through both if it has both kinds of state.
+	 *
+	 * NULL = no extra gauges (the common case). Called from the operator
+	 * endpoint's own child, so -- same constraint as .status() -- everything
+	 * read here must be shared memory or configuration, never another
+	 * process's heap. Returns how many of the up to FPM_POOL_LIVE_GAUGES_MAX
+	 * slots in out[] it filled. */
+	int (*live_gauges)(struct fpm_worker_pool_s *wp, struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
 };
 
 /* Type with this name, or NULL. An empty name gives the default (fastcgi) type

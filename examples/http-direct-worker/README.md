@@ -155,5 +155,4 @@ the pool's own log channel with the severity derived from the error level
 - **Response headers are validated.** A header name that is not an RFC 9110
   token, or a header set that exceeds 64 KB, makes `fpmng_worker_respond()`
   return `false` and sends a 500 — the header is never silently dropped.
-- **No TLS, no streaming responses, no HTTP/2, no per-request scoreboard
-  accounting.**
+- **No HTTP/2, no per-request scoreboard accounting.**

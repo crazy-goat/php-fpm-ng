@@ -89,6 +89,24 @@ because upstream's `Tester::getPort()` bases every instance at the same port
 (issue #394) -- so its wall clock is the sum of its tests, and this is the one
 number that tells you which ones to look at.
 
+`summary.txt` carries `min_pass_check`, and a full run fails when fewer than
+**half** the selected tests passed. The trap being defended is a run that skips
+everything and still exits 0: as root php-fpm refuses to start, so every test
+SKIPs and `run-tests.php` reports success. The ownership check of issue #95 does
+not catch it -- discovered-equals-owned is a property of the tree and is just as
+true when nothing ran. Until issue #393 moved the package gate off the
+pull-request path, `build/ci-package-gate.sh`'s exact per-flavour counts were
+the defence; this fraction is its replacement here.
+
+It is a fraction and not an exact count because how many tests legitimately skip
+depends on which `--enable-fpmng-*` flags the binary carries, and a runner
+developers point at arbitrary builds cannot hard-code that. The worst legitimate
+configuration is the plain apk package -- no TLS, no ACME, no fiber -- measured
+at PASS=62 SKIP=43 of 105 on release run 35200538713, so it clears a floor of
+half by a wide margin. `TEST_FPM_MIN_PASS` overrides it with an explicit count,
+or `0` turns it off. A filtered run is exempt unless a count was given, because
+selecting nothing but tests this binary skips is a useful thing to do.
+
 ## The virtual clock
 
 Some behaviour can only be observed after real time passes, and the test cannot

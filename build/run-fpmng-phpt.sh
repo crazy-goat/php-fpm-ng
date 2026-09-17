@@ -286,6 +286,7 @@ write_metadata() {
         printf '%s\n' "TEST_FPM_EXTENSION_DIR=${TEST_FPM_EXTENSION_DIR-unset}"
         printf '%s\n' "TEST_FPM_RUN_AS_ROOT=${TEST_FPM_RUN_AS_ROOT-unset}"
         printf '%s\n' "TEST_FPM_TIMEOUT=${TEST_FPM_TIMEOUT-120}"
+        printf '%s\n' "TEST_FPM_MIN_PASS=${TEST_FPM_MIN_PASS-unset}"
     } > "$METADATA"
 }
 
@@ -393,6 +394,40 @@ SHOW_SLOW_MS=${TEST_FPM_SHOW_SLOW_MS-1000}
 case "$SHOW_SLOW_MS" in
     ''|*[!0-9]*) preflight_fail "TEST_FPM_SHOW_SLOW_MS must be a non-negative integer: $SHOW_SLOW_MS" ;;
 esac
+
+# The floor on PASS, and why this runner needs one at all.
+#
+# The standing trap in this repository is a run that skips every test and still
+# reports success: as root php-fpm refuses to start, so every test SKIPs and
+# run-tests.php exits 0. Nothing above catches it -- the ownership check of
+# issue #95 compares discovered against owned, which is a property of the tree
+# and is just as true when nothing ran.
+#
+# Until 2026-09-17 the defence was build/ci-package-gate.sh, which asserts the
+# exact PASS/SKIP/TOTAL counts per flavour and says so in its own header. That
+# gate left the pull-request path with issue #393 (it now runs only in
+# release.yml, on the tag), which took the defence with it. This is its
+# replacement on the fast path.
+#
+# A FRACTION, NOT THE EXACT COUNT. The gate can afford exact numbers because a
+# package flavour is a fixed configuration; it pays for them with a long block
+# of comments that every new test has to update. A runner used by developers on
+# arbitrary builds cannot: how many tests legitimately skip depends on which
+# --enable-fpmng-* flags the binary carries. So the assertion is "at least half
+# of the selected tests passed", which needs no maintenance and still catches
+# PASS=0.
+#
+# Half is not arbitrary. The worst legitimate configuration is the plain apk
+# package -- no TLS, no ACME, no fiber -- and release run 35200538713 measured
+# it at PASS=62 SKIP=43 of 105, while the gate's current expectation for it is
+# PASS=80 of 124. Half of 124 is 62, so the tightest real configuration clears
+# this by 18 tests. Set TEST_FPM_MIN_PASS to an explicit count to override, or
+# to 0 to turn the check off.
+MIN_PASS=${TEST_FPM_MIN_PASS-}
+case "$MIN_PASS" in
+    '') ;;
+    *[!0-9]*) preflight_fail "TEST_FPM_MIN_PASS must be a non-negative integer: $MIN_PASS" ;;
+esac
 # Unquoted on purpose below (word splitting is what turns this into two argv
 # entries); empty when the table is off, and run-tests.php then never sees the
 # flag -- passing --show-slow 0 would mark every test slow instead.
@@ -486,10 +521,33 @@ else
     MEASUREMENT_STATUS=MEASURED
     BLOCKER=none
 fi
+PASS_COUNT=$(awk -F '\t' 'NR > 1 && $2 == "PASS" {count++} END {print count + 0}' "$RESULTS")
+
+# See the TEST_FPM_MIN_PASS block above for why this exists and why it is a
+# fraction. Not enforced on a filtered run unless a count was given explicitly:
+# a filter may legitimately select nothing but tests this binary skips, which is
+# a useful thing to be able to do and not a broken run.
+LOW_PASS=
+MIN_PASS_CHECK=skipped
+if [ "$MIN_PASS" = 0 ]; then
+    MIN_PASS_CHECK=off
+elif [ -n "$MIN_PASS" ]; then
+    MIN_PASS_CHECK="$PASS_COUNT >= $MIN_PASS"
+    if [ "$PASS_COUNT" -lt "$MIN_PASS" ]; then
+        LOW_PASS="only $PASS_COUNT of $SELECTED_COUNT selected tests passed; TEST_FPM_MIN_PASS demands $MIN_PASS"
+    fi
+elif [ "$FILTERED" = no ]; then
+    MIN_PASS_CHECK="$PASS_COUNT of $SELECTED_COUNT, floor is half"
+    if [ "$((PASS_COUNT * 2))" -lt "$SELECTED_COUNT" ]; then
+        LOW_PASS="only $PASS_COUNT of $SELECTED_COUNT tests passed, fewer than half; a run that skips everything and exits 0 is the trap this checks for (as root php-fpm refuses to start). Read $RESULTS for the skip reasons, or set TEST_FPM_MIN_PASS if this binary really cannot pass more"
+    fi
+fi
+
 {
     printf 'measurement_status=%s\n' "$MEASUREMENT_STATUS"
     printf 'run_exit_status=%s\n' "$RUN_STATUS"
     printf 'blocker=%s\n' "$BLOCKER"
+    printf 'min_pass_check=%s\n' "$MIN_PASS_CHECK"
     write_counts
 } > "$SUMMARY"
 
@@ -549,4 +607,11 @@ printf '%s\n' "Per-test results: $RESULTS" >&2
 if [ -s "$SLOW" ]; then
     printf '%s\n' "Per-test durations: $SLOW" >&2
 fi
+# After the summary and the slow table, not instead of them: the counts and the
+# durations are exactly what someone debugging this failure needs to see.
+if [ -n "$LOW_PASS" ]; then
+    printf '%s\n' "run-fpmng-phpt.sh: $LOW_PASS" >&2
+    [ "$RUN_STATUS" -ne 0 ] || RUN_STATUS=1
+fi
+
 exit "$RUN_STATUS"

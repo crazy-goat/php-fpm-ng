@@ -1535,7 +1535,18 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 	if (ZSTR_LEN(body) && !fpm_http_direct_status_bodyless(p->http, (int) status)) {
 		evbuffer_add(out, ZSTR_VAL(body), ZSTR_LEN(body));
 	}
-	if (fpm_worker_stopping) {
+	/* issue #336: pm.max_requests must add "Connection: close" to the very
+	 * reply that trips it, not merely to every one after -- a client pipelining
+	 * requests on a kept-alive connection otherwise has no signal that this was
+	 * the last answer it will get and sends one more into a connection about to
+	 * be torn down. fw.answered/fpm_worker_stopping is evaluated here, before
+	 * the header is written, rather than after fpm_worker_send_reply() the way
+	 * the bookkeeping below still runs for everything else it does (counting
+	 * the reply, notifying the loop) -- moving the whole block up would fire
+	 * fpm_worker_notify() before the reply is even queued, which is not
+	 * necessary to fix and not worth the churn. */
+	if (fpm_worker_stopping || (fw.wp->config->pm_max_requests &&
+			fw.answered + 1 >= (unsigned) fw.wp->config->pm_max_requests)) {
 		evhttp_add_header(evhttp_request_get_output_headers(p->http), "Connection", "close");
 	}
 	/* Drop the close callback before handing the request back: libevent owns

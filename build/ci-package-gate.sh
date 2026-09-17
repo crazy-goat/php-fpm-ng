@@ -303,14 +303,44 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # fpm_connection_info() on the worker executor are exercised by the existing
 # fpmng-http-direct-connection-info.phpt's TLS cases, not by a new worker TLS
 # harness, so no TLS-only count changes here.)
+#
+# fpmng-http-direct-worker-saturation-refuses-new.phpt,
+# fpmng-http-direct-worker-write-watcher.phpt,
+# fpmng-http-direct-worker-watcher-exceptions.phpt,
+# fpmng-http-direct-worker-retire.phpt,
+# fpmng-http-direct-worker-max-requests-keepalive.phpt,
+# fpmng-http-direct-worker-slow-reader.phpt, and
+# fpmng-http-direct-worker-max-body.phpt (issue #336) are a twenty-second
+# addition, seven tests together: all seven are pool.type = http-direct with
+# pool.executor = worker pools needing neither TLS nor ACME (--SKIPIF-- is the
+# plain skipif.inc for all seven), so all seven pass on every flavour like the
+# additions above. TOTAL and the four PASS counts below each carry a further
+# +7 for the group.
+#
+# fpmng-http-direct-worker-tls-and-client-tls.phpt (issue #336) is an eighth,
+# separate addition in the same batch: a pool.type = http-direct pool with
+# pool.executor = worker AND http.tls_cert/http.tls_key configured (mirroring
+# fpmng-http-direct-tls.phpt's own --SKIPIF-- probe for "built with TLS
+# support"), so it only runs where TLS is actually linked in. TOTAL carries a
+# further +1. But its --SKIPIF-- also carries the same "-n CLI has no openssl
+# (shared ext loaded via ini here)" probe as
+# fpmng-http-direct-worker-buffered-streams.phpt and
+# fpmng-http-direct-session-status.phpt above, because its outbound-client-TLS
+# half spawns the origin as PHP_BINARY -n too -- so like those two, it PASSes
+# on deb (TLS linked in via php8.5-embed's own build, openssl loaded either
+# way) but SKIPs on apk even with TLS_PACKAGE=1 (alpine's package image loads
+# openssl as a shared ext through php.ini, which -n does not read). The PASS
+# count carries +1 only for deb with TLS_PACKAGE=1; the SKIP counts carry +1
+# everywhere else (apk regardless of TLS_PACKAGE, and deb/apk with
+# TLS_PACKAGE=0).
 EXPECT_FAIL=0
-EXPECT_TOTAL=116
+EXPECT_TOTAL=124
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=80; EXPECT_SKIP=36
-    else EXPECT_PASS=75; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=88; EXPECT_SKIP=36
+    else EXPECT_PASS=82; EXPECT_SKIP=42; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -343,8 +373,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=78; EXPECT_SKIP=38
-    else EXPECT_PASS=73; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=85; EXPECT_SKIP=39
+    else EXPECT_PASS=80; EXPECT_SKIP=44; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

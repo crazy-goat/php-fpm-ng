@@ -385,6 +385,70 @@ and its follow-ups, not to this limit.
   `worker.max_pending` saturation, a timeout answers and frees exactly the
   request that overstayed, and everything else keeps running.
 
+#### `worker.max_memory` and `worker.max_lifetime` (issue #334)
+
+`pm.max_requests` bounds a classic worker's memory growth by counting
+*answered* requests. `pool.executor = worker` answers requests too — but it is
+also the executor `fpmng_worker_respond_start()`/`_chunk()`/`_end()` (issue
+#332) stream a long-poll or an SSE feed through, and a worker holding one of
+those can go a long time between answers. Nothing bounded a per-request leak
+in that window: `worker.max_memory` and `worker.max_lifetime` close it, the
+same way `supervisor.max_memory`/`supervisor.max_runtime` (issues #324/#326)
+close it for `pool.type = supervisor` — see `docs/supervisor.md`.
+
+- **`worker.max_memory = <size>`** (for example `256M`, same K/M/G suffix as
+  `http.max_body`), default `0` (disabled). A periodic check (armed whenever
+  either this directive or `worker.max_lifetime` is non-zero — see the
+  implementation note below) reads the worker's own peak resident set size
+  (`getrusage(RUSAGE_SELF).ru_maxrss`, converted to bytes the same way
+  `supervisor.max_memory` does — see the platform-unit comment in
+  `fpm_http_direct_worker.c`); once it reaches the configured limit, the
+  worker is asked to stop the exact same graceful way `pm.max_requests` asks
+  it to: in-flight work drains (through `fpm_worker_finish_output()`, the same
+  drain `worker.max_pending` saturation triggers), the child exits, the master
+  respawns it.
+- **`worker.max_lifetime = <seconds>`** (same suffix convention as
+  `supervisor.max_runtime`), default `0` (disabled). Bounds how long a single
+  worker process may run before it is recycled, regardless of memory or
+  request volume — the same periodic check compares elapsed time since the
+  worker started serving against this limit and triggers an identical
+  graceful stop.
+- **Both are opt-in and independent.** Setting only one leaves the other
+  unbounded, exactly today's behavior.
+- **Neither is a kill.** Unlike `supervisor.max_runtime`, which sends
+  `supervisor.stop_signal` to a *script it does not otherwise control the
+  shape of*, this executor already has a well-defined graceful stop
+  (`fpm_worker_stopping`, the same flag `pm.max_requests` and
+  `worker.max_pending` saturation set): a trip here sets that flag and lets
+  the worker script drain and exit on its own, never `kill()`. This executor
+  has no per-request state isolation, so cutting a worker off mid-flight would
+  lose whatever it was holding — exactly the outcome `worker.request_timeout`
+  and `worker.max_pending`'s own drains already avoid.
+- **Only valid under `pool.executor = worker`,** rejected everywhere else the
+  same way `worker.max_pending` is.
+- **Example:**
+
+  ```ini
+  [pool]
+  pool.type = http-direct
+  pool.executor = worker
+  worker.max_memory = 256M
+  worker.max_lifetime = 3600
+  ```
+
+  A worker in this pool recycles once its peak RSS reaches 256 MiB, or after
+  an hour of uptime, whichever comes first.
+- **Implementation note:** a single periodic timer (`fw.health_sweep`,
+  one second, independent of `worker.request_timeout`'s own sweep — that one
+  is armed only when `worker.request_timeout` itself is non-zero, so it is not
+  reliably running) checks both directives together, the same one-timer-not-
+  one-per-request shape `worker.request_timeout`'s sweep already uses. See
+  `fpm_worker_health_sweep()` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`.
+- **Interaction:** a memory or lifetime recycle is logged (`NOTICE`, mirroring
+  `supervisor.max_memory`'s wording) but is not otherwise different from any
+  other graceful stop of this executor — `worker.max_pending` saturation,
+  `pm.max_requests`, SIGQUIT, or a reload all drain and recycle the same way.
+
 ### Streaming responses under `pool.executor = worker` (issue #332)
 
 `fpmng_worker_respond()` takes one complete body: nothing reaches the wire

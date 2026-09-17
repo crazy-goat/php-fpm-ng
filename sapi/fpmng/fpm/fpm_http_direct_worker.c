@@ -44,6 +44,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/resource.h>
 #include <netdb.h>
 #include <event2/event.h>
 #include <event2/http.h>
@@ -100,6 +101,17 @@
  * instead of every 50 ms / DIVISOR = 12.5, rounded down to single-digit ms. */
 #define FPM_WORKER_REQUEST_TIMEOUT_SWEEP_DIVISOR 4
 #define FPM_WORKER_REQUEST_TIMEOUT_SWEEP_FLOOR_MS 25
+
+/* worker.max_memory/worker.max_lifetime (issue #334): how often fw.health_sweep
+ * checks the child's own peak RSS and elapsed lifetime. Unlike
+ * fw.request_timeout_sweep, this timer is armed whenever EITHER directive is
+ * non-zero -- worker.request_timeout's sweep interval is derived from that
+ * one directive's own value and cannot be relied on to run at all (it is
+ * simply absent when worker.request_timeout = 0, the default). One second is
+ * frequent enough that a worker recycles within a second of crossing either
+ * limit without the getrusage() call this costs every tick showing up as
+ * measurable overhead. */
+#define FPM_WORKER_HEALTH_SWEEP_INTERVAL_SEC 1
 
 /* Watcher kinds accepted by fpmng_worker_event_create(). Mirrors what
  * Revolt's AbstractDriver activates (readable/writable streams and timers);
@@ -214,6 +226,17 @@ static struct {
 	 * fpm_worker_finish_output()'s whole wait with a single timer rather than
 	 * one per unflushed reply. */
 	struct event *request_timeout_sweep;
+	/* issue #334: worker.max_memory/worker.max_lifetime's periodic check,
+	 * armed in child_main() whenever either directive is non-zero -- see the
+	 * field comment on FPM_WORKER_HEALTH_SWEEP_INTERVAL_SEC for why this is a
+	 * timer of its own rather than reusing request_timeout_sweep above. NULL
+	 * when both directives are 0 (off), the same "off means off" contract
+	 * request_timeout_sweep already has. */
+	struct event *health_sweep;
+	/* issue #334: when this child's php_request_startup() began, for
+	 * worker.max_lifetime to compare "now" against. time(NULL) has
+	 * second-granularity, which matches worker.max_lifetime's own unit. */
+	time_t start_time;
 	/* issue #333: this child's shared-memory handle for the pending/watcher
 	 * gauges the operator endpoint reads (fpm_http_direct_worker_metrics.c).
 	 * NULL is a valid value throughout -- fpm_worker_metrics_publish() is a
@@ -324,6 +347,16 @@ int fpm_http_direct_worker_validate(struct fpm_worker_pool_s *wp)
 	/* worker.request_timeout is milliseconds and fpm_conf_set_integer() already
 	 * refuses a negative value (see its "greater or equal than zero" message),
 	 * so there is nothing left to check here: 0 is the valid "off". */
+	/* issue #334: worker.max_memory is bytes, parsed by fpm_conf_set_bytes()
+	 * into a size_t -- there is no negative value to reject, the same bar
+	 * supervisor.max_memory clears (fpm_pool_supervisor.c has no validation
+	 * for it either). worker.max_lifetime is seconds, parsed by
+	 * fpm_conf_set_time() into a signed int; clamped to 0 ("off") rather than
+	 * rejected outright, the same way fpm_pool_supervisor_validate() clamps a
+	 * negative supervisor.max_runtime instead of failing startup over it. */
+	if (c->worker_max_lifetime < 0) {
+		c->worker_max_lifetime = 0;
+	}
 	return 0;
 }
 
@@ -808,6 +841,75 @@ static void fpm_worker_sweep_expired(evutil_socket_t fd, short events, void *arg
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u request(s) exceeded worker.request_timeout(%d ms); "
 			"answering 504 Gateway Timeout",
 			fw.wp->config->name, expired, fw.wp->config->worker_request_timeout);
+	}
+}
+
+/* This process's own peak resident set size, in bytes, for worker.max_memory
+ * (issue #334). Identical to fpm_pool_supervisor_memory_bytes()
+ * (fpm_pool_supervisor.c, issue #324) -- not shared between the two files
+ * because this executor and the supervisor pool type do not otherwise share
+ * any code, and the whole function is three lines wrapping one syscall.
+ * getrusage(RUSAGE_SELF).ru_maxrss is a monotonically non-decreasing
+ * high-water mark -- exactly what a one-way "has this process outgrown its
+ * budget" check needs -- and its unit differs by platform: Linux (the target
+ * platform) reports kilobytes, Darwin/macOS (a local dev build) reports
+ * bytes. Both are converted to bytes here so worker.max_memory (parsed by
+ * fpm_conf_set_bytes(), also bytes) never has to know which platform it is
+ * running on. */
+static size_t fpm_worker_memory_bytes(void)
+{
+	struct rusage ru;
+
+	if (getrusage(RUSAGE_SELF, &ru) != 0) {
+		return 0;
+	}
+#ifdef __APPLE__
+	return (size_t) ru.ru_maxrss;
+#else
+	return (size_t) ru.ru_maxrss * 1024;
+#endif
+}
+
+/* worker.max_memory/worker.max_lifetime (issue #334): fw.health_sweep's
+ * callback, armed whenever either directive is non-zero (see the field
+ * comment on FPM_WORKER_HEALTH_SWEEP_INTERVAL_SEC). Trips the exact same
+ * graceful stop pm.max_requests uses -- fpm_worker_stopping = 1, notify, let
+ * the worker script drain and exit on its own -- never a kill: this executor
+ * has no per-request state isolation, so a kill mid-flight would lose
+ * whatever the worker was holding, exactly the outcome worker.request_timeout
+ * and worker.max_pending's own drains already avoid. */
+static void fpm_worker_health_sweep(evutil_socket_t fd, short events, void *arg)
+{
+	size_t memory_bytes;
+	long lifetime_sec;
+
+	(void) fd;
+	(void) events;
+	(void) arg;
+
+	if (fpm_worker_stopping) {
+		return;
+	}
+	if (fw.wp->config->worker_max_memory > 0) {
+		memory_bytes = fpm_worker_memory_bytes();
+		if (memory_bytes >= fw.wp->config->worker_max_memory) {
+			zlog(ZLOG_NOTICE, "[pool %s] http-direct worker: memory usage %zu bytes reached "
+				"worker.max_memory = %zu bytes, recycling the worker",
+				fw.wp->config->name, memory_bytes, fw.wp->config->worker_max_memory);
+			fpm_worker_stopping = 1;
+			fpm_worker_notify();
+			return;
+		}
+	}
+	if (fw.wp->config->worker_max_lifetime > 0) {
+		lifetime_sec = (long) (time(NULL) - fw.start_time);
+		if (lifetime_sec >= fw.wp->config->worker_max_lifetime) {
+			zlog(ZLOG_NOTICE, "[pool %s] http-direct worker: lifetime %ld s reached "
+				"worker.max_lifetime = %d s, recycling the worker",
+				fw.wp->config->name, lifetime_sec, fw.wp->config->worker_max_lifetime);
+			fpm_worker_stopping = 1;
+			fpm_worker_notify();
+		}
 	}
 }
 
@@ -2184,6 +2286,23 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 			exit(FPM_EXIT_SOFTWARE);
 		}
 	}
+	/* issue #334: worker.max_memory/worker.max_lifetime, 0/0 = off. Armed
+	 * whenever EITHER is non-zero, unlike worker.request_timeout_sweep above:
+	 * that timer's own interval is derived from the one directive it serves,
+	 * so it is simply absent when that directive is 0 and cannot double as
+	 * this check's clock. fw.start_time is stamped here too, right before the
+	 * timer that reads it back. */
+	fw.start_time = time(NULL);
+	if (wp->config->worker_max_memory > 0 || wp->config->worker_max_lifetime > 0) {
+		struct timeval health_tv = {FPM_WORKER_HEALTH_SWEEP_INTERVAL_SEC, 0};
+
+		fw.health_sweep = event_new(fw.base, -1, EV_PERSIST, fpm_worker_health_sweep, NULL);
+		if (!fw.health_sweep || event_add(fw.health_sweep, &health_tv) < 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http-direct worker: failed to arm the worker.max_memory/"
+				"worker.max_lifetime health sweep", wp->config->name);
+			exit(FPM_EXIT_SOFTWARE);
+		}
+	}
 	/* Strictly before the sigaction() below: the handler writes to
 	 * fw.notify_write, and until the pipe exists that field must be a
 	 * descriptor fpm_worker_notify() refuses rather than fd 0. */
@@ -2342,6 +2461,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	if (fw.request_timeout_sweep) {
 		event_free(fw.request_timeout_sweep);
 		fw.request_timeout_sweep = NULL;
+	}
+	/* issue #334: same reasoning as request_timeout_sweep just above. */
+	if (fw.health_sweep) {
+		event_free(fw.health_sweep);
+		fw.health_sweep = NULL;
 	}
 	/* Strictly before zend_hash_destroy(&fw.pending). evhttp_free() closes the
 	 * still-open server connections and *does* fire their close callbacks;

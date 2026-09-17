@@ -283,6 +283,29 @@ struct fpm_worker_pool_config_s {
 	 * docs/http-direct.md). size_t, not int: fpm_conf_set_bytes() (the same
 	 * setter http.max_body uses) always stores a size_t at this offset. */
 	size_t worker_send_buffer_limit;
+	/* fpm-ng: pool.executor = worker, the worker.* equivalent of
+	 * supervisor.max_memory (issue #324) -- see fpm_http_direct_worker.c.
+	 * pm.max_requests only counts ANSWERED requests, which a worker holding a
+	 * long-poll or SSE stream (issue #332) can go a long time between, so a
+	 * per-request leak that would otherwise eventually be caught by
+	 * pm.max_requests can instead run unbounded in this executor's single
+	 * long-lived process. Checked by a periodic health-check timer,
+	 * independent of worker.request_timeout's own sweep (that one is armed
+	 * only when the directive is non-zero, so it is not reliably running); a
+	 * trip stops the worker the same graceful way pm.max_requests does --
+	 * drain, then exit, then the master respawns -- never a kill. 0 =
+	 * disabled (default), bytes, same K/M/G suffix as http.max_body
+	 * (issue #334). */
+	size_t worker_max_memory;
+	/* fpm-ng: pool.executor = worker, the worker.* equivalent of
+	 * supervisor.max_runtime (issue #326), but bounding the whole worker's
+	 * lifetime rather than one iteration and stopping it gracefully rather
+	 * than killing it -- see the field comment on worker_max_memory just
+	 * above for why a worker needs its own recycle trigger beyond
+	 * pm.max_requests. Checked by the same periodic timer as
+	 * worker_max_memory. 0 = disabled (default), seconds, same suffix
+	 * convention as supervisor.max_runtime (issue #334). */
+	int worker_max_lifetime;
 	struct key_value_s *env;
 	struct key_value_s *php_admin_values;
 	struct key_value_s *php_values;

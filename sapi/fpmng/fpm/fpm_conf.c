@@ -231,6 +231,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "worker.max_pending",        &fpm_conf_set_integer,     WPO(worker_max_pending) },
 	{ "worker.request_timeout",    &fpm_conf_set_integer,     WPO(worker_request_timeout) },
 	{ "worker.send_buffer_limit",  &fpm_conf_set_bytes,       WPO(worker_send_buffer_limit) },
+	{ "worker.max_memory",         &fpm_conf_set_bytes,       WPO(worker_max_memory) },
+	{ "worker.max_lifetime",       &fpm_conf_set_time,        WPO(worker_max_lifetime) },
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
@@ -990,6 +992,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->worker_max_pending = FPM_WORKER_PENDING_MAX;	/* fpm-ng: issue #331, see fpm_http_direct_worker.h */
 	wp->config->worker_request_timeout = 0;	/* fpm-ng: issue #331, 0 = off (today's behavior) */
 	wp->config->worker_send_buffer_limit = 0;	/* fpm-ng: issue #332, 0 = off (no backpressure bound) */
+	wp->config->worker_max_memory = 0;	/* fpm-ng: issue #334, 0 = off (no memory-triggered recycle) */
+	wp->config->worker_max_lifetime = 0;	/* fpm-ng: issue #334, 0 = off (no lifetime-triggered recycle) */
 #ifdef SO_SETFIB
 	wp->config->listen_setfib = -1;
 #endif

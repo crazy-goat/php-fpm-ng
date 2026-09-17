@@ -223,6 +223,22 @@ expectConfigFailure(
     ["'worker.send_buffer_limit' is not supported by pool.type = http-direct with pool.executor = classic"]
 );
 
+/* issue #334. worker.max_memory/worker.max_lifetime mean something only under
+ * pool.executor = worker, the same reasoning as worker.send_buffer_limit
+ * just above. */
+expectConfigFailure(
+    'direct-classic-worker-max-memory',
+    str_replace('pool.executor = worker', 'pool.executor = classic', $workerBase)
+        . "\nworker.max_memory = 64M",
+    ["'worker.max_memory' is not supported by pool.type = http-direct with pool.executor = classic"]
+);
+
+expectConfigFailure(
+    'http-worker-max-lifetime-directive-on-classic',
+    $base . "\npool.type = http\nworker.max_lifetime = 60",
+    ["'worker.max_lifetime' is not supported by pool.type = http"]
+);
+
 expectConfigFailure(
     'direct-worker-missing-script',
     str_replace('/worker.php', '/absent.php', $workerBase) . "\nphp_admin_value[max_execution_time] = 0",
@@ -279,6 +295,8 @@ direct-worker-max-pending-zero: rejected
 direct-classic-worker-max-pending: rejected
 http-worker-directive-on-classic: rejected
 direct-classic-worker-send-buffer-limit: rejected
+direct-classic-worker-max-memory: rejected
+http-worker-max-lifetime-directive-on-classic: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected

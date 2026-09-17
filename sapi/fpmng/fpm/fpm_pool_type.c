@@ -223,6 +223,11 @@ static const char *const fpm_http_direct_worker_accepts[] = {
 	 * queue fpmng_worker_respond_chunk() may build up; meaningless anywhere
 	 * else, same reasoning as the two directives above it. */
 	"worker.send_buffer_limit",
+	/* issue #334: worker.max_memory/worker.max_lifetime, the worker.*
+	 * equivalent of supervisor.max_memory/supervisor.max_runtime -- meaningless
+	 * anywhere else, same reasoning as the directives above them. */
+	"worker.max_memory",
+	"worker.max_lifetime",
 	NULL
 };
 

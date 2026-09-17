@@ -1398,8 +1398,10 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 
 	/* fpmng_supervisor_heartbeat() (issue #327): has_heartbeat is "the script
 	 * has ever called it", not "recently" -- a renderer computes the age
-	 * itself against time(NULL), exactly like uptime/backoff_seconds above,
-	 * rather than this file deciding what counts as stuck. */
+	 * itself against FPM_NOW(), exactly like uptime/backoff_seconds above,
+	 * rather than this file deciding what counts as stuck. The renderer has to
+	 * use FPM_NOW() and not time(NULL), because the stamp below is written on
+	 * that same clock (issue #396). */
 	if (shared->last_heartbeat != 0) {
 		out->has_heartbeat = 1;
 		out->last_heartbeat = shared->last_heartbeat;

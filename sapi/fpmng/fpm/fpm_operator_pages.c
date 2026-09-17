@@ -44,6 +44,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
 #include "fpm_metrics.h"
+#include "fpm_debug_clock.h"
 #include "php_fpmng_metrics.h"
 #include "zlog.h"
 
@@ -184,7 +185,13 @@ static void fpm_operator_page_row_prometheus_live(struct fpm_operator_buf_s *b, 
 static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
 {
 	static const char *const states[] = { "running", "backoff", "gave_up", "finished", "idle" };
-	time_t now = time(NULL);
+	/* FPM_NOW(), not time(NULL) (issue #396): every stamp this function
+	 * subtracts from -- last_start, backoff_until, last_heartbeat -- is written
+	 * by the pool code on the scaled clock. Reading the real one here would mix
+	 * the two: under FPMNG_DEBUG_CLOCK_RATE the virtual clock runs ahead, so
+	 * uptime and heartbeat_age would clamp to 0 and backoff_seconds would be
+	 * inflated by the whole drift. With the flag off this IS time(NULL). */
+	time_t now = FPM_NOW();
 	size_t i;
 
 	fpm_operator_buf_appendf(b, "fpmng_pool_info{pool=\"%s\",type=\"%s\"} 1\n", row->name, row->type_name);
@@ -342,7 +349,13 @@ static void fpm_operator_page_row_json_live(struct fpm_operator_buf_s *b, const 
 
 static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struct fpm_operator_page_row_s *row) /* {{{ */
 {
-	time_t now = time(NULL);
+	/* FPM_NOW(), not time(NULL) (issue #396): every stamp this function
+	 * subtracts from -- last_start, backoff_until, last_heartbeat -- is written
+	 * by the pool code on the scaled clock. Reading the real one here would mix
+	 * the two: under FPMNG_DEBUG_CLOCK_RATE the virtual clock runs ahead, so
+	 * uptime and heartbeat_age would clamp to 0 and backoff_seconds would be
+	 * inflated by the whole drift. With the flag off this IS time(NULL). */
+	time_t now = FPM_NOW();
 
 	/* The baseline counter's JSON key is the short name the type chose, which is
 	 * why "requests" below is not written out: on a request-serving pool that IS

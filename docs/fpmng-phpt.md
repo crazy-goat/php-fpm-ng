@@ -95,7 +95,8 @@ Some behaviour can only be observed after real time passes, and the test cannot
 shorten the wait. `cron.schedule` is plain five-field crontab syntax, so its
 finest resolution is one minute; `cron.expect_within` is only meaningful once the
 schedule's *next* occurrence has passed, which is one tick plus a further minute.
-Four tests were spending about 150 seconds of the suite's wall clock this way.
+Five tests were spending well over a hundred seconds of the suite's wall clock
+this way.
 
 A binary configured with `--enable-fpmng-debug-clock` honours
 `FPMNG_DEBUG_CLOCK_RATE`, an integer from 1 to 600, and runs **both**
@@ -144,8 +145,8 @@ Three rules this facility lives by:
   | `fpmng-cron-schedule` | 40.0 | **yes** | asserts only that the marker exists; the `gmdate('c')` it writes is never compared |
   | `fpmng-baseline-counters-cron` | 2.0 / 40.1 | **yes** | asserts only on master-produced figures (the `fpmng_pool_runs_total` series and the status page) |
   | `fpmng-supervisor-jitter` | 25.1 | no | same as cron-jitter, on `microtime(true)` deltas written by the iteration script |
-  | `fpmng-supervisor-max-memory` | 14.7 | no | waits for a worker to grow, not for the clock; nothing to scale |
-  | `fpmng-supervisor-reload-rolling` | 12.5 | no | the settling window is measured by the test process with `microtime(true)` |
+  | `fpmng-supervisor-max-memory` | 14.7 | no | almost all of it is a 15 s negative-proof budget in the *test* process; the recycle itself is instant |
+  | `fpmng-supervisor-reload-rolling` | 12.5 | no | 10 of it is `supervisor.stop_timeout`, spent in the watchdog, which counts real seconds by design |
   | `fpmng-cron-expect-within` | 12.3 | **yes** | asserts on master log patterns only |
   | `fpmng-cron-stop-signal` | 6.0 | **yes** | asserts on master log patterns only |
   | `fpmng-supervisor-heartbeat` | 5.9 | no | its `heartbeat_age` threshold is calibrated against a script whose own `usleep()` is real |
@@ -156,7 +157,22 @@ Three rules this facility lives by:
   these tests add variance to the suite's duration and not just time. At rate 10
   the lottery is 0-6 s.
 
-  Accelerating any of the four "no" rows needs the assertion rewritten to read a
+  Two of those "no" rows are cheap to fix without the clock at all, and the
+  reasons above are why. `fpmng-supervisor-reload-rolling` pays
+  `supervisor.stop_timeout` because the survivor the reload spares runs an
+  unconditional `for (;;)`: it never returns to the signal handler that the
+  retiring kill set a flag in, so the pool's watchdog ends it with SIGKILL ten
+  seconds later, and `fpm_pool_watchdog.c` counts those seconds with a plain
+  `sleep(1)` on purpose -- a watchdog that a test environment variable could
+  speed up would not be a watchdog. Setting `supervisor.stop_timeout = 1` in
+  the test's own config recovers most of it. `fpmng-supervisor-max-memory`
+  spends its budget proving `restart = never` does not restart; the master says
+  so positively in the error log ("restart = never -> not restarting"), which
+  the test already reads, so waiting for that line and keeping a short negative
+  window afterwards recovers most of it. Both are test design, tracked
+  separately from this facility.
+
+  Accelerating any of the four "no" rows by *clock* needs the assertion rewritten to read a
   master-measured figure first -- the way `fpmng-cron-jitter` already cross-checks
   the operator status page against the child's recorded offset. That is a
   separate piece of work, not a rate in an `--ENV--` section.
@@ -169,6 +185,26 @@ not an integer in range logs a `WARNING` and falls back to real speed.
 Two clock readings are deliberately **not** scaled: the `clock_gettime()` calls
 in `fpm_pool_cron.c` and `fpm_pool_supervisor.c` that exist only as hash entropy
 mixed with `getpid()`. They measure nothing.
+
+A stamp and the reading it is subtracted from must come from the **same** clock,
+and the operator page is where that is easy to get wrong. `uptime`,
+`backoff_seconds` and `heartbeat_age` are not stored; each renderer in
+`fpm_operator_pages.c` derives them at render time from `last_start`,
+`backoff_until` and `last_heartbeat`, all three of which the pool code writes
+with `FPM_NOW()`. So the renderers read `FPM_NOW()` too. They used to read
+`time(NULL)`, which was correct only at rate 1: under any higher rate the
+virtual clock runs ahead of the real one, so `uptime` and `heartbeat_age` would
+have clamped to 0 and `backoff_seconds` would have been inflated by the whole
+drift -- a silently wrong number on a page a test asserts against, not a
+failure. None of the five converted tests read those three fields, so nothing
+was reporting wrongly; it was found by audit, not by a red test.
+
+The gateway and the HTTP worker are the other half of the rule, and they are
+consistent the other way: `fpm_http_direct_worker.c` writes `fw.start_time` with
+`time(NULL)` and compares it against `time(NULL)`, and the access logs format
+wall-clock time, which must stay real. That path is not scaled at all -- both
+sides of every comparison in it are real -- so a test of it cannot be
+accelerated, but neither can it be made inconsistent.
 
 ## Excluding a test from the runner
 

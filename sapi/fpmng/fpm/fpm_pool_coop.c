@@ -48,6 +48,7 @@ const char *const fpm_coop_rejects[] = {
 	"request_slowlog_trace_depth",
 	"slowlog",
 	"ping.",				/* fpm_main.c's loop handles ping, not us */
+	"worker.",				/* worker.* means pool.executor = worker, a different executor entirely (issue #331) */
 	NULL
 };
 

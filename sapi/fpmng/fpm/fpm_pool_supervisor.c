@@ -96,6 +96,7 @@ const char *const fpm_pool_supervisor_rejects[] = {
 	"security.limit_extensions",
 	"http.",
 	"fiber.",
+	"worker.",
 	NULL
 };
 

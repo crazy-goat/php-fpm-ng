@@ -50,6 +50,7 @@ const char *const fpm_operator_endpoint_rejects[] = {
 	"cron.",
 	"http.",
 	"fiber.",
+	"worker.",
 	NULL
 };
 

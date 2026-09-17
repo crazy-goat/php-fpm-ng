@@ -68,9 +68,18 @@ struct fpm_http_direct_labels {
  * pm.status_path on the pool's own listener was supported by the classic
  * executor between issues #59 and #275; it is now answered on the operator
  * listener instead, unchanged. The worker executor rejects it still (see
- * fpm_http_direct_worker_rejects) for reasons of its own. */
+ * fpm_http_direct_worker_rejects) for reasons of its own.
+ *
+ * worker. is here too (issue #331): worker.max_pending and
+ * worker.request_timeout mean something only under pool.executor = worker, so
+ * the classic executor rejects the whole namespace like it does fiber.'s. The
+ * worker executor's own rejects array (fpm_http_direct_worker_rejects) starts
+ * from this same macro and carves the two directives back out via
+ * .reject_exceptions on fpm_http_direct_worker's fpm_pool_type_s entry
+ * (fpm_pool_type.c) -- the established mechanism for "reject a whole prefix,
+ * name the exceptions", see fpm_pool_type.h. */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON \
-	"fiber.", "supervisor.", "cron."
+	"fiber.", "supervisor.", "cron.", "worker."
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

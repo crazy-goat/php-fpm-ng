@@ -75,10 +75,9 @@
 #include "zlog.h"
 
 #define FPM_WORKER_BODY_MAX (8 * 1024 * 1024)
-/* Bounds the memory a client burst can pin in accepted-but-unanswered
- * requests. Beyond it the transport answers 503 itself, as the gateway does
- * when its worker budget is exhausted (fpm_http.c:153-155). */
-#define FPM_WORKER_PENDING_MAX 256
+/* FPM_WORKER_PENDING_MAX (the compile-time default for worker.max_pending) is
+ * declared in fpm_http_direct_worker.h, not here: fpm_conf.c needs it too, to
+ * seed the directive's default before the pool's config is parsed. */
 /* One year, in seconds. Any longer timer is indistinguishable from "never" for
  * a worker process, and this keeps a non-finite or absurd userland timeout out
  * of struct timeval. */
@@ -89,6 +88,13 @@
  * on its own stop timeout at this point, and losing the reply is no worse than
  * the silent close this whole path exists to prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
+/* worker.request_timeout's sweep runs more often than the timeout itself so
+ * that an expired request is caught within one sweep interval of its
+ * deadline, not one whole timeout period late. Floored so a short timeout
+ * (the 200 ms sapi/fpmng/tests case, for one) still sweeps at a sane rate
+ * instead of every 50 ms / DIVISOR = 12.5, rounded down to single-digit ms. */
+#define FPM_WORKER_REQUEST_TIMEOUT_SWEEP_DIVISOR 4
+#define FPM_WORKER_REQUEST_TIMEOUT_SWEEP_FLOOR_MS 25
 
 /* Watcher kinds accepted by fpmng_worker_event_create(). Mirrors what
  * Revolt's AbstractDriver activates (readable/writable streams and timers);
@@ -114,6 +120,12 @@
 struct fpm_worker_pending {
 	struct evhttp_request *http;	/* NULL after the connection died */
 	zend_ulong id;
+	/* issue #331: when fpm_worker_accept() queued this entry, for
+	 * worker.request_timeout's sweep (fpm_worker_sweep_expired()) to compare
+	 * against "now". gettimeofday(), the same call fpm_http_direct_conn.c:421
+	 * already makes to stamp a connection's accept time -- this file has no
+	 * cached libevent clock of its own to reuse instead. */
+	struct timeval accepted_at;
 };
 
 struct fpm_worker_watcher {
@@ -159,7 +171,13 @@ static struct {
 	HashTable pending;		/* id -> struct fpm_worker_pending * */
 	HashTable watchers;		/* id -> struct fpm_worker_watcher * */
 	zend_ulong next_id;
-	zend_ulong ready[FPM_WORKER_PENDING_MAX];	/* FIFO of ids not yet handed to PHP */
+	/* issue #331: FIFO of ids not yet handed to PHP, ring-buffered over
+	 * ready_max slots. Sized once in child_main() from
+	 * wp->config->worker_max_pending (pemalloc'd, since the rest of this
+	 * struct's owned allocations are persistent too) and freed on every exit
+	 * path child_main() has -- see the pefree() next to evhttp_free() there. */
+	zend_ulong *ready;
+	unsigned ready_max;
 	unsigned ready_head;
 	unsigned ready_count;
 	unsigned answered;
@@ -167,6 +185,20 @@ static struct {
 	 * the shutdown path reads it; see fpm_worker_finish_output(). */
 	unsigned unflushed;
 	bool running;
+	/* issue #331: worker.request_timeout. NULL when the directive is 0 (off) --
+	 * "off means off", not a sweep that runs and never expires anything -- and
+	 * otherwise a persistent libevent timer re-armed by
+	 * fpm_worker_sweep_expired() itself, one sweep over fw.pending rather than
+	 * one libevent timer per pending request: up to worker.max_pending (default
+	 * 256) requests can be held at once, and re-arming 256 individual one-shot
+	 * timers on every accept/respond is 256 event_add()s of bookkeeping this
+	 * file does not otherwise need, against one periodic timer whose callback
+	 * is O(pending) either way (fpm_worker_finish_output() already walks the
+	 * whole table). This file already has precedent for a periodic deadline
+	 * timer over a per-entry one -- fpm_worker_flush_deadline() bounds
+	 * fpm_worker_finish_output()'s whole wait with a single timer rather than
+	 * one per unflushed reply. */
+	struct event *request_timeout_sweep;
 } fw;
 
 static volatile sig_atomic_t fpm_worker_stopping;
@@ -259,6 +291,18 @@ int fpm_http_direct_worker_validate(struct fpm_worker_pool_s *wp)
 			c->name, timeout);
 		return -1;
 	}
+	/* issue #331: the ring buffer fw.ready[] is sized from this value once, in
+	 * child_main(), so a value that reached the child unchecked would either
+	 * allocate nothing (0) or wrap the modulo arithmetic into never accepting
+	 * anything -- checked here, at the same master-side validation point as
+	 * every other pool.* bound, rather than defended against in the child. */
+	if (c->worker_max_pending <= 0) {
+		zlog(ZLOG_ALERT, "[pool %s] worker.max_pending(%d) must be a positive value", c->name, c->worker_max_pending);
+		return -1;
+	}
+	/* worker.request_timeout is milliseconds and fpm_conf_set_integer() already
+	 * refuses a negative value (see its "greater or equal than zero" message),
+	 * so there is nothing left to check here: 0 is the valid "off". */
 	return 0;
 }
 
@@ -440,30 +484,34 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 			return;
 		}
 	}
-	if (fpm_worker_stopping || fw.ready_count >= FPM_WORKER_PENDING_MAX ||
-		zend_hash_num_elements(&fw.pending) >= FPM_WORKER_PENDING_MAX) {
+	if (fpm_worker_stopping || fw.ready_count >= fw.ready_max ||
+		zend_hash_num_elements(&fw.pending) >= fw.ready_max) {
 		/* No "Connection: close" of our own: evhttp_send_error() clears the
 		 * output headers and sets it itself. */
 		fpm_worker_send_error(http, 503, "Worker unavailable");
 		/* Saturation must not be permanent. A pending entry is removed only by
-		 * fpmng_worker_respond(), so a handler that returns without answering
-		 * burns its slot for the life of the worker; after
-		 * FPM_WORKER_PENDING_MAX such leaks every later request would get 503
+		 * fpmng_worker_respond() or, once it expires, by
+		 * fpm_worker_sweep_expired() -- so a handler that returns without
+		 * answering AND never times out (worker.request_timeout = 0, still the
+		 * default) burns its slot for the life of the worker; after
+		 * worker.max_pending such leaks every later request would get 503
 		 * forever, and nothing would notice — request_terminate_timeout is
 		 * rejected by this executor and pm.max_requests only counts answered
 		 * requests. Ask for a graceful stop instead: in-flight work drains,
 		 * the child exits, the master respawns it. A genuine burst of more
-		 * than FPM_WORKER_PENDING_MAX concurrent requests therefore recycles
-		 * the worker as well; that is the same drain pm.max_requests performs,
+		 * than worker.max_pending concurrent requests therefore recycles the
+		 * worker as well; that is the same drain pm.max_requests performs,
 		 * and the pool is already answering 503 at that point. The cost of
-		 * that choice -- 256 deliberately held long-polls are lost with the
-		 * worker -- is the documented contract of this mode, not an accident:
-		 * see "Held requests under pool.executor = worker" in
-		 * docs/http-direct.md (issue #184). */
+		 * that choice -- worker.max_pending deliberately held long-polls are
+		 * lost with the worker -- is the documented contract of this mode,
+		 * not an accident: see "Held requests under pool.executor = worker" in
+		 * docs/http-direct.md (issue #184), and worker.request_timeout
+		 * (issue #331) for the lever that keeps a stuck handler from reaching
+		 * this ceiling at all. */
 		if (!fpm_worker_stopping) {
-			zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %d requests accepted but unanswered; "
+			zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u requests accepted but unanswered; "
 				"answering 503 and asking the worker script to stop so the master can respawn it",
-				fw.wp->config->name, FPM_WORKER_PENDING_MAX);
+				fw.wp->config->name, fw.ready_max);
 			fpm_worker_stopping = 1;
 			fpm_worker_notify();
 		}
@@ -476,8 +524,9 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	p = pemalloc(sizeof(*p), 1);
 	p->http = http;
 	p->id = fw.next_id++;
+	gettimeofday(&p->accepted_at, NULL);
 	zend_hash_index_add_new_ptr(&fw.pending, p->id, p);
-	fw.ready[(fw.ready_head + fw.ready_count) % FPM_WORKER_PENDING_MAX] = p->id;
+	fw.ready[(fw.ready_head + fw.ready_count) % fw.ready_max] = p->id;
 	fw.ready_count++;
 	/* evhttp serves one request per connection at a time, so at most one
 	 * pending request per connection can be waiting for a close notice. */
@@ -577,6 +626,85 @@ static void fpm_worker_finish_output(void)
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u response(s) were still unwritten after %d s; "
 			"those connections are closed without a reply",
 			fw.wp->config->name, fw.unflushed, FPM_WORKER_FLUSH_BUDGET);
+	}
+}
+
+/* worker.request_timeout (issue #331): fw.request_timeout_sweep's callback,
+ * armed only when the directive is non-zero. Runs every
+ * FPM_WORKER_REQUEST_TIMEOUT_SWEEP_DIVISOR'th of the timeout and answers 504
+ * to any pending entry whose accepted_at is old enough, then reaps it exactly
+ * like fpmng_worker_respond() does on the happy path.
+ *
+ * ids are snapshotted first, the same defensive shape
+ * fpm_worker_activate_buffered() uses for fw.watchers: fpm_worker_send_error()
+ * calls evhttp_send_error(), which can run this same event base's other
+ * pending callbacks synchronously in some libevent versions' bufferevent
+ * paths, so a plain ZEND_HASH_FOREACH over fw.pending while reaping entries
+ * out of it under the same walk would be modifying the table the iterator is
+ * still holding. */
+static void fpm_worker_sweep_expired(evutil_socket_t fd, short events, void *arg)
+{
+	struct timeval now;
+	zend_ulong *ids;
+	uint32_t count = 0, i;
+	zend_ulong id;
+	unsigned expired = 0;
+
+	(void) fd;
+	(void) events;
+	(void) arg;
+
+	if (zend_hash_num_elements(&fw.pending) == 0) {
+		return;
+	}
+	gettimeofday(&now, NULL);
+	ids = safe_emalloc(zend_hash_num_elements(&fw.pending), sizeof(zend_ulong), 0);
+	ZEND_HASH_FOREACH_NUM_KEY(&fw.pending, id) {
+		ids[count++] = id;
+	} ZEND_HASH_FOREACH_END();
+
+	for (i = 0; i < count; i++) {
+		struct fpm_worker_pending *p = zend_hash_index_find_ptr(&fw.pending, ids[i]);
+		long elapsed_ms;
+
+		/* Gone already (answered, closed, or reaped by an earlier iteration of
+		 * this same sweep) -- matches how fpm_worker_conn_closed()'s NULL
+		 * leaves an entry for a later reader to skip rather than assuming it
+		 * is still live. */
+		if (!p || !p->http) {
+			continue;
+		}
+		elapsed_ms = (now.tv_sec - p->accepted_at.tv_sec) * 1000L +
+			(now.tv_usec - p->accepted_at.tv_usec) / 1000L;
+		if (elapsed_ms < fw.wp->config->worker_request_timeout) {
+			continue;
+		}
+		/* Same shape as the saturation and shutdown 503 paths: drop the close
+		 * callback before handing the request to libevent, since a later
+		 * close on this connection must not reach a pending entry we are
+		 * about to reap. */
+		evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
+		fpm_worker_send_error(p->http, 504, "Gateway Timeout");
+		p->http = NULL;
+		fpm_worker_reap(p);
+		expired++;
+		/* fw.ready still holds this id -- reclaimed the next time
+		 * fpmng_worker_next_request() dequeues it and finds nothing in
+		 * fw.pending, the same lazy path an already-closed connection's id
+		 * takes there. worker.max_pending's saturation check ORs fw.ready_count
+		 * with zend_hash_num_elements(&fw.pending), and the reap above already
+		 * shrank the latter, so a timed-out request stops counting against the
+		 * ceiling as soon as its id is drained -- not held forever the way an
+		 * unanswered, non-expiring leak would be. */
+	}
+	efree(ids);
+	if (expired) {
+		/* Not permanent: unlike the worker.max_pending 503 path above, a
+		 * timeout answers and frees exactly the requests that overstayed --
+		 * everything else keeps running, so the worker is not asked to stop. */
+		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u request(s) exceeded worker.request_timeout(%d ms); "
+			"answering 504 Gateway Timeout",
+			fw.wp->config->name, expired, fw.wp->config->worker_request_timeout);
 	}
 }
 
@@ -924,7 +1052,7 @@ static ZEND_FUNCTION(fpmng_worker_next_request)
 	ZEND_PARSE_PARAMETERS_NONE();
 	while (fw.ready_count) {
 		id = fw.ready[fw.ready_head];
-		fw.ready_head = (fw.ready_head + 1) % FPM_WORKER_PENDING_MAX;
+		fw.ready_head = (fw.ready_head + 1) % fw.ready_max;
 		fw.ready_count--;
 		/* Skip anything whose client vanished while it sat in the queue: a
 		 * handler must not be started for a connection that cannot be
@@ -1652,6 +1780,35 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	}
 	zend_hash_init(&fw.pending, 16, NULL, fpm_worker_pending_dtor, 1);
 	zend_hash_init(&fw.watchers, 16, NULL, fpm_worker_watcher_dtor, 1);
+	/* issue #331: worker.max_pending, validated > 0 in
+	 * fpm_http_direct_worker_validate(). Sized once, here, rather than at
+	 * every fpm_worker_accept() -- the config never changes for the life of
+	 * this child. */
+	fw.ready_max = (unsigned) wp->config->worker_max_pending;
+	fw.ready = pemalloc(fw.ready_max * sizeof(*fw.ready), 1);
+	/* issue #331: worker.request_timeout, 0 = off. No timer at all in that
+	 * case -- see the field comment on fw.request_timeout_sweep for why this
+	 * is one periodic sweep rather than one timer per pending request. The
+	 * sweep interval is a quarter of the timeout (floored, so a very short
+	 * timeout still gets checked often enough to matter) rather than the
+	 * timeout itself, trading a bit of extra wakeups for a worst-case overshoot
+	 * of one sweep interval instead of one whole timeout period. */
+	if (wp->config->worker_request_timeout > 0) {
+		int sweep_ms = wp->config->worker_request_timeout / FPM_WORKER_REQUEST_TIMEOUT_SWEEP_DIVISOR;
+		struct timeval sweep_tv;
+
+		if (sweep_ms < FPM_WORKER_REQUEST_TIMEOUT_SWEEP_FLOOR_MS) {
+			sweep_ms = FPM_WORKER_REQUEST_TIMEOUT_SWEEP_FLOOR_MS;
+		}
+		sweep_tv.tv_sec = sweep_ms / 1000;
+		sweep_tv.tv_usec = (sweep_ms % 1000) * 1000;
+		fw.request_timeout_sweep = event_new(fw.base, -1, EV_PERSIST, fpm_worker_sweep_expired, NULL);
+		if (!fw.request_timeout_sweep || event_add(fw.request_timeout_sweep, &sweep_tv) < 0) {
+			zlog(ZLOG_ERROR, "[pool %s] http-direct worker: failed to arm the worker.request_timeout sweep",
+				wp->config->name);
+			exit(FPM_EXIT_SOFTWARE);
+		}
+	}
 	/* Strictly before the sigaction() below: the handler writes to
 	 * fw.notify_write, and until the pipe exists that field must be a
 	 * descriptor fpm_worker_notify() refuses rather than fd 0. */
@@ -1795,6 +1952,15 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * the base itself, and a userland watcher still registered there would
 	 * call into PHP after the worker script has already returned. */
 	fpm_worker_finish_output();
+	/* After finish_output(), which may still drive the base and therefore let
+	 * this fire once more; before event_base_free() below, which the event
+	 * must be freed ahead of. Harmless either way since fw.pending is still
+	 * alive here, but nothing is left for it to check once every remaining
+	 * entry is about to be destroyed unanswered. */
+	if (fw.request_timeout_sweep) {
+		event_free(fw.request_timeout_sweep);
+		fw.request_timeout_sweep = NULL;
+	}
 	/* Strictly before zend_hash_destroy(&fw.pending). evhttp_free() closes the
 	 * still-open server connections and *does* fire their close callbacks;
 	 * measured against libevent 2.1: "before evhttp_free, got_closecb=0" /
@@ -1810,6 +1976,9 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	fpm_http_direct_conns_free(fw.conns);
 	evhttp_free(fw.http);
 	zend_hash_destroy(&fw.pending);
+	/* issue #331: the ring buffer allocated in the setup above, next to the
+	 * table it indexes into -- freed here for the same reason, not before. */
+	pefree(fw.ready, 1);
 	php_request_shutdown(NULL);
 	sigaction(SIGTERM, &term_before, NULL);
 	SG(server_context) = NULL;

@@ -30,15 +30,19 @@
 
 /* http.* tunes the gateway, which starts only under pool.type = http — on every
  * other type these directives have nothing to tune. fiber.* applies only to
- * pool.executor = fiber (fpm_coop_rejects does not include it). */
+ * pool.executor = fiber (fpm_coop_rejects does not include it). worker.*
+ * applies only to pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
+ * further down carves its two directives back out on that one type. */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
 	"fiber.",
+	"worker.",
 	NULL
 };
 
 static const char *const fpm_pool_http_classic_rejects[] = {
 	"fiber.",
+	"worker.",
 	NULL
 };
 
@@ -190,6 +194,17 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
  * executor (fpm_pool_http_fiber above): the transport is unchanged and only
  * the child's execution model differs. .name stays "http-direct" so
  * diagnostics keep naming the type the operator actually configured. */
+/* issue #331: the two directives worker. is a prefix for. FPM_HTTP_DIRECT_REJECTS_COMMON
+ * (fpm_http_direct_request.h) rejects the whole "worker." namespace for every
+ * http-direct pool, including this one -- these are the exact names carved
+ * back out, the same mechanism fpm_pool_type_s.reject_exceptions documents
+ * for pm.status_path/ping.* on cron/supervisor. */
+static const char *const fpm_http_direct_worker_accepts[] = {
+	"worker.max_pending",
+	"worker.request_timeout",
+	NULL
+};
+
 static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.name                         = "http-direct",
 	/* Issue #295, and the one judgement in this file that needed making rather
@@ -226,6 +241,7 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	 * for the same reason -- a worker answers requests. */
 	.child_logs_via_master        = 1,
 	.rejects                      = fpm_http_direct_worker_rejects,
+	.reject_exceptions            = fpm_http_direct_worker_accepts,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above. An executor variant
 	 * replaces the whole type struct rather than overriding fields of it, so

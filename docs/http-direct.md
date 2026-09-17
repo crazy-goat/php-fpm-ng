@@ -269,53 +269,121 @@ are **not measured/implemented**.
 
 ### Held requests under `pool.executor = worker` (decision, 2026-09-11)
 
-A worker may hold **at most 256 accepted-but-unanswered requests at a time**
-(`FPM_WORKER_PENDING_MAX`, `sapi/fpmng/fpm/fpm_http_direct_worker.c:76`). That
-is the concurrency limit of deferred replies, and it is a hard one: reaching it
-does not merely throttle, it retires the worker.
+A worker may hold **at most `worker.max_pending` accepted-but-unanswered
+requests at a time** (default 256, `FPM_WORKER_PENDING_MAX` in
+`sapi/fpmng/fpm/fpm_http_direct_worker.h`). That is the concurrency limit of
+deferred replies, and it is a hard one: reaching it does not merely throttle,
+it retires the worker.
 
 The transport cannot tell a request held on purpose — the long-poll that
 `fpmng_worker_respond()` exists to answer later — from one leaked by a handler
 that returned without answering, because a pending entry is removed only by
-`fpmng_worker_respond()` (`fpm_worker_reap()`, `:351-354`). **This decision
-resolves that ambiguity against the deliberate case, on purpose**: on the
-257th concurrent request `fpm_worker_accept()` (`:368-401`)
+`fpmng_worker_respond()` (`fpm_worker_reap()`) or, once it expires,
+`worker.request_timeout` (below). **This decision resolves that ambiguity
+against the deliberate case, on purpose**: past the ceiling,
+`fpm_worker_accept()`
 
-- answers that request `503 Worker unavailable`,
-- logs `WARNING … 256 requests accepted but unanswered`,
+- answers the request that tipped it over `503 Worker unavailable`,
+- logs `WARNING … N requests accepted but unanswered`,
 - sets the stop flag, so the worker script is asked to stop and the master
-  respawns the child — and `fpm_worker_finish_output()` (`:453-489`) then
-  answers **every one of the 256 held requests** `503` as well, logging how
-  many it abandoned.
+  respawns the child — and `fpm_worker_finish_output()` then answers **every
+  one of the held requests** `503` as well, logging how many it abandoned.
 
-So a handler that deliberately parks 256 long-polls loses all of them. The
-alternative — a way for the script to mark a request as held on purpose — is
-not implemented, because nothing else in the process would then bound it: the
-master-side deadlines that would normally catch a stuck request
-(`request_terminate_timeout`, `request_slowlog_timeout`, `slowlog`) are
-*rejected* at startup by this executor (`:167-175`), since the worker script
-never ends a request and the child never leaves its stage. A leak that the
-transport did not catch would therefore be caught by nothing at all, for the
-life of the worker. Given a POC whose long-lived-connection story is still
-being measured (#68), a bounded false positive for long-polling was preferred
-over an unbounded false negative for leaks.
+So a handler that deliberately parks `worker.max_pending` long-polls loses all
+of them. The alternative — a way for the script to mark a request as held on
+purpose (`worker.on_saturation = stop|reject`, or similar) — is not
+implemented; this decision is only about making the ceiling itself
+configurable and giving a stuck handler a way out via a timeout, not about
+changing what happens once the ceiling is reached.
 
 Two consequences follow from the same "the child never ends a request"
 property and are **not** bugs in the above, but they are easy to trip over:
 
-- `pm.max_requests` counts only *answered* requests (`:1071-1078`), so a worker
-  that holds requests forever never recycles on that trigger. The pending
-  ceiling is the only thing that eventually retires it.
-- The child reports `ACCEPTING` for its whole life (`fpm_request_accepting(false)`
-  is called once, `:1512`), so `fpm_request_is_idle()`
-  (`sapi/fpmng/fpm/fpm_request.c:306-316`) — and therefore `pm = ondemand`
-  bookkeeping and the scoreboard — see a worker holding 200 long-polls as idle.
-  Per-request accounting for this executor is #64.
+- `pm.max_requests` counts only *answered* requests, so a worker that holds
+  requests forever never recycles on that trigger. The pending ceiling (and,
+  per-request, `worker.request_timeout`) are the only things that eventually
+  free it.
+- The child reports `ACCEPTING` for its whole life
+  (`fpm_request_accepting(false)` is called once), so `fpm_request_is_idle()`
+  (`sapi/fpmng/fpm/fpm_request.c`) — and therefore `pm = ondemand` bookkeeping
+  and the scoreboard — see a worker holding long-polls as idle. Per-request
+  accounting for this executor is #64.
 
-If a supported long-polling shape ever needs more than 256 held requests per
-worker, or needs them to survive the ceiling, that is a design change: it has
-to come with a bound of its own, and it belongs to #68 and its follow-ups, not
-to this limit.
+If a supported long-polling shape ever needs more than `worker.max_pending`
+held requests per worker, or needs them to survive the ceiling, that is a
+design change: it has to come with a bound of its own, and it belongs to #68
+and its follow-ups, not to this limit.
+
+#### `worker.max_pending` (issue #331)
+
+- **Default:** `256` (`FPM_WORKER_PENDING_MAX`).
+- **What it does:** caps how many accepted-but-unanswered requests a single
+  worker may hold at once, as described above. Must be a positive integer;
+  `0` or a negative value is rejected at configuration validation time
+  (`fpm_http_direct_worker_validate()`).
+- **Only valid under `pool.executor = worker`.** Every other pool type and
+  every other executor of `pool.type = http-direct` rejects it at startup,
+  the same way `fiber.*` is rejected outside `pool.executor = fiber`.
+- **Example:**
+
+  ```ini
+  [pool]
+  pool.type = http-direct
+  pool.executor = worker
+  worker.max_pending = 64
+  ```
+
+  A worker in this pool answers `503 Worker unavailable` (and recycles, per
+  the decision above) on its 65th concurrently held request instead of its
+  257th.
+- **Interaction:** lowering it makes the worker recycle sooner under a burst
+  of concurrent long-polls; raising it holds more state (one
+  `struct fpm_worker_pending` and one ring-buffer slot each) in exchange for
+  tolerating a larger burst before the safety net above trips.
+
+#### `worker.request_timeout` (issue #331)
+
+- **Default:** `0` (off) — milliseconds, the same convention as
+  `http.read_timeout`.
+- **What it does:** bounds how long a single accepted request may sit
+  unanswered before the SAPI answers it itself. `request_terminate_timeout` is
+  rejected for this executor (the worker script never ends a request and the
+  scoreboard stage never changes, so nothing there would ever detect it); this
+  directive is the equivalent lever for `pool.executor = worker`. Past the
+  timeout, the worker answers `504 Gateway Timeout` (not `503`: this is a
+  single stuck request being cut loose, not the worker itself being retired)
+  and reaps the pending entry the same way `fpmng_worker_respond()` does, so
+  its slot counts toward `worker.max_pending` again as soon as the next
+  drain of the ring buffer notices it is gone.
+- **`0` is a true off**, not merely a no-op check: no sweep timer is armed at
+  all when the directive is `0`, so a pool that never sets it pays nothing for
+  the feature.
+- **Only valid under `pool.executor = worker`,** rejected everywhere else the
+  same way `worker.max_pending` is.
+- **Example:**
+
+  ```ini
+  [pool]
+  pool.type = http-direct
+  pool.executor = worker
+  worker.request_timeout = 5000
+  ```
+
+  A handler that never calls `fpmng_worker_respond()` for a given request gets
+  that request answered `504` on its behalf after 5 seconds, instead of
+  holding a slot for the life of the worker.
+- **Implementation note:** a single periodic sweep (armed only when the
+  directive is non-zero, at `worker.request_timeout / 4` — floored at 25 ms —
+  so the worst-case overshoot past the deadline is one sweep interval, not a
+  whole timeout period) walks the pending table and expires overdue entries,
+  rather than one libevent timer per pending request. `worker.max_pending`
+  defaults to 256 held requests; arming and tearing down that many one-shot
+  timers on every accept/respond would be considerably more event-loop
+  bookkeeping than one bounded walk every sweep tick. See
+  `fpm_worker_sweep_expired()` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`.
+- **Interaction:** does not ask the worker to stop or recycle — unlike
+  `worker.max_pending` saturation, a timeout answers and frees exactly the
+  request that overstayed, and everything else keeps running.
 
 ## Connection limits (`http.max_connections`)
 

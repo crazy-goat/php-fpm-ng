@@ -183,6 +183,35 @@ expectConfigFailure(
     ['pool.executor = worker: max_execution_time = 30 would apply to']
 );
 
+/* issue #331. worker.max_pending must be a positive value: validated in
+ * fpm_http_direct_worker_validate(), the same place max_execution_time is
+ * checked just above. */
+expectConfigFailure(
+    'direct-worker-max-pending-zero',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nworker.max_pending = 0",
+    ['worker.max_pending(0) must be a positive value']
+);
+
+/* issue #331. worker.max_pending and worker.request_timeout mean something
+ * only under pool.executor = worker -- the classic executor of the SAME
+ * pool.type rejects them, the same way it rejects request_terminate_timeout
+ * above but for the opposite reason (a worker-only directive, not a
+ * classic-only one). */
+expectConfigFailure(
+    'direct-classic-worker-max-pending',
+    str_replace('pool.executor = worker', 'pool.executor = classic', $workerBase)
+        . "\nworker.max_pending = 10",
+    ["'worker.max_pending' is not supported by pool.type = http-direct with pool.executor = classic"]
+);
+
+/* issue #331. Every other pool.type rejects the whole worker.* namespace too,
+ * the same way it already rejects fiber.*. */
+expectConfigFailure(
+    'http-worker-directive-on-classic',
+    $base . "\npool.type = http\nworker.request_timeout = 100",
+    ["'worker.request_timeout' is not supported by pool.type = http"]
+);
+
 expectConfigFailure(
     'direct-worker-missing-script',
     str_replace('/worker.php', '/absent.php', $workerBase) . "\nphp_admin_value[max_execution_time] = 0",
@@ -235,6 +264,9 @@ default-fastcgi-executor: rejected
 direct-worker-request-terminate-timeout: rejected
 direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected
+direct-worker-max-pending-zero: rejected
+direct-classic-worker-max-pending: rejected
+http-worker-directive-on-classic: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected

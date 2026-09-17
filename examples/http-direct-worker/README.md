@@ -59,7 +59,31 @@ time (for i in $(seq 8); do curl -s "localhost:8080/sleep?id=$i" & done; wait)
 # ~1 s, not 8 s — one worker, eight suspended fibers
 ```
 
-`build/test-http-direct-amphp.sh` automates exactly the above.
+`build/test-http-direct-amphp.sh` automates exactly the above, including the
+concurrency measurement. It needs Composer and a PHP CLI with `ext-phar` to
+run `composer install` — which the CI image
+(`.github/docker/ci.Dockerfile`) does not provide, so this integration is
+**not gated** by the automated matrix. It does run there as its own job
+(`http-direct-amphp` in `.github/workflows/build-matrix.yml`), but that job
+SKIPs today by design; see the comment on that job and issue #75 for the
+decision and its cost. The dependency-free half of the same claim — that the
+worker transport's primitives are sufficient for a Revolt-style event loop —
+is `sapi/fpmng/tests/fpmng-http-direct-worker.phpt`, which CI does gate.
+
+Run the harness manually wherever Composer is available:
+
+```sh
+./build/test-http-direct-amphp.sh /path/to/php-fpm-ng /path/to/php-cli
+```
+
+Two environment variables let it work on a box that is missing one piece or
+the other:
+
+- `FPMNG_AMPHP_VENDOR` — a pre-built `vendor/` directory to use instead of
+  running Composer at all (for a box with no network: run `composer install`
+  elsewhere and copy the tree over).
+- `FPMNG_COMPOSER` — path to `composer.phar`, for a box where Composer is not
+  installed system-wide.
 
 ## Why `max_execution_time` must be 0
 

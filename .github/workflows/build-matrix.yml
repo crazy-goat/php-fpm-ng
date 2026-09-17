@@ -1082,6 +1082,62 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
+  # Issue #75: give the amphp/Revolt integration a named, visible slot in CI
+  # instead of not running anywhere at all (confirmed by grep before this job
+  # existed: build/test-http-direct-amphp.sh was not referenced from any
+  # workflow). The decision, written down per the issue's acceptance
+  # criteria: DECLARE IT OPTIONAL rather than gate it.
+  #
+  # Gating was costed and rejected for now. .github/docker/ci.Dockerfile has
+  # no php-cli/phar/composer at all -- every job here builds php-src from
+  # scratch with --disable-all -- so gating would mean apt-installing
+  # php-cli+composer (or a pinned composer.phar) into that image. Worse,
+  # ci-image.yml explicitly does not push a rebuilt image on pull_request
+  # (only on push to main), so a single PR could not add both the Dockerfile
+  # change and a build-matrix job that depends on it -- landing gating would
+  # need a merge-then-follow-up pair of PRs. That is a real cost, and
+  # disproportionate to what is, today, an optional harness whose
+  # dependency-free half (sapi/fpmng/tests/fpmng-http-direct-worker.phpt) is
+  # already gated in the fpmng-phpt job above.
+  #
+  # So: this job runs the harness against the same canonical build every
+  # worker-mode job here uses, in the same ghcr.io/crazy-goat/php-fpm-ng-ci
+  # image -- which has no phar/composer -- so it SKIPs (exit 0) on every run
+  # today. That is expected, not a bug in this job. What changes is that the
+  # skip is now a named, always-present entry in the checks list and in the
+  # job's own step summary (build/test-http-direct-amphp.sh's skip()
+  # function), instead of a harness nobody invoked. Upgrading this to a real
+  # gate later means doing the two-step Dockerfile-then-job dance above.
+  http-direct-amphp:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
+      options: --user 1001:1001
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: run the amphp/Revolt worker-mode harness (issue #75)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng build-out/bin/php
+          ./build/test-http-direct-amphp.sh "$PWD/build-out/bin/php-fpm-ng" "$PWD/build-out/bin/php"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
   # Issue #224: gate the artefact a user installs, not the tree it was built
   # from. Every other cell here runs a binary out of a build directory; this one
   # builds the .deb and the .apk, throws the build host away, installs each

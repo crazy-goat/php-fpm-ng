@@ -291,14 +291,26 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # worker.max_lifetime added to the existing
 # fpmng-config-rejected-directives.phpt do not change any count, same
 # reasoning as worker.max_pending/worker.request_timeout above.)
+#
+# fpmng-http-direct-worker-connection-info.phpt,
+# fpmng-http-direct-worker-early-hints.phpt, and
+# fpmng-http-direct-worker-request-body-idempotent.phpt (issue #335) are a
+# twenty-first addition, three tests together: all three are pool.type =
+# http-direct with pool.executor = worker pools, needing neither TLS nor ACME
+# (--SKIPIF-- is the plain skipif.inc for all three), so all three pass on
+# every flavour like the additions above. TOTAL and the four PASS counts
+# below each carry a further +3 for the trio. (TLS-specific fields of
+# fpm_connection_info() on the worker executor are exercised by the existing
+# fpmng-http-direct-connection-info.phpt's TLS cases, not by a new worker TLS
+# harness, so no TLS-only count changes here.)
 EXPECT_FAIL=0
-EXPECT_TOTAL=113
+EXPECT_TOTAL=116
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=77; EXPECT_SKIP=36
-    else EXPECT_PASS=72; EXPECT_SKIP=41; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=80; EXPECT_SKIP=36
+    else EXPECT_PASS=75; EXPECT_SKIP=41; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -331,8 +343,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=75; EXPECT_SKIP=38
-    else EXPECT_PASS=70; EXPECT_SKIP=43; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=78; EXPECT_SKIP=38
+    else EXPECT_PASS=73; EXPECT_SKIP=43; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

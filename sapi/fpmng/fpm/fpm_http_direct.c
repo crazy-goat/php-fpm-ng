@@ -1726,7 +1726,7 @@ ZEND_END_ARG_INFO()
  * never a truncated one: the 512-byte buffer here is generous for any real
  * certificate, and a name that does not fit is reported as unavailable
  * rather than silently cut. */
-static char *fpm_direct_x509_name(X509_NAME *name)
+char *fpm_http_direct_x509_name(X509_NAME *name)
 {
 	char buf[512];
 	if (!name || X509_NAME_oneline(name, buf, sizeof(buf)) == NULL) {
@@ -1740,7 +1740,7 @@ static char *fpm_direct_x509_name(X509_NAME *name)
  * year, pre-2050 certs) and ASN1_GENERALIZEDTIME (4-digit year) encodings
  * X509_get0_notBefore()/notAfter() can return into the one shape this
  * function then reformats with dashes/colons for readability. */
-static char *fpm_direct_x509_time(const ASN1_TIME *t)
+char *fpm_http_direct_x509_time(const ASN1_TIME *t)
 {
 	ASN1_GENERALIZEDTIME *gt = NULL;
 	char *out = NULL;
@@ -1762,7 +1762,7 @@ static char *fpm_direct_x509_time(const ASN1_TIME *t)
 /* Lowercase hex SHA-256 of the DER encoding, the same value
  * `openssl x509 -noout -fingerprint -sha256` reports (modulo case and the
  * colons, which this omits since nothing here needs them split). */
-static char *fpm_direct_x509_fingerprint(X509 *cert)
+char *fpm_http_direct_x509_fingerprint(X509 *cert)
 {
 	unsigned char digest[EVP_MAX_MD_SIZE];
 	unsigned int len = 0;
@@ -1882,11 +1882,11 @@ static ZEND_FUNCTION(fpm_connection_info)
 		if (SSL_get_verify_mode(ssl) & SSL_VERIFY_PEER) {
 			cert = SSL_get1_peer_certificate(ssl);
 			if (cert) {
-				char *subject = fpm_direct_x509_name(X509_get_subject_name(cert));
-				char *issuer = fpm_direct_x509_name(X509_get_issuer_name(cert));
-				char *not_before = fpm_direct_x509_time(X509_get0_notBefore(cert));
-				char *not_after = fpm_direct_x509_time(X509_get0_notAfter(cert));
-				char *fingerprint = fpm_direct_x509_fingerprint(cert);
+				char *subject = fpm_http_direct_x509_name(X509_get_subject_name(cert));
+				char *issuer = fpm_http_direct_x509_name(X509_get_issuer_name(cert));
+				char *not_before = fpm_http_direct_x509_time(X509_get0_notBefore(cert));
+				char *not_after = fpm_http_direct_x509_time(X509_get0_notAfter(cert));
+				char *fingerprint = fpm_http_direct_x509_fingerprint(cert);
 
 				add_assoc_bool(return_value, "client_cert_verified",
 					SSL_get_verify_result(ssl) == X509_V_OK);

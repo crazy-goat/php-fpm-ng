@@ -1433,13 +1433,29 @@ $info = fpm_connection_info();
 ```
 
 Returns `false` when there is nothing to report — no request currently in
-flight (e.g. called outside of the direct-request lifecycle), or on a pool
-where the API does not apply at all: `pool.executor = worker` (the facts
-belong to a specific accepted connection, which this executor's model does
-not expose to the script the same way), and any pool that is not
-`pool.type = http-direct` in the first place — `function_exists
+flight (e.g. called outside of the direct-request lifecycle) — or any pool
+that is not `pool.type = http-direct` in the first place — `function_exists
 ('fpm_connection_info')` is `false` there, since the function is registered
 per-pool at startup, not globally.
+
+**`pool.executor = worker`** (issue #335): this executor answers by request
+id, since several requests can be in flight against one PHP engine at once —
+`fpm_connection_info(int $id = 0)`. There is no ambient "current request" the
+way classic has, so an omitted or zero `$id` returns `false` unconditionally,
+the same as an `$id` this worker never handed out, or one whose request has
+already been answered. Otherwise the array is the same shape described below,
+with two keys always missing rather than faked: `age` and `requests`. This
+executor deliberately drops its per-connection bookkeeping the moment the
+first request off a connection arrives, to avoid leaking one fd's worth of
+state for the life of the worker (the same `track_live` trade-off the classic
+executor makes the opposite way) — there is therefore no accept time and no
+served-request count it can honestly report, and it says so by omitting the
+keys instead of inventing a value, the same "report honestly, omit what
+genuinely cannot be known" convention issue #333 established for worker
+metrics. TLS/client-cert fields are produced by the same code the classic
+executor uses (`evhttp_connection_get_bufferevent()` reached from the
+pending request's own `evhttp_request*`), so everything below except `age`
+and `requests` applies unchanged to a worker pool.
 
 Otherwise returns an array, always with:
 
@@ -1483,11 +1499,15 @@ keys being absent, so a script does not have to special-case "no keys" versus
 **Deliberately not exposed**: the raw socket/file descriptor (a script gets
 facts about the connection, never a handle it could use to touch the socket
 directly, bypassing the SAPI); the server's own certificate or private key
-material; and anything about a connection other than the one currently
-executing — there is no connection-id parameter, on purpose. This keeps the
+material; and anything about a connection other than one that has an actual
+request pending against it right now. Classic's `fpm_connection_info()` takes
+no id at all, since it only ever has one request in flight to mean; the
+worker executor's `$id` (issue #335) is not a query interface over arbitrary
+connections either — it only resolves an id this same worker itself hasn't
+yet answered, never another worker's or another pool's state. This keeps the
 API's trust model simple: everything it returns describes facts the worker
-itself observed on the wire for *this* request, not a query interface over
-other clients' state.
+itself observed on the wire for *a* request it is actually handling, not a
+general connection directory.
 
 **Trust model**: these are the worker's own observations of its own TLS
 session, not values a request could inject or a proxy could have rewritten in
@@ -1498,12 +1518,13 @@ OpenSSL's own chain validation against `http.tls_client_ca`
 (`SSL_get_verify_result() == X509_V_OK`), the same validation that decides
 whether `require` accepts the handshake at all.
 
-**Read-only and per-request isolation**: `fpm_connection_info()` takes no
-arguments and has no corresponding setter; it cannot be used to affect the
-connection, only to observe it. Task 054's cross-request isolation guarantees
-extend to it: a connection's fields (`age`, `requests`, TLS session state)
+**Read-only and per-request isolation**: `fpm_connection_info()` has no
+corresponding setter; it cannot be used to affect the connection, only to
+observe it. Task 054's cross-request isolation guarantees extend to it: a
+connection's fields (TLS session state, and on classic, `age`/`requests`)
 never leak into a different connection's requests, and a worker that has
-served no request in the current call sees `false`.
+served no request in the current call (classic), or an id that names no
+pending request (worker executor), sees `false`.
 
 Covered by `sapi/fpmng/tests/fpmng-http-direct-connection-info.phpt`: a plain
 pool returning transport facts with no TLS keys; `tls_verify_client = none`
@@ -1512,8 +1533,15 @@ never exposing `client_cert_*` even when the client offers a certificate;
 against `openssl s_client`'s own view of the same handshake), and with an
 untrusted one (handshake proceeds, `client_cert_verified` is `false`);
 `require` rejecting both a missing and an untrusted client certificate at the
-handshake layer; `pool.executor = worker` returning `false`; and a
-`pool.type = http` gateway pool never defining the function at all.
+handshake layer; a `pool.type = http` gateway pool never defining the
+function at all; and, before issue #335, `pool.executor = worker` returning
+`false` unconditionally. `pool.executor = worker`'s own id-based behavior —
+a valid id reporting `peer_addr`/`peer_port`/`transport` with `age`/`requests`
+absent, and a missing/zero/unknown id returning `false` — is covered
+separately by `sapi/fpmng/tests/fpmng-http-direct-worker-connection-info.phpt`,
+on a plain (non-TLS) pool; the TLS/client-cert fields are the same code path
+already exercised above, so that test does not duplicate a TLS harness for
+the worker executor.
 
 ## Protocol passthrough: early hints, status codes, and methods (issue #63)
 
@@ -1564,7 +1592,7 @@ when:
   reads strictly in order;
 - the client is HTTP/1.0, which has no notion of a 1xx interim response and
   would read these bytes as garbage before the one status line it expects;
-- `pool.executor = worker` — see below.
+- on `pool.executor = worker` (see below), the id is missing/zero or unknown.
 
 Can be called more than once per request; RFC 8297 allows several 103
 responses before the final one. Header validation is the same chain the
@@ -1594,23 +1622,41 @@ same one `fpm_connection_info()` reaches for its TLS fields), never touching
 evhttp's request/reply state — the real response afterwards goes out through
 the normal path exactly as if this had never been called.
 
-**`pool.executor = worker`**: not supported, `false` unconditionally, for the
-same structural reason `fpm_connection_info()` gives on this executor — see
-[`fpm_connection_info()`](#fpm_connection_info-issue-62) above. Writing a 103
-needs a single "current connection" to target; this executor answers by
-request id with several requests in flight against one PHP engine, and does
-not keep the accepting connection's `bufferevent` reachable once the first
-request off it has been dispatched. Extending this needs the same new design
-`fpm_connection_info()` would on this executor — a connection/request id
-parameter and a place to keep per-connection state alive across requests —
-future work, not this issue's scope.
+**`pool.executor = worker`** (issue #335): `fpm_send_early_hints(array
+$headers, int $id = 0)` — the worker executor's own version takes the same
+kind of id `fpm_connection_info()` does, since several requests can be in
+flight against one PHP engine and there is no ambient "current request" to
+default to; a missing/zero `$id`, or one this worker never handed out,
+returns `false`. Given a valid id, the guard replacing classic's `r->responded
+|| r->streaming || SG(headers_sent)` is: the id must still be pending (an id
+already answered outright by the buffered `fpmng_worker_respond()` has already
+been reaped out of the pending table, so it resolves to nothing — the same as
+an unknown id) and its pending entry's streaming flag (set by
+`fpmng_worker_respond_start()` from issue #332, cleared by
+`fpmng_worker_respond_end()`/an aborted stream) must not be set — a final
+response already streaming out is exactly the "may already be on the wire"
+condition classic's flags describe. Header validation, serialization (a
+"HTTP/1.1 103 Early Hints" status line, the validated headers, then a blank
+line), and the write to the connection's `bufferevent` — resolved via
+`evhttp_connection_get_bufferevent(evhttp_request_get_connection())` from the
+pending entry's `evhttp_request*` instead of `r->conn_bev` — are otherwise
+identical to classic's implementation, reusing the same header-validation
+chain `fpm_worker_add_header()` already uses for the final response. The
+HTTP/1.0 check is unchanged: `p->http->major`/`->minor` are the same
+`evhttp_request` fields classic checks.
 
 Covered by `sapi/fpmng/tests/fpmng-http-direct-early-hints.phpt`: a raw-socket
 client observing the exact wire order and byte-for-byte framing of a 103
 followed by the final response (headers included); early hints ahead of a
 bodyless (HEAD/204) final response, checked for keep-alive correctness on the
 same connection afterwards; a malformed header name dropped from the 103
-without failing the call; and `pool.executor = worker` returning `false`.
+without failing the call; and, before issue #335, `pool.executor = worker`
+returning `false` unconditionally (unchanged: that test still calls the
+1-arg form with no id, still `false`). `pool.executor = worker`'s own
+id-based success/failure cases — wire order on a successful send, refusal
+once a streamed response has started, refusal for HTTP/1.0, and refusal for
+a missing/unknown id — are covered separately by
+`sapi/fpmng/tests/fpmng-http-direct-worker-early-hints.phpt`.
 
 ### Custom / arbitrary request methods: not supported (infeasible on this libevent)
 

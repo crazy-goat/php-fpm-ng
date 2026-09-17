@@ -118,4 +118,19 @@ bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value
 bool fpm_http_direct_status_final(long status);
 bool fpm_http_direct_status_bodyless(struct evhttp_request *http, int status);
 
+/* Client-certificate field formatting shared by fpm_connection_info() on both
+ * executors (classic: fpm_http_direct.c; worker: fpm_http_direct_worker.c,
+ * issue #335). Compiled in only when the build has OpenSSL (HAVE_FPM_HTTP_TLS,
+ * fpm_config.h's signal for that -- see fpm_tls_http.h's comment); the
+ * includer is expected to have included fpm_config.h already, the same
+ * assumption fpm_tls_http.h makes. <openssl/x509.h> is included here rather
+ * than assumed, since not every includer of this header (fpm_http.c, for one)
+ * otherwise has a reason to pull it in. */
+#ifdef HAVE_FPM_HTTP_TLS
+#include <openssl/x509.h>
+char *fpm_http_direct_x509_name(X509_NAME *name);
+char *fpm_http_direct_x509_time(const ASN1_TIME *t);
+char *fpm_http_direct_x509_fingerprint(X509 *cert);
+#endif
+
 #endif

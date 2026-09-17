@@ -65,8 +65,8 @@ namespace (#283).
 | `operator.status_path` | This pool's status page, on the operator listener. | unset = off (gateway: `/status`) |
 | `operator.metrics` | `on` = expose metrics at `/metrics/<pool name>`. | `off` |
 | `operator.status` | `on` = expose status at `/status/<pool name>`. | `off` |
-| `operator.metrics_listen` | Where the metrics path binds. | `127.0.0.1:<port>` |
-| `operator.status_listen` | Where the status path binds. | `127.0.0.1:<port>` |
+| `operator.metrics_listen` | Where the metrics path binds. | `127.0.0.1:9253` |
+| `operator.status_listen` | Where the status path binds. | `127.0.0.1:9253` |
 
 `operator.metrics = on` and `operator.metrics_path = …` are two spellings of
 one switch. `on` picks the path for you, and picks the one the gateway will use
@@ -216,7 +216,8 @@ ping.response = pong                    ; Proves the gateway lives -- NOT the ta
 ; below; written out only for clarity. "" turns one off (with a warning).
 operator.metrics_path = /metrics
 operator.status_path  = /status
-; operator.*_listen unset -> 127.0.0.1:<default port>, shared with every pool below
+; operator.*_listen unset -> 127.0.0.1:9253, shared with every pool below
+; (9253 is the Prometheus registry's PHP-FPM exporter port; moves off 8080 in #386)
 
 ; Expose the operator pages through this public port. For every pool that
 ; exposed itself the gateway serves <base>/<pool name>, regardless of the
@@ -288,8 +289,9 @@ worker.request_timeout = 30
 worker.max_memory = 512M
 worker.max_lifetime = 12h
 
-operator.metrics = on                   ; metrics only: this executor refuses status
-                                        ; and ping today -- an open question, below
+operator.metrics = on
+operator.status  = on                   ; reduced page: no per-request stage (#387)
+                                        ; ping.path on this executor: open, below
 
 ; ===========================================================================
 ; No HTTP endpoint of their own at all. The operator listener is their ONLY
@@ -336,7 +338,7 @@ On the public port `443`, through the gateway (operator paths only from
 /metrics  /status                       -> the gateway's own series and page
 /metrics/app       /status/app
 /metrics/api       /status/api          <- although the pool's local paths are /_m and /_s
-/metrics/ws                             <- no /status/ws: the worker executor refuses it
+/metrics/ws        /status/ws           <- status is the reduced worker page (#387)
 /metrics/cronjobs  /status/cronjobs
 /metrics/queue     /status/queue
 ```
@@ -372,20 +374,24 @@ beside the gateway, with `/ping` and `/_fpm_status` in their upstream meaning.
   scrape is `/metrics/cronjobs`, so the check depends on Prometheus asking for
   that exact path.
 
-## Open questions
+## Open question
 
-Both concern `pool.type = http-direct` with `pool.executor = worker`, and both
-are tracked in the decision issue below.
+One, about `pool.type = http-direct` with `pool.executor = worker`, tracked in
+#387.
 
 - **`ping.path`.** The executor refuses it (`fpm_http_direct_worker.c`) with a
   reason that is about status -- no per-request stage, duration or CPU to
-  report. Ping needs none of that: it is a literal path match in the connection
-  handler, and the executor already shares `fpm_http_direct_ops.c`, where
-  `ops->ping_path` lives. It looks like ping was thrown out with status.
-- **`operator.status`.** Stays refused, or a reduced page with only what this
-  executor really has (connections, pending, watchers from #333)? Refusing is
-  honest; it is also the only type on which a status directive is a
-  configuration error rather than a working one.
+  report. Ping needs none of that: it is a literal path match in the
+  connection handler (`fpm_http_direct_ops_try_local()`), which the classic
+  executor calls before queueing a request and which the worker executor could
+  call from the same place in `fpm_worker_accept()`, with no PHP and no
+  scoreboard involved. The open point is only *where*: after the saturation
+  check (ping answers `503` when the worker would refuse a real request --
+  proposed) or before it (ping says "alive" while every request gets `503`).
+- **`operator.status`** -- decided 2026-09-17: supported, as a *reduced* page
+  showing only what the executor records honestly (requests answered per
+  #333, `worker_pending`, `worker_watchers`, the http-direct totals, per-child
+  rows without stage/duration/CPU/memory). `access.*` stays refused.
 
 ## Issues
 
@@ -398,7 +404,7 @@ are tracked in the decision issue below.
 | #388 (v0.10.0) | `pool.type = gateway`; `http` retired; target 0 gone; supersedes #345 |
 | #389 (v0.10.0) | `http.operator`, `http.operator_allowed_clients`, the `<base>/<pool>` map |
 | #390 (v0.10.0) | shm counters rendered by the operator child; the `/metrics` index |
-| #387 (v0.10.0) | the two open questions above |
+| #387 (v0.10.0) | worker executor: reduced status page (decided); `ping.path` placement (open) |
 | #383 (v0.11.0) | `fastcgi` on the operator listener -- simplified by the rename |
 | #385 (v0.11.0) | fold this page into `operator-endpoint.md` once the above has landed |
 

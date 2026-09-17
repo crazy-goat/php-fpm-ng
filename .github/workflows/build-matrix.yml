@@ -5,16 +5,75 @@ name: build
 # rather than the full ZTS x session x TLS matrix. The static musl build is
 # covered separately below.
 #
-# Runs on pull_request, and on push to main. The push run builds nothing that
-# a merge needs -- it exists to write the ccache entries that the next pull
-# request restores. A cache written on a PR branch is visible only to that
-# branch; one written on the default branch is visible to every branch, so
-# without a run on main the first run of every new branch compiles php-src
-# from scratch.
+# Runs on pull_request, and on a weekly schedule. NOT on push to main
+# (removed 2026-09-17): merging a pull request whose run was already green
+# re-ran the identical tree, and a merge is not allowed to be the first time
+# anything here is tried -- that is what the pull-request run is for.
+#
+# The push run did do one thing no pull request can: it wrote the ccache
+# entries every new branch starts from. actions/cache scopes an entry to the
+# branch that wrote it, and only the default branch's entries are visible to
+# every other branch, so with no run on main the first run of each new branch
+# would compile php-src from scratch -- `build` 89 s -> 202 s, `static-musl`
+# 107 s -> 318 s, `fpmng-phpt-fiber` 168 s -> 262 s (measured on runs
+# 34703566697 warm and 34702558731 cold).
+#
+# The schedule below replaces it. Once a week is enough because what those
+# entries mostly hold is php-src, which is pinned by tag (PHP_SRC_REF) and
+# therefore stable between bumps; our own sources are a small part of the
+# compile. Restoring an entry counts as using it, so pull-request traffic
+# keeps the default-branch entry from being evicted for inactivity (7 days)
+# between scheduled runs.
+#
+# BUMPING PHP_SRC_REF is the one case that wants a hand: the new pin has no
+# entry anywhere, and a pull request cannot create one the next branch can
+# see. Run this workflow manually on main (workflow_dispatch) after such a
+# merge, or accept that every branch compiles cold until the next Monday.
+#
+# WHAT IS NOT HERE: THE PACKAGE GATE (was issue #224; removed 2026-09-17).
+# build/ci-package-gate.sh used to run here on every pull request, in four
+# flavours -- deb, apk, and both again with FPMNG_PACKAGE_TLS -- and it WAS
+# this workflow's runtime. Measured on run 35261751822: package-gate 32.3
+# minutes of a 32.8-minute run, while all sixteen other jobs were green by
+# minute eleven and sat waiting for it. Each flavour builds libphp, packages
+# it, installs it into a compiler-less container and runs the owned suite --
+# about eight minutes each -- so the same eight-minute suite ran six times per
+# pull request (once here, once on the fiber build, four times in the gate).
+#
+# It was kept because a regression in the artefact users install should not
+# reach a tag. It did not deliver that: v0.5.0 and v0.5.1 are both tagged and
+# neither has a release, because both failed at packaging time and only v0.5.2
+# shipped. The gate that cost every pull request half an hour did not catch
+# either one; release.yml's own run on the tag did. So the cost was real and
+# the protection was not.
+#
+# The gate now lives only in release.yml, where it runs all four flavours on
+# the tag. build/ci-package-gate.sh, the packaging scripts and the
+# php-fpm-ng-package-gate images are unchanged and still used from there.
+# If a cheaper form of pre-tag packaging coverage is wanted, it belongs on a
+# schedule against main, not on the pull-request path.
+#
+# PATH FILTERS. A change that touches only documentation cannot break a build,
+# and this workflow used to run all of it anyway: the two commits that landed
+# docs/gateway.md each spent a full run proving that a markdown file still
+# compiles. Deliberately NOT ignored: .github/**, build/**, packaging/** and
+# anything under sapi/ -- a change to CI itself must run CI.
+#
+# Note what paths-ignore does to a required check: a skipped workflow reports
+# nothing, so a branch protection rule naming a job here would block a
+# docs-only pull request forever. If such a rule is ever added, it has to be
+# satisfied by a separate always-green job, not by removing these filters.
 on:
   pull_request:
-  push:
-    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+  # Cache refresh only -- see the note on the ccache above. Monday 04:17 UTC;
+  # an odd minute because the top of the hour is when every cron on the
+  # platform fires and scheduled runs get queued behind it.
+  schedule:
+    - cron: '17 4 * * 1'
   workflow_dispatch:
     inputs:
       php_src_ref:
@@ -22,7 +81,7 @@ on:
         required: false
         default: ""
 
-# Every push to a PR branch restarts the whole 16-job matrix; without this the
+# Every push to a PR branch restarts the whole matrix; without this the
 # superseded run keeps burning minutes to completion. main is excluded: see
 # the concurrency block below.
 #
@@ -52,7 +111,7 @@ on:
 # the account gets at that moment, and the warm run of the pair happened to
 # queue behind another.
 #
-# Every job below except static-musl and package-gate runs in
+# Every job below except static-musl runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from
 # .github/docker/ci.Dockerfile), which is why none of them apt-get anything
 # any more. The repeated container: block is unavoidable -- GitHub Actions
@@ -60,14 +119,15 @@ on:
 #
 # KNOWN LIMIT, fork pull requests. That image is a private package, and a
 # fork's GITHUB_TOKEN cannot read it: such a pull request dies at `Initialize
-# containers` with 403 before any step runs. The fix is to make the two ghcr
-# packages public (php-fpm-ng-ci and php-fpm-ng-package-gate); until that is
-# done, a contribution from a fork has to be re-pushed as a branch here to be
-# tested.
+# containers` with 403 before any step runs. The fix is to make
+# php-fpm-ng-ci public; until that is done, a contribution from a fork has to
+# be re-pushed as a branch here to be tested. (php-fpm-ng-package-gate is no
+# longer pulled by this workflow -- see the note on the package gate at the top
+# of this file -- but release.yml still needs it.)
 #
-# static-musl and package-gate are the exceptions: they drive `docker run`
-# with host bind mounts, and -v paths are resolved by the host daemon, so a
-# containerised copy of them would mount empty directories.
+# static-musl is the exception: it drives `docker run` with host bind mounts,
+# and -v paths are resolved by the host daemon, so a containerised copy of it
+# would mount empty directories.
 # actions: write is only for build/ci-cancel-run.sh (issue #209), the
 # if: failure() step every job ends with: cancelling a run is an Actions API
 # write.
@@ -86,10 +146,10 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  # Not on main. actions/cache does not save on a cancelled job, and the run on
-  # main exists for nothing but its cache save (see the note on `on:` above):
-  # two merges in quick succession would cancel the first and throw away
-  # exactly the entry every new branch restores from.
+  # Not on main. actions/cache does not save on a cancelled job, and the only
+  # runs on main now are the weekly cache refresh and a manual one (see the
+  # note on `on:` above), which exist for nothing but that save -- cancelling
+  # one would throw away exactly the entry every new branch restores from.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
@@ -130,9 +190,23 @@ env:
   FPMNG_CONFIGURE_FLAGS: --disable-all --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme --enable-session --with-openssl
 
 jobs:
-  # Task 014: the comment-content contract in workflow.md stays linked from the
-  # contributor entry points. Fast — checkout only.
-  comment-content-rule:
+
+  # One job for every check that needs no build product of ours: the
+  # comment-content rule (task 014), the fpmng .phpt coverage glob (issue #95)
+  # and clang-tidy (build/lint-c.sh).
+  #
+  # These were three jobs until the CI restructure. Each cost a runner
+  # allocation and an `Initialize containers` pull to run a script that
+  # finishes in seconds, and none of them is on the critical path -- the run
+  # has always been bounded by the .phpt suites, so three cheap jobs in
+  # parallel bought nothing over one job running them in sequence, and cost
+  # three rows in the checks list.
+  #
+  # Order is deliberate: the two hermetic scripts first, the configured
+  # php-src tree clang-tidy needs last, so a failure in either cheap check
+  # costs nothing. A failing step stops the ones after it -- which is what
+  # the fail-fast of issue #209 already did to the whole run.
+  checks:
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
@@ -145,41 +219,85 @@ jobs:
       # depend on: as root php-fpm refuses to start, so a root job reports
       # PASS=0 with everything skipped and still looks green.
       options: --user 1001:1001
+    env:
+      # Both from the former `lint` job. The CI image sets CCACHE_DIR=/ccache,
+      # which was a mount of the self-hosted box's own disk and is not
+      # writable by uid 1001 here. Nothing carries this directory anywhere --
+      # see PHPSRC below for why this job has no cache entry -- it just has to
+      # point somewhere writable so configure's conftest compiles do not fail.
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      # The same configure line as `build`, so the tree this job configures is
+      # the one clang-tidy's compile_commands.json has to describe. It shares
+      # nothing else with that job: no cache entry of its own, because
+      # build/lint-c.sh runs clang-tidy and never make, so all a ccache entry
+      # here would ever hold is configure's conftest objects.
+      PHPSRC: ${{ github.workspace }}/php-src-dynamic
     steps:
       - uses: actions/checkout@v7
+
+      # Task 014: the comment-content contract in workflow.md stays linked
+      # from the contributor entry points. Checkout only.
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
-      # Issue #209: 16 separate jobs, so GitHub's matrix `fail-fast` does not
-      # apply. One red job otherwise leaves the other fifteen compiling for a
-      # result nobody will read. The run ends as "cancelled" rather than
-      # "failed";
-      # build/ci-cancel-run.sh says why that is the price and what it costs.
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
 
-  # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the tests
-  # this repo owns, so a new test file cannot be silently unreachable. Hermetic
-  # -- no build, no binary; the runner stops at its own preflight.
-  fpmng-phpt-coverage:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
+      # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the
+      # tests this repo owns, so a new test file cannot be silently
+      # unreachable. Hermetic -- no build, no binary; the runner stops at its
+      # own preflight.
       - name: verify fpmng .phpt coverage check (issue #95)
         run: ./build/test-fpmng-phpt-coverage.sh
+
+      # Task 013: clang-tidy over our C sources only (never a prepared php-src
+      # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
+      # build on day one for pre-existing findings teaches people to ignore the
+      # job. That backlog is now empty: issue #107 fixed the one real finding
+      # (clang-analyzer-unix.Malloc in fpm_http.c) and issue #111 the remaining
+      # two nits, so on 2026-09-09 `continue-on-error` was dropped and this job
+      # became a required check. See docs/c-style.md for the enabled/disabled
+      # check contract.
+      #
+      # Caveat, accepted knowingly, and narrowed since this job moved into
+      # .github/docker/ci.Dockerfile: clang-tidy is whatever version that image's
+      # base gives (LLVM 18.1.3 on ubuntu 24.04 today), so a new check can still
+      # turn this job red without any change to our C sources. The fix then is a
+      # decision about that check -- silence it in .clang-tidy with a reason, or
+      # fix the code -- not restoring continue-on-error.
+      #
+      # Pinning the LLVM version was originally rejected as trading a rare, loud
+      # break for a permanently stale checker. Pinning the base image is the same
+      # trade only in part: the checker does go stale, but it moves on a reviewed
+      # Dockerfile diff instead of on GitHub's runner-image schedule, so the break
+      # lands in a PR that is already about the toolchain rather than on an
+      # unrelated one.
+      #
+      # Issue #196: one step in place of clone + prepare + buildconf +
+      # configure. Headers only -- clang-tidy needs a configured tree, not a
+      # built one.
+      - name: php-src build tree (headers only; no make)
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+        run: |
+          # shellcheck disable=SC2086 -- the flag list is meant to word-split
+          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree-lint.rc ) | tee tree-lint.log
+          exit "$(cat tree-lint.rc)"
+
+      - name: clang-tidy report (our files only)
+        run: |
+          chmod +x build/lint-c.sh
+          ./build/lint-c.sh "$PHPSRC" 2>&1 | tee lint-c-report.txt
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-c-report
+          path: lint-c-report.txt
+          retention-days: 14
+
+      # Issue #209: separate jobs, so GitHub's matrix `fail-fast` does not
+      # apply. One red job otherwise leaves the others compiling for a result
+      # nobody will read. The run ends as "cancelled" rather than "failed";
+      # build/ci-cancel-run.sh says why that is the price and what it costs.
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         env:
@@ -436,45 +554,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
-  # Task 001 landed the copied upstream FPM .phpt suite and its runner
-  # (build/run-fpm-phpt.sh); wire it into CI against the canonical build cell.
-  phpt:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: run the upstream FPM .phpt suite against php-fpm-ng
-        run: |
-          chmod +x build-out/bin/php-fpm-ng build-out/bin/php
-          TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
-          ./build/run-fpm-phpt.sh "$PWD/build-out/prepared" "$PWD/phpt-results"
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: phpt-results
-          path: phpt-results
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
   # Task 003: regression tests for pool.type, pool.executor, and request-less
   # pool types. Fiber cases skip on the canonical build (--enable-fpmng-fiber is
   # off by default); cron may take up to one minute.
@@ -695,85 +774,6 @@ jobs:
   # opcache in (build/static-full.sh) but only smoke-tests a scratch
   # container, never the .phpt suite, so it doesn't cover this either way.
 
-  # Task 013: clang-tidy over our C sources only (never a prepared php-src
-  # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
-  # build on day one for pre-existing findings teaches people to ignore the
-  # job. That backlog is now empty: issue #107 fixed the one real finding
-  # (clang-analyzer-unix.Malloc in fpm_http.c) and issue #111 the remaining
-  # two nits, so on 2026-09-09 `continue-on-error` was dropped and this job
-  # became a required check. See docs/c-style.md for the enabled/disabled
-  # check contract.
-  #
-  # Caveat, accepted knowingly, and narrowed since this job moved into
-  # .github/docker/ci.Dockerfile: clang-tidy is whatever version that image's
-  # base gives (LLVM 18.1.3 on ubuntu 24.04 today), so a new check can still
-  # turn this job red without any change to our C sources. The fix then is a
-  # decision about that check -- silence it in .clang-tidy with a reason, or
-  # fix the code -- not restoring continue-on-error.
-  #
-  # Pinning the LLVM version was originally rejected as trading a rare, loud
-  # break for a permanently stale checker. Pinning the base image is the same
-  # trade only in part: the checker does go stale, but it moves on a reviewed
-  # Dockerfile diff instead of on GitHub's runner-image schedule, so the break
-  # lands in a PR that is already about the toolchain rather than on an
-  # unrelated one.
-  lint:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    env:
-      # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
-      # self-hosted box's own disk and is not writable by uid 1001 here.
-      # Nothing carries this directory anywhere -- see PHPSRC below for why
-      # this job has no cache entry -- it just has to point somewhere writable
-      # so configure's conftest compiles do not fail.
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      # The same configure line as `build`, so the tree this job configures is
-      # the one clang-tidy's compile_commands.json has to describe. It shares
-      # nothing else with that job: no cache entry of its own, because
-      # build/lint-c.sh runs clang-tidy and never make, so all a ccache entry
-      # here would ever hold is configure's conftest objects.
-      PHPSRC: ${{ github.workspace }}/php-src-dynamic
-    steps:
-      - uses: actions/checkout@v7
-
-      # Issue #196: one step in place of clone + prepare + buildconf + configure.
-      # Headers only -- clang-tidy needs a configured tree, not a built one.
-      - name: php-src build tree (headers only; no make)
-        env:
-          CC: ccache gcc
-          CXX: ccache g++
-        run: |
-          # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS 2>&1; echo "$?" > tree-lint.rc ) | tee tree-lint.log
-          exit "$(cat tree-lint.rc)"
-
-      - name: clang-tidy report (our files only)
-        run: |
-          chmod +x build/lint-c.sh
-          ./build/lint-c.sh "$PHPSRC" 2>&1 | tee lint-c-report.txt
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: lint-c-report
-          path: lint-c-report.txt
-          retention-days: 14
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
   # Task 004: prove that the shipped SAPI, not the historical php-src HTTP POC,
   # links statically on musl and serves HTTP when it is the only executable in
   # a scratch image.
@@ -878,6 +878,120 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
+  # Every shell-driven scenario that runs the canonical build as a normal
+  # (non-root) user, plus the upstream FPM .phpt suite, in one job.
+  #
+  # These were seven jobs until the CI restructure, each 20 to 70 seconds of
+  # work behind a runner allocation, an `Initialize containers` pull and an
+  # artifact download of the same build. Sequentially they cost about four
+  # minutes, which is well inside the fpmng-phpt suite this run is bounded by,
+  # so splitting them bought no wall clock at all -- only seven rows in the
+  # checks list and seven copies of the same six-line preamble.
+  #
+  # What the split did buy was a named verdict per scenario: a red row said
+  # which one broke without opening a log. That is now the step name instead,
+  # and a failing step stops the steps after it -- which is what the fail-fast
+  # of issue #209 already did to the whole run. Each step keeps the comment
+  # explaining why the scenario cannot be a .phpt, because that is the part
+  # that is expensive to rediscover.
+  #
+  # gateway-privileges is NOT here: it is the one scenario that must start as
+  # root, and this job must not (see the options: line below).
+  integration:
+    needs: build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      # uid 1001 is the `runner` account that owns the workspace on a hosted
+      # image, so the container writes files the rest of the job can read. It
+      # is also the only thing keeping this job off root, which the suites
+      # depend on: as root php-fpm refuses to start, so a root job reports
+      # PASS=0 with everything skipped and still looks green.
+      options: --user 1001:1001
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: make the canonical build executable
+        run: chmod +x build-out/bin/php-fpm-ng build-out/bin/php
+
+      # Task 003's sibling: the suite php-src itself ships for FPM, run
+      # against our SAPI. Cheap, and first here because a failure in it means
+      # the build is wrong rather than one scenario being wrong.
+      - name: run the upstream FPM .phpt suite against php-fpm-ng
+        run: |
+          TEST_PHP_EXECUTABLE="$PWD/build-out/bin/php" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          ./build/run-fpm-phpt.sh "$PWD/build-out/prepared" "$PWD/phpt-results"
+
+      # Task 040: a renewed TLS certificate must take effect in every gateway
+      # process without a restart. Needs multiple real gateway processes under
+      # SO_REUSEPORT, a load generator running across the file swap, and a
+      # deliberately broken candidate -- no .phpt can drive that.
+      - name: verify TLS certificate reload without restart (task 040)
+        run: ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #172: a pool with http.tls_wait_for_cert must start without its
+      # certificate, refuse TLS connections rather than answer them badly, and
+      # have every gateway process pick up the certificate once it appears.
+      # The load-bearing part is a socket that is bound but not listening,
+      # which no phpt can observe -- it shows up only as the difference
+      # between curl exit 7 (refused) and 35 (handshake failed).
+      - name: verify the NO_CERT -> READY transition (issue #172)
+        run: ./build/test-http-tls-wait-for-cert.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #90: the per-connection read deadline (task 031) used to fire
+      # into a bufferevent evhttp had already freed, killing the whole gateway
+      # process with SIGSEGV. Real gateway processes, real TLS.
+      - name: verify a gateway survives its own read deadline (issue #90)
+        run: ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Task 042: the redirect-only plain HTTP companion listener.
+      - name: verify the redirect-only plain HTTP companion (task 042)
+        run: ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #75: the amphp/Revolt worker-mode harness is DECLARED OPTIONAL
+      # rather than gated. The CI image has no php-cli/phar/composer -- every
+      # job here builds php-src from scratch with --disable-all -- so this
+      # SKIPs (exit 0) on every run today. That is expected, not a bug: what
+      # the step buys is that the skip is visible in the job summary
+      # (build/test-http-direct-amphp.sh's skip()) instead of being a harness
+      # nobody invoked. Gating it needs php-cli+composer in
+      # .github/docker/ci.Dockerfile, and ci-image.yml does not push a
+      # rebuilt image on pull_request, so landing that needs a
+      # merge-then-follow-up pair of PRs. Its dependency-free half
+      # (sapi/fpmng/tests/fpmng-http-direct-worker.phpt) is already gated in
+      # fpmng-phpt.
+      - name: run the amphp/Revolt worker-mode harness (issue #75)
+        run: ./build/test-http-direct-amphp.sh "$PWD/build-out/bin/php-fpm-ng" "$PWD/build-out/bin/php"
+
+      # Issue #129: a synchronous hard write error while handing a request to
+      # an upstream freed the connection and the upstream underneath their
+      # caller. Nothing observable from outside the process changes -- the
+      # gateway answers 502 and keeps serving on a corrupted heap -- so this
+      # runs the gateway under valgrind and fails on any invalid access inside
+      # fpm_http.c. Last in the job because valgrind makes it the step most
+      # likely to be slow on a contended runner; measured on run 35261751822
+      # it was 36 s, behind read-deadline's 66 s.
+      - name: verify a synchronous upstream write failure corrupts nothing (issue #129)
+        run: ./build/test-http-gateway-write-failure.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: phpt-results
+          path: phpt-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
   # Task 010: the HTTP gateway must drop root before it ever accepts a
   # connection, instead of holding the master's identity (and the TLS private
   # key) for its whole life. Needs to run as root, which the phpt job's
@@ -903,380 +1017,6 @@ jobs:
         run: |
           chmod +x build-out/bin/php-fpm-ng
           ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Task 040: a renewed TLS certificate must take effect in every gateway
-  # process without a restart. Needs multiple real gateway processes under
-  # SO_REUSEPORT, a load generator running across the file swap, and a
-  # deliberately broken candidate -- a shell-driven scenario like
-  # gateway-privileges above, but no root needed (nothing here drops
-  # privileges), so it stays out of the phpt job rather than needing sudo.
-  tls-reload:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: verify TLS certificate reload without restart (task 040)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng
-          ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #172: a pool with http.tls_wait_for_cert must start without its
-  # certificate, refuse TLS connections rather than answer them badly, and
-  # have every gateway process pick up the certificate once it appears. The
-  # load-bearing part is a socket that is bound but not listening, which no
-  # phpt can observe -- it shows up only as the difference between curl exit
-  # 7 (refused) and 35 (handshake failed). Same shape and same non-root
-  # requirement as tls-reload above, its own job so a failure here is not
-  # read as a reload failure.
-  tls-wait-for-cert:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # As root php-fpm refuses to start and the suite would report success
-      # without having tested anything. See the same note on tls-reload.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: verify the NO_CERT -> READY transition (issue #172)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng
-          ./build/test-http-tls-wait-for-cert.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #90: the per-connection read deadline (task 031) used to fire into a
-  # bufferevent evhttp had already freed, killing the whole gateway process
-  # with SIGSEGV. Same shape as tls-reload above -- real gateway processes,
-  # real TLS, no root -- and its own job so a crash here is not read as a
-  # reload failure.
-  read-deadline:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: verify a gateway survives its own read deadline (issue #90)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng
-          ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #129: a synchronous hard write error while handing a request to an
-  # upstream freed the connection and the upstream underneath their caller.
-  # Nothing observable from outside the process changes -- the gateway answers
-  # 502 and keeps serving on a corrupted heap -- so this cell runs the gateway
-  # under valgrind and fails on any invalid access inside fpm_http.c. Own job
-  # for the same reason as read-deadline above: memcheck makes it slow, and a
-  # failure here means one specific thing.
-  gateway-write-failure:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: verify a synchronous upstream write failure corrupts nothing (issue #129)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng
-          ./build/test-http-gateway-write-failure.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  plain-http-listener:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: verify the redirect-only plain HTTP companion (task 042)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng
-          ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #75: give the amphp/Revolt integration a named, visible slot in CI
-  # instead of not running anywhere at all (confirmed by grep before this job
-  # existed: build/test-http-direct-amphp.sh was not referenced from any
-  # workflow). The decision, written down per the issue's acceptance
-  # criteria: DECLARE IT OPTIONAL rather than gate it.
-  #
-  # Gating was costed and rejected for now. .github/docker/ci.Dockerfile has
-  # no php-cli/phar/composer at all -- every job here builds php-src from
-  # scratch with --disable-all -- so gating would mean apt-installing
-  # php-cli+composer (or a pinned composer.phar) into that image. Worse,
-  # ci-image.yml explicitly does not push a rebuilt image on pull_request
-  # (only on push to main), so a single PR could not add both the Dockerfile
-  # change and a build-matrix job that depends on it -- landing gating would
-  # need a merge-then-follow-up pair of PRs. That is a real cost, and
-  # disproportionate to what is, today, an optional harness whose
-  # dependency-free half (sapi/fpmng/tests/fpmng-http-direct-worker.phpt) is
-  # already gated in the fpmng-phpt job above.
-  #
-  # So: this job runs the harness against the same canonical build every
-  # worker-mode job here uses, in the same ghcr.io/crazy-goat/php-fpm-ng-ci
-  # image -- which has no phar/composer -- so it SKIPs (exit 0) on every run
-  # today. That is expected, not a bug in this job. What changes is that the
-  # skip is now a named, always-present entry in the checks list and in the
-  # job's own step summary (build/test-http-direct-amphp.sh's skip()
-  # function), instead of a harness nobody invoked. Upgrading this to a real
-  # gate later means doing the two-step Dockerfile-then-job dance above.
-  http-direct-amphp:
-    needs: build
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # uid 1001 is the `runner` account that owns the workspace on a hosted
-      # image, so the container writes files the rest of the job can read. It
-      # is also the only thing keeping this job off root, which the suites
-      # depend on: as root php-fpm refuses to start, so a root job reports
-      # PASS=0 with everything skipped and still looks green.
-      options: --user 1001:1001
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v8
-        with:
-          name: fpmng-canonical-build
-          path: build-out
-      - name: run the amphp/Revolt worker-mode harness (issue #75)
-        run: |
-          chmod +x build-out/bin/php-fpm-ng build-out/bin/php
-          ./build/test-http-direct-amphp.sh "$PWD/build-out/bin/php-fpm-ng" "$PWD/build-out/bin/php"
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #224: gate the artefact a user installs, not the tree it was built
-  # from. Every other cell here runs a binary out of a build directory; this one
-  # builds the .deb and the .apk, throws the build host away, installs each
-  # package into a container with no compiler in it, and runs the owned suite
-  # against the installed binary. The file layout, the conffiles, the dependency
-  # on the distribution's embed package and issue #220's refusal to run against
-  # another minor's libphp have no other coverage.
-  #
-  # Gating, not informational (which is where #217 left it): once this build is
-  # what users install, a regression that only CI could have caught would
-  # otherwise ship and be found by a user. That is also why #217 asked for a
-  # second, non-gating cell doing the same build and closed without one -- it
-  # would have been this job with its verdict thrown away.
-  #
-  # HOW TO READ A FAILURE HERE (issue #217). This is the one cell that links
-  # against a PHP nobody in this repository pinned: 8.5.4 from Ubuntu and
-  # 8.5.10 from Alpine, against the php-8.5.9 the rest of the matrix builds.
-  # So a red here that no other cell shows is a question before it is a
-  # verdict, and the first thing to check is the version line the job prints
-  # ("libphp-build.sh: php-config8.5 -> PHP x.y.z"). A distribution moving its
-  # minor, dropping a symbol, or changing what its php_config.h claims about
-  # the build host all land here and nowhere else. It still blocks the merge,
-  # because the packages are what users install and shipping a package this
-  # cell cannot install is worse than waiting -- but the fix may well be in
-  # this repository's expectations rather than in the change under review.
-  #
-  # Not containerised, like static-musl and for the same reason: the script
-  # drives `docker run` with host bind mounts, and -v paths are resolved by the
-  # host daemon, so a containerised copy of it would mount empty directories.
-  #
-  # Both flavours in one job rather than two: they share the prepared tree set
-  # up below, and on a hosted runner two jobs would each clone and patch
-  # php-src again to split a step that costs less than that.
-  #
-  # WHERE THE TIME GOES (issue #240). Timed on the box, the deb flavour was 328
-  # seconds, of which 232 were `apt-get` unpacking the distribution's PHP -- our
-  # own build and package step was 16 and the 61-test suite was 72. Not the
-  # network: downloading those packages took 6 seconds and dpkg took 66. So
-  # build/ci-package-gate.sh now runs its two stages in images ci-image.yml
-  # pre-installs that set into, and does the unpacking nightly instead of four
-  # times per pull request. The images are a cache, not a contract: the stages
-  # still name every package they need, and against a bare base image they
-  # install it exactly as before.
-  package-gate:
-    needs: patches
-    runs-on: ubuntu-latest
-    env:
-      # A host path the runner user owns, for the same reason static-musl
-      # names one, and named without the runner context, which a job-level
-      # env: does not have. Nothing caches it, so unlike MUSL_CACHE it may sit
-      # outside the workspace. The reclaim-from-root steps that used to precede
-      # the checkout are gone with the shared box -- nothing outside this run
-      # will ever try to unlink what the containers below write as root.
-      PACKAGE_CACHE: ${{ github.workspace }}/../buildtree-package
-      # Refuse the bare-base-image fallback. See the login step below.
-      FPMNG_REQUIRE_WARM_IMAGES: "1"
-    steps:
-      - uses: actions/checkout@v7
-
-      # This job is not containerised, so nothing has authenticated its docker
-      # daemon to ghcr -- and the package-gate images are private. Without this
-      # the pull in ci-package-gate.sh fails and the script falls back to
-      # building both stages from a bare base image: the job goes back to the
-      # 328 seconds issue #240 removed, and still passes. Which is why
-      # FPMNG_REQUIRE_WARM_IMAGES is set below -- in CI that fallback is a
-      # failure, not a slow path.
-      - name: log in to ghcr.io for the package-gate images
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-
-      # The tree is needed for its sources and its tests, never for a build
-      # product: build/libphp-build.sh compiles the 54 sources config.m4 names
-      # against the distribution's headers, inside the container. Hence
-      # FPMNG_TREE_SKIP_CONFIGURE -- there is no configure on this path at all.
-      - name: php-src tree for the package build
-        env:
-          FPMNG_TREE_SKIP_CONFIGURE: "yes"
-        run: |
-          ( set +e; ./build/ci-build-tree.sh "$PACKAGE_CACHE/src" "$PHP_SRC_REPO" "$PHP_SRC_REF" 2>&1; echo "$?" > tree-package.rc ) | tee tree-package.log
-          exit "$(cat tree-package.rc)"
-
-      - name: the .deb, installed on a machine with no compiler
-        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb"
-      - name: the .apk, installed on a machine with no compiler
-        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk"
-
-      # The TLS/ACME package (issue #294), on a pull request too now. It used
-      # to be built and gated only by .github/workflows/release.yml, on a tag
-      # -- the reasoning there was that this job is already the longest one in
-      # CI (issue #240) and a second row would double that cost on every pull
-      # request to gate an artefact that only ships on a tag. That reasoning
-      # is what let the regression this comment is a response to ship
-      # undetected all the way to a v0.5.0 tag: fpmng-http-direct-connection-
-      # info.phpt's own SKIPIF checked for a TLS-capable binary but not for
-      # pool.type = http support, so it FAILed instead of skipping the moment
-      # a real --enable-fpmng-tls build met a distribution libphp without
-      # patches/0006 -- a combination only release.yml's tag-only run ever
-      # produced. A wrong assertion in the suite is exactly the kind of bug a
-      # pull request should have caught before it could reach a tag.
-      #
-      # The compromise: two more flavours, not two more jobs. The tree above
-      # is already fetched and prepared for this run, so each TLS row costs
-      # about what release.yml's own TLS steps measure (tens of seconds of
-      # build plus the suite run -- issue #240's 232-second apt-get/apk unpack
-      # is what the warm images below already remove), not a second checkout
-      # or a second tree fetch.
-      #
-      # "apk stays release-only" was this job's original call here, reasoned
-      # as: deb and apk build and gate the same source against the same
-      # suite, so a regression specific to which packaging format Alpine uses
-      # is not the risk a TLS row exists to catch. The v0.5.1 release attempt
-      # proved that reasoning incomplete: the TLS .apk flavour flaked on
-      # fpmng-http-direct-connection-info.phpt's supervisor-result poll (a
-      # budget of 5s for a fork+exec+PHP-bootstrap, tight enough that CPU
-      # contention on a package-gate container -- exactly what this job's
-      # own multi-flavour run creates -- could exceed it) in a way the .deb
-      # flavour, on the same commit, did not. That is evidence a TLS-flavoured
-      # regression can be format-specific after all, so both TLS rows now run
-      # on every pull request rather than waiting for a tag to find out.
-      - name: the TLS .deb, installed on a machine with no compiler
-        env:
-          FPMNG_PACKAGE_TLS: "1"
-        run: ./build/ci-package-gate.sh deb "$PACKAGE_CACHE/src" "$PWD/out-package-deb-tls"
-      - name: the TLS .apk, installed on a machine with no compiler
-        env:
-          FPMNG_PACKAGE_TLS: "1"
-        run: ./build/ci-package-gate.sh apk "$PACKAGE_CACHE/src" "$PWD/out-package-apk-tls"
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: package-gate-results
-          path: |
-            out-package-deb/results
-            out-package-apk/results
-            out-package-deb-tls/results
-            out-package-apk-tls/results
-          retention-days: 14
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         env:

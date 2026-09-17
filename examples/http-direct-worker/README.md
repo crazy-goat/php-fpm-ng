@@ -63,10 +63,10 @@ time (for i in $(seq 8); do curl -s "localhost:8080/sleep?id=$i" & done; wait)
 concurrency measurement. It needs Composer and a PHP CLI with `ext-phar` to
 run `composer install` — which the CI image
 (`.github/docker/ci.Dockerfile`) does not provide, so this integration is
-**not gated** by the automated matrix. It does run there as its own job
-(`http-direct-amphp` in `.github/workflows/build-matrix.yml`), but that job
-SKIPs today by design; see the comment on that job and issue #75 for the
-decision and its cost. The dependency-free half of the same claim — that the
+**not gated** by the automated matrix. It does run there, as a step of the
+`integration` job in `.github/workflows/build-matrix.yml`, but that step SKIPs
+today by design; see the comment on it and issue #75 for the decision and its
+cost. The dependency-free half of the same claim — that the
 worker transport's primitives are sufficient for a Revolt-style event loop —
 is `sapi/fpmng/tests/fpmng-http-direct-worker.phpt`, which CI does gate.
 

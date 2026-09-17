@@ -66,6 +66,15 @@ diagnostic pragma when the compiler needs one), never by widening this config.
 
 ## CI
 
-The `lint` job in `.github/workflows/build-matrix.yml` runs `build/lint-c.sh`
-and is **non-blocking** (`continue-on-error: true`). Turning findings into
-hard failures is a separate decision once the report is noise-free.
+The `checks` job in `.github/workflows/build-matrix.yml` runs
+`build/lint-c.sh` and is **blocking**. It landed non-blocking
+(`continue-on-error: true`) on purpose -- a red build on day one for
+pre-existing findings teaches people to ignore the job -- but that backlog was
+emptied by issues #107 and #111, and `continue-on-error` was dropped on
+2026-09-09. A finding here is fixed in the code, or silenced in `.clang-tidy`
+with a reason; it is not waved through.
+
+(It was its own `lint` job until the CI restructure of 2026-09-17, which
+folded it in with the two hermetic doc/coverage checks -- three jobs that each
+paid a runner allocation to run a script finishing in seconds, none of them on
+the critical path.)

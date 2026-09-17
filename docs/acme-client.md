@@ -190,7 +190,7 @@ outage.
 
 The canonical CI build has no libcurl: `.github/docker/ci.Dockerfile:17`
 installs `libevent-dev libssl-dev zlib1g-dev` and nothing else, and
-`.github/workflows/build-matrix.yml:178` configures without `--with-curl`
+`.github/workflows/build-matrix.yml`'s `FPMNG_CONFIGURE_FLAGS` configures without `--with-curl`
 (only `build/static-full.sh:39-45` enables it). A client that needed ext/curl
 would be a client the project's own CI cannot test. `https://` over the
 OpenSSL stream wrappers is always present in a build that can do TLS at all —

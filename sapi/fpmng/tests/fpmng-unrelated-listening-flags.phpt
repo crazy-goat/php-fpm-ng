@@ -81,11 +81,13 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
 $basePort = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26039);
 $fiberAddress = "127.0.0.1:$basePort";
 $classicAddress = '127.0.0.1:' . ($basePort + 1);
+$dir = __DIR__;
 
 /* pool.type = http since issue #379: the retired pool type's fiber cell is
  * gone with the type, and http x fiber is the surviving fiber configuration.
- * The fiber pool's own listener speaks HTTP on http.listen; the unrelated
- * classic pool below keeps its upstream FastCGI socket. */
+ * The fiber pool's own listener speaks HTTP on http.listen (requests go to a
+ * script file, same shape as the fiber-matrix test); the unrelated classic
+ * pool below keeps its upstream FastCGI socket. */
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -93,6 +95,7 @@ pid = {{FILE:PID}}
 [fiber]
 listen = $fiberAddress
 http.listen = $fiberAddress
+chdir = $dir
 pool.type = http
 pool.executor = fiber
 php_admin_value[opcache.enable] = 0
@@ -106,11 +109,12 @@ pm.max_children = 1
 EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "ok";');
+$script = basename($tester->makeSourceFile('unrelated-flags-'));
+$httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
 
 $tester->start();
 $tester->expectLogStartNotices();
-$httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
-if (@file_get_contents("http://$fiberAddress/", false, $httpCtx) !== 'ok') {
+if (@file_get_contents("http://$fiberAddress/$script", false, $httpCtx) !== 'ok') {
     throw new RuntimeException('fiber pool did not answer over HTTP');
 }
 $tester->request(address: $classicAddress)->expectBody('ok', skipHeadersCheck: true);

@@ -78,6 +78,7 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
     }
 }
 
+$dir = __DIR__;
 $port = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26037);
 $address = "127.0.0.1:$port";
 
@@ -94,6 +95,7 @@ process_control_timeout = 2
 [reload]
 listen = $address
 http.listen = $address
+chdir = $dir
 pool.type = http
 pool.executor = fiber
 php_admin_value[opcache.enable] = 0
@@ -110,25 +112,33 @@ process_control_timeout = 2
 [reload]
 listen = $address
 http.listen = $address
+chdir = $dir
 pool.type = http
 pm = static
 pm.max_children = 1
 EOT;
 
+/* The gateway maps a request path onto a source file (same shape as the
+ * fiber-matrix test): the script prints "ok", so the body check needs no
+ * front controller. */
 $httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
 
 $tester = new FPM\Tester($fiberConfig, '<?php echo "ok";');
+$script = basename($tester->makeSourceFile('reload-flags-'));
+$httpOk = function () use ($address, $script, $httpCtx): bool {
+    return @file_get_contents("http://$address/$script", false, $httpCtx) === 'ok';
+};
 
 $tester->start();
 $tester->expectLogStartNotices();
-if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+if (!$httpOk()) {
     throw new RuntimeException('fiber start did not answer over HTTP');
 }
 assertNonblocking(masterListenFlags($tester->getPid(), $address), true, 'fiber start');
 
 $tester->reload($classicConfig);
 $tester->expectLogReloadingNotices();
-if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+if (!$httpOk()) {
     throw new RuntimeException('classic after fiber reload did not answer over HTTP');
 }
 assertNonblocking(masterListenFlags($tester->getPid(), $address), false, 'classic after fiber reload');
@@ -137,7 +147,7 @@ $holdSeconds = (int) (getenv('FPMNG_TASK037_HOLD_SECONDS') ?: 0);
 if ($holdSeconds > 0) {
     $deadline = microtime(true) + $holdSeconds;
     while (microtime(true) < $deadline) {
-        if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+        if (!$httpOk()) {
             throw new RuntimeException('hold request did not answer over HTTP');
         }
         usleep(10000);
@@ -146,7 +156,7 @@ if ($holdSeconds > 0) {
 
 $tester->reload($fiberConfig);
 $tester->expectLogReloadingNotices();
-if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+if (!$httpOk()) {
     throw new RuntimeException('fiber after classic reload did not answer over HTTP');
 }
 assertNonblocking(masterListenFlags($tester->getPid(), $address), true, 'fiber after classic reload');

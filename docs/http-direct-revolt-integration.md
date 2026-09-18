@@ -219,6 +219,10 @@ buffered bytes just like a TLS one. Any other cast of a filtered stream — to a
    Concurrent requests per worker, SSE fan-out and `fpm_push()` in worker mode
    are delivered by userland fibers; the task should measure the *classic*
    head-of-line cost and stop treating "fibers" as one word covering both modes.
+   (2026-09-18, issue #342: SSE fan-out no longer claims a Revolt driver or
+   fibers specifically — `examples/http-direct-worker-sse/` delivers it on the
+   plain `fpmng_worker_*` primitives with plain Fibers; the "fan-out" is within
+   one worker either way, see issue #182 for the cross-worker question.)
 3. **New task 073** (this note's POC): worker mode plus loop primitives plus a
    userland Revolt driver, proven by an amphp hello-world with a concurrent
    one-second sleep.

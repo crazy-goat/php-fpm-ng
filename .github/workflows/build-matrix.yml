@@ -314,6 +314,10 @@ jobs:
 
       - name: clang-tidy report (our files only)
         run: |
+          # pipefail: the pipeline must fail on clang-tidy's exit code, not
+          # tee's -- with WarningsAsErrors in .clang-tidy (issue #414) a
+          # finding in sapi/fpmng/ has to turn this step red.
+          set -o pipefail
           chmod +x build/lint-c.sh
           ./build/lint-c.sh "$PHPSRC" 2>&1 | tee lint-c-report.txt
 

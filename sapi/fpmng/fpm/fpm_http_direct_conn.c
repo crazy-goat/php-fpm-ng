@@ -381,6 +381,7 @@ void fpm_http_direct_conns_free(struct fpm_http_direct_conns *conns)
 	 * c->conns inside fpm_direct_conn_unlink(). Caching the head in a local
 	 * and walking c->next would be the actual use-after-free. */
 	while (conns->list) {
+		/* NOLINTNEXTLINE(clang-analyzer-unix.Malloc) -- false positive, see above */
 		fpm_direct_conn_forget(conns->list);
 	}
 	free(conns);
@@ -598,6 +599,7 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 		struct fpm_direct_conn *c = conns->tail;
 
 		if (c->served && fpm_direct_conn_abandoned(c)) {
+			/* NOLINTNEXTLINE(clang-analyzer-unix.Malloc) -- false positive, see above */
 			fpm_direct_conn_forget(c);
 			continue;
 		}

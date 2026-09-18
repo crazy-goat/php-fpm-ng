@@ -74,6 +74,17 @@ emptied by issues #107 and #111, and `continue-on-error` was dropped on
 2026-09-09. A finding here is fixed in the code, or silenced in `.clang-tidy`
 with a reason; it is not waved through.
 
+### Warnings are errors (issue #414)
+
+`WarningsAsErrors: '*'` since the #414 fixes. The report was already scoped to
+our TUs and headers only (`lint-c.sh` passes only our `.c` files and the
+`HeaderFilterRegex` covers only our directories), so every diagnostic it
+prints is ours to own — letting them through printed the six #414 findings
+into the artifact while the job stayed green. Site suppressions
+(`NOLINT` with a stated reason) are the release valve for false positives,
+e.g. the two analyzer reports in `fpm_http_direct_conn.c` where `forget()`
+unlinks before it frees and the loop legitimately re-reads the list head.
+
 (It was its own `lint` job until the CI restructure of 2026-09-17, which
 folded it in with the two hermetic doc/coverage checks -- three jobs that each
 paid a runner allocation to run a script finishing in seconds, none of them on

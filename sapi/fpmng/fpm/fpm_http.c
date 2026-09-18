@@ -3397,12 +3397,12 @@ static struct fpm_worker_pool_s *fpm_http_route_target_pool(struct fpm_worker_po
 		 * "unsupported" would teach operators -- and the next person reading
 		 * this file -- that FastCGI is the only thing a target can ever be. */
 		zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' is 'pool.type = %s'; routing to it is "
-			"not yet supported (see #344). Until then an http.route target must be a fastcgi or "
-			"fastcgi-ng pool", wp->config->name, pool_name, pool_name, type->name);
+			"not yet supported (see #344). Until then an http.route target must be a fastcgi "
+			"pool", wp->config->name, pool_name, pool_name, type->name);
 		return NULL;
 	}
 	zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' is 'pool.type = %s', which the gateway cannot "
-		"use as a target; an http.route target must be a fastcgi or fastcgi-ng pool",
+		"use as a target; an http.route target must be a fastcgi pool",
 		wp->config->name, pool_name, pool_name, type->name);
 	return NULL;
 }

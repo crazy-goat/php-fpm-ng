@@ -1440,7 +1440,7 @@ static int fpm_conf_process_all_pools(void)
 		 * pm.*_listen directives say where THAT endpoint binds, and the pool
 		 * they bind is created by fpm_operator_endpoint.c.
 		 *
-		 * On fastcgi and fastcgi-ng there is no such listener, on purpose:
+		 * On fastcgi there is no such listener, on purpose:
 		 * those types have a web server in front of them, which is where an
 		 * operator already restricts who may reach a path. pm.status_path
 		 * therefore keeps its upstream meaning there -- answered on the pool's

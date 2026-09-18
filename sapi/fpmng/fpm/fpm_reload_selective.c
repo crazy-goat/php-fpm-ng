@@ -200,7 +200,13 @@ static int fpm_reload_selective_env_take(const char *name, pid_t **out_pids) /* 
 			rest = comma ? comma + 1 : rest + strlen(rest);
 		}
 
-		pids = malloc(sizeof(pid_t) * (size_t) n);
+		/* Only allocate when there is something to carry: a malformed group
+		 * ("name:" with an empty pid list) leaves n == 0, and handing the
+		 * caller a non-NULL array alongside a zero count would leak it in
+		 * fpm_reload_selective_adopt(), which returns on n == 0. */
+		if (n > 0) {
+			pids = malloc(sizeof(pid_t) * (size_t) n);
+		}
 		if (pids) {
 			int i = 0;
 

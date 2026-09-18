@@ -277,7 +277,7 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 	 * for one URL, because the operator scraping it has no way to tell which
 	 * pool replied. */
 	for (r = l->routes; r; r = r->next) {
-		if (strcmp(r->path, path)) {
+		if (strcmp(r->path, path) != 0) {
 			continue;
 		}
 
@@ -388,7 +388,7 @@ static void fpm_operator_endpoint_dispatch(void *ctx, const char *path, const ch
 	for (r = l->routes; r; r = r->next) {
 		const struct fpm_pool_type_s *type;
 
-		if (strcmp(r->path, path)) {
+		if (strcmp(r->path, path) != 0) {
 			continue;
 		}
 

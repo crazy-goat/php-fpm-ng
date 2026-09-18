@@ -189,7 +189,7 @@ Three rules this facility lives by:
   test environment variable could speed up would not be a watchdog. So the fix
   is not in the watchdog but in the test's own config:
   `supervisor.stop_timeout = 1`, which is the lowest value accepted (anything
-  below it is reset to the default 10).
+  below it is reset to the default 10). Measured: 12.5 s -> 3.57 s.
 
   `fpmng-supervisor-max-memory` spent its budget proving a negative -- that
   `restart = never` does not restart. The master states it positively, at
@@ -197,19 +197,31 @@ Three rules this facility lives by:
   restarting"*, logged in the same breath as the flag whose absence was the
   original bug. The test now waits for that line and keeps a 1.5 s negative
   window after it, and the line itself became an assertion: without it, a run
-  count of 1 only means nothing had got round to restarting yet.
-  `fpmng-reload-selective-on` was the same case against
+  count of 1 only means nothing had got round to restarting yet. Measured on
+  run 35311532797: 14.7 s -> 1.67 s.
+
+  `fpmng-reload-selective-on` looked like the same case against
   `fpm_reload_selective.c`'s *"config unchanged -- sparing all N running
-  child(ren)"*, and got the same treatment.
+  child(ren)"* and got the same treatment, and it is the one that did not work:
+  the line never arrived, the test spent its whole 15 s timeout waiting for it
+  and then failed, 3.5 s -> 16.9 s. The change was reverted; the test is back on
+  its 3 s pid window. What makes it worth a separate look rather than a second
+  guess is that the pid window itself has always passed, both before and after
+  -- so the pool really is being spared, and it is the *reading* of that NOTICE
+  that is wrong, not the feature. The obvious difference from the max-memory
+  case is the reload: `Tester::reload()` calls `cleanConfigFiles()` and
+  rewrites the config before signalling, and the NOTICE is emitted by the old
+  master between that and `execvp()`. Tracked separately.
 
   The remaining two are plain over-provisioning. `fpmng-http-pool-full-503` and
   `fpmng-http-pool-full-wait-bounded` pinned their single worker with a
   `sleep(5)` in the script and then read that response to completion, so each
   paid all five seconds although every deadline they assert on falls inside the
   first second; `sleep(2)` keeps a margin of more than three times over the
-  longest of them. `fpmng-http-direct-streaming` and its TLS sibling waited
-  `sleep(3)` for a `http.stream_write_timeout` of 1000 ms, now 1.5 s, still
-  half again over the bound that has to expire.
+  longest of them, and both landed at 2.02 s from 5.0 s.
+  `fpmng-http-direct-streaming` and its TLS sibling waited `sleep(3)` for a
+  `http.stream_write_timeout` of 1000 ms, now 1.5 s, still half again over the
+  bound that has to expire: 4.5 s -> 2.11 s and 4.5 s -> 2.65 s.
 
   One of those five is worth singling out as a technique rather than a saving.
   The streaming tests proved "the first chunk left before the script finished"

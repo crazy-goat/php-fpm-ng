@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: worker.executor honest metrics -- requests counted, pending/watcher gauges live (issue #333)
+fpm-ng: worker.executor honest metrics -- requests counted, pending/watcher gauges live (issue #333, extended by #339)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--
@@ -152,6 +152,27 @@ function metric(string $body, string $name): int
     return (int) $m[1];
 }
 
+/* fpmng_pool_<name>{pool="worker",<extra labels>} <value>: the shape issue
+ * #339's per-slot/labeled series use -- one label list per metric (slot=, or
+ * reason=, or slot=+type=), always with pool="worker" first and the rest in
+ * the exact order fpm_http_direct_ops_render_worker_metrics_prometheus()
+ * writes them in. $labels is given in that same order; a mismatch is a
+ * missing-metric error just like metric() above, not a silent non-match, so a
+ * label-order regression in the C code fails this test instead of the
+ * assertion quietly finding nothing. */
+function metricLabeled(string $body, string $name, array $labels): string
+{
+    $pattern = '/^fpmng_pool_' . preg_quote($name, '/') . '\{pool="worker"';
+    foreach ($labels as $label => $value) {
+        $pattern .= ',' . preg_quote($label, '/') . '="' . preg_quote((string) $value, '/') . '"';
+    }
+    $pattern .= '\} (-?\d+(?:\.\d+)?)$/m';
+    if (!preg_match($pattern, $body, $m)) {
+        throw new RuntimeException("metric missing: $name " . var_export($labels, true) . "\n$body");
+    }
+    return $m[1];
+}
+
 /* Polls rather than sleeps. fpm_worker_metrics_publish() writes the shared
  * slot synchronously on every fw.pending/fw.watchers mutation -- there is no
  * tick to wait a whole period for here, unlike the classic executor's
@@ -200,6 +221,25 @@ try {
     $baseRequests = metric($body, 'requests_total');
     $baseWatchers = metric($body, 'worker_watchers');
     expect('resting pending', metric($body, 'worker_pending'), 0);
+
+    /* Issue #339's slot-labeled series, checked at the same resting point:
+     * fpmng_pool_worker_queued is the fw.ready_count gauge, which this test's
+     * synchronous handle() loop never leaves non-zero between requests (every
+     * queued id is drained in the same read-watcher callback that queued it),
+     * so "0 at rest" is the only value this test can ever observe for it --
+     * still worth asserting, the same way worker_pending's resting 0 is above,
+     * because a stuck-nonzero regression would show up as a mismatch here.
+     * worker_memory_bytes and worker_accepted_total are captured as baselines
+     * to build deltas from below, the same pattern baseRequests/baseWatchers
+     * already use two lines up. */
+    expect('resting queued', (int) metricLabeled($body, 'worker_queued', ['slot' => '0']), 0);
+    $baseMemoryBytes = (int) metricLabeled($body, 'worker_memory_bytes', ['slot' => '0']);
+    if ($baseMemoryBytes <= 0) {
+        throw new RuntimeException('worker_memory_bytes baseline not positive: ' .
+            var_export($baseMemoryBytes, true));
+    }
+    $baseAccepted = (int) metricLabeled($body, 'worker_accepted_total', ['slot' => '0']);
+    $baseWatchersTimer = (int) metricLabeled($body, 'worker_watchers', ['slot' => '0', 'type' => 'timer']);
     echo "baseline: ok\n";
 
     /* 1. The buffered path (fpmng_worker_respond()): five plain requests, so
@@ -216,6 +256,23 @@ try {
         return metric($b, 'requests_total') >= $baseRequests + 5 ? $b : null;
     }, 15, 'five buffered requests to be counted');
     expect('requests after buffered load', metric($body, 'requests_total'), $baseRequests + 5);
+
+    /* fpmng_pool_worker_accepted_total (issue #339): one accepted TCP
+     * connection per request here, none of them pipelined or reused -- the
+     * same one-shot-connection shape file_get_contents() already gives the
+     * requests_total assertion right above, so this counter has to have moved
+     * by at least as much in the same window. Not an exact-five check like
+     * requests_total's: fpmng_worker_accept_hook() fires strictly before a
+     * request is even parsed, so nothing stops it from having also counted
+     * connections this test does not otherwise account for (a probe, a retry)
+     * -- ">=" is the honest claim, "the accept path is wired up and moving",
+     * without asserting connection-count internals this test does not
+     * control. */
+    $acceptedAfterBuffered = (int) metricLabeled($body, 'worker_accepted_total', ['slot' => '0']);
+    if ($acceptedAfterBuffered < $baseAccepted + 5) {
+        throw new RuntimeException('worker_accepted_total after buffered load: expected >= ' .
+            ($baseAccepted + 5) . ', got ' . var_export($acceptedAfterBuffered, true));
+    }
     echo "buffered-requests-counted: ok\n";
 
     /* 2. The streaming path (fpmng_worker_respond_start/_chunk/_end(), issue
@@ -285,6 +342,13 @@ try {
         return metric($b, 'worker_watchers') >= $baseWatchers + 2 ? $b : null;
     }, 15, 'two created watchers to be counted');
     expect('watchers after create', metric($body, 'worker_watchers'), $baseWatchers + 2);
+
+    /* fpmng_pool_worker_watchers{type="timer"} (issue #339): both watchers
+     * /watcher-create registers are FPMNG_WORKER_TIMER, so the split-by-type
+     * gauge has to account for the exact same two the untyped total just did,
+     * not just move by some amount of its own. */
+    expect('timer watchers after create', (int) metricLabeled($body, 'worker_watchers', ['slot' => '0', 'type' => 'timer']),
+        $baseWatchersTimer + 2);
     echo "watchers-counted-on-create: ok\n";
 
     foreach ($ids as $id) {
@@ -297,7 +361,27 @@ try {
         $b = $page();
         return metric($b, 'worker_watchers') === $baseWatchers ? $b : null;
     }, 15, 'freed watchers to drop back to the baseline');
+
+    /* fpmng_pool_worker_watchers{type="timer"} again, back at its own
+     * baseline once both are freed -- same "drops back down" discipline the
+     * untyped gauge's own assertion right above already applies. */
+    expect('timer watchers after free', (int) metricLabeled($body, 'worker_watchers', ['slot' => '0', 'type' => 'timer']),
+        $baseWatchersTimer);
     echo "watchers-drop-on-free: ok\n";
+
+    /* fpmng_pool_worker_memory_bytes (issue #339, reusing issue #334's
+     * ru_maxrss sample): not a delta check like the counters above -- RSS is
+     * whatever the allocator and the kernel made it, not a number this test's
+     * load moves by a predictable amount -- just that the gauge is still
+     * there and still a sane positive number after all the load above, the
+     * same "present and plausible" discipline the baseline positivity check
+     * near the top already used before any of this test's load ran. */
+    $memoryBytesNow = (int) metricLabeled($body, 'worker_memory_bytes', ['slot' => '0']);
+    if ($memoryBytesNow <= 0) {
+        throw new RuntimeException('worker_memory_bytes after load not positive: ' .
+            var_export($memoryBytesNow, true));
+    }
+    echo "memory-bytes-present: ok\n";
 
     echo "Done\n";
 } finally {
@@ -318,6 +402,7 @@ pending-while-held: ok
 pending-drops-after-answer: ok
 watchers-counted-on-create: ok
 watchers-drop-on-free: ok
+memory-bytes-present: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

@@ -306,6 +306,20 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 		"# TYPE fpmng_pool_heartbeat_age_seconds gauge\n");
 	fpm_operator_page_collect(b, fpm_operator_page_row_prometheus, wp);
 
+	/* issue #339: per-slot/labeled series that do not fit
+	 * fpm_operator_page_row_prometheus_live()'s fixed live_gauges array --
+	 * see fpm_pool_type_s.render_metrics_prometheus's comment. Same
+	 * "no occupier, no lines" contract as the application-metrics block
+	 * below: a pool type with no hook set (everything but
+	 * pool.executor = worker, for now) adds nothing here. */
+	{
+		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+		if (type && type->render_metrics_prometheus) {
+			type->render_metrics_prometheus(wp, b);
+		}
+	}
+
 	/* Application metrics (NOTES 3k): the time-series tables written by workers
 	 * into shm — read another process's shared memory from this process,
 	 * without PHP or request context, so neither renderer touches ZEND_API. No

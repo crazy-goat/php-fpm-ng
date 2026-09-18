@@ -250,13 +250,6 @@ struct fpm_worker_pool_config_s {
 	 * it forever. Only meaningful with http.stream = yes; must be > 0, because
 	 * a worker blocked forever on one slow client serves nobody else. */
 	int http_stream_write_timeout;
-	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
-	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */
-	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class
-	 * static properties; see fpm_pool_coop_statics.c. Comma-separated list of
-	 * Class\Name::property (declaring class, PHP property syntax without the
-	 * '$'); empty = mechanism off, see FPM_COOP_STATICS_MAX. */
-	char *fiber_isolate_statics;
 	/* fpm-ng: pool.executor = worker, see fpm_http_direct_worker.c. Ceiling on
 	 * requests accepted but not yet answered (fw.pending / fw.ready[]); past it
 	 * the worker answers 503 and asks to stop so the master respawns it
@@ -331,6 +324,19 @@ struct fpm_worker_pool_config_s {
 #ifdef SO_SETFIB
 	int listen_setfib;
 #endif
+	/* issue #371: appended here, at the very end of the struct, rather than up
+	 * near http_stream_write_timeout where the rest of fiber's fields would
+	 * naturally sort -- see the matching fence in fpm_conf.c's
+	 * ini_fpm_pool_options[] for why: issue #373's cut lives on a long-lived
+	 * branch whose diff against main must stay purely additive. Branch async
+	 * appends below this line, main appends above it. */
+	/* fpm-ng: pool.executor = fiber, see fpm_pool_coop_reval.c */
+	int fiber_revalidate_freq;		/* seconds between mtime checks of loaded files; 0 = disabled (default) */
+	/* fpm-ng: pool.executor = fiber, per-request isolation of listed class
+	 * static properties; see fpm_pool_coop_statics.c. Comma-separated list of
+	 * Class\Name::property (declaring class, PHP property syntax without the
+	 * '$'); empty = mechanism off, see FPM_COOP_STATICS_MAX. */
+	char *fiber_isolate_statics;
 };
 
 struct ini_value_parser_s {

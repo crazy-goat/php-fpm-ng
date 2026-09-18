@@ -184,10 +184,10 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # fpmng-http-pool-full-wait-config.phpt, fpmng-http-pool-full-wait-dispatch.phpt
 # and fpmng-http-pool-full-wait-bounded.phpt (issue #309) are a fifth addition,
 # three tests together this time: all three use pool.type = http, which this
-# stage's distribution libphp does not support (fastcgi-ng and http are
-# refused, issue #214), so all three skip on every flavour regardless of TLS.
-# TOTAL carries a further +3 and each flavour's SKIP count carries a further
-# +3; the four PASS counts are unaffected.
+# stage's distribution libphp does not support (http is refused, issue #214),
+# so all three skip on every flavour regardless of TLS. TOTAL carries a
+# further +3 and each flavour's SKIP count carries a further +3; the four PASS
+# counts are unaffected.
 #
 # fpmng-http-direct-connection-info.phpt (issue #62) is a sixth addition: a
 # pool.type = http-direct pool with http.tls_cert configured, which needs no
@@ -384,6 +384,17 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # regardless of TLS. TOTAL carries a further +3 and each flavour's SKIP count
 # carries a further +3; the four PASS counts are unaffected. Combined with
 # the twenty-fifth addition and issue #373's removal above: 120 + 3 = 123.
+#
+# Issue #376 removed the second of the two pool types this gate's libphp could
+# not honour, and turned its name into a retired one refused with its own
+# message. It moves none of the counts
+# below: no .phpt file was added or removed (the retired-name assertion lives
+# inside the existing fpmng-config-rejected-directives.phpt, which stays one
+# file with one outcome), and no test skipped on the package for the removed
+# type's support alone -- a retired name cannot be probed as a supported type,
+# so fpmng-pool-type-build-support.phpt and fpmng-pool-type-classic-matrix.phpt
+# keep the file counts they had. The constants are unchanged; this note is the
+# per-test record of that zero delta.
 EXPECT_FAIL=0
 EXPECT_TOTAL=123
 

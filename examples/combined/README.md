@@ -1,8 +1,9 @@
 # Example: combined (Tier 1)
 
 One `fpm-ng.conf`, one container, one `docker run`: `http` (`[app]`),
-`cron` (`[tick]`, every minute), `supervisor` (`[worker]`) and `status`
-(`[metrics]`) running at the same time, in the same process.
+`cron` (`[tick]`, every minute) and `supervisor` (`[worker]`) running at the
+same time, in the same process, with `[app]`'s status and metrics endpoints on
+their own ports.
 
 ## Run it
 
@@ -11,7 +12,7 @@ One `fpm-ng.conf`, one container, one `docker run`: `http` (`[app]`),
 cp <build>/sapi/fpmng/php-fpm-ng examples/combined/php-fpm-ng
 cd examples/combined
 docker build -t fpmng-combined-example .
-docker run --rm --name fpmng-combined-example -p 8080:8080 -p 8081:8081 fpmng-combined-example
+docker run --rm --name fpmng-combined-example -p 8080:8080 -p 8081:8081 -p 8082:8082 fpmng-combined-example
 ```
 
 ## Verify all four at once
@@ -35,10 +36,18 @@ The supervisor's worker is alive:
 docker exec fpmng-combined-example cat /www/data/worker-heartbeat.txt
 ```
 
-`pool.type = status` reflects all three **at once**, in the same request:
+`pool.type = status` was removed (issue #278); the replacement is the per-pool
+`pm.status_path`/`pm.status_listen` on `[app]`, and it reflects all three **at
+once**, in the same request:
 
 ```sh
 curl -s http://localhost:8081/status
+```
+
+The Prometheus metrics endpoint answers on its own port too:
+
+```sh
+curl -s http://localhost:8082/metrics
 ```
 
 The JSON body includes, together: `app`'s scoreboard (idle/active workers,

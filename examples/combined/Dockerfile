@@ -19,5 +19,5 @@ COPY www /www
 RUN chown -R app:app /www
 
 USER app
-EXPOSE 8080 8081
+EXPOSE 8080 8081 8082
 ENTRYPOINT ["/php-fpm-ng", "-y", "/fpm-ng.conf", "-F"]

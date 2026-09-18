@@ -184,9 +184,12 @@ line that calls `fpm_pool_fiber_sleep_install()`:
   unpatched, exactly today's behavior)
 - port 18971 = AFTER (`~/rd/b3/build`, this spike's code)
 
-Both: `pool.type = fastcgi-ng`, `pool.executor = fiber`, `pm = static`,
+Both: `pool.executor = fiber`, `pm = static`,
 `pm.max_children = 1` (one process, N requests in flight, per the fiber
-executor's whole point).
+executor's whole point). The transport was the pool type retired in 0.9.0
+(issue #376) -- the optimized FastCGI one behind nginx; since issue #379 fiber
+lives on `pool.type = http` only, and these numbers have not been redone
+there.
 
 | | BEFORE (unpatched) | AFTER (this spike) |
 |---|---|---|

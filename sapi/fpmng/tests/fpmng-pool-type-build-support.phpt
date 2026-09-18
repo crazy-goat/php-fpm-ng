@@ -8,7 +8,7 @@ fpm-ng: the pool types a build cannot honour are refused, the rest are accepted 
 require_once "tester.inc";
 
 /* Two builds produce this binary and they support different sets of pool
- * types. A build from patched source accepts all four. The libphp build
+ * types. A build from patched source accepts all three. The libphp build
  * (build/libphp-build.sh) links against a distribution's libphp, which carries
  * no patch of ours inside Zend/, so zend_signal_use_persistent_handlers()
  * (patches/0006) is not in it and every type with reuses_request_runtime set
@@ -51,18 +51,19 @@ file_put_contents($root . '/index.php', '<?php');
 $configs = [
     'fastcgi'     => 'pool.type = fastcgi',
     'http-direct' => "pool.type = http-direct\nchdir = $root\nhttp.front_controller = /index.php",
-    'fastcgi-ng'  => 'pool.type = fastcgi-ng',
     'http'        => "pool.type = http\nhttp.listen = {{ADDR[http]}}",
 ];
 
-/* The two types that need patches/0006 stand or fall together, so one of them
- * decides which build this is and the other is then held to the same answer. */
-$probe = validate($configs['fastcgi-ng']);
+/* The libphp guard is keyed off the capability bit (reuses_request_runtime),
+ * so http is the one type left that decides which build this is; the other
+ * two are then held to the opposite answer. Issue #376 removed fastcgi-ng,
+ * which used to stand beside http here. */
+$probe = validate($configs['http']);
 $libphpBuild = $probe !== null && str_contains($probe, REASON);
 
 foreach ($configs as $label => $extraConfig) {
-    $needsPatch = $label === 'fastcgi-ng' || $label === 'http';
-    $error = $label === 'fastcgi-ng' ? $probe : validate($extraConfig);
+    $needsPatch = $label === 'http';
+    $error = $label === 'http' ? $probe : validate($extraConfig);
 
     if ($libphpBuild && $needsPatch) {
         if ($error === null) {
@@ -93,7 +94,7 @@ foreach ($configs as $label => $extraConfig) {
 
 /* The EXPECTF section below is exact for fastcgi and http-direct -- those are
  * what both builds exist to serve, and a refusal of either is a bug anywhere.
- * The other two lines are %s because the right answer differs by build and a
+ * The other line is %s because the right answer differs by build and a
  * .phpt cannot know which one is running it. Nothing is lost: every wrong
  * answer above exits non-zero with the reason before the comparison happens,
  * so %s only ever absorbs the two spellings of a correct one. */
@@ -103,6 +104,5 @@ Done
 --EXPECTF--
 fastcgi: accepted
 http-direct: accepted
-fastcgi-ng: %s
 http: %s
 Done

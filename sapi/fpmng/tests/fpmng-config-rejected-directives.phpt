@@ -34,9 +34,9 @@ require_once "tester.inc";
 const FPMNG_ASYNC_DISABLED_BY_POLICY = 'pool.executor = async is disabled';
 const FPMNG_ASYNC_NOT_BUILT = '--enable-fpmng-async';
 
-/* A binary linked against a distribution libphp refuses `pool.type = http` and
- * `pool.type = fastcgi-ng` outright, before any directive of that pool is
- * looked at (fpm_pool_type_check_build_support()). The cases below that use
+/* A binary linked against a distribution libphp refuses `pool.type = http`
+ * outright, before any directive of that pool is looked at
+ * (fpm_pool_type_check_build_support()). The cases below that use
  * `http` are then rejected for that reason instead of the one they name, which
  * is the binary being right, not the test failing -- so that refusal counts as
  * a rejection here. The other ten cases run on both builds, which is the point:
@@ -149,6 +149,21 @@ expectConfigFailure(
     'default-fastcgi-executor',
     $base . "\npool.executor = classic",
     ['pool.executor is not supported by pool.type = fastcgi']
+);
+
+/* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
+ * unknown one -- a config file outlives the release that broke it, so the
+ * message has to say what happened and where the transport went. The libphp
+ * guard below (FPMNG_TYPE_UNSUPPORTED) counts as a rejection on its own, so
+ * this case reads the same on both builds. */
+expectConfigFailure(
+    'retired-fastcgi-ng',
+    $base . "\npool.type = fastcgi-ng",
+    [
+        "pool.type 'fastcgi-ng' no longer exists",
+        'removed in 0.9.0 (issue #376)',
+        'use pool.type = fastcgi, or pool.type = http-direct for a pool with no web server in front',
+    ]
 );
 
 /* pool.type = http-direct + pool.executor = worker (task 073). The worker
@@ -277,6 +292,16 @@ expectConfigFailure(
     ['user_ini.filename must be a bare file name']
 );
 
+/* issue #340. http.route[] is the gateway's routing table and http-direct runs
+ * no gateway, so the directive would be read by nobody. This type accepts the
+ * rest of the "http." namespace, so it has to name http.route explicitly
+ * instead of inheriting the prefix rule that covers fastcgi pools. */
+expectConfigFailure(
+    'direct-http-route',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.route[api] = /api",
+    ["'http.route' is not supported by pool.type = http-direct"]
+);
+
 unlink("$workerRoot/worker.php");
 rmdir($workerRoot);
 
@@ -299,6 +324,7 @@ supervisor-listen: rejected
 cron-pm: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
+retired-fastcgi-ng: rejected
 direct-worker-request-terminate-timeout: rejected
 direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected
@@ -312,6 +338,7 @@ direct-classic-worker-accept-threshold: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected
+direct-http-route: rejected
 async-disabled: rejected
 Done
 --CLEAN--

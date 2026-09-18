@@ -3,7 +3,6 @@ fpm-ng: legal pool.type values with the classic executor start, serve one reques
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
 fpmng_skip_if_pool_type_unsupported('http');
 ?>
 --FILE--
@@ -53,13 +52,11 @@ EOT;
     echo "$label: ok\n";
 }
 
-exercise('fastcgi-ng-classic', "pool.type = fastcgi-ng\npool.executor = classic");
 exercise('http-classic', "pool.type = http\nhttp.listen = {{ADDR[http]}}", http: true);
 
 ?>
 Done
 --EXPECT--
-fastcgi-ng-classic: ok
 http-classic: ok
 Done
 --CLEAN--

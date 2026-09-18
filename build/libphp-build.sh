@@ -7,14 +7,16 @@
 # from what this script produces, and a user installs them without a compiler.
 # 62 translation units, against 711 files for the full php-src build.
 #
-# WHAT IT IS NOT. It cannot speak for `pool.type = fastcgi-ng` or
-# `pool.type = http` -- they need zend_signal_use_persistent_handlers(), added
-# by patches/0006 inside Zend/, which is the distribution's file and not ours.
-# Nor for fibers/async (patches/0007, 0008, likewise inside libphp), nor for
-# static-musl (no distribution ships a static libphp). The binary produced here
-# REFUSES those pool types at startup rather than running them on upstream
-# behaviour under their name -- issue #214, asserted below on the binary this
-# run produced.
+# WHAT IT IS NOT. It cannot speak for `pool.type = http` -- it needs
+# zend_signal_use_persistent_handlers(), added by patches/0006 inside Zend/,
+# which is the distribution's file and not ours. Nor for static-musl (no
+# distribution ships a static libphp). The fiber/async executors are not a
+# concern here either: they only exist as executor variants of `pool.type =
+# http`, which this binary refuses at startup rather than running it on
+# upstream behaviour under its name -- issue #214, asserted below on the
+# binary this run produced. (`fastcgi-ng`, the other type the refusal used to
+# cover, was retired in 0.9.0 -- issue #376 -- and is refused everywhere with
+# its own message; it is no longer part of this script's loop.)
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
 # 58 sources out of config.m4 plus 5, and the owned .phpt suite reports
@@ -157,7 +159,7 @@ off_reason() {
   HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
                                 echo "patches/0007 and 0008 apply inside libphp, which is the distribution's file" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)
-                                echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes pool.type = fastcgi-ng and http refuse to start here instead of running on a no-op (issue #214)" ;;
+                                echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes pool.type = http refuse to start here instead of running on a no-op (issue #214)" ;;
   *) return 1 ;;
   esac
 }
@@ -440,7 +442,11 @@ EOT
 echo '<?php' > "$OUT/index.php"
 HTTP_DIRECT_CONF="chdir = $OUT
 http.front_controller = /index.php"
-for t in fastcgi-ng http; do
+# Only `http` stands in this loop since issue #376: the other retired name is
+# refused with its own message by every build, and a retired name
+# does not tell this libphp build apart from a source build -- the patches/0006
+# refusal of `http` does.
+for t in http; do
   if out=$(conf_test "$t"); then
     fail "'pool.type = $t' was accepted by a binary that does not carry patches/0006; the pool would have run with upstream signal behaviour and said nothing"
   fi
@@ -455,7 +461,7 @@ for t in fastcgi http-direct; do
     fail "'pool.type = $t' is one of the two types this build exists to ship, and it does not even pass a configuration test: $out"
   fi
 done
-echo "libphp-build.sh: pool.type fastcgi and http-direct accepted, fastcgi-ng and http refused (issue #214)"
+echo "libphp-build.sh: pool.type fastcgi and http-direct accepted, http refused (issue #214)"
 
 ldd "$BIN" | grep -qi "libphp" || fail "the binary does not link a distribution libphp; this is not the build this script is for"
 echo "libphp-build.sh: $(ldd "$BIN" | grep -i libphp | tr -s ' ')"

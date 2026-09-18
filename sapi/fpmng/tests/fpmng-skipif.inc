@@ -4,7 +4,7 @@
  * the one gate that is ours.
  *
  * A binary built by build/libphp-build.sh links against a distribution's
- * libphp and therefore refuses `pool.type = fastcgi-ng` and `pool.type = http`
+ * libphp and therefore refuses `pool.type = http`
  * at configuration time -- see fpm_pool_type_check_build_support(). A test
  * whose pool needs one of those cannot pass there, and must not pretend to
  * fail either: the binary is telling it the truth. It skips.

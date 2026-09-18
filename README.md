@@ -138,6 +138,13 @@ Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 `docker stop` are documented in
 [`docs/shutdown-timeouts.md`](docs/shutdown-timeouts.md).
 
+One gateway can serve several pools: `http.route[<pool>] = <prefix>[,...]`
+sends a path prefix to another `fastcgi`/`fastcgi-ng` pool, so an API or a
+stream endpoint gets its own workers and its own saturation behaviour without
+its own listener. The longest-prefix rule, why `/` is an ordinary entry, and
+why the connection budget belongs to a target pool rather than to a prefix:
+[`docs/http-route.md`](docs/http-route.md).
+
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS

@@ -266,9 +266,14 @@ static int fpm_child_cloexec(void)
  *
  * Every type with an operator endpoint is covered, with no exception: since
  * issue #275 there is no type left that answers the path on its own listener.
- * ping.path is deliberately untouched on every type -- #273, point 9, leaves it
- * on the request listener, because it is a liveness probe for whatever sits in
- * front of the pool. */
+ * ping.path is deliberately untouched here on every type -- #273, point 9, left
+ * it on the request listener, because it is a liveness probe for whatever sits
+ * in front of the pool. pool.type = http is the one exception, and on purpose
+ * (issue #382): for that type the thing sitting in front of the pool IS the
+ * gateway process, so fpm_http.c answers ping.path itself, in the gateway,
+ * before a request ever reaches this child -- there is no "untouched" left to
+ * do here. fastcgi keeps #273's original answer (a real web server is in
+ * front) and http-direct already answered locally before #382 existed. */
 static void fpm_child_operator_endpoint_owns_status(struct fpm_worker_pool_s *wp)
 {
 	const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);

@@ -239,6 +239,21 @@ struct fpm_http_gateway_s {
 	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
 	int front_controller_ok;			/* validated once by the master, before the first fork -- see fpm_http_front_controller_validate() */
 
+	/* ping.path/ping.response, answered locally -- issue #382. NULL ping_path
+	 * means the directive is unset, exactly as fpm_conf.c leaves it; a set
+	 * ping_path always has a non-NULL ping_response by the time fpm_conf.c is
+	 * done validating (it defaults to "pong"), copied again here so a gateway
+	 * process depends on nothing beyond its own fork()ed memory. */
+	char *ping_path;
+	char *ping_response;
+
+	/* access.suppress_path[], copied the same way -- fpm_http_log_response()
+	 * checks every entry before writing a line. First real consumer of the
+	 * directive on this listener (issue #382); see
+	 * fpm_http_direct_access_log.c for the pool.type = http-direct twin. */
+	char **suppress_paths;
+	unsigned suppress_paths_count;
+
 	/* Pool's resolved 'user'/'group' (wp->set_uid/set_gid/set_user, copied
 	 * once in the master by fpm_http_gateway_settings() -- fpm_unix_conf_wp()
 	 * has already resolved them by then, see fpm_http.c:fpm_http_gateway_drop_privileges).
@@ -545,13 +560,54 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 static const char *fpm_http_method_name(enum evhttp_cmd_type type);
 static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
 
+/* access.suppress_path[]: matched the same way ping.path is (see
+ * fpm_http_serve_ping()) -- whole path, query string cut off, no
+ * percent-decoding, so the entry an operator writes in the pool file is what
+ * is compared against. This is the http gateway's first consumer of the
+ * directive (issue #382); it was parsed in fpm_conf.c and copied onto
+ * gw->suppress_paths in fpm_http_gateway_settings() but never referenced
+ * here before. */
+static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+{
+	const char *uri = evhttp_request_get_uri(req);
+	const char *query = uri ? strchr(uri, '?') : NULL;
+	size_t path_len;
+	char path[512];
+	unsigned i;
+
+	if (!gw->suppress_paths_count || !uri) {
+		return 0;
+	}
+	path_len = query ? (size_t) (query - uri) : strlen(uri);
+	if (path_len >= sizeof(path)) {
+		return 0;
+	}
+	memcpy(path, uri, path_len);
+	path[path_len] = '\0';
+	for (i = 0; i < gw->suppress_paths_count; i++) {
+		if (!strcmp(path, gw->suppress_paths[i])) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 /* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
  * straight from the evhttp_request, callers only supply what they already know
- * (effective remote_addr, remote_user if any, final status, body bytes sent). */
+ * (effective remote_addr, remote_user if any, final status, body bytes sent).
+ *
+ * A locally answered ping.path (issue #382) IS logged here, like every other
+ * locally answered response (an ACME challenge, a static file) already was --
+ * it is real HTTP traffic that reached this process, and an operator who
+ * wants it out of the log has the same lever as for any other noisy path:
+ * access.suppress_path[], applied by fpm_http_log_suppressed() above. */
 static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *remote_addr, const char *remote_user, int status, size_t bytes)
 {
 	if (!gw->access_log) {
+		return;
+	}
+	if (fpm_http_log_suppressed(gw, req)) {
 		return;
 	}
 	fpm_http_access_log_write(gw->access_log, remote_addr, remote_user,
@@ -1808,6 +1864,68 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 	return 1;
 }
 
+/* ping.path, answered directly by the gateway process -- issue #382. Called
+ * from fpm_http_try_local(), so this runs BEFORE ACME, BEFORE the static
+ * lookup (a stray docroot/ping file must not shadow the probe) and, via the
+ * caller's caller, before fpm_http_build_request(), routing, the queue and
+ * the FastCGI connection: no child, no queue slot, no scoreboard entry,
+ * pm.max_requests or queue counter is ever touched by a locally answered
+ * ping. It is not a request of the pool.
+ *
+ * Matched against the RAW request URI (evhttp_request_get_uri(), not the
+ * percent-decoded path fpm_http_static_decode_path() produces for ACME/static
+ * below), with any query string cut off and the whole path compared so that
+ * "/pings" is not "/ping" -- verbatim the matcher http-direct already uses,
+ * fpm_http_direct_ops_try_local() in fpm_http_direct_ops.c. No
+ * percent-decoding: ping.path is a literal in the pool file and upstream
+ * matches it literally too, so "/%70ing" is not a way past a proxy rule
+ * written against the documented spelling. */
+static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
+{
+	const char *uri = evhttp_request_get_uri(req);
+	const char *query = uri ? strchr(uri, '?') : NULL;
+	size_t path_len;
+	char path[512];
+	struct evkeyvalq *out;
+	struct evbuffer *body;
+	size_t bytes;
+
+	if (!gw->ping_path || !uri) {
+		return 0;
+	}
+	path_len = query ? (size_t) (query - uri) : strlen(uri);
+	if (path_len >= sizeof(path)) {
+		return 0;
+	}
+	memcpy(path, uri, path_len);
+	path[path_len] = '\0';
+	if (strcmp(path, gw->ping_path) != 0) {
+		return 0;
+	}
+
+	body = evbuffer_new();
+	if (!body || evbuffer_add_printf(body, "%s", gw->ping_response ? gw->ping_response : "pong") < 0) {
+		if (body) {
+			evbuffer_free(body);
+		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		return 1;
+	}
+
+	out = evhttp_request_get_output_headers(req);
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	/* Same three headers upstream's fpm_status.c sends for ping/status: a
+	 * liveness probe a proxy is free to cache is a liveness probe that lies. */
+	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
+	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+	bytes = evbuffer_get_length(body);
+	fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, bytes);
+	evhttp_send_reply(req, HTTP_OK, "OK", body);
+	evbuffer_free(body);
+	return 1;
+}
+
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
@@ -1816,6 +1934,13 @@ static int fpm_http_try_local(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	char *path;
 	size_t path_len;
 	int answered = 0;
+
+	/* ping.path first, ahead of everything else in here -- see
+	 * fpm_http_serve_ping() for why the ordering and the raw (undecoded) URI
+	 * both matter. */
+	if (fpm_http_serve_ping(gw, req, remote_addr)) {
+		return 1;
+	}
 
 	/* Not gated on gw->static_files: the ACME challenge below is not a
 	 * static file, and http.static = 0 must not switch it off (issue #48,
@@ -2862,6 +2987,16 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->access_log_path);
 		free(gw->http_listen_override);
 		free(gw->plain_listen_address);
+		free(gw->ping_path);
+		free(gw->ping_response);
+		{
+			unsigned j;
+
+			for (j = 0; j < gw->suppress_paths_count; j++) {
+				free(gw->suppress_paths[j]);
+			}
+			free(gw->suppress_paths);
+		}
 		free(gw->pool);
 		free(gw->listen_address);
 		free(gw->docroot);
@@ -2953,6 +3088,37 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 
 	if (wp->config->http_access_log && *wp->config->http_access_log) {
 		gw->access_log_path = strdup(wp->config->http_access_log);
+	}
+
+	/* ping.path/ping.response -- issue #382. fpm_conf.c has already validated
+	 * ping_path and, when it is set, filled in ping_response with "pong" if
+	 * the pool did not set one, so nothing is re-validated here. */
+	if (wp->config->ping_path && *wp->config->ping_path) {
+		gw->ping_path = strdup(wp->config->ping_path);
+		gw->ping_response = strdup(wp->config->ping_response ? wp->config->ping_response : "pong");
+	}
+
+	/* access.suppress_path[], copied the same way http-direct's access log
+	 * does (fpm_http_direct_access_log.c) -- see fpm_http_log_suppressed(). */
+	{
+		struct key_value_s *kv;
+		unsigned n = 0;
+
+		for (kv = wp->config->access_suppress_paths; kv; kv = kv->next) {
+			n++;
+		}
+		if (n) {
+			gw->suppress_paths = calloc(n, sizeof(*gw->suppress_paths));
+			if (gw->suppress_paths) {
+				for (kv = wp->config->access_suppress_paths; kv; kv = kv->next) {
+					gw->suppress_paths[gw->suppress_paths_count] = strdup(kv->value);
+					if (!gw->suppress_paths[gw->suppress_paths_count]) {
+						break;
+					}
+					gw->suppress_paths_count++;
+				}
+			}
+		}
 	}
 
 	/* Default is "/index.php" (see the struct field's init in fpm_conf.c), so an

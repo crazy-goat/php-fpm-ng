@@ -301,5 +301,14 @@ independent on/off switches, since "on" means "the path is set".
 
 ## What is not here yet
 
-- `ping.path` stays on the pool's own listener on every type. It is a liveness
-  probe for whatever is in front of the pool, so that is where it belongs.
+- `ping.path` stays on the pool's own listener on `fastcgi` and `http-direct`.
+  It is a liveness probe for whatever is in front of the pool, so that is
+  where it belongs — and on `http-direct` "in front of the pool" already is
+  the pool's own listener, so it was answered locally from the start. On
+  `pool.type = http`, "in front of the pool" is the gateway process, and since
+  issue #382 that is exactly who answers it: the gateway matches `ping.path`
+  itself, before routing and before the request ever reaches a worker, so a
+  locally answered ping never touches the scoreboard, `pm.max_requests` or a
+  queue counter — it is not a request of the pool. See
+  [`docs/gateway.md`](gateway.md) and
+  [`docs/http-direct.md`](http-direct.md#pingpath-and-pmstatus_path).

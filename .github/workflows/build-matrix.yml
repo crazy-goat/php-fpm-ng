@@ -111,6 +111,29 @@ on:
 # the account gets at that moment, and the warm run of the pair happened to
 # queue behind another.
 #
+# WHAT INVALIDATES ALL OF IT AT ONCE: A NEW AC_DEFINE. autoconf writes every
+# AC_DEFINE in sapi/fpmng/config.m4 into main/php_config.h, and practically
+# every translation unit in php-src includes that header. So adding or removing
+# one define changes the preprocessed input of the whole tree, ccache misses on
+# every object, and the branch compiles php-src from scratch however warm the
+# cache it restored was. Measured on issue #396, which added
+# --enable-fpmng-debug-clock: the `build` step took 30-33 s on main (runs
+# 35266355232 and 35276934325) and 134 s on the branch carrying the new define.
+#
+# A NEW DEFINE WANTS THE SAME MANUAL RUN AS A PHP_SRC_REF BUMP, for exactly the
+# reason given above for that case: merging does not warm anything any more.
+# With the push-on-main trigger gone, the default branch's entry is rewritten
+# only by the weekly schedule, so between Mondays every branch keeps restoring
+# a pre-define entry and keeps paying the full rebuild -- the merge itself
+# changes nothing. Measured the hard way: #397 merged at 22:01 and the very next
+# pull request's `build` step still took 138 s at 22:04.
+#
+# So after merging a pull request that adds or removes an AC_DEFINE, dispatch
+# this workflow on main by hand, the same as after a pin bump. That was measured
+# too, on this very branch: three `build` steps before the dispatch took 134,
+# 138 and 139 s, and the first one after it (run 35280483951 wrote the entry at
+# 22:11:56) took 43 s.
+#
 # Every job below except static-musl runs in
 # ghcr.io/crazy-goat/php-fpm-ng-ci (built by ci-image.yml from
 # .github/docker/ci.Dockerfile), which is why none of them apt-get anything

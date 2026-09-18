@@ -1,7 +1,9 @@
 # Fiber: what is non-blocking, and what blocks the whole process
 
-State as of 2026-09-07, `pool.executor = fiber`. Applies to `pool.type = fastcgi-ng`
-and `pool.type = http`.
+State as of 2026-09-07, `pool.executor = fiber`. Applies to `pool.type = http`
+(since issue #379; the measurements behind this page were taken on the retired
+optimized-FastCGI transport, removed in 0.9.0 -- issue #376 -- and have to be
+redone on `http` if fiber is ever promoted).
 
 Thing to remember: in this executor one process serves N requests at once, so
 **one blocking call stops every request in flight**, not just its own. In

@@ -44,25 +44,6 @@ static int fpm_pool_type_coop_http_concurrent_init(struct fpm_worker_pool_s *wp)
  * #ifdef -- fpm_pool_type_coop_variant() below hands back NULL for them
  * instead. */
 #ifdef HAVE_FPMNG_FIBER
-static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
-	.name                         = "fastcgi-ng",
-	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
-	 * #82, #84 and #85 are open correctness bugs against this executor's
-	 * request isolation, and criterion 3 of the bar in #269 ("no open
-	 * correctness issue") is therefore not met. It is also behind a
-	 * default-off configure flag, so nobody is running it by accident. */
-	.tier                         = FPM_TIER_EXPERIMENTAL,
-	.requires_listen              = 1,
-	.requires_pm                  = 1,
-	.serves_requests              = 1,
-	.reuses_request_runtime       = 1,
-	.listening_socket_nonblocking = 1,
-	.baseline_counter             = "requests",
-	.rejects                      = fpm_coop_rejects,
-	.validate                     = fpm_pool_type_coop_fiber_validate,
-	.child_main                   = fpm_pool_fiber_child_main,
-};
-
 static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 	.name                         = "http",
 	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
@@ -86,23 +67,6 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 #endif /* HAVE_FPMNG_FIBER */
 
 #ifdef HAVE_FPMNG_ASYNC
-static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
-	.name                   = "fastcgi-ng",
-	/* Issue #295. Experimental, one criterion short of beta in a way that is
-	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
-	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
-	 * on every PR -- has nothing behind it here. */
-	.tier                   = FPM_TIER_EXPERIMENTAL,
-	.requires_listen        = 1,
-	.requires_pm            = 1,
-	.serves_requests        = 1,
-	.reuses_request_runtime = 1,
-	.baseline_counter       = "requests",
-	.rejects                = fpm_pool_async_rejects,
-	.validate               = fpm_pool_async_validate,
-	.child_main             = fpm_pool_async_child_main,
-};
-
 static const struct fpm_pool_type_s fpm_pool_http_async = {
 	.name                   = "http",
 	/* Issue #295. Experimental, one criterion short of beta in a way that is
@@ -126,23 +90,13 @@ static const struct fpm_pool_type_s fpm_pool_http_async = {
 const struct fpm_pool_type_s *fpm_pool_type_coop_variant(const char *type_name, const char *executor_name)
 {
 #ifdef HAVE_FPMNG_FIBER
-	if (!strcmp(executor_name, "fiber")) {
-		if (!strcmp(type_name, "fastcgi-ng")) {
-			return &fpm_pool_fastcgi_ng_fiber;
-		}
-		if (!strcmp(type_name, "http")) {
-			return &fpm_pool_http_fiber;
-		}
+	if (!strcmp(executor_name, "fiber") && !strcmp(type_name, "http")) {
+		return &fpm_pool_http_fiber;
 	}
 #endif
 #ifdef HAVE_FPMNG_ASYNC
-	if (!strcmp(executor_name, "async")) {
-		if (!strcmp(type_name, "fastcgi-ng")) {
-			return &fpm_pool_fastcgi_ng_async;
-		}
-		if (!strcmp(type_name, "http")) {
-			return &fpm_pool_http_async;
-		}
+	if (!strcmp(executor_name, "async") && !strcmp(type_name, "http")) {
+		return &fpm_pool_http_async;
 	}
 #endif
 	(void) type_name;

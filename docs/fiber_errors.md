@@ -7,11 +7,11 @@ State as of 2026-09-06, after hardening from the `fiber-hardening` branch. `pool
 The problems concern the configuration:
 
 ```ini
-pool.type = fastcgi-ng | http
+pool.type = http
 pool.executor = fiber
 ```
 
-They do not concern the production paths `fastcgi`, `fastcgi-ng/classic` or `http/classic`. All the code described below lives in `sapi/fpmng/fpm/fpm_pool_coop.c` (the shared "many requests in one process" core), in the pool type's `validate` callback, and in container startup — `fpm_conf.c`, `fpm_children.c` and `fpm_pool_type.h` were not touched, per the extensibility contract.
+They do not concern the production paths `fastcgi/classic` or `http/classic`. All the code described below lives in `sapi/fpmng/fpm/fpm_pool_coop.c` (the shared "many requests in one process" core), in the pool type's `validate` callback, and in container startup — `fpm_conf.c`, `fpm_children.c` and `fpm_pool_type.h` were not touched, per the extensibility contract.
 
 Fiber requires OPcache disabled and `max_execution_time` set to zero:
 
@@ -163,7 +163,7 @@ Until this exists, the block stays.
 
 ## Confirmed working elements
 
-For `fastcgi-ng/fiber` and `http/fiber` on a clean release build of PHP 8.5, previously confirmed:
+For `http/fiber` on a clean release build of PHP 8.5, previously confirmed (the transport under `http/fiber` is the built-in gateway; the measurements in `docs/flock-streams-spike-report.md` and `docs/sleep-yield-report.md` were taken on the retired optimized-FastCGI transport behind nginx (removed in 0.9.0, issue #376) — if fiber is ever promoted, those numbers have to be redone on `http`, see issue #379):
 
 - small and large responses;
 - binary POST;

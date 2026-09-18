@@ -110,9 +110,10 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # It moved to 84 with the tier announcements (issue #295), which added two
 # tests, and they do not move the same counter. fpmng-tier-announce.phpt is two
 # http-direct pools and needs nothing this build lacks, so it PASSes on both.
-# fpmng-tier-experimental.phpt asks the binary for --enable-fpmng-fiber in its
-# SKIPIF and the packages are not built with it, so it SKIPs on both -- the
-# fiber cell of build-matrix.yml is where that one is actually run.
+# fpmng-tier-experimental.phpt asked the binary for the fiber build flag in
+# its SKIPIF; issue #373 moved the fiber/async executors (and that test) to
+# branch async, so this addition no longer exists in the owned suite -- it
+# never counted a pass or a skip here after that move.
 #
 # It moved to 85 with fpmng-tier-build-flags.phpt (issue #294), which reads the
 # two BETA lines a TLS/ACME build prints about itself. It SKIPs on the default
@@ -362,14 +363,26 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # skip on every flavour regardless of TLS. TOTAL carries a further +3 and each
 # flavour's SKIP count carries a further +3; the four PASS counts are
 # unaffected.
+#
+# Issue #373 removed 11 tests: the fiber/coop executors moved to branch
+# `async` and everything that existed only to exercise them went with them --
+# eight fiber-specific tests (dropped-request, exceptions, flock,
+# request-isolation, sleep-concurrency, stream-select, tls-concurrency, and
+# the pool-type matrix), the two listening-flags tests that only made sense
+# with a fiber pool in the mix, and the experimental-tier announcement test.
+# Every one of them asked the binary for the fiber build flag in its SKIPIF,
+# and this gate never builds a package with that flag, so all 11 were SKIPs
+# on every flavour. TOTAL loses 11 and each flavour's SKIP count loses 11;
+# the four PASS counts are unaffected. Combined with the twenty-fifth
+# addition above: 131 - 11 = 120.
 EXPECT_FAIL=0
-EXPECT_TOTAL=131
+EXPECT_TOTAL=120
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=42
-    else EXPECT_PASS=83; EXPECT_SKIP=48; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=31
+    else EXPECT_PASS=83; EXPECT_SKIP=37; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -402,8 +415,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=45
-    else EXPECT_PASS=81; EXPECT_SKIP=50; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=34
+    else EXPECT_PASS=81; EXPECT_SKIP=39; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

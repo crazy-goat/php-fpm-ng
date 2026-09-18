@@ -17,9 +17,7 @@ task file).
 
 Same as [`fpm-phpt.md`](fpm-phpt.md): a prepared php-src tree, matching patch
 stack, built `php-fpm-ng` and CLI `php` from that tree, `strings`, and a
-SHA-256 tool. The fiber isolation and fiber matrix tests require a binary
-configured with `--enable-fpmng-fiber`; without it they skip cleanly via
-`--SKIPIF--`.
+SHA-256 tool.
 
 ## Run only the fpmng-owned suite
 

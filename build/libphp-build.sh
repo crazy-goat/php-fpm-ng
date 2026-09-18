@@ -10,11 +10,12 @@
 # WHAT IT IS NOT. It cannot speak for `pool.type = fastcgi-ng` or
 # `pool.type = http` -- they need zend_signal_use_persistent_handlers(), added
 # by patches/0006 inside Zend/, which is the distribution's file and not ours.
-# Nor for fibers/async (patches/0007, 0008, likewise inside libphp), nor for
-# static-musl (no distribution ships a static libphp). The binary produced here
-# REFUSES those pool types at startup rather than running them on upstream
-# behaviour under their name -- issue #214, asserted below on the binary this
-# run produced.
+# Nor for static-musl (no distribution ships a static libphp). The fiber/async
+# executors are not a concern here at all any more: issue #373 cut them out of
+# this tree onto branch async, along with the patches (0007, 0008) they needed.
+# The binary produced here REFUSES those pool types at startup rather than
+# running them on upstream behaviour under their name -- issue #214, asserted
+# below on the binary this run produced.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
 # 58 sources out of config.m4 plus 5, and the owned .phpt suite reports
@@ -154,8 +155,6 @@ off_reason() {
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
   HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; it exists for the test suite and must never be in a shipped package, so this one has no FPMNG_* toggle to turn it on (issue #396)" ;;
-  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC)
-                                echo "patches/0007 and 0008 apply inside libphp, which is the distribution's file" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)
                                 echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes pool.type = fastcgi-ng and http refuse to start here instead of running on a no-op (issue #214)" ;;
   *) return 1 ;;

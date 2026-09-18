@@ -13,7 +13,9 @@
 # resolve the same way a real build would. Without it, clang-tidy still runs;
 # expect missing-header noise — useful only as a smoke check of the config.
 #
-# Exit status: clang-tidy's. CI treats this job as non-blocking for now.
+# Exit status: clang-tidy's. With WarningsAsErrors: '*' in .clang-tidy
+# (issue #414) any finding in our TUs/headers fails the run; the CI job
+# propagates it (pipefail in the workflow step).
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

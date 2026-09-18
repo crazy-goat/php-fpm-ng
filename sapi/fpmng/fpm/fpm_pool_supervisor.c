@@ -1287,7 +1287,6 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			while (waitpid(max_runtime_watchdog, NULL, 0) < 0 && errno == EINTR) {
 				continue;
 			}
-			max_runtime_watchdog = -1;
 		}
 
 		shared->running = 0;

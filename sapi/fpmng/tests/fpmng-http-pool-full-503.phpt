@@ -34,7 +34,12 @@ http.gateways = 1
 http.listen = {{ADDR[http]}}
 EOT;
 
-$tester = new FPM\Tester($config, '<?php sleep(5); echo "slow";');
+/* sleep(2), not 5 (issue #399): the worker only has to still be busy when
+ * request 2 arrives, which is one usleep(500000) plus a connect and a round
+ * trip away -- so 2 s leaves about 1.5 s of margin for a loaded box, while the
+ * test used to read this response to completion and pay all five. The
+ * $elapsed > 3 bound below is unaffected; it bounds the 503, not this. */
+$tester = new FPM\Tester($config, '<?php sleep(2); echo "slow";');
 $tester->start();
 $tester->expectLogStartNotices();
 

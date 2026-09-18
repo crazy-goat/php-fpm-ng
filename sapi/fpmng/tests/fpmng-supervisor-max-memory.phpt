@@ -129,11 +129,24 @@ while (time() < $deadline) {
     usleep(200000);
 }
 
-/* "never": give it the same wall-clock budget to prove a NEGATIVE -- that it
- * does NOT keep restarting. A budget shared with the "always" polling above
- * (rather than an extra fixed sleep) keeps the test's total time bounded by
- * the same 15 s either way. */
+/* "never": wait for the master to SAY it is not restarting, then hold a short
+ * negative window (issue #399). The earlier version of this only had the
+ * window -- 15 s of polling that exits early on violation and otherwise runs
+ * to the end, which made it the single most expensive thing in this test while
+ * proving nothing the master does not already state outright:
+ * fpm_pool_supervisor_apply_policy() logs "restart = %s -> not restarting" at
+ * NOTICE in the same breath as it sets shared->terminal, i.e. in the very code
+ * path whose absence was the #324 regression. Asserting on that line is
+ * positive proof and arrives as soon as the script's first run ends.
+ *
+ * The window after it is not redundant: the line says the decision was taken,
+ * the window says nothing respawned anyway (fpm_children.c could still restart
+ * a process that then re-ran the script -- which is exactly what the buggy
+ * draft did). 1.5 s covers that, being well over the restart_delay this pool
+ * would use if it were restarting at all. */
 $neverCount = 0;
+$errorLogPath = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
+$neverSpared = false;
 $deadline2 = time() + 15;
 while (time() < $deadline2) {
     $data = @file_get_contents($neverRuns);
@@ -141,13 +154,32 @@ while (time() < $deadline2) {
         $neverCount = max($neverCount, substr_count($data, "\n"));
     }
     if ($neverCount > 1) {
-        /* Already violated -- no need to wait out the rest of the budget. */
+        /* Already violated -- no need to wait for anything else. */
+        break;
+    }
+    if (preg_match('/\[pool never\][^\n]*restart = never -> not restarting/',
+            (string) @file_get_contents($errorLogPath))) {
+        $neverSpared = true;
         break;
     }
     usleep(200000);
 }
 
-$errorLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
+if ($neverSpared) {
+    $windowEnd = microtime(true) + 1.5;
+    while (microtime(true) < $windowEnd) {
+        $data = @file_get_contents($neverRuns);
+        if (is_string($data)) {
+            $neverCount = max($neverCount, substr_count($data, "\n"));
+        }
+        if ($neverCount > 1) {
+            break;
+        }
+        usleep(200000);
+    }
+}
+
+$errorLog = $errorLogPath;
 $logText = is_file($errorLog) ? (string) file_get_contents($errorLog) : '';
 $recycleLines = substr_count($logText, 'supervisor.max_memory');
 $gaveUp = str_contains($logText, 'giving up');
@@ -172,11 +204,16 @@ $gaveUp = str_contains($logText, 'giving up');
  * issue #1). */
 $alwaysSignaled = (bool) preg_match('/\[pool always\][^\n]*on signal/', $logText);
 
-$ok = $alwaysCount > 5 && $recycleLines >= 1 && !$gaveUp && $neverCount === 1 && !$alwaysSignaled;
+/* $neverSpared is an assertion in its own right, not just a progress flag: if
+ * the NOTICE never appeared, a $neverCount of 1 only means nothing had got
+ * round to restarting yet within the budget. */
+$ok = $alwaysCount > 5 && $recycleLines >= 1 && !$gaveUp && $neverCount === 1
+    && $neverSpared && !$alwaysSignaled;
 
 if (!$ok) {
     echo "FAIL: supervisor-max-memory always-runs=$alwaysCount recycle-notices=$recycleLines "
         . "gave-up=" . ($gaveUp ? 'yes' : 'no') . " never-runs=$neverCount (want exactly 1) "
+        . "never-not-restarting-notice=" . ($neverSpared ? 'seen' : 'NEVER SEEN') . " "
         . "always-signaled=" . ($alwaysSignaled ? 'yes (BAD: uncaught signal death)' : 'no') . "\n";
 
     foreach (['always' => $alwaysRuns, 'never' => $neverRuns] as $label => $file) {

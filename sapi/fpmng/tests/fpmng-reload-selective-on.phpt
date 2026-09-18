@@ -93,15 +93,35 @@ while (time() < $deadline && $changePidAfter === $changePidBefore) {
     usleep(100000);
 }
 
-/* [keep]'s pid file is being overwritten every 50ms by the SAME process this
- * whole time if it was never restarted -- read it well after the reload has
- * settled, and also confirm the reader never observed a different pid along
- * the way (a brief flip-then-back would still be a bug: it would mean the
- * pool restarted, its config not actually being what this test believes it
- * is). */
+/* Two independent halves, and the first of them used to be missing (issue
+ * #399). The master states the decision outright -- fpm_reload_selective.c
+ * logs "[pool keep] issue #330: config unchanged -- sparing all N running
+ * child(ren)" at NOTICE in the same function that puts the pids into
+ * FPM_RELOAD_SELECTIVE_ENV for the next generation to adopt -- so that line is
+ * positive proof, available as soon as the old master reaches execvp(). It is
+ * read out of the error log directly rather than through the log tool, because
+ * expectLogReloadingNotices() above has already walked past it.
+ *
+ * The pid window after it is still necessary, and is what this test was built
+ * on: the NOTICE says the old master meant to spare the child, the window says
+ * the child really is the same process afterwards, including that it never
+ * briefly flipped and came back. But it no longer has to carry the whole proof
+ * on its own, so one second of it is enough where three were budgeted. */
+$logFile = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
+$keepSpared = false;
+$spareDeadline = time() + 15;
+while (time() < $spareDeadline) {
+    if (preg_match('/\[pool keep\][^\n]*config unchanged -- sparing all 1 running/',
+            (string) @file_get_contents($logFile))) {
+        $keepSpared = true;
+        break;
+    }
+    usleep(100000);
+}
+
 $keepPidsSeen = [$keepPidBefore => true];
-$pollDeadline = time() + 3;
-while (time() < $pollDeadline) {
+$pollDeadline = microtime(true) + 1.0;
+while (microtime(true) < $pollDeadline) {
     $data = @file_get_contents($keepPidFile);
     if ($data !== false && $data !== '' && preg_match('/^[0-9]+$/', $data)) {
         $keepPidsSeen[(int) $data] = true;
@@ -111,6 +131,9 @@ while (time() < $pollDeadline) {
 
 if ($changePidAfter === $changePidBefore) {
     echo "FAIL: [change] pool did not restart across the reload (pid stayed $changePidBefore)\n";
+} elseif (!$keepSpared) {
+    echo "FAIL: the master never logged that it was sparing [keep]'s child; "
+        . "reload.selective = yes did not take effect on an unchanged pool\n";
 } elseif (count($keepPidsSeen) > 1) {
     printf("FAIL: [keep] pool's worker pid changed across the reload (saw: %s) -- "
         . "reload.selective = yes must leave an unchanged pool untouched\n",
@@ -119,7 +142,7 @@ if ($changePidAfter === $changePidBefore) {
     echo "reload-selective-on: ok\n";
 }
 
-if ($changePidAfter === $changePidBefore || count($keepPidsSeen) > 1) {
+if ($changePidAfter === $changePidBefore || !$keepSpared || count($keepPidsSeen) > 1) {
     $tester->close(true);
     $cleanup();
     exit(1);

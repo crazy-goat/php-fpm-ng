@@ -122,12 +122,15 @@ EOT,
     ['http.route[other]', 'cannot use as a target']
 );
 
-/* The wording matters as much as the refusal: routing to an http-direct pool
- * is a capability that #344 adds, not something ruled out by design. */
+/* Issue #344: an http-direct target is now accepted (the HTTP/1.1 client
+ * transport), so nothing here asserts its refusal any more -- it is exercised
+ * end to end by fpmng-http-route-http-direct.phpt. Still refused: a target
+ * that terminates TLS on its own listener, because the client transport
+ * speaks cleartext to loopback and unix sockets only. */
 expectConfigFailure(
-    'http-direct target',
-    gateway('http.route[api] = /x', "pool.type = http-direct\nhttp.listen = {{ADDR[http2]}}"),
-    ['http.route[api]', 'not yet supported', '#344']
+    'http-direct TLS target',
+    gateway('http.route[api] = /x', "pool.type = http-direct\nchdir = /tmp\nhttp.tls_cert = /fpmng-route-invalid-no-such-cert.pem"),
+    ['http.route[api]', 'terminates TLS']
 );
 
 ?>
@@ -139,7 +142,7 @@ duplicate prefix: rejected
 prefix without a leading slash: rejected
 empty value: rejected
 http target: rejected
-http-direct target: rejected
+http-direct TLS target: rejected
 Done
 --CLEAN--
 <?php

@@ -77,6 +77,11 @@
 #include "php_ini.h"
 #include "php_variables.h"
 #include "php_streams.h"
+#include "zend_smart_str.h"
+/* issue #343: Sec-WebSocket-Accept is base64(SHA1(key || GUID)) -- both
+ * primitives are PHPAPI in ext/standard, which is always linked. */
+#include "ext/standard/base64.h"
+#include "ext/standard/sha1.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
 #include "zend_ini.h"
@@ -187,6 +192,10 @@ struct fpm_worker_pending {
 	zend_string *body_cache;
 };
 
+/* issue #343: the WebSocket hijack context, defined with
+ * fpmng_worker_upgrade() below. */
+struct fpm_ws_ctx;
+
 struct fpm_worker_watcher {
 	struct event *ev;
 	zval callback;
@@ -197,6 +206,13 @@ struct fpm_worker_watcher {
 	 * watcher starts firing for an unrelated descriptor. IS_UNDEF for
 	 * timers. */
 	zval stream;
+	/* issue #343: non-NULL when the watched stream is an upgraded WebSocket
+	 * connection (fpmng_worker_upgrade()). The hijacked connection's data
+	 * lands in its bufferevent's input evbuffer -- the descriptor itself goes
+	 * quiet once libevent has drained it -- so the fd watcher on its own can
+	 * never fire for buffered bytes; the bufferevent callbacks fire the
+	 * watcher through this back-pointer instead. */
+	struct fpm_ws_ctx *ws;
 	/* Busy-spin detection for fpm_worker_activate_buffered(): how many
 	 * iterations in a row this watcher was activated for a buffer that did not
 	 * shrink, the size it was left holding last time, and whether the warning
@@ -212,6 +228,14 @@ struct fpm_worker_watcher {
 	 * fpmng_pool_worker_watchers{type=...} gauge's only use for it. */
 	short type;
 };
+
+/* issue #343: defined in the fpmng_worker_upgrade() block below; the dtor
+ * above calls it, which is why the declaration exists. */
+static void fpm_ws_unregister_watcher(struct fpm_worker_watcher *watcher);
+/* issue #343: fpmng_worker_upgrade() reuses these; both are defined further
+ * down, after the pending table's own helpers. */
+static struct fpm_worker_pending *fpm_worker_pending_get(zend_long id);
+static void fpm_worker_count_scoreboard_request(void);
 
 static struct {
 	struct fpm_worker_pool_s *wp;
@@ -503,6 +527,9 @@ static void fpm_worker_watcher_dtor(zval *zv)
 	event_free(watcher->ev);
 	zval_ptr_dtor(&watcher->callback);
 	zval_ptr_dtor(&watcher->stream);
+	/* issue #343: an upgraded connection keeps its watchers' ids to be able
+	 * to fire them; a freed watcher must not be fired. */
+	fpm_ws_unregister_watcher(watcher);
 	pefree(watcher, 1);
 }
 
@@ -1458,6 +1485,500 @@ static void fpm_worker_register_variables(zval *array)
 	php_register_variable("SERVER_PORT", fw.server_port, array);
 }
 
+/* ------------------------------------------------------------------ issue #343 */
+
+/* fpmng_worker_upgrade(): the one builtin of the WebSocket story. The worker
+ * executor runs PHP in the process that owns the accepted connection's
+ * bufferevent, so a connection can leave evhttp's request/response world and
+ * become an ordinary bidirectional PHP stream -- RFC 6455 framing, masking,
+ * ping/pong and close codes stay in userland codecs (amphp/websocket-server,
+ * ratchet/rfc6455, ReactPHP), exactly as this executor keeps Revolt/amphp
+ * out of C. The classic executor keeps all three of #68's impossibility
+ * policies: it has no event loop of its own to hand a hijacked connection to.
+ *
+ * The hijack follows libevent 2.2's own evws_new_session() (ws.c), reduced to
+ * what the public 2.1 API can express: write the 101 into the bufferevent,
+ * replace ALL of the bufferevent's callbacks (evhttp's state machine on this
+ * connection is never driven again), clear the closecb and the timeouts, and
+ * take ownership of the request (evhttp_request_own()) so evhttp neither
+ * answers nor frees it; the request stays on the connection's request list
+ * until evhttp_connection_free() unlinks it there, and is never freed by us
+ * -- one small struct per WebSocket connection ever accepted, bounded by the
+ * worker's recycle. The bufferevent itself is the delicate part: evhttp
+ * cannot be told to release it (evcon->bufev is not reachable through the
+ * public API), so the hijack takes a bufferevent reference of its own
+ * (bufferevent_incref()) and calls evhttp_connection_free() itself -- which
+ * drops the connection from http->connections and its (evhttp) bufferevent
+ * reference, while ours keeps the bufferevent -- and its fd, and the SSL* on
+ * a TLS pool -- alive until the stream's close op frees it exactly once, via
+ * the same BEV_OPT_CLOSE_ON_FREE (fpm_worker_bevcb()) an ordinary connection
+ * is torn down with.
+ *
+ * Readiness: an fd watcher alone cannot see this connection's data -- the
+ * bufferevent drains the descriptor into its input evbuffer, and a drained
+ * descriptor never fires. The bufferevent's own read/write callbacks
+ * therefore activate the read/write watchers bound to this context
+ * (watcher->ws, wired in fpmng_worker_event_create()), which is also what
+ * makes fpmng_worker_stream_has_buffered() and feof() honest: fpmng stream
+ * ops answer from the evbuffers, and the event callback flags EOF on the
+ * stream the moment the peer goes away. */
+
+struct fpm_ws_ctx {
+	struct bufferevent *bev;
+	php_stream *stream;
+	bool eof;			/* the event callback saw BEV_EVENT_EOF or BEV_EVENT_ERROR */
+	bool orphaned;		/* teardown: the bufferevent was (or is being) freed by evhttp_free() */
+	/* watcher ids bound to this connection, fired by the bufferevent
+	 * callbacks; ids only -- the table re-lookup and the ->ws check happen at
+	 * fire time, the same shape fpm_worker_activate_buffered() uses. */
+	zend_ulong *watchers;
+	unsigned watchers_n;
+	unsigned watchers_cap;
+	struct fpm_ws_ctx *next;
+};
+
+/* Every connection this child has hijacked and not yet closed, so the
+ * teardown in child_main() can tell the stream close ops that evhttp_free()
+ * is about to free the bufferevents it never let go of. The head is touched
+ * only from this child's own single-threaded callbacks. */
+static struct fpm_ws_ctx *fpm_ws_all = NULL;
+
+static void fpm_ws_unregister(struct fpm_ws_ctx *ctx)
+{
+	struct fpm_ws_ctx **p = &fpm_ws_all;
+
+	while (*p && *p != ctx) {
+		p = &(*p)->next;
+	}
+	if (*p) {
+		*p = ctx->next;
+	}
+}
+
+static void fpm_ws_unregister_watcher(struct fpm_worker_watcher *watcher)
+{
+	struct fpm_ws_ctx *ctx = watcher->ws;
+	unsigned i;
+
+	watcher->ws = NULL;
+	if (!ctx) {
+		return;
+	}
+	for (i = 0; i < ctx->watchers_n; i++) {
+		if (ctx->watchers[i] == watcher->id) {
+			ctx->watchers[i] = ctx->watchers[--ctx->watchers_n];
+			return;
+		}
+	}
+}
+
+/* The watcher callbacks run PHP, so every fire needs the same guard
+ * fpm_worker_activate_buffered() and fpm_worker_watcher_fire() use: the
+ * callback may free watchers (event_free inside a callback is the advertised
+ * cancellation idiom), so ids are snapshotted and each is re-looked-up and
+ * re-checked before event_active() -- which only arms the event for THIS
+ * iteration, exactly what a real fd readability would have done. */
+static void fpm_ws_fire(struct fpm_ws_ctx *ctx, short type)
+{
+	zend_ulong *ids;
+	unsigned n = ctx->watchers_n, i;
+
+	if (!n) {
+		return;
+	}
+	ids = emalloc(n * sizeof(*ids));
+	memcpy(ids, ctx->watchers, n * sizeof(*ids));
+	for (i = 0; i < n; i++) {
+		struct fpm_worker_watcher *watcher = zend_hash_index_find_ptr(&fw.watchers, ids[i]);
+
+		if (!watcher || watcher->ws != ctx || watcher->type != type
+			|| !event_pending(watcher->ev, type == FPM_WORKER_EV_READ ? EV_READ : EV_WRITE, NULL)) {
+			continue;
+		}
+		event_active(watcher->ev, type == FPM_WORKER_EV_READ ? EV_READ : EV_WRITE, 0);
+	}
+	efree(ids);
+}
+
+static void fpm_ws_readcb(struct bufferevent *bev, void *arg)
+{
+	(void) bev;
+	fpm_ws_fire(arg, FPM_WORKER_EV_READ);
+}
+
+static void fpm_ws_writecb(struct bufferevent *bev, void *arg)
+{
+	(void) bev;
+	fpm_ws_fire(arg, FPM_WORKER_EV_WRITE);
+}
+
+static void fpm_ws_eventcb(struct bufferevent *bev, short what, void *arg)
+{
+	struct fpm_ws_ctx *ctx = arg;
+
+	(void) bev;
+	if (what & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
+		ctx->eof = true;
+		/* The userspace answer to "did the peer go away": the next fread()
+		 * comes up empty and feof() is true. Setting the flag on the stream
+		 * here (rather than in the read op) is what makes feof() exact -- a
+		 * merely empty buffer must not read as EOF. */
+		if (ctx->stream) {
+			ctx->stream->eof = 1;
+		}
+		fpm_ws_fire(ctx, FPM_WORKER_EV_READ);
+	}
+}
+
+static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
+{
+	struct fpm_ws_ctx *ctx = stream->abstract;
+	struct evbuffer *in = bufferevent_get_input(ctx->bev);
+	size_t buffered = evbuffer_get_length(in);
+	size_t take;
+
+	if (count > buffered) {
+		count = buffered;
+	}
+	/* 0 = "nothing buffered" -- _php_stream_read() does not treat a 0 from
+	 * the ops read as EOF, so feof() stays exactly as the event callback
+	 * flags it. An empty buffer on this stream is the NORMAL state between
+	 * WebSocket messages, not an error and not an end. */
+	take = count ? (size_t) evbuffer_remove(in, buf, count) : 0;
+	return (ssize_t) take;
+}
+
+static ssize_t fpm_ws_write(php_stream *stream, const char *buf, size_t count)
+{
+	struct fpm_ws_ctx *ctx = stream->abstract;
+	struct evbuffer *out = bufferevent_get_output(ctx->bev);
+
+	/* #332's backpressure contract, on the connection's own output evbuffer:
+	 * once what is queued-but-unwritten is at the limit, refuse to queue more
+	 * and return 0 -- the write watcher (fired by fpm_ws_writecb() when the
+	 * buffer drains) is what wakes the codec to try again. */
+	if (fw.wp->config->worker_send_buffer_limit > 0
+		&& evbuffer_get_length(out) >= (size_t) fw.wp->config->worker_send_buffer_limit) {
+		return 0;
+	}
+	return bufferevent_write(ctx->bev, buf, count) == 0 ? (ssize_t) count : -1;
+}
+
+static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *arg);
+static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg);
+
+static int fpm_ws_close(php_stream *stream, int close_handle)
+{
+	struct fpm_ws_ctx *ctx = stream->abstract;
+	zend_ulong *ids;
+	unsigned n, i;
+
+	(void) close_handle;
+	fpm_ws_unregister(ctx);
+	/* The connection is going away under the watchers watching it: drop them
+	 * (their dtor runs fpm_ws_unregister_watcher(), so the array empties
+	 * through the same path userland's event_free() uses). Snapshot ids for
+	 * the same reason every other walk here does. */
+	n = ctx->watchers_n;
+	ids = n ? emalloc(n * sizeof(*ids)) : NULL;
+	if (ids) {
+		memcpy(ids, ctx->watchers, n * sizeof(*ids));
+	}
+	for (i = 0; i < n; i++) {
+		struct fpm_worker_watcher *watcher = zend_hash_index_find_ptr(&fw.watchers, ids[i]);
+
+		if (watcher && watcher->ws == ctx) {
+			zend_hash_index_del(&fw.watchers, ids[i]);
+		}
+	}
+	if (ids) {
+		efree(ids);
+	}
+	/* The bufferevent stays evhttp's -- see the comment in
+	 * fpmng_worker_upgrade() -- so tearing the connection down is a
+	 * shutdown(), not a bufferevent_free(): the client sees the connection
+	 * die, the fd and the SSL* are closed by evhttp_free() at teardown. What
+	 * is already queued (a close frame, most often -- the codec writes it
+	 * and calls fclose() in the same breath) gets its chance first: with
+	 * bytes still unwritten, the callbacks are pointed at
+	 * fpm_ws_close_after_write(), which half-closes the moment they are on
+	 * the wire -- the last thing this connection ever does. */
+	if (!ctx->orphaned) {
+		int ws_fd = (int) bufferevent_getfd(ctx->bev);
+
+		if (ws_fd >= 0 && evbuffer_get_length(bufferevent_get_output(ctx->bev)) > 0) {
+			bufferevent_setcb(ctx->bev, NULL, fpm_ws_close_after_write_cb, fpm_ws_close_after_write, ctx->bev);
+			bufferevent_enable(ctx->bev, EV_WRITE);
+		} else if (ws_fd >= 0) {
+			shutdown(ws_fd, SHUT_RDWR);
+		}
+		ctx->eof = true;
+	}
+	efree(ctx->watchers);
+	efree(ctx);
+	return 0;
+}
+
+/* The tail of a closed upgraded connection: queued bytes out, then the
+ * half-close. arg is the bufferevent -- the context is long gone (freed by
+ * fpm_ws_close() above), so this reads nothing but the buffer itself. */
+static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *arg)
+{
+	int ws_fd;
+
+	(void) arg;
+	if (!(what & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
+		&& evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
+		return;	/* still writing; the write callback fires again */
+	}
+	ws_fd = (int) bufferevent_getfd(bev);
+	if (ws_fd >= 0) {
+		shutdown(ws_fd, SHUT_RDWR);
+	}
+}
+
+static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg)
+{
+	fpm_ws_close_after_write(bev, 0, arg);
+}
+
+static int fpm_ws_cast(php_stream *stream, int castas, void **ret)
+{
+	struct fpm_ws_ctx *ctx = stream->abstract;
+	int fd = (int) bufferevent_getfd(ctx->bev);
+
+	switch (castas) {
+		case PHP_STREAM_AS_FD:
+		case PHP_STREAM_AS_FD_FOR_SELECT:
+		case PHP_STREAM_AS_SOCKETD:
+			if (fd < 0) {
+				return FAILURE;
+			}
+			if (ret) {
+				*(int *) ret = fd;
+			}
+			return SUCCESS;
+		default:
+			return FAILURE;
+	}
+}
+
+static int fpm_ws_set_option(php_stream *stream, int option, int value, void *ptrparam)
+{
+	struct fpm_ws_ctx *ctx = stream->abstract;
+
+	(void) value;
+	(void) ptrparam;
+	switch (option) {
+		case PHP_STREAM_OPTION_CHECK_LIVENESS:
+			/* _php_stream_eof() marks the stream EOF when this reports the
+			 * stream unlivable -- the answer must come from the bufferevent's
+			 * event callback (fpm_ws_eventcb()), never from "the buffer is
+			 * empty right now", which on a WebSocket is the NORMAL state. */
+			return ctx->eof ? PHP_STREAM_OPTION_RETURN_ERR : PHP_STREAM_OPTION_RETURN_OK;
+		default:
+			return PHP_STREAM_OPTION_RETURN_NOTIMPL;
+	}
+}
+
+static const php_stream_ops fpm_ws_ops = {
+	fpm_ws_write,	/* write */
+	fpm_ws_read,	/* read */
+	fpm_ws_close,	/* close */
+	NULL,			/* flush: bytes reach the socket when the loop drains the bufferevent */
+	"fpmng-ws",		/* label */
+	NULL,			/* seek: a stream is not seekable */
+	fpm_ws_cast,	/* cast */
+	NULL,			/* stat */
+	fpm_ws_set_option,	/* set_option */
+};
+
+static bool fpm_ws_is_ws_stream(php_stream *stream)
+{
+	return stream->ops == &fpm_ws_ops;
+}
+
+/* Sec-WebSocket-Accept: base64(SHA1(key || GUID)), RFC 6455 section 4.2.1.
+ * ext/standard's SHA1 and base64 are PHPAPI and always linked. */
+static zend_string *fpm_ws_accept_key(const char *ws_key)
+{
+	static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+	PHP_SHA1_CTX sha;
+	unsigned char digest[20];
+	char buf[128];
+
+	snprintf(buf, sizeof(buf), "%s%s", ws_key, guid);
+	PHP_SHA1Init(&sha);
+	PHP_SHA1Update(&sha, (const unsigned char *) buf, strlen(buf));
+	PHP_SHA1Final(digest, &sha);
+	return php_base64_encode(digest, sizeof(digest));
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_upgrade, 0, 2, IS_RESOURCE, 0)
+	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
+	ZEND_ARG_TYPE_INFO(0, response_headers, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* Returns an ordinary bidirectional php_stream over the hijacked connection:
+ * fread()/fwrite()/fclose()/feof()/stream_has_buffered() work on it, and so do
+ * the watcher primitives, which see the underlying fd. Throws (before any
+ * state changed, so the request stays answerable by fpmng_worker_respond())
+ * when the id is unknown/answered, the client is gone, or the request is not
+ * an RFC 6455 upgrade candidate: a GET with "Upgrade: websocket" and a
+ * Sec-WebSocket-Key. */
+static ZEND_FUNCTION(fpmng_worker_upgrade)
+{
+	zend_long id;
+	HashTable *response_headers;
+	struct fpm_worker_pending *p;
+	struct fpm_ws_ctx *ctx;
+	struct evhttp_connection *connection;
+	struct bufferevent *bev;
+	struct evkeyvalq *in;
+	const char *upgrade, *key;
+	zend_string *accept;
+	smart_str head = {0};
+	zend_string *name;
+	zval *value;
+	php_stream *stream;
+
+	ZEND_PARSE_PARAMETERS_START(2, 2)
+		Z_PARAM_LONG(id)
+		Z_PARAM_ARRAY_HT(response_headers)
+	ZEND_PARSE_PARAMETERS_END();
+
+	p = fpm_worker_pending_get(id);
+	if (!p || !p->http) {
+		zend_argument_value_error(1, "is not an in-flight request");
+		RETURN_THROWS();
+	}
+	in = evhttp_request_get_input_headers(p->http);
+	upgrade = evhttp_find_header(in, "Upgrade");
+	key = evhttp_find_header(in, "Sec-WebSocket-Key");
+	if (evhttp_request_get_command(p->http) != EVHTTP_REQ_GET || !upgrade
+		|| evutil_ascii_strcasecmp(upgrade, "websocket") != 0 || !key || !*key) {
+		zend_argument_value_error(1, "is not a WebSocket upgrade request");
+		RETURN_THROWS();
+	}
+
+	accept = fpm_ws_accept_key(key);
+
+	smart_str_appends(&head, "HTTP/1.1 101 Switching Protocols\r\n");
+	smart_str_appends(&head, "Upgrade: websocket\r\n");
+	smart_str_appends(&head, "Connection: Upgrade\r\n");
+	smart_str_appends(&head, "Sec-WebSocket-Accept: ");
+	smart_str_appends(&head, ZSTR_VAL(accept));
+	smart_str_appends(&head, "\r\n");
+	zend_string_release(accept);
+
+	/* Caller headers (Sec-WebSocket-Protocol and friends), validated the same
+	 * way every other response header this executor sends is: the name must
+	 * be an RFC 9110 token, the hop-by-hop list still applies (Upgrade and
+	 * Connection are this function's to set), and one bad header refuses the
+	 * upgrade -- nothing has been written yet, so the request remains
+	 * answerable. */
+	ZEND_HASH_FOREACH_STR_KEY_VAL(response_headers, name, value) {
+		if (!name || !fpm_http_direct_header_name_ok(ZSTR_VAL(name))
+			|| fpm_http_direct_header_dropped(ZSTR_VAL(name))) {
+			smart_str_free(&head);
+			zend_argument_value_error(2, "contains an invalid or hop-by-hop header name");
+			RETURN_THROWS();
+		}
+		if (Z_TYPE_P(value) != IS_STRING) {
+			smart_str_free(&head);
+			zend_argument_value_error(2, "must be an array of strings");
+			RETURN_THROWS();
+		}
+		smart_str_appends(&head, ZSTR_VAL(name));
+		smart_str_appends(&head, ": ");
+		smart_str_appends(&head, Z_STR_P(value) ? Z_STRVAL_P(value) : "");
+		smart_str_appends(&head, "\r\n");
+	} ZEND_HASH_FOREACH_END();
+	smart_str_appends(&head, "\r\n");
+
+	ctx = emalloc(sizeof(*ctx));
+	memset(ctx, 0, sizeof(*ctx));
+	ctx->next = fpm_ws_all;
+	fpm_ws_all = ctx;
+
+	/* evhttp owns the connection until the request is answered -- which it
+	 * never will be. The hijack follows evws_new_session()'s
+	 * evhttp_start_ws_() step for step, on the public 2.1 API -- and where
+	 * 2.2's internal version steals evcon->bufev and frees the connection,
+	 * this one keeps BOTH alive: the public API can neither reach
+	 * evcon->bufev (to null it before a free) nor detach a connection from
+	 * its evhttp, and 2.1's own evhttp_connection_free() shutdown(fd,
+	 * SHUT_WR)s the connection on the way out, which would kill the
+	 * WebSocket the moment it was born. So:
+	 *
+	 *   - our callbacks replace evhttp's, and its state machine on this
+	 *     connection is never driven again;
+	 *   - the closecb and the timeouts go (an idle WebSocket must not be cut
+	 *     by http.read_timeout; liveness is the codec's ping/pong);
+	 *   - the request is left exactly where evhttp put it: never answered,
+	 *     never driven, freed with the connection at evhttp_free();
+	 *   - the stream's close does NOT free the bufferevent -- it
+	 *     shutdown(fd, SHUT_RDWR)s, which is what tears the connection down
+	 *     from the client's side -- because evhttp still owns it and frees
+	 *     it (fd and SSL) at teardown; a registry of hijacked connections
+	 *     (fpm_ws_all, walked in child_main() just before evhttp_free())
+	 *     tells a late stream free the bufferevent is gone.
+	 *
+	 * The cost, honestly stated: one bufferevent plus one request per
+	 * WebSocket connection ever accepted stays allocated until the worker
+	 * recycles (pm.max_requests, worker.max_lifetime, the master's own
+	 * recycling), the same bound every other per-connection allocation of
+	 * this executor lives under. */
+	connection = evhttp_request_get_connection(p->http);
+	bev = connection ? evhttp_connection_get_bufferevent(connection) : NULL;
+	if (!bev) {
+		/* the client is already gone */
+		smart_str_free(&head);
+		efree(ctx);
+		fpm_worker_reap(p);
+		RETURN_FALSE;
+	}
+	ctx->bev = bev;
+	bufferevent_setcb(bev, fpm_ws_readcb, fpm_ws_writecb, fpm_ws_eventcb, ctx);
+	bufferevent_set_timeouts(bev, NULL, NULL);
+	bufferevent_enable(bev, EV_READ | EV_WRITE);
+	evhttp_connection_set_closecb(connection, NULL, NULL);
+	p->http = NULL;
+
+	stream = php_stream_alloc(&fpm_ws_ops, ctx, 0, "r+b");
+	if (!stream) {
+		smart_str_free(&head);
+		efree(ctx->watchers);
+		efree(ctx);
+		/* Nothing was written: the request is still answerable. */
+		RETURN_FALSE;
+	}
+	ctx->stream = stream;
+
+	/* The 101 goes out through the bufferevent -- ours from here on -- with
+	 * the stream already installed, so there is no window in which evhttp
+	 * could be asked to write it. */
+	bufferevent_write(bev, ZSTR_VAL(head.s), ZSTR_LEN(head.s));
+	smart_str_free(&head);
+
+	/* The connection leaves the pending world: worker.max_pending and
+	 * worker.request_timeout do not apply to it any more, and it counts
+	 * towards pm.max_requests like any other answered request -- the recycle
+	 * tail is fpmng_worker_respond_end()'s, without the reply counting (the
+	 * 101 never goes through fpm_worker_count_reply()). */
+	fpm_worker_reap(p);
+	fw.answered++;
+	fpm_worker_count_scoreboard_request();
+	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
+		!fpm_worker_stopping) {
+		fpm_worker_stopping = 1;
+		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
+		fpm_worker_notify();
+	}
+
+	RETURN_RES(stream->res);
+}
+
 /* PHP-callable surface ---------------------------------------------------- */
 
 static struct fpm_worker_pending *fpm_worker_pending_get(zend_long id)
@@ -1545,6 +2066,14 @@ static ZEND_FUNCTION(fpmng_worker_stream_has_buffered)
 	php_stream_from_zval_no_verify(php_stream_handle, stream);
 	if (!php_stream_handle) {
 		RETURN_THROWS();
+	}
+	/* issue #343: an upgraded WebSocket connection buffers in its
+	 * bufferevent's input evbuffer, not in the php_stream's own read buffer
+	 * the generic path below peeks at. */
+	if (fpm_ws_is_ws_stream(php_stream_handle)) {
+		struct fpm_ws_ctx *ctx = php_stream_handle->abstract;
+
+		RETURN_BOOL(!ctx->eof && evbuffer_get_length(bufferevent_get_input(ctx->bev)) > 0);
 	}
 	RETURN_BOOL(fpm_worker_stream_buffered(php_stream_handle) > 0);
 }
@@ -2156,6 +2685,7 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 	watcher->buffered = 0;
 	watcher->spin_warned = false;
 	watcher->type = (short) type;
+	watcher->ws = NULL;
 	ZVAL_COPY(&watcher->callback, callback);
 	if (type == FPM_WORKER_EV_TIMER) {
 		ZVAL_UNDEF(&watcher->stream);
@@ -2171,6 +2701,20 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 		pefree(watcher, 1);
 		zend_throw_error(NULL, "fpmng_worker_event_create(): failed to create a libevent event");
 		RETURN_THROWS();
+	}
+	/* issue #343: an upgraded WebSocket connection's data lands in its
+	 * bufferevent, not in the descriptor -- bind the watcher to the
+	 * connection so the bufferevent callbacks can fire it. Timers carry no
+	 * stream, and php_stream_handle is untouched for them. */
+	if (type != FPM_WORKER_EV_TIMER && fpm_ws_is_ws_stream(php_stream_handle)) {
+		struct fpm_ws_ctx *ctx = php_stream_handle->abstract;
+
+		watcher->ws = ctx;
+		if (ctx->watchers_n == ctx->watchers_cap) {
+			ctx->watchers_cap = ctx->watchers_cap ? ctx->watchers_cap * 2 : 4;
+			ctx->watchers = erealloc(ctx->watchers, ctx->watchers_cap * sizeof(*ctx->watchers));
+		}
+		ctx->watchers[ctx->watchers_n++] = watcher->id;
 	}
 	zend_hash_index_add_new_ptr(&fw.watchers, watcher->id, watcher);
 	/* issue #333: see the matching call in fpm_worker_reap(). */
@@ -2581,6 +3125,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_stream_has_buffered, arginfo_fpmng_worker_stream_has_buffered)
 	ZEND_FE(fpmng_worker_next_request, arginfo_fpmng_worker_next_request)
 	ZEND_FE(fpmng_worker_closed_requests, arginfo_fpmng_worker_closed_requests)
+	ZEND_FE(fpmng_worker_upgrade, arginfo_fpmng_worker_upgrade)
 	ZEND_FE(fpmng_worker_request_env, arginfo_fpmng_worker_request_env)
 	ZEND_FE(fpmng_worker_request_body, arginfo_fpmng_worker_request_body)
 	ZEND_FE(fpmng_worker_respond, arginfo_fpmng_worker_respond)
@@ -3076,6 +3621,17 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * event on this base and a reference to a bufferevent evhttp is about to
 	 * drop. */
 	fpm_http_direct_conns_free(fw.conns);
+	/* issue #343: the bufferevents of hijacked WebSocket connections stay
+	 * evhttp's for the child's whole life (see fpmng_worker_upgrade()) -- the
+	 * free below frees them, and a stream shell php_request_shutdown() frees
+	 * later must not touch its (now gone) bufferevent again. */
+	{
+		struct fpm_ws_ctx *ctx;
+
+		for (ctx = fpm_ws_all; ctx; ctx = ctx->next) {
+			ctx->orphaned = true;
+		}
+	}
 	evhttp_free(fw.http);
 	zend_hash_destroy(&fw.pending);
 	/* issue #331: the ring buffer allocated in the setup above, next to the

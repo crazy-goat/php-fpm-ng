@@ -21,18 +21,16 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
-#include "fpm_pool_async.h"
 #include "fpm_operator_endpoint.h"
-#include "fpm_pool_coop.h"
-#include "fpm_pool_coop_statics.h"
-#include "fpm_pool_fiber.h"
+#include "fpm_pool_type_coop.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
 /* http.* tunes the gateway, which starts only under pool.type = http — on every
  * other type these directives have nothing to tune. fiber.* applies only to
- * pool.executor = fiber (fpm_coop_rejects does not include it). worker.*
- * applies only to pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
+ * pool.executor = fiber (the fiber executor's own rejected-directive list,
+ * fpm_pool_type_coop.c, does not include it). worker.* applies only to
+ * pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
  * further down carves its two directives back out on that one type. */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
@@ -98,115 +96,6 @@ static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
 	}
 	return fpm_http_direct_worker_metrics_init_main(wp);
 }
-
-#ifdef HAVE_FPMNG_FIBER
-static int fpm_pool_type_fiber_validate(struct fpm_worker_pool_s *wp)
-{
-	if (fpm_coop_validate(wp, "fiber") < 0) {
-		return -1;
-	}
-	/* fiber.isolate_statics syntax check -- master side, before any fork.
-	 * See fpm_pool_coop_statics.c: class/property existence cannot be checked
-	 * here (no autoloader yet), only at runtime. */
-	return fpm_coop_statics_validate(wp);
-}
-#endif
-
-#if defined(HAVE_FPMNG_FIBER) || defined(HAVE_FPMNG_ASYNC)
-static int fpm_pool_type_http_concurrent_init(struct fpm_worker_pool_s *wp)
-{
-	/* A multi-request executor can handle multiple connections per worker. */
-	return fpm_http_init_pool_with_capacity(wp, 128);
-}
-#endif
-
-/* Effective type/executor combinations. They are not separate pool.type
- * values and therefore do not appear in the type list in messages.
- *
- * Both groups below exist only in a binary built with the corresponding flag
- * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"). Without
- * the flag the sources are not compiled at all (see build/prepare.sh and
- * sapi/fpmng/config.m4), so these structures and the executor-list entries
- * pointing at them are protected by the same #ifdef. */
-#ifdef HAVE_FPMNG_FIBER
-static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
-	.name                         = "fastcgi-ng",
-	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
-	 * #82, #84 and #85 are open correctness bugs against this executor's
-	 * request isolation, and criterion 3 of the bar in #269 ("no open
-	 * correctness issue") is therefore not met. It is also behind a
-	 * default-off configure flag, so nobody is running it by accident. */
-	.tier                         = FPM_TIER_EXPERIMENTAL,
-	.requires_listen              = 1,
-	.requires_pm                  = 1,
-	.serves_requests              = 1,
-	.reuses_request_runtime       = 1,
-	.listening_socket_nonblocking = 1,
-	.baseline_counter             = "requests",
-	.rejects                      = fpm_coop_rejects,
-	.validate                     = fpm_pool_type_fiber_validate,
-	.child_main                   = fpm_pool_fiber_child_main,
-};
-
-static const struct fpm_pool_type_s fpm_pool_http_fiber = {
-	.name                         = "http",
-	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
-	 * #82, #84 and #85 are open correctness bugs against this executor's
-	 * request isolation, and criterion 3 of the bar in #269 ("no open
-	 * correctness issue") is therefore not met. It is also behind a
-	 * default-off configure flag, so nobody is running it by accident. */
-	.tier                         = FPM_TIER_EXPERIMENTAL,
-	.requires_listen              = 1,
-	.requires_pm                  = 1,
-	.serves_requests              = 1,
-	.reuses_request_runtime       = 1,
-	.listening_socket_nonblocking = 1,
-	.baseline_counter             = "requests",
-	.operator_endpoint            = 1,
-	.rejects                      = fpm_coop_rejects,
-	.validate                     = fpm_pool_type_fiber_validate,
-	.init_main                    = fpm_pool_type_http_concurrent_init,
-	.child_main                   = fpm_pool_fiber_child_main,
-};
-#endif /* HAVE_FPMNG_FIBER */
-
-#ifdef HAVE_FPMNG_ASYNC
-static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
-	.name                   = "fastcgi-ng",
-	/* Issue #295. Experimental, one criterion short of beta in a way that is
-	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
-	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
-	 * on every PR -- has nothing behind it here. */
-	.tier                   = FPM_TIER_EXPERIMENTAL,
-	.requires_listen        = 1,
-	.requires_pm            = 1,
-	.serves_requests        = 1,
-	.reuses_request_runtime = 1,
-	.baseline_counter       = "requests",
-	.rejects                = fpm_pool_async_rejects,
-	.validate               = fpm_pool_async_validate,
-	.child_main             = fpm_pool_async_child_main,
-};
-
-static const struct fpm_pool_type_s fpm_pool_http_async = {
-	.name                   = "http",
-	/* Issue #295. Experimental, one criterion short of beta in a way that is
-	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
-	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
-	 * on every PR -- has nothing behind it here. */
-	.tier                   = FPM_TIER_EXPERIMENTAL,
-	.requires_listen        = 1,
-	.requires_pm            = 1,
-	.serves_requests        = 1,
-	.reuses_request_runtime = 1,
-	.baseline_counter       = "requests",
-	.operator_endpoint      = 1,
-	.rejects                = fpm_pool_async_rejects,
-	.validate               = fpm_pool_async_validate,
-	.init_main              = fpm_pool_type_http_concurrent_init,
-	.child_main             = fpm_pool_async_child_main,
-};
-#endif /* HAVE_FPMNG_ASYNC */
 
 /* POC, task 073: pool.type = http-direct with pool.executor = worker. Same
  * transport, same listener, same master-side bookkeeping; only the CHILD loop
@@ -325,44 +214,60 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
  * the sources are not compiled at all (see build/prepare.sh and
  * sapi/fpmng/config.m4). The entry stays in the list either way, so a
  * configuration asking for one still gets told which flag it needs rather than
- * that the executor does not exist. */
-static const struct fpm_pool_executor_s fpm_fastcgi_ng_executors[] = {
+ * that the executor does not exist.
+ *
+ * .type starts NULL and is filled in once, lazily, by
+ * fpm_pool_type_install_coop_variants() below through the one hook this file
+ * has onto the fiber/async structs (fpm_pool_type_coop_variant(), see
+ * fpm_pool_type_coop.h) -- not a static initializer, because which flags this
+ * binary was built with is not a compile-time constant this file may name.
+ * .build_flag stays set either way: fpm_pool_type_validate_executor() below
+ * only reads it once .type turns out still NULL after that call. */
+static struct fpm_pool_executor_s fpm_fastcgi_ng_executors[] = {
 	{ .name = "classic", .resolves_to_base = 1 },
-	{ .name = "fiber",
-#ifdef HAVE_FPMNG_FIBER
-	  .type = &fpm_pool_fastcgi_ng_fiber,
-#else
-	  .build_flag = "--enable-fpmng-fiber",
-#endif
-	},
-	{ .name = "async",
-#ifdef HAVE_FPMNG_ASYNC
-	  .type = &fpm_pool_fastcgi_ng_async,
-#else
-	  .build_flag = "--enable-fpmng-async",
-#endif
-	},
+	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
+	{ .name = "async", .build_flag = "--enable-fpmng-async" },
 	{ .name = NULL }
 };
 
-static const struct fpm_pool_executor_s fpm_http_executors[] = {
+static struct fpm_pool_executor_s fpm_http_executors[] = {
 	{ .name = "classic", .resolves_to_base = 1 },
-	{ .name = "fiber",
-#ifdef HAVE_FPMNG_FIBER
-	  .type = &fpm_pool_http_fiber,
-#else
-	  .build_flag = "--enable-fpmng-fiber",
-#endif
-	},
-	{ .name = "async",
-#ifdef HAVE_FPMNG_ASYNC
-	  .type = &fpm_pool_http_async,
-#else
-	  .build_flag = "--enable-fpmng-async",
-#endif
-	},
+	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
+	{ .name = "async", .build_flag = "--enable-fpmng-async" },
 	{ .name = NULL }
 };
+
+/* Fills in the .type pointers above, once. Idempotent and safe to call from
+ * more than one entry point (fpm_pool_type_get() below calls it, and it is
+ * the first function every path into this file goes through) rather than
+ * requiring one designated startup call site -- see fpm_pool_type_coop.h for
+ * why this indirection exists at all. */
+static void fpm_pool_type_install_coop_variants(void)
+{
+	static int installed = 0;
+	struct fpm_pool_executor_s *tables[2];
+	size_t t;
+
+	if (installed) {
+		return;
+	}
+	installed = 1;
+
+	tables[0] = fpm_fastcgi_ng_executors;
+	tables[1] = fpm_http_executors;
+
+	for (t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
+		struct fpm_pool_executor_s *e;
+
+		for (e = tables[t]; e->name; e++) {
+			if (e->resolves_to_base) {
+				continue;
+			}
+			e->type = fpm_pool_type_coop_variant(
+				t == 0 ? "fastcgi-ng" : "http", e->name);
+		}
+	}
+}
 
 /* http-direct ships its own child loop, so it offers its own executor instead
  * of the fiber/async pair — see the comment on fpm_http_direct_worker. */
@@ -582,9 +487,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
  * behaviour under a name that promises the opposite. That makes every
  * measurement taken on it wrong and says nothing while doing it. The fiber and
  * async executors need patches 0007/0008 and are handled differently, by being
- * compiled out entirely (HAVE_FPMNG_FIBER / HAVE_FPMNG_ASYNC): an executor
- * that is not in the type's list is already rejected by name, so there is
- * nothing to add here for them.
+ * compiled out entirely when their configure flag is off (see
+ * fpm_pool_type_coop.c): an executor that is not in the type's list is
+ * already rejected by name, so there is nothing to add here for them.
  */
 int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
@@ -721,6 +626,11 @@ const char *fpm_pool_type_retired(const char *name)
 const struct fpm_pool_type_s *fpm_pool_type_get(const char *name)
 {
 	size_t i;
+
+	/* Every path into this file starts here -- see the comment on the loop
+	 * below -- so this is the one place that must run before fpm_fastcgi_ng_
+	 * executors/fpm_http_executors are read anywhere. */
+	fpm_pool_type_install_coop_variants();
 
 	if (!name || !*name) {
 		return FPM_POOL_TYPE_DEFAULT;

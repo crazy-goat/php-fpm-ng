@@ -226,8 +226,6 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.tls_wait_for_cert",    &fpm_conf_set_boolean,     WPO(http_tls_wait_for_cert) },
 	{ "http.stream",               &fpm_conf_set_boolean,     WPO(http_stream) },
 	{ "http.stream_write_timeout", &fpm_conf_set_integer,     WPO(http_stream_write_timeout) },
-	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
-	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 	{ "worker.max_pending",        &fpm_conf_set_integer,     WPO(worker_max_pending) },
 	{ "worker.request_timeout",    &fpm_conf_set_integer,     WPO(worker_request_timeout) },
 	{ "worker.accept_threshold",   &fpm_conf_set_integer,     WPO(worker_accept_threshold) },
@@ -237,6 +235,14 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
+	/* issue #371: appended here, not sorted in above by prefix like the rest of
+	 * this table, because issue #373's cut lands on a long-lived branch that
+	 * needs its diff against main to stay purely additive -- an append at the
+	 * tail merges cleanly against another append at the tail; one in the
+	 * middle does not. Branch async appends below this line, main appends
+	 * above it. */
+	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
+	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 	{ 0, 0, 0 }
 };
 

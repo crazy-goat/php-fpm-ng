@@ -222,13 +222,6 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
  * before #373; it is now a no-op kept for the day those structs come back.
  * fpm_pool_type_validate_executor() reads .type being NULL to report the
  * pointer at branch async. */
-static struct fpm_pool_executor_s fpm_fastcgi_ng_executors[] = {
-	{ .name = "classic", .resolves_to_base = 1 },
-	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
-	{ .name = "async", .build_flag = "--enable-fpmng-async" },
-	{ .name = NULL }
-};
-
 static struct fpm_pool_executor_s fpm_http_executors[] = {
 	{ .name = "classic", .resolves_to_base = 1 },
 	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
@@ -255,9 +248,13 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
 	{ .name = NULL }
 };
 
-/* Types visible in configuration. fastcgi-ng is the optimized FastCGI path;
- * http starts the built-in gateway. Both default to the classic executor, and
- * fpm_pool_type_resolve() selects their effective variant. */
+/* Types visible in configuration. http starts the built-in gateway and
+ * defaults to the classic executor; fpm_pool_type_resolve() selects the
+ * effective variant. The optimized FastCGI path "fastcgi-ng" used to sit next
+ * to "fastcgi" here and was removed in 0.9.0 (issue #376): once fiber/async
+ * had left, its only content was the reuses_request_runtime bit, measured at
+ * 9.5 us per request (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to
+ * "http", which sets the same bit. It is kept as a retired name below. */
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
@@ -270,20 +267,6 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.serves_requests = 1,
 		.baseline_counter = "requests",
 		.rejects         = fpm_pool_fastcgi_rejects,
-	},
-	{
-		.name                   = "fastcgi-ng",
-		.serves_fastcgi         = 1,
-		/* Issue #295: the same transport as "fastcgi" with patches 0004-0006
-		 * under it, covered by the phpt suite on every PR since v0.1.0. */
-		.tier                   = FPM_TIER_SUPPORTED,
-		.requires_listen        = 1,
-		.requires_pm            = 1,
-		.serves_requests        = 1,
-		.reuses_request_runtime = 1,
-		.baseline_counter       = "requests",
-		.executors              = fpm_fastcgi_ng_executors,
-		.rejects                = fpm_pool_fastcgi_rejects,
 	},
 	{
 		.name                   = "http",
@@ -591,6 +574,10 @@ static const struct {
 	{ "status",
 	  "set 'pm.status_path' and 'pm.metrics_path' on the pool you want to watch "
 	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
+	{ "fastcgi-ng",
+	  "it was removed in 0.9.0 (issue #376): the optimized transport it selected lives on under "
+	  "pool.type = http; use pool.type = fastcgi, or pool.type = http-direct for a pool with "
+	  "no web server in front" },
 };
 
 /* NULL when the name is not a retired one. */
@@ -619,8 +606,8 @@ const struct fpm_pool_type_s *fpm_pool_type_get(const char *name)
 	size_t i;
 
 	/* Every path into this file starts here -- see the comment on the loop
-	 * below -- so this is the one place that must run before fpm_fastcgi_ng_
-	 * executors/fpm_http_executors are read anywhere. */
+	 * below -- so this is the one place that must run before the executor
+	 * tables are read anywhere. */
 	fpm_pool_type_install_coop_variants();
 
 	if (!name || !*name) {

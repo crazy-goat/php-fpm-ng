@@ -20,7 +20,7 @@
  * one is fpm_pool_type_s.operator_status, data like everything else here.
  *
  * Whether a type gets this at all is data, not a name comparison: it is
- * fpm_pool_type_s.operator_endpoint. On fastcgi and fastcgi-ng the flag is off
+ * fpm_pool_type_s.operator_endpoint. On fastcgi the flag is off
  * and pm.status_path keeps its upstream meaning -- a path answered on the pool's
  * own FastCGI socket, with a web server in front of it -- because there the
  * front end is exactly what an operator already has (#273, point 2).

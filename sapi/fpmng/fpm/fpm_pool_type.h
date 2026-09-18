@@ -220,8 +220,8 @@ struct fpm_pool_type_s {
 	 *     signal handlers once instead of on every zend_signal_activate().
 	 *
 	 * Set it for a type whose children speak FastCGI over a connection the
-	 * type itself owns for the child's lifetime -- "fastcgi-ng" and the
-	 * workers behind "http", including their fiber and async variants. NOT for
+	 * type itself owns for the child's lifetime -- the workers behind "http",
+	 * including their fiber and async variants. NOT for
 	 * plain "fastcgi", whose connection comes from whatever front end dialled
 	 * in, and not for "http-direct", which speaks HTTP itself and never
 	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
@@ -285,7 +285,7 @@ struct fpm_pool_type_s {
 	 * HTTP listener of its own -- see fpm_operator_endpoint.h and issue #273.
 	 * Set for cron, supervisor, http and http-direct.
 	 *
-	 * Off for fastcgi and fastcgi-ng, where it changes what pm.status_path
+	 * Off for fastcgi, where it changes what pm.status_path
 	 * means: with the flag off the path keeps its upstream meaning, answered on
 	 * the pool's own FastCGI socket by whatever web server is already in front
 	 * of it, which on those types is exactly what an operator has (#273,

@@ -7,10 +7,10 @@ fpm-ng: operator endpoint configuration -- collisions, the internal type, and th
 
 require_once "tester.inc";
 
-/* A binary linked against a distribution libphp refuses pool.type = http and
- * fastcgi-ng before any directive of that pool is read
- * (fpm_pool_type_check_build_support()). None of the cases below use those
- * types, so every one of them runs on both builds. */
+/* A binary linked against a distribution libphp refuses pool.type = http
+ * before any directive of that pool is read
+ * (fpm_pool_type_check_build_support()). None of the cases below use that
+ * type, so every one of them runs on both builds. */
 
 function expectRejected(string $label, string $cfg, array $needles): void
 {

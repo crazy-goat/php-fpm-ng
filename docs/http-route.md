@@ -157,7 +157,12 @@ unchanged.
 Request mapping:
 
 - The **method and request-target arrive as received** — the route prefix is
-  *not* stripped, the same rule FastCGI follows with `REQUEST_URI`.
+  *not* stripped, the same rule FastCGI follows with `REQUEST_URI`. One
+  consequence for document roots: the target resolves the path against its
+  own docroot **including the prefix**, so with
+  `http.route[direct] = /direct` the file behind `/direct/index.php` is
+  `docroot/direct/index.php` — a shared docroot, exactly as for FastCGI
+  targets (or the pool's own `http.front_controller` fallback).
 - Input headers are copied minus the hop-by-hop set: `Connection`,
   `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Trailer`, `Proxy-*`. The
   gateway's own `Connection: keep-alive` replaces the client's.

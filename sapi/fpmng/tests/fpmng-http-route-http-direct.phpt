@@ -31,6 +31,10 @@ $docroot = sys_get_temp_dir() . '/fpmng-http-route-direct-' . getmypid();
 file_put_contents($docroot . '/index.php', <<<'PHP'
 <?php
 header('X-Direct-Pool: yes');
+if (str_contains($_SERVER['PATH_INFO'] ?? '', '/empty')) {
+    header('Content-Length: 0');
+    exit;
+}
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     header('Content-Type: application/octet-stream');
     echo file_get_contents('php://input');
@@ -43,6 +47,10 @@ echo getenv('FPMNG_ROUTE_POOL') ?: json_encode([
     'uri' => $_SERVER['REQUEST_URI'] ?? null,
 ]);
 PHP);
+
+/* A direct pool ALWAYS executes its front controller (SCRIPT_FILENAME is
+ * resolved once at startup; the path rides in PATH_INFO), so the empty-body
+ * case is a branch of index.php, not a file of its own. */
 
 $config = <<<EOT
 [global]
@@ -89,6 +97,20 @@ function fetchAll(string $url, ?string $body = null): array
     return [$raw, $http_response_header ?? []];
 }
 
+function readHead($fp, int $expected): array
+{
+    $line = fgets($fp);
+    if (!$line || !str_starts_with($line, "HTTP/1.1 $expected ")) {
+        throw new RuntimeException('bad status line: ' . var_export($line, true));
+    }
+    $headers = [];
+    while (($line = fgets($fp)) !== false && $line !== "\r\n") {
+        [$k, $v] = explode(':', $line, 2);
+        $headers[strtolower(trim($k))] = trim($v);
+    }
+    return $headers;
+}
+
 $tester = new FPM\Tester($config, '<?php echo "unused";');
 try {
     $tester->start();
@@ -125,6 +147,33 @@ try {
     [$body] = fetchAll("http://$http/direct/index.php", $payload);
     check($body === $payload, 'the POST body did not survive the round trip: ' . strlen((string) $body) . ' of ' . strlen($payload));
     echo "post-body-intact: ok\n";
+
+    /* Keep-alive reuse across responses with NO body (Content-Length: 0) and
+     * a HEAD: a zero-length response must complete the request (it would
+     * otherwise pin the target's single budget slot for ever), and the
+     * connection must remain in sync for the requests after it. */
+    $fp = stream_socket_client("tcp://$http", $errno, $error, 5);
+    if (!$fp) throw new RuntimeException("connect: $error");
+    stream_set_timeout($fp, 10);
+    fwrite($fp, "GET /direct/empty HTTP/1.1\r\nHost: t\r\n\r\n");
+    readHead($fp, 200);
+    echo "empty-body-completes: ok\n";
+    fwrite($fp, "HEAD /direct/index.php HTTP/1.1\r\nHost: t\r\n\r\n");
+    readHead($fp, 200);
+    echo "head-no-body: ok\n";
+    fwrite($fp, "GET /direct/index.php HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    $headers = readHead($fp, 200);
+    $cl = (int) ($headers['content-length'] ?? 0);
+    $body = '';
+    while (strlen($body) < $cl) {
+        $part = fread($fp, $cl - strlen($body));
+        if ($part === false || $part === '') throw new RuntimeException('short read after HEAD');
+        $body .= $part;
+    }
+    $seen = json_decode($body, true, 2, JSON_THROW_ON_ERROR);
+    check(isset($seen['uri']), 'the connection after a HEAD is out of sync: ' . var_export($body, true));
+    fclose($fp);
+    echo "keep-alive-reuse: ok\n";
 } finally {
     $tester->terminate();
     $tester->close();
@@ -137,6 +186,9 @@ echo "Done\n";
 fastcgi-route-unchanged: ok
 http-direct-route: ok
 post-body-intact: ok
+empty-body-completes: ok
+head-no-body: ok
+keep-alive-reuse: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

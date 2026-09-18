@@ -93,6 +93,26 @@ struct fpm_http_http_state_s {
 	int expect_eof;			/* the response ends at EOF; the connection is not reusable */
 };
 
+/* Is `token` one of the comma-separated values in a header like Connection or
+ * Transfer-Encoding? Exact token match: a substring probe would read
+ * "keep-alive" as "close" (the 'l'), which quietly turned every response into
+ * a close-delimited one and dismantled connection reuse. */
+static int fpm_http_http_token_in(const char *value, size_t vlen, const char *token)
+{
+	size_t tlen = strlen(token);
+	size_t start = 0, i;
+
+	for (i = 0; i <= vlen; i++) {
+		if (i == vlen || value[i] == ',' || value[i] == ' ' || value[i] == '\t') {
+			if (i - start == tlen && strncasecmp(value + start, token, tlen) == 0) {
+				return 1;
+			}
+			start = i + 1;
+		}
+	}
+	return 0;
+}
+
 static void fpm_http_http_state_reset(struct fpm_http_http_state_s *st)
 {
 	smart_str_free(&st->head);
@@ -314,11 +334,9 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 					has_length = 1;
 					content_length = fpm_http_http_value_ulong(value, vlen);
 				} else if (klen == 17 && strncasecmp(key, "Transfer-Encoding", 17) == 0) {
-					/* "chunked" is the only TE coding our side sends; the 'k'
-					 * is the discriminator within the token */
-					chunked = memchr(value, 'k', vlen) != NULL;
+					chunked = fpm_http_http_token_in(value, vlen, "chunked");
 				} else if (klen == 10 && strncasecmp(key, "Connection", 10) == 0) {
-					close_seen = memchr(value, 'l', vlen) != NULL;	/* "close" */
+					close_seen = fpm_http_http_token_in(value, vlen, "close");
 				}
 			}
 		}
@@ -354,16 +372,21 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 			const char *key, *value;
 			size_t klen, vlen;
 
-			if (fpm_http_http_split_header(line, len, &key, &klen, &value, &vlen)
-				&& klen < 64 && !fpm_http_http_header_dropped(key)) {
+			if (fpm_http_http_split_header(line, len, &key, &klen, &value, &vlen) && klen < 64) {
 				char keybuf[64];
 
+				/* key points into the head buffer without a terminator --
+				 * copy first, compare second: strcasecmp on the raw pointer
+				 * would read into the rest of the line and "keep-alive"
+				 * would fail every hop-by-hop match. */
 				memcpy(keybuf, key, klen);
 				keybuf[klen] = '\0';
-				smart_str_appends(&c->cgi_headers, keybuf);
-				smart_str_appends(&c->cgi_headers, ": ");
-				smart_str_appendl(&c->cgi_headers, value, vlen);
-				smart_str_appends(&c->cgi_headers, "\r\n");
+				if (!fpm_http_http_header_dropped(keybuf)) {
+					smart_str_appends(&c->cgi_headers, keybuf);
+					smart_str_appends(&c->cgi_headers, ": ");
+					smart_str_appendl(&c->cgi_headers, value, vlen);
+					smart_str_appends(&c->cgi_headers, "\r\n");
+				}
 			}
 		}
 		line = nl ? nl + 1 : end;
@@ -596,10 +619,14 @@ static void fpm_http_http_data(fpm_http_upstream *up, const char *buf, size_t le
 			buf += len;
 			len = 0;
 			{
+				/* Resume the scan a few bytes into the previous buffer: a
+				 * "\r\n\r\n" straddling two read()s has its first byte up to
+				 * three positions before the old end, and a scan that
+				 * resumed exactly at head_scan would never see it. */
 				const char *h = ZSTR_VAL(st->head.s);
-				size_t i;
+				size_t i, from = st->head_scan > 3 ? st->head_scan - 3 : 0;
 
-				for (i = st->head_scan; i + 3 < ZSTR_LEN(st->head.s); i++) {
+				for (i = from; i + 3 < ZSTR_LEN(st->head.s); i++) {
 					if (memcmp(h + i, "\r\n\r\n", 4) == 0) {
 						head_len = i + 2;	/* the head ends after the header block's final CRLF */
 						break;
@@ -627,6 +654,20 @@ static void fpm_http_http_data(fpm_http_upstream *up, const char *buf, size_t le
 			fpm_http_http_head_done(up, head_len);
 			if (up->dead) {
 				break;
+			}
+			/* A response whose body is already finished by its framing --
+			 * Content-Length: 0, 204/304, a HEAD request -- has nothing left
+			 * to wait for: no further byte will ever arrive on a keep-alive
+			 * connection, and without completing here the request would pin
+			 * its budget slot for ever. complete() honours expect_eof (a
+			 * bodiless response that also said Connection: close drops the
+			 * upstream instead of reusing it). */
+			if (!tail && st->body == FPM_HTTP_HTTP_BODY_CL && st->remaining == 0) {
+				fpm_http_http_complete(up);
+				if (up->dead) {
+					break;
+				}
+				continue;
 			}
 			if (tail) {
 				char *tailcopy = malloc(tail);

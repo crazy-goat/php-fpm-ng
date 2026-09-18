@@ -78,9 +78,14 @@ switch ($_GET['mode'] ?? 'plain') {
         }
         break;
     case 'early':
+        /* 300ms, not a full second (issue #399): what the reader downstream
+         * has to be able to tell apart is "the first chunk arrived while the
+         * script was still running" from "both arrived together at the end",
+         * and 300ms is three orders of magnitude above the read jitter that
+         * distinction is measured against. */
         echo "first\n";
         flush();
-        usleep(1000000);
+        usleep(300000);
         echo "second\n";
         break;
     case 'respond':
@@ -247,7 +252,9 @@ try {
     $rest = readChunked($fp);
     $doneAt = microtime(true) - $started;
     check($first === "first\n" && $rest === "second\n", "early: '$first' / '$rest'");
-    check($firstAt <= 0.5 && $doneAt >= 0.9, "early: first at {$firstAt}s, done at {$doneAt}s");
+    /* The interval between the two reads, not $doneAt on its own: see the same
+     * change in fpmng-http-direct-streaming.phpt (issue #399). */
+    check($firstAt <= 0.5 && $doneAt - $firstAt >= 0.2, "early: first at {$firstAt}s, done at {$doneAt}s");
     fclose($fp);
     echo "tls-streamed-early: first chunk before the script finished\n";
 
@@ -280,7 +287,10 @@ try {
     $fp = tlsConnect($stallPort);
     fwrite($fp, "GET /?mode=stall HTTP/1.1\r\nHost: t\r\n\r\n");
     readHead($fp, 200);
-    sleep(3);
+    /* 1.5 s against http.stream_write_timeout = 1000 (issue #399): still 50%
+     * past the timeout, which is what has to elapse for the drop to be the
+     * timeout firing rather than anything else. */
+    usleep(1500000);
     $seen = '';
     while (($part = fread($fp, 1 << 20)) !== false && $part !== '') {
         $seen .= $part;

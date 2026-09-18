@@ -30,9 +30,14 @@ switch ($_GET['mode'] ?? 'plain') {
         for ($i = 0; $i < 32; $i++) { echo str_repeat('M', 65536); }
         break;
     case 'early':
+        /* 300ms, not a full second (issue #399): what the reader downstream
+         * has to be able to tell apart is "the first chunk arrived while the
+         * script was still running" from "both arrived together at the end",
+         * and 300ms is three orders of magnitude above the read jitter that
+         * distinction is measured against. */
         echo "first\n";
         flush();
-        usleep(1000000);
+        usleep(300000);
         echo "second\n";
         break;
     case 'stall':
@@ -185,7 +190,12 @@ try {
     $rest = readChunked($fp);
     $doneAt = microtime(true) - $started;
     if ($first !== "first\n" || $rest !== "second\n") throw new RuntimeException("early: '$first' / '$rest'");
-    if ($firstAt > 0.5 || $doneAt < 0.9) throw new RuntimeException("early: first at {$firstAt}s, done at {$doneAt}s");
+    /* The gap between the two reads, not $doneAt on its own (issue #399): the
+     * property is that the script's own pause happened BETWEEN them, and
+     * measuring it as an interval says so without also absorbing however long
+     * connect, the request and php startup took -- which is what made the old
+     * absolute bound need a sleep long enough to dwarf them. */
+    if ($firstAt > 0.5 || $doneAt - $firstAt < 0.2) throw new RuntimeException("early: first at {$firstAt}s, done at {$doneAt}s");
     echo "streamed-early: first chunk before the script finished\n";
 
     /* 4. Bodyless responses keep their framing: streaming declines to start,
@@ -233,7 +243,10 @@ try {
     stream_set_timeout($fp, 20);
     fwrite($fp, "GET /?mode=stall HTTP/1.1\r\nHost: t\r\n\r\n");
     readHead($fp, 200);
-    sleep(3);
+    /* 1.5 s against http.stream_write_timeout = 1000 (issue #399): still 50%
+     * past the timeout, which is what has to elapse for the drop to be the
+     * timeout firing rather than anything else. */
+    usleep(1500000);
     $seen = '';
     while (($part = fread($fp, 1 << 20)) !== false && $part !== '') $seen .= $part;
     if (feof($fp) === false) throw new RuntimeException('the worker kept the stalled connection open');

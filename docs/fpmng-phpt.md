@@ -163,8 +163,8 @@ Three rules this facility lives by:
   | `fpmng-cron-schedule` | 40.0 | **yes** | asserts only that the marker exists; the `gmdate('c')` it writes is never compared |
   | `fpmng-baseline-counters-cron` | 2.0 / 40.1 | **yes** | asserts only on master-produced figures (the `fpmng_pool_runs_total` series and the status page) |
   | `fpmng-supervisor-jitter` | 25.1 | no | same as cron-jitter, on `microtime(true)` deltas written by the iteration script |
-  | `fpmng-supervisor-max-memory` | 14.7 | no | almost all of it is a 15 s negative-proof budget in the *test* process; the recycle itself is instant |
-  | `fpmng-supervisor-reload-rolling` | 12.5 | no | 10 of it is `supervisor.stop_timeout`, spent in the watchdog, which counts real seconds by design |
+  | `fpmng-supervisor-max-memory` | 14.7 | no, shortened by #399 | almost all of it was a 15 s negative-proof budget in the *test* process; the recycle itself is instant |
+  | `fpmng-supervisor-reload-rolling` | 12.5 | no, shortened by #399 | 10 of it was `supervisor.stop_timeout`, spent in the watchdog, which counts real seconds by design |
   | `fpmng-cron-expect-within` | 12.3 | **yes** | asserts on master log patterns only |
   | `fpmng-cron-stop-signal` | 6.0 | **yes** | asserts on master log patterns only |
   | `fpmng-supervisor-heartbeat` | 5.9 | no | its `heartbeat_age` threshold is calibrated against a script whose own `usleep()` is real |
@@ -175,25 +175,59 @@ Three rules this facility lives by:
   these tests add variance to the suite's duration and not just time. At rate 10
   the lottery is 0-6 s.
 
-  Two of those "no" rows are cheap to fix without the clock at all, and the
-  reasons above are why. `fpmng-supervisor-reload-rolling` pays
-  `supervisor.stop_timeout` because the survivor the reload spares runs an
-  unconditional `for (;;)`: it never returns to the signal handler that the
-  retiring kill set a flag in, so the pool's watchdog ends it with SIGKILL ten
-  seconds later, and `fpm_pool_watchdog.c` counts those seconds with a plain
-  `sleep(1)` on purpose -- a watchdog that a test environment variable could
-  speed up would not be a watchdog. Setting `supervisor.stop_timeout = 1` in
-  the test's own config recovers most of it. `fpmng-supervisor-max-memory`
-  spends its budget proving `restart = never` does not restart; the master says
-  so positively in the error log ("restart = never -> not restarting"), which
-  the test already reads, so waiting for that line and keeping a short negative
-  window afterwards recovers most of it. Both are test design, tracked
-  separately from this facility.
+  Two of those "no" rows were cheap to fix without the clock at all, and the
+  reasons above are why. Issue #399 did both, and three more of the same kind
+  further down the list. They are worth reading as a group, because they share
+  one shape: **a test that waits out a fixed budget is usually asking a question
+  the master already answers out loud.**
 
-  Accelerating any of the four "no" rows by *clock* needs the assertion rewritten to read a
-  master-measured figure first -- the way `fpmng-cron-jitter` already cross-checks
-  the operator status page against the child's recorded offset. That is a
-  separate piece of work, not a rate in an `--ENV--` section.
+  `fpmng-supervisor-reload-rolling` paid `supervisor.stop_timeout` because the
+  survivor the reload spares runs an unconditional `for (;;)`: it never returns
+  to the signal handler that the retiring kill set a flag in, so the pool's
+  watchdog ends it with SIGKILL ten seconds later, and `fpm_pool_watchdog.c`
+  counts those seconds with a plain `sleep(1)` on purpose -- a watchdog that a
+  test environment variable could speed up would not be a watchdog. So the fix
+  is not in the watchdog but in the test's own config:
+  `supervisor.stop_timeout = 1`, which is the lowest value accepted (anything
+  below it is reset to the default 10).
+
+  `fpmng-supervisor-max-memory` spent its budget proving a negative -- that
+  `restart = never` does not restart. The master states it positively, at
+  NOTICE, in `fpm_pool_supervisor_apply_policy()`: *"restart = never -> not
+  restarting"*, logged in the same breath as the flag whose absence was the
+  original bug. The test now waits for that line and keeps a 1.5 s negative
+  window after it, and the line itself became an assertion: without it, a run
+  count of 1 only means nothing had got round to restarting yet.
+  `fpmng-reload-selective-on` was the same case against
+  `fpm_reload_selective.c`'s *"config unchanged -- sparing all N running
+  child(ren)"*, and got the same treatment.
+
+  The remaining two are plain over-provisioning. `fpmng-http-pool-full-503` and
+  `fpmng-http-pool-full-wait-bounded` pinned their single worker with a
+  `sleep(5)` in the script and then read that response to completion, so each
+  paid all five seconds although every deadline they assert on falls inside the
+  first second; `sleep(2)` keeps a margin of more than three times over the
+  longest of them. `fpmng-http-direct-streaming` and its TLS sibling waited
+  `sleep(3)` for a `http.stream_write_timeout` of 1000 ms, now 1.5 s, still
+  half again over the bound that has to expire.
+
+  One of those five is worth singling out as a technique rather than a saving.
+  The streaming tests proved "the first chunk left before the script finished"
+  with an absolute bound -- `$doneAt >= 0.9` against a one-second pause in the
+  script -- which quietly requires the pause to dwarf connect, the request and
+  php startup, since all of them are inside the same measurement. Measuring the
+  *interval* between the two reads instead (`$doneAt - $firstAt >= 0.2`) states
+  the property directly and is independent of that startup cost, which is what
+  let the pause drop to 300 ms. A test that needs a long sleep to make its
+  bound safe is often measuring from the wrong origin.
+
+  What #399 could not touch is the three rows whose cost is not a budget but a
+  bound the assertion itself depends on: the two jitter tests and
+  `fpmng-supervisor-heartbeat`. Accelerating any of those by *clock* needs the
+  assertion rewritten to read a master-measured figure first -- the way
+  `fpmng-cron-jitter` already cross-checks the operator status page against the
+  child's recorded offset. That is a separate piece of work (issue #398), not a
+  rate in an `--ENV--` section.
 
 At rate 1, or with the variable unset, every reading is the plain libc call and
 nothing is logged -- so a debug-clock build behaves identically to one without

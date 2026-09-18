@@ -35,6 +35,17 @@ for (;;) {
 PHP;
 file_put_contents("$work/loop.php", $script);
 
+/* supervisor.stop_timeout = 1, not the default 10 (issue #399): the script
+ * above is an unconditional for(;;), so the retiring kill's flag is never
+ * looked at and the pool's watchdog is what actually ends the survivor, with
+ * SIGKILL after stop_timeout (fpm_pool_supervisor.c arms it; anything below 1
+ * is reset to 10). The settle loop below needs the last 20 rows to come from
+ * exactly 2 pids, which cannot happen until that SIGKILL lands -- so the
+ * default was making this test wait out nine seconds of grace it has no use
+ * for. 1 is the minimum accepted, and the global process_control_timeout
+ * (default 10) is still above it, so no configuration warning is emitted.
+ * This only shortens the grace period; the 2.5 s gap bound below is an upper
+ * bound on real time, and shortening the retirement only makes it easier. */
 $cfgBefore = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -46,6 +57,7 @@ supervisor.script = $work/loop.php
 supervisor.processes = 3
 supervisor.restart = always
 supervisor.restart_delay = 1
+supervisor.stop_timeout = 1
 EOT;
 
 /* issue #329 scope (a): supervisor.processes changes on a reload of an

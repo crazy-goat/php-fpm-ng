@@ -43,10 +43,15 @@ http.pool_full_queue_max = 1
 http.pool_full_wait_ms = 300
 EOT;
 
-// The one worker sleeps far longer than both the wait bound (300ms) and this
-// test's own patience, standing in for CPU-bound work that cannot drain the
-// queue any faster no matter how long a request waits.
-$tester = new FPM\Tester($config, '<?php sleep(5); echo "slow";');
+// The one worker sleeps far longer than the wait bound (300ms), standing in
+// for CPU-bound work that cannot drain the queue any faster no matter how long
+// a request waits. sleep(2), not 5 (issue #399): every deadline this test
+// depends on falls inside the first 700ms -- request 2 is queued at 300ms and
+// its 300ms bound expires around 600ms, request 3 is rejected at 400ms -- so
+// 2 s is still more than three times the longest of them, and the test no
+// longer spends three seconds reading out request 1 at the end. Both the
+// $elapsed3 > 1 and $elapsed2 > 2 bounds are unaffected.
+$tester = new FPM\Tester($config, '<?php sleep(2); echo "slow";');
 $tester->start();
 $tester->expectLogStartNotices();
 

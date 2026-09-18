@@ -145,6 +145,63 @@ whole duration, so `pm.max_children` on an `events` pool is a hard cap on
 concurrent streams. Issue #179 tracks the cost of that model. Routing bounds the
 damage; it does not remove it.
 
+## Routing to `http-direct` pools (issue #344)
+
+An `http.route[]` target may be a `pool.type = http-direct` pool. The gateway
+then speaks plain HTTP/1.1 to that pool's own listener (`http.listen`) instead
+of FastCGI, and the response is re-framed through the same path the FastCGI
+STDOUT records use — so `http.route[/sse] = sse_pool` reaches an http-direct
+pool with `http.stream = 1`, or a `pool.executor = worker` SSE stream (#342),
+unchanged.
+
+Request mapping:
+
+- The **method and request-target arrive as received** — the route prefix is
+  *not* stripped, the same rule FastCGI follows with `REQUEST_URI`. One
+  consequence for document roots: the target resolves the path against its
+  own docroot **including the prefix**, so with
+  `http.route[direct] = /direct` the file behind `/direct/index.php` is
+  `docroot/direct/index.php` — a shared docroot, exactly as for FastCGI
+  targets (or the pool's own `http.front_controller` fallback).
+- Input headers are copied minus the hop-by-hop set: `Connection`,
+  `Keep-Alive`, `Transfer-Encoding`, `Upgrade`, `Trailer`, `Proxy-*`. The
+  gateway's own `Connection: keep-alive` replaces the client's.
+- **`X-Forwarded-For`** gets the address the gateway actually saw appended
+  (or the header created); **`X-Forwarded-Proto`** and **`-Port`** are set
+  from the gateway's resolved forwarded state. A direct pool has no
+  trusted-proxy list of its own (its `REMOTE_ADDR` is its direct peer — the
+  gateway), so `X-Forwarded-For` is the application's evidence that a proxy
+  was involved, the same as behind nginx.
+- The body travels with an explicit `Content-Length` (the gateway has the
+  whole body buffered already — evhttp guarantees that before dispatch).
+
+Response mapping: `Content-Length` is honoured as identity framing (the body
+passes through byte-for-byte); a chunked upstream response is de-chunked and
+re-framed by evhttp, one piece per chunk — which is what makes streaming work.
+The upstream's `Connection` header is the upstream connection's business and
+never reaches the client.
+
+Failure matrix, identical to a FastCGI target's: a target that cannot be
+reached or dies mid-request answers **502** with a log line naming the
+target's address; a full target (the target pool's `pm.max_children` is also
+the connection budget) answers **503 + `Retry-After`**, subject to the same
+`http.pool_full_policy`.
+
+Two deliberate refusals:
+
+- **`Upgrade` is answered 501**, not stripped: a stripped websocket handshake
+  hangs the client mid-handshake, which is worse than an explicit "not
+  implemented". WebSocket is #343's worker-executor feature; gateway
+  passthrough would be a later decision.
+- A target that **terminates TLS on its own listener** (`http.tls_cert` on the
+  target pool) is refused at startup: this transport speaks cleartext to
+  loopback and unix sockets only.
+
+Streaming cost, unchanged from the FastCGI case: every open stream pins one
+of the target's connections (one budget slot) for its whole life.
+
+
+
 ## What is logged
 
 At startup a routed gateway prints its table in lookup order, longest prefix

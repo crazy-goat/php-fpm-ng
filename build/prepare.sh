@@ -14,22 +14,15 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # MUST run BEFORE the directory is rebuilt: below, sapi/fpmng is deleted and
 # recreated from the upstream sapi/fpm, which has no PHP_FPMNG_*_FILES blocks.
 # Used to detect whether a .c file appeared or disappeared — see the warning
-# at the end. The list is split into three blocks (base, fiber, async) — see
-# below — but for change detection we take them together, because the whole
-# set matters regardless of which block a file landed in.
+# at the end.
 OLD_SOURCES=""
 if [ -f "$PHPSRC/sapi/fpmng/config.m4" ]; then
-  # Only the PHP_FPMNG_*_FILES="..." blocks — config.m4 also mentions other
+  # Only the PHP_FPMNG_FILES="..." block — config.m4 also mentions other
   # files (fpm_systemd.c, fpm_trace.c, www.c under conditions) that do not
-  # belong to any of these lists.
-  OLD_SOURCES=$( { \
-      sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
-        "$PHPSRC/sapi/fpmng/config.m4"; \
-      sed -n '/PHP_FPMNG_FIBER_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
-        "$PHPSRC/sapi/fpmng/config.m4"; \
-      sed -n '/PHP_FPMNG_ASYNC_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
-        "$PHPSRC/sapi/fpmng/config.m4"; \
-    } | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u)
+  # belong to it.
+  OLD_SOURCES=$(sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' \
+      "$PHPSRC/sapi/fpmng/config.m4" \
+    | grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u)
 fi
 
 rm -rf "$PHPSRC/sapi/fpmng"
@@ -71,17 +64,15 @@ for f in $(cd "$REPO/sapi/fpmng" && find fpm -name '*.c' | sort); do
 $f"
 done
 
-# Split into five groups: fiber (fiber + the whole coop layer, used only by
-# fiber), async (fpm_pool_async.c), tls and acme go under --enable-fpmng-fiber
-# / --enable-fpmng-async / --enable-fpmng-tls / --enable-fpmng-acme (all
-# default "no"); the rest is always built.
-# The fiber/async split was verified against symbol references — coop.* is not
-# used outside fiber, async does not reference coop.
+# Split into three groups: tls and acme go under --enable-fpmng-tls /
+# --enable-fpmng-acme (both default "no"); the rest is always built. Issue
+# #373 removed the fourth and fifth groups this used to have (one for the
+# fiber executor and its shared-state layer, one for the async executor's own
+# source file) along with the sources themselves -- they live on branch async
+# now.
 # Matching by NAME PREFIX, not by enumerating files. Enumeration would undo
 # the whole point of this script: the source list must come from 'find' so a
-# new file needs no edit. With enumeration, a new fpm_pool_coop_whatever.c
-# would NOT match the pattern, would silently land in the base list, and end
-# up in the default binary — exactly what these flags are meant to prevent.
+# new file needs no edit.
 #
 # The TLS group is why the prefix is fpm_tls_ and not the older fpm_*_tls*
 # naming (issue #280): fpm_http_direct_tls.c must stay in EVERY build — it
@@ -90,8 +81,6 @@ done
 # that matched "tls anywhere in the name" would take it out of the default
 # binary and break the link. So the rule is the file name: fpm_tls_*.c is
 # code that needs OpenSSL, everything else is code that does not.
-FIBER_PATTERN='^fpm/fpm_pool_(fiber|coop)[A-Za-z0-9_]*\.c$'
-ASYNC_PATTERN='^fpm/fpm_pool_async\.c$'
 TLS_PATTERN='^fpm/fpm_tls_[A-Za-z0-9_]*\.c$'
 # The ACME group needs no such care: nothing outside it is named fpm_acme_*,
 # and the three callers that reach into it (fpm.c, fpm_pool_script.c,
@@ -99,29 +88,19 @@ TLS_PATTERN='^fpm/fpm_tls_[A-Za-z0-9_]*\.c$'
 # (issue #281).
 ACME_PATTERN='^fpm/fpm_acme_[A-Za-z0-9_]*\.c$'
 
-BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$FIBER_PATTERN" | grep -Ev "$ASYNC_PATTERN" \
-  | grep -Ev "$TLS_PATTERN" | grep -Ev "$ACME_PATTERN")
-FIBER_SOURCES=$(echo "$SOURCES" | grep -E "$FIBER_PATTERN")
-ASYNC_SOURCES=$(echo "$SOURCES" | grep -E "$ASYNC_PATTERN")
+BASE_SOURCES=$(echo "$SOURCES" | grep -Ev "$TLS_PATTERN" | grep -Ev "$ACME_PATTERN")
 TLS_SOURCES=$(echo "$SOURCES" | grep -E "$TLS_PATTERN")
 ACME_SOURCES=$(echo "$SOURCES" | grep -E "$ACME_PATTERN")
 
-[ -n "$FIBER_SOURCES" ] || { echo "no fiber/coop files found in the source list" >&2; exit 1; }
-[ -n "$ASYNC_SOURCES" ] || { echo "fpm_pool_async.c not found in the source list" >&2; exit 1; }
 [ -n "$TLS_SOURCES" ] || { echo "no fpm_tls_*.c files found in the source list" >&2; exit 1; }
 [ -n "$ACME_SOURCES" ] || { echo "no fpm_acme_*.c files found in the source list" >&2; exit 1; }
 
 BASE_LIST=$(echo "$BASE_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
-FIBER_LIST=$(echo "$FIBER_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
-ASYNC_LIST=$(echo "$ASYNC_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 TLS_LIST=$(echo "$TLS_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 ACME_LIST=$(echo "$ACME_SOURCES" | sed 's/$/ \\/' | sed 's/^/    /')
 
-awk -v base="$BASE_LIST" -v fiber="$FIBER_LIST" -v async="$ASYNC_LIST" -v tls="$TLS_LIST" \
-    -v acme="$ACME_LIST" '{
+awk -v base="$BASE_LIST" -v tls="$TLS_LIST" -v acme="$ACME_LIST" '{
     gsub(/@FPMNG_SOURCES@/, "\n" base "\n  ");
-    gsub(/@FPMNG_FIBER_SOURCES@/, "\n" fiber "\n  ");
-    gsub(/@FPMNG_ASYNC_SOURCES@/, "\n" async "\n  ");
     gsub(/@FPMNG_TLS_SOURCES@/, "\n" tls "\n  ");
     gsub(/@FPMNG_ACME_SOURCES@/, "\n" acme "\n  ");
     print

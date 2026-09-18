@@ -31,7 +31,7 @@ startup, the script, and PHP shutdown, including extension RINIT/RSHUTDOWN.
 
 **Decision (2026-09-13, spike #66, measurement #169, write-up #170):** this
 restriction stays. It is not because a retired direct child would cost more
-memory than it saves — `--enable-fpmng-fiber` was not the question here, and
+memory than it saves — the fiber executor (branch `async`) was not the question here, and
 this build's children were too small (~2 MB PSS per child) for the saving to
 matter either way. It stays because retiring a direct child today drops any
 request that was in flight on its socket: every measured retirement with a

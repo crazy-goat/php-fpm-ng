@@ -12,7 +12,7 @@ require_once "tester.inc";
 
 /* Pid-suffixed so two runs of the suite on the same box (the poligon is
  * shared) cannot share a docroot; --CLEAN-- runs in another process and finds
- * it back with a glob, the way fpmng-fiber-stream-select.phpt does. */
+ * it back with a glob. */
 $docRoot = sys_get_temp_dir() . '/fpmng-http-log-reopen-' . getmypid();
 @mkdir($docRoot, 0700, true);
 

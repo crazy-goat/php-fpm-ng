@@ -67,6 +67,18 @@ refuses --enable-fpmng-quic \
 	"HTTP/3 over QUIC is NOT IMPLEMENTED" \
 	"issues/188"
 
+# Issue #373: the fiber and async multi-request executors were cut out of this
+# tree onto branch async. Same refusal pattern as http2/quic above, but the
+# reason is "it moved", not "it does not exist yet" -- so whoever brings an
+# executor back onto main deletes this assertion together with the
+# AC_MSG_ERROR in sapi/fpmng/config.m4, same as the http2/quic pair.
+refuses --enable-fpmng-fiber \
+	"fiber executor is not in this tree" \
+	"branch async"
+refuses --enable-fpmng-async \
+	"async executor is not in this tree" \
+	"branch async"
+
 # The names are reserved to be READ, so `./configure --help` has to carry them
 # -- with the "NOT IMPLEMENTED" marker and the dependency on --enable-fpmng-tls
 # that both will have when they exist (HTTP/2 is negotiated over ALPN, and QUIC
@@ -83,5 +95,17 @@ $line"
   --enable-fpmng-tls: $line"
 done
 echo "test-reserved-configure-flags.sh: both names are in ./configure --help: ok"
+
+# Issue #373: fiber/async carry a MOVED marker instead of NOT IMPLEMENTED --
+# they existed on main once and were relocated, not merely never written --
+# and no --enable-fpmng-tls dependency, since neither ever had one.
+for flag in --enable-fpmng-fiber --enable-fpmng-async; do
+	line=$(echo "$help" | grep -A2 -- "$flag" || true)
+	[ -n "$line" ] || fail "./configure --help does not list $flag (issue #373)"
+	echo "$line" | grep -q "MOVED to branch async" ||
+		fail "./configure --help lists $flag without the MOVED marker:
+$line"
+done
+echo "test-reserved-configure-flags.sh: both fiber/async names are in ./configure --help: ok"
 
 echo "test-reserved-configure-flags.sh: PASS"

@@ -561,6 +561,7 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 {
 	pid_t pid;
 	struct fpm_child_s *child;
+	struct fpm_scoreboard_proc_s *proc;
 	int max;
 	static int warned = 0;
 
@@ -623,6 +624,23 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 				zlog(ZLOG_DEBUG, "unblocking signals, child born");
 				fpm_signals_unblock();
 				child->pid = pid;
+				/* Stamped here too, not only by the child's own
+				 * fpm_scoreboard_child_use() call in fpm_child_resources_use():
+				 * the master already knows fork()'s return value, and the scoreboard
+				 * slot has been `used` since fpm_resources_prepare(), before fork() at
+				 * all. Leaving the pid at its previous occupant's value (0 for a slot
+				 * never used before) until the child gets scheduled and stamps its own
+				 * left a window where an operator ?full poll can read `live: 1` for a
+				 * slot with no real pid on it yet -- one that widens with load rather
+				 * than shrinks. Issue #65's retire test found it: it took that 0 as an
+				 * address to retire, and `kill(0, ...)` does not fail with "no such
+				 * process", it signals the whole calling process group. Writing it here
+				 * closes the window at its source; the child's own stamp shortly after
+				 * repeats the same value. */
+				proc = fpm_scoreboard_proc_get_from_child(child);
+				if (proc) {
+					proc->pid = pid;
+				}
 				fpm_clock_get(&child->started);
 				fpm_parent_resources_use(child);
 

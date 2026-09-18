@@ -87,6 +87,7 @@
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_worker_metrics.h"
+#include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_http_direct_tls.h"
@@ -205,6 +206,10 @@ struct fpm_worker_watcher {
 	size_t buffered;
 	bool spin_warned;
 	zend_ulong id;
+	/* issue #339: FPM_WORKER_EV_READ/WRITE/TIMER, set once at
+	 * fpmng_worker_event_create() and never changed -- the
+	 * fpmng_pool_worker_watchers{type=...} gauge's only use for it. */
+	short type;
 };
 
 static struct {
@@ -288,9 +293,28 @@ static struct {
 	 * no-op on it -- so a pool whose init_main() failed to allocate the
 	 * segment still runs, just without these two gauges. */
 	struct fpm_worker_metrics *metrics;
+	/* issue #339: this child's slot in fpm_http_direct_ops's shared table,
+	 * the same one the classic executor uses for pm.status_path's ?full rows
+	 * -- see fpm_pool_type_http_direct_worker_init()'s comment for why this
+	 * executor now allocates it too. NULL is a valid value throughout for the
+	 * same reason as metrics above: every fpm_http_direct_ops_worker_*() call
+	 * is a no-op on a NULL ops. */
+	struct fpm_http_direct_ops *ops;
+	/* issue #339: fpmng_worker_loop_stall_seconds_max. When the previous call
+	 * to fpmng_worker_loop() returned, or {0,0} before the first call -- the
+	 * sentinel a plain gettimeofday() result can never produce on a machine
+	 * with a working clock, since tv_sec would have to be exactly the epoch. */
+	struct timeval loop_last_entry;
 } fw;
 
 static volatile sig_atomic_t fpm_worker_stopping;
+
+/* issue #339: defined near fpm_worker_memory_bytes() below (it needs that
+ * function and fpm_worker_pending_oldest_seconds(), both declared later in
+ * this file), but called from fpm_worker_reap() and fpm_worker_accept()
+ * above that point -- the same "every removal/creation path funnels through
+ * one publish call" shape fpm_worker_metrics_publish() already has. */
+static void fpm_worker_ops_publish_live(void);
 
 /* }}} */
 
@@ -430,6 +454,10 @@ static void fpm_worker_stop_signal(int signo)
 {
 	(void) signo;
 	fpm_worker_stopping = 1;
+	/* issue #339: a plain shm increment, safe from a signal handler -- same
+	 * reasoning as the fpm_worker_notify() write() call right below, which
+	 * this handler already makes. */
+	fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_SIGNAL);
 	fpm_worker_notify();
 }
 
@@ -537,6 +565,7 @@ static void fpm_worker_reap(struct fpm_worker_pending *p)
 	 * connection closed) funnels through, so this is the only spot that needs
 	 * to publish the shrink -- see fpm_http_direct_worker_metrics.h. */
 	fpm_worker_metrics_publish(fw.metrics, zend_hash_num_elements(&fw.pending), zend_hash_num_elements(&fw.watchers));
+	fpm_worker_ops_publish_live();
 }
 
 /* issue #332: the streaming counterpart of the 503 fpm_worker_finish_output()
@@ -595,6 +624,14 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	 * fpmng_worker_respond_end() completing normally would have. */
 	if (p->http && p->streaming && !evhttp_request_get_connection(p->http)) {
 		evhttp_send_reply_end(p->http);
+	}
+	/* issue #339: closecb is only ever wired to this function while p->http
+	 * is still set and no reply has gone out for it yet (fpmng_worker_respond()
+	 * and friends clear it before answering, see the comment there) -- so
+	 * reaching here with p->http non-NULL means the client hung up on a
+	 * request nobody had answered. */
+	if (p->http) {
+		fpm_http_direct_ops_worker_client_gone(fw.ops);
 	}
 	p->http = NULL;
 	fpm_worker_notify();
@@ -708,6 +745,11 @@ static void fpm_worker_accept_hook(void *arg, struct bufferevent *bev)
 	(void) arg;
 	fpm_http_direct_conns_accepted(fw.conns, bev);
 	fw.accept_taken++;
+	/* issue #339: fpmng_pool_worker_accepted_total -- the fairness measurement
+	 * the accept ceiling above exists to protect, counted at the same point
+	 * the classic executor's fpm_direct_accept_close_gate() counts its own
+	 * conn_accepted. */
+	fpm_http_direct_ops_accepted(fw.ops);
 	fpm_worker_accept_maybe_close();
 }
 
@@ -741,12 +783,15 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 		 * the same place the http gateway asks it. */
 		evhttp_connection_get_peer(evhttp_request_get_connection(http), &peer, &peer_port);
 		if (!peer || !fpm_http_acl_check(fw.acl, peer)) {
+			fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_ACL);
 			fpm_worker_send_error(http, 403, "Forbidden");
 			return;
 		}
 	}
 	if (fpm_worker_stopping || fw.ready_count >= fw.ready_max ||
 		zend_hash_num_elements(&fw.pending) >= fw.ready_max) {
+		fpm_http_direct_ops_worker_refused(fw.ops,
+			fpm_worker_stopping ? FPM_WORKER_REFUSED_STOPPING : FPM_WORKER_REFUSED_SATURATED);
 		/* No "Connection: close" of our own: evhttp_send_error() clears the
 		 * output headers and sets it itself. */
 		fpm_worker_send_error(http, 503, "Worker unavailable");
@@ -774,11 +819,13 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 				"answering 503 and asking the worker script to stop so the master can respawn it",
 				fw.wp->config->name, fw.ready_max);
 			fpm_worker_stopping = 1;
+			fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_SATURATION);
 			fpm_worker_notify();
 		}
 		return;
 	}
 	if (!fpm_http_direct_request_acceptable(http)) {
+		fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_BAD_REQUEST);
 		fpm_worker_send_error(http, 400, "Bad request");
 		return;
 	}
@@ -796,7 +843,11 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	/* issue #333: see the matching call in fpm_worker_reap(). */
 	fpm_worker_metrics_publish(fw.metrics, zend_hash_num_elements(&fw.pending), zend_hash_num_elements(&fw.watchers));
 	fw.ready[(fw.ready_head + fw.ready_count) % fw.ready_max] = p->id;
+	/* issue #339: fw.ready_count itself changes right below, so the publish
+	 * happens after it -- see fpm_worker_ops_publish_live()'s use of
+	 * fw.ready_count for fpmng_pool_worker_queued. */
 	fw.ready_count++;
+	fpm_worker_ops_publish_live();
 	/* evhttp serves one request per connection at a time, so at most one
 	 * pending request per connection can be waiting for a close notice. */
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_worker_conn_closed, p);
@@ -883,6 +934,11 @@ static void fpm_worker_finish_output(void)
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u accepted "
 			"request(s) unanswered; answering 503 rather than closing the connection silently",
 			fw.wp->config->name, abandoned);
+		/* issue #339: fpmng_pool_worker_abandoned_total. Not streams_cut_short
+		 * above -- those got a status line (possibly some chunks) before the
+		 * worker stopped, which is an answer, just an incomplete one; this
+		 * counter is for requests that got no answer at all. */
+		fpm_http_direct_ops_worker_abandoned(fw.ops, abandoned);
 	}
 	if (streams_cut_short) {
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u streamed "
@@ -909,6 +965,11 @@ static void fpm_worker_finish_output(void)
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u response(s) were still unwritten after %d s; "
 			"those connections are closed without a reply",
 			fw.wp->config->name, fw.unflushed, FPM_WORKER_FLUSH_BUDGET);
+		/* issue #339: also fpmng_pool_worker_abandoned_total -- the client was
+		 * told an answer was coming (evhttp_send_reply() already queued it)
+		 * but it never reached the wire, which from the client's side is
+		 * indistinguishable from never having been answered at all. */
+		fpm_http_direct_ops_worker_abandoned(fw.ops, fw.unflushed);
 	}
 }
 
@@ -1026,6 +1087,72 @@ static size_t fpm_worker_memory_bytes(void)
 #endif
 }
 
+/* issue #339: the oldest fw.pending entry's age, for
+ * fpmng_pool_worker_pending_oldest_seconds. Same walk and the same
+ * "!p->http || p->streaming" skip as fpm_worker_sweep_expired() above -- a
+ * streaming or already-answered entry has no bearing on "how long has this
+ * worker made someone wait for a first byte". Returns 0 when nothing
+ * qualifies (the common case), which the caller renders as "no oldest
+ * request" rather than a fake handful of nanoseconds. */
+static double fpm_worker_pending_oldest_seconds(void)
+{
+	struct timeval now;
+	struct fpm_worker_pending *p;
+	double oldest = 0;
+
+	if (zend_hash_num_elements(&fw.pending) == 0) {
+		return 0;
+	}
+	gettimeofday(&now, NULL);
+	ZEND_HASH_FOREACH_PTR(&fw.pending, p) {
+		double age;
+
+		if (!p->http || p->streaming) {
+			continue;
+		}
+		age = (double) (now.tv_sec - p->accepted_at.tv_sec) +
+			(double) (now.tv_usec - p->accepted_at.tv_usec) / 1000000.0;
+		if (age > oldest) {
+			oldest = age;
+		}
+	} ZEND_HASH_FOREACH_END();
+	return oldest;
+}
+
+/* issue #339: publishes every fpmng_pool_worker_* gauge in one call, so the
+ * four call sites below (accept, reap, event create/free) cannot let one
+ * gauge drift out of step with another the way four separate publish
+ * functions could. fw.ops is NULL-safe throughout, same contract as
+ * fpm_worker_metrics_publish(). */
+static void fpm_worker_ops_publish_live(void)
+{
+	struct fpm_http_direct_ops_worker_live live;
+	struct fpm_worker_watcher *watcher;
+
+	if (!fw.ops) {
+		return;
+	}
+	memset(&live, 0, sizeof(live));
+	live.queued = fw.ready_count;
+	live.pending_oldest_seconds = fpm_worker_pending_oldest_seconds();
+	ZEND_HASH_FOREACH_PTR(&fw.watchers, watcher) {
+		switch (watcher->type) {
+			case FPM_WORKER_EV_READ:
+				live.watchers_read++;
+				break;
+			case FPM_WORKER_EV_WRITE:
+				live.watchers_write++;
+				break;
+			case FPM_WORKER_EV_TIMER:
+				live.watchers_timer++;
+				break;
+		}
+	} ZEND_HASH_FOREACH_END();
+	live.memory_bytes = fpm_worker_memory_bytes();
+	live.unflushed = fw.unflushed;
+	fpm_http_direct_ops_worker_publish(fw.ops, &live);
+}
+
 /* worker.max_memory/worker.max_lifetime (issue #334): fw.health_sweep's
  * callback, armed whenever either directive is non-zero (see the field
  * comment on FPM_WORKER_HEALTH_SWEEP_INTERVAL_SEC). Trips the exact same
@@ -1053,6 +1180,7 @@ static void fpm_worker_health_sweep(evutil_socket_t fd, short events, void *arg)
 				"worker.max_memory = %zu bytes, recycling the worker",
 				fw.wp->config->name, memory_bytes, fw.wp->config->worker_max_memory);
 			fpm_worker_stopping = 1;
+			fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_MEMORY);
 			fpm_worker_notify();
 			return;
 		}
@@ -1064,6 +1192,7 @@ static void fpm_worker_health_sweep(evutil_socket_t fd, short events, void *arg)
 				"worker.max_lifetime = %d s, recycling the worker",
 				fw.wp->config->name, lifetime_sec, fw.wp->config->worker_max_lifetime);
 			fpm_worker_stopping = 1;
+			fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_LIFETIME);
 			fpm_worker_notify();
 		}
 	}
@@ -1689,6 +1818,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 		/* Recycling is the master's contract with pm.max_requests; the worker
 		 * script sees it as an ordinary stop request and drains. */
 		fpm_worker_stopping = 1;
+		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
 		fpm_worker_notify();
 	}
 	RETURN_TRUE;
@@ -1920,6 +2050,7 @@ static ZEND_FUNCTION(fpmng_worker_respond_end)
 		/* Recycling is the master's contract with pm.max_requests; the worker
 		 * script sees it as an ordinary stop request and drains. */
 		fpm_worker_stopping = 1;
+		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
 		fpm_worker_notify();
 	}
 	RETURN_TRUE;
@@ -1982,6 +2113,7 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 	watcher->spin = 0;
 	watcher->buffered = 0;
 	watcher->spin_warned = false;
+	watcher->type = (short) type;
 	ZVAL_COPY(&watcher->callback, callback);
 	if (type == FPM_WORKER_EV_TIMER) {
 		ZVAL_UNDEF(&watcher->stream);
@@ -2001,6 +2133,7 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 	zend_hash_index_add_new_ptr(&fw.watchers, watcher->id, watcher);
 	/* issue #333: see the matching call in fpm_worker_reap(). */
 	fpm_worker_metrics_publish(fw.metrics, zend_hash_num_elements(&fw.pending), zend_hash_num_elements(&fw.watchers));
+	fpm_worker_ops_publish_live();
 	RETURN_LONG((zend_long) watcher->id);
 }
 
@@ -2094,6 +2227,7 @@ static ZEND_FUNCTION(fpmng_worker_event_free)
 	zend_hash_index_del(&fw.watchers, watcher->id);
 	/* issue #333: see the matching call in fpm_worker_reap(). */
 	fpm_worker_metrics_publish(fw.metrics, zend_hash_num_elements(&fw.pending), zend_hash_num_elements(&fw.watchers));
+	fpm_worker_ops_publish_live();
 	RETURN_TRUE;
 }
 
@@ -2108,6 +2242,8 @@ static ZEND_FUNCTION(fpmng_worker_loop)
 {
 	bool blocking;
 	int result;
+	struct timeval now;
+	double stall_seconds;
 
 	ZEND_PARSE_PARAMETERS_START(1, 1)
 		Z_PARAM_BOOL(blocking)
@@ -2118,6 +2254,23 @@ static ZEND_FUNCTION(fpmng_worker_loop)
 			"libevent allows only one event_base_loop() per base at a time");
 		RETURN_THROWS();
 	}
+	/* issue #339: fpmng_pool_worker_loop_iterations_total /
+	 * fpmng_pool_worker_loop_stall_seconds_max. Measured on entry, not exit --
+	 * this call itself can block for as long as the caller's `blocking`
+	 * argument and libevent's own timers allow, and it is exactly that gap
+	 * between one entry and the next this metric exists to catch: a userland
+	 * driver that got stuck somewhere else and stopped calling back in here at
+	 * all. fw.loop_last_entry's zero value is the "no previous call yet"
+	 * sentinel -- see its field comment. */
+	gettimeofday(&now, NULL);
+	if (fw.loop_last_entry.tv_sec || fw.loop_last_entry.tv_usec) {
+		stall_seconds = (double) (now.tv_sec - fw.loop_last_entry.tv_sec) +
+			(double) (now.tv_usec - fw.loop_last_entry.tv_usec) / 1000000.0;
+	} else {
+		stall_seconds = -1;
+	}
+	fw.loop_last_entry = now;
+	fpm_http_direct_ops_worker_loop_iteration(fw.ops, stall_seconds);
 	/* Before libevent, never after: it is what keeps a stream whose bytes sit
 	 * in a userland buffer from parking this iteration on an idle descriptor.
 	 * Inside fw.running, because its refill can call a user-space stream's
@@ -2617,6 +2770,12 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * a no-op on NULL, so a worker still serves requests without these two
 	 * gauges rather than failing to start over a metrics channel. */
 	fw.metrics = fpm_http_direct_worker_metrics_init_child(wp);
+	/* issue #339: claims this child's slot in fpm_http_direct_ops's shared
+	 * table -- the same one the classic executor uses for pm.status_path,
+	 * now also allocated for this executor by
+	 * fpm_pool_type_http_direct_worker_init(). Same best-effort/NULL-safe
+	 * contract as fw.metrics above. */
+	fw.ops = fpm_http_direct_ops_init_child(wp);
 	/* issue #331: worker.max_pending, validated > 0 in
 	 * fpm_http_direct_worker_validate(). Sized once, here, rather than at
 	 * every fpm_worker_accept() -- the config never changes for the life of
@@ -2811,6 +2970,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script returned without being asked to "
 			"stop (exit status %d); the master will respawn this child",
 			wp->config->name, EG(exit_status));
+		/* issue #339: fpmng_pool_worker_recycles_total{reason="script_returned"}.
+		 * Every other recycle reason sets fpm_worker_stopping itself before the
+		 * script gets a chance to return on its own; reaching this branch means
+		 * none of them did. */
+		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_SCRIPT_RETURNED);
 	}
 	/* issue #333: a graceful exit zeroes this child's gauges immediately
 	 * rather than leaving the last published value for a successor child to
@@ -2819,6 +2983,8 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * UNgraceful exit (killed, no chance to run this line), but avoidable
 	 * here. */
 	fpm_worker_metrics_publish(fw.metrics, 0, 0);
+	/* issue #339: same reasoning, for this executor's own gauges. */
+	fpm_http_direct_ops_worker_publish(fw.ops, &(struct fpm_http_direct_ops_worker_live) {0});
 	/* Before php_request_shutdown(), not after: a watcher holds a zval
 	 * callback allocated by this request, so releasing it once the request
 	 * arena is gone would be a use-after-free. Freeing the events here also
@@ -2870,6 +3036,8 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	pefree(fw.ready, 1);
 	fpm_http_direct_worker_metrics_free(fw.metrics);
 	fw.metrics = NULL;
+	fpm_http_direct_ops_free(fw.ops);
+	fw.ops = NULL;
 	php_request_shutdown(NULL);
 	sigaction(SIGTERM, &term_before, NULL);
 	SG(server_context) = NULL;

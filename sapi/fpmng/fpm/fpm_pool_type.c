@@ -62,8 +62,7 @@ static int fpm_pool_type_http_direct_init(struct fpm_worker_pool_s *wp)
 
 /* The classic executor only (issue #59): the shared segment behind
  * pm.status_path counts what the children do, so it has to exist before the
- * first of them forks. The worker executor rejects pm.status_path, so it has
- * nothing to allocate. */
+ * first of them forks. */
 static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
 {
 	if (fpm_pool_type_http_direct_init(wp) < 0) {
@@ -72,17 +71,29 @@ static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
 	return fpm_http_direct_ops_init_main(wp);
 }
 
-/* The worker executor only (issue #333): the shared slots behind
- * fpmng_pool_worker_pending/fpmng_pool_worker_watchers (fpm_pool_type_s.
+/* The worker executor only (issue #333, extended by #339): the shared slots
+ * behind fpmng_pool_worker_pending/fpmng_pool_worker_watchers (fpm_pool_type_s.
  * live_gauges below) need to exist before the first child forks, same
  * reasoning as fpm_pool_type_http_direct_classic_init() above for
  * pm.status_path's segment -- and the same reason this is its own function
  * rather than a branch in either of those: an executor variant repeats
  * everything the master must do before fork instead of overriding a shared
- * one. */
+ * one.
+ *
+ * Issue #339: this executor also allocates fpm_http_direct_ops's per-child
+ * shm table, the same one the classic executor uses for pm.status_path.
+ * That table is not tied to pm.status_path itself -- it is just a per-slot
+ * counters/gauges block keyed by scoreboard index -- and the worker executor
+ * needs it for the fpmng_pool_worker_* per-slot metrics on pm.metrics_path.
+ * pm.status_path stays rejected for this executor (see
+ * fpm_http_direct_worker_rejects below); only the underlying table is now
+ * shared between both executors. */
 static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
 {
 	if (fpm_pool_type_http_direct_init(wp) < 0) {
+		return -1;
+	}
+	if (fpm_http_direct_ops_init_main(wp) < 0) {
 		return -1;
 	}
 	return fpm_http_direct_worker_metrics_init_main(wp);
@@ -267,6 +278,15 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	 * reject to discover it missing. */
 	.operator_endpoint            = 1,
 	.operator_status              = fpm_http_direct_ops_render_status,
+	/* Issue #339: the fpmng_pool_worker_* per-slot metrics on pm.metrics_path.
+	 * Unlike live_gauges below (a fixed 4-scalar array), these are per-slot
+	 * and labeled (pool, slot, reason, type), so they need the same
+	 * write-into-a-buffer shape operator_status above already uses rather
+	 * than growing that array -- see fpm_pool_type_s's comment on
+	 * render_metrics_prometheus. JSON is deliberately not given the same
+	 * hook: the metrics page is Prometheus-first, and nothing else on it has
+	 * a JSON form either. */
+	.render_metrics_prometheus    = fpm_http_direct_ops_render_worker_metrics_prometheus,
 	/* Issue #260, same as the base type above: this child owns the accept
 	 * socket and narrates its own lifecycle, so its zlog() lines need the
 	 * channel back to the master. Repeated rather than inherited, like
@@ -277,14 +297,15 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.reject_exceptions            = fpm_http_direct_worker_accepts,
 	.validate                     = fpm_http_direct_worker_validate,
 	/* Same master-side TLS setup as the base type above, plus this executor's
-	 * OWN shared segment behind live_gauges below (issue #333) -- an executor
-	 * variant replaces the whole type struct rather than overriding fields of
-	 * it, so anything the master must do before the first fork has to be
-	 * repeated here. Leaving the TLS half out made a TLS worker pool fork
-	 * children that found no certificate loaded, exit, and be respawned
-	 * forever (issue #55); leaving the new half out would make live_gauges
-	 * below always report zero, the exact placeholder this issue exists to
-	 * avoid. */
+	 * OWN shared segment behind live_gauges below (issue #333) and the
+	 * fpm_http_direct_ops table behind render_metrics_prometheus above (issue
+	 * #339) -- an executor variant replaces the whole type struct rather than
+	 * overriding fields of it, so anything the master must do before the
+	 * first fork has to be repeated here. Leaving the TLS half out made a TLS
+	 * worker pool fork children that found no certificate loaded, exit, and
+	 * be respawned forever (issue #55); leaving either metrics half out would
+	 * make its gauges always report zero, the exact placeholder these issues
+	 * exist to avoid. */
 	.init_main                    = fpm_pool_type_http_direct_worker_init,
 	.child_main                   = fpm_http_direct_worker_child_main,
 	/* issue #333: fpmng_pool_worker_pending / fpmng_pool_worker_watchers,

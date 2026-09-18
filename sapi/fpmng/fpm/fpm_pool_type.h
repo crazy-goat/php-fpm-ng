@@ -16,6 +16,7 @@
 
 struct fpm_worker_pool_s;
 struct fpm_operator_reply_s;
+struct fpm_operator_buf_s;
 
 /* State for a pool that does NOT handle requests (serves_requests = 0). For
  * fcgi/http pools (serves_requests = 1), the data shape is different
@@ -301,6 +302,25 @@ struct fpm_pool_type_s {
 	 * handled. */
 	void (*operator_status)(struct fpm_worker_pool_s *wp, const char *query,
 		struct fpm_operator_reply_s *reply);
+
+	/* Extra Prometheus lines appended to the operator endpoint's metrics page,
+	 * after the generic per-pool lines and after live_gauges above. NULL is the
+	 * common case (nothing extra). Unlike live_gauges' fixed array of scalar
+	 * gauges, this callback writes its own lines straight into the buffer --
+	 * the same shape operator_status above already uses for the status page --
+	 * because what it has to report is per-slot (issue #339: pool.executor =
+	 * worker's fpmng_pool_worker_queued{pool,slot} and friends), and a slot
+	 * label multiplies every gauge by pm.max_children, which is exactly the
+	 * "more than a handful" case FPM_POOL_LIVE_GAUGES_MAX's own comment says
+	 * does not belong in that array.
+	 *
+	 * Called in the operator endpoint's own child, same constraint as
+	 * operator_status: shared memory and configuration only. JSON is
+	 * deliberately not given the same hook -- the metrics page is this
+	 * project's Prometheus-first surface (docs/operator-endpoint.md), and the
+	 * JSON status page already carries this type's pool-wide numbers through
+	 * live_gauges. */
+	void (*render_metrics_prometheus)(struct fpm_worker_pool_s *wp, struct fpm_operator_buf_s *b);
 
 	/* This type exists to be created by fpm-ng itself and cannot be named in a
 	 * configuration: fpm_pool_type_get() will not return it and

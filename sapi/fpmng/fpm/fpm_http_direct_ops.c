@@ -33,6 +33,23 @@ struct fpm_http_direct_ops_slot {
 	unsigned long responses_pending;		/* gauge, published from the worker's tick */
 	unsigned long responses_rejected;
 	unsigned retiring;		/* gauge, issue #65: this child is draining and will exit */
+
+	/* pool.executor = worker only (issue #339). Always 0 on a classic slot --
+	 * see fpm_http_direct_ops.h's comment above these functions' declarations
+	 * for why this is the same table rather than a second one. */
+	unsigned long worker_queued;			/* gauge */
+	unsigned long worker_pending_oldest_us;	/* gauge, microseconds */
+	unsigned long worker_loop_stall_max_us;	/* gauge, microseconds */
+	unsigned long worker_loop_iterations;		/* counter */
+	unsigned long worker_watchers_read;		/* gauge */
+	unsigned long worker_watchers_write;		/* gauge */
+	unsigned long worker_watchers_timer;		/* gauge */
+	unsigned long worker_refused[FPM_WORKER_REFUSED_MAX];		/* counter */
+	unsigned long worker_recycles[FPM_WORKER_RECYCLE_MAX];		/* counter */
+	unsigned long worker_abandoned;		/* counter */
+	unsigned long worker_client_gone;		/* counter */
+	unsigned long worker_memory_bytes;		/* gauge */
+	unsigned long worker_unflushed;		/* gauge */
 };
 
 /* The version on the page. Bump it when a field changes meaning or leaves;
@@ -187,6 +204,21 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 			/* A replacement is not born retiring, however its predecessor
 			 * left. */
 			ops->slot->retiring = 0;
+			/* issue #339: the worker executor's own gauges, same "child killed
+			 * mid-request leaks a gauge" reasoning as the three above -- a
+			 * fresh worker has nothing queued, nothing pending, no watchers and
+			 * no reply sitting unflushed yet. The worker_refused/worker_recycles
+			 * counters and worker_abandoned/worker_client_gone stay: they are
+			 * this pool's totals, not this child's, exactly like conn_accepted
+			 * above them. */
+			ops->slot->worker_queued = 0;
+			ops->slot->worker_pending_oldest_us = 0;
+			ops->slot->worker_loop_stall_max_us = 0;
+			ops->slot->worker_watchers_read = 0;
+			ops->slot->worker_watchers_write = 0;
+			ops->slot->worker_watchers_timer = 0;
+			ops->slot->worker_memory_bytes = 0;
+			ops->slot->worker_unflushed = 0;
 		}
 	}
 
@@ -260,6 +292,70 @@ void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	ops->slot->conn_refused += live->refused_conn - ops->published_refused;
 	ops->published_timed_out = live->timed_out;
 	ops->published_refused = live->refused_conn;
+}
+
+void fpm_http_direct_ops_worker_refused(struct fpm_http_direct_ops *ops,
+	enum fpm_http_direct_worker_refused_reason why)
+{
+	if (ops && ops->slot && why >= 0 && why < FPM_WORKER_REFUSED_MAX) {
+		ops->slot->worker_refused[why]++;
+	}
+}
+
+void fpm_http_direct_ops_worker_recycle(struct fpm_http_direct_ops *ops,
+	enum fpm_http_direct_worker_recycle_reason why)
+{
+	if (ops && ops->slot && why >= 0 && why < FPM_WORKER_RECYCLE_MAX) {
+		ops->slot->worker_recycles[why]++;
+	}
+}
+
+void fpm_http_direct_ops_worker_abandoned(struct fpm_http_direct_ops *ops, unsigned n)
+{
+	if (ops && ops->slot) {
+		ops->slot->worker_abandoned += n;
+	}
+}
+
+void fpm_http_direct_ops_worker_client_gone(struct fpm_http_direct_ops *ops)
+{
+	if (ops && ops->slot) {
+		ops->slot->worker_client_gone++;
+	}
+}
+
+void fpm_http_direct_ops_worker_loop_iteration(struct fpm_http_direct_ops *ops, double stall_seconds)
+{
+	unsigned long stall_us;
+
+	if (!ops || !ops->slot) {
+		return;
+	}
+	ops->slot->worker_loop_iterations++;
+	if (stall_seconds < 0) {
+		/* This child's first call: nothing to compare the gap against yet. */
+		return;
+	}
+	stall_us = (unsigned long) (stall_seconds * 1000000.0);
+	if (stall_us > ops->slot->worker_loop_stall_max_us) {
+		ops->slot->worker_loop_stall_max_us = stall_us;
+	}
+}
+
+void fpm_http_direct_ops_worker_publish(struct fpm_http_direct_ops *ops,
+	const struct fpm_http_direct_ops_worker_live *live)
+{
+	if (!ops || !ops->slot || !live) {
+		return;
+	}
+	ops->slot->worker_queued = live->queued;
+	ops->slot->worker_pending_oldest_us = live->pending_oldest_seconds > 0
+		? (unsigned long) (live->pending_oldest_seconds * 1000000.0) : 0;
+	ops->slot->worker_watchers_read = live->watchers_read;
+	ops->slot->worker_watchers_write = live->watchers_write;
+	ops->slot->worker_watchers_timer = live->watchers_timer;
+	ops->slot->worker_memory_bytes = live->memory_bytes;
+	ops->slot->worker_unflushed = live->unflushed;
 }
 
 int fpm_http_direct_ops_allowed(struct fpm_http_direct_ops *ops, const char *peer)
@@ -526,6 +622,118 @@ void fpm_http_direct_ops_render_status(struct fpm_worker_pool_s *wp, const char 
 
 	reply->content_type = json ? "application/json" : "text/plain; charset=utf-8";
 	fpm_http_direct_ops_status_body(wp, json, fpm_operator_http_has_flag(query, "full"), &reply->body);
+}
+
+/* issue #339. The per-slot series get a "slot" label, bounded by
+ * pm.max_children the same way the classic status page's ?full rows are;
+ * the four aggregate ones (refused/recycles/abandoned/client_gone) do not --
+ * see fpm_http_direct_ops.h's comments on each for why the issue that asked
+ * for them did not want one. HELP/TYPE lines are emitted once regardless of
+ * nslots, same convention fpm_operator_page_row_prometheus_live() already
+ * uses for live_gauges. */
+static const char *const fpm_worker_refused_reason_name[FPM_WORKER_REFUSED_MAX] = {
+	"saturated", "stopping", "acl", "bad_request"
+};
+
+static const char *const fpm_worker_recycle_reason_name[FPM_WORKER_RECYCLE_MAX] = {
+	"max_requests", "saturation", "max_memory", "max_lifetime", "script_returned", "signal"
+};
+
+void fpm_http_direct_ops_render_worker_metrics_prometheus(struct fpm_worker_pool_s *wp,
+	struct fpm_operator_buf_s *b)
+{
+	const struct fpm_http_direct_ops_shared *shared = fpm_http_direct_ops_shared_get(wp);
+	struct fpm_http_direct_ops_slot total;
+	unsigned i, r;
+
+	if (!shared) {
+		return;
+	}
+	memset(&total, 0, sizeof(total));
+	for (i = 0; i < shared->nslots; i++) {
+		for (r = 0; r < FPM_WORKER_REFUSED_MAX; r++) {
+			total.worker_refused[r] += shared->slots[i].worker_refused[r];
+		}
+		for (r = 0; r < FPM_WORKER_RECYCLE_MAX; r++) {
+			total.worker_recycles[r] += shared->slots[i].worker_recycles[r];
+		}
+		total.worker_abandoned += shared->slots[i].worker_abandoned;
+		total.worker_client_gone += shared->slots[i].worker_client_gone;
+	}
+
+	fpm_operator_buf_appendf(b,
+		"# HELP fpmng_pool_worker_queued Requests accepted by this worker but not yet handed to PHP.\n"
+		"# TYPE fpmng_pool_worker_queued gauge\n"
+		"# HELP fpmng_pool_worker_pending_oldest_seconds Age of the oldest unanswered request held by this worker.\n"
+		"# TYPE fpmng_pool_worker_pending_oldest_seconds gauge\n"
+		"# HELP fpmng_pool_worker_loop_stall_seconds_max Longest gap observed between fpmng_worker_loop() entries.\n"
+		"# TYPE fpmng_pool_worker_loop_stall_seconds_max gauge\n"
+		"# HELP fpmng_pool_worker_loop_iterations_total fpmng_worker_loop() calls made by this worker.\n"
+		"# TYPE fpmng_pool_worker_loop_iterations_total counter\n"
+		"# HELP fpmng_pool_worker_watchers Libevent watchers currently registered by this worker, by type.\n"
+		"# TYPE fpmng_pool_worker_watchers gauge\n"
+		"# HELP fpmng_pool_worker_memory_bytes This worker's peak resident set size (getrusage ru_maxrss).\n"
+		"# TYPE fpmng_pool_worker_memory_bytes gauge\n"
+		"# HELP fpmng_pool_worker_responses_unflushed Replies this worker has queued with libevent but not yet on the wire.\n"
+		"# TYPE fpmng_pool_worker_responses_unflushed gauge\n"
+		"# HELP fpmng_pool_worker_accepted_total Connections accepted by this worker, the fairness measurement itself.\n"
+		"# TYPE fpmng_pool_worker_accepted_total counter\n"
+		"# HELP fpmng_pool_worker_refused_total Requests this pool refused before handing them to PHP, by reason.\n"
+		"# TYPE fpmng_pool_worker_refused_total counter\n"
+		"# HELP fpmng_pool_worker_recycles_total Times a worker of this pool asked to stop and be respawned, by reason.\n"
+		"# TYPE fpmng_pool_worker_recycles_total counter\n"
+		"# HELP fpmng_pool_worker_abandoned_total Accepted requests this pool never answered (shutdown drain or unflushed timeout).\n"
+		"# TYPE fpmng_pool_worker_abandoned_total counter\n"
+		"# HELP fpmng_pool_worker_client_gone_total Client connections closed while a request on them was still unanswered.\n"
+		"# TYPE fpmng_pool_worker_client_gone_total counter\n");
+
+	for (i = 0; i < shared->nslots; i++) {
+		const struct fpm_http_direct_ops_slot *in = &shared->slots[i];
+		int alive = fpm_http_direct_ops_slot_alive(wp->scoreboard, i);
+		unsigned long queued = alive ? in->worker_queued : 0;
+		unsigned long pending_oldest_us = alive ? in->worker_pending_oldest_us : 0;
+		unsigned long loop_stall_max_us = alive ? in->worker_loop_stall_max_us : 0;
+		unsigned long watchers_read = alive ? in->worker_watchers_read : 0;
+		unsigned long watchers_write = alive ? in->worker_watchers_write : 0;
+		unsigned long watchers_timer = alive ? in->worker_watchers_timer : 0;
+		unsigned long memory_bytes = alive ? in->worker_memory_bytes : 0;
+		unsigned long unflushed = alive ? in->worker_unflushed : 0;
+
+		fpm_operator_buf_appendf(b,
+			"fpmng_pool_worker_queued{pool=\"%s\",slot=\"%u\"} %lu\n"
+			"fpmng_pool_worker_pending_oldest_seconds{pool=\"%s\",slot=\"%u\"} %.6f\n"
+			"fpmng_pool_worker_loop_stall_seconds_max{pool=\"%s\",slot=\"%u\"} %.6f\n"
+			"fpmng_pool_worker_loop_iterations_total{pool=\"%s\",slot=\"%u\"} %lu\n"
+			"fpmng_pool_worker_watchers{pool=\"%s\",slot=\"%u\",type=\"read\"} %lu\n"
+			"fpmng_pool_worker_watchers{pool=\"%s\",slot=\"%u\",type=\"write\"} %lu\n"
+			"fpmng_pool_worker_watchers{pool=\"%s\",slot=\"%u\",type=\"timer\"} %lu\n"
+			"fpmng_pool_worker_memory_bytes{pool=\"%s\",slot=\"%u\"} %lu\n"
+			"fpmng_pool_worker_responses_unflushed{pool=\"%s\",slot=\"%u\"} %lu\n"
+			"fpmng_pool_worker_accepted_total{pool=\"%s\",slot=\"%u\"} %lu\n",
+			wp->config->name, i, queued,
+			wp->config->name, i, (double) pending_oldest_us / 1000000.0,
+			wp->config->name, i, (double) loop_stall_max_us / 1000000.0,
+			wp->config->name, i, in->worker_loop_iterations,
+			wp->config->name, i, watchers_read,
+			wp->config->name, i, watchers_write,
+			wp->config->name, i, watchers_timer,
+			wp->config->name, i, memory_bytes,
+			wp->config->name, i, unflushed,
+			wp->config->name, i, in->conn_accepted);
+	}
+
+	for (r = 0; r < FPM_WORKER_REFUSED_MAX; r++) {
+		fpm_operator_buf_appendf(b, "fpmng_pool_worker_refused_total{pool=\"%s\",reason=\"%s\"} %lu\n",
+			wp->config->name, fpm_worker_refused_reason_name[r], total.worker_refused[r]);
+	}
+	for (r = 0; r < FPM_WORKER_RECYCLE_MAX; r++) {
+		fpm_operator_buf_appendf(b, "fpmng_pool_worker_recycles_total{pool=\"%s\",reason=\"%s\"} %lu\n",
+			wp->config->name, fpm_worker_recycle_reason_name[r], total.worker_recycles[r]);
+	}
+	fpm_operator_buf_appendf(b, "fpmng_pool_worker_abandoned_total{pool=\"%s\"} %lu\n",
+		wp->config->name, total.worker_abandoned);
+	fpm_operator_buf_appendf(b, "fpmng_pool_worker_client_gone_total{pool=\"%s\"} %lu\n",
+		wp->config->name, total.worker_client_gone);
 }
 
 static void fpm_http_direct_ops_send(struct evhttp_request *http, const char *content_type,

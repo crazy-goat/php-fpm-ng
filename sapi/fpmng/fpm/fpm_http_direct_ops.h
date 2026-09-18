@@ -114,6 +114,107 @@ struct fpm_http_direct_ops_live {
 void fpm_http_direct_ops_publish(struct fpm_http_direct_ops *ops,
 	const struct fpm_http_direct_ops_live *live);
 
+/* pool.executor = worker only (issue #339). The plumbing gap the issue starts
+ * with: this table already existed for the classic executor, one slot per
+ * scoreboard index, and is simply not written to by a worker child before
+ * this. Everything below is additive to the classic fields above -- a classic
+ * slot never calls any of it and stays zero, and a worker slot never touches
+ * conn_live/requests_active/responses_pending above (this executor has no
+ * per-request scoreboard stage to publish there, see
+ * fpm_http_direct_worker_rejects). Reusing the one table rather than a second
+ * one is deliberate: fpm_http_direct_ops_init_child() already resolves "this
+ * child's slot" once, from the scoreboard index, and a second lookup would be
+ * a second place that decision could disagree with the first. */
+
+/* fpmng_pool_worker_refused_total{pool,reason}, reason as an index rather than
+ * a name: what the classic executor's FPM_HTTP_DIRECT_REFUSED_ACL/CAPACITY
+ * enum already does, for the same reason -- ACL and "bad request" mean
+ * different things to whoever is reading a dashboard and a status page that
+ * only said "refused" would make them guess which. "saturated" and "stopping"
+ * are the two ways worker.max_pending's ceiling in fpm_worker_accept() answers
+ * 503: the first while the worker is otherwise healthy, the second once it has
+ * already asked to stop and is refusing everything on the way out -- the same
+ * distinction the recycle reasons below draw for why a worker is recycling in
+ * the first place. */
+enum fpm_http_direct_worker_refused_reason {
+	FPM_WORKER_REFUSED_SATURATED = 0,	/* worker.max_pending reached, still healthy */
+	FPM_WORKER_REFUSED_STOPPING,		/* worker.max_pending reached while draining */
+	FPM_WORKER_REFUSED_ACL,			/* listen.allowed_clients */
+	FPM_WORKER_REFUSED_BAD_REQUEST,		/* fpm_http_direct_request_acceptable() said no */
+	FPM_WORKER_REFUSED_MAX
+};
+void fpm_http_direct_ops_worker_refused(struct fpm_http_direct_ops *ops,
+	enum fpm_http_direct_worker_refused_reason why);
+
+/* fpmng_pool_worker_recycles_total{pool,reason}: every path that sets
+ * fpm_worker_stopping = 1 (fpm_http_direct_worker.c), plus the one path that
+ * stops the worker WITHOUT ever setting it -- the script simply returning on
+ * its own, counted as "script_returned" at the one place child_main() already
+ * distinguishes that case from every asked-for stop below it. Same shape as
+ * the supervisor's restarts counter (issue #277): a number that only ever
+ * climbing on a healthy pool is the signal, not the count of any one reason by
+ * itself. */
+enum fpm_http_direct_worker_recycle_reason {
+	FPM_WORKER_RECYCLE_MAX_REQUESTS = 0,	/* pm.max_requests */
+	FPM_WORKER_RECYCLE_SATURATION,		/* worker.max_pending's ceiling asked the script to drain */
+	FPM_WORKER_RECYCLE_MAX_MEMORY,		/* worker.max_memory */
+	FPM_WORKER_RECYCLE_MAX_LIFETIME,	/* worker.max_lifetime */
+	FPM_WORKER_RECYCLE_SCRIPT_RETURNED,	/* the worker script ended on its own, unasked */
+	FPM_WORKER_RECYCLE_SIGNAL,		/* SIGQUIT or SIGUSR1 (issue #65 retire) */
+	FPM_WORKER_RECYCLE_MAX
+};
+void fpm_http_direct_ops_worker_recycle(struct fpm_http_direct_ops *ops,
+	enum fpm_http_direct_worker_recycle_reason why);
+
+/* fpmng_pool_worker_abandoned_total{pool}: requests fpm_worker_finish_output()
+ * 503'd at shutdown drain (n = however many in one call) or a reply still
+ * unwritten when its flush budget ran out (n = 1, one call per event since
+ * fw.unflushed has no per-request identity left by then). Both are the same
+ * thing to an operator: an accepted request this pool never delivered an
+ * answer for. */
+void fpm_http_direct_ops_worker_abandoned(struct fpm_http_direct_ops *ops, unsigned n);
+
+/* fpmng_pool_worker_client_gone_total{pool}: the client's connection closed
+ * while a request on it was still unanswered (fpm_worker_conn_closed()) --
+ * invisible in any status code today, since nothing was ever sent. */
+void fpm_http_direct_ops_worker_client_gone(struct fpm_http_direct_ops *ops);
+
+/* fpmng_pool_worker_loop_iterations_total{pool,slot} and
+ * fpmng_pool_worker_loop_stall_seconds_max{pool,slot}: called once per
+ * fpmng_worker_loop() call, from the ZEND_FUNCTION itself. stall_seconds is
+ * the gap since the previous call, or a negative number for the very first
+ * call this child ever makes (nothing to compare against yet) -- the counter
+ * still increments either way, only the gauge's running max is left alone.
+ * Head-of-line blocking (one synchronous call freezing every connection this
+ * child holds) is this executor's characteristic failure mode, and the
+ * longest gap between loop entries is what catches it directly: a handler
+ * that never yields back to fpmng_worker_loop() is a gap that keeps growing
+ * until it returns. */
+void fpm_http_direct_ops_worker_loop_iteration(struct fpm_http_direct_ops *ops, double stall_seconds);
+
+/* The rest of the worker's gauges, all published from the same mutation
+ * points fpm_worker_metrics_publish() already is (fpm_worker_accept(),
+ * fpm_worker_reap(), fpmng_worker_event_create()/_free()) -- one child, one
+ * set of "how busy am I right now" numbers, so there is no reason for this
+ * table to be refreshed on a different schedule than fw.pending/fw.watchers'
+ * combined total already is. */
+struct fpm_http_direct_ops_worker_live {
+	unsigned long queued;			/* fw.ready_count: accepted, not yet handed to PHP */
+	/* Seconds, not the raw timeval: a gauge is one double either way, and
+	 * every other duration on this page already ends in the same suffix. 0
+	 * when nothing is pending -- indistinguishable from "just this instant",
+	 * which is the same approximation worker.request_timeout's own sweep
+	 * makes when it reads a fresh accepted_at. */
+	double pending_oldest_seconds;
+	unsigned long watchers_read;
+	unsigned long watchers_write;
+	unsigned long watchers_timer;
+	unsigned long memory_bytes;		/* getrusage(RUSAGE_SELF).ru_maxrss, issue #334's own sample reused */
+	unsigned long unflushed;		/* fw.unflushed: replies queued with libevent, not yet on the wire */
+};
+void fpm_http_direct_ops_worker_publish(struct fpm_http_direct_ops *ops,
+	const struct fpm_http_direct_ops_worker_live *live);
+
 /* 1 when the peer may be served, 0 when listen.allowed_clients excludes it.
  * peer may be NULL (a connection whose address libevent could not report),
  * which is treated as not allowed whenever a list is configured. */
@@ -144,5 +245,21 @@ int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp
 struct fpm_operator_reply_s;
 void fpm_http_direct_ops_render_status(struct fpm_worker_pool_s *wp, const char *query,
 	struct fpm_operator_reply_s *reply);
+
+/* fpm_pool_type_s.render_metrics_prometheus for the worker executor (issue
+ * #339): the twelve series above, appended to the operator endpoint's
+ * Prometheus page after the generic per-pool lines and after live_gauges'
+ * fpmng_pool_worker_pending/fpmng_pool_worker_watchers (issue #333). Same
+ * shape as fpm_http_direct_ops_render_status above -- a type-specific
+ * callback that owns writing its own lines into the buffer -- rather than
+ * live_gauges' fixed few-scalars array: a slot label multiplies every gauge
+ * by pm.max_children, which is exactly the "more than a handful" case
+ * FPM_POOL_LIVE_GAUGES_MAX's own comment says does not belong in that array.
+ *
+ * Called in the operator endpoint's own child, same foreign-shared-memory
+ * read as fpm_http_direct_ops_render_status. */
+struct fpm_operator_buf_s;
+void fpm_http_direct_ops_render_worker_metrics_prometheus(struct fpm_worker_pool_s *wp,
+	struct fpm_operator_buf_s *b);
 
 #endif

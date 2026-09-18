@@ -166,7 +166,8 @@ that request total is a real, per-request count since issue #333 — see
 [`http-direct.md`](http-direct.md#pingpath-and-pmstatus_path) for what else
 that executor does and does not report, including the two extra gauges
 (`fpmng_pool_worker_pending`, `fpmng_pool_worker_watchers`) it adds on top of
-the shape below. A pool that does not serve requests (`cron`, `supervisor`) reports its state,
+the shape below, and [Per-slot worker metrics](#per-slot-worker-metrics-issue-339)
+below for a further, more detailed set. A pool that does not serve requests (`cron`, `supervisor`) reports its state,
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs. A `cron` pool with
 `cron.expect_within` set also reports `stale`, and a `supervisor` pool whose
@@ -204,6 +205,53 @@ reads zero.
 back by `supervisor.restart = always` leaves `consecutive_failures` at zero
 forever while `restarts` climbs; that combination is the signature of a pool
 that is flapping silently, and reading the two together is how you see it.
+
+### Per-slot worker metrics (issue #339)
+
+On `pool.type = http-direct` with `pool.executor = worker`, `pm.metrics_path`
+also carries a set of series keyed by `slot` (this pool's scoreboard index,
+one worker child per slot) or by a `reason`/`type` label, on top of the
+pool-wide `fpmng_pool_worker_pending` and `fpmng_pool_worker_watchers` gauges
+issue #333 already added. They exist to answer three questions issue #333's
+two gauges cannot: which slot is under pressure, why a worker was refused or
+recycled, and how long its event loop has gone quiet.
+
+`pm.status_path` stays unsupported on this executor (see
+[`http-direct.md`](http-direct.md#pingpath-and-pmstatus_path)) — only
+`pm.metrics_path` reports these.
+
+Per-slot gauges. Each is only meaningful for a slot currently holding a live
+worker; a slot with no worker in it (not yet spawned, or between an exit and
+its replacement) reports `0` rather than a stale number from whichever worker
+had the slot before:
+
+| Series | Labels | Meaning |
+|---|---|---|
+| `fpmng_pool_worker_queued` | `pool`, `slot` | Requests accepted but not yet dispatched to the script (`fw.ready_count`). |
+| `fpmng_pool_worker_pending_oldest_seconds` | `pool`, `slot` | Age, in seconds, of the oldest request this worker has accepted but not yet answered. `0` when nothing is pending. |
+| `fpmng_pool_worker_loop_stall_seconds_max` | `pool`, `slot` | Longest gap seen so far between two consecutive `fpmng_worker_loop()` calls — how long the script's own code, not libevent, has ever held the loop. |
+| `fpmng_pool_worker_watchers` | `pool`, `slot`, `type` (`read`, `write`, `timer`) | Libevent watchers this worker currently has registered, split by kind. The sum across `type` for one slot equals that slot's `fpmng_pool_worker_watchers` without the split, minus nothing — the two counts agree by construction. |
+| `fpmng_pool_worker_memory_bytes` | `pool`, `slot` | This worker's peak RSS (`getrusage(RUSAGE_SELF).ru_maxrss`), the same sample `worker.max_memory` (issue #334) already computes for its own recycling decision. |
+| `fpmng_pool_worker_responses_unflushed` | `pool`, `slot` | Bytes this worker has queued to a client but not yet confirmed written to the socket (`worker.send_buffer_limit`, issue #332). |
+
+Per-slot counter. Unlike the gauges above, this one is owned by the slot, not
+by whichever worker currently occupies it — it keeps counting across a
+`pm.max_requests` recycle instead of resetting to `0` when a new worker takes
+the slot:
+
+| Series | Labels | Meaning |
+|---|---|---|
+| `fpmng_pool_worker_accepted_total` | `pool`, `slot` | TCP connections accepted by this slot, ever. Counts connections, not requests — keep-alive means this can be lower than `fpmng_pool_<name>_total`'s per-request count for the same traffic. |
+
+Pool-wide counters, one number for the whole pool rather than one per slot,
+because what they count outlives any one worker occupying any one slot:
+
+| Series | Labels | Meaning |
+|---|---|---|
+| `fpmng_pool_worker_refused_total` | `pool`, `reason` (`saturated`, `stopping`, `acl`, `bad_request`) | Requests this pool answered with an error instead of dispatching to a script, by reason. `saturated`: every ready slot was full. `stopping`: the worker holding the connection was already draining. `acl`: `listen.allowed_clients` rejected the peer. `bad_request`: the request itself was malformed. |
+| `fpmng_pool_worker_recycles_total` | `pool`, `reason` (`max_requests`, `saturation`, `max_memory`, `max_lifetime`, `script_returned`, `signal`) | Times a worker in this pool was told to stop, by reason. `max_requests`/`max_memory`/`max_lifetime` are the matching `pm.max_requests`/`worker.max_memory`/`worker.max_lifetime` directives; `saturation` is this worker recycling itself after refusing a request it had no room for; `script_returned` is a script that exited on its own without ever being asked to stop; `signal` is every other stop signal (shutdown, reload, `FPM\Tester::terminate()`, …). `max_lifetime` is an addition beyond the metric's original proposal in issue #339, added because `worker.max_lifetime` (issue #334) is an existing, distinct recycle trigger the reason list would otherwise have no way to report. |
+| `fpmng_pool_worker_abandoned_total` | `pool` | Requests this pool never answered at all: still pending when a worker's shutdown drain gave up on them, or a streamed response whose bytes never reached the socket before the worker exited. |
+| `fpmng_pool_worker_client_gone_total` | `pool` | Requests whose client disconnected before this pool had sent any answer for them. |
 
 ## Application metrics on a per-pool metrics path
 

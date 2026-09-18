@@ -1112,6 +1112,12 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 		free(kv->value);
 		free(kv);
 	}
+	for (kv = wpc->http_routes; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
 	for (kv = wpc->php_values; kv; kv = kv_next) {
 		kv_next = kv->next;
 		free(kv->key);
@@ -1443,7 +1449,7 @@ static int fpm_conf_process_all_pools(void)
 		 * pm.*_listen directives say where THAT endpoint binds, and the pool
 		 * they bind is created by fpm_operator_endpoint.c.
 		 *
-		 * On fastcgi and fastcgi-ng there is no such listener, on purpose:
+		 * On fastcgi there is no such listener, on purpose:
 		 * those types have a web server in front of them, which is where an
 		 * operator already restricts who may reach a path. pm.status_path
 		 * therefore keeps its upstream meaning there -- answered on the pool's
@@ -2109,6 +2115,32 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 	} else if (zend_string_equals_literal(Z_STR_P(name), "access.suppress_path")) {
 		config = (char *)current_wp->config + WPO(access_suppress_paths);
 		err = fpm_conf_set_array(NULL, value, &config, 0);
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.route")) {
+		/* http.route[<pool>] = <prefix>[,<prefix>...] -- issue #340. Only the
+		 * shape is checked here, where the pool sections that follow this one
+		 * are not parsed yet; everything that needs the whole configuration --
+		 * does the named pool exist, is its type a legal target, is a prefix
+		 * claimed twice -- is fpm_http_validate_pool()'s, which runs after
+		 * every section has been read.
+		 *
+		 * Noted as a set directive even though it is an array: that is what
+		 * makes the "http." entry of fpm_pool_fastcgi_rejects (fpm_pool_type.c)
+		 * reach it, so a route on a pool that runs no gateway is refused
+		 * instead of silently ignored. */
+		if (!*Z_STRVAL_P(value)) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.route[%s]: empty value; give at least one path prefix",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		config = (char *)current_wp->config + WPO(http_routes);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
 
 	} else {
 		zlog(ZLOG_ERROR, "[%s:%d] unknown directive '%s'", ini_filename, ini_lineno, Z_STRVAL_P(name));

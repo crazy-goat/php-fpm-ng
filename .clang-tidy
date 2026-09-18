@@ -14,7 +14,14 @@ Checks: >
   clang-analyzer-core.uninitialized.Assign,
   clang-analyzer-unix.Malloc,
   clang-analyzer-deadcode.DeadStores
-WarningsAsErrors: ''
+# Issue #414: every check here is scoped to our own TUs and headers
+# (HeaderFilterRegex above, and lint-c.sh only ever passes sapi/fpmng and
+# ext/fpmng_metrics .c files), so any diagnostic the report shows is ours.
+# Promoting warnings to errors is what makes the CI job fail on a finding in
+# sapi/fpmng/ instead of printing it into the artifact and staying green.
+# Suppressed findings are silenced at the site with NOLINT and a reason, not
+# here.
+WarningsAsErrors: '*'
 # Only diagnose headers under this repository. build/lint-c.sh overrides this
 # with an absolute ^$REPO/(sapi/fpmng|ext/fpmng_metrics)/ filter so a prepared
 # php-src/sapi/fpmng/ tree (upstream copies) is never part of the report.

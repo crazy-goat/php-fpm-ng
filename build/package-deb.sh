@@ -175,10 +175,9 @@ Description: $SUMMARY
  .
  Two pool types are supported here: pool.type = fastcgi, which is classic FPM,
  and pool.type = http-direct, in which the worker speaks HTTP itself and needs
- no web server in front of it. pool.type = fastcgi-ng and pool.type = http are
- refused at startup: they need a patch inside Zend/ that a distribution libphp
- does not carry, and running them without it would change signal behaviour
- silently. Build from source for those.
+ no web server in front of it. pool.type = http is refused at startup: it needs
+ a patch inside Zend/ that a distribution libphp does not carry, and running it
+ without it would change signal behaviour silently. Build from source for it.
 $EXTRA
 EOT
 

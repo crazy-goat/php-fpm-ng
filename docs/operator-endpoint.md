@@ -184,7 +184,7 @@ the counter's name does too:
 
 | Pool type | Counter | Counts |
 |---|---|---|
-| `http`, `http-direct`, `fastcgi`, `fastcgi-ng` | `requests` | Requests served. |
+| `http`, `http-direct`, `fastcgi` | `requests` | Requests served. |
 | `cron` | `runs` | Scheduled runs started. |
 | `supervisor` | `restarts` | Times the supervised script was started again. |
 

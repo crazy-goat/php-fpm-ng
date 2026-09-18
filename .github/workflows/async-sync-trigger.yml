@@ -1,0 +1,24 @@
+name: async-sync-trigger
+
+# Part of #374. GitHub only reads `schedule:`/`workflow_dispatch:` triggers
+# from a workflow file that is on the repository's DEFAULT branch (main) --
+# never from the branch a workflow's own logic lives on -- so this thin proxy
+# exists here purely to fire, on the clock, the real async-sync.yml that
+# lives (and does the actual merge/build/test work) on branch `async`.
+on:
+  schedule:
+    # Same weekly cadence as async-sync.yml on branch async: Sunday 04:41 UTC.
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: dispatch async-sync.yml on branch async
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run async-sync.yml --repo "$GITHUB_REPOSITORY" --ref async

@@ -183,10 +183,10 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # fpmng-http-pool-full-wait-config.phpt, fpmng-http-pool-full-wait-dispatch.phpt
 # and fpmng-http-pool-full-wait-bounded.phpt (issue #309) are a fifth addition,
 # three tests together this time: all three use pool.type = http, which this
-# stage's distribution libphp does not support (fastcgi-ng and http are
-# refused, issue #214), so all three skip on every flavour regardless of TLS.
-# TOTAL carries a further +3 and each flavour's SKIP count carries a further
-# +3; the four PASS counts are unaffected.
+# stage's distribution libphp does not support (http is refused, issue #214),
+# so all three skip on every flavour regardless of TLS. TOTAL carries a
+# further +3 and each flavour's SKIP count carries a further +3; the four PASS
+# counts are unaffected.
 #
 # fpmng-http-direct-connection-info.phpt (issue #62) is a sixth addition: a
 # pool.type = http-direct pool with http.tls_cert configured, which needs no
@@ -352,14 +352,41 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # three skip on every flavour regardless of TLS. TOTAL carries a further +3
 # and each flavour's SKIP count carries a further +3; the four PASS counts are
 # unaffected.
+#
+# fpmng-http-route-prefix.phpt, fpmng-http-route-pool-full-503.phpt and
+# fpmng-http-route-invalid.phpt (issue #340) are a twenty-fifth addition,
+# three tests together: all three use pool.type = http -- the third one only
+# to have a gateway pool whose http.route[] table can be refused -- so the
+# same reasoning as the two http trios above applies, this stage's
+# distribution libphp does not support the type (issue #214) and all three
+# skip on every flavour regardless of TLS. TOTAL carries a further +3 and each
+# flavour's SKIP count carries a further +3; the four PASS counts are
+# unaffected.
+#
+# Branch async carries the fiber/async executor tests main cut in issue #373
+# (eight fiber-specific tests, the two listening-flags tests, and the
+# experimental-tier announcement test -- the 11 that made main's count 120),
+# so the base count here is main's pre-cut 131, not main's 123.
+#
+# fpmng-http-route-target-access-log.phpt, fpmng-http-route-target-metrics.phpt
+# and fpmng-http-gateway-no-route-unchanged.phpt (issue #341, merged from main)
+# are three further additions: all three use pool.type = http, and this
+# stage's distribution libphp does not support the type (issue #214) -- so all
+# three skip on every flavour regardless of TLS. TOTAL carries +3 (131 + 3 =
+# 134) and each flavour's SKIP count carries +3; the four PASS counts are
+# unaffected. Issue #376 retired fastcgi-ng and moved no counts: no .phpt file
+# was added or removed (the retired-name assertion lives inside the existing
+# fpmng-config-rejected-directives.phpt), and the fiber tests this branch runs
+# now sit on pool.type = http, which skips on libphp for the same reason the
+# old fastcgi-ng cells did.
 EXPECT_FAIL=0
-EXPECT_TOTAL=128
+EXPECT_TOTAL=134
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=39
-    else EXPECT_PASS=83; EXPECT_SKIP=45; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=45
+    else EXPECT_PASS=83; EXPECT_SKIP=51; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -392,8 +419,13 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=42
-    else EXPECT_PASS=81; EXPECT_SKIP=47; fi
+<<<<<<< ours
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=37
+    else EXPECT_PASS=81; EXPECT_SKIP=42; fi
+=======
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=45
+    else EXPECT_PASS=81; EXPECT_SKIP=50; fi
+>>>>>>> theirs
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

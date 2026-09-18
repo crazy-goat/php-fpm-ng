@@ -191,6 +191,20 @@ struct fpm_worker_pool_config_s {
 	size_t http_max_body;			/* bytes, hard cap on a request body the gateway buffers whole; see fpm_http.c */
 	int http_max_connections;		/* http-direct: connections one worker will hold at a time; 0 = unlimited. See fpm_http_direct_conn.h */
 	int http_max_connections_per_client;	/* http-direct: connections one peer address may hold on one worker; 0 = unlimited */
+	/* http.route[<pool>] = <prefix>[,<prefix>...] -- path-prefix routing on the
+	 * gateway (issue #340). The KEY is the target pool's name and the VALUE is
+	 * its comma-separated prefix list, not the other way round: an INI array
+	 * key is read literally up to ']', so a path as the key would carry '/',
+	 * '.', '^' and '|' into the key and leave nothing that could be validated,
+	 * while a pool name must match a configured section and therefore
+	 * validates itself. Several prefixes may name one pool; a pool named twice
+	 * is refused rather than merged (fpm_http_validate_pool()).
+	 *
+	 * Resolved once in the master, before the first gateway forks -- there is
+	 * no hot reload of routes, a reload restarts the gateway as it always did.
+	 * NULL/empty = today's gateway: one target, the pool's own listener, at
+	 * prefix "/". */
+	struct key_value_s *http_routes;
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */

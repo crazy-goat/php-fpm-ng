@@ -145,8 +145,7 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 |---|---|---|---|
 | `fastcgi` | yes | yes | upstream FPM's protocol handling; needs nothing from the engine that a distribution `libphp` does not export. |
 | `http-direct` | yes | yes | including `pool.executor = worker`. The HTTP listener lives entirely in this SAPI. |
-| `fastcgi-ng` | **no** | yes | needs `zend_signal_use_persistent_handlers()`, added by `patches/0006` **inside `Zend/`**. That is the distribution's file, not ours, so a distribution `libphp` does not export it. |
-| `http` | **no** | yes | same mechanism as `fastcgi-ng`: both keep a request runtime alive across requests, which is what the persistent signal handlers exist for. |
+| `http` | **no** | yes | `http` keeps a request runtime alive across requests, which is what `zend_signal_use_persistent_handlers()` -- added by `patches/0006` **inside `Zend/`** -- exists for. That is the distribution's file, not ours, so a distribution `libphp` does not export it. |
 | fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
 | async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
 | TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the single package terminated TLS. |
@@ -186,7 +185,7 @@ apk add --allow-untrusted ./php-fpm-ng-tls-v0.4.0-php8.5-x86_64.apk
 
 Everything else on this page applies unchanged: same paths, same
 `/etc/php-fpm-ng`, same service file, same dependency on the distribution
-`libphp`, same refusal of `pool.type = http` and `fastcgi-ng`.
+`libphp`, same refusal of `pool.type = http`.
 
 **The two cannot be co-installed**, and they say so to the package manager
 rather than fighting over `/usr/sbin/php-fpm-ng`: each declares `Conflicts` and
@@ -259,7 +258,7 @@ At runtime the binary checks again, and the two cases differ:
 
 ## If you need what the package cannot give
 
-`fastcgi-ng`, `http`, fibers and async need patches that apply inside `libphp`,
+`http`, fibers and async need patches that apply inside `libphp`,
 so they need a build from source. TLS termination needs only a flag, but the
 packaged binary is built without it, so it is the same answer:
 

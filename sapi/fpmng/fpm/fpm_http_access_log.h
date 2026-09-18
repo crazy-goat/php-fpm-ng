@@ -56,9 +56,25 @@ struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_
 
 /* log == NULL -> no-op. remote_user may be NULL/empty (becomes "-").
  * status < 0 -> "-" instead of a code (for example, the connection failed
- * before a response). */
+ * before a response).
+ *
+ * target (issue #341): the name of the backend pool this request was
+ * dispatched to, appended as a trailing "target=<name>" field so an existing
+ * Combined Log Format parser -- which reads fields by position, not by
+ * counting to the end -- keeps working unmodified; only a parser that expects
+ * the line to END after the User-Agent field would notice the addition.
+ *
+ * target == NULL becomes "target=-", used for two distinct cases a reader
+ * cannot tell apart from the log line alone, deliberately: a gateway with no
+ * http.route[] configured at all (this field is then ALWAYS "-", never a pool
+ * name -- the one byte-for-byte guarantee this issue makes for a gateway that
+ * never opted into routing), and a request a ROUTED gateway answered locally
+ * without dispatching to any pool (ping.path, a static file, an ACME
+ * challenge, an ACL rejection before routing ran). A caller passes target ==
+ * NULL for both; only fpm_http_log_response() in fpm_http.c decides which
+ * case it is, from whether the gateway's own http.route[] is set. */
 void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *remote_addr,
 	const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
-	int status, size_t bytes_sent, const char *referer, const char *user_agent);
+	int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target);
 
 #endif

@@ -299,6 +299,14 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.baseline_counter       = "requests",
 		.executors              = fpm_http_executors,
 		.operator_endpoint      = 1,
+		/* Issue #341: fpmng_gateway_{upstreams_used,upstreams_max,
+		 * requests_total,rejected_total}{pool,target} on pm.metrics_path, one
+		 * row per http.route[] target (or the pool's own listener when
+		 * http.route[] is unset) -- see fpm_http.h. Write-into-a-buffer shape,
+		 * same reason the worker executor's per-slot hook below uses it: a
+		 * target label multiplies every series, which does not fit
+		 * live_gauges' fixed scalar array. */
+		.render_metrics_prometheus = fpm_http_render_metrics_prometheus,
 		.rejects                = fpm_pool_http_classic_rejects,
 		.validate               = fpm_http_validate_pool,
 		.init_main              = fpm_pool_type_http_init,

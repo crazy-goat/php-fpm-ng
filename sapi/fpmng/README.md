@@ -9,11 +9,11 @@ Our files. The rest of the SAPI is copied from upstream `sapi/fpm/` by
 | `fpm/fpm.c` | hook `fpm_http_init_main()` in `fpm_run()` — the attachment point for pool types |
 | `fpm/fpm_http.c` | HTTP gateway |
 | `fpm/fpm_http.h` | |
-| `fpm/fpm_pool_async.c` | POC `pool.executor = async` for `fastcgi-ng` and `http` — the True Async implementation stays in the tree, but validation rejects the executor until it has the required hardening (NOTES 3t, `docs/async_errors.md`) |
+| `fpm/fpm_pool_async.c` | POC `pool.executor = async` for `http` — the True Async implementation stays in the tree, but validation rejects the executor until it has the required hardening (NOTES 3t, `docs/async_errors.md`) |
 | `fpm/fpm_pool_async.h` | |
 | `fpm/fpm_pool_coop.c` | shared request state for the experimental multi-request executors |
 | `fpm/fpm_pool_coop.h` | |
-| `fpm/fpm_pool_fiber.c` | EXPERIMENT: `pool.executor = fiber` for `fastcgi-ng` and `http` on upstream PHP, libevent scheduler (NOTES 3u) |
+| `fpm/fpm_pool_fiber.c` | EXPERIMENT: `pool.executor = fiber` for `http` on upstream PHP, libevent scheduler (NOTES 3u) |
 | `fpm/fpm_pool_fiber.h` | |
 | `fpm/fpm_pool_fiber_xport.c` | suspending Fibers on the `tcp` and `unix` transports |
 | `fpm/fpm_metrics.c` | application-metrics glue (NOTES 3k/3w): the master allocates shm slots, the child in `run_child:` gets a slot + pool label |

@@ -129,11 +129,11 @@ static size_t fpm_http_access_log_escape(const char *in, char *out, size_t out_s
 
 void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *remote_addr, /* {{{ */
 		const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
-		int status, size_t bytes_sent, const char *referer, const char *user_agent)
+		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target)
 {
 	char line[4096];
 	char uri_esc[1024], referer_esc[512], ua_esc[512];
-	char addr_esc[128], user_esc[256];
+	char addr_esc[128], user_esc[256], target_esc[128];
 	/* 12, not 8: the format is "%d" and `status` is an int, so gcc's
 	 * -Wformat-truncation counts up to 11 characters plus the NUL. Real
 	 * statuses are three digits and the negative case takes the "-" branch
@@ -162,6 +162,7 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	fpm_http_access_log_escape(uri, uri_esc, sizeof(uri_esc));
 	fpm_http_access_log_escape(referer, referer_esc, sizeof(referer_esc));
 	fpm_http_access_log_escape(user_agent, ua_esc, sizeof(ua_esc));
+	fpm_http_access_log_escape(target, target_esc, sizeof(target_esc));
 
 	if (status >= 0) {
 		snprintf(status_buf, sizeof(status_buf), "%d", status);
@@ -169,8 +170,12 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 		snprintf(status_buf, sizeof(status_buf), "-");
 	}
 
+	/* target (issue #341): a trailing field, not inserted between existing
+	 * ones -- see the header for why this is the one shape that does not
+	 * break a parser reading the classic Combined Log Format fields by
+	 * position. */
 	len = snprintf(line, sizeof(line),
-		"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\"\n",
+		"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\" target=%s\n",
 		addr_esc[0] ? addr_esc : "-",
 		user_esc[0] ? user_esc : "-",
 		timebuf,
@@ -180,7 +185,8 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 		status_buf,
 		bytes_sent,
 		referer_esc[0] ? referer_esc : "-",
-		ua_esc[0] ? ua_esc : "-");
+		ua_esc[0] ? ua_esc : "-",
+		target_esc[0] ? target_esc : "-");
 
 	if (len <= 0) {
 		return;

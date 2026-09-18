@@ -20,9 +20,9 @@ require_once "tester.inc";
  * with the sources it was testing. */
 const FPMNG_ASYNC_NOT_ON_BRANCH = 'is not on this branch';
 
-/* A binary linked against a distribution libphp refuses `pool.type = http` and
- * `pool.type = fastcgi-ng` outright, before any directive of that pool is
- * looked at (fpm_pool_type_check_build_support()). The cases below that use
+/* A binary linked against a distribution libphp refuses `pool.type = http`
+ * outright, before any directive of that pool is looked at
+ * (fpm_pool_type_check_build_support()). The cases below that use
  * `http` are then rejected for that reason instead of the one they name, which
  * is the binary being right, not the test failing -- so that refusal counts as
  * a rejection here. The other ten cases run on both builds, which is the point:
@@ -115,6 +115,21 @@ expectConfigFailure(
     'default-fastcgi-executor',
     $base . "\npool.executor = classic",
     ['pool.executor is not supported by pool.type = fastcgi']
+);
+
+/* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
+ * unknown one -- a config file outlives the release that broke it, so the
+ * message has to say what happened and where the transport went. The libphp
+ * guard below (FPMNG_TYPE_UNSUPPORTED) counts as a rejection on its own, so
+ * this case reads the same on both builds. */
+expectConfigFailure(
+    'retired-fastcgi-ng',
+    $base . "\npool.type = fastcgi-ng",
+    [
+        "pool.type 'fastcgi-ng' no longer exists",
+        'removed in 0.9.0 (issue #376)',
+        'use pool.type = fastcgi, or pool.type = http-direct for a pool with no web server in front',
+    ]
 );
 
 /* pool.type = http-direct + pool.executor = worker (task 073). The worker

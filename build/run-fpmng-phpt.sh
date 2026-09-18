@@ -358,9 +358,9 @@ command -v strings >/dev/null 2>&1 || preflight_fail 'strings is required to ver
 if ! FPM_STRINGS=$(strings "$FPM_BIN" 2>/dev/null); then
     preflight_fail "cannot inspect strings in $FPM_BIN"
 fi
-MARKERS=$(printf '%s\n' "$FPM_STRINGS" | grep -E 'php-fpm-ng|pool\.type|fpmng_|fastcgi-ng' | LC_ALL=C sort -u || true)
+MARKERS=$(printf '%s\n' "$FPM_STRINGS" | grep -E 'php-fpm-ng|pool\.type|fpmng_' | LC_ALL=C sort -u || true)
 printf '%s\n' "$MARKERS" | grep -q 'fpmng_' || preflight_fail "strings has no fpmng_ marker: $FPM_BIN"
-printf '%s\n' "$MARKERS" | grep -Eq 'php-fpm-ng|pool\.type|fastcgi-ng' || preflight_fail "strings has no pool.type/php-fpm-ng marker: $FPM_BIN"
+printf '%s\n' "$MARKERS" | grep -Eq 'php-fpm-ng|pool\.type' || preflight_fail "strings has no pool.type/php-fpm-ng marker: $FPM_BIN"
 
 HARNESS_DIR=$RESULTS_DIR/.harness
 mkdir -p "$HARNESS_DIR/bin" "$HARNESS_DIR/fpm"

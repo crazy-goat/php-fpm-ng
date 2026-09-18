@@ -132,10 +132,10 @@ touch "$DIRTY"
 "$REPO/build/prepare.sh" "$TREE"
 
 # The configure log is kept inside the tree, not in the workspace, because a
-# reused tree does not run configure again and the jobs assert on this log --
-# fpmng-phpt-fiber checks that --enable-fpmng-fiber was actually honoured
-# (issue #97). An assertion that silently has nothing to read on the fast path
-# is worse than no assertion.
+# reused tree does not run configure again and jobs assert on this log -- the
+# `build` job checks that --enable-fpmng-tls and --enable-fpmng-acme were
+# actually honoured. An assertion that silently has nothing to read on the
+# fast path is worse than no assertion.
 CONFIGURE_LOG="$TREE/.fpmng-ci-configure.log"
 
 if [ "$REUSED" = no ] && [ "$SKIP_CONFIGURE" = no ]; then

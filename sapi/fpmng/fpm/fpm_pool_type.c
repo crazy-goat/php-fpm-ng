@@ -22,25 +22,27 @@
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_cron.h"
 #include "fpm_operator_endpoint.h"
-#include "fpm_pool_type_coop.h"
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
 /* http.* tunes the gateway, which starts only under pool.type = http — on every
- * other type these directives have nothing to tune. fiber.* applies only to
- * pool.executor = fiber (the fiber executor's own rejected-directive list,
- * fpm_pool_type_coop.c, does not include it). worker.* applies only to
+ * other type these directives have nothing to tune. worker.* applies only to
  * pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
- * further down carves its two directives back out on that one type. */
+ * further down carves its two directives back out on that one type.
+ *
+ * fiber.* had a matching entry here before issue #373: the fiber executor's
+ * own two directives (fiber.revalidate_freq, fiber.isolate_statics) do not
+ * exist on this branch at all any more (they lived on fpm_pool_coop_reval.c
+ * / fpm_pool_coop_statics.c, both moved to branch async), so there is no
+ * fiber.* namespace left to reject -- an unrecognised directive already
+ * fails config parsing on its own, regardless of pool.type. */
 static const char *const fpm_pool_fastcgi_rejects[] = {
 	"http.",
-	"fiber.",
 	"worker.",
 	NULL
 };
 
 static const char *const fpm_pool_http_classic_rejects[] = {
-	"fiber.",
 	"worker.",
 	NULL
 };
@@ -107,8 +109,8 @@ static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
  * the base itself through fpmng_worker_loop(), so Revolt (and therefore amphp)
  * can suspend. See docs/http-direct-revolt-integration.md.
  *
- * An executor rather than a second pool.type for the same reason "fiber" is an
- * executor (fpm_pool_http_fiber above): the transport is unchanged and only
+ * An executor rather than a second pool.type for the same reason "fiber" is
+ * (was, on branch async) an executor: the transport is unchanged and only
  * the child's execution model differs. .name stays "http-direct" so
  * diagnostics keep naming the type the operator actually configured. */
 /* issue #331: the two directives worker. is a prefix for. FPM_HTTP_DIRECT_REJECTS_COMMON
@@ -210,20 +212,16 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
  * executor so that fpm_pool_type_resolve() looks a name up instead of
  * comparing against one; it resolves to the base type, hence .resolves_to_base.
  *
- * fiber and async each exist only in a binary built with the matching flag
- * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"): without it
- * the sources are not compiled at all (see build/prepare.sh and
- * sapi/fpmng/config.m4). The entry stays in the list either way, so a
- * configuration asking for one still gets told which flag it needs rather than
- * that the executor does not exist.
+ * fiber and async do not exist on this branch at all (issue #373 cut them,
+ * along with --enable-fpmng-fiber / --enable-fpmng-async, out to branch
+ * async). The entries stay in the list so that a configuration asking for one
+ * still gets told where it went instead of that the name is unknown.
  *
- * .type starts NULL and is filled in once, lazily, by
- * fpm_pool_type_install_coop_variants() below through the one hook this file
- * has onto the fiber/async structs (fpm_pool_type_coop_variant(), see
- * fpm_pool_type_coop.h) -- not a static initializer, because which flags this
- * binary was built with is not a compile-time constant this file may name.
- * .build_flag stays set either way: fpm_pool_type_validate_executor() below
- * only reads it once .type turns out still NULL after that call. */
+ * .type stays NULL forever on this branch: fpm_pool_type_install_coop_variants()
+ * below is the hook that used to fill it in from the fiber/async structs
+ * before #373; it is now a no-op kept for the day those structs come back.
+ * fpm_pool_type_validate_executor() reads .type being NULL to report the
+ * pointer at branch async. */
 static struct fpm_pool_executor_s fpm_fastcgi_ng_executors[] = {
 	{ .name = "classic", .resolves_to_base = 1 },
 	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
@@ -238,36 +236,15 @@ static struct fpm_pool_executor_s fpm_http_executors[] = {
 	{ .name = NULL }
 };
 
-/* Fills in the .type pointers above, once. Idempotent and safe to call from
- * more than one entry point (fpm_pool_type_get() below calls it, and it is
- * the first function every path into this file goes through) rather than
- * requiring one designated startup call site -- see fpm_pool_type_coop.h for
- * why this indirection exists at all. */
+/* Used to fill in the .type pointers above from the fiber/async structs,
+ * through a lookup that lived in fpm_pool_type_coop.c. Issue #373 cut those
+ * structs out to branch async, so there is nothing left to install: the
+ * fiber/async entries above keep .type == NULL forever on this branch, which
+ * is exactly what fpm_pool_type_validate_executor() needs to point an
+ * operator at branch async. Kept as a no-op call site rather than deleted so
+ * a future variant source has one designated place to hook back in. */
 static void fpm_pool_type_install_coop_variants(void)
 {
-	static int installed = 0;
-	struct fpm_pool_executor_s *tables[2];
-	size_t t;
-
-	if (installed) {
-		return;
-	}
-	installed = 1;
-
-	tables[0] = fpm_fastcgi_ng_executors;
-	tables[1] = fpm_http_executors;
-
-	for (t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
-		struct fpm_pool_executor_s *e;
-
-		for (e = tables[t]; e->name; e++) {
-			if (e->resolves_to_base) {
-				continue;
-			}
-			e->type = fpm_pool_type_coop_variant(
-				t == 0 ? "fastcgi-ng" : "http", e->name);
-		}
-	}
 }
 
 /* http-direct ships its own child loop, so it offers its own executor instead
@@ -492,10 +469,10 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
  * Zend signal handlers were reinstalled on every request -- upstream
  * behaviour under a name that promises the opposite. That makes every
  * measurement taken on it wrong and says nothing while doing it. The fiber and
- * async executors need patches 0007/0008 and are handled differently, by being
- * compiled out entirely when their configure flag is off (see
- * fpm_pool_type_coop.c): an executor that is not in the type's list is
- * already rejected by name, so there is nothing to add here for them.
+ * async executors needed patches 0007/0008 and were handled differently, by
+ * being compiled out entirely: on this branch they do not exist at all
+ * (issue #373; they live on branch async), and their entries stay rejected
+ * by name, so there is nothing to add here for them.
  */
 int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
 {
@@ -808,9 +785,9 @@ int fpm_pool_type_validate_executor(struct fpm_worker_pool_s *wp)
 	}
 
 	if (!e->resolves_to_base && !e->type) {
-		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s: this binary was built without "
-			"%s; rebuild with that flag to use this executor",
-			wp->config->name, e->name, e->build_flag);
+		zlog(ZLOG_ALERT, "[pool %s] pool.executor = %s is not on this branch: it lives on "
+			"branch async of the repository",
+			wp->config->name, e->name);
 		return -1;
 	}
 

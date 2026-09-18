@@ -360,9 +360,9 @@ static const struct fpm_http_direct_labels fpm_worker_labels = {
 };
 
 /* INI value set in the pool, or NULL when only php.ini applies. Same shape and
- * same admin-before-value order as fpm_coop_pool_ini() in fpm_pool_coop.c;
- * duplicated because that file is compiled only with --enable-fpmng-fiber and
- * a stock binary does not contain it. */
+ * same admin-before-value order as the fiber executor's pool-INI lookup on
+ * branch `async` (issue #373); duplicated because that code does not exist on
+ * this branch and a stock binary does not contain it. */
 static const char *fpm_worker_pool_ini(struct fpm_worker_pool_s *wp, const char *key)
 {
 	struct key_value_s *kv;

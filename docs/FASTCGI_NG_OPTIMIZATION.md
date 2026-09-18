@@ -1,5 +1,15 @@
 # `fastcgi-ng` optimization plan
 
+**Won't do: `pool.type = fastcgi-ng` was removed in 0.9.0 (issue #376).** The
+measured gain was 114.53 us upstream against 105.01 us per request ("Worker
+CPU without saturating the machine" below) -- 9.5 us, 8.3% of a hello-world
+request and 0.02-0.2% of a 5-50 ms framework request; throughput at
+saturation moved +0.41%, within noise ("Throughput at saturation" below).
+The optimizations themselves (patches 0004/0005/0006) survive
+under `pool.type = http`, which sets the same capability bit; the numbers
+below still apply there. This document is the measurement that justified the
+removal and stays as written.
+
 ## Goal
 
 `pool.type = fastcgi-ng` is meant to be an optimized FastCGI frontend, while:
@@ -110,6 +120,9 @@ Variant 2 should be performance- and behavior-equivalent to upstream. Variant 3 
 
 ### 2. Establish the recommended `fastcgi-ng` configuration
 
+> Closed as won't-do (issue #376): the type was removed in 0.9.0. Text left
+> as written.
+
 For lightweight endpoints, measure and document this configuration:
 
 ```ini
@@ -131,6 +144,9 @@ Measure each option separately as well:
 Do not change the defaults of classic `fastcgi` to improve the benchmark result.
 
 ### 3. Profile the hot path again
+
+> Closed as won't-do (issue #376): the type was removed in 0.9.0. Text left
+> as written.
 
 After splitting the frontends, collect the following for both variants:
 

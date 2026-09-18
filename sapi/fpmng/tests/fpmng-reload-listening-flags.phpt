@@ -147,10 +147,11 @@ $tester->expectLogReloadingNotices();
 if (!$httpOk()) {
     throw new RuntimeException('classic after fiber reload did not answer over HTTP');
 }
-/* Not the old fastcgi-ng asymmetry (fiber nonblocking, classic blocking): the
- * http classic executor is a single-threaded event loop, so its listener is
- * nonblocking too. What the reload still exercises is that the flags survive
- * the fiber -> classic transition instead of inheriting stale state. */
+/* Not the retired optimized-FastCGI asymmetry (fiber nonblocking, classic
+ * blocking): the http classic executor is a single-threaded event loop, so
+ * its listener is nonblocking too. What the reload still exercises is that
+ * the flags survive the fiber -> classic transition instead of inheriting
+ * stale state. */
 assertNonblocking(masterListenFlags($tester->getPid(), $address), true, 'classic after fiber reload');
 
 $holdSeconds = (int) (getenv('FPMNG_TASK037_HOLD_SECONDS') ?: 0);

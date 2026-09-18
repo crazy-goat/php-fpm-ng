@@ -419,13 +419,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-<<<<<<< ours
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=37
-    else EXPECT_PASS=81; EXPECT_SKIP=42; fi
-=======
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=45
-    else EXPECT_PASS=81; EXPECT_SKIP=50; fi
->>>>>>> theirs
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=48
+    else EXPECT_PASS=81; EXPECT_SKIP=53; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

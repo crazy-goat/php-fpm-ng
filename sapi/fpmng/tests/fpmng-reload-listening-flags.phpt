@@ -80,7 +80,13 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
 
 $dir = __DIR__;
 $port = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26037);
-$address = "127.0.0.1:$port";
+/* Two listeners, two ports: the pool's `listen` socket (required by every
+ * request-serving type) and the gateway's `http.listen` cannot be the same
+ * address -- the first bind wins and the second refuses to start. The flags
+ * this test watches are the http listener's, because that is the socket the
+ * fiber executor serves on. */
+$listenAddress = "127.0.0.1:$port";
+$address = "127.0.0.1:" . ($port + 1);
 
 /* pool.type = http since issue #379: the retired pool type's fiber cells this
  * test was written on are gone with the type, and http x fiber is the
@@ -93,7 +99,7 @@ error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 2
 [reload]
-listen = $address
+listen = $listenAddress
 http.listen = $address
 chdir = $dir
 pool.type = http
@@ -110,7 +116,7 @@ error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 2
 [reload]
-listen = $address
+listen = $listenAddress
 http.listen = $address
 chdir = $dir
 pool.type = http

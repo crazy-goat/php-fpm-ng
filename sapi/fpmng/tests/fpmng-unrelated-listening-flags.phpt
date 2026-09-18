@@ -79,8 +79,11 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
 }
 
 $basePort = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26039);
+/* Two ports for the fiber pool (`listen` and `http.listen` cannot share an
+ * address -- the first bind wins), a third for the unrelated classic pool. */
 $fiberAddress = "127.0.0.1:$basePort";
-$classicAddress = '127.0.0.1:' . ($basePort + 1);
+$fcgiAddress = '127.0.0.1:' . ($basePort + 1);
+$classicAddress = '127.0.0.1:' . ($basePort + 2);
 $dir = __DIR__;
 
 /* pool.type = http since issue #379: the retired pool type's fiber cell is
@@ -93,7 +96,7 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 [fiber]
-listen = $fiberAddress
+listen = $fcgiAddress
 http.listen = $fiberAddress
 chdir = $dir
 pool.type = http

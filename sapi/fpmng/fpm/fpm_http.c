@@ -150,6 +150,9 @@ struct {								\
 #include "fpm_http_static.h"
 #include "fpm_child_error_log.h"
 #include "fpm_error_log_follow.h"
+/* issue #341: fpm_operator_buf_s/fpm_operator_buf_appendf, for
+ * fpm_http_render_metrics_prometheus() at the bottom of this file. */
+#include "fpm_operator_http.h"
 #include "zlog.h"
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
@@ -266,6 +269,18 @@ struct fpm_http_target_s {
 	 * pm.max_children, the number its workers actually enforce */
 	unsigned max_upstreams;
 	atomic_t *upstreams_used;		/* shared between the gateway processes */
+
+	/* Issue #341: per-target counters, shared memory for the same reason
+	 * upstreams_used is -- fpm_operator_pages.c's
+	 * fpm_pool_type_s.render_metrics_prometheus hook runs in the operator
+	 * endpoint's OWN child, a fork() taken after fpm_http_routes_build() has
+	 * already allocated these, so that child's copy of `gw->targets` points
+	 * at the same shared segment every gateway process updates. Never NULL
+	 * once fpm_http_target_init() has returned 0 -- checked defensively at
+	 * the two read sites anyway, the same caution upstreams_used itself
+	 * takes at fpm_operator_pages.c. */
+	atomic_t *requests_total;		/* requests routed to this target, whatever they answered */
+	atomic_t *rejected_total;		/* of those, how many found no budget and got 503 */
 
 	/* gateway process only */
 	struct sockaddr_storage upstream_addr;
@@ -410,6 +425,14 @@ struct fpm_http_gateway_s {
 	unsigned ntargets;
 	struct fpm_http_route_s *routes;
 	unsigned nroutes;
+	/* Issue #341: true when THIS pool set http.route[] at all (even if every
+	 * entry claims "/" and leaves ntargets == 1). Gates the access log's
+	 * target field: a pool that never opted into routing must log "-" on
+	 * every line, byte-for-byte what it logged before this issue, and this is
+	 * the one flag that tells fpm_http_log_response() so without it having to
+	 * re-derive "did this pool configure routing" from the shape of the
+	 * table it already built. */
+	int has_routes;
 
 	/* gateway process only */
 	struct event_base *base;
@@ -605,6 +628,25 @@ static void fpm_http_budget_give_back(struct fpm_http_target_s *t)
 	}
 }
 
+/* Issue #341: the same cmp-set loop as the budget above, for the two
+ * monotonic counters a target's metrics report. No saturating case to worry
+ * about here (unlike budget_give_back's `used == 0` guard) -- a counter only
+ * ever goes up. `counter` may be NULL in principle -- fpm_http_target_init()
+ * refuses to start the gateway if the shm allocation failed, so this is a
+ * defensive check, not a reachable path, kept only because every other
+ * dereference of one of these fields in this file makes the same check. */
+static void fpm_http_counter_incr(atomic_t *counter)
+{
+	unsigned long value;
+
+	if (!counter) {
+		return;
+	}
+	do {
+		value = *counter;
+	} while (!atomic_cmp_set(counter, value, value + 1));
+}
+
 /* EAGAIN and EWOULDBLOCK are the same value on most systems, hence the macro dance */
 static inline int fpm_http_would_block(int err)
 {
@@ -705,9 +747,17 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
  * locally answered response (an ACME challenge, a static file) already was --
  * it is real HTTP traffic that reached this process, and an operator who
  * wants it out of the log has the same lever as for any other noisy path:
- * access.suppress_path[], applied by fpm_http_log_suppressed() above. */
+ * access.suppress_path[], applied by fpm_http_log_suppressed() above.
+ *
+ * target (issue #341): the backend pool this request was dispatched to, NULL
+ * for a request this gateway answered on its own (ping, static, ACME, an ACL
+ * rejection before routing ran) -- see fpm_http_access_log.h for the exact
+ * field this produces. Gated on gw->has_routes here, not left to the caller:
+ * a gateway with no http.route[] configured logs "-" on every line whether or
+ * not the caller happens to know its one implicit target's name, which is
+ * what keeps that gateway's log byte-for-byte what it was before this issue. */
 static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
-		const char *remote_addr, const char *remote_user, int status, size_t bytes)
+		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target)
 {
 	if (!gw->access_log) {
 		return;
@@ -719,7 +769,8 @@ static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_r
 		fpm_http_method_name(evhttp_request_get_command(req)), evhttp_request_get_uri(req),
 		req->major, req->minor, status, bytes,
 		evhttp_find_header(evhttp_request_get_input_headers(req), "Referer"),
-		evhttp_find_header(evhttp_request_get_input_headers(req), "User-Agent"));
+		evhttp_find_header(evhttp_request_get_input_headers(req), "User-Agent"),
+		gw->has_routes ? target : NULL);
 }
 
 /* ---------------------------------------------------------------- FastCGI encoding */
@@ -1228,7 +1279,7 @@ static void fpm_http_finish(fpm_http_conn *c, int explained)
 		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	}
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
-		c->remote_user, c->status, c->bytes_out);
+		c->remote_user, c->status, c->bytes_out, c->target->pool);
 	fpm_http_conn_free(c);
 }
 
@@ -1606,6 +1657,14 @@ static const struct fpm_http_transport_s fpm_http_target_fastcgi_ops = {
 static void fpm_http_reject_queued(fpm_http_conn *c)
 {
 	c->status = FPM_HTTP_SERVICE_UNAVAIL;
+	/* Issue #341: this is the ONE place every rejection funnels through --
+	 * a full queue drained here, the queue-cap check at enqueue time, and
+	 * fpm_http_wait_expired() below all call this function rather than
+	 * reject a request themselves -- so it is also the one place that has to
+	 * name the target for both the WARNING and rejected_total. */
+	zlog(ZLOG_WARNING, "[pool %s] http: pool full, rejecting a queued request target=%s",
+		c->gw->pool, c->target->pool);
+	fpm_http_counter_incr(c->target->rejected_total);
 	if (c->evcon) {
 		struct evbuffer *body = evbuffer_new();
 
@@ -1620,7 +1679,7 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 		}
 	}
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
-		c->remote_user, c->status, c->bytes_out);
+		c->remote_user, c->status, c->bytes_out, c->target->pool);
 	fpm_http_conn_free(c);
 }
 
@@ -1910,7 +1969,7 @@ static void fpm_http_static_log_response(void *ctx, int status, size_t bytes)
 {
 	struct fpm_http_static_log_ctx *c = ctx;
 
-	fpm_http_log_response(c->gw, c->req, c->remote_addr, NULL, status, bytes);
+	fpm_http_log_response(c->gw, c->req, c->remote_addr, NULL, status, bytes, NULL);
 }
 
 static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
@@ -1966,7 +2025,7 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 		/* Still answered locally: this namespace belongs to ACME whatever the
 		 * method, and forwarding a POST here to the application would expose
 		 * a path the application never routes. */
-		fpm_http_log_response(gw, req, remote_addr, NULL, 405, 0);
+		fpm_http_log_response(gw, req, remote_addr, NULL, 405, 0, NULL);
 		evhttp_send_error(req, 405, "Method Not Allowed");
 		return 1;
 	}
@@ -1975,7 +2034,7 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 		? fpm_acme_challenge_lookup(token, keyauth, sizeof(keyauth))
 		: -1;
 	if (len < 0) {
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0);
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0, NULL);
 		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
 		return 1;
 	}
@@ -1991,7 +2050,7 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 
 		snprintf(content_length, sizeof(content_length), "%zd", len);
 		evhttp_add_header(out, "Content-Length", content_length);
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, 0);
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, 0, NULL);
 		evhttp_send_reply(req, HTTP_OK, "OK", NULL);
 		return 1;
 	}
@@ -2002,11 +2061,11 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 			if (body) {
 				evbuffer_free(body);
 			}
-			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
+			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
 			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) len);
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) len, NULL);
 		evhttp_send_reply(req, HTTP_OK, "OK", body);
 		evbuffer_free(body);
 	}
@@ -2057,7 +2116,7 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 		if (body) {
 			evbuffer_free(body);
 		}
-		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0);
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
 		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		return 1;
 	}
@@ -2069,7 +2128,7 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
 	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
 	bytes = evbuffer_get_length(body);
-	fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, bytes);
+	fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, bytes, NULL);
 	evhttp_send_reply(req, HTTP_OK, "OK", body);
 	evbuffer_free(body);
 	return 1;
@@ -2316,7 +2375,7 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		/* ACL is about the direct network peer, so it (and its log entry) is
 		 * deliberately NOT run through X-Forwarded-For -- an address rejected
 		 * here is exactly the one that made the TCP connection. */
-		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0);
+		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, NULL);
 		evhttp_send_error(req, 403, "Forbidden");
 		return;
 	}
@@ -2370,11 +2429,17 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * transport the order costs nothing; without it, adding the second one
 		 * (#344) would have to unpick FastCGI framing from the request path. */
 		c->target = fpm_http_route(gw, req);
+		/* Issue #341: fpmng_gateway_requests_total{target=...} -- every request
+		 * this gateway routed to a target, counted here regardless of how it is
+		 * eventually answered (200, a proxied error, a 503 from the reject path
+		 * below). What upstreams_used/_max describe is pressure on the target;
+		 * this is the traffic that pressure is a rate OF. */
+		fpm_http_counter_incr(c->target->requests_total);
 		error = c->target->ops->write_request(c, script_missing);
 	}
 
 	if (error) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, error, 0);
+		fpm_http_log_response(gw, req, effective_addr, NULL, error, 0, c->target->pool);
 		evhttp_send_error(req, error, NULL);
 		c->evcon = NULL;
 		fpm_http_conn_free(c);
@@ -3481,11 +3546,15 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
 	}
 	t->max_upstreams = capacity ? capacity : 1;
 	t->upstreams_used = fpm_shm_alloc(sizeof(*t->upstreams_used));
-	if (!t->pool || !t->listen_address || !t->upstreams_used) {
+	t->requests_total = fpm_shm_alloc(sizeof(*t->requests_total));
+	t->rejected_total = fpm_shm_alloc(sizeof(*t->rejected_total));
+	if (!t->pool || !t->listen_address || !t->upstreams_used || !t->requests_total || !t->rejected_total) {
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", gw->pool);
 		return -1;
 	}
 	*t->upstreams_used = 0;
+	*t->requests_total = 0;
+	*t->rejected_total = 0;
 	return 0;
 }
 
@@ -3503,6 +3572,8 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 {
 	struct key_value_s *kv;
 	unsigned nentries = 0, nprefixes = 0, own = 1, ti = 0, ri = 0;
+
+	gw->has_routes = wp->config->http_routes != NULL;
 
 	for (kv = wp->config->http_routes; kv; kv = kv->next) {
 		const char *cursor = kv->value, *prefix;
@@ -3585,6 +3656,12 @@ static void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
 		free(gw->targets[i].listen_address);
 		if (gw->targets[i].upstreams_used) {
 			fpm_shm_free((void*)gw->targets[i].upstreams_used, sizeof(*gw->targets[i].upstreams_used));
+		}
+		if (gw->targets[i].requests_total) {
+			fpm_shm_free((void*)gw->targets[i].requests_total, sizeof(*gw->targets[i].requests_total));
+		}
+		if (gw->targets[i].rejected_total) {
+			fpm_shm_free((void*)gw->targets[i].rejected_total, sizeof(*gw->targets[i].rejected_total));
 		}
 	}
 	free(gw->routes);
@@ -3976,6 +4053,19 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 					gw->routes[i].target->max_upstreams);
 			}
 		}
+		/* Issue #341: one line per TARGET, pool/address/capacity, as opposed to
+		 * the http.route[] lines above which are one line per PREFIX (several
+		 * of which may name the same target -- see fpm_http_target_s's own
+		 * comment on why the budget is per pool and not per prefix). Printed
+		 * unconditionally, including the unrouted case where ntargets == 1 and
+		 * this is the pool's own listener: an operator grepping startup logs
+		 * for "http target:" should not have to know whether http.route[] was
+		 * configured to find every target a gateway may talk to. */
+		for (i = 0; i < gw->ntargets; i++) {
+			zlog(ZLOG_NOTICE, "[pool %s] http target: pool %s at %s, %u persistent connection(s)",
+				wp->config->name, gw->targets[i].pool, gw->targets[i].listen_address,
+				gw->targets[i].max_upstreams);
+		}
 
 		for (i = 0; i < gw->nproc; i++) {
 			gw->slots[i] = calloc(1, sizeof(*gw->slots[i]));
@@ -4194,6 +4284,58 @@ int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capa
 }
 /* }}} */
 
+/* Issue #341, fpm_pool_type_s.render_metrics_prometheus for pool.type = http.
+ * Runs in the operator endpoint's OWN child (see fpm_http.h), which reached
+ * this point by fork()ing the master AFTER fpm_http_init_pool_ex() built the
+ * `gateways` list below -- so this process has its own copy of that list,
+ * pointing at the same shared-memory counters every gateway process of `wp`
+ * updates. `gateways` is a flat list across every http-type pool in the
+ * config (one entry per pool, not per gateway process, see fpm_http_gateway_s's
+ * comment), hence the name match instead of a pointer this file never handed
+ * out. */
+void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm_operator_buf_s *b) /* {{{ */
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned i;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		if (strcmp(gw->pool, wp->config->name) == 0) {
+			break;
+		}
+	}
+	if (!gw || !gw->ntargets) {
+		return;
+	}
+
+	fpm_operator_buf_appendf(b,
+		"# HELP fpmng_gateway_upstreams_used Persistent connections this gateway currently holds open to a target.\n"
+		"# TYPE fpmng_gateway_upstreams_used gauge\n"
+		"# HELP fpmng_gateway_upstreams_max Persistent connections this gateway may hold open to a target, from the target's own pm.max_children.\n"
+		"# TYPE fpmng_gateway_upstreams_max gauge\n"
+		"# HELP fpmng_gateway_requests_total Requests this gateway routed to a target, however they were answered.\n"
+		"# TYPE fpmng_gateway_requests_total counter\n"
+		"# HELP fpmng_gateway_rejected_total Of those, how many found no free connection and no budget and were answered 503.\n"
+		"# TYPE fpmng_gateway_rejected_total counter\n");
+
+	for (i = 0; i < gw->ntargets; i++) {
+		struct fpm_http_target_s *t = &gw->targets[i];
+
+		/* Same defensive NULL check fpm_http_counter_incr() takes -- these
+		 * fields are never NULL in practice (fpm_http_target_init() refuses
+		 * to start the gateway otherwise), kept for the same reason. */
+		fpm_operator_buf_appendf(b,
+			"fpmng_gateway_upstreams_used{pool=\"%s\",target=\"%s\"} %lu\n"
+			"fpmng_gateway_upstreams_max{pool=\"%s\",target=\"%s\"} %u\n"
+			"fpmng_gateway_requests_total{pool=\"%s\",target=\"%s\"} %lu\n"
+			"fpmng_gateway_rejected_total{pool=\"%s\",target=\"%s\"} %lu\n",
+			gw->pool, t->pool, t->upstreams_used ? (unsigned long) *t->upstreams_used : 0UL,
+			gw->pool, t->pool, t->max_upstreams,
+			gw->pool, t->pool, t->requests_total ? (unsigned long) *t->requests_total : 0UL,
+			gw->pool, t->pool, t->rejected_total ? (unsigned long) *t->rejected_total : 0UL);
+	}
+}
+/* }}} */
+
 #else /* HAVE_FPM_HTTP */
 
 int fpm_http_init_pool(struct fpm_worker_pool_s *wp)
@@ -4213,6 +4355,12 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp)
 {
 	(void)wp;
 	return 0;
+}
+
+void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm_operator_buf_s *b)
+{
+	(void)wp;
+	(void)b;
 }
 
 #endif

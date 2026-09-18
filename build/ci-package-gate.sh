@@ -375,14 +375,23 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # on every flavour. TOTAL loses 11 and each flavour's SKIP count loses 11;
 # the four PASS counts are unaffected. Combined with the twenty-fifth
 # addition above: 131 - 11 = 120.
+#
+# fpmng-http-route-target-access-log.phpt, fpmng-http-route-target-metrics.phpt
+# and fpmng-http-gateway-no-route-unchanged.phpt (issue #341) are a
+# twenty-sixth addition, three tests together: all three use pool.type = http,
+# same reasoning as the trio above -- this stage's distribution libphp does
+# not support the type (issue #214) -- so all three skip on every flavour
+# regardless of TLS. TOTAL carries a further +3 and each flavour's SKIP count
+# carries a further +3; the four PASS counts are unaffected. Combined with
+# the twenty-fifth addition and issue #373's removal above: 120 + 3 = 123.
 EXPECT_FAIL=0
-EXPECT_TOTAL=120
+EXPECT_TOTAL=123
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=31
-    else EXPECT_PASS=83; EXPECT_SKIP=37; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=34
+    else EXPECT_PASS=83; EXPECT_SKIP=40; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -415,8 +424,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=34
-    else EXPECT_PASS=81; EXPECT_SKIP=39; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=37
+    else EXPECT_PASS=81; EXPECT_SKIP=42; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

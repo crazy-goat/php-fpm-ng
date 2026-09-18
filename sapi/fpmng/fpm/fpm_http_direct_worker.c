@@ -164,8 +164,9 @@ struct fpm_worker_pending {
 	 * cached libevent clock of its own to reuse instead. */
 	struct timeval accepted_at;
 	/* issue #332: true from fpmng_worker_respond_start() until
-	 * fpmng_worker_respond_end() (or fpm_worker_stream_abort()) reaps this
-	 * entry. Exempts it from worker.request_timeout's sweep
+	 * fpmng_worker_respond_end() reaps this entry (or the client's closecb
+	 * ends the stream server-side -- fpm_worker_conn_closed()). Exempts it
+	 * from worker.request_timeout's sweep
 	 * (fpm_worker_sweep_expired()) -- that directive means "never got its
 	 * first byte of response", not "streaming took a while", and a stream can
 	 * legitimately run for as long as the client keeps the connection open.
@@ -242,6 +243,18 @@ static struct {
 	unsigned ready_max;
 	unsigned ready_head;
 	unsigned ready_count;
+	/* issue #342: FIFO of ids whose client hung up before the request was
+	 * answered -- streamed or not -- drained by fpmng_worker_closed_requests().
+	 * Ring-buffered over ready_max slots like fw.ready, and for the same bound:
+	 * an id reaches this ring only through fpm_worker_conn_closed(), which an
+	 * accepted request can hit at most once, and the pending table never
+	 * exceeds ready_max (fpm_worker_accept() refuses new work at that bar).
+	 * A userland driver that never drains sees oldest ids dropped, never
+	 * garbage: the ring overwrites, it does not corrupt. */
+	zend_ulong *closed;
+	unsigned closed_max;
+	unsigned closed_head;
+	unsigned closed_count;
 	unsigned answered;
 	/* issue #338: worker.accept_threshold, copied once in child_main(). 0 means
 	 * the ceiling is off and accept_taken/accept_closed stay untouched. */
@@ -568,44 +581,19 @@ static void fpm_worker_reap(struct fpm_worker_pending *p)
 	fpm_worker_ops_publish_live();
 }
 
-/* issue #332: the streaming counterpart of the 503 fpm_worker_finish_output()
- * sends an unanswered request. Once fpmng_worker_respond_start() has put a
- * status line on the wire there is no clean way to say "actually, no" --
- * evhttp_send_reply() cannot be called a second time, and evhttp_send_error()
- * would try to write a second status line to a connection that already has
- * one. A chunked body cut short of its terminator is the only truthful thing
- * left to send, exactly as classic's fpm_direct_stream_abort()
- * (fpm_http_direct.c) explains: shutdown() the connection from inside a
- * callback so the event loop discovers the failure on its next pass and frees
- * the request there, not on this stack.
- *
- * Does not reap `p`: the caller decides when that happens (immediately for a
- * connection discovered dead from a later builtin call; left for
- * zend_hash_destroy(&fw.pending) to free during teardown when called from
- * fpm_worker_finish_output(), which walks that very table). */
-static void fpm_worker_stream_abort(struct fpm_worker_pending *p, const char *why)
-{
-	struct evhttp_connection *connection;
-	struct bufferevent *bev;
-	evutil_socket_t fd;
-
-	if (!p->http) {
-		return;
-	}
-	zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %s; the streamed response is cut short and the "
-		"connection closed without its terminating chunk", fw.wp->config->name, why);
-	connection = evhttp_request_get_connection(p->http);
-	evhttp_request_set_on_complete_cb(p->http, NULL, NULL);
-	if (connection) {
-		evhttp_connection_set_closecb(connection, NULL, NULL);
-		bev = evhttp_connection_get_bufferevent(connection);
-		fd = bev ? bufferevent_getfd(bev) : -1;
-		if (fd >= 0) {
-			shutdown(fd, SHUT_RDWR);
-		}
-	}
-	p->http = NULL;
-}
+/* issue #332/#342: this file used to need a "cut a started stream short" path
+ * here -- once fpmng_worker_respond_start() has put a status line on the wire
+ * there is no way to say "actually, no": evhttp_send_reply() cannot be called a
+ * second time, and evhttp_send_error() would try to write a second status line
+ * to a connection that already has one. The old answer was classic's
+ * fpm_direct_stream_abort() shape (fpm_http_direct.c): shutdown() the
+ * connection from inside a callback so the event loop discovers the failure on
+ * its next pass and frees the request there. #342 removed the one caller: a
+ * worker retiring now ends its streams with evhttp_send_reply_end(), which puts
+ * the terminating chunk on the wire and lets an EventSource reconnect -- see
+ * fpm_worker_finish_output(). Every other failure a stream can hit (client
+ * gone, backpressure, _end()) already had a truthful answer, so nothing calls
+ * the abort shape any more and it is gone. */
 
 static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *arg)
 {
@@ -632,6 +620,23 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	 * request nobody had answered. */
 	if (p->http) {
 		fpm_http_direct_ops_worker_client_gone(fw.ops);
+	}
+	if (p->http || p->streaming) {
+		/* issue #342: tell userland which request died, rather than letting it
+		 * discover one dead client per heartbeat interval -- the next
+		 * fpmng_worker_respond_chunk() would return false, but a stream that
+		 * emits an event every 15 s should be free to drop its subscription
+		 * the moment the client is gone, not one interval later. Recorded for
+		 * every unanswered request, streamed or not; the drain is what keeps
+		 * the ring bounded. */
+		if (fw.closed_max) {
+			fw.closed[(fw.closed_head + fw.closed_count) % fw.closed_max] = p->id;
+			if (fw.closed_count < fw.closed_max) {
+				fw.closed_count++;
+			} else {
+				fw.closed_head = (fw.closed_head + 1) % fw.closed_max;
+			}
+		}
 	}
 	p->http = NULL;
 	fpm_worker_notify();
@@ -893,7 +898,7 @@ static void fpm_worker_finish_output(void)
 {
 	struct fpm_worker_pending *p;
 	unsigned abandoned = 0;
-	unsigned streams_cut_short = 0;
+	unsigned streams_ended = 0;
 	struct event *deadline;
 	struct timeval budget = {FPM_WORKER_FLUSH_BUDGET, 0};
 
@@ -911,11 +916,22 @@ static void fpm_worker_finish_output(void)
 			continue;	/* the client is already gone: fpm_worker_conn_closed() cleared it */
 		}
 		if (p->streaming) {
-			/* issue #332: a status line (and possibly some chunks) are already
-			 * on the wire, so evhttp_send_error()'s second status line is not
-			 * an option here -- see fpm_worker_stream_abort(). */
-			fpm_worker_stream_abort(p, "the worker script stopped while a response was still streaming");
-			streams_cut_short++;
+			/* issue #342: unlike the status line, the terminator does not have
+			 * to be the end of the world -- evhttp_send_reply_end() puts the
+			 * final zero-length chunk on the wire, which is exactly what an
+			 * EventSource needs to notice a clean close and reconnect with
+			 * Last-Event-ID. Cutting the stream short here (the #332 behaviour,
+			 * fpm_worker_stream_abort()) turned every worker retirement into a
+			 * transport error for every subscriber. The worker script is gone
+			 * by now, so ending on its behalf is safe: nobody else can be
+			 * writing to this request. The entry is not reaped -- the caller
+			 * walks fw.pending, and zend_hash_destroy() frees it during
+			 * teardown. */
+			evhttp_connection_set_closecb(evhttp_request_get_connection(p->http), NULL, NULL);
+			fpm_worker_count_reply(p->http);
+			evhttp_send_reply_end(p->http);
+			p->http = NULL;
+			streams_ended++;
 			continue;
 		}
 		/* Same shape as the saturation 503 in fpm_worker_accept(), including
@@ -940,10 +956,11 @@ static void fpm_worker_finish_output(void)
 		 * counter is for requests that got no answer at all. */
 		fpm_http_direct_ops_worker_abandoned(fw.ops, abandoned);
 	}
-	if (streams_cut_short) {
-		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: the worker script stopped with %u streamed "
-			"response(s) still in progress; those connections are closed without their terminating chunk",
-			fw.wp->config->name, streams_cut_short);
+	if (streams_ended) {
+		zlog(ZLOG_NOTICE, "[pool %s] http-direct worker: the worker script stopped with %u streamed "
+			"response(s) still in progress; those were ended with their terminating chunk so the "
+			"clients can reconnect (issue #342)",
+			fw.wp->config->name, streams_ended);
 	}
 	if (!fw.unflushed) {
 		return;
@@ -1556,6 +1573,31 @@ static ZEND_FUNCTION(fpmng_worker_next_request)
 		}
 	}
 	RETURN_NULL();
+}
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_closed_requests, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+/* issue #342: drain the ids whose client hung up before the request was
+ * answered. The notify pipe tells a driver *that* something happened -- one of
+ * the events it carries is a disconnect -- but not *which* request died: the
+ * driver used to learn that only from the next fpmng_worker_respond_chunk()
+ * returning false, which for a stream that emits an event every 15 s kept a
+ * dead client's subscription alive for up to one heartbeat interval per
+ * stream. Returned oldest first, ids as ints, and emptied -- the next call
+ * returns only closes that happened since, the same drain shape
+ * fpmng_worker_next_request() has for its queue. */
+static ZEND_FUNCTION(fpmng_worker_closed_requests)
+{
+	ZEND_PARSE_PARAMETERS_NONE();
+
+	array_init_size(return_value, fw.closed_count);
+	while (fw.closed_count) {
+		zend_ulong id = fw.closed[fw.closed_head];
+		fw.closed_head = (fw.closed_head + 1) % fw.closed_max;
+		fw.closed_count--;
+		add_next_index_long(return_value, (zend_long) id);
+	}
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_request_env, 0, 1, IS_ARRAY, 0)
@@ -2450,7 +2492,7 @@ ZEND_END_ARG_INFO()
  * PHP engine.
  *
  * "Already responded" guard: p->streaming is true from fpmng_worker_respond_start()
- * until fpmng_worker_respond_end()/fpm_worker_stream_abort() reaps the entry,
+ * until fpmng_worker_respond_end() reaps the entry,
  * so it is exactly "a status line may already be on the wire" for a request
  * that is still in fw.pending. A request answered outright by the buffered
  * fpmng_worker_respond() needs no flag of its own: fpm_worker_reap() removes
@@ -2538,6 +2580,7 @@ static const zend_function_entry fpm_worker_functions[] = {
 	ZEND_FE(fpmng_worker_may_exit, arginfo_fpmng_worker_may_exit)
 	ZEND_FE(fpmng_worker_stream_has_buffered, arginfo_fpmng_worker_stream_has_buffered)
 	ZEND_FE(fpmng_worker_next_request, arginfo_fpmng_worker_next_request)
+	ZEND_FE(fpmng_worker_closed_requests, arginfo_fpmng_worker_closed_requests)
 	ZEND_FE(fpmng_worker_request_env, arginfo_fpmng_worker_request_env)
 	ZEND_FE(fpmng_worker_request_body, arginfo_fpmng_worker_request_body)
 	ZEND_FE(fpmng_worker_respond, arginfo_fpmng_worker_respond)
@@ -2782,6 +2825,10 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * this child. */
 	fw.ready_max = (unsigned) wp->config->worker_max_pending;
 	fw.ready = pemalloc(fw.ready_max * sizeof(*fw.ready), 1);
+	/* issue #342: the closed-id ring, one slot per pending entry at most --
+	 * see the field comment on fw.closed. */
+	fw.closed_max = (unsigned) wp->config->worker_max_pending;
+	fw.closed = pemalloc(fw.closed_max * sizeof(*fw.closed), 1);
 	/* issue #338: worker.accept_threshold, 0 = off. fpm_conf_set_integer()
 	 * already refuses a negative value, so there is nothing to clamp; read
 	 * once here for the same reason ready_max is. */
@@ -3034,6 +3081,8 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	/* issue #331: the ring buffer allocated in the setup above, next to the
 	 * table it indexes into -- freed here for the same reason, not before. */
 	pefree(fw.ready, 1);
+	/* issue #342: the closed-id ring, allocated next to fw.ready above. */
+	pefree(fw.closed, 1);
 	fpm_http_direct_worker_metrics_free(fw.metrics);
 	fw.metrics = NULL;
 	fpm_http_direct_ops_free(fw.ops);

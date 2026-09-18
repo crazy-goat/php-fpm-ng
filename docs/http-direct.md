@@ -631,11 +631,68 @@ progress when the worker is asked to stop (`pm.max_requests` reached, or
 SIGQUIT/reload) cannot be answered `503`: its status line — and possibly some
 chunks — are already on the wire, and `evhttp_send_error()`'s second status
 line is not an option once that has happened. `fpm_worker_finish_output()`
-instead shuts the connection down without its terminating chunk (mirroring
-classic's `fpm_direct_stream_abort()`), logs how many streams it cut short, and
-still waits for every other queued reply the normal way. A client mid-stream
-therefore sees a truncated chunked message rather than a hung connection or a
-buffered error page it cannot parse as one.
+instead **ends the stream cleanly** (issue #342): the terminating chunk goes on
+the wire, so a client reading a stream — an `EventSource`, for instance — sees
+a complete chunked message and reconnects, honouring `Last-Event-ID`, rather
+than treating the connection as broken. It still waits for the ending chunks to
+reach the wire the normal way, bounded by the same shutdown budget as every
+other queued reply. (Until #342 this path cut streams short with a
+`shutdown()`, mirroring classic's `fpm_direct_stream_abort()`; the clean end
+made that shape unreachable, so it is gone.)
+
+**Server-Sent Events** are the workload this whole section was built for: a
+response that is *deliberately never finished*, one `data:` frame per event.
+On top of the builtins above an SSE endpoint needs only the three semantics
+this file states — a started stream occupies one `worker.max_pending` slot for
+as long as the client reads, is exempt from `worker.request_timeout` once
+`_start()` has run, is ended with a clean terminating chunk when the worker
+retires, and has its dead clients reported by id through
+[`fpmng_worker_closed_requests()`](#server-sent-events-sse-issue-342). A
+runnable example lives in `examples/http-direct-worker-sse/`.
+
+### Server-Sent Events (SSE) (issue #342)
+
+An SSE stream is a chunked response that is deliberately never finished, which
+breaks the assumptions three places in the worker executor were written under
+— all three now have decided, tested semantics:
+
+1. **Timeout.** A stream with `fpmng_worker_respond_start()` already called is
+   **exempt** from `worker.request_timeout` — that directive means "never got
+   its first byte of response", and a stream that sent its last event 30 s ago
+   is healthy, not leaked. It is exemption, not per-chunk re-arming: the
+   directive keeps exactly one meaning, "how long an unanswered request may
+   sit", and a started stream is out of its business. The remaining backstop
+   is `http.read_timeout`, as for every connection.
+2. **Retirement.** When the worker stops, every still-open stream is ended with
+   a clean terminating chunk, not a 503 and not a reset — an `EventSource`
+   reconnects automatically. See the "graceful shutdown" interaction above.
+3. **Client gone.** A client that walks away mid-stream is reported by request
+   id: the notify pipe signals *that* something happened, and
+
+   ```php
+   fpmng_worker_closed_requests(): list<int>
+   ```
+
+   drains *which* ids died, oldest first, emptying the queue — the same drain
+   shape as `fpmng_worker_next_request()`. Without it a fan-out driver learns
+   of a dead client only from `_chunk()` returning `false`, which for a stream
+   emitting an event every 15 s keeps the dead client's subscription alive for
+   up to one heartbeat interval.
+
+Per-stream cost is one `worker.max_pending` slot for the life of the stream: a
+pool whose purpose is holding streams should size `worker.max_pending` to its
+expected subscriber count, and consider `worker.send_buffer_limit` so a slow
+reader cannot queue events without bound. TLS needs nothing special — the SSL
+bufferevent the stream writes through is the same one every chunk of every
+response uses. SSE frames themselves (`event:`, `data:`, `id:`, retry) are
+userland bytes; the transport never parses them.
+
+`examples/http-direct-worker-sse/` is a runnable, dependency-free example: one
+`/events` route with a ping comment every 15 s, `Last-Event-ID` honoured from
+`$_SERVER['HTTP_LAST_EVENT_ID']` (headers arrive CGI-style via
+`fpmng_worker_request_env()`), fan-out of one published message to every open
+stream *on the worker* — cross-worker publish/subscribe is a different problem
+(issue #182) and deliberately not answered here.
 
 ## Connection limits (`http.max_connections`)
 

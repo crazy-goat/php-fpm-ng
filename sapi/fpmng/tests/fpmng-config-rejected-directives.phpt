@@ -285,6 +285,7 @@ supervisor-listen: rejected
 cron-pm: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
+retired-fastcgi-ng: rejected
 direct-worker-request-terminate-timeout: rejected
 direct-worker-stream: rejected
 direct-worker-max-execution-time: rejected

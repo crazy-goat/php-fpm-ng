@@ -22,11 +22,11 @@ Verified 2026-09-07 against `sapi/fpmng`:
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
 - runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
   33,885,546 bytes with the full, unstripped binary
-- the frontend selects `pool.type = fastcgi | fastcgi-ng | http`; no directive
-  means classic `fastcgi` and stays compatible with upstream FPM
-- `fastcgi-ng` and `http` accept an optional `pool.executor` (default
-  `classic`); the `fiber` and `async` executors moved to branch `async`
-  (issue #373) and are not available on `main`
+- the frontend selects `pool.type = fastcgi | http`; no directive means
+  classic `fastcgi` and stays compatible with upstream FPM
+- `http` accepts an optional `pool.executor` (default `classic`); the `fiber`
+  and `async` executors moved to branch `async` (issue #373) and are not
+  available on `main`
 - metrics: `pm.status_path` (JSON) and `pm.metrics_path` (Prometheus) expose
   one pool on an operator listener named by `pm.status_listen` /
   `pm.metrics_listen`, one target per pool (`docs/operator-endpoint.md`);
@@ -52,7 +52,7 @@ Where things stand today:
 
 | | tier |
 | --- | --- |
-| `pool.type = fastcgi`, `fastcgi-ng`, `http`, `supervisor`, `cron` | supported |
+| `pool.type = fastcgi`, `http`, `supervisor`, `cron` | supported |
 | `pool.type = http-direct` with the default `classic` executor | supported |
 | the operator endpoint (`pm.status_path`, `pm.metrics_path`) | supported |
 | `pool.type = http-direct` with `pool.executor = worker` | beta |
@@ -103,8 +103,8 @@ port nobody answers on.
   carrying all of them; the JSON body keeps its `{"pools":[…]}` shape, one
   element long. Worked example:
   [`docs/operator-endpoint.md`](docs/operator-endpoint.md#replacing-a-pooltype--status-pool).
-- **`pm.status_listen` means something else, and is refused on `fastcgi` and
-  `fastcgi-ng`** (#278). It used to auto-create a second FastCGI pool named
+- **`pm.status_listen` means something else, and is refused on `fastcgi`**
+  (#278). It used to auto-create a second FastCGI pool named
   `<pool>_status`; it now names where a type's own operator endpoint binds, and
   the types with a web server in front of them do not have one. On those, keep
   `pm.status_path` on the pool's own socket and restrict it at that web server,
@@ -137,7 +137,7 @@ Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 [`docs/shutdown-timeouts.md`](docs/shutdown-timeouts.md).
 
 One gateway can serve several pools: `http.route[<pool>] = <prefix>[,...]`
-sends a path prefix to another `fastcgi`/`fastcgi-ng` pool, so an API or a
+sends a path prefix to another `fastcgi` pool, so an API or a
 stream endpoint gets its own workers and its own saturation behaviour without
 its own listener. The longest-prefix rule, why `/` is an ordinary entry, and
 why the connection budget belongs to a target pool rather than to a prefix:

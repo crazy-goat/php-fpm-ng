@@ -5,8 +5,8 @@ It does **not** start gateway children, create an internal FastCGI listener, or
 serialize requests/responses as FastCGI records. The master still creates,
 monitors, replaces, and signals normal FPM children.
 
-This is a **POC, not a production frontend**. Existing `http`, `fastcgi`, and
-`fastcgi-ng` pools are unchanged.
+This is a **POC, not a production frontend**. Existing `http` and `fastcgi`
+pools are unchanged.
 
 ```ini
 [direct]

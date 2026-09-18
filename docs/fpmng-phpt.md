@@ -155,7 +155,11 @@ Three rules this facility lives by:
   writes a real second-of-minute, and the comparison becomes meaningless.
 
   Measured on run 35274092140, these are the suite's remaining slow tests and
-  why each one is or is not converted:
+  why each one is or is not converted. (For scale: with #396's conversions and
+  #399's test-design cuts both in, run 35312206620 was green in 5 min 40 s,
+  against 11.5 min before either -- the canonical suite step 190 s and the fiber
+  one 159 s. The canonical figure swings by tens of seconds between runs on the
+  cron tick lottery below, so it is a range and not a reading.)
 
   | test | s | converted | why |
   |---|---|---|---|

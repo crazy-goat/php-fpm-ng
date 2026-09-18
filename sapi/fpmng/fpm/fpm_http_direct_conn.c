@@ -599,8 +599,8 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 		struct fpm_direct_conn *c = conns->tail;
 
 		if (c->served && fpm_direct_conn_abandoned(c)) {
-			/* NOLINTNEXTLINE(clang-analyzer-unix.Malloc) -- false positive, see above */
-			fpm_direct_conn_forget(c);
+			/* False positive, see the comment above the loop. */
+			fpm_direct_conn_forget(c); /* NOLINT(clang-analyzer-unix.Malloc) */
 			continue;
 		}
 		fpm_direct_conn_unlink(c);

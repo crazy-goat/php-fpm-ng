@@ -3,7 +3,7 @@ fpm-ng: a fiber pool does not change an unrelated classic socket
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
+fpmng_skip_if_pool_type_unsupported('http');
 
 if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
     die('skip requires Linux /proc socket metadata');
@@ -82,13 +82,18 @@ $basePort = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26039);
 $fiberAddress = "127.0.0.1:$basePort";
 $classicAddress = '127.0.0.1:' . ($basePort + 1);
 
+/* pool.type = http since issue #379: the retired pool type's fiber cell is
+ * gone with the type, and http x fiber is the surviving fiber configuration.
+ * The fiber pool's own listener speaks HTTP on http.listen; the unrelated
+ * classic pool below keeps its upstream FastCGI socket. */
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 [fiber]
 listen = $fiberAddress
-pool.type = fastcgi-ng
+http.listen = $fiberAddress
+pool.type = http
 pool.executor = fiber
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
@@ -104,7 +109,10 @@ $tester = new FPM\Tester($config, '<?php echo "ok";');
 
 $tester->start();
 $tester->expectLogStartNotices();
-$tester->request(address: $fiberAddress)->expectBody('ok', skipHeadersCheck: true);
+$httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
+if (@file_get_contents("http://$fiberAddress/", false, $httpCtx) !== 'ok') {
+    throw new RuntimeException('fiber pool did not answer over HTTP');
+}
 $tester->request(address: $classicAddress)->expectBody('ok', skipHeadersCheck: true);
 assertNonblocking(masterListenFlags($tester->getPid(), $fiberAddress), true, 'fiber socket');
 assertNonblocking(masterListenFlags($tester->getPid(), $classicAddress), false, 'unrelated classic socket');

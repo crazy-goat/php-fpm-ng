@@ -3,7 +3,6 @@ fpm-ng: legal pool.type values with the fiber executor start, serve one request,
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
 fpmng_skip_if_pool_type_unsupported('http');
 
 $binary = getenv('TEST_PHP_FPM_EXECUTABLE') ?: FPM\Tester::findExecutable();
@@ -65,17 +64,19 @@ EOT;
     echo "$label: ok\n";
 }
 
-exercise('fastcgi-ng-fiber', "pool.type = fastcgi-ng\npool.executor = fiber");
 /* pool.executor = fiber spelled out: without it this case is pool.type = http
  * on the classic executor, i.e. character for character what
  * fpmng-pool-type-classic-matrix.phpt's http-classic case already covers, in a
- * file that only runs in an --enable-fpmng-fiber build (issue #87). */
+ * file that only runs in an --enable-fpmng-fiber build (issue #87).
+ *
+ * The retired pool type's fiber cell (issue #376/#379) is gone: http x fiber
+ * is the surviving fiber configuration, and it is already this file's other
+ * cell, so the matrix lost a row rather than gaining a substitute. */
 exercise('http-fiber', "pool.type = http\npool.executor = fiber\nhttp.listen = {{ADDR[http]}}", http: true);
 
 ?>
 Done
 --EXPECT--
-fastcgi-ng-fiber: ok
 http-fiber: ok
 Done
 --CLEAN--

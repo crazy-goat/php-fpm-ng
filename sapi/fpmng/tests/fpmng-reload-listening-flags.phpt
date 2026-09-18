@@ -3,7 +3,7 @@ fpm-ng: normalize fiber listening-socket flags across reloads
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('fastcgi-ng');
+fpmng_skip_if_pool_type_unsupported('http');
 
 if (PHP_OS_FAMILY !== 'Linux' || !is_dir('/proc')) {
     die('skip requires Linux /proc socket metadata');
@@ -81,6 +81,11 @@ function assertNonblocking(int $flags, bool $expected, string $label): void
 $port = (int) (getenv('FPMNG_TASK037_BASE_PORT') ?: 26037);
 $address = "127.0.0.1:$port";
 
+/* pool.type = http since issue #379: the retired pool type's fiber cells this
+ * test was written on are gone with the type, and http x fiber is the
+ * surviving fiber configuration. Both sides of the reload speak HTTP on
+ * http.listen; a plain GET on the listening port carries the assertion the old
+ * FastCGI request did. */
 $fiberConfig = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -88,7 +93,8 @@ pid = {{FILE:PID}}
 process_control_timeout = 2
 [reload]
 listen = $address
-pool.type = fastcgi-ng
+http.listen = $address
+pool.type = http
 pool.executor = fiber
 php_admin_value[opcache.enable] = 0
 php_admin_value[max_execution_time] = 0
@@ -103,36 +109,46 @@ pid = {{FILE:PID}}
 process_control_timeout = 2
 [reload]
 listen = $address
-pool.type = fastcgi-ng
-pool.executor = classic
+http.listen = $address
+pool.type = http
 pm = static
 pm.max_children = 1
 EOT;
+
+$httpCtx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
 
 $tester = new FPM\Tester($fiberConfig, '<?php echo "ok";');
 
 $tester->start();
 $tester->expectLogStartNotices();
-$tester->request(address: $address)->expectBody('ok', skipHeadersCheck: true);
+if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+    throw new RuntimeException('fiber start did not answer over HTTP');
+}
 assertNonblocking(masterListenFlags($tester->getPid(), $address), true, 'fiber start');
 
 $tester->reload($classicConfig);
 $tester->expectLogReloadingNotices();
-$tester->request(address: $address)->expectBody('ok', skipHeadersCheck: true);
+if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+    throw new RuntimeException('classic after fiber reload did not answer over HTTP');
+}
 assertNonblocking(masterListenFlags($tester->getPid(), $address), false, 'classic after fiber reload');
 
 $holdSeconds = (int) (getenv('FPMNG_TASK037_HOLD_SECONDS') ?: 0);
 if ($holdSeconds > 0) {
     $deadline = microtime(true) + $holdSeconds;
     while (microtime(true) < $deadline) {
-        $tester->request(address: $address)->expectBody('ok', skipHeadersCheck: true);
+        if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+            throw new RuntimeException('hold request did not answer over HTTP');
+        }
         usleep(10000);
     }
 }
 
 $tester->reload($fiberConfig);
 $tester->expectLogReloadingNotices();
-$tester->request(address: $address)->expectBody('ok', skipHeadersCheck: true);
+if (@file_get_contents("http://$address/", false, $httpCtx) !== 'ok') {
+    throw new RuntimeException('fiber after classic reload did not answer over HTTP');
+}
 assertNonblocking(masterListenFlags($tester->getPid(), $address), true, 'fiber after classic reload');
 
 $tester->terminate();

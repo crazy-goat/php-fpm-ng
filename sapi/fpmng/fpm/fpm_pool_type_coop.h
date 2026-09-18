@@ -22,7 +22,8 @@
 
 struct fpm_pool_type_s;
 
-/* The executor variant of base pool.type = type_name ("fastcgi-ng" or "http")
+/* The executor variant of base pool.type = type_name ("http"; "fastcgi-ng",
+ * which this function also served before issue #376, is retired in 0.9.0)
  * for pool.executor = executor_name ("fiber" or "async"), or NULL when this
  * binary was not built with the configure flag that provides it. Called once
  * per (type, executor) pair, lazily, the first time fpm_pool_type.c needs to

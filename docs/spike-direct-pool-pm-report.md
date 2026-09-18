@@ -178,7 +178,7 @@ Recorded here as infeasible, not as "not measured".
   the socket closes) would then clear rules 1/2/4 is genuinely unknown — that
   is future work, gated on the retirement path itself changing, not on this
   spike's data.
-- `--enable-fpmng-fiber`'s executor was not part of this grid; #66 never asked
+- The fiber executor (branch `async`) was not part of this grid; #66 never asked
   for it, and it has its own build gate and constraints (see
   `docs/spike-sleep-yield-report.md`).
 

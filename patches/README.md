@@ -33,8 +33,6 @@ patches/php-8.4/*.patch      only for that version; overrides the same-named pat
 | `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5.9, 8.6.0-dev |
 | `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5.9, 8.6.0-dev |
 | `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | move the switch behind an API owned by `sapi/fpmng`, or propose it upstream | 8.5; older versions and master to verify |
-| `0007-fiber-tls-nonblocking-transports.patch` | `ext/openssl/xp_ssl.c`, `openssl.c` | nothing upstream — fpm-ng behavior, gated on `HAVE_FPMNG_FIBER_TLS` so upstream is the default; expires by redesign | 8.5.9, master |
-| `0008-fiber-stream-select.patch` | `ext/standard/streamsfuncs.c` | nothing upstream — fpm-ng behavior, gated on `HAVE_FPMNG_FIBER` so upstream is the default; expires by redesign | PHP-8.5 branch (67d1476d4d80, 8.5.11-dev) |
 
 The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the
 context around `accept()`), although they are independent in substance.
@@ -87,19 +85,6 @@ Logical Zend handlers are still reset per request, confirmed with
 direct libc `sigaction()` is not automatically repaired with the default
 `zend.signal_check=0`; explicit `zend.signal_check=1` still detects the change
 during request shutdown.
-
-### Why 0007 (fiber TLS transports)
-
-`pool.executor = fiber` suspends the request fiber instead of blocking on
-`tcp`/`unix` sockets (`sapi/fpmng/fpm/fpm_pool_fiber_xport.c`), but TLS lived
-inside ext/openssl's own loops, which poll internally — `https://`, Guzzle's
-stream handler, and TLS-wrapped MySQL/Redis all blocked the whole process.
-The interception must sit inside `php_openssl_enable_crypto` and
-`php_openssl_sockop_io` (a handshake is a sequence of reads and writes, and
-suspension has to be possible inside it), which cannot be done from `sapi/`
-alone. The patch is fully gated on `HAVE_FPMNG_FIBER_TLS` (off unless
-`--enable-fpmng-fiber` with a static ext/openssl), so upstream behavior is
-the default and other SAPIs never see the fiber variants. Task 005.
 
 ### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
 

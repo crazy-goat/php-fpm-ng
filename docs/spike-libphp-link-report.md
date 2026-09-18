@@ -121,9 +121,11 @@ Details that cost time and would cost it again:
   — `php_module_startup()` takes one additional module and `cgi_module_entry`
   already occupies it. Nothing in the suite covers the userland side today.
 - **Pool types this build cannot speak for:** `fastcgi-ng` and `http` (the
-  `patches/0006` no-op), and fiber/async (`patches/0007`/`0008` live inside
-  libphp). `static-musl` cannot use this path at all — Alpine ships no static
+  `patches/0006` no-op), and the fiber/async executors (now on branch
+  `async`, patches formerly numbered 0007/0008 lived inside libphp).
+  `static-musl` cannot use this path at all — Alpine ships no static
   libphp.
 - The one FAIL, `fpmng-config-rejected-directives.phpt`, is a harness
   assumption, not a defect: it inspects `Configure Command` to decide whether
-  `--enable-fpmng-async` was set, and a distribution PHP prints no such line.
+  the async executor's build flag was set, and a distribution PHP prints no
+  such line.

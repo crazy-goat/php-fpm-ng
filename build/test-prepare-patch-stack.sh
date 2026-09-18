@@ -29,15 +29,19 @@ cat > "$TMP/repo/sapi/fpmng/config.m4" <<'EOF'
 PHP_FPMNG_FILES="
 @FPMNG_SOURCES@
 "
-PHP_FPMNG_FIBER_FILES="
-@FPMNG_FIBER_SOURCES@
+PHP_FPMNG_TLS_FILES="
+@FPMNG_TLS_SOURCES@
 "
-PHP_FPMNG_ASYNC_FILES="
-@FPMNG_ASYNC_SOURCES@
+PHP_FPMNG_ACME_FILES="
+@FPMNG_ACME_SOURCES@
 "
 EOF
-touch "$TMP/repo/sapi/fpmng/fpm/fpm_pool_fiber.c"
-touch "$TMP/repo/sapi/fpmng/fpm/fpm_pool_async.c"
+# prepare.sh refuses to run unless it finds at least one fpm_tls_*.c and one
+# fpm_acme_*.c file in the source list (build/prepare.sh's own exit-1 guards) --
+# these two stand in for them, the same way issue #373 removed the fiber/coop
+# files this fake tree used to touch here for the same reason.
+touch "$TMP/repo/sapi/fpmng/fpm/fpm_tls_stub.c"
+touch "$TMP/repo/sapi/fpmng/fpm/fpm_acme_stub.c"
 
 cat > "$TMP/repo/patches/0001-first.patch" <<'EOF'
 --- a/main/stack.txt

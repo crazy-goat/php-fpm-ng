@@ -235,14 +235,6 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 #ifdef HAVE_APPARMOR
 	{ "apparmor_hat",              &fpm_conf_set_string,      WPO(apparmor_hat) },
 #endif
-	/* issue #371: appended here, not sorted in above by prefix like the rest of
-	 * this table, because issue #373's cut lands on a long-lived branch that
-	 * needs its diff against main to stay purely additive -- an append at the
-	 * tail merges cleanly against another append at the tail; one in the
-	 * middle does not. Branch async appends below this line, main appends
-	 * above it. */
-	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
-	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
 	{ 0, 0, 0 }
 };
 
@@ -1102,7 +1094,6 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
-	free(wpc->fiber_isolate_statics);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

@@ -12,8 +12,7 @@ function check(bool $condition, string $message): void
 }
 
 /* Each URL gets its own php process, so the N requests really are in flight
- * at the same time against the single worker configured below. Same technique
- * as fpmng-fiber-sleep-concurrency.phpt. */
+ * at the same time against the single worker configured below. */
 function concurrentHttpGet(array $urls): array
 {
     $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
@@ -34,11 +33,10 @@ function concurrentHttpGet(array $urls): array
     return $bodies;
 }
 
-/* The load-bearing assertion, borrowed from fpmng-fiber-sleep-concurrency.phpt:
- * the LAST wait to start did so before the FIRST one finished, i.e. all of
- * them were suspended in the one worker simultaneously. Proven from the
- * worker's own clock, so it needs no wall-clock bound and does not depend on
- * how loaded the box is. */
+/* The load-bearing assertion: the LAST wait to start did so before the FIRST
+ * one finished, i.e. all of them were suspended in the one worker
+ * simultaneously. Proven from the worker's own clock, so it needs no
+ * wall-clock bound and does not depend on how loaded the box is. */
 function expectOverlap(array $rows, string $what): void
 {
     $lastStart = max(array_column($rows, 't0'));

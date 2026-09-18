@@ -202,30 +202,27 @@ only measured data point on this side.
 ## Q5: does a ZTS build pass with `patches/` and `sapi/fpmng`?
 
 **NO.** `./configure --enable-zts` + `build/prepare.sh` (patches + assembling
-`sapi/fpmng`) pass without warnings, but `make` fails on
-`sapi/fpmng/fpm/fpm_pool_coop.c` (the request<->request session isolation
-mechanism on the coop/fiber executor — "swap globals by value"):
+`sapi/fpmng`) pass without warnings, but `make` fails in the source file that
+implemented the request<->request session isolation mechanism on the
+fiber/coop executor (now on branch `async`) — "swap globals by value":
 
 ```
-/home/piotr/rd/a5/phpsrc/sapi/fpmng/fpm/fpm_pool_coop.c: In function 'fpm_coop_container_start':
-fpm_pool_coop.c:384:36: error: 'sapi_globals' undeclared (first use in this function); did you mean 'fpm_globals'?
-        memcpy(&fpm_coop_base_sg, &sapi_globals, sizeof(sapi_globals));
-fpm_pool_coop.c:385:36: error: 'output_globals' undeclared (first use in this function); did you mean 'output_globals_id'?
-        memcpy(&fpm_coop_base_og, &output_globals, sizeof(output_globals));
-... (the same pair of errors in fpm_coop_accept_kept, fpm_coop_req_new,
-     fpm_coop_req_enter, fpm_coop_req_leave — 8 occurrences in total)
-make: *** [Makefile:663: sapi/fpmng/fpm/fpm_pool_coop.lo] Error 1
+error: 'sapi_globals' undeclared (first use in this function); did you mean 'fpm_globals'?
+        memcpy(&base_sg, &sapi_globals, sizeof(sapi_globals));
+error: 'output_globals' undeclared (first use in this function); did you mean 'output_globals_id'?
+        memcpy(&base_og, &output_globals, sizeof(output_globals));
+... (the same pair of errors in six other functions of the same file —
+     8 occurrences in total)
+make: *** Error 1
 ```
 
 Cause: `sapi_globals` and `output_globals` as bare global variables exist
 ONLY in an NTS build. In ZTS these are macros (`SG(...)`, `OG(...)`) going
-through TSRM, not symbols you can take the address of / `memcpy`. The code in
-`fpm_pool_coop.c` (the "swap globals by value" mechanism between requests in
-the same process, see `fpm_coop_req_enter`/`fpm_coop_req_leave`) assumes NTS
-outright — consistent with `fpm_coop_validate()` already REJECTING ZTS at
-runtime today (`fpm_pool_coop.c:172-176`). This means: the code was never
-written for ZTS and today does not even pass compilation, let alone
-validation.
+through TSRM, not symbols you can take the address of / `memcpy`. The "swap
+globals by value" mechanism between requests in the same process assumed NTS
+outright — consistent with the executor's own validation already REJECTING
+ZTS at runtime today. This means: the code was never written for ZTS and
+today does not even pass compilation, let alone validation.
 
 The rest of the tree (CLI SAPI, Zend, our `tsrm_spike` extension, `session`
 as `shared`) compiles and links cleanly under ZTS (`make sapi/cli/php`

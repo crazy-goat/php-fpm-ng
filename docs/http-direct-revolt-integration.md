@@ -114,9 +114,9 @@ execution.
 This splits the roadmap into two independent tracks instead of one ladder:
 
 - **classic direct** keeps the open question of whether the *SAPI* should
-  suspend requests (`sapi/fpmng/fpm/fpm_pool_fiber.c`, tasks 070 and the
-  `nice-to-have` fiber track) — that is where request-transparent concurrency
-  for unmodified applications would come from;
+  suspend requests (the fiber executor, now on branch `async`; tasks 070 and
+  the `nice-to-have` fiber track) — that is where request-transparent
+  concurrency for unmodified applications would come from;
 - **worker direct** needs none of it, and is reachable now.
 
 ## Honest limits of worker mode
@@ -224,15 +224,14 @@ buffered bytes just like a TLS one. Any other cast of a filtered stream — to a
    one-second sleep.
 4. **Tasks 055, 063, 066 unchanged**: worker-level I/O policy and observability,
    independent of the userland scheduler.
-5. **Worker mode is an executor, not a type.** `fiber` and `async` are already
+5. **Worker mode is an executor, not a type.** `fiber` and `async` were already
    type *variants* selected from `pool.executor` by `fpm_pool_type_resolve()`
-   (`fpm_pool_type.c`: `fpm_pool_http_fiber`, `fpm_pool_fastcgi_ng_async`), each
-   swapping `child_main` wholesale — which is exactly what worker mode does to
-   `http-direct`. Revision 1 of this note implied a second `pool.type`; that
-   would have made the operator learn a new type name for an unchanged
-   transport, and the "different lifecycle" argument for it does not hold,
-   because the fiber executor already gives up per-request isolation of the
-   function table (see the comment in `fpmng-fiber-sleep-concurrency.phpt`). So
+   (`fpm_pool_type.c`), each swapping `child_main` wholesale — which is
+   exactly what worker mode does to `http-direct`. Revision 1 of this note
+   implied a second `pool.type`; that would have made the operator learn a new
+   type name for an unchanged transport, and the "different lifecycle"
+   argument for it does not hold, because the fiber executor (now on branch
+   `async`) already gave up per-request isolation of the function table. So
    task 073 ships `pool.type = http-direct` + `pool.executor = worker`. The
    variant is declared as data on the type — an entry in the `executors` list
    on `fpm_pool_type_s` (issue #76 generalised task 073's original

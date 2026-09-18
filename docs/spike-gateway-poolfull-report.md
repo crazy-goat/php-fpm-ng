@@ -90,8 +90,8 @@ new default, and not for CPU-bound pools.**
   ~140x tail cost, because 128 fibers contending for a handful of real CPU
   cores just serializes the work instead of signalling overload
   (`fiber-gw1-c128-cpu`, `reject-gw1-c128-cpu`, `report.txt`). It also
-  needs its own build (`--enable-fpmng-fiber`, off by default,
-  `sapi/fpmng/config.m4:549-566`) and a fundamentally different execution
+  needs its own build (the fiber executor, off by default and now on branch
+  `async`, `sapi/fpmng/config.m4:549-566`) and a fundamentally different execution
   model with its own constraints (no ZTS, no OPcache — see
   `docs/spike-sleep-yield-report.md`'s "Risks" section). This confirms
   #54's own framing of it as "for reference only", not a candidate for

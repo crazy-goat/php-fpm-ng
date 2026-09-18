@@ -15,8 +15,7 @@ name: build
 # branch that wrote it, and only the default branch's entries are visible to
 # every other branch, so with no run on main the first run of each new branch
 # would compile php-src from scratch -- `build` 89 s -> 202 s, `static-musl`
-# 107 s -> 318 s, `fpmng-phpt-fiber` 168 s -> 262 s (measured on runs
-# 34703566697 warm and 34702558731 cold).
+# 107 s -> 318 s (measured on runs 34703566697 warm and 34702558731 cold).
 #
 # The schedule below replaces it. Once a week is enough because what those
 # entries mostly hold is php-src, which is pinned by tag (PHP_SRC_REF) and
@@ -37,8 +36,8 @@ name: build
 # minutes of a 32.8-minute run, while all sixteen other jobs were green by
 # minute eleven and sat waiting for it. Each flavour builds libphp, packages
 # it, installs it into a compiler-less container and runs the owned suite --
-# about eight minutes each -- so the same eight-minute suite ran six times per
-# pull request (once here, once on the fiber build, four times in the gate).
+# about eight minutes each -- so the same eight-minute suite ran five times per
+# pull request (once here, four times in the gate).
 #
 # It was kept because a regression in the artefact users install should not
 # reach a tag. It did not deliver that: v0.5.0 and v0.5.1 are both tagged and
@@ -95,7 +94,7 @@ on:
 #
 # Losing that box cost the two things it kept on its own disk between runs: a
 # ccache directory and a configured php-src tree (issue #196). The ccache is
-# replaced by actions/cache in the three jobs that compile -- see the cache
+# replaced by actions/cache in the jobs that compile -- see the cache
 # step in each. The reused tree is not replaced: it is a full configured
 # php-src checkout, far too large to tar into the cache service every run, so
 # every job configures from scratch and leans on ccache for the compile.
@@ -105,7 +104,6 @@ on:
 #
 #   build              202 s -> 89 s
 #   static-musl        318 s -> 107 s
-#   fpmng-phpt-fiber   262 s -> 168 s
 #
 # Per job, not per run: run wall clock is dominated by how many hosted runners
 # the account gets at that moment, and the warm run of the pair happened to
@@ -183,12 +181,11 @@ env:
   PHP_SRC_REPO: https://github.com/php/php-src.git
   PHP_SRC_REF: ${{ github.event.inputs.php_src_ref || 'php-8.5.9' }}
   # The canonical configure line, in one place because more than one cell has
-  # to use exactly it. fpmng-phpt-fiber (issue #97) is only meaningful as a
-  # comparison against the default build: if the two configure lines drift --
-  # the way --with-openssl was once added to just one of them for task 039 --
-  # then a test can silently run on one cell and skip on the other, and the
-  # fiber cell stops being evidence about the flag. Three copies of the same
-  # string could not be kept in step by a comment, so there is one string.
+  # to use exactly it: the lint tree and the build/test tree. If the two
+  # configure lines drift -- the way --with-openssl was once added to just one
+  # of them for task 039 -- then a test can silently run on one cell and skip
+  # on the other. Two copies of the same string could not be kept in step by a
+  # comment, so there is one string.
   #
   # --enable-fpmng-tls: since issue #280 TLS termination is opt-in and OFF by
   # default, so without this flag every TLS test in the matrix would SKIP and
@@ -588,8 +585,7 @@ jobs:
         run: ./build/ci-cancel-run.sh
 
   # Task 003: regression tests for pool.type, pool.executor, and request-less
-  # pool types. Fiber cases skip on the canonical build (--enable-fpmng-fiber is
-  # off by default); cron may take up to one minute.
+  # pool types. cron may take up to one minute.
   fpmng-phpt:
     needs: build
     runs-on: ubuntu-latest
@@ -633,156 +629,6 @@ jobs:
         with:
           name: fpmng-phpt-results
           path: fpmng-phpt-results
-      - name: fail fast -- cancel the rest of the run (issue #209)
-        if: failure()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/ci-cancel-run.sh
-
-  # Issue #97: ten of the .phpt tests this repo owns are gated on
-  # --enable-fpmng-fiber, and no cell built with it -- so they could only ever
-  # report SKIP. Reachable and unconditionally skipped is still untested:
-  # nothing in CI would have noticed the fiber executor's request isolation,
-  # its flock() interception, or the listening-flag normalisation across
-  # reloads breaking, which is precisely the behaviour those tests exist for.
-  #
-  # This cell builds its own binary rather than reusing fpmng-canonical-build:
-  # the flag changes the SAPI that gets compiled, so there is no artifact to
-  # download. The default build keeps running the same suite in fpmng-phpt
-  # above, so both sides of the flag stay covered -- which matters, because
-  # the executor is chosen per pool and a stock binary does not contain this
-  # code at all.
-  #
-  # --enable-fpmng-async is deliberately NOT set here: issue #87 records that
-  # fpmng-config-rejected-directives.phpt can only pass with it off, so a cell
-  # turning both on is a separate decision.
-  #
-  # Measured on the poligon, 2026-09-11, php-8.5.9, this exact configure line:
-  # PASS=58, FAIL/ERROR=0, SKIP=0 of 58.
-  fpmng-phpt-fiber:
-    needs: patches
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-      # As root php-fpm refuses to start, so the suite would report PASS=0
-      # with everything skipped and still look green. Same note as fpmng-phpt.
-      options: --user 1001:1001
-    env:
-      # The CI image sets CCACHE_DIR=/ccache, which was a mount of the
-      # self-hosted box's own disk. There is no such mount now, and / is not
-      # writable by uid 1001, so the cache lives in the workspace -- which is
-      # also the only place actions/cache can reach from inside a container job.
-      # 900M rather than the image's 5G: the whole repository gets 10 GB of
-      # cache and three jobs write one of these each, on every run.
-      CCACHE_DIR: ${{ github.workspace }}/.ccache
-      CCACHE_MAXSIZE: 900M
-      # A directory and a cache prefix of its own: --enable-fpmng-fiber is a
-      # different configure, so it cannot share objects with the default build.
-      PHPSRC: ${{ github.workspace }}/php-src-fiber
-    steps:
-      - uses: actions/checkout@v7
-
-      # What replaces the ccache directory the self-hosted runner kept on its
-      # own disk. Restore only; the save is a separate step after the compile,
-      # and runs on main alone. The restore-key is the prefix, so a run picks
-      # up the newest entry for this job and this php-src pin, which on a
-      # branch is always the one the last run on main wrote -- that is why this
-      # workflow now also runs on push to main.
-      - name: restore the compiler cache
-        uses: actions/cache/restore@v6
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ github.sha }}
-          restore-keys: |
-            ccache-fiber-${{ env.PHP_SRC_REF }}-
-
-      # fpmng-http-direct-request-parity.phpt needs this locale to be
-      # discriminating at all -- see the same step on fpmng-phpt (issue #105).
-      - name: assert tr_TR.UTF-8 is present (issue #105)
-        run: locale -a | grep -i tr_TR
-
-      # Issue #196: one step in place of clone + prepare + buildconf + configure.
-      # On a hosted runner there is never a tree to reuse, so what this buys
-      # here is the four steps in one place; the compile behind it is what
-      # ccache covers.
-      - name: php-src build tree with the fiber executor
-        env:
-          CC: ccache gcc
-          CXX: ccache g++
-        run: |
-          # $FPMNG_CONFIGURE_FLAGS and nothing else, plus the one flag this
-          # cell is about, so the two builds cannot differ in anything else.
-          # shellcheck disable=SC2086 -- the flag list is meant to word-split
-          ( set +e; ./build/ci-build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber 2>&1; echo "$?" > tree-fiber.rc ) | tee tree-fiber.log
-          exit "$(cat tree-fiber.rc)"
-
-      - name: assert the fiber executor is really in this build
-        # configure does not fail on an unknown --enable flag, it warns; so
-        # assert the executor is actually in this build rather than trusting
-        # the command line. Without this the whole cell could silently degrade
-        # into a second copy of fpmng-phpt. The log is read from inside the
-        # tree, where ci-build-tree.sh writes it, rather than from a step's own
-        # stdout: the assertion then holds wherever configure ran.
-        run: |
-          grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
-
-      - name: build
-        # Captures make's own status, not tee's; a build that failed would
-        # otherwise reach the test step looking fine. See the longer note on
-        # the `build` job for why this is not `set -o pipefail`.
-        run: |
-          # Issue #196: mark the tree unfinished for the duration of the build.
-          # cancel-in-progress kills this step outright on every superseded
-          # push, and a .o truncated by that kill keeps a fresh mtime, so make
-          # would consider it current for good. ci-build-tree.sh starts over
-          # when it finds this marker.
-          touch "$PHPSRC/.fpmng-ci-dirty"
-          ( set +e; make -C "$PHPSRC" -j"$(nproc)" fpmng cli 2>&1; echo "$?" > make-fiber.rc ) | tee make-fiber.log
-          if [ "$(cat make-fiber.rc)" = 0 ]; then rm -f "$PHPSRC/.fpmng-ci-dirty"; fi
-          exit "$(cat make-fiber.rc)"
-
-      # Same as on the `build` job, and for the same reason: only main writes,
-      # so a pull-request push cannot evict the entry it restores from.
-      - name: save the compiler cache
-        if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: ccache-fiber-${{ env.PHP_SRC_REF }}-${{ github.sha }}
-
-      # Same as on the `build` job: the suite reads the payload out of the
-      # binary it tests (issue #171), and this cell builds its own binary.
-      - name: embed the distribution payload (issue #171)
-        run: |
-          chmod +x build/embed-payload.sh
-          # FPMNG_ACME=1: the payload is the ACME client, and since issue #281
-          # it is embedded only into a build that was configured for it --
-          # which this one is, via FPMNG_CONFIGURE_FLAGS.
-          FPMNG_ACME=1 ./build/embed-payload.sh "$PHPSRC/sapi/fpmng/php-fpm-ng" "$PHPSRC/sapi/cli/php"
-
-      - name: run fpmng-owned .phpt tests on the fiber build
-        run: |
-          chmod +x build/run-fpmng-phpt.sh
-          TEST_PHP_EXECUTABLE="$PHPSRC/sapi/cli/php" \
-          TEST_PHP_FPM_EXECUTABLE="$PHPSRC/sapi/fpmng/php-fpm-ng" \
-          TEST_FPM_TIMEOUT=120 \
-          ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-fiber-results"
-
-      # The green/red of the step above is not the acceptance criterion: a run
-      # where all ten fiber tests SKIP passes it. See the script's header.
-      - name: assert the fiber-gated tests actually ran (issue #97)
-        run: |
-          chmod +x build/assert-fiber-tests-ran.sh
-          ./build/assert-fiber-tests-ran.sh "$PWD/fpmng-phpt-fiber-results"
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: fpmng-phpt-fiber-results
-          path: fpmng-phpt-fiber-results
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         env:

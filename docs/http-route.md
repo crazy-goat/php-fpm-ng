@@ -45,7 +45,7 @@ follow from: the thing on the left is the thing that has workers, a queue and a
 limit. Writing it the other way -- one line per prefix -- would suggest that two
 prefixes on the same pool are two independent things, which they are not.
 
-- Only a `fastcgi` or `fastcgi-ng` pool may be a target. Routing to an
+- Only a `fastcgi` pool may be a target. Routing to an
   `http-direct` pool is not yet supported; issue #344 adds the HTTP/1.1 client
   transport that makes it possible, and until then the configuration is refused
   with a message that says so. Routing to another `pool.type = http` pool is a

@@ -277,6 +277,16 @@ expectConfigFailure(
     ['user_ini.filename must be a bare file name']
 );
 
+/* issue #340. http.route[] is the gateway's routing table and http-direct runs
+ * no gateway, so the directive would be read by nobody. This type accepts the
+ * rest of the "http." namespace, so it has to name http.route explicitly
+ * instead of inheriting the prefix rule that covers fastcgi pools. */
+expectConfigFailure(
+    'direct-http-route',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.route[api] = /api",
+    ["'http.route' is not supported by pool.type = http-direct"]
+);
+
 unlink("$workerRoot/worker.php");
 rmdir($workerRoot);
 
@@ -312,6 +322,7 @@ direct-classic-worker-accept-threshold: rejected
 direct-worker-missing-script: rejected
 direct-worker-foreign-executor: rejected
 direct-user-ini-filename-separator: rejected
+direct-http-route: rejected
 async-disabled: rejected
 Done
 --CLEAN--

@@ -138,6 +138,22 @@ struct fpm_pool_type_s {
 	unsigned requires_pm:1;			/* pool must have meaningful pm/pm.max_children */
 	unsigned serves_requests:1;		/* counted in the request scoreboard */
 
+	/* What a pool of this type speaks on its own listener, asked by the HTTP
+	 * gateway's router when http.route[] names it as a target (issue #340).
+	 * Data on the type, not a name comparison in fpm_http.c, for the same
+	 * reason operator_endpoint below is: nothing outside this file should be
+	 * able to answer "is this a fastcgi pool?" by spelling the name.
+	 *
+	 * Both are 0 on every type that has no request listener at all (cron,
+	 * supervisor) and on `http` itself -- a gateway in front of a gateway is
+	 * a nested proxy, and the router refuses it. serves_http11 is set on
+	 * http-direct, whose pools ARE reachable in principle; the gateway
+	 * refuses them today with "not yet supported (see #344)" rather than as a
+	 * permanent rejection, and that bit is how it tells that case apart from
+	 * a type that could never be a target. */
+	unsigned serves_fastcgi:1;
+	unsigned serves_http11:1;
+
 	/* This type, in its OWN child, reads another pool's FOREIGN scoreboard
 	 * (the operator endpoint: idle/active/requests of the serves_requests = 1
 	 * pool it reports on). See fpm_children.c:

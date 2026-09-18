@@ -142,6 +142,9 @@ struct {								\
  * (issue #117) is the same on both transports, so each has one definition. */
 #include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
+/* issue #340: http.route[] asks a target pool's type what it speaks, through
+ * fpm_pool_type_resolve() and the serves_fastcgi/serves_http11 bits. */
+#include "fpm_pool_type.h"
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
@@ -196,6 +199,89 @@ struct fpm_http_gw_slot_s {
 	 * replaced with the process (issue #134, fpm_error_log_follow.h). NULL
 	 * when there is no file error_log to follow. */
 	struct fpm_error_log_follow_s *log_follow;
+};
+
+/* ------------------------------------------------------------------------ *
+ * Routing targets (issue #340)
+ *
+ * A gateway proxies to one or more backend pools, chosen per request by the
+ * longest matching path prefix. Everything that used to be singular on the
+ * gateway -- the upstream address, the persistent-connection list, the shared
+ * budget and the queue of requests waiting for a free connection -- is per
+ * TARGET, because the workers that enforce it are one set per target pool.
+ * Two prefixes routed to the same pool therefore share one budget and one
+ * queue; a prefix is a routing key, a target is a pool.
+ *
+ * A gateway with no http.route[] has exactly one target -- the pool's own
+ * FastCGI listener -- at prefix "/", so it is the gateway this file has always
+ * had, with the table walked once per request instead of not at all. "/" is an
+ * ordinary row and not a special case, which is what lets a future
+ * gateway-only pool (#345) have no row 0 at all.
+ * ------------------------------------------------------------------------ */
+
+struct fpm_http_target_s;
+
+/* Which wire protocol the gateway speaks to a target. Only FastCGI is
+ * implemented here; HTTP/1.1 towards a pool.type = http-direct target is #344,
+ * and the vtable below exists so that it is a new set of four functions rather
+ * than a second request path. */
+enum fpm_http_transport_e {
+	FPM_HTTP_TARGET_FASTCGI = 0
+};
+
+/* Everything transport-specific about talking to a target, bound once at
+ * config time from the target's pool.type. The four members are the four
+ * points where this file used to name FastCGI directly.
+ *
+ * What is NOT here is deliberate: handing c->out to an upstream, the pending
+ * buffer, the budget and the queue are bytes and bookkeeping, identical for
+ * any stream protocol. Only who PRODUCES those bytes (write_request) and who
+ * INTERPRETS the answer (on_readable) differ. */
+struct fpm_http_transport_s {
+	/* Opens one persistent connection to the target, budget included, or
+	 * returns NULL when the target is full or the connect failed. */
+	fpm_http_upstream *(*connect)(struct fpm_http_target_s *t);
+	/* Serializes the request into c->out, ready to be handed to any
+	 * connection of this target. Returns 0, or an HTTP status to answer the
+	 * client with instead. Called from fpm_http_request() AFTER c->target is
+	 * set -- a request may not be serialized before it is known who it is
+	 * for. */
+	int (*write_request)(fpm_http_conn *c, int script_missing_hint);
+	/* The upstream socket's read callback, i.e. this protocol's parser. */
+	void (*on_readable)(evutil_socket_t fd, short what, void *arg);
+	/* Tears one connection down, returning its budget slot. */
+	void (*drop)(fpm_http_upstream *up);
+};
+
+/* One backend pool this gateway may send requests to. */
+struct fpm_http_target_s {
+	struct fpm_http_gateway_s *gw;
+	char *pool;				/* the target pool's name, for the log */
+	char *listen_address;			/* where that pool takes requests */
+	enum fpm_http_transport_e transport;
+	const struct fpm_http_transport_s *ops;
+
+	/* how many persistent connections all the gateways of this pool may hold
+	 * to THIS target together; sized from the target pool's own
+	 * pm.max_children, the number its workers actually enforce */
+	unsigned max_upstreams;
+	atomic_t *upstreams_used;		/* shared between the gateway processes */
+
+	/* gateway process only */
+	struct sockaddr_storage upstream_addr;
+	socklen_t upstream_len;
+	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
+	unsigned nupstreams;
+	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
+};
+
+/* One row of the routing table: a path prefix and the target it selects. The
+ * rows are sorted longest prefix first at config time, so the lookup is the
+ * first match. */
+struct fpm_http_route_s {
+	char *prefix;
+	size_t prefix_len;
+	struct fpm_http_target_s *target;
 };
 
 /* one gateway family per pool */
@@ -315,18 +401,19 @@ struct fpm_http_gateway_s {
 	 * an outage we caused. */
 	int tls_ready;
 
-	/* how many persistent connections all the gateways of this pool may hold together */
-	unsigned max_upstreams;
-	atomic_t *upstreams_used;		/* shared between the gateway processes */
+	/* Routing (issue #340), built once in the master before the first gateway
+	 * forks and never touched again -- a reload restarts the gateway, there is
+	 * no hot reload of routes. targets[0] is the pool's own listener whenever
+	 * http.route[] did not claim "/" itself. nroutes >= ntargets: one row per
+	 * prefix, several rows may point at one target. */
+	struct fpm_http_target_s *targets;
+	unsigned ntargets;
+	struct fpm_http_route_s *routes;
+	unsigned nroutes;
 
 	/* gateway process only */
 	struct event_base *base;
 	struct evhttp *http;
-	struct sockaddr_storage upstream_addr;
-	socklen_t upstream_len;
-	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
-	unsigned nupstreams;
-	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
 	/* http.fault_upstream_write, see fpm_http_upstream_write_must_fail().
 	 * 0 = off, which is the value every real deployment has. The counter is
 	 * per gateway process: fork() copies a zero into each one. */
@@ -378,6 +465,15 @@ static struct fpm_http_gateway_s *gateways = NULL;
 /* one HTTP request being proxied */
 struct _fpm_http_conn {
 	struct fpm_http_gateway_s *gw;
+	/* Which backend pool this request is for (issue #340). Set by
+	 * fpm_http_route() BEFORE one byte of the request is serialized, and
+	 * everything queue-, budget- and transport-related reads it from here
+	 * afterwards: c->target->waiting is the queue this request joins, and
+	 * c->target->ops is the protocol its bytes were written in. Never NULL
+	 * from fpm_http_request()'s serialization step onwards -- the table
+	 * always has a row that matches, because a table with no "/" row of its
+	 * own gets the gateway's own listener as one. */
+	struct fpm_http_target_s *target;
 	struct evhttp_request *req;
 	struct evhttp_connection *evcon;
 	fpm_http_upstream *upstream;		/* while in flight */
@@ -434,6 +530,12 @@ struct _fpm_http_conn {
  * FIONREAD ioctl that evbuffer_read does out of the hot path. */
 struct _fpm_http_upstream {
 	struct fpm_http_gateway_s *gw;
+	/* The target this connection belongs to (issue #340): whose budget it
+	 * holds, whose list it is on, whose queue it serves. Kept alongside `gw`
+	 * rather than instead of it because most of this file's uses of `gw` are
+	 * about the GATEWAY process (its event base, its log, its timeouts), not
+	 * about the backend. t->gw is always this gw. */
+	struct fpm_http_target_s *t;
 	int fd;
 	struct event *ev_read;
 	struct event *ev_write;				/* only pending while a write did not fit or we are connecting */
@@ -474,27 +576,30 @@ static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl);
 static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg);
 static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void *arg);
 
-/* Claims one of the pool's workers for a persistent connection, or fails when they are all taken. */
-static int fpm_http_budget_take(struct fpm_http_gateway_s *gw)
+/* Claims one of the TARGET pool's workers for a persistent connection, or
+ * fails when they are all taken. Per target since issue #340: two prefixes
+ * routed to one pool share this counter, two prefixes routed to two pools do
+ * not, because the workers enforcing the limit are one set per pool. */
+static int fpm_http_budget_take(struct fpm_http_target_s *t)
 {
 	while (1) {
-		unsigned long used = *gw->upstreams_used;	/* atomic_t is an integer of some width on every branch of fpm_atomic.h */
+		unsigned long used = *t->upstreams_used;	/* atomic_t is an integer of some width on every branch of fpm_atomic.h */
 
-		if (used >= gw->max_upstreams) {
+		if (used >= t->max_upstreams) {
 			return 0;
 		}
-		if (atomic_cmp_set(gw->upstreams_used, used, used + 1)) {
+		if (atomic_cmp_set(t->upstreams_used, used, used + 1)) {
 			return 1;
 		}
 	}
 }
 
-static void fpm_http_budget_give_back(struct fpm_http_gateway_s *gw)
+static void fpm_http_budget_give_back(struct fpm_http_target_s *t)
 {
 	while (1) {
-		unsigned long used = *gw->upstreams_used;	/* atomic_t is an integer of some width on every branch of fpm_atomic.h */
+		unsigned long used = *t->upstreams_used;	/* atomic_t is an integer of some width on every branch of fpm_atomic.h */
 
-		if (used == 0 || atomic_cmp_set(gw->upstreams_used, used, used - 1)) {
+		if (used == 0 || atomic_cmp_set(t->upstreams_used, used, used - 1)) {
 			return;
 		}
 	}
@@ -987,7 +1092,7 @@ static void fpm_http_conn_free(fpm_http_conn *c)
 		evhttp_connection_set_closecb(c->evcon, NULL, NULL);
 	}
 	if (c->queued) {
-		TAILQ_REMOVE(&c->gw->waiting, c, link);
+		TAILQ_REMOVE(&c->target->waiting, c, link);
 	}
 	/* http.pool_full_policy = wait (issue #309): freed here and nowhere else,
 	 * so every path out of the queue -- dispatch, the reject-drain, an
@@ -1138,10 +1243,10 @@ static void fpm_http_finish(fpm_http_conn *c, int explained)
  * "the pool is full" for a pool that has just freed a slot. */
 static void fpm_http_upstream_detach(fpm_http_upstream *up)
 {
-	struct fpm_http_gateway_s *gw = up->gw;
+	struct fpm_http_target_s *t = up->t;
 
-	TAILQ_REMOVE(&gw->upstreams, up, link);
-	gw->nupstreams--;
+	TAILQ_REMOVE(&t->upstreams, up, link);
+	t->nupstreams--;
 	/* Deregistered here, freed with the struct. When the free is deferred that
 	 * incidentally keeps event_free() out of the callback of the event being
 	 * freed -- but only then: every other drop still frees from the callback,
@@ -1155,7 +1260,7 @@ static void fpm_http_upstream_detach(fpm_http_upstream *up)
 	close(up->fd);
 	up->fd = -1;
 	smart_str_free(&up->pending);
-	fpm_http_budget_give_back(gw);
+	fpm_http_budget_give_back(t);
 }
 
 static void fpm_http_upstream_free(fpm_http_upstream *up)
@@ -1188,6 +1293,11 @@ static void fpm_http_upstream_drop(fpm_http_upstream *up)
 static void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 {
 	struct fpm_http_gateway_s *gw = up->gw;
+	/* The address named in the two lines below is the TARGET's, not the
+	 * gateway pool's own: with http.route[] they are different pools, and a
+	 * line that named the gateway would send the operator to the wrong one.
+	 * For a gateway with no routes the two are the same string. */
+	const char *upstream_address = up->t->listen_address;
 	/* Saved before anything else runs: both branches below report this errno,
 	 * and event_base_gettimeofday_cached() may fall through to a real
 	 * gettimeofday(), which is free to overwrite it. */
@@ -1221,16 +1331,16 @@ static void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 			"written to it, without one byte of a reply (%s): the worker died, or it refused the request "
 			"head and closed without answering -- if the master reports no child exit for this pool, the "
 			"request head is the remaining suspect",
-			gw->pool, gw->listen_address, ms, clean_eof ? "EOF" : strerror(err));
+			gw->pool, upstream_address, ms, clean_eof ? "EOF" : strerror(err));
 	} else if (!clean_eof) {
-		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s': %s", gw->pool, gw->listen_address, strerror(err));
+		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s': %s", gw->pool, upstream_address, strerror(err));
 	}
 	/* EOF is normal after pm.max_requests or a worker restart; a request in flight is lost though */
 	if (up->current) {
 		fpm_http_finish(up->current, clean_eof || mute);
 		up->current = NULL;
 	}
-	fpm_http_upstream_drop(up);
+	up->t->ops->drop(up);
 	fpm_http_pump(gw);
 }
 
@@ -1426,37 +1536,43 @@ static void fpm_http_upstream_write(fpm_http_upstream *up, const char *data, siz
 	}
 }
 
-static fpm_http_upstream *fpm_http_upstream_new(struct fpm_http_gateway_s *gw)
+/* The FastCGI transport's connect(): one persistent FastCGI connection to a
+ * target pool. Reached only through fpm_http_target_fastcgi_ops below -- issue
+ * #340 moved it behind that pointer so #344 can add an HTTP/1.1 one next to it
+ * without a second dispatch path. */
+static fpm_http_upstream *fpm_http_fcgi_connect(struct fpm_http_target_s *t)
 {
+	struct fpm_http_gateway_s *gw = t->gw;
 	fpm_http_upstream *up;
 
-	if (!fpm_http_budget_take(gw)) {
+	if (!fpm_http_budget_take(t)) {
 		return NULL;
 	}
 	up = calloc(1, sizeof(*up));
 	up->gw = gw;
-	up->fd = socket(gw->upstream_addr.ss_family, SOCK_STREAM, 0);
+	up->t = t;
+	up->fd = socket(t->upstream_addr.ss_family, SOCK_STREAM, 0);
 	if (up->fd < 0) {
 		free(up);
-		fpm_http_budget_give_back(gw);
+		fpm_http_budget_give_back(t);
 		return NULL;
 	}
 	evutil_make_socket_nonblocking(up->fd);
-	if (gw->upstream_addr.ss_family != AF_UNIX) {
+	if (t->upstream_addr.ss_family != AF_UNIX) {
 		int on = 1;
 
 		setsockopt(up->fd, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(on));
 	}
-	up->ev_read = event_new(gw->base, up->fd, EV_READ | EV_PERSIST, fpm_http_upstream_readcb, up);
+	up->ev_read = event_new(gw->base, up->fd, EV_READ | EV_PERSIST, t->ops->on_readable, up);
 	up->ev_write = event_new(gw->base, up->fd, EV_WRITE, fpm_http_upstream_writecb, up);
 
-	if (connect(up->fd, (struct sockaddr*)&gw->upstream_addr, gw->upstream_len) != 0) {
+	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
 			event_free(up->ev_read);
 			event_free(up->ev_write);
 			close(up->fd);
 			free(up);
-			fpm_http_budget_give_back(gw);
+			fpm_http_budget_give_back(t);
 			return NULL;
 		}
 		up->connecting = 1;
@@ -1464,10 +1580,20 @@ static fpm_http_upstream *fpm_http_upstream_new(struct fpm_http_gateway_s *gw)
 	} else {
 		event_add(up->ev_read, NULL);
 	}
-	TAILQ_INSERT_TAIL(&gw->upstreams, up, link);
-	gw->nupstreams++;
+	TAILQ_INSERT_TAIL(&t->upstreams, up, link);
+	t->nupstreams++;
 	return up;
 }
+
+/* The FastCGI transport. Bound to a target at config time by
+ * fpm_http_target_bind_transport(); nothing outside these four functions and
+ * fpm_http_build_request() (which they call) names a FCGI_* symbol. */
+static const struct fpm_http_transport_s fpm_http_target_fastcgi_ops = {
+	fpm_http_fcgi_connect,
+	fpm_http_build_request,
+	fpm_http_upstream_readcb,
+	fpm_http_upstream_drop
+};
 
 /* One dispatch round. Never called directly -- fpm_http_pump() below owns the
  * re-entrancy rules. */
@@ -1515,43 +1641,53 @@ static void fpm_http_wait_expired(evutil_socket_t fd, short what, void *arg)
 
 	(void) fd;
 	(void) what;
-	TAILQ_REMOVE(&c->gw->waiting, c, link);
+	TAILQ_REMOVE(&c->target->waiting, c, link);
 	c->queued = 0;
 	fpm_http_reject_queued(c);
 }
 
-/* http.pool_full_policy = wait (issue #309): how many requests are on
- * gw->waiting right now. Walked rather than counted in a field: the walk is
+/* http.pool_full_policy = wait (issue #309): how many requests are on this
+ * TARGET's queue right now. Walked rather than counted in a field: the walk is
  * bounded by the cap it is compared against, it only runs when the pool is
  * already full, and a counter would have to be kept correct at every removal
  * site instead of at this one call site (see issue #107 about exactly that
- * kind of bookkeeping going wrong). */
-static unsigned fpm_http_waiting_len(struct fpm_http_gateway_s *gw)
+ * kind of bookkeeping going wrong). The cap is per target since issue #340,
+ * for the same reason the budget is: a queue belongs to the pool whose workers
+ * will drain it. */
+static unsigned fpm_http_waiting_len(struct fpm_http_target_s *t)
 {
 	fpm_http_conn *c;
 	unsigned n = 0;
 
-	TAILQ_FOREACH(c, &gw->waiting, link) {
+	TAILQ_FOREACH(c, &t->waiting, link) {
 		n++;
 	}
 	return n;
 }
 
-static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
+/* One dispatch round for ONE target (issue #340). Split out of
+ * fpm_http_pump_once() unchanged except for what it reads the queue, the
+ * connection list and the budget from: a target that is full must not stop the
+ * next target's dispatch, which is exactly what a single shared loop would do
+ * -- the http.pool_full_policy = wait early return below would leave every
+ * other target's queue standing. */
+static void fpm_http_pump_target(struct fpm_http_target_s *t)
 {
-	while (!TAILQ_EMPTY(&gw->waiting)) {
+	struct fpm_http_gateway_s *gw = t->gw;
+
+	while (!TAILQ_EMPTY(&t->waiting)) {
 		fpm_http_upstream *up, *idle = NULL;
 		fpm_http_conn *c;
 		smart_str out;
 
-		TAILQ_FOREACH(up, &gw->upstreams, link) {
+		TAILQ_FOREACH(up, &t->upstreams, link) {
 			if (!up->busy) {
 				idle = up;
 				break;
 			}
 		}
 		if (!idle) {
-			idle = fpm_http_upstream_new(gw);
+			idle = t->ops->connect(t);
 		}
 		if (!idle) {
 			/* The pool is FULL for this gateway: every upstream connection it
@@ -1593,17 +1729,17 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
 				return;
 			}
-			while (!TAILQ_EMPTY(&gw->waiting)) {
-				c = TAILQ_FIRST(&gw->waiting);
-				TAILQ_REMOVE(&gw->waiting, c, link);
+			while (!TAILQ_EMPTY(&t->waiting)) {
+				c = TAILQ_FIRST(&t->waiting);
+				TAILQ_REMOVE(&t->waiting, c, link);
 				c->queued = 0;
 				fpm_http_reject_queued(c);
 			}
 			return;
 		}
 
-		c = TAILQ_FIRST(&gw->waiting);
-		TAILQ_REMOVE(&gw->waiting, c, link);
+		c = TAILQ_FIRST(&t->waiting);
+		TAILQ_REMOVE(&t->waiting, c, link);
 		c->queued = 0;
 		/* http.pool_full_policy = wait (issue #309): measured here, at the
 		 * moment the request stops waiting, and reported in
@@ -1637,6 +1773,19 @@ static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
 		memset(&c->out, 0, sizeof(c->out));
 		fpm_http_upstream_write(idle, ZSTR_VAL(out.s), ZSTR_LEN(out.s));
 		smart_str_free(&out);
+	}
+}
+
+/* One dispatch round over every target. The order is the table's -- targets[0]
+ * first -- and it does not matter: each target's queue is drained against its
+ * own connections and its own budget, so no target can consume another's
+ * capacity by being looked at first. */
+static void fpm_http_pump_once(struct fpm_http_gateway_s *gw)
+{
+	unsigned i;
+
+	for (i = 0; i < gw->ntargets; i++) {
+		fpm_http_pump_target(&gw->targets[i]);
 	}
 }
 
@@ -2069,6 +2218,78 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	free(redirect_host);
 }
 
+/* ------------------------------------------------------------------- routing */
+
+/* Does `path` fall under `prefix`? Segment-aware, which is the whole
+ * difference between a path prefix and a string prefix: "/api" covers "/api"
+ * and "/api/x" but NOT "/apiary". "/" covers everything -- it is the one
+ * prefix whose last character IS the separator, so it needs no extra rule,
+ * only the one below that accepts a prefix already ending in '/'. */
+static int fpm_http_prefix_covers(const char *prefix, size_t prefix_len, const char *path, size_t path_len)
+{
+	if (path_len < prefix_len || memcmp(path, prefix, prefix_len) != 0) {
+		return 0;
+	}
+	if (path_len == prefix_len || prefix[prefix_len - 1] == '/') {
+		return 1;
+	}
+	return path[prefix_len] == '/';
+}
+
+/* Which backend pool serves this request (issue #340).
+ *
+ * Longest matching prefix wins, and the table is already sorted longest first,
+ * so the first match is the answer. It always finds one: the last row is "/",
+ * either because http.route[] claimed it or because the gateway's own listener
+ * was inserted there -- see fpm_http_routes_build(). That is why this returns a
+ * target and not a target-or-NULL, and why "no route matched" is not a state
+ * the request path has to have an opinion about.
+ *
+ * Matching is on the DECODED path, the same bytes SCRIPT_NAME is built from
+ * (fpm_http_build_request()), so "/%61pi/x" routes exactly as "/api/x" does
+ * and a percent-encoded prefix cannot slip past a route. A path that does not
+ * decode at all takes the "/" row and then fails in write_request() with the
+ * 400 it always produced -- the decode is not repeated for the verdict's sake.
+ *
+ * Runs AFTER fpm_http_try_local(), so ping.path, the ACME challenge and static
+ * files are still answered by the gateway itself and are never routed
+ * anywhere (issue #382 for ping.path in particular: the probe proves the
+ * gateway is alive, not any target's workers). */
+static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+{
+	const struct evhttp_uri *uri;
+	const char *path;
+	char *decoded;
+	size_t decoded_len;
+	unsigned i;
+	struct fpm_http_target_s *hit;
+
+	/* The gateway every existing configuration has: one target, one row, "/". */
+	if (gw->nroutes < 2) {
+		return gw->routes[0].target;
+	}
+
+	uri = evhttp_request_get_evhttp_uri(req);
+	path = uri ? evhttp_uri_get_path(uri) : NULL;
+	if (!path || !*path) {
+		return gw->routes[gw->nroutes - 1].target;
+	}
+	decoded = evhttp_uridecode(path, 0, &decoded_len);
+	if (!decoded) {
+		return gw->routes[gw->nroutes - 1].target;
+	}
+
+	hit = gw->routes[gw->nroutes - 1].target;
+	for (i = 0; i < gw->nroutes; i++) {
+		if (fpm_http_prefix_covers(gw->routes[i].prefix, gw->routes[i].prefix_len, decoded, decoded_len)) {
+			hit = gw->routes[i].target;
+			break;
+		}
+	}
+	free(decoded);
+	return hit;
+}
+
 static void fpm_http_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
@@ -2143,7 +2364,13 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 			strlcpy(c->peer_addr, peer_addr, sizeof(c->peer_addr));
 		}
 
-		error = fpm_http_build_request(c, script_missing);
+		/* Routing BEFORE serialization, and this order is a requirement, not a
+		 * convenience (issue #340): the bytes written below are in the target's
+		 * wire protocol, so the target has to be known first. With one
+		 * transport the order costs nothing; without it, adding the second one
+		 * (#344) would have to unpick FastCGI framing from the request path. */
+		c->target = fpm_http_route(gw, req);
+		error = c->target->ops->write_request(c, script_missing);
 	}
 
 	if (error) {
@@ -2161,11 +2388,11 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	 * the ordinary 503 straight away, it does not wait its own wait bound
 	 * out only to be rejected anyway -- and because a request that is never
 	 * enqueued needs no timer and nothing to unlink. */
-	if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT && fpm_http_waiting_len(gw) >= (unsigned) gw->wait_queue_max) {
+	if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT && fpm_http_waiting_len(c->target) >= (unsigned) gw->wait_queue_max) {
 		fpm_http_reject_queued(c);
 		return;
 	}
-	TAILQ_INSERT_TAIL(&gw->waiting, c, link);
+	TAILQ_INSERT_TAIL(&c->target->waiting, c, link);
 	c->queued = 1;
 	if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
 		evutil_gettimeofday(&c->wait_since, NULL);
@@ -2185,16 +2412,20 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 
 /* ---------------------------------------------------------------- processes */
 
-static int fpm_http_resolve_upstream(struct fpm_http_gateway_s *gw)
+/* Turns one target's configured listen address into the sockaddr its
+ * connections are opened against. Per target since issue #340; for a gateway
+ * with no http.route[] the one target is the pool's own listener and this is
+ * the call it always made. */
+static int fpm_http_resolve_upstream(struct fpm_http_target_s *t)
 {
-	const char *address = gw->listen_address;
+	char *address = t->listen_address;
 
-	if (fpm_sockets_domain_from_address(gw->listen_address) == FPM_AF_UNIX) {
-		struct sockaddr_un *sa_un = (struct sockaddr_un*)&gw->upstream_addr;
+	if (fpm_sockets_domain_from_address(address) == FPM_AF_UNIX) {
+		struct sockaddr_un *sa_un = (struct sockaddr_un*)&t->upstream_addr;
 
 		sa_un->sun_family = AF_UNIX;
 		strlcpy(sa_un->sun_path, address, sizeof(sa_un->sun_path));
-		gw->upstream_len = sizeof(*sa_un);
+		t->upstream_len = sizeof(*sa_un);
 		return 0;
 	} else {
 		struct addrinfo hints, *res;
@@ -2216,8 +2447,8 @@ static int fpm_http_resolve_upstream(struct fpm_http_gateway_s *gw)
 		hints.ai_socktype = SOCK_STREAM;
 		ret = getaddrinfo(host ? host : "localhost", port, &hints, &res);
 		if (ret == 0) {
-			memcpy(&gw->upstream_addr, res->ai_addr, res->ai_addrlen);
-			gw->upstream_len = res->ai_addrlen;
+			memcpy(&t->upstream_addr, res->ai_addr, res->ai_addrlen);
+			t->upstream_len = res->ai_addrlen;
 			freeaddrinfo(res);
 		}
 		free(dup_address);
@@ -2575,6 +2806,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	struct fpm_worker_pool_s *wp;
 	struct sigaction act;
 	char title[128];
+	unsigned i;
 
 	fpm_globals.is_child = 1;
 
@@ -2649,12 +2881,26 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * own (issue #137, fpm_http_log_follow_readable()). */
 	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
 
-	if (fpm_http_resolve_upstream(gw) != 0) {
-		zlog(ZLOG_ERROR, "[pool %s] http: cannot resolve '%s'", gw->pool, gw->listen_address);
-		exit(FPM_EXIT_SOFTWARE);
+	/* One resolve per target, in this gateway process, exactly where the one
+	 * resolve used to be (issue #340). A name that no longer resolves is still
+	 * fatal for the process, not for the one target: a gateway that came up
+	 * with a target it can never reach would answer 502 for that prefix
+	 * forever with nothing in the log after startup to say why. */
+	for (i = 0; i < gw->ntargets; i++) {
+		struct fpm_http_target_s *t = &gw->targets[i];
+
+		if (fpm_http_resolve_upstream(t) != 0) {
+			if (strcmp(t->pool, gw->pool) == 0) {
+				zlog(ZLOG_ERROR, "[pool %s] http: cannot resolve '%s'", gw->pool, t->listen_address);
+			} else {
+				zlog(ZLOG_ERROR, "[pool %s] http: cannot resolve '%s' for http.route target pool '%s'",
+					gw->pool, t->listen_address, t->pool);
+			}
+			exit(FPM_EXIT_SOFTWARE);
+		}
+		TAILQ_INIT(&t->upstreams);
+		TAILQ_INIT(&t->waiting);
 	}
-	TAILQ_INIT(&gw->upstreams);
-	TAILQ_INIT(&gw->waiting);
 
 	gw->base = event_base_new();
 	gw->http = evhttp_new(gw->base);
@@ -2938,6 +3184,9 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 }
 /* }}} */
 
+/* defined with the rest of the http.route[] machinery, below */
+static void fpm_http_routes_free(struct fpm_http_gateway_s *gw);
+
 static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 {
 	struct fpm_http_gateway_s *gw, *next;
@@ -2965,9 +3214,7 @@ static void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		if (gw->plain_listen_fd >= 0) {
 			close(gw->plain_listen_fd);
 		}
-		if (gw->upstreams_used) {
-			fpm_shm_free((void*)gw->upstreams_used, sizeof(*gw->upstreams_used));
-		}
+		fpm_http_routes_free(gw);
 #ifdef HAVE_FPM_HTTP_TLS
 		if (gw->reload) {
 			fpm_tls_reload_free(gw->reload);
@@ -3013,6 +3260,340 @@ static int cleanup_registered = 0;
  * "set to the default"); env remains a fallback for deployments that already
  * use it. http.allowed_clients is a new directive and deliberately has no
  * environment fallback. */
+/* ---------------------------------------------------------- http.route[] */
+
+/* Walks one http.route[] value, which is a comma-separated prefix list in the
+ * convention listen.allowed_clients already uses for lists. *cursor starts at
+ * the value and is advanced past each entry returned; whitespace around an
+ * entry is trimmed. Returns 0 when the list is exhausted. */
+static int fpm_http_route_next_prefix(const char **cursor, const char **out, size_t *out_len)
+{
+	const char *p = *cursor, *end;
+
+	while (*p == ',' || *p == ' ' || *p == '\t') {
+		p++;
+	}
+	if (!*p) {
+		*cursor = p;
+		return 0;
+	}
+	end = strchr(p, ',');
+	if (!end) {
+		end = p + strlen(p);
+	}
+	*cursor = end;
+	while (end > p && (end[-1] == ' ' || end[-1] == '\t')) {
+		end--;
+	}
+	*out = p;
+	*out_len = (size_t) (end - p);
+	return 1;
+}
+
+/* The pool one http.route[] key names, or NULL with the refusal already
+ * logged. Every refusal here is a startup error: a route that names a pool
+ * that does not exist, or one the gateway cannot speak to, would otherwise
+ * become a 502 per request for a prefix the operator believes is configured.
+ *
+ * What a target speaks is asked OF THE TYPE (fpm_pool_type_s.serves_fastcgi /
+ * .serves_http11), never of its name -- see fpm_pool_type.h. A pool.type =
+ * http target has neither bit and lands in the last branch: a gateway in front
+ * of a gateway is a nested proxy, and nothing about this issue makes it work. */
+static struct fpm_worker_pool_s *fpm_http_route_target_pool(struct fpm_worker_pool_s *wp,
+	const char *pool_name, enum fpm_http_transport_e *transport)
+{
+	struct fpm_worker_pool_s *w;
+	const struct fpm_pool_type_s *type;
+
+	for (w = fpm_worker_all_pools; w; w = w->next) {
+		if (w->config && w->config->name && strcmp(w->config->name, pool_name) == 0) {
+			break;
+		}
+	}
+	if (!w) {
+		zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: no pool named '%s' is configured",
+			wp->config->name, pool_name, pool_name);
+		return NULL;
+	}
+	type = fpm_pool_type_resolve(w);
+	if (!type) {
+		zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' has no usable pool.type/pool.executor combination",
+			wp->config->name, pool_name, pool_name);
+		return NULL;
+	}
+	if (type->serves_fastcgi) {
+		*transport = FPM_HTTP_TARGET_FASTCGI;
+		return w;
+	}
+	if (type->serves_http11) {
+		/* Deliberate wording, asserted by a phpt: this is a capability that is
+		 * planned (#344 adds the HTTP/1.1 client transport behind the same
+		 * vtable), not a rejection by design. A message that only said
+		 * "unsupported" would teach operators -- and the next person reading
+		 * this file -- that FastCGI is the only thing a target can ever be. */
+		zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' is 'pool.type = %s'; routing to it is "
+			"not yet supported (see #344). Until then an http.route target must be a fastcgi or "
+			"fastcgi-ng pool", wp->config->name, pool_name, pool_name, type->name);
+		return NULL;
+	}
+	zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' is 'pool.type = %s', which the gateway cannot "
+		"use as a target; an http.route target must be a fastcgi or fastcgi-ng pool",
+		wp->config->name, pool_name, pool_name, type->name);
+	return NULL;
+}
+
+/* One prefix already claimed by this gateway's routes, for the duplicate
+ * check. The pool it came from is kept so the refusal can name both sides. */
+struct fpm_http_seen_prefix_s {
+	const char *prefix;
+	size_t len;
+	const char *pool;
+};
+
+/* Everything about http.route[] that can be decided from the configuration
+ * alone, checked in the master with every pool section already parsed (issue
+ * #340). Called from fpm_http_validate_pool(), so `php-fpm-ng -t` refuses a
+ * bad route table without anything having started.
+ *
+ * Refuses, each naming the pool and the offending directive: an unknown target
+ * pool, a pool named twice, a target type the gateway cannot speak to, a
+ * prefix without a leading '/', and a prefix claimed by two different entries.
+ * An empty value is refused earlier, by the INI parser (fpm_conf.c), where the
+ * line number is still known. */
+static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
+{
+	struct key_value_s *kv, *kv2;
+	const char *name = wp->config->name;
+	struct fpm_http_seen_prefix_s *seen;
+	unsigned nseen = 0, total = 0;
+	int rc = 0;
+
+	if (!wp->config->http_routes) {
+		return 0;
+	}
+
+	for (kv = wp->config->http_routes; kv; kv = kv->next) {
+		const char *cursor = kv->value, *prefix;
+		size_t prefix_len;
+
+		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			total++;
+		}
+	}
+	if (!total) {
+		zlog(ZLOG_ERROR, "[pool %s] http.route[]: no path prefix in any entry", name);
+		return -1;
+	}
+	seen = calloc(total, sizeof(*seen));
+	if (!seen) {
+		zlog(ZLOG_ERROR, "[pool %s] http.route[]: out of memory", name);
+		return -1;
+	}
+
+	for (kv = wp->config->http_routes; kv && rc == 0; kv = kv->next) {
+		const char *cursor = kv->value, *prefix;
+		size_t prefix_len;
+		enum fpm_http_transport_e transport;
+
+		for (kv2 = wp->config->http_routes; kv2 != kv; kv2 = kv2->next) {
+			if (strcmp(kv2->key, kv->key) == 0) {
+				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' is named twice; put every "
+					"prefix of one target in a single comma-separated value",
+					name, kv->key, kv->key);
+				rc = -1;
+				break;
+			}
+		}
+		if (rc != 0) {
+			break;
+		}
+		if (!fpm_http_route_target_pool(wp, kv->key, &transport)) {
+			rc = -1;
+			break;
+		}
+
+		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			unsigned i;
+
+			if (prefix_len == 0 || prefix[0] != '/') {
+				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' must begin with '/'",
+					name, kv->key, (int) prefix_len, prefix);
+				rc = -1;
+				break;
+			}
+			for (i = 0; i < nseen; i++) {
+				if (seen[i].len == prefix_len && memcmp(seen[i].prefix, prefix, prefix_len) == 0) {
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' is already routed "
+						"to pool '%s'; one prefix selects one target",
+						name, kv->key, (int) prefix_len, prefix, seen[i].pool);
+					rc = -1;
+					break;
+				}
+			}
+			if (rc != 0) {
+				break;
+			}
+			seen[nseen].prefix = prefix;
+			seen[nseen].len = prefix_len;
+			seen[nseen].pool = kv->key;
+			nseen++;
+		}
+	}
+
+	free(seen);
+	return rc;
+}
+
+/* Sorts the table longest prefix first, so that the lookup is "the first row
+ * that covers this path" and nothing at request time has to compare lengths.
+ * An insertion sort over a table an operator wrote by hand. */
+static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
+{
+	unsigned i, j;
+
+	for (i = 1; i < gw->nroutes; i++) {
+		struct fpm_http_route_s row = gw->routes[i];
+
+		for (j = i; j > 0 && gw->routes[j - 1].prefix_len < row.prefix_len; j--) {
+			gw->routes[j] = gw->routes[j - 1];
+		}
+		gw->routes[j] = row;
+	}
+}
+
+/* Fills one target in and gives it its share of shared memory. own_capacity is
+ * the gateway's own connection budget, which differs from the pool's child
+ * count for a multi-request executor (see fpm_http_init_pool_ex()); every other
+ * target is sized from its own pool's pm.max_children, the number that pool's
+ * workers actually enforce. */
+static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gateway_s *gw,
+	const char *pool, const char *listen_address, enum fpm_http_transport_e transport, unsigned capacity)
+{
+	t->gw = gw;
+	t->pool = strdup(pool);
+	t->listen_address = strdup(listen_address);
+	t->transport = transport;
+	switch (transport) {
+		case FPM_HTTP_TARGET_FASTCGI:
+		default:
+			t->ops = &fpm_http_target_fastcgi_ops;
+			break;
+	}
+	t->max_upstreams = capacity ? capacity : 1;
+	t->upstreams_used = fpm_shm_alloc(sizeof(*t->upstreams_used));
+	if (!t->pool || !t->listen_address || !t->upstreams_used) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", gw->pool);
+		return -1;
+	}
+	*t->upstreams_used = 0;
+	return 0;
+}
+
+/* Builds the gateway's routing table, once, in the master, before the first
+ * gateway forks (issue #340). fpm_http_validate_routes() has already refused
+ * everything that could go wrong in the configuration, so the walk below only
+ * has allocation left to fail on.
+ *
+ * "/" is an ordinary row. When no http.route[] entry claims it, the pool's own
+ * listener is inserted as target 0 with prefix "/" -- a row in the same table,
+ * not a fallback branch somewhere else -- which is what makes a gateway with no
+ * routes exactly today's gateway and what leaves room for #345 to run one with
+ * no row 0 at all. */
+static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned own_capacity)
+{
+	struct key_value_s *kv;
+	unsigned nentries = 0, nprefixes = 0, own = 1, ti = 0, ri = 0;
+
+	for (kv = wp->config->http_routes; kv; kv = kv->next) {
+		const char *cursor = kv->value, *prefix;
+		size_t prefix_len;
+
+		nentries++;
+		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			nprefixes++;
+			if (prefix_len == 1 && prefix[0] == '/') {
+				own = 0;	/* an entry claims "/" itself, so there is no row 0 to add */
+			}
+		}
+	}
+
+	gw->targets = calloc(nentries + own, sizeof(*gw->targets));
+	gw->routes = calloc(nprefixes + own, sizeof(*gw->routes));
+	if (!gw->targets || !gw->routes) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
+		return -1;
+	}
+
+	if (own) {
+		if (fpm_http_target_init(&gw->targets[0], gw, gw->pool, gw->listen_address,
+				FPM_HTTP_TARGET_FASTCGI, own_capacity) != 0) {
+			return -1;
+		}
+		gw->routes[0].prefix = strdup("/");
+		if (!gw->routes[0].prefix) {
+			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
+			return -1;
+		}
+		gw->routes[0].prefix_len = 1;
+		gw->routes[0].target = &gw->targets[0];
+		ti = ri = 1;
+	}
+
+	for (kv = wp->config->http_routes; kv; kv = kv->next) {
+		const char *cursor = kv->value, *prefix;
+		size_t prefix_len;
+		enum fpm_http_transport_e transport = FPM_HTTP_TARGET_FASTCGI;
+		struct fpm_worker_pool_s *target = fpm_http_route_target_pool(wp, kv->key, &transport);
+		unsigned capacity;
+
+		if (!target) {
+			return -1;		/* unreachable: validate ran first */
+		}
+		capacity = target->config->pm_max_children > 0 ? (unsigned) target->config->pm_max_children : 1;
+		if (fpm_http_target_init(&gw->targets[ti], gw, target->config->name,
+				target->config->listen_address, transport, capacity) != 0) {
+			return -1;
+		}
+		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			gw->routes[ri].prefix = strndup(prefix, prefix_len);
+			if (!gw->routes[ri].prefix) {
+				zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
+				return -1;
+			}
+			gw->routes[ri].prefix_len = prefix_len;
+			gw->routes[ri].target = &gw->targets[ti];
+			ri++;
+		}
+		ti++;
+	}
+
+	gw->ntargets = ti;
+	gw->nroutes = ri;
+	fpm_http_routes_sort(gw);
+	return 0;
+}
+
+static void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
+{
+	unsigned i;
+
+	for (i = 0; i < gw->nroutes; i++) {
+		free(gw->routes[i].prefix);
+	}
+	for (i = 0; i < gw->ntargets; i++) {
+		free(gw->targets[i].pool);
+		free(gw->targets[i].listen_address);
+		if (gw->targets[i].upstreams_used) {
+			fpm_shm_free((void*)gw->targets[i].upstreams_used, sizeof(*gw->targets[i].upstreams_used));
+		}
+	}
+	free(gw->routes);
+	free(gw->targets);
+	gw->routes = NULL;
+	gw->targets = NULL;
+	gw->nroutes = gw->ntargets = 0;
+}
+
 static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned *nproc_wanted, int *reuseport_out) /* {{{ */
 {
 	const char *env;
@@ -3355,10 +3936,13 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		/* A classic worker handles one connection at a time; a multi-request
 		 * executor supplies its own capacity independently of the child count. */
 		gw->nproc = MIN(nproc_wanted, workers);
-		gw->max_upstreams = capacity;
-		gw->upstreams_used = fpm_shm_alloc(sizeof(*gw->upstreams_used));
-		if (!gw->upstreams_used) {
-			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", wp->config->name);
+		/* The routing table, built once here in the master so that every
+		 * gateway process inherits the same targets and shares one budget
+		 * counter per target (issue #340). Without http.route[] this is a
+		 * single row, "/" -> this pool's own listener, which is what keeps a
+		 * plain gateway byte-for-byte what it was. */
+		if (fpm_http_routes_build(wp, gw, capacity) != 0) {
+			fpm_http_routes_free(gw);
 			close(gw->listen_fd);
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
@@ -3374,7 +3958,6 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw);
 			return -1;
 		}
-		*gw->upstreams_used = 0;
 		gw->pids = calloc(gw->nproc, sizeof(pid_t));
 		/* array of pointers — sizeof(void *) is intentional */
 		gw->slots = calloc(gw->nproc, sizeof(void *));
@@ -3383,6 +3966,16 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		zlog(ZLOG_NOTICE, "[pool %s] HTTP listener: %u gateway(s)%s%s, %u persistent connection(s) to the pool",
 			wp->config->name, gw->nproc, reuseport ? " with SO_REUSEPORT" : "",
 			gw->acl ? ", access-restricted" : "", capacity);
+		if (wp->config->http_routes) {
+			/* Printed in lookup order, longest prefix first, because that is
+			 * the order a request is matched in and the only way to read the
+			 * table is to read it the way the gateway does. */
+			for (i = 0; i < gw->nroutes; i++) {
+				zlog(ZLOG_NOTICE, "[pool %s] http.route: '%s' -> pool %s (%u persistent connection(s))",
+					wp->config->name, gw->routes[i].prefix, gw->routes[i].target->pool,
+					gw->routes[i].target->max_upstreams);
+			}
+		}
 
 		for (i = 0; i < gw->nproc; i++) {
 			gw->slots[i] = calloc(1, sizeof(*gw->slots[i]));
@@ -3431,6 +4024,14 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_read_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.read_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the
+	 * route table names OTHER pools, and by the time every pool has been
+	 * validated they have all been parsed, so a typo in a pool name is a
+	 * startup refusal (and a `-t` failure) rather than a 502 per request on a
+	 * prefix the operator believes is configured. */
+	if (fpm_http_validate_routes(wp) != 0) {
 		return -1;
 	}
 	/* http.pool_full_policy = wait (issue #309): both bounds are mandatory

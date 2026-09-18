@@ -140,6 +140,7 @@ static const char *const fpm_http_direct_worker_accepts[] = {
 
 static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.name                         = "http-direct",
+	.serves_http11                = 1,
 	/* Issue #295, and the one judgement in this file that needed making rather
 	 * than reading off #269. Beta, not supported: it is covered by CI on every
 	 * PR, it is documented, and nothing is open against its correctness -- but
@@ -283,6 +284,8 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
+		/* issue #340: reachable as an http.route[] target. */
+		.serves_fastcgi  = 1,
 		/* Issue #295: upstream FPM's own type, unchanged by this project. */
 		.tier            = FPM_TIER_SUPPORTED,
 		.requires_listen = 1,
@@ -293,6 +296,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                   = "fastcgi-ng",
+		.serves_fastcgi         = 1,
 		/* Issue #295: the same transport as "fastcgi" with patches 0004-0006
 		 * under it, covered by the phpt suite on every PR since v0.1.0. */
 		.tier                   = FPM_TIER_SUPPORTED,
@@ -324,6 +328,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                         = "http-direct",
+		/* issue #340/#344: a legal target in principle, refused for now. */
+		.serves_http11                = 1,
 		/* Issue #295: the classic executor, which is what this entry is. The
 		 * worker executor is a variant with a tier of its own (beta, see
 		 * fpm_http_direct_worker above) -- an executor variant replaces the

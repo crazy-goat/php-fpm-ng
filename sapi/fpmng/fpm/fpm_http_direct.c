@@ -62,7 +62,12 @@
  * response costs. */
 #define FPM_DIRECT_STREAM_HIGHWATER (256 * 1024)
 
-const char *const fpm_http_direct_rejects[] = { FPM_HTTP_DIRECT_REJECTS_COMMON, NULL };
+/* issue #340: http.route[] is the gateway's routing table and an http-direct
+ * pool runs no gateway, so it would be read by nobody. Named explicitly
+ * because this type ACCEPTS the rest of the "http." namespace -- http.listen,
+ * http.static and the TLS directives are all its own -- so the prefix rule
+ * that refuses the directive on a fastcgi pool does not reach it here. */
+const char *const fpm_http_direct_rejects[] = { FPM_HTTP_DIRECT_REJECTS_COMMON, "http.route", NULL };
 
 /* How this executor names itself in the startup errors of the shared
  * validation (fpm_http_direct_request.c). */

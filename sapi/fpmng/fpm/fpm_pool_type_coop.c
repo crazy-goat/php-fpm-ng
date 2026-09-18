@@ -46,6 +46,7 @@ static int fpm_pool_type_coop_http_concurrent_init(struct fpm_worker_pool_s *wp)
 #ifdef HAVE_FPMNG_FIBER
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_fiber = {
 	.name                         = "fastcgi-ng",
+	.serves_fastcgi               = 1,
 	/* Issue #295. Experimental, and the tracker is the argument: #79, #80,
 	 * #82, #84 and #85 are open correctness bugs against this executor's
 	 * request isolation, and criterion 3 of the bar in #269 ("no open
@@ -88,6 +89,7 @@ static const struct fpm_pool_type_s fpm_pool_http_fiber = {
 #ifdef HAVE_FPMNG_ASYNC
 static const struct fpm_pool_type_s fpm_pool_fastcgi_ng_async = {
 	.name                   = "fastcgi-ng",
+	.serves_fastcgi         = 1,
 	/* Issue #295. Experimental, one criterion short of beta in a way that is
 	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
 	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests

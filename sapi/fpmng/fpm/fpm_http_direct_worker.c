@@ -1496,23 +1496,24 @@ static void fpm_worker_register_variables(zval *array)
  * out of C. The classic executor keeps all three of #68's impossibility
  * policies: it has no event loop of its own to hand a hijacked connection to.
  *
- * The hijack follows libevent 2.2's own evws_new_session() (ws.c), reduced to
- * what the public 2.1 API can express: write the 101 into the bufferevent,
- * replace ALL of the bufferevent's callbacks (evhttp's state machine on this
- * connection is never driven again), clear the closecb and the timeouts, and
- * take ownership of the request (evhttp_request_own()) so evhttp neither
- * answers nor frees it; the request stays on the connection's request list
- * until evhttp_connection_free() unlinks it there, and is never freed by us
- * -- one small struct per WebSocket connection ever accepted, bounded by the
- * worker's recycle. The bufferevent itself is the delicate part: evhttp
- * cannot be told to release it (evcon->bufev is not reachable through the
- * public API), so the hijack takes a bufferevent reference of its own
- * (bufferevent_incref()) and calls evhttp_connection_free() itself -- which
- * drops the connection from http->connections and its (evhttp) bufferevent
- * reference, while ours keeps the bufferevent -- and its fd, and the SSL* on
- * a TLS pool -- alive until the stream's close op frees it exactly once, via
- * the same BEV_OPT_CLOSE_ON_FREE (fpm_worker_bevcb()) an ordinary connection
- * is torn down with.
+ * The hijack follows libevent 2.2's own evws_new_session() (ws.c) in intent,
+ * on the public 2.1 API -- and where 2.2's internal evhttp_start_ws_() steals
+ * evcon->bufev and frees the connection, the public API can reach neither
+ * evcon->bufev nor the connection list, and 2.1's own
+ * evhttp_connection_free() shutdown(SHUT_WR)s the fd on the way out, which
+ * would kill the WebSocket the moment it was born. So the connection stays
+ * evhttp's for the child's whole life: the hijack writes the 101 into the
+ * bufferevent, replaces ALL of its callbacks (evhttp's state machine on this
+ * connection is never driven again), clears the closecb and the timeouts, and
+ * leaves the request exactly where evhttp put it -- never answered, never
+ * driven, freed with the connection at evhttp_free(). The stream's close
+ * does shutdown(SHUT_RDWR) -- what the client sees -- and the registry below
+ * (fpm_ws_all, walked in child_main() just before that free) tells a late
+ * stream close the bufferevent is already gone. The cost, honestly stated:
+ * one bufferevent plus one request per WebSocket connection ever accepted
+ * stays allocated until the worker recycles (pm.max_requests,
+ * worker.max_lifetime, the master's own recycling), the same bound every
+ * other per-connection allocation of this executor lives under.
  *
  * Readiness: an fd watcher alone cannot see this connection's data -- the
  * bufferevent drains the descriptor into its input evbuffer, and a drained
@@ -1805,12 +1806,17 @@ static zend_string *fpm_ws_accept_key(const char *ws_key)
 	static const char guid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 	PHP_SHA1_CTX sha;
 	unsigned char digest[20];
-	char buf[128];
+	size_t key_len = strlen(ws_key);
+	char *buf = emalloc(key_len + sizeof(guid));
 
-	snprintf(buf, sizeof(buf), "%s%s", ws_key, guid);
+	/* sized to the actual key: a truncated key||GUID hashes to the wrong
+	 * Accept and the compliant client hangs on the handshake */
+	memcpy(buf, ws_key, key_len);
+	memcpy(buf + key_len, guid, sizeof(guid));
 	PHP_SHA1Init(&sha);
-	PHP_SHA1Update(&sha, (const unsigned char *) buf, strlen(buf));
+	PHP_SHA1Update(&sha, (const unsigned char *) buf, key_len + sizeof(guid) - 1);
 	PHP_SHA1Final(digest, &sha);
+	efree(buf);
 	return php_base64_encode(digest, sizeof(digest));
 }
 
@@ -1889,6 +1895,22 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 			zend_argument_value_error(2, "must be an array of strings");
 			RETURN_THROWS();
 		}
+		{
+			/* The value goes into a hand-written response head, bypassing
+			 * evhttp_add_header()'s own validation -- a \r\n in it would be
+			 * response splitting, and the value is often the client's own
+			 * Sec-WebSocket-Protocol echoed back. */
+			const char *v = Z_STRVAL_P(value);
+			size_t vlen = Z_STRLEN_P(value), vi;
+
+			for (vi = 0; vi < vlen; vi++) {
+				if (v[vi] == '\r' || v[vi] == '\n' || v[vi] == '\0') {
+					smart_str_free(&head);
+					zend_argument_value_error(2, "contains a header value with a control character");
+					RETURN_THROWS();
+				}
+			}
+		}
 		smart_str_appends(&head, ZSTR_VAL(name));
 		smart_str_appends(&head, ": ");
 		smart_str_appends(&head, Z_STR_P(value) ? Z_STRVAL_P(value) : "");
@@ -1898,8 +1920,6 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 
 	ctx = emalloc(sizeof(*ctx));
 	memset(ctx, 0, sizeof(*ctx));
-	ctx->next = fpm_ws_all;
-	fpm_ws_all = ctx;
 
 	/* evhttp owns the connection until the request is answered -- which it
 	 * never will be. The hijack follows evws_new_session()'s
@@ -1939,25 +1959,29 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 		RETURN_FALSE;
 	}
 	ctx->bev = bev;
+
+	/* Everything that can fail now happens BEFORE any of evhttp's callbacks
+	 * are replaced: a failure path below leaves the connection exactly as the
+	 * accept built it -- the request is still answerable by
+	 * fpmng_worker_respond(), the same contract every throw above keeps. */
+	stream = php_stream_alloc(&fpm_ws_ops, ctx, 0, "r+b");
+	if (!stream) {
+		smart_str_free(&head);
+		efree(ctx);
+		RETURN_FALSE;
+	}
+	ctx->stream = stream;
+	ctx->next = fpm_ws_all;
+	fpm_ws_all = ctx;
+
+	/* The point of no return, one run with no loop iteration inside: evhttp's
+	 * callbacks go, ours go in, the 101 is written. */
 	bufferevent_setcb(bev, fpm_ws_readcb, fpm_ws_writecb, fpm_ws_eventcb, ctx);
 	bufferevent_set_timeouts(bev, NULL, NULL);
 	bufferevent_enable(bev, EV_READ | EV_WRITE);
 	evhttp_connection_set_closecb(connection, NULL, NULL);
 	p->http = NULL;
 
-	stream = php_stream_alloc(&fpm_ws_ops, ctx, 0, "r+b");
-	if (!stream) {
-		smart_str_free(&head);
-		efree(ctx->watchers);
-		efree(ctx);
-		/* Nothing was written: the request is still answerable. */
-		RETURN_FALSE;
-	}
-	ctx->stream = stream;
-
-	/* The 101 goes out through the bufferevent -- ours from here on -- with
-	 * the stream already installed, so there is no window in which evhttp
-	 * could be asked to write it. */
 	bufferevent_write(bev, ZSTR_VAL(head.s), ZSTR_LEN(head.s));
 	smart_str_free(&head);
 

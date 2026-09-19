@@ -95,7 +95,7 @@ function connect(int $port)
     return $fp;
 }
 
-function readHead($fp): array
+function readHead($fp): string
 {
     $line = fgets($fp);
     if (!$line || !str_starts_with($line, 'HTTP/')) {

@@ -1711,8 +1711,21 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 		if (ws_fd >= 0 && evbuffer_get_length(bufferevent_get_output(ctx->bev)) > 0) {
 			bufferevent_setcb(ctx->bev, NULL, fpm_ws_close_after_write_cb, fpm_ws_close_after_write, ctx->bev);
 			bufferevent_enable(ctx->bev, EV_WRITE);
-		} else if (ws_fd >= 0) {
-			shutdown(ws_fd, SHUT_RDWR);
+		} else {
+			/* Disarm BEFORE the shutdown(): the ctx is efree()d below while
+			 * the bev stays evhttp's and enabled, and shutdown() makes the
+			 * fd readable (EOF pending) -- on the very next loop dispatch
+			 * fpm_ws_eventcb() would run with this ctx as its argument, on
+			 * freed heap (issue #442: confirmed worker SIGSEGV, respawn).
+			 * The bev keeps EV_WRITE enabled so a queued byte, if one is
+			 * still being flushed, lands on the wire; nothing reads it
+			 * again. Covers ws_fd < 0 too: no fd to shut down, the same
+			 * armed callbacks on a still-live bev. */
+			bufferevent_setcb(ctx->bev, NULL, NULL, NULL, NULL);
+			bufferevent_disable(ctx->bev, EV_READ | EV_WRITE);
+			if (ws_fd >= 0) {
+				shutdown(ws_fd, SHUT_RDWR);
+			}
 		}
 		ctx->eof = true;
 	}

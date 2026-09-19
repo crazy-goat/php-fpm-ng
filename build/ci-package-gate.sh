@@ -66,11 +66,12 @@ esac
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 32 of the 77 owned tests skip on either
-# of them for the same reason: their pool type needs patches/0006 inside Zend/,
-# which a distribution libphp does not carry, so they ask the binary and skip
-# (issue #230) instead of failing. That number is a property of this build path
-# and is the same everywhere.
+# The expected score, per distribution. 47 of the 136 owned tests skip on the
+# default (non-TLS) deb package and 49 on the default apk package: the six
+# http.route[] HTTP-transport tests ask their pool type and skip because a
+# distribution libphp does not support it (issue #214, issue #230's mechanism),
+# and the two Alpine-only session skips below stay. That number is a property
+# of this build path.
 #
 # It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
 # added four tests: three exercise cron, supervisor and http-direct pools and run
@@ -395,14 +396,46 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # so fpmng-pool-type-build-support.phpt and fpmng-pool-type-classic-matrix.phpt
 # keep the file counts they had. The constants are unchanged; this note is the
 # per-test record of that zero delta.
+#
+# Issue #445 is the stale-constants bug this block exists to prevent, found
+# when the v0.8.0/v0.9.0 tags failed this very gate. Thirteen tests had landed
+# since the constants above were touched, none of it a regression. Measured on
+# all four flavour x TLS rows (the poligon, php-8.5.9, 2026-09-19), the delta
+# against the 123-test constants:
+#
+#   six always-PASS (worker executor, no pool.type dependency):
+#     fpmng-http-direct-worker-closed-requests.phpt (#342),
+#     fpmng-http-direct-worker-sse-dead-client-slot.phpt (#444),
+#     fpmng-http-direct-worker-sse-retire.phpt (#342),
+#     fpmng-http-direct-worker-ws.phpt (#343),
+#     fpmng-http-direct-worker-ws-close-idle.phpt (#442),
+#     fpmng-http-direct-worker-ws-orphaned-ops.phpt (#443)
+#   one PASS with TLS, SKIP without (#294's tls package carries it):
+#     fpmng-http-direct-worker-ws-tls.phpt (#343)
+#   six always-SKIP -- http.route[] over the HTTP/1.1 client transport (#344)
+#   and its follow-ups; the package gate's libphp does not support
+#   pool.type = http (issue #214), which every one of them asks for:
+#     fpmng-http-route-http-direct.phpt,
+#     fpmng-http-route-http-direct-fail.phpt,
+#     fpmng-http-route-http-direct-stream.phpt,
+#     fpmng-http-route-header-name.phpt (#453),
+#     fpmng-http-route-xff-peer.phpt (#452),
+#     fpmng-http-route-1xx-interim.phpt (#451)
+#
+# TOTAL 123 + 13 = 136. Every row: +6 PASS (the always-pass six), +7 SKIP on
+# the non-TLS packages (the six routes plus ws-tls), +6 SKIP with TLS (the
+# six routes). deb: non-TLS 83/40 -> 89/47, TLS 89/34 -> 96/40. apk: non-TLS
+# 81/42 -> 87/49, TLS 86/37 -> 93/43. On the TLS rows EXPECT_PASS is a
+# PASS+WARN sum (issue #301): fpmng-supervisor-jitter.phpt wobbles between a
+# bare pass and a warning (issue #398), and the sum holds either way.
 EXPECT_FAIL=0
-EXPECT_TOTAL=123
+EXPECT_TOTAL=136
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=34
-    else EXPECT_PASS=83; EXPECT_SKIP=40; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=96; EXPECT_SKIP=40
+    else EXPECT_PASS=89; EXPECT_SKIP=47; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -435,8 +468,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=37
-    else EXPECT_PASS=81; EXPECT_SKIP=42; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=93; EXPECT_SKIP=43
+    else EXPECT_PASS=87; EXPECT_SKIP=49; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

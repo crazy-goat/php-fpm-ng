@@ -1645,7 +1645,6 @@ static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
 	}
 	in = bufferevent_get_input(ctx->bev);
 	buffered = evbuffer_get_length(in);
-	size_t take;
 
 	if (count > buffered) {
 		count = buffered;

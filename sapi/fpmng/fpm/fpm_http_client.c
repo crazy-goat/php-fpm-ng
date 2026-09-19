@@ -217,7 +217,12 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	 * http.trusted_proxies decides what to believe of the chain. */
 	smart_str_appends(&c->out, "X-Forwarded-For: ");
 	fpm_http_http_xff(&c->out, evhttp_find_header(in, "X-Forwarded-For"),
-		c->fwd.remote_addr[0] ? c->fwd.remote_addr : c->peer_addr);
+		/* nginx $proxy_add_x_forwarded_for appends the address THIS proxy
+		 * accepted the connection from -- the direct peer, trusted or not.
+		 * fwd.remote_addr is the resolved CLIENT (an element of the client's
+		 * own XFF chain, fpm_http_forwarded.c) and would duplicate the
+		 * client instead of naming the last hop (#439 item 2). */
+		c->peer_addr);
 	smart_str_appends(&c->out, "X-Forwarded-Proto: ");
 	smart_str_appends(&c->out, c->fwd.scheme[0] ? c->fwd.scheme : "http");
 	smart_str_appends(&c->out, "\r\n");

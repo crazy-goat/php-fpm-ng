@@ -2663,7 +2663,7 @@ static ZEND_FUNCTION(fpmng_worker_event_create)
 	zend_long type;
 	zval *stream, *callback;
 	struct fpm_worker_watcher *watcher;
-	php_stream *php_stream_handle;
+	php_stream *php_stream_handle = NULL;
 	int fd = -1;	/* php_stream_cast() writes an int for PHP_STREAM_AS_FD_FOR_SELECT */
 	short flags;
 

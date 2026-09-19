@@ -387,7 +387,8 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 						c->gw->pool, up->t->listen_address, FPM_HTTP_HEADER_NAME_MAX);
 					line = nl ? nl + 1 : end;
 					continue;
-				}				char keybuf[FPM_HTTP_HEADER_NAME_MAX + 1];
+				}
+				char keybuf[FPM_HTTP_HEADER_NAME_MAX + 1];
 
 				/* key points into the head buffer without a terminator --
 				 * copy first, compare second: strcasecmp on the raw pointer

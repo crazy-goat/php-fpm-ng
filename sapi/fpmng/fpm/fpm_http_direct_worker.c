@@ -1634,9 +1634,17 @@ static void fpm_ws_eventcb(struct bufferevent *bev, short what, void *arg)
 static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
 {
 	struct fpm_ws_ctx *ctx = stream->abstract;
-	struct evbuffer *in = bufferevent_get_input(ctx->bev);
-	size_t buffered = evbuffer_get_length(in);
+	struct evbuffer *in;
+	size_t buffered;
 	size_t take;
+
+	if (ctx->orphaned) {
+		/* Teardown already freed the bufferevent (#443): answer like a dead
+		 * stream, never touch it. */
+		return 0;
+	}
+	in = bufferevent_get_input(ctx->bev);
+	buffered = evbuffer_get_length(in);
 
 	if (count > buffered) {
 		count = buffered;
@@ -1652,7 +1660,14 @@ static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
 static ssize_t fpm_ws_write(php_stream *stream, const char *buf, size_t count)
 {
 	struct fpm_ws_ctx *ctx = stream->abstract;
-	struct evbuffer *out = bufferevent_get_output(ctx->bev);
+	struct evbuffer *out;
+
+	if (ctx->orphaned) {
+		/* The bufferevent is gone (#443): report the write failed rather
+		 * than queue bytes into freed heap. */
+		return -1;
+	}
+	out = bufferevent_get_output(ctx->bev);
 
 	/* #332's backpressure contract, on the connection's own output evbuffer:
 	 * once what is queued-but-unwritten is at the limit, refuse to queue more
@@ -1759,7 +1774,13 @@ static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg)
 static int fpm_ws_cast(php_stream *stream, int castas, void **ret)
 {
 	struct fpm_ws_ctx *ctx = stream->abstract;
-	int fd = (int) bufferevent_getfd(ctx->bev);
+	int fd;
+
+	if (ctx->orphaned) {
+		/* The fd belongs to the freed bufferevent (#443): nothing to cast. */
+		return FAILURE;
+	}
+	fd = (int) bufferevent_getfd(ctx->bev);
 
 	switch (castas) {
 		case PHP_STREAM_AS_FD:
@@ -2110,6 +2131,11 @@ static ZEND_FUNCTION(fpmng_worker_stream_has_buffered)
 	if (fpm_ws_is_ws_stream(php_stream_handle)) {
 		struct fpm_ws_ctx *ctx = php_stream_handle->abstract;
 
+		if (ctx->orphaned) {
+			/* The bufferevent was freed at teardown (#443): nothing can be
+			 * buffered any more. */
+			RETURN_FALSE;
+		}
 		RETURN_BOOL(!ctx->eof && evbuffer_get_length(bufferevent_get_input(ctx->bev)) > 0);
 	}
 	RETURN_BOOL(fpm_worker_stream_buffered(php_stream_handle) > 0);
@@ -3667,6 +3693,14 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 
 		for (ctx = fpm_ws_all; ctx; ctx = ctx->next) {
 			ctx->orphaned = true;
+			/* feof() / stream_select() liveness checks run during the
+			 * shutdown-function window below and must answer "the peer is
+			 * gone", not "alive" (#443). The stream shell still exists --
+			 * php_request_shutdown() frees it later. */
+			ctx->eof = true;
+			if (ctx->stream) {
+				ctx->stream->eof = 1;
+			}
 		}
 	}
 	evhttp_free(fw.http);

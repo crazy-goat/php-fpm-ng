@@ -66,11 +66,12 @@ esac
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 32 of the 77 owned tests skip on either
-# of them for the same reason: their pool type needs patches/0006 inside Zend/,
-# which a distribution libphp does not carry, so they ask the binary and skip
-# (issue #230) instead of failing. That number is a property of this build path
-# and is the same everywhere.
+# The expected score, per distribution. 44 of the 130 owned tests skip on the
+# default (non-TLS) deb package and 46 on the default apk package: the three
+# http.route[] HTTP-transport tests ask their pool type and skip because a
+# distribution libphp does not support it (issue #214, issue #230's mechanism),
+# and the two Alpine-only session skips below stay. That number is a property
+# of this build path.
 #
 # It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
 # added four tests: three exercise cron, supervisor and http-direct pools and run
@@ -395,14 +396,37 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # so fpmng-pool-type-build-support.phpt and fpmng-pool-type-classic-matrix.phpt
 # keep the file counts they had. The constants are unchanged; this note is the
 # per-test record of that zero delta.
+#
+# Issue #445: the constants above had gone stale for this very tree -- seven
+# tests had landed since they were last touched, and the v0.8.0 tag failed its
+# own gate on it. Measured on all four flavour x TLS rows (the poligon,
+# php-8.5.9, 2026-09-19), the delta against the 123-test constants:
+#
+#   three always-PASS (worker executor, no pool.type dependency):
+#     fpmng-http-direct-worker-closed-requests.phpt (#342),
+#     fpmng-http-direct-worker-sse-retire.phpt (#342),
+#     fpmng-http-direct-worker-ws.phpt (#343)
+#   one PASS with TLS, SKIP without (#294's tls package carries it):
+#     fpmng-http-direct-worker-ws-tls.phpt (#343)
+#   three always-SKIP -- http.route[] over the HTTP/1.1 client transport
+#   (#344); the package gate's libphp does not support pool.type = http
+#   (issue #214), which every one of them asks for:
+#     fpmng-http-route-http-direct.phpt,
+#     fpmng-http-route-http-direct-fail.phpt,
+#     fpmng-http-route-http-direct-stream.phpt
+#
+# TOTAL 123 + 7 = 130. Every row: +3 PASS (the always-pass three), +4 SKIP on
+# the non-TLS packages (the three routes plus ws-tls), +3 SKIP with TLS (the
+# three routes). deb: non-TLS 83/40 -> 86/44, TLS 89/34 -> 93/37. apk:
+# non-TLS 81/42 -> 84/46, TLS 86/37 -> 90/40.
 EXPECT_FAIL=0
-EXPECT_TOTAL=123
+EXPECT_TOTAL=130
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=89; EXPECT_SKIP=34
-    else EXPECT_PASS=83; EXPECT_SKIP=40; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=93; EXPECT_SKIP=37
+    else EXPECT_PASS=86; EXPECT_SKIP=44; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -435,8 +459,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=86; EXPECT_SKIP=37
-    else EXPECT_PASS=81; EXPECT_SKIP=42; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=90; EXPECT_SKIP=40
+    else EXPECT_PASS=84; EXPECT_SKIP=46; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

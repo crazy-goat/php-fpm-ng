@@ -1681,8 +1681,11 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 	 * through the same path userland's event_free() uses). Snapshot ids for
 	 * the same reason every other walk here does. */
 	n = ctx->watchers_n;
-	ids = n ? emalloc(n * sizeof(*ids)) : NULL;
-	if (ids) {
+	/* safe_emalloc, no NULL branch: it aborts on OOM (the same shape
+	 * fpm_worker_activate_buffered()'s id snapshot uses), so the loop below
+	 * has no null to dereference whatever n is. */
+	ids = safe_emalloc(n, sizeof(*ids), 0);
+	if (n) {
 		memcpy(ids, ctx->watchers, n * sizeof(*ids));
 	}
 	for (i = 0; i < n; i++) {
@@ -1692,9 +1695,7 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 			zend_hash_index_del(&fw.watchers, ids[i]);
 		}
 	}
-	if (ids) {
-		efree(ids);
-	}
+	efree(ids);
 	/* The bufferevent stays evhttp's -- see the comment in
 	 * fpmng_worker_upgrade() -- so tearing the connection down is a
 	 * shutdown(), not a bufferevent_free(): the client sees the connection

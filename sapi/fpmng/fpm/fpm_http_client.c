@@ -43,6 +43,7 @@
 #include <errno.h>
 
 #include "fpm_http_internal.h"
+#include "fpm_http_direct_request.h"
 #include "zlog.h"
 
 /* A response head above this bound is a protocol failure, not a big header
@@ -372,8 +373,22 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 			const char *key, *value;
 			size_t klen, vlen;
 
-			if (fpm_http_http_split_header(line, len, &key, &klen, &value, &vlen) && klen < 64) {
-				char keybuf[64];
+			/* The same bound the inbound side and the FastCGI transport honour
+			 * (#115): a name of up to FPM_HTTP_HEADER_NAME_MAX bytes is
+			 * forwarded, one longer is refused -- audibly, so the silence
+			 * that hid the old 64-byte stack bound (#439 item 3) cannot come
+			 * back. The reply has not been started yet, but the head is
+			 * already parsed, so "refuse" means drop the header and say so
+			 * in the log, the way the inbound side turns an over-long
+			 * request-header name into a 400. */
+			if (fpm_http_http_split_header(line, len, &key, &klen, &value, &vlen)) {
+				if (klen > FPM_HTTP_HEADER_NAME_MAX) {
+					zlog(ZLOG_DEBUG, "[pool %s] http: upstream '%s' sent a response header name above %d bytes, dropped",
+						c->gw->pool, up->t->listen_address, FPM_HTTP_HEADER_NAME_MAX);
+					line = nl ? nl + 1 : end;
+					continue;
+				}
+				char keybuf[FPM_HTTP_HEADER_NAME_MAX + 1];
 
 				/* key points into the head buffer without a terminator --
 				 * copy first, compare second: strcasecmp on the raw pointer

@@ -179,8 +179,10 @@ above come from one sitting on one toolchain for that reason.
 
 ## Deliberate limits
 
-- No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2,
-  WebSocket upgrades, or CONNECT/TRACE. TLS is supported — see below. Static
+- No trusted-proxy handling, gateway ACLs, gateway access log, HTTP/2, or
+  CONNECT/TRACE. WebSocket upgrades are supported on `pool.executor = worker`
+  only — [WebSocket](#websocket-poolexecutor--worker-issue-343); the classic
+  executor keeps refusing them, and TLS is supported — see below. Static
   files are too, opt-in and on the classic executor only — see below as well.
   The pool-level operator directives (`ping.path`, `pm.status_path`,
   `access.log`, `listen.allowed_clients`, `chroot`) are supported as well — see
@@ -694,7 +696,71 @@ userland bytes; the transport never parses them.
 stream *on the worker* — cross-worker publish/subscribe is a different problem
 (issue #182) and deliberately not answered here.
 
+## WebSocket (`pool.executor = worker`) (issue #343)
+
+`fpmng_worker_upgrade(int $id, array $responseHeaders): resource` turns a
+pending request into an ordinary bidirectional PHP stream:
+
+1. It validates the request is an RFC 6455 upgrade candidate — a `GET` with
+   `Upgrade: websocket` and a `Sec-WebSocket-Key` — and throws `ValueError`
+   otherwise, **before any state changes**: the request stays answerable by
+   `fpmng_worker_respond()`.
+2. It writes the `101 Switching Protocols` response straight to the
+   connection's bufferevent, with `Sec-WebSocket-Accept` computed in C
+   (`base64(sha1(key || GUID))`) and `$responseHeaders` appended after
+   validation — pass `Sec-WebSocket-Protocol` there. Hop-by-hop headers are
+   refused, the same list every response on this executor obeys.
+3. It hijacks the connection away from evhttp (the same three steps libevent
+   2.2's own `evws_new_session()` performs, reduced to the public 2.1 API),
+   wraps the bufferevent — the OpenSSL one on a TLS pool, whole, since the fd
+   carries only ciphertext — in a `php_stream` and returns it.
+
+The returned resource is a normal stream: `fread()`, `fwrite()`, `fclose()`,
+`feof()` work, and so do the existing primitives with no new API —
+`fpmng_worker_event_create(FPMNG_WORKER_READ|WRITE, $stream, $cb)` for
+readiness, `fpmng_worker_stream_has_buffered()` for the already-buffered case.
+`fclose()` tears the connection down (fd, and the `SSL*` on TLS), and the
+worker's own retirement closes it the same way.
+
+Semantics worth knowing:
+
+- **Readiness is not the raw fd.** The bufferevent drains the descriptor into
+  its input buffer, where an fd watcher cannot see it — so the watcher bound
+  to an upgraded stream is fired by the connection itself when frames arrive
+  or the output buffer drains. It behaves like a plain read watcher; it just
+  is not `select(2)` on the descriptor.
+- **Read until short.** `fread()` returns everything buffered, `''` when
+  there is none — an empty buffer is the normal state between frames, not
+  EOF. `feof()` becomes true only when the peer (or the worker) actually
+  closed. Read until `fread()` comes up short, the same rule every stream on
+  this executor obeys.
+- **Backpressure is #332's contract**: `fwrite()` returns `0` once the
+  connection's queued-but-unwritten output reaches
+  `worker.send_buffer_limit`, and the write watcher wakes the codec when it
+  drains. There is no WebSocket-specific backpressure.
+- **The hijacked connection is not a pending request**: `worker.max_pending`
+  and `worker.request_timeout` do not bound it; it counts towards
+  `pm.max_requests` like any answered request. `http.read_timeout` no longer
+  applies to it either (the bufferevent timeout is cleared at the hijack) —
+  liveness is the codec's ping/pong.
+- **Framing is userland.** Masking, fragmentation, ping/pong, close codes are
+  RFC 6455 byte manipulation, done by `amphp/websocket-server`,
+  `ratchet/rfc6455` or a codec of your own (`examples/http-direct-worker-ws/`
+  has a minimal one). On retirement the driver sees `fpmng_worker_stopping()`
+  and sends its `1001 Going Away` before the loop exits — C guarantees only
+  that the fd is closed, not that the protocol was.
+- **The gateway cannot proxy any of this** (#344 answers `Upgrade` with 501):
+  FastCGI has no way to carry a raw bidirectional stream. #68's three
+  impossibility arguments stand for the classic executor and the gateway;
+  what this section lifts is the third one, for the worker executor only —
+  the one that runs PHP next to its own event loop.
+- Because a hijacked connection never finishes its request, a WebSocket
+  server's driver does not exit on `fpmng_worker_may_exit()` alone — the
+  driver keeps its own connections until it has closed them (see the
+  example).
+
 ## Connection limits (`http.max_connections`)
+
 
 Three policies, added by issue #61, all of them **per worker**. A pool with
 `pm.max_children = 4` and `http.max_connections = 64` allows up to 256

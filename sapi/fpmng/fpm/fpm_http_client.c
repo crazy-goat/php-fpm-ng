@@ -299,8 +299,10 @@ static int fpm_http_http_split_header(const char *line, size_t len,
 /* The response head is complete: turn it into the CGI header block
  * fpm_http_start_reply() parses, decide the body framing from the raw head,
  * and start the reply. Does NOT free st->head: the caller slices the body
- * bytes that rode in with the head off it first. */
-static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
+ * bytes that rode in with the head off it first. Returns 1 when the head was
+ * a 1xx interim response -- it is discarded, the parser must reset and the
+ * real final head is still to come -- 0 when the reply was started. */
+static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 {
 	fpm_http_conn *c = up->current;
 	struct fpm_http_http_state_s *st = up->http;
@@ -347,6 +349,18 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 			}
 		}
 		line = nl ? nl + 1 : end;
+	}
+
+	/* RFC 9110 15.1 (1xx): an interim response carries no body and never
+	 * completes the exchange. #451 reproduced the opposite: the 103 head
+	 * took the no_body completion path below, became the client's final
+	 * answer, and the target's real response arrived to no request --
+	 * silently. Discard the interim head here and let the caller reset the
+	 * parser for the final head. The gateway does not relay interims to the
+	 * client: early hints would need their own framing discipline on the
+	 * evhttp reply, and nothing this transport serves depends on them. */
+	if (code >= 100 && code < 200) {
+		return 1;
 	}
 
 	if (code < 200 || code == 204 || code == 304
@@ -433,6 +447,7 @@ static void fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 	if (close_seen) {
 		st->expect_eof = 1;
 	}
+	return 0;
 }
 
 /* One completed response. fpm_http_request_done() finishes the client reply
@@ -624,20 +639,27 @@ static void fpm_http_http_data(fpm_http_upstream *up, const char *buf, size_t le
 		struct fpm_http_http_state_s *st = up->http;
 
 		if (!up->current || !st) {
-			/* bytes for a request whose client already went away: the
-			 * FastCGI transport reads and discards them record by record;
-			 * here the response has nowhere to go, so the connection goes
-			 * the way of any other dead one. */
+			/* Bytes for a request whose client already went away -- or, the
+			 * shape that hid #451 for so long: an upstream answer with no
+			 * request left to attach it to. The FastCGI transport reads and
+			 * discards them record by record; here the response has nowhere
+			 * to go, so the connection goes the way of any other dead one
+			 * -- but the operator reads WHY in the log. */
+			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' sent response bytes with no request to attach them to",
+				up->gw->pool, up->t->listen_address);
 			fpm_http_upstream_fail(up, 1);
 			break;
 		}
 		if (!st->head_done) {
 			size_t head_len = 0, total, tail, tail_off;
+			int interim;
 
 			smart_str_appendl(&st->head, buf, len);
 			smart_str_0(&st->head);
 			buf += len;
 			len = 0;
+
+rescan:
 			{
 				/* Resume the scan a few bytes into the previous buffer: a
 				 * "\r\n\r\n" straddling two read()s has its first byte up to
@@ -663,7 +685,6 @@ static void fpm_http_http_data(fpm_http_upstream *up, const char *buf, size_t le
 				}
 				break;
 			}
-			st->head_done = 1;
 			/* The tail bytes (a body fragment riding with the head) are
 			 * copied out before the head buffer is freed -- feeding the
 			 * parser a pointer into freed memory is exactly the bug the
@@ -671,10 +692,29 @@ static void fpm_http_http_data(fpm_http_upstream *up, const char *buf, size_t le
 			total = ZSTR_LEN(st->head.s);
 			tail_off = head_len + 2;
 			tail = total > tail_off ? total - tail_off : 0;
-			fpm_http_http_head_done(up, head_len);
+			interim = fpm_http_http_head_done(up, head_len);
 			if (up->dead) {
 				break;
 			}
+			if (interim) {
+				/* A 1xx interim head: head_done discarded it without
+				 * starting a reply. Shift whatever rode in behind it to the
+				 * front of the head buffer and parse on -- those bytes
+				 * belong to the FINAL head, not to a body (#451). */
+				st->head_done = 0;
+				st->head_scan = 0;
+				head_len = 0;
+				if (tail) {
+					memmove(ZSTR_VAL(st->head.s), ZSTR_VAL(st->head.s) + tail_off, tail);
+					ZSTR_VAL(st->head.s)[tail] = '\0';
+					ZSTR_LEN(st->head.s) = tail;
+					tail = 0;
+					goto rescan;
+				}
+				smart_str_free(&st->head);
+				continue;
+			}
+			st->head_done = 1;
 			/* A response whose body is already finished by its framing --
 			 * Content-Length: 0, 204/304, a HEAD request -- has nothing left
 			 * to wait for: no further byte will ever arrive on a keep-alive

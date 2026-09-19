@@ -1717,9 +1717,8 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 			 * fd readable (EOF pending) -- on the very next loop dispatch
 			 * fpm_ws_eventcb() would run with this ctx as its argument, on
 			 * freed heap (issue #442: confirmed worker SIGSEGV, respawn).
-			 * The bev keeps EV_WRITE enabled so a queued byte, if one is
-			 * still being flushed, lands on the wire; nothing reads it
-			 * again. Covers ws_fd < 0 too: no fd to shut down, the same
+			 * The buffer is empty here, so disabling EV_WRITE strands
+			 * nothing. Covers ws_fd < 0 too: no fd to shut down, the same
 			 * armed callbacks on a still-live bev. */
 			bufferevent_setcb(ctx->bev, NULL, NULL, NULL, NULL);
 			bufferevent_disable(ctx->bev, EV_READ | EV_WRITE);

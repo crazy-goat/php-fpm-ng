@@ -151,7 +151,7 @@ try {
     echo "orphaned-ops-dead-stream: ok\n";
 
     /* The retirement must have been clean -- no signal death in the log. */
-    $tester->expectNoLogPattern('exited on signal');
+    $tester->expectNoLogPattern('#exited on signal#');
     echo "clean-recycle: ok\n";
     fclose($ws);
 } finally {

@@ -299,6 +299,11 @@ static struct {
 	 * the shutdown path reads it; see fpm_worker_finish_output(). */
 	unsigned unflushed;
 	bool running;
+	/* True for the whole of fpm_worker_finish_output()'s teardown walk (issue
+	 * #444): that walk iterates fw.pending un-snapshotted, so a close callback
+	 * firing during its bounded flush wait must not reap behind its back --
+	 * zend_hash_destroy() owns whatever is left when it returns. */
+	bool finishing;
 	/* issue #331: worker.request_timeout. NULL when the directive is 0 (off) --
 	 * "off means off", not a sweep that runs and never expires anything -- and
 	 * otherwise a persistent libevent timer re-armed by
@@ -637,7 +642,7 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	 * from mid-flight (issue #332 self-review). evhttp_send_reply_end() on a
 	 * request whose connection is already gone just frees it, the same as
 	 * fpmng_worker_respond_end() completing normally would have. */
-	if (p->http && p->streaming && !evhttp_request_get_connection(p->http)) {
+	if (p->http && !evhttp_request_get_connection(p->http)) {
 		evhttp_send_reply_end(p->http);
 	}
 	/* issue #339: closecb is only ever wired to this function while p->http
@@ -667,6 +672,20 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	}
 	p->http = NULL;
 	fpm_worker_notify();
+	/* issue #444: a driver that drops the id the moment
+	 * fpmng_worker_closed_requests() reports it never responds for it -- the
+	 * zombie {streaming = true, http = NULL} entry would then hold its
+	 * worker.max_pending slot for the worker's whole life, and the churn of
+	 * disconnected subscribers would burn the accept ceiling into 503s and a
+	 * forced recycle (confirmed, zero real load). Reap here. Safe because
+	 * this callback fires from the event loop, never inside a walk that
+	 * matters: the timeout sweep snapshots ids (and tolerates mid-sweep
+	 * reaps), and fpm_worker_finish_output()'s un-snapshotted teardown walk
+	 * is covered by fw.finishing. The ring record above happens first, so
+	 * fpmng_worker_closed_requests() still reports the id. */
+	if (!fw.finishing) {
+		fpm_worker_reap(p);
+	}
 }
 
 /* THE ACCEPT CEILING (issue #338)
@@ -3648,7 +3667,9 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	/* After the watchers, never before: fpm_worker_finish_output() drives
 	 * the base itself, and a userland watcher still registered there would
 	 * call into PHP after the worker script has already returned. */
+	fw.finishing = true;
 	fpm_worker_finish_output();
+	fw.finishing = false;
 	/* After finish_output(), which may still drive the base and therefore let
 	 * this fire once more; before event_base_free() below, which the event
 	 * must be freed ahead of. Harmless either way since fw.pending is still

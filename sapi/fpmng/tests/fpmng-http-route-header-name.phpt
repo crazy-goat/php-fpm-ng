@@ -94,7 +94,7 @@ try {
     check($body === 'body', 'body intact: ' . var_export($body, true));
 
     foreach (['63' => true, '64' => true, '1024' => true, '1025' => false] as $len => $expect) {
-        $name = 'x-test-' . str_repeat('a', max(0, (int) $len - 10)) . $len;
+        $name = 'x-test-' . str_repeat('a', max(0, (int) $len - 10)) . sprintf('%03d', (int) $len);
         $present = isset($headers[$name]) && $headers[$name] === $len;
         check($present === $expect,
             "header name of $len bytes: " . ($expect ? 'expected present' : 'expected dropped')

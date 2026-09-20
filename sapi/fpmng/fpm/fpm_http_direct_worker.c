@@ -375,8 +375,17 @@ const char *const fpm_http_direct_worker_rejects[] = {
 	 * report and no request to count. A status page would show one process
 	 * stuck in one state and an access log would have nothing to time, so
 	 * both are refused rather than answered with placeholders. The classic
-	 * executor supports all of these. */
-	"operator.status_path", "operator.status", "ping.path", "ping.response",
+	 * executor supports all of these.
+	 *
+	 * ping.path/ping.response are NOT in this list any more (issue #387):
+	 * ping needs none of that per-request accounting, it is a literal path
+	 * match in the connection handler, and the worker executor already shares
+	 * fpm_http_direct_ops.c (which is where ops->ping_path is filled in). Rule
+	 * 1 of docs/gateway.md says ping is answered on the request listener by the
+	 * process serving requests there; the worker has one and serves requests,
+	 * so refusing ping was the one place that rule did not hold. The status
+	 * page stays refused on purpose -- see docs/http-direct.md. */
+	"operator.status_path", "operator.status",
 	"access.log", "access.format", "access.suppress_path",
 	/* issue #61. http.max_connections is enforced by keeping the listener
 	 * disabled while the worker is at its limit, which is the accept gate of
@@ -874,6 +883,25 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 			fpm_worker_notify();
 		}
 		return;
+	}
+	/* ping.path/ping.response, issue #387. Answered here, after the
+	 * saturation/stopping 503 above and ahead of the userland queue, exactly
+	 * where the classic executor answers it (fpm_http_direct.c): a pool that
+	 * has stopped accepting work is not healthy, so answering "pong" there
+	 * would be the one wrong answer this endpoint can give. The response goes
+	 * straight onto the wire and never becomes a fpmng_worker_next_request()
+	 * entry, so ping touches neither the scoreboard's per-request accounting
+	 * nor worker.max_pending. fpm_http_direct_ops_try_local() is the shared
+	 * literal-match helper; ops->ping_path is already populated for this
+	 * executor (fpm_http_direct_ops_init_child()). */
+	{
+		int local_status;
+		size_t local_bytes;
+
+		if (fpm_http_direct_ops_try_local(fw.ops, http, &local_status, &local_bytes)) {
+			fpm_http_direct_ops_local(fw.ops);
+			return;
+		}
 	}
 	if (!fpm_http_direct_request_acceptable(http)) {
 		fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_BAD_REQUEST);

@@ -1476,11 +1476,24 @@ What differs from a fastcgi pool:
 
 - `access.suppress_path[]` matches the same request path.
 
-Under `pool.executor = worker` all three of `ping.path`, `operator.status_path` and
+Under `pool.executor = worker`, `operator.status_path`/`operator.status` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
 that executor calls `fpm_request_accepting(false)` once for the life of the
 child, so there is no per-request stage, duration, CPU or peak memory to
 report. Refusing the directive is better than answering it with placeholders.
+Issue #387 decided the status page **stays refused** here rather than being
+reduced to a second, differently-shaped page — which is exactly what #275
+avoided when it moved http-direct's page unchanged. `operator.metrics_path` is
+the honest view of this executor.
+
+`ping.path`/`ping.response` are **supported** since issue #387. Ping needs none
+of that per-request accounting — it is a literal path match in the connection
+handler — and this executor has a request listener and serves requests, so
+refusing it was the one place `docs/gateway.md`'s first rule ("ping is answered
+on the request listener, by a process that serves requests there") did not
+hold. It is answered after the saturation `503` and ahead of the userland
+queue, so it touches neither the scoreboard's per-request accounting nor
+`worker.max_pending`.
 
 That does not make `operator.metrics_path` (which this executor does not reject)
 untruthful. Since issue #333 its `requests` total is a real count, incremented

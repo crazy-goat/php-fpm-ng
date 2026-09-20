@@ -27,10 +27,12 @@ Verified 2026-09-07 against `sapi/fpmng`:
 - `http` accepts an optional `pool.executor` (default `classic`); the `fiber`
   and `async` executors moved to branch `async` (issue #373) and are not
   available on `main`
-- metrics: `pm.status_path` (JSON) and `pm.metrics_path` (Prometheus) expose
-  one pool on an operator listener named by `pm.status_listen` /
-  `pm.metrics_listen`, one target per pool (`docs/operator-endpoint.md`);
-  application metrics from PHP
+- metrics: `operator.status_path` (JSON) and `operator.metrics_path`
+  (Prometheus) expose one pool on an operator listener named by
+  `operator.status_listen` / `operator.metrics_listen`, one target per pool
+  (`docs/operator-endpoint.md`); `operator.metrics` / `operator.status` are
+  shorthands for `/metrics/<pool>` / `/status/<pool>`; application metrics from
+  PHP
   (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
   `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
 - the `fiber` and `async` executors live on branch `async` of this repository
@@ -54,7 +56,7 @@ Where things stand today:
 | --- | --- |
 | `pool.type = fastcgi`, `http`, `supervisor`, `cron` | supported |
 | `pool.type = http-direct` with the default `classic` executor | supported |
-| the operator endpoint (`pm.status_path`, `pm.metrics_path`) | supported |
+| the operator endpoint (`operator.status_path`, `operator.metrics_path`) | supported |
 | `pool.type = http-direct` with `pool.executor = worker` | beta |
 | TLS termination (`--enable-fpmng-tls`, `http.tls_*`) | beta |
 | ACME certificate issuance (`--enable-fpmng-acme`) | beta |
@@ -97,8 +99,9 @@ port nobody answers on.
 
 - **`pool.type = status` is gone** (#278). A pool that reported on every other
   pool from a listener of its own is what the operator endpoint (#274) already
-  is. Put `pm.status_path` and `pm.metrics_path` on the pools you want to
-  watch, pointing `pm.status_listen` at the address the status pool used. The
+  is. Put `operator.status_path` and `operator.metrics_path` on the pools you
+  want to watch, pointing `operator.status_listen` at the address the status
+  pool used. The
   scraper keeps its port and gains one target per pool instead of one target
   carrying all of them; the JSON body keeps its `{"pools":[…]}` shape, one
   element long. Worked example:
@@ -109,6 +112,17 @@ port nobody answers on.
   the types with a web server in front of them do not have one. On those, keep
   `pm.status_path` on the pool's own socket and restrict it at that web server,
   which is where access to a path is already decided.
+
+## Upgrading to v0.10.0: the operator directives moved to `operator.*`
+
+Since issue #386 the operator endpoint's directives are `operator.status_path`,
+`operator.metrics_path`, `operator.status_listen` and `operator.metrics_listen`,
+with `operator.status` / `operator.metrics` as shorthands for
+`/status/<pool>` / `/metrics/<pool>`. The old `pm.` spellings are **refused by
+name**, not aliased: an affected configuration does not start. `pm.status_path`
+is the one name that stays, and only on `pool.type = fastcgi`, where it keeps
+its upstream meaning. See
+[`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
 ## Plan
 
@@ -125,9 +139,10 @@ purpose — the script sets the pace, and a script that returns instead of
 looping now says so in the log. Who decides the interval, and the fast-restart
 warning: [`docs/supervisor.md`](docs/supervisor.md).
 
-A `cron`, `supervisor`, `http` or `http-direct` pool answers `pm.status_path`
-and `pm.metrics_path` on an operator listener of its own rather than on the
-socket carrying its traffic — the directives, the default of `127.0.0.1:8080`,
+A `cron`, `supervisor`, `http` or `http-direct` pool answers
+`operator.status_path`
+and `operator.metrics_path` on an operator listener of its own rather than on the
+socket carrying its traffic — the directives, the default of `127.0.0.1:9253`,
 the collision rule and what each page contains are in
 [`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 

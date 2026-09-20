@@ -61,7 +61,7 @@ static int fpm_pool_type_http_direct_init(struct fpm_worker_pool_s *wp)
 }
 
 /* The classic executor only (issue #59): the shared segment behind
- * pm.status_path counts what the children do, so it has to exist before the
+ * the status page counts what the children do, so it has to exist before the
  * first of them forks. */
 static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
 {
@@ -75,17 +75,17 @@ static int fpm_pool_type_http_direct_classic_init(struct fpm_worker_pool_s *wp)
  * behind fpmng_pool_worker_pending/fpmng_pool_worker_watchers (fpm_pool_type_s.
  * live_gauges below) need to exist before the first child forks, same
  * reasoning as fpm_pool_type_http_direct_classic_init() above for
- * pm.status_path's segment -- and the same reason this is its own function
+ * the status page's segment -- and the same reason this is its own function
  * rather than a branch in either of those: an executor variant repeats
  * everything the master must do before fork instead of overriding a shared
  * one.
  *
  * Issue #339: this executor also allocates fpm_http_direct_ops's per-child
- * shm table, the same one the classic executor uses for pm.status_path.
- * That table is not tied to pm.status_path itself -- it is just a per-slot
+ * shm table, the same one the classic executor uses for its status page.
+ * That table is not tied to the status page itself -- it is just a per-slot
  * counters/gauges block keyed by scoreboard index -- and the worker executor
- * needs it for the fpmng_pool_worker_* per-slot metrics on pm.metrics_path.
- * pm.status_path stays rejected for this executor (see
+ * needs it for the fpmng_pool_worker_* per-slot metrics on operator.metrics_path.
+ * operator.status_path stays rejected for this executor (see
  * fpm_http_direct_worker_rejects below); only the underlying table is now
  * shared between both executors. */
 static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
@@ -116,8 +116,7 @@ static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
 /* issue #331: the two directives worker. is a prefix for. FPM_HTTP_DIRECT_REJECTS_COMMON
  * (fpm_http_direct_request.h) rejects the whole "worker." namespace for every
  * http-direct pool, including this one -- these are the exact names carved
- * back out, the same mechanism fpm_pool_type_s.reject_exceptions documents
- * for pm.status_path/ping.* on cron/supervisor. */
+ * back out, the same mechanism fpm_pool_type_s.reject_exceptions documents. */
 static const char *const fpm_http_direct_worker_accepts[] = {
 	"worker.max_pending",
 	"worker.request_timeout",
@@ -163,14 +162,14 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.baseline_counter             = "requests",
 	/* Both, like everything else here, are repeated rather than inherited: an
 	 * executor variant replaces the whole type struct. The renderer has no
-	 * effect on this executor yet -- it still rejects pm.status_path itself
-	 * (see fpm_http_direct_worker_rejects and issue #59), so no route is ever
-	 * registered for it -- but it is the same page from the same shared
+	 * effect on this executor yet -- it still rejects operator.status_path
+	 * itself (see fpm_http_direct_worker_rejects and issue #59), so no route is
+	 * ever registered for it -- but it is the same page from the same shared
 	 * counters, so it is set here rather than left for whoever lifts that
 	 * reject to discover it missing. */
 	.operator_endpoint            = 1,
 	.operator_status              = fpm_http_direct_ops_render_status,
-	/* Issue #339: the fpmng_pool_worker_* per-slot metrics on pm.metrics_path.
+	/* Issue #339: the fpmng_pool_worker_* per-slot metrics on operator.metrics_path.
 	 * Unlike live_gauges below (a fixed 4-scalar array), these are per-slot
 	 * and labeled (pool, slot, reason, type), so they need the same
 	 * write-into-a-buffer shape operator_status above already uses rather
@@ -283,7 +282,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.executors              = fpm_http_executors,
 		.operator_endpoint      = 1,
 		/* Issue #341: fpmng_gateway_{upstreams_used,upstreams_max,
-		 * requests_total,rejected_total}{pool,target} on pm.metrics_path, one
+		 * requests_total,rejected_total}{pool,target} on operator.metrics_path, one
 		 * row per http.route[] target (or the pool's own listener when
 		 * http.route[] is unset) -- see fpm_http.h. Write-into-a-buffer shape,
 		 * same reason the worker executor's per-slot hook below uses it: a
@@ -349,11 +348,10 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.publishes_acme_challenges = 1,	/* see the same flag on "cron" below */
 		.operator_endpoint       = 1,
 		.rejects                 = fpm_pool_supervisor_rejects,
-		/* supervisor rejects the whole "pm." namespace, for a good reason that
-		 * stays: its pm.* is generated from supervisor.processes. The operator
-		 * endpoint's directives live under the same prefix (#273) and are the
-		 * exception -- see .reject_exceptions and issue #283. */
-		.reject_exceptions       = fpm_operator_endpoint_directives,
+		/* Issue #386: the operator endpoint's directives left the "pm."
+		 * namespace, so there is nothing left to carve out of it -- "pm."
+		 * here matches only the process-manager directives this type
+		 * generates from supervisor.processes. */
 		.validate                = fpm_pool_supervisor_validate,
 		.init_main               = fpm_pool_supervisor_init_main,
 		.child_main              = fpm_pool_supervisor_child_main,
@@ -384,7 +382,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.publishes_acme_challenges = 1,
 		.operator_endpoint       = 1,
 		.rejects                 = fpm_pool_cron_rejects,
-		.reject_exceptions       = fpm_operator_endpoint_directives,	/* as supervisor above */
+		/* Issue #386: no operator.* carve-out -- those directives moved out of
+		 * "pm.", so "pm." here is the process-manager-only namespace it says
+		 * it is (as supervisor above). */
 		.validate                = fpm_pool_cron_validate,
 		.init_main               = fpm_pool_cron_init_main,
 		.child_main              = fpm_pool_cron_child_main,
@@ -572,7 +572,7 @@ static const struct {
 	const char *replacement;
 } fpm_pool_types_retired[] = {
 	{ "status",
-	  "set 'pm.status_path' and 'pm.metrics_path' on the pool you want to watch "
+	  "set 'operator.status_path' and 'operator.metrics_path' on the pool you want to watch "
 	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
 	{ "fastcgi-ng",
 	  "it was removed in 0.9.0 (issue #376): the optimized transport it selected lives on under "

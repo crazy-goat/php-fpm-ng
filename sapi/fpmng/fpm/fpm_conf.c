@@ -58,6 +58,7 @@ static char *fpm_conf_set_time(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_bytes(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_boolean(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_string(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_renamed_operator_directive(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
@@ -153,9 +154,20 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "pm.process_idle_timeout",   &fpm_conf_set_time,        WPO(pm_process_idle_timeout) },
 	{ "pm.max_requests",           &fpm_conf_set_integer,     WPO(pm_max_requests) },
 	{ "pm.status_path",            &fpm_conf_set_string,      WPO(pm_status_path) },
-	{ "pm.status_listen",          &fpm_conf_set_string,      WPO(pm_status_listen) },
-	{ "pm.metrics_path",           &fpm_conf_set_string,      WPO(pm_metrics_path) },
-	{ "pm.metrics_listen",         &fpm_conf_set_string,      WPO(pm_metrics_listen) },
+	/* Issue #386: the operator listener's directives left the "pm." namespace.
+	 * These three old names are still PARSED -- so a config that uses one is
+	 * refused by name with the replacement, instead of "unknown entry" -- but
+	 * they store nothing. The refusal itself is a pool-level check in
+	 * fpm_conf_process_all_pools(), where the resolved pool.type can be read. */
+	{ "pm.status_listen",          &fpm_conf_set_renamed_operator_directive, 0 },
+	{ "pm.metrics_path",           &fpm_conf_set_renamed_operator_directive, 0 },
+	{ "pm.metrics_listen",         &fpm_conf_set_renamed_operator_directive, 0 },
+	{ "operator.status_path",      &fpm_conf_set_string,      WPO(operator_status_path) },
+	{ "operator.status_listen",    &fpm_conf_set_string,      WPO(operator_status_listen) },
+	{ "operator.metrics_path",     &fpm_conf_set_string,      WPO(operator_metrics_path) },
+	{ "operator.metrics_listen",   &fpm_conf_set_string,      WPO(operator_metrics_listen) },
+	{ "operator.metrics",          &fpm_conf_set_boolean,     WPO(operator_metrics) },
+	{ "operator.status",           &fpm_conf_set_boolean,     WPO(operator_status) },
 	{ "ping.path",                 &fpm_conf_set_string,      WPO(ping_path) },
 	{ "ping.response",             &fpm_conf_set_string,      WPO(ping_response) },
 	{ "access.log",                &fpm_conf_set_string,      WPO(access_log) },
@@ -334,6 +346,19 @@ static char *fpm_conf_set_string(zval *value, void **config, intptr_t offset) /*
 		return "Can't use '$pool' when the pool is not defined";
 	}
 
+	return NULL;
+}
+/* }}} */
+
+/* The renamed operator directives (issue #386). Parsed so that a config using
+ * one reaches the pool-level refusal in fpm_conf_process_all_pools(), which can
+ * name the replacement AND the resolved pool.type; this setter only keeps the
+ * value out of the way. It is never NULL-checked because it stores nothing. */
+static char *fpm_conf_set_renamed_operator_directive(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	(void) value;
+	(void) config;
+	(void) offset;
 	return NULL;
 }
 /* }}} */
@@ -1068,9 +1093,10 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->listen_mode);
 	free(wpc->listen_allowed_clients);
 	free(wpc->pm_status_path);
-	free(wpc->pm_status_listen);
-	free(wpc->pm_metrics_path);
-	free(wpc->pm_metrics_listen);
+	free(wpc->operator_status_path);
+	free(wpc->operator_status_listen);
+	free(wpc->operator_metrics_path);
+	free(wpc->operator_metrics_listen);
 	free(wpc->ping_path);
 	free(wpc->ping_response);
 	free(wpc->access_log);
@@ -1258,6 +1284,44 @@ static int fpm_evaluate_full_path(char **path, struct fpm_worker_pool_s *wp, cha
 }
 /* }}} */
 
+/* Issue #386: the operator endpoint's directives left the "pm." namespace that
+ * never described them. Every old name is refused by name with its replacement
+ * -- not aliased, because two names for one mechanism is the disease the rename
+ * removes. The three listen/path names were never about the process manager and
+ * are refused on every type; pm.status_path keeps upstream's meaning on
+ * pool.type = fastcgi and is refused everywhere else.
+ *
+ * Called BEFORE fpm_pool_type_check_directives() so that cron and supervisor,
+ * which reject the whole "pm." prefix, report the rename rather than their
+ * generic "is not supported". */
+static int fpm_conf_reject_renamed_operator_directives(struct fpm_worker_pool_s *wp,
+	const struct fpm_pool_type_s *type)
+{
+	static const struct { const char *old; const char *new_; } renamed[] = {
+		{ "pm.status_listen",  "operator.status_listen" },
+		{ "pm.metrics_path",   "operator.metrics_path" },
+		{ "pm.metrics_listen", "operator.metrics_listen" },
+	};
+	size_t i;
+
+	for (i = 0; i < sizeof(renamed) / sizeof(renamed[0]); i++) {
+		if (fpm_conf_directive_was_set(wp->config, renamed[i].old)) {
+			zlog(ZLOG_ALERT, "[pool %s] '%s' was renamed to '%s' (issue #386); update the "
+				"configuration", wp->config->name, renamed[i].old, renamed[i].new_);
+			return -1;
+		}
+	}
+
+	if (fpm_conf_directive_was_set(wp->config, "pm.status_path") && type->operator_endpoint) {
+		zlog(ZLOG_ALERT, "[pool %s] on pool.type = %s 'pm.status_path' was renamed to "
+			"'operator.status_path' (issue #386); 'pm.status_path' now has upstream's meaning "
+			"on pool.type = fastcgi only", wp->config->name, type->name);
+		return -1;
+	}
+
+	return 0;
+}
+
 static int fpm_conf_process_all_pools(void)
 {
 	struct fpm_worker_pool_s *wp, *wp2;
@@ -1307,6 +1371,12 @@ static int fpm_conf_process_all_pools(void)
 				zlog(ZLOG_ERROR, "[pool %s] the prefix '%s' does not exist or is not a directory", wp->config->name, wp->config->prefix);
 				return -1;
 			}
+		}
+
+		/* Issue #386: old operator directive names, refused by name before the
+		 * type's own reject list can report them generically. */
+		if (0 > fpm_conf_reject_renamed_operator_directives(wp, type)) {
+			return -1;
 		}
 
 		/* Directives unsupported by this type — reject, do not ignore. */
@@ -1434,19 +1504,20 @@ static int fpm_conf_process_all_pools(void)
 			config->pm_max_spare_servers = 0;
 		}
 
-		/* status and metrics.
+		/* status and metrics -- the operator endpoint's directives (issue #386:
+		 * they left the "pm." namespace, which never described them).
 		 *
-		 * On a type that carries its own operator endpoint (#273, #274) the two
-		 * pm.*_listen directives say where THAT endpoint binds, and the pool
+		 * On a type that carries its own operator endpoint (#273, #274) the
+		 * operator.* directives say where THAT endpoint binds, and the pool
 		 * they bind is created by fpm_operator_endpoint.c.
 		 *
-		 * On fastcgi there is no such listener, on purpose:
-		 * those types have a web server in front of them, which is where an
-		 * operator already restricts who may reach a path. pm.status_path
-		 * therefore keeps its upstream meaning there -- answered on the pool's
-		 * own FastCGI socket -- and the two addresses have nothing to name.
-		 * Whether a type has the listener is a flag on the type and never a
-		 * name compared here; see fpm_pool_type_s.operator_endpoint. */
+		 * On fastcgi there is no such listener, on purpose: it has a real web
+		 * server in front, which is where an operator already restricts who may
+		 * reach a path. pm.status_path therefore keeps its upstream meaning
+		 * there -- answered on the pool's own FastCGI socket -- and every
+		 * operator.* directive is refused, because there is no endpoint to
+		 * name. Whether a type has the listener is a flag on the type and never
+		 * a name compared here; see fpm_pool_type_s.operator_endpoint. */
 		if (type->operator_endpoint) {
 			if (0 > fpm_operator_endpoint_configure(wp, type)) {
 				return -1;
@@ -1463,23 +1534,21 @@ static int fpm_conf_process_all_pools(void)
 			 * restrict pm.status_path at the web server that is already in
 			 * front, so the error says so rather than starting a master that
 			 * quietly no longer has the pool the operator is scraping. */
-			static const char *const unsupported[] = { "pm.status_listen", "pm.metrics_listen", "pm.metrics_path" };
-			const char *const values[] = {
-				wp->config->pm_status_listen,
-				wp->config->pm_metrics_listen,
-				wp->config->pm_metrics_path
+			static const char *const unsupported[] = {
+				"operator.status_path", "operator.status_listen",
+				"operator.metrics_path", "operator.metrics_listen",
+				"operator.metrics", "operator.status"
 			};
 			size_t i;
 
 			for (i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
-				if (!values[i] || !*values[i]) {
-					continue;
+				if (fpm_conf_directive_was_set(wp->config, unsupported[i])) {
+					zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s: that type has no "
+						"operator listener of its own, because it has a web server in front of it -- "
+						"keep 'pm.status_path' on the pool's own socket and restrict it there",
+						wp->config->name, unsupported[i], type->name);
+					return -1;
 				}
-				zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s: that type has no "
-					"operator listener of its own, because it has a web server in front of it -- "
-					"keep 'pm.status_path' on the pool's own socket and restrict it there",
-					wp->config->name, unsupported[i], type->name);
-				return -1;
 			}
 		}
 
@@ -2338,9 +2407,12 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\tpm.process_idle_timeout = %d",    wp->config->pm_process_idle_timeout);
 		zlog(ZLOG_NOTICE, "\tpm.max_requests = %d",            wp->config->pm_max_requests);
 		zlog(ZLOG_NOTICE, "\tpm.status_path = %s",             STR2STR(wp->config->pm_status_path));
-		zlog(ZLOG_NOTICE, "\tpm.metrics_path = %s",            STR2STR(wp->config->pm_metrics_path));
-		zlog(ZLOG_NOTICE, "\tpm.metrics_listen = %s",          STR2STR(wp->config->pm_metrics_listen));
-		zlog(ZLOG_NOTICE, "\tpm.status_listen = %s",           STR2STR(wp->config->pm_status_listen));
+		zlog(ZLOG_NOTICE, "\toperator.status_path = %s",       STR2STR(wp->config->operator_status_path));
+		zlog(ZLOG_NOTICE, "\toperator.status_listen = %s",     STR2STR(wp->config->operator_status_listen));
+		zlog(ZLOG_NOTICE, "\toperator.metrics_path = %s",      STR2STR(wp->config->operator_metrics_path));
+		zlog(ZLOG_NOTICE, "\toperator.metrics_listen = %s",    STR2STR(wp->config->operator_metrics_listen));
+		zlog(ZLOG_NOTICE, "\toperator.metrics = %d",           wp->config->operator_metrics);
+		zlog(ZLOG_NOTICE, "\toperator.status = %d",            wp->config->operator_status);
 		zlog(ZLOG_NOTICE, "\tping.path = %s",                  STR2STR(wp->config->ping_path));
 		zlog(ZLOG_NOTICE, "\tping.response = %s",              STR2STR(wp->config->ping_response));
 		zlog(ZLOG_NOTICE, "\taccess.log = %s",                 STR2STR(wp->config->access_log));

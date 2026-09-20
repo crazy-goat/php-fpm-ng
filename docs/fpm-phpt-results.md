@@ -19,8 +19,8 @@ The final run covered all 150 discovered tests:
 Four tests in the inventory below — `status-listen.phpt`,
 `status-listen-expose-php-on.phpt`, `status-listen-expose-php-off.phpt` and
 `status-ping.phpt` — passed when this table was measured and fail now. Issue
-#278 removed `pm.status_listen` and the shared status pool they configure; a
-status page is a `pm.status_path` on the pool it describes, served from that
+#278 removed `operator.status_listen` and the shared status pool they configure; a
+status page is an `operator.status_path` on the pool it describes, served from that
 pool's own or operator listener. The behaviour they test is gone on purpose,
 so they can only fail.
 

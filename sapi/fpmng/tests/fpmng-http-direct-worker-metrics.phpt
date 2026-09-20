@@ -7,7 +7,7 @@ fpm-ng: worker.executor honest metrics -- requests counted, pending/watcher gaug
 require_once "tester.inc";
 require_once "fpmng-operator.inc";
 
-/* Issue #333. Before this, `pm.metrics_path` on a `pool.executor = worker`
+/* Issue #333. Before this, `operator.metrics_path` on a `pool.executor = worker`
  * pool published `requests_total` without one call ever having incremented it
  * -- fpm_scoreboard_update() was never reached from this executor's request
  * path -- and had no way at all to say how many requests were mid-flight or
@@ -18,7 +18,7 @@ require_once "fpmng-operator.inc";
  * status page -- this is the sibling file for the worker executor's metrics
  * page, which that test explicitly does not cover.
  *
- * The page is read from the operator listener (pm.metrics_listen), not from
+ * The page is read from the operator listener (operator.metrics_listen), not from
  * the pool's own: the scrape is then none of the requests this test counts. */
 $root = sys_get_temp_dir() . '/fpmng-worker-metrics-' . getmypid();
 @mkdir($root, 0700, true);
@@ -129,8 +129,8 @@ http.max_body = 1M
 catch_workers_output = yes
 php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
-pm.metrics_listen = $ops
-pm.metrics_path = /metrics
+operator.metrics_listen = $ops
+operator.metrics_path = /metrics
 CFG;
 
 function expect(string $what, $actual, $expected): void

@@ -70,8 +70,8 @@ pool.type = cron
 cron.schedule = * * * * *
 cron.script = $work/job.php
 cron.expect_within = 1
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /tick-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /tick-status
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');

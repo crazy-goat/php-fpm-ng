@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: operator endpoint configuration -- collisions, the internal type, and the pm. carve-out (issues #274, #283)
+fpm-ng: operator endpoint configuration -- collisions, the internal type, the operator.* namespace and its old pm. spellings (issues #274, #283, #386)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--
@@ -81,25 +81,25 @@ EOT;
  * way to tell which pool answered. */
 expectRejected(
     'same path on one listener',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
-          . $cron('b', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status"),
-    ['collides with pool', "pm.status_path = /status"]
+    $head . $cron('a', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status")
+          . $cron('b', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status"),
+    ['collides with pool', "operator.status_path = /status"]
 );
 
 /* The same path on two different listeners is not a collision -- the triple
  * differs in the address. Each endpoint reports on its own pool. */
 expectAccepted(
     'same path on two listeners',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op1]}}\npm.status_path = /status")
-          . $cron('b', "pm.status_listen = {{ADDR[op2]}}\npm.status_path = /status")
+    $head . $cron('a', "operator.status_listen = {{ADDR[op1]}}\noperator.status_path = /status")
+          . $cron('b', "operator.status_listen = {{ADDR[op2]}}\noperator.status_path = /status")
 );
 
 /* One pool may take both formats from one address: the paths differ, so the
  * two routes are two URLs. */
 expectAccepted(
     'both formats on one listener',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status\n"
-                     . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics")
+    $head . $cron('a', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status\n"
+                     . "operator.metrics_listen = {{ADDR[op]}}\noperator.metrics_path = /metrics")
 );
 
 /* ...and one pool may not take both formats from ONE path, which is the same
@@ -109,9 +109,9 @@ expectAccepted(
  * operator their pool collides with itself (issue #276). */
 expectRejected(
     'both formats on one path',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /both\n"
-                     . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /both"),
-    ['pm.status_path and pm.metrics_path are both /both',
+    $head . $cron('a', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /both\n"
+                     . "operator.metrics_listen = {{ADDR[op]}}\noperator.metrics_path = /both"),
+    ['operator.status_path and operator.metrics_path are both /both',
      'the status page and the metrics page need different paths']
 );
 
@@ -120,8 +120,8 @@ expectRejected(
  * /metrics on every port gets to have that. */
 expectAccepted(
     'both formats on one path, two listeners',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op1]}}\npm.status_path = /page\n"
-                     . "pm.metrics_listen = {{ADDR[op2]}}\npm.metrics_path = /page")
+    $head . $cron('a', "operator.status_listen = {{ADDR[op1]}}\noperator.status_path = /page\n"
+                     . "operator.metrics_listen = {{ADDR[op2]}}\noperator.metrics_path = /page")
 );
 
 /* The listener pool is created by fpm-ng and is not a type anyone can name.
@@ -133,45 +133,81 @@ expectRejected(
     ["unknown pool.type 'operator-endpoint'", 'known types: ']
 );
 
-/* Issue #283, both ways round on one type: cron rejects the whole "pm." prefix,
- * and the four operator directives are carved out of that reject. The carve-out
- * has to be exact -- a directive under the same prefix that was never carved out
- * is still refused, or the mechanism is just a hole in the reject list. */
+/* Issue #386: the operator directives left the "pm." namespace, so cron and
+ * supervisor need no carve-out any more -- "pm." is refused whole, and the
+ * operator.* names are accepted because nothing rejects them. */
 expectAccepted(
-    'carved-out pm. directive on cron',
-    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
+    'operator directive on cron',
+    $head . $cron('a', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status")
 );
 expectRejected(
     'other pm. directive on cron',
     $head . $cron('a', "pm.max_children = 4"),
     ["'pm.max_children' is not supported by pool.type = cron"]
 );
-
-/* supervisor carries the same reject list and the same carve-out, and the
- * metrics pair goes through it as well as the status pair -- four directives
- * were carved out, so all four have to be asked for somewhere. */
 expectAccepted(
-    'carved-out metrics directives on supervisor',
+    'operator metrics flag on supervisor',
     $head . "\n[sup]\npool.type = supervisor\nsupervisor.script = /dev/null\n"
-          . "supervisor.restart = never\n"
-          . "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics\n"
+          . "supervisor.restart = never\noperator.metrics = on\n"
+);
+
+/* The old names are refused by name with the replacement, on any type -- not
+ * aliased. cron is the interesting one because it also rejects "pm.": the
+ * rename message must win over the generic reject. */
+expectRejected(
+    'old pm.metrics_path on cron',
+    $head . $cron('a', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics"),
+    ["'pm.metrics_path' was renamed to 'operator.metrics_path' (issue #386)"]
 );
 expectRejected(
-    'other pm. directive on supervisor',
-    $head . "\n[sup]\npool.type = supervisor\nsupervisor.script = /dev/null\n"
-          . "supervisor.restart = never\npm.max_children = 4\n",
-    ["'pm.max_children' is not supported by pool.type = supervisor"]
+    'old pm.status_path on cron',
+    $head . $cron('a', "pm.status_path = /status"),
+    ["'pm.status_path' was renamed to 'operator.status_path' (issue #386)"]
+);
+expectRejected(
+    'old pm.status_listen on cron',
+    $head . $cron('a', "pm.status_listen = {{ADDR[op]}}\noperator.status_path = /status"),
+    ["'pm.status_listen' was renamed to 'operator.status_listen' (issue #386)"]
+);
+
+/* Both spellings of one page at once is refused naming both directives. */
+expectRejected(
+    'operator.metrics flag and path together',
+    $head . $cron('a', "operator.metrics = on\noperator.metrics_path = /x"),
+    ["'operator.metrics = on' and 'operator.metrics_path = /x'", 'set one or the other']
+);
+expectRejected(
+    'operator.status flag and path together',
+    $head . $cron('a', "operator.status = on\noperator.status_path = /x"),
+    ["'operator.status = on' and 'operator.status_path = /x'", 'set one or the other']
+);
+
+/* A pool that exposes a page carries its name into a URL, so its name has to be
+ * path-safe; a pool that exposes nothing keeps whatever name it had. */
+expectRejected(
+    'operator flag on a pool whose name is not path-safe',
+    $head . "\n[bad name]\npool.type = cron\ncron.schedule = @hourly\ncron.script = /dev/null\n"
+          . "operator.metrics = on\n",
+    ['[pool bad name]', "must contain only the characters '[alphanum]/_-.~'", 'URL path segment']
+);
+expectAccepted(
+    'the same pool with no operator directive',
+    $head . "\n[bad name]\npool.type = cron\ncron.schedule = @hourly\ncron.script = /dev/null\n"
+);
+
+/* The derived paths are just paths: operator.metrics = on alone is accepted and
+ * answers /metrics/<pool>. */
+expectAccepted(
+    'operator.metrics = on alone',
+    $head . $cron('tick', "operator.metrics = on")
 );
 
 /* Both of http-direct's operator pages go to the operator listener, and both
- * directives that name where are accepted on it. pm.status_listen used to be
- * refused by this type outright -- under its upstream meaning it asked for a
- * second FastCGI socket a direct child has nowhere to put -- and issue #275 is
- * what gave it something to name. */
+ * directives that name where are accepted on it. */
 expectAccepted(
     'both operator paths on http-direct',
-    $head . $direct('web', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics\n"
-                         . "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
+    $head . $direct('web', "operator.metrics_listen = {{ADDR[op]}}\noperator.metrics_path = /metrics\n"
+                         . "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status")
 );
 
 /* And the status route is a real route, so it collides like one: since #275
@@ -182,8 +218,8 @@ expectAccepted(
  * pass again. */
 expectRejected(
     'status path claimed by two http-direct pools on one listener',
-    $head . $direct('one', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status")
-          . $direct('two', "pm.status_listen = {{ADDR[op]}}\npm.status_path = /status"),
+    $head . $direct('one', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status")
+          . $direct('two', "operator.status_listen = {{ADDR[op]}}\noperator.status_path = /status"),
     ['collides with pool', 'an address, a port and a path identify one endpoint']
 );
 
@@ -193,22 +229,31 @@ expectRejected(
 expectRejected(
     'pools sharing a listener disagree on identity',
     $head . $direct('one', "listen.mode = 0660
-pm.metrics_listen = {{ADDR[op]}}
-pm.metrics_path = /one")
+operator.metrics_listen = {{ADDR[op]}}
+operator.metrics_path = /one")
           . $direct('two', "listen.mode = 0600
-pm.metrics_listen = {{ADDR[op]}}
-pm.metrics_path = /two"),
+operator.metrics_listen = {{ADDR[op]}}
+operator.metrics_path = /two"),
     ['disagree on listen.mode', 'one listener is one process and one socket']
 );
 
-/* pm.metrics_path only means something on a type that serves an operator
- * endpoint. On fastcgi, pm.status_path keeps its upstream meaning and there is
- * nowhere to put a metrics page, so asking for one is an error rather than a
- * directive that quietly does nothing. */
+/* On fastcgi, pm.status_path keeps upstream's meaning and there is no operator
+ * listener to name, so pm.status_path is fine and every operator.* directive is
+ * an error rather than one that quietly does nothing. The old metrics spelling
+ * is refused by its own name first, naming the replacement (issue #386). */
+expectAccepted(
+    'upstream pm.status_path on fastcgi',
+    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\npm.status_path = /status\n"
+);
 expectRejected(
-    'metrics path on a fastcgi pool',
-    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\npm.metrics_path = /metrics\n",
-    ["'pm.metrics_path' is not supported by pool.type = fastcgi"]
+    'operator.metrics_path on a fastcgi pool',
+    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\noperator.metrics_path = /metrics\n",
+    ["'operator.metrics_path' is not supported by pool.type = fastcgi"]
+);
+expectRejected(
+    'old pm.metrics_path on http-direct',
+    $head . $direct('web', "pm.metrics_listen = {{ADDR[op]}}\npm.metrics_path = /metrics"),
+    ["'pm.metrics_path' was renamed to 'operator.metrics_path' (issue #386)"]
 );
 
 @unlink($root . '/front.php');
@@ -223,14 +268,23 @@ both formats on one listener: accepted
 both formats on one path: rejected
 both formats on one path, two listeners: accepted
 the internal type is not configurable: rejected
-carved-out pm. directive on cron: accepted
+operator directive on cron: accepted
 other pm. directive on cron: rejected
-carved-out metrics directives on supervisor: accepted
-other pm. directive on supervisor: rejected
+operator metrics flag on supervisor: accepted
+old pm.metrics_path on cron: rejected
+old pm.status_path on cron: rejected
+old pm.status_listen on cron: rejected
+operator.metrics flag and path together: rejected
+operator.status flag and path together: rejected
+operator flag on a pool whose name is not path-safe: rejected
+the same pool with no operator directive: accepted
+operator.metrics = on alone: accepted
 both operator paths on http-direct: accepted
 status path claimed by two http-direct pools on one listener: rejected
 pools sharing a listener disagree on identity: rejected
-metrics path on a fastcgi pool: rejected
+upstream pm.status_path on fastcgi: accepted
+operator.metrics_path on a fastcgi pool: rejected
+old pm.metrics_path on http-direct: rejected
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

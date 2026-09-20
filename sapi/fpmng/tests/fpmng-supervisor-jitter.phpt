@@ -116,8 +116,8 @@ supervisor.restart_delay = $rjSecDelay
 supervisor.restart_delay_max = $rjSecDelay
 supervisor.restart_max = 0
 supervisor.restart_jitter = $rjSecJitter
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /rjsec-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /rjsec-status
 
 [rjpct]
 pool.type = supervisor

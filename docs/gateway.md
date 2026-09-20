@@ -1,13 +1,12 @@
 # The gateway: ping, metrics and status across pool types
 
-> **Status: design for v0.10.0, not implemented.** Nothing on this page exists
-> at HEAD. Today `pool.type = http` is a FastCGI pool with gateway processes in
-> front of it, the operator directives are spelled `pm.status_path`,
-> `pm.metrics_path`, `pm.status_listen`, `pm.metrics_listen`, and the gateway
-> forwards nothing operator-related. [`operator-endpoint.md`](operator-endpoint.md)
-> describes what runs now. This page is the target, decided 2026-09-17; the
-> issues that carry it are listed at the end. When the last of them lands this
-> banner goes and the two pages merge.
+> **Status: design for v0.10.0; the `operator.*` rename landed in #386, the
+> gateway type has not.** The operator directives are `operator.*` now (see
+> [`operator-endpoint.md`](operator-endpoint.md)); what does not exist yet is
+> `pool.type = gateway`, which forwards every pool's operator pages under
+> `<base>/<pool name>` and answers `ping.path` in the gateway process. This page
+> is the target, decided 2026-09-17; the issues that carry the rest are listed at
+> the end. When the last of them lands this banner goes and the two pages merge.
 
 ## Why
 

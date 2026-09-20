@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: pool.type = http answers pm.status_path on the operator listener and no longer on the public one (issue #274)
+fpm-ng: pool.type = http answers operator.status_path on the operator listener and no longer on the public one (issue #274)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -15,7 +15,7 @@ require_once "tester.inc";
  * endpoint's own code.
  *
  * The half this test exists for is the other one. Upstream's in-child handler
- * matches pm.status_path against SG(request_info).request_uri, which the
+ * matches operator.status_path against SG(request_info).request_uri, which the
  * gateway fills from SCRIPT_NAME. With http.front_controller set -- the default
  * -- every unmatched path falls back to the front controller and SCRIPT_NAME is
  * never the request path, so the handler is invisible. With the fallback turned
@@ -51,8 +51,8 @@ pm.max_children = 2
 chdir = $root
 http.listen = {{ADDR[public]}}
 http.front_controller =
-pm.status_path = /gw-status.php
-pm.status_listen = {{ADDR[operator]}}
+operator.status_path = /gw-status.php
+operator.status_listen = {{ADDR[operator]}}
 ping.path = /gw-ping
 ping.response = pong
 EOT;

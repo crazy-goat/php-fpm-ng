@@ -91,8 +91,8 @@ cron.schedule = * * * * *
 cron.script = $work/stablejob-job.php
 cron.jitter = $jitter
 cron.jitter_mode = stable
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /stablejob-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /stablejob-status
 EOT;
 
 function readSeconds(string $marker): array

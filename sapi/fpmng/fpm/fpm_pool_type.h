@@ -355,19 +355,18 @@ struct fpm_pool_type_s {
 	 * NULL-terminated, may be NULL. Exact names only -- a prefix here would be
 	 * a second pattern language arguing with the first one.
 	 *
-	 * It exists because the operator endpoint's directives live under "pm."
-	 * (pm.status_path and friends, issue #273) while the types that most need
-	 * that endpoint -- cron, supervisor -- reject the whole "pm." namespace,
-	 * and for a good reason: their pm.* is generated programmatically, so a
-	 * user-set one would be a second source of truth. The carve-out keeps that
-	 * reason intact and names the handful of exceptions instead of weakening
-	 * the prefix.
+	 * It exists because a type sometimes rejects a whole namespace while
+	 * accepting a few exact names in it: pool.executor = worker rejects the
+	 * whole "worker." namespace, then carves its own directives back out.
+	 * (Before issue #386 it also carved the operator endpoint's directives out
+	 * of the "pm." namespace that cron and supervisor reject; the rename to
+	 * "operator." removed that need.)
 	 *
-	 * Not by dropping the prefix and enumerating the ~20 real pm.* directives:
+	 * Not by dropping the prefix and enumerating every real directive in it:
 	 * that is the enumeration-versus-pattern mistake build/prepare.sh:75-79
-	 * documents, and a pm.* added later would silently become legal on a cron
-	 * pool. An exception must be added deliberately; a new directive must not
-	 * become one by omission. */
+	 * documents, and a directive added later would silently become legal on a
+	 * pool that rejects its namespace. An exception must be added deliberately;
+	 * a new directive must not become one by omission. */
 	const char *const *reject_exceptions;
 
 	/* Type-specific checks; NULL = none. Returns 0 or -1. */

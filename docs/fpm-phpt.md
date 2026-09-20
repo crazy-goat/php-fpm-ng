@@ -112,7 +112,7 @@ never turned into a skip or a pass.
 reason, the upstream tests that cover behaviour this project removed on purpose:
 
 ```
-status-listen.phpt	issue #278 removed pm.status_listen and the shared status pool; ...
+status-listen.phpt	issue #278 removed operator.status_listen and the shared status pool; ...
 ```
 
 This is triage category 2 below — *intended difference* — written down where the

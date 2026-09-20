@@ -336,7 +336,7 @@ static struct {
 	 * segment still runs, just without these two gauges. */
 	struct fpm_worker_metrics *metrics;
 	/* issue #339: this child's slot in fpm_http_direct_ops's shared table,
-	 * the same one the classic executor uses for pm.status_path's ?full rows
+	 * the same one the classic executor uses for operator.status_path's ?full rows
 	 * -- see fpm_pool_type_http_direct_worker_init()'s comment for why this
 	 * executor now allocates it too. NULL is a valid value throughout for the
 	 * same reason as metrics above: every fpm_http_direct_ops_worker_*() call
@@ -376,7 +376,7 @@ const char *const fpm_http_direct_worker_rejects[] = {
 	 * stuck in one state and an access log would have nothing to time, so
 	 * both are refused rather than answered with placeholders. The classic
 	 * executor supports all of these. */
-	"pm.status_path", "ping.path", "ping.response",
+	"operator.status_path", "operator.status", "ping.path", "ping.response",
 	"access.log", "access.format", "access.suppress_path",
 	/* issue #61. http.max_connections is enforced by keeping the listener
 	 * disabled while the worker is at its limit, which is the accept gate of
@@ -2353,7 +2353,7 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
 }
 
 /* issue #333: the ONLY scoreboard fact this executor can report honestly --
- * see the comment on fpm_http_direct_worker_rejects's pm.status_path, ping.*
+ * see the comment on fpm_http_direct_worker_rejects's operator.status_path, ping.*
  * and access.* entries for why nothing else (stage, duration, CPU, peak
  * memory) follows it. Called once per answered request, from both the buffered path
  * (fpmng_worker_respond()) and the streaming completion path
@@ -3441,7 +3441,7 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * gauges rather than failing to start over a metrics channel. */
 	fw.metrics = fpm_http_direct_worker_metrics_init_child(wp);
 	/* issue #339: claims this child's slot in fpm_http_direct_ops's shared
-	 * table -- the same one the classic executor uses for pm.status_path,
+	 * table -- the same one the classic executor uses for operator.status_path,
 	 * now also allocated for this executor by
 	 * fpm_pool_type_http_direct_worker_init(). Same best-effort/NULL-safe
 	 * contract as fw.metrics above. */

@@ -1,5 +1,5 @@
 /* fpm-ng: the operator surface of pool.type = http-direct (issue #59) --
- * listen.allowed_clients, ping.path and pm.status_path.
+ * listen.allowed_clients, ping.path and operator.status_path.
  *
  * These three were refused by the type until issue #59, and each was refused for
  * the same reason: a direct pool answers the client from the child's own event
@@ -224,7 +224,7 @@ int fpm_http_direct_ops_allowed(struct fpm_http_direct_ops *ops, const char *pee
  * the caller should carry on. `status` and `bytes` receive what was sent, for
  * the access log.
  *
- * pm.status_path used to be answered here too. Issue #275 moved it onto the
+ * operator.status_path used to be answered here too. Issue #275 moved it onto the
  * operator endpoint's listener (fpm_pool_type_s.operator_status ->
  * fpm_http_direct_ops_render_status below), so that the directive names one
  * page on one socket. ping.path stayed: it is a liveness probe for whatever is

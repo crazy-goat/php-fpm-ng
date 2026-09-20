@@ -37,7 +37,7 @@ docker exec fpmng-combined-example cat /www/data/worker-heartbeat.txt
 ```
 
 `pool.type = status` was removed (issue #278); the replacement is the per-pool
-`pm.status_path`/`pm.status_listen` on `[app]`, and it reflects all three **at
+`operator.status_path`/`operator.status_listen` on `[app]`, and it reflects all three **at
 once**, in the same request:
 
 ```sh

@@ -120,6 +120,18 @@ that are already running, via the `LARAVEL_DB_*` / `LARAVEL_REDIS_*`
 variables below (e.g. the shared test box). It never issues `FLUSHDB` or
 `FLUSHALL` and never creates or drops anything outside its own database name.
 
+**The negative controls must not run against shared services (issue #51).**
+They are *designed* to corrupt their database: with an empty static list the
+concurrent requests of a scenario share state and the probe writes garbage at
+whatever MySQL it can reach — on 2026-09-08 that was the shared test-box MySQL
+on 3306, which logged `RSET_HEADER packet additional data length is past 3
+bytes`. So under `SERVICE_MODE=external` the negative phase is **skipped** and
+the run reports `negative_skipped=1` (the `run-all.sh` aggregate then says
+`NOT MEASURED`, not `PASS`). Run the negative suite with `SERVICE_MODE=docker`
+(the default, which provisions a private MySQL/Redis), or set
+`LARAVEL_NEGATIVE_ALLOW_EXTERNAL=1` only when the external services are
+themselves private.
+
 ## Dedicated test-box run
 
 The runner is designed for a private directory and private resources:

@@ -150,6 +150,14 @@ classify_laravel() {
         echo ERROR
         return
     fi
+    # Issue #51: under SERVICE_MODE=external the negative controls are skipped
+    # (they are designed to corrupt their database, so they must not point at
+    # shared services). Without them the Laravel claim is only half measured,
+    # so say so instead of reporting PASS.
+    if [[ $line =~ negative_skipped=1 ]]; then
+        echo "NOT MEASURED"
+        return
+    fi
     echo PASS
 }
 

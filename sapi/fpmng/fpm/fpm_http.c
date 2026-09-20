@@ -2052,7 +2052,11 @@ static struct fpm_http_operator_entry_s *fpm_http_operator_lookup(struct fpm_htt
 	unsigned i;
 
 	for (i = 0; i < gw->noperator_entries; i++) {
-		if (!strcmp(gw->operator_entries[i].path, path)) {
+		/* .path and .target are both non-NULL for every published row (see
+		 * the INVARIANT on fpm_http_gateway_s.operator_entries); checked here
+		 * too so a lookup can never hand a caller a targetless entry. */
+		if (gw->operator_entries[i].path && gw->operator_entries[i].target
+				&& !strcmp(gw->operator_entries[i].path, path)) {
 			return &gw->operator_entries[i];
 		}
 	}
@@ -3729,22 +3733,33 @@ static int fpm_http_operator_build(struct fpm_worker_pool_s *wp, struct fpm_http
 				zlog(ZLOG_ERROR, "[pool %s] http.operator: cannot allocate the forwarding map", gw->pool);
 				return -1;
 			}
+			/* Publish the row only once all three fields are set: t is the
+			 * non-NULL target fpm_http_operator_target() returned above (the
+			 * NULL case returns -1 before this point), key/local are its path
+			 * and the operator listener's local path. Kept in step with the
+			 * loop, not assigned once at the end: fpm_http_operator_free()
+			 * frees exactly noperator_entries rows, so an allocation failure
+			 * later in the loop must not strand the keys already built. This
+			 * is the invariant fpm_http_gateway_s.operator_entries documents. */
 			gw->operator_entries[n].path = key;
 			gw->operator_entries[n].local_uri = local;
 			gw->operator_entries[n].target = t;
 			n++;
-			/* Kept in step with the loop, not assigned once at the end:
-			 * fpm_http_operator_free() frees exactly noperator_entries rows, so
-			 * an allocation failure later in the loop must not strand the keys
-			 * already built. */
 			gw->noperator_entries = n;
 		}
 	}
 
 	for (n = 0; n < gw->noperator_entries; n++) {
+		struct fpm_http_target_s *t = gw->operator_entries[n].target;
+
+		/* Defensive: a published row always has a target (see the invariant
+		 * above), but a skipped row beats a NULL dereference if that ever
+		 * changes. */
+		if (!t) {
+			continue;
+		}
 		zlog(ZLOG_NOTICE, "[pool %s] http.operator: '%s' -> %s%s",
-			gw->pool, gw->operator_entries[n].path,
-			gw->operator_entries[n].target->listen_address,
+			gw->pool, gw->operator_entries[n].path, t->listen_address,
 			gw->operator_entries[n].local_uri);
 	}
 

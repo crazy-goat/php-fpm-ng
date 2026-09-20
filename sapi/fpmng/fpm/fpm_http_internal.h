@@ -411,7 +411,16 @@ struct fpm_http_gateway_s {
 	char *operator_metrics_base;
 	char *operator_status_base;
 	/* One transport target per distinct operator listener address (several
-	 * pages can share one listener), plus the exact-match map itself. */
+	 * pages can share one listener), plus the exact-match map itself.
+	 *
+	 * INVARIANT: every row in operator_entries[0 .. noperator_entries) is
+	 * fully published -- .path, .local_uri and .target are all non-NULL.
+	 * fpm_http_operator_build() increments noperator_entries only after it has
+	 * all three (and never counts a row whose target could not be created), so
+	 * rows beyond the count are the calloc zeros and no published row has a
+	 * NULL .target. Consumers still check .target defensively -- see the
+	 * startup log loop and fpm_http_operator_lookup() -- so a future change
+	 * that breaks the invariant produces a skipped row, not a crash. */
 	struct fpm_http_target_s *operator_targets;
 	unsigned noperator_targets;
 	struct fpm_http_operator_entry_s *operator_entries;

@@ -59,6 +59,8 @@ chdir = $root
 http.front_controller = /front.php
 operator.metrics_listen = {{ADDR[operator]}}
 operator.metrics = on
+operator.status_listen = {{ADDR[operator]}}
+operator.status = on
 
 [api]
 pool.type = http-direct
@@ -90,6 +92,25 @@ function gatewayGet(string $url): array
         }
     }
     return [$status, $body === false ? '' : $body];
+}
+
+/* gatewayGet() plus the Content-Type, for the query-variant check below. */
+function gatewayFetch(string $url): array
+{
+    $ctx = stream_context_create(['http' => ['timeout' => 10, 'ignore_errors' => true]]);
+    $body = @file_get_contents($url, false, $ctx);
+    $headers = $http_response_header ?? [];
+    $status = 0;
+    $type = '';
+    foreach ($headers as $h) {
+        if (preg_match('#^HTTP/\S+\s+(\d+)#', $h, $m)) {
+            $status = (int) $m[1];
+        }
+        if (stripos($h, 'Content-Type:') === 0) {
+            $type = trim(substr($h, strlen('Content-Type:')));
+        }
+    }
+    return [$status, $type, $body === false ? '' : $body];
 }
 
 function expectSame(string $what, string $gatewayUrl, string $operatorAddr, string $localPath): void
@@ -142,6 +163,21 @@ try {
     }
     echo "status: forwarded and own\n";
 
+    /* The query string survives the rewrite exactly once. app's http-direct
+     * status page selects its JSON variant with ?json; before the fix the
+     * rewritten request line carried the query twice, the operator listener's
+     * flag matcher missed it, and the JSON variant was silently the text page.
+     * Content type is the stable signal (the bodies carry a moving uptime). */
+    [$status, $type, $body] = gatewayFetch("http://$http/status/app?json");
+    if ($status !== 200 || !str_contains($type, 'application/json') || !str_starts_with(ltrim($body), '{')) {
+        throw new RuntimeException("?json through the gateway was not honoured: status=$status type=$type\n$body");
+    }
+    [$status, $type] = gatewayFetch("http://$http/status/app");
+    if ($status !== 200 || !str_contains($type, 'text/plain')) {
+        throw new RuntimeException("the unqueried status page should be text/plain: status=$status type=$type");
+    }
+    echo "query variant: ?json honoured\n";
+
     /* Precedence: the operator namespace is checked before http.route[], so
      * even though "/" is routed to app, /metrics is not. */
     echo "precedence: ok\n";
@@ -188,6 +224,7 @@ app: same body
 api: same body
 gateway own metrics: same body
 status: forwarded and own
+query variant: ?json honoured
 precedence: ok
 access-log: target=operator, suppressed
 Done

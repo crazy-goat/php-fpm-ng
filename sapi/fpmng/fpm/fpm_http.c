@@ -2195,8 +2195,12 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	 * asked for a variant. Everything else about the request (method, body --
 	 * monitored pages are GETs) is serialized by the #344 HTTP transport. */
 	local_len = strlen(hit->local_uri);
+	/* `query` is strchr(uri, '?') and therefore INCLUDES the leading '?', so
+	 * it is copied whole exactly once -- writing a separate '?' and then
+	 * copying query produced "/_m??json", and the operator listener's
+	 * fpm_operator_http_has_flag() then never matched the variant. */
 	query_len = query ? strlen(query) : 0;
-	target_uri = malloc(local_len + (query ? query_len + 1 : 0) + 1);
+	target_uri = malloc(local_len + query_len + 1);
 	if (!target_uri) {
 		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
 		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
@@ -2204,11 +2208,10 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 		return 1;
 	}
 	memcpy(target_uri, hit->local_uri, local_len);
-	if (query) {
-		target_uri[local_len] = '?';
-		memcpy(target_uri + local_len + 1, query, query_len);
+	if (query_len) {
+		memcpy(target_uri + local_len, query, query_len);
 	}
-	target_uri[local_len + (query ? query_len + 1 : 0)] = '\0';
+	target_uri[local_len + query_len] = '\0';
 	c->upstream_uri_owned = target_uri;
 	c->upstream_uri = target_uri;
 
@@ -3604,14 +3607,32 @@ static void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
 static struct fpm_http_target_s *fpm_http_operator_target(struct fpm_http_gateway_s *gw, const char *address)
 {
 	unsigned i;
+	struct fpm_http_target_s *t;
 
 	for (i = 0; i < gw->noperator_targets; i++) {
 		if (!strcmp(gw->operator_targets[i].listen_address, address)) {
 			return &gw->operator_targets[i];
 		}
 	}
-	if (fpm_http_target_init(&gw->operator_targets[gw->noperator_targets], gw, address, address,
+	t = &gw->operator_targets[gw->noperator_targets];
+	if (fpm_http_target_init(t, gw, address, address,
 			FPM_HTTP_TARGET_HTTP, FPM_HTTP_OPERATOR_UPSTREAMS) != 0) {
+		/* fpm_http_target_init() does not clean up after itself on failure,
+		 * and the target is not in noperator_targets yet, so
+		 * fpm_http_operator_free() would not free it either. Release what it
+		 * may have allocated and leave the slot zeroed. */
+		free(t->pool);
+		free(t->listen_address);
+		if (t->upstreams_used) {
+			fpm_shm_free((void*) t->upstreams_used, sizeof(*t->upstreams_used));
+		}
+		if (t->requests_total) {
+			fpm_shm_free((void*) t->requests_total, sizeof(*t->requests_total));
+		}
+		if (t->rejected_total) {
+			fpm_shm_free((void*) t->rejected_total, sizeof(*t->rejected_total));
+		}
+		memset(t, 0, sizeof(*t));
 		return NULL;
 	}
 	return &gw->operator_targets[gw->noperator_targets++];
@@ -3712,9 +3733,13 @@ static int fpm_http_operator_build(struct fpm_worker_pool_s *wp, struct fpm_http
 			gw->operator_entries[n].local_uri = local;
 			gw->operator_entries[n].target = t;
 			n++;
+			/* Kept in step with the loop, not assigned once at the end:
+			 * fpm_http_operator_free() frees exactly noperator_entries rows, so
+			 * an allocation failure later in the loop must not strand the keys
+			 * already built. */
+			gw->noperator_entries = n;
 		}
 	}
-	gw->noperator_entries = n;
 
 	for (n = 0; n < gw->noperator_entries; n++) {
 		zlog(ZLOG_NOTICE, "[pool %s] http.operator: '%s' -> %s%s",
@@ -4034,6 +4059,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		 * certificate-watch machinery failed to start, and then this gate
 		 * must fire exactly as it always did. */
 		if (wp->config->http_tls_cert && *wp->config->http_tls_cert && !gw->tls && !gw->tls_wait_for_cert) {
+			fpm_http_operator_free(gw);	/* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
 			free(gw->access_log_path);
@@ -4053,6 +4079,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		 * Issue #388: not on the gateway, where `listen` IS the public
 		 * address and there is nothing to bump — it may be a unix socket. */
 		if (!gw->proxy_only && wp->listen_address_domain != FPM_AF_INET && !gw->http_listen_override) {
+			fpm_http_operator_free(gw);	/* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
 			free(gw->front_controller);
@@ -4065,6 +4092,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 
 		if (gw->allowed_clients && fpm_http_acl_parse(gw->pool, "http.allowed_clients", gw->allowed_clients, &gw->acl) != 0) {
+			fpm_http_operator_free(gw);	/* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
 			free(gw->front_controller);
@@ -4079,6 +4107,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 
 		if (gw->trusted_proxies && fpm_http_acl_parse(gw->pool, "http.trusted_proxies", gw->trusted_proxies, &gw->trusted_proxies_acl) != 0) {
+			fpm_http_operator_free(gw);	/* issue #389 */
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
@@ -4106,7 +4135,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->plain_listen_address);
-			free(gw->operator_allowed_clients);
+			fpm_http_operator_free(gw);	/* issue #389: also operator_allowed_clients */
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
@@ -4146,6 +4175,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert);
 		}
 		if (gw->listen_fd < 0) {
+			fpm_http_operator_free(gw);	/* issue #389 */
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
@@ -4164,6 +4194,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1);
 			if (gw->plain_listen_fd < 0) {
 				close(gw->listen_fd);
+				fpm_http_operator_free(gw);	/* issue #389 */
 				fpm_http_acl_free(gw->acl);
 				free(gw->allowed_clients);
 				fpm_http_acl_free(gw->trusted_proxies_acl);
@@ -4192,6 +4223,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		 * fpm_http_validate_pool() has refused a table with no entries. */
 		if (fpm_http_routes_build(wp, gw, capacity) != 0) {
 			fpm_http_routes_free(gw);
+			fpm_http_operator_free(gw);	/* issue #389 */
 			close(gw->listen_fd);
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
@@ -4395,21 +4427,42 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	/* Issue #389: http.operator. With both base paths empty there is nothing to
 	 * forward under, so the switch cannot mean anything; the ACL is required
 	 * because these pages describe the inside of the process tree and the
-	 * public port is not loopback. A route claiming one of the bases is
-	 * refused: operator paths are matched before routing, so such a route could
-	 * never fire -- a silent no-op the operator would report as a bug. */
+	 * public port is not loopback. A route claiming a base OR any path under
+	 * one is refused: operator paths are matched before routing, so such a
+	 * route could never fire -- a silent no-op the operator would report as a
+	 * bug. */
 	if (proxy_only && wp->config->http_operator) {
 		char metrics_scratch[192], status_scratch[192];
 		const char *mbase = fpm_http_operator_base(wp, 1, metrics_scratch, sizeof(metrics_scratch));
 		const char *sbase = fpm_http_operator_base(wp, 0, status_scratch, sizeof(status_scratch));
+		const char *raw = wp->config->http_operator_allowed_clients;
+		struct fpm_http_acl_s *acl = NULL;
 		struct key_value_s *kv;
 
-		if (!wp->config->http_operator_allowed_clients || !*wp->config->http_operator_allowed_clients) {
-			zlog(ZLOG_ERROR, "[pool %s] http.operator = yes requires http.operator_allowed_clients: "
-				"the forwarded pages describe the inside of the process tree, so who may reach them on "
-				"the public port has to be stated (issue #389)", wp->config->name);
+		/* Parse first, and require a value that actually PARSES TO ENTRIES.
+		 * fpm_http_acl_parse() returns success with *out == NULL for a
+		 * non-empty string that names no address (",", " "). Treating that as
+		 * "an ACL was given" would leave the forwarded pages world-readable,
+		 * because a NULL ACL makes the runtime guard
+		 * (`gw->operator_acl && !fpm_http_acl_check(...)`) short-circuit. */
+		if (raw && *raw &&
+				fpm_http_acl_parse(wp->config->name, "http.operator_allowed_clients", raw, &acl) != 0) {
+			return -1;	/* a bad address: parse already logged which one */
+		}
+		if (!acl) {
+			if (!raw || !*raw) {
+				zlog(ZLOG_ERROR, "[pool %s] http.operator = yes requires http.operator_allowed_clients: "
+					"the forwarded pages describe the inside of the process tree, so who may reach them on "
+					"the public port has to be stated (issue #389)", wp->config->name);
+			} else {
+				zlog(ZLOG_ERROR, "[pool %s] http.operator_allowed_clients = '%s' names no address, so it "
+					"is not an ACL and would leave the forwarded pages world-readable; http.operator = yes "
+					"requires at least one (issue #389)", wp->config->name, raw);
+			}
 			return -1;
 		}
+		fpm_http_acl_free(acl);
+
 		if (!mbase && !sbase) {
 			zlog(ZLOG_ERROR, "[pool %s] http.operator = yes but both operator.metrics_path and "
 				"operator.status_path are empty, so there is no base to forward <base>/<pool> under "
@@ -4423,26 +4476,39 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
 				const char *collide = NULL;
+				size_t base_len;
 
-				if (mbase && prefix_len == strlen(mbase) && !memcmp(prefix, mbase, prefix_len)) {
-					collide = mbase;
-				} else if (sbase && prefix_len == strlen(sbase) && !memcmp(prefix, sbase, prefix_len)) {
-					collide = sbase;
+				/* At or UNDER the base: "operator paths are checked before
+				 * http.route[]", so /metrics/app is answered by the map (or a
+				 * local 404), never by a route. Segment-aware, exactly like
+				 * fpm_http_operator_under_base(): /metricsx is a different
+				 * prefix and is not shadowed. */
+				if (mbase) {
+					base_len = strlen(mbase);
+					if (prefix_len >= base_len && !memcmp(prefix, mbase, base_len)
+							&& (prefix_len == base_len || prefix[base_len] == '/')) {
+						collide = mbase;
+					}
+				}
+				if (!collide && sbase) {
+					base_len = strlen(sbase);
+					if (prefix_len >= base_len && !memcmp(prefix, sbase, base_len)
+							&& (prefix_len == base_len || prefix[base_len] == '/')) {
+						collide = sbase;
+					}
 				}
 				if (collide) {
-					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' collides with the operator "
-						"base path '%s'; with http.operator = yes the gateway answers <base>/<pool> there "
-						"before routing, so a route cannot claim it (issue #389)",
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' falls in the operator "
+						"namespace of base path '%s'; with http.operator = yes the gateway answers "
+						"<base>/<pool> there before routing, so a route cannot claim it (issue #389)",
 						wp->config->name, kv->key, (int) prefix_len, prefix, collide);
 					return -1;
 				}
 			}
 		}
-	}
-	/* Validate the ACL's addresses whenever it is set, even with http.operator
-	 * off: a typo in a directive the operator wrote must fail `-t`, not sit
-	 * unread. */
-	if (wp->config->http_operator_allowed_clients && *wp->config->http_operator_allowed_clients) {
+	} else if (wp->config->http_operator_allowed_clients && *wp->config->http_operator_allowed_clients) {
+		/* http.operator off: the addresses are still validated, so a typo in a
+		 * directive the operator wrote fails `-t` instead of sitting unread. */
 		struct fpm_http_acl_s *tmp = NULL;
 
 		if (fpm_http_acl_parse(wp->config->name, "http.operator_allowed_clients",

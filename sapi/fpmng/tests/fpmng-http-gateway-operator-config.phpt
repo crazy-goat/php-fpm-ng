@@ -67,19 +67,43 @@ expectConfigFailure(
 expectConfigFailure(
     'operator-route-claims-metrics-base',
     gatewayConfig("http.route[app] = /metrics\n", "http.operator = yes\nhttp.operator_allowed_clients = 127.0.0.1\n"),
-    ['http.route[app]', "'/metrics'", 'collides with the operator base path']
+    ['http.route[app]', "'/metrics'", 'falls in the operator namespace']
 );
 
 expectConfigFailure(
     'operator-route-claims-status-base',
     gatewayConfig("http.route[app] = /status\n", "http.operator = yes\nhttp.operator_allowed_clients = 127.0.0.1\n"),
-    ['http.route[app]', "'/status'", 'collides with the operator base path']
+    ['http.route[app]', "'/status'", 'falls in the operator namespace']
+);
+
+/* Under the base, not just equal to it: the operator namespace is entered for
+ * any path at or below a base and matched before routing, so this route could
+ * never fire either. */
+expectConfigFailure(
+    'operator-route-under-metrics-base',
+    gatewayConfig("http.route[app] = /metrics/app\n", "http.operator = yes\nhttp.operator_allowed_clients = 127.0.0.1\n"),
+    ['http.route[app]', "'/metrics/app'", 'falls in the operator namespace']
+);
+
+expectConfigFailure(
+    'operator-route-under-status-base-trailing-slash',
+    gatewayConfig("http.route[app] = /status/\n", "http.operator = yes\nhttp.operator_allowed_clients = 127.0.0.1\n"),
+    ['http.route[app]', "'/status/'", 'falls in the operator namespace']
 );
 
 expectConfigFailure(
     'operator-acl-bad-address',
     gatewayConfig("http.route[app] = /\n", "http.operator = yes\nhttp.operator_allowed_clients = 10.0.0.0/8\n"),
     ['is not a valid IP address']
+);
+
+/* A non-empty value that parses to no address is not an ACL: accepting it
+ * would leave the forwarded pages world-readable (fpm_http_acl_parse() returns
+ * success with *out == NULL for ","). */
+expectConfigFailure(
+    'operator-acl-no-entries',
+    gatewayConfig("http.route[app] = /\n", "http.operator = yes\nhttp.operator_allowed_clients = ,\n"),
+    ['names no address', "','"]
 );
 
 ?>
@@ -90,7 +114,10 @@ operator-both-bases-empty: rejected
 operator-both-bases-off: rejected
 operator-route-claims-metrics-base: rejected
 operator-route-claims-status-base: rejected
+operator-route-under-metrics-base: rejected
+operator-route-under-status-base-trailing-slash: rejected
 operator-acl-bad-address: rejected
+operator-acl-no-entries: rejected
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

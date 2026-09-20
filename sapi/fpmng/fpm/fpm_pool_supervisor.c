@@ -113,6 +113,21 @@ struct fpm_supervisor_shared_s {
 						 * (planned completion, NOT a failure) */
 	unsigned char fatal_signaled;		/* SIGTERM sent to the master once already (idempotent) */
 
+	/* Issue #347: how many of the pool's supervisor_processes copies have
+	 * finished their ONE-SHOT (restart = never: the script returned; restart =
+	 * on-failure: it returned 0). The "stop restarting" decision belongs to the
+	 * copy that made it, not to the pool: with restart = never and
+	 * supervisor.processes > 1 the intended shape is "run this script once per
+	 * copy, N times total", and a single pool-wide terminal flag let the
+	 * fastest copy stop every other copy before it had run even once. A copy
+	 * that finishes its one-shot PARKS (fpm_pool_supervisor_park()) instead of
+	 * exiting, so the master does not respawn it and it cannot run a second
+	 * time; terminal is set only once this counter reaches
+	 * supervisor_processes, so the pool as a whole still reports FINISHED and
+	 * every copy still parks for good. restart_max exhaustion and
+	 * supervisor.fatal stay pool-wide and keep using terminal + gave_up. */
+	unsigned long one_shot_done;
+
 	/* Fields added solely for the operator status page (docs/NOTES.md 3u) —
 	 * exactly what that page shows, not one field more. "failures"/"terminal"/
 	 * "gave_up" above already existed and serve both policy and status; the three
@@ -953,7 +968,7 @@ static unsigned fpm_pool_supervisor_jitter(unsigned max_value) /* {{{ */
 /* Backoff and the "should we try again?" decision, applied between subsequent
  * script executions in the SAME process and also by every fresh respawn after a
  * crash (because shared memory survives process death). */
-static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
+static int fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		struct fpm_supervisor_shared_s *shared, int exit_code, time_t duration,
 		unsigned long duration_ms) /* {{{ */
 {
@@ -969,12 +984,22 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 	}
 
 	if (!wants_retry) {
-		shared->terminal = 1;
-		shared->gave_up = 0;
-		shared->failures = 0;
-		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script finished (exit code %d), restart = %s -> not restarting",
-			c->name, exit_code, c->supervisor_restart);
-		return;
+		unsigned long processes = c->supervisor_processes > 0
+			? (unsigned long) c->supervisor_processes : 1;
+
+		/* Issue #347: this copy is done; the pool is done only when every copy
+		 * is. The caller parks this process on a 1 return, so it stays alive
+		 * (no respawn, no second run) and terminal is set exactly when the last
+		 * copy finishes. */
+		shared->one_shot_done++;
+		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script finished (exit code %d), restart = %s -> not restarting (this copy is done: %lu of %lu)",
+			c->name, exit_code, c->supervisor_restart, shared->one_shot_done, processes);
+		if (shared->one_shot_done >= processes) {
+			shared->terminal = 1;
+			shared->gave_up = 0;
+			shared->failures = 0;
+		}
+		return 1;
 	}
 
 	if (exit_code == 0) {
@@ -1019,7 +1044,7 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 			shared->fast_runs = 0;
 			shared->fast_warned = 0;
 		}
-		return;
+		return 0;
 	}
 
 	/* From here on: a real failure (exit != 0). "Ran long enough" before the
@@ -1071,6 +1096,8 @@ static void fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 			(c->supervisor_restart_jitter > 0 || c->supervisor_restart_jitter_is_percent) ? " + this copy's own jitter" : "",
 			shared->failures, c->supervisor_restart_max > 0 ? "" : "/unlimited");
 	}
+
+	return 0;
 }
 /* }}} */
 
@@ -1217,10 +1244,12 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			if (supervisor_term_requested) {
 				break;
 			}
-			/* A sibling copy may have exhausted supervisor_restart_max (or
-			 * finished under restart = never) while this one slept -- without
-			 * this check it would run its script anyway, even after
-			 * supervisor.fatal already asked the master to shut down. */
+			/* A sibling copy may have exhausted supervisor_restart_max while
+			 * this one slept -- or this may be the pool's last copy to be about
+			 * to run, with every other copy already parked under restart =
+			 * never/on-failure. Without this check it would run its script
+			 * anyway, even after supervisor.fatal already asked the master to
+			 * shut down. */
 			if (shared->terminal) {
 				break;
 			}
@@ -1305,12 +1334,11 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * as a real failure here, on purpose (supervisor.restart_max means "this
 		 * many actual failures", not "this many total recycles" -- see
 		 * docs/supervisor.md). Checking max_memory only when apply_policy() did
-		 * NOT set shared->terminal also means supervisor.restart = never/
-		 * on-failure keep their contract: a script this pool has decided not to
-		 * run again parks (fpm_pool_supervisor_park() at the top of this
-		 * function on the next respawn) instead of being kept alive by a memory
-		 * recycle that exits and gets it immediately restarted regardless of
-		 * the configured policy.
+		 * NOT stop this copy also means supervisor.restart = never/
+		 * on-failure keep their contract: a script this copy has decided not to
+		 * run again parks (fpm_pool_supervisor_park(), issue #347) instead of
+		 * being kept alive by a memory recycle that exits and gets it
+		 * immediately restarted regardless of the configured policy.
 		 *
 		 * issue #326: unlike max_memory above, a supervisor.max_runtime kill is
 		 * deliberately NOT exempted from this same accounting -- see
@@ -1318,7 +1346,19 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * apply_policy() below runs unmodified with whatever exit_code the
 		 * script actually returned (including one set by a script that trapped
 		 * the max_runtime stop signal and exited on its own). */
-		fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms);
+		if (fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms)) {
+			/* Issue #347: this copy finished its one-shot. If terminal is set
+			 * too, this was the pool's LAST copy and the break below ends it
+			 * like any other terminal. Otherwise the pool still has copies to
+			 * run, so park this process rather than exit: exiting would have
+			 * the master respawn it and run the script a second time, while
+			 * parking keeps it alive (and counted) until the pool is done. */
+			if (shared->terminal) {
+				break;
+			}
+			fpm_pool_supervisor_park();
+			exit(FPM_EXIT_OK);
+		}
 
 		if (shared->terminal) {
 			break;

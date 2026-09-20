@@ -61,7 +61,16 @@ EOT;
 $cfgAfter = str_replace('supervisor.restart_delay = 1', 'supervisor.restart_delay = 2', $cfgBefore);
 
 $tester = new FPM\Tester($cfgBefore, $script);
-$tester->start();
+/* Issue #405: start() defaults to forceStderr=true, i.e. FPM's -O, which sends
+ * the master's log to stderr and leaves error_log = {{FILE:LOG}} unwritten.
+ * That is why #399 could not read the sparing NOTICE out of the error log after
+ * a reload: there was nothing in the file. forceStderr=false plus an explicit
+ * switch to {{FILE:LOG}} puts the master's own account (including the NOTICE
+ * asserted below) in the file the operator would read. Same pattern as
+ * fpmng-supervisor-restart.phpt. */
+@unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
+$tester->start([], false);
+$tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
 
 $waitForPid = function (string $file, int $timeoutSeconds = 15): int {
@@ -109,17 +118,48 @@ while (time() < $pollDeadline) {
     usleep(50000);
 }
 
+/* Issue #405: the master's own statement that it spared [keep] is the positive
+ * proof, and now that the error log is actually written (see the start()
+ * comment above) it is readable. The pid window below is not redundant: the
+ * NOTICE says the decision was taken, the window says no respawn undid it. */
+$errorLogPath = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
+$logText = is_file($errorLogPath) ? (string) file_get_contents($errorLogPath) : '';
+$keepSparred = (bool) preg_match(
+    '/\[pool keep\][^\n]*issue #330: config unchanged -- sparing all \d+ running child/',
+    $logText
+);
+
+$failed = false;
 if ($changePidAfter === $changePidBefore) {
     echo "FAIL: [change] pool did not restart across the reload (pid stayed $changePidBefore)\n";
+    $failed = true;
 } elseif (count($keepPidsSeen) > 1) {
     printf("FAIL: [keep] pool's worker pid changed across the reload (saw: %s) -- "
         . "reload.selective = yes must leave an unchanged pool untouched\n",
         implode(', ', array_keys($keepPidsSeen)));
+    $failed = true;
+} elseif (!$keepSparred) {
+    echo "FAIL: the master never logged that it spared [keep] (issue #405)\n";
+    $failed = true;
 } else {
     echo "reload-selective-on: ok\n";
 }
 
-if ($changePidAfter === $changePidBefore || count($keepPidsSeen) > 1) {
+if ($failed) {
+    /* Issue #405: the failure path used to print a message and no evidence.
+     * Dump the resolved error-log path, whether it exists at all, and its last
+     * lines -- the one thing that turns the next CI run into an answer. */
+    printf("--- error log (%s):\n", $errorLogPath);
+    if (is_file($errorLogPath)) {
+        printf("(%d bytes)\n", filesize($errorLogPath));
+        $lines = file($errorLogPath, FILE_IGNORE_NEW_LINES);
+        foreach (array_slice($lines, -80) as $line) {
+            echo $line, "\n";
+        }
+    } else {
+        echo "(the error log does not exist)\n";
+    }
+    echo "--- end of error log\n";
     $tester->close(true);
     $cleanup();
     exit(1);

@@ -422,20 +422,22 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 #     fpmng-http-route-xff-peer.phpt (#452),
 #     fpmng-http-route-1xx-interim.phpt (#451)
 #
-# TOTAL 123 + 13 = 136. Every row: +6 PASS (the always-pass six), +7 SKIP on
-# the non-TLS packages (the six routes plus ws-tls), +6 SKIP with TLS (the
-# six routes). deb: non-TLS 83/40 -> 89/47, TLS 89/34 -> 96/40. apk: non-TLS
-# 81/42 -> 87/49, TLS 86/37 -> 93/43. On the TLS rows EXPECT_PASS is a
-# PASS+WARN sum (issue #301): fpmng-supervisor-jitter.phpt wobbles between a
-# bare pass and a warning (issue #398), and the sum holds either way.
+# TOTAL 123 + 13 + 1 = 137. Every row: +6 PASS (the always-pass six), +7 SKIP
+# on the non-TLS packages (the six routes plus ws-tls), +6 SKIP with TLS (the
+# six routes). Issue #347 added fpmng-supervisor-restart-never-processes.phpt,
+# which runs on every flavour: +1 PASS everywhere. deb: non-TLS 83/40 ->
+# 90/47, TLS 89/34 -> 97/40. apk: non-TLS 81/42 -> 88/49, TLS 86/37 -> 94/43.
+# On the TLS rows EXPECT_PASS is a PASS+WARN sum (issue #301):
+# fpmng-supervisor-jitter.phpt wobbles between a bare pass and a warning
+# (issue #398), and the sum holds either way.
 EXPECT_FAIL=0
-EXPECT_TOTAL=136
+EXPECT_TOTAL=137
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=96; EXPECT_SKIP=40
-    else EXPECT_PASS=89; EXPECT_SKIP=47; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=97; EXPECT_SKIP=40
+    else EXPECT_PASS=90; EXPECT_SKIP=47; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -468,8 +470,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=93; EXPECT_SKIP=43
-    else EXPECT_PASS=87; EXPECT_SKIP=49; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=94; EXPECT_SKIP=43
+    else EXPECT_PASS=88; EXPECT_SKIP=49; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

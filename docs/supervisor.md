@@ -168,11 +168,21 @@ failing exit code, and `supervisor.restart_max` still means "this many
 *actual* failures in a row", not "this many total recycles of any kind".
 
 Running the check only after a "run it again" decision also means
-`supervisor.restart = never` and `restart = on-failure` keep their existing
-contract: a script this pool has decided not to run again parks (instead of
-exiting and being handed straight back to `fpm_children.c`, which
-would otherwise turn every respawn into another attempt regardless of
-`supervisor.restart`) rather than being kept alive by the memory recycle.
+`supervisor.restart = never` and `restart = on-failure` keep their contract: a
+copy this pool has decided not to run again parks (instead of exiting and being
+handed straight back to `fpm_children.c`, which would otherwise turn every
+respawn into another attempt regardless of `supervisor.restart`) rather than
+being kept alive by the memory recycle.
+
+**Issue #347:** that decision is **per copy**, not pool-wide. With
+`supervisor.processes = N` and `restart = never`, each of the N copies runs the
+script exactly once and then parks — "a one-shot job replicated N ways" — and
+the pool as a whole is `FINISHED` only once all N have run. Before #347 the
+first copy to finish set a pool-wide terminal flag, so the other copies (still
+inside their `supervisor.start_jitter` delay, for example) parked without ever
+running: N copies produced one execution. `supervisor.restart_max` exhaustion
+and `supervisor.fatal` remain pool-wide, as they always were — those describe
+the pool giving up, not one copy finishing.
 
 The default is `0` (disabled) — a stock configuration keeps today's unbounded
 behavior.

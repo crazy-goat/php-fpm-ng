@@ -2,29 +2,27 @@
 # Build php-fpm-ng against the distribution's libphp instead of compiling
 # php-src (issue #212, from spike #198 -- docs/spike-libphp-link-report.md).
 #
-# WHAT THIS BUILD IS. For `pool.type = fastcgi` and `pool.type = http-direct`
-# this is the shipping path (issue #219): the packages in #221/#222 are built
-# from what this script produces, and a user installs them without a compiler.
-# 62 translation units, against 711 files for the full php-src build.
+# WHAT THIS BUILD IS. For `pool.type = fastcgi`, `pool.type = gateway` and
+# `pool.type = http-direct` this is the shipping path (issue #219): the
+# packages in #221/#222 are built from what this script produces, and a user
+# installs them without a compiler. 62 translation units, against 711 files for
+# the full php-src build.
 #
-# WHAT IT IS NOT. It cannot speak for `pool.type = http` -- it needs
-# zend_signal_use_persistent_handlers(), added by patches/0006 inside Zend/,
-# which is the distribution's file and not ours. Nor for static-musl (no
-# distribution ships a static libphp). The fiber/async
-# executors are not a concern here at all any more: issue #373 cut them out of
-# this tree onto branch async, along with the patches (0007, 0008) they needed.
-# The binary produced here REFUSES that pool type at startup rather than
-# running it on upstream behaviour under its name -- issue #214, asserted
-# below on the binary this run produced. (Issue #376 retired one of the two
-# pool types this refusal used to cover; it is refused everywhere now, with
-# its own message, and no longer part of this script's loop.)
+# WHAT IT IS NOT. It cannot speak for static-musl (no distribution ships a
+# static libphp). More importantly, no pool type in this tree needs
+# zend_signal_use_persistent_handlers() (patches/0006, inside Zend/) any more:
+# issue #376 retired `fastcgi-ng`, issue #373 moved the fiber/async executors
+# (patches 0007/0008) to branch async, and issue #388 retired `pool.type =
+# http` and split its proxy half into `pool.type = gateway`, which runs no PHP
+# child and needs nothing from the engine. The refusal mechanism in
+# fpm_pool_type_check_build_support() stays for the next type that does; this
+# run asserts no type triggers it, and that the accepted types really do pass a
+# configuration test on this binary.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
-# 58 sources out of config.m4 plus 5, and the owned .phpt suite reports
-# PASS=37 FAIL=0 SKIP=31 of 68 against this binary. The 31 skips are the tests
-# whose pool needs one of the two types refused above; they ask the binary and
-# skip rather than fail (issue #230), which is what makes this suite usable as
-# a gate for the package.
+# 58 sources out of config.m4 plus 5. (The suite counts in that line are a
+# pre-#388 record; a package gate run re-derives them, and ci-package-gate.sh
+# carries the current numbers.)
 #
 # Usage: build/libphp-build.sh [php-src-tree] [outdir]
 #   php-src-tree  a tree with our overlay applied (build/prepare.sh), default ./php-src
@@ -158,7 +156,7 @@ off_reason() {
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
   HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; it exists for the test suite and must never be in a shipped package, so this one has no FPMNG_* toggle to turn it on (issue #396)" ;;
   HAVE_FPMNG_PERSISTENT_SIGNALS)
-                                echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes pool.type = http refuse to start here instead of running on a no-op (issue #214)" ;;
+                                echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes any type that needs it refuse to start here instead of running on a no-op (issue #214). Issue #388 retired pool.type = http, the last such type, so nothing in this tree triggers it today" ;;
   *) return 1 ;;
   esac
 }
@@ -403,12 +401,14 @@ else
     fail "a default build carries a distribution payload, and the only thing the payload holds is the ACME client (issue #281)"
 fi
 
-# --- assert the refusal, not the define ----------------------------------------
-# Issue #214. HAVE_FPMNG_PERSISTENT_SIGNALS being absent from the compile line
-# is not evidence of anything: what matters is that a pool whose behaviour
-# depends on patches/0006 does not start here. -t runs the same
-# fpm_conf_post_process() a real start runs, so this exercises the production
-# path and costs a few milliseconds.
+# --- assert what is accepted, and that the retired name is refused -------------
+# Issue #214, re-aimed by #388. HAVE_FPMNG_PERSISTENT_SIGNALS being absent is no
+# longer what any type keys on: #388 retired pool.type = http, the last type
+# whose children needed patches/0006, and pool.type = gateway runs no PHP child
+# at all. So this is now a positive check -- every type this build exists to
+# ship (fastcgi, gateway, http-direct) passes -t on this binary -- plus the one
+# negative that still means something: the retired name is refused by name.
+# -t runs the same fpm_conf_post_process() a real start runs.
 # FPM refuses to run as root without a user/group to drop to, and the two
 # distributions this build targets do not agree on what that pair is called
 # (Ubuntu has no group "nobody"; Alpine does). Asked of the system rather than
@@ -435,32 +435,50 @@ EOT
   "$BIN" -n -t -y "$OUT/type-check.conf" 2>&1
 }
 
+# The gateway rejects pm/pm.max_children and needs at least one http.route[]
+# with a target pool, so it cannot use conf_test()'s base. Its own minimal
+# configuration, then. -t validates, it does not bind.
+conf_test_gateway() {
+  cat > "$OUT/type-check.conf" <<EOT
+[global]
+error_log = /dev/stderr
+[typecheck]
+pool.type = gateway
+listen = 127.0.0.1:9
+$DROP_TO
+http.route[app] = /
+[app]
+listen = 127.0.0.1:8
+$DROP_TO
+pm = static
+pm.max_children = 1
+EOT
+  "$BIN" -n -t -y "$OUT/type-check.conf" 2>&1
+}
+
 # http-direct has directives of its own that its validate() requires, and that
 # validate() runs after the check under test. They are here so that a failure
 # below means what it says rather than "http-direct needs a chdir".
 echo '<?php' > "$OUT/index.php"
 HTTP_DIRECT_CONF="chdir = $OUT
 http.front_controller = /index.php"
-# Only `http` stands in this loop since issue #376: the other retired name is
-# refused with its own message by every build, and a retired name
-# does not tell this libphp build apart from a source build -- the patches/0006
-# refusal of `http` does.
-for t in http; do
-  if out=$(conf_test "$t"); then
-    fail "'pool.type = $t' was accepted by a binary that does not carry patches/0006; the pool would have run with upstream signal behaviour and said nothing"
-  fi
-  case "$out" in
-  *"does not carry patches/0006"*) ;;
-  *) fail "'pool.type = $t' was rejected, but not for the reason this build has: $out" ;;
-  esac
-done
+
 for t in fastcgi http-direct; do
   [ "$t" = http-direct ] && extra=$HTTP_DIRECT_CONF || extra=
   if ! out=$(conf_test "$t" "$extra"); then
-    fail "'pool.type = $t' is one of the two types this build exists to ship, and it does not even pass a configuration test: $out"
+    fail "'pool.type = $t' is one of the types this build exists to ship, and it does not even pass a configuration test: $out"
   fi
 done
-echo "libphp-build.sh: pool.type fastcgi and http-direct accepted, http refused (issue #214)"
+if ! out=$(conf_test_gateway); then
+  fail "pool.type = gateway is one of the types this build exists to ship, and it does not even pass a configuration test: $out"
+fi
+# pool.type = http is retired (issue #388): refused by name on every build. It
+# is no longer the libphp guard -- nothing sets the capability bit -- so only
+# the refusal itself is asserted here.
+if out=$(conf_test http); then
+  fail "the retired 'pool.type = http' was accepted: $out"
+fi
+echo "libphp-build.sh: pool.type fastcgi, gateway and http-direct accepted, http retired (issues #214, #388)"
 
 ldd "$BIN" | grep -qi "libphp" || fail "the binary does not link a distribution libphp; this is not the build this script is for"
 echo "libphp-build.sh: $(ldd "$BIN" | grep -i libphp | tr -s ' ')"

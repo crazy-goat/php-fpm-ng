@@ -243,11 +243,15 @@ error_log = __FPM_LOG__
 log_level = notice
 daemonize = yes
 
-[www]
-listen = 127.0.0.1:__FCGI_PORT__
-pool.type = http
-http.listen = 127.0.0.1:__HTTP_PORT__
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:__HTTP_PORT__
 http.access_log = __HTTP_LOG__
+http.route[www] = /
+
+[www]
+pool.type = fastcgi
+listen = 127.0.0.1:__FCGI_PORT__
 pool.executor = fiber
 pm = static
 pm.max_children = 1
@@ -284,11 +288,15 @@ error_log = $RUN_DIR/php-fpm-ng-$mode.log
 log_level = notice
 daemonize = yes
 
-[www]
-listen = 127.0.0.1:$FCGI_PORT
-pool.type = http
-http.listen = 127.0.0.1:$HTTP_PORT
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:$HTTP_PORT
 http.access_log = $RUN_DIR/http-$mode.access
+http.route[www] = /
+
+[www]
+pool.type = fastcgi
+listen = 127.0.0.1:$FCGI_PORT
 pool.executor = fiber
 pm = static
 pm.max_children = 1

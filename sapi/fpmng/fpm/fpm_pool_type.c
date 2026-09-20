@@ -71,7 +71,22 @@ static const char *const fpm_pool_gateway_rejects[] = {
 	"request_slowlog_timeout",
 	"request_slowlog_trace_depth",
 	"slowlog",
+	"request_cpu_tracking",
 	"security.limit_extensions",
+	/* Worker-output and worker-identity settings: read only by
+	 * fpm_unix_init_child()/fpm_php_init_child()/fpm_stdio_init_child() for a
+	 * PHP worker, which a gateway never runs. Leaving them accepted would make
+	 * them silently do nothing. */
+	"catch_workers_output",
+	"clear_env",
+	"decorate_workers_output",
+	"chroot",
+	"rlimit_files",
+	"rlimit_core",
+	"process.priority",
+	"process.dumpable",
+	/* AppArmor confines a PHP child; the gateway process is not confined. */
+	"apparmor_hat",
 	"fiber.",
 	"worker.",
 	NULL
@@ -295,12 +310,13 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		/* Issue #388: the gateway's own operator pages default to /metrics
 		 * and /status; on every other type an unset path means "not exposed". */
 		.operator_paths_default = 1,
-		/* Same socket options as the old http type's gateway processes: the
-		 * child answers the client directly, so O_NONBLOCK in the master and
-		 * TCP_NODELAY on the listening socket before any fork -- see the two
-		 * field comments in fpm_pool_type.h for why not in the child. */
-		.listening_socket_nonblocking = 1,
-		.listening_socket_nodelay     = 1,
+		/* Deliberately no .listening_socket_nonblocking / .listening_socket_nodelay:
+		 * those flags describe a socket the MASTER owns and prepares before the
+		 * fork, and a TCP gateway has no master-owned socket (fpm_sockets is
+		 * skipped; the type's init_main() binds through fpm_http_listen(),
+		 * which sets TCP_NODELAY before bind, and the child sets O_NONBLOCK
+		 * itself). A unix gateway keeps the master's socket, and the child
+		 * makes it nonblocking there too. */
 		.operator_endpoint      = 1,
 		/* Issue #341: fpmng_gateway_{upstreams_used,upstreams_max,
 		 * requests_total,rejected_total}{pool,target} on operator.metrics_path,
@@ -866,6 +882,17 @@ int fpm_pool_type_prepare_listening_socket(struct fpm_worker_pool_s *wp)
 	int desired;
 
 	if (!type->requires_listen) {
+		return 0;
+	}
+
+	/* Issue #388: a proxy_only type binds and configures its own listener in
+	 * its init_main() (fpm_http_listen() for a TCP address; the master's
+	 * socket, unchanged, for a unix one). For a TCP gateway there is no
+	 * master-owned socket at all -- fpm_http_validate_pool() cleared the
+	 * domain so fpm_sockets_init_main() skipped the pool, and
+	 * wp->listening_socket is the calloc zero -- so fcntl()ing it here would
+	 * touch fd 0. */
+	if (type->proxy_only) {
 		return 0;
 	}
 

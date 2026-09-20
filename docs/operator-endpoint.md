@@ -31,8 +31,8 @@ operator.metrics_path   = /tick/metrics
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
-| `operator.status_path` | Path answering JSON for this pool. Unset: off. | unset = off |
-| `operator.metrics_path` | Path answering Prometheus text for this pool. Unset: off. | unset = off |
+| `operator.status_path` | Path answering JSON for this pool. Unset: off. | unset = off (`/status` on `gateway`) |
+| `operator.metrics_path` | Path answering Prometheus text for this pool. Unset: off. | unset = off (`/metrics` on `gateway`) |
 | `operator.status` | Shorthand: expose status at `/status/<pool name>`. | `off` |
 | `operator.metrics` | Shorthand: expose metrics at `/metrics/<pool name>`. | `off` |
 | `operator.status_listen` | Where `operator.status_path` binds. | `127.0.0.1:9253` |
@@ -100,6 +100,18 @@ one pool serving both formats from one address.
 
 A request for a path no pool claimed gets a 404 listing the paths that listener
 does answer.
+
+A gateway is the one type whose paths **default** to being set (`/status` and
+`/metrics`, issue #388). Two gateways with no `operator.*_listen` therefore
+both want those paths on the default `127.0.0.1:9253` -- and that must still
+start, because the defaults are offered, not demanded. The first gateway to
+register a default path owns it; a later gateway whose *derived* path collides
+drops that page and logs a NOTICE naming the pool that owns it. An **explicit**
+`operator.status_path` / `operator.metrics_path` is not treated that way: if
+the operator wrote it, a collision is still a startup error. Give the second
+gateway a path or a listen address of its own to expose it, or
+`operator.status = off` / `operator.metrics = off` to say it has none. Note
+that an explicit `off` is honoured: it is not overwritten by the default.
 
 One socket is one process, so it can have only one identity. The `user`, `group`,
 `listen.owner`, `listen.group` and `listen.mode` of the pools sharing an address

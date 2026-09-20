@@ -108,19 +108,24 @@ daemonize = no
 error_log = $DIR/error.log
 pid = $DIR/fpm.pid
 log_level = notice
-[www]
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:$HTTP_PORT
 chdir = $DIR/docroot
-listen = 127.0.0.1:$FCGI_PORT
-pm = static
-pm.max_children = 4
-pool.type = http
 http.gateways = 2
 http.reuseport = yes
-http.listen = 127.0.0.1:$HTTP_PORT
 http.front_controller = /index.php
 http.read_timeout = $READ_TIMEOUT_MS
 http.tls_cert = $DIR/certs/cert.pem
 http.tls_key = $DIR/certs/key.pem
+http.route[www] = /
+
+[www]
+pool.type = fastcgi
+chdir = $DIR/docroot
+listen = 127.0.0.1:$FCGI_PORT
+pm = static
+pm.max_children = 4
 EOF
 
 info "starting php-fpm-ng (2 gateways, TLS, http.read_timeout=${READ_TIMEOUT_MS}ms)"

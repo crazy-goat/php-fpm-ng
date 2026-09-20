@@ -1156,6 +1156,10 @@ def config_text(arm, gateways, directory, port, listen_path, max_children, extra
     cell costs exactly one TCP port -- the gateway's -- out of the range this
     harness confines itself to.
     """
+    # Issue #388: the public port is the gateway's `listen`; the FastCGI
+    # listener is the [app] target behind it. The arm's own directives are
+    # gateway directives (http.idle_timeout and friends), so they go on [gw]
+    # before the [app] section.
     lines = [
         "[global]",
         f"error_log = {directory / 'fpm.log'}",
@@ -1164,20 +1168,27 @@ def config_text(arm, gateways, directory, port, listen_path, max_children, extra
         "process_control_timeout = 5",
         "",
         "[gw]",
-        f"listen = {listen_path}",
-        "pool.type = http",
-        "pm = static",
-        f"pm.max_children = {max_children}",
+        "pool.type = gateway",
+        f"listen = 127.0.0.1:{port}",
         f"chdir = {directory}",
         f"http.gateways = {gateways}",
-        f"http.listen = 127.0.0.1:{port}",
+        "http.route[app] = /",
+    ]
+    # The arm's own directives, last in [gw], so an arm can override anything
+    # above it -- variant 3 of #54 is "the status quo with a different
+    # http.idle_timeout" and it has to be expressible without a second binary
+    # or a second template.
+    lines += list(extra)
+    lines += [
+        "",
+        "[app]",
+        "pool.type = fastcgi",
+        f"listen = {listen_path}",
+        "pm = static",
+        f"pm.max_children = {max_children}",
         "php_admin_value[opcache.enable] = 0",
         "php_admin_value[max_execution_time] = 0",
     ]
-    # The arm's own directives, last, so an arm can override anything above it
-    # -- variant 3 of #54 is "the status quo with a different http.idle_timeout"
-    # and it has to be expressible without a second binary or a second template.
-    lines += list(extra)
     return "\n".join(lines) + "\n"
 
 

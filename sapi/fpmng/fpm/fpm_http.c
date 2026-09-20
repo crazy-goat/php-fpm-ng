@@ -2513,8 +2513,15 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	sigaction(SIGPIPE, &act, 0);
 	fpm_signals_unblock();
 
-	/* the pools' FastCGI listeners are the master's business */
+	/* The pools' FastCGI listeners are the master's business. Skip a pool with
+	 * no listener at all (requires_listen = 0: cron, supervisor) and a
+	 * proxy_only inet gateway, whose listening_socket the master already set to
+	 * -1 because it never created one -- closing the underlying fd 0 would be
+	 * closing this process's stdin. Issue #388. */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+		if (!fpm_pool_type_of(wp)->requires_listen || wp->listening_socket < 0) {
+			continue;
+		}
 		close(wp->listening_socket);
 	}
 
@@ -3645,15 +3652,33 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		}
 
 		if (gw->proxy_only) {
-			/* Issue #388: on the gateway `listen` is the public port, and
-			 * fpm_sockets_init_main() has already bound and listen()ed it as
-			 * wp->listening_socket. dup() rather than use that fd directly so
-			 * the gateway family owns its own descriptor (fpm_http_cleanup()
-			 * closes it, and a reuseport child closes and rebinds it) without
-			 * closing the master's. The socket is already LISTENing; the
-			 * per-child call in fpm_http_gateway_run() repeats listen()
-			 * idempotently, for the same reason it always did. */
-			gw->listen_fd = dup(wp->listening_socket);
+			/* Issue #388: on the gateway `listen` is the public port. For a
+			 * TCP address the master binds it here through fpm_http_listen(),
+			 * NOT by reusing the socket upstream's fpm_sockets_init_main()
+			 * would have created: fpm_http_validate_pool() zeroed the domain
+			 * so that socket does not exist. fpm_http_listen() sets
+			 * SO_REUSEPORT before bind(), so a reuseport group works, and the
+			 * socket is not in upstream's sockets_list, so an exec-reload
+			 * never exports a closed fd. do_listen = 0 in NO_CERT keeps the
+			 * bind-but-do-not-listen state. */
+			enum fpm_address_domain listen_domain = fpm_sockets_domain_from_address(gw->listen_address);
+
+			if (listen_domain == FPM_AF_UNIX) {
+				/* fpm_http_listen() parses host:port only, so a unix public
+				 * listener keeps using the master's socket (dup()ed so this
+				 * family owns its own descriptor). reuseport is meaningless
+				 * on a unix socket; force it off. */
+				gw->listen_fd = dup(wp->listening_socket);
+				reuseport = 0;
+				gw->reuseport = 0;
+			} else {
+				gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->listen_address,
+					gw->backlog, reuseport, !gw->tls_wait_for_cert);
+				/* No master-owned socket for this pool: make the unused slot
+				 * explicit so nothing -- the child's listener-socket close
+				 * loop in particular -- treats fd 0 as this pool's listener. */
+				wp->listening_socket = -1;
+			}
 		} else {
 			gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert);
 		}
@@ -3776,19 +3801,11 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				close(gw->plain_listen_fd);
 				gw->plain_listen_fd = -1;
 			}
-			/* Issue #388: on the gateway the master's public socket is
-			 * wp->listening_socket (bound and listen()ed by
-			 * fpm_sockets_init_main()), and it was NOT opened with
-			 * SO_REUSEPORT -- unlike the http type's separate gw->listen_fd
-			 * above. Left open it would keep taking a share of the
-			 * connections and never accept them, which is exactly the
-			 * starvation the close above exists to prevent, so it goes too.
-			 * The gateway's own children already hold their own REUSEPORT
-			 * sockets. */
-			if (gw->proxy_only && wp->listening_socket >= 0) {
-				close(wp->listening_socket);
-				wp->listening_socket = -1;
-			}
+			/* Issue #388: on a TCP gateway gw->listen_fd IS the public
+			 * socket (bound through fpm_http_listen() above, never
+			 * wp->listening_socket), so closing it here is the whole job --
+			 * there is no second, non-REUSEPORT socket to starve the group.
+			 * A unix gateway forces reuseport off before it gets here. */
 		}
 	}
 
@@ -3828,6 +3845,24 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (proxy_only) {
 		wp->config->pm = PM_STYLE_STATIC;
 		wp->config->pm_max_children = 1;
+	}
+
+	/* Issue #388: the gateway binds its own public listener in
+	 * fpm_http_init_pool_ex(), through fpm_http_listen() -- which sets
+	 * SO_REUSEPORT (when asked) before bind() and is not in upstream's
+	 * sockets_list. Clear the domain so fpm_sockets_init_main() does NOT
+	 * create, and later export on exec-reload, a second, non-REUSEPORT socket
+	 * for the same address: fpm_sockets switches on listen_address_domain and
+	 * 0 matches no case, so the pool is skipped and keeps no master socket.
+	 * The address string itself is left in place for the gateway and for
+	 * fpm_conf_dump().
+	 *
+	 * A unix public listener is the exception: fpm_http_listen() parses
+	 * host:port only, so a unix gateway keeps the master's socket (and this
+	 * domain), exactly as every other listening pool does. That path also
+	 * cannot use http.reuseport, which is meaningless on a unix socket. */
+	if (proxy_only && wp->listen_address_domain == FPM_AF_INET) {
+		wp->listen_address_domain = 0;
 	}
 
 	/* Issue #388: on the gateway `listen` is the public HTTP(S) port, so

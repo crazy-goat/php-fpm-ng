@@ -117,12 +117,11 @@ chdir = $root
 http.static = 0
 http.front_controller = /env.php
 http.route[nostatic] = /
-; Two gateways share the default operator address 127.0.0.1:9253, and both
-; would default to the same /status and /metrics paths there (issue #388 made
-; them defaults on this type), which the endpoint refuses as a collision. This
-; test scrapes neither, so give the second one addresses of its own.
-operator.status_listen = {{ADDR[op2]}}
-operator.metrics_listen = {{ADDR[op2]}}
+; Issue #388 finding 3: two gateways default their operator pages to the same
+; 127.0.0.1:9253 /status and /metrics. That must not refuse startup: the first
+; gateway to register the shared default paths keeps them, the second drops its
+; derived pages with a NOTICE (an EXPLICIT path would still collide loudly).
+; Neither gateway is scraped by this test.
 [nostatic]
 pool.type = fastcgi
 listen = {{ADDR[fcgi2]}}

@@ -421,6 +421,24 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		return;
 	}
 
+	/* Issue #388: a type with a baseline counter and no .status() (the
+	 * gateway) has no state to report. The gate has to come BEFORE any state
+	 * key is written: row.st is a zeroed struct, and enum state 0 is
+	 * FPM_POOL_STATE_RUNNING, so writing it would report a measured "running"
+	 * that nothing measured. Same reasoning as the Prometheus renderer's
+	 * has_state gate. */
+	if (!row->has_state) {
+		fpm_operator_buf_appendf(b,
+			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false",
+			row->name, row->type_name);
+		if (row->counter) {
+			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
+		}
+		fpm_operator_page_row_json_live(b, row);
+		fpm_operator_buf_appendf(b, "}");
+		return;
+	}
+
 	fpm_operator_buf_appendf(b,
 		"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false,"
 		"\"state\":\"%s\",\"last_start\":%ld,\"consecutive_failures\":%u",
@@ -428,13 +446,6 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		(long) row->st.last_start, row->st.consecutive_failures);
 	if (row->counter) {
 		fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
-	}
-	/* Issue #388: no state to report -- same reasoning as the Prometheus
-	 * renderer's has_state gate above. */
-	if (!row->has_state) {
-		fpm_operator_page_row_json_live(b, row);
-		fpm_operator_buf_appendf(b, "}");
-		return;
 	}
 	if (row->st.state == FPM_POOL_STATE_RUNNING && row->st.last_start > 0) {
 		fpm_operator_buf_appendf(b, ",\"uptime\":%ld",

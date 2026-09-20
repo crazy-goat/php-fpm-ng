@@ -99,6 +99,49 @@ echo 'public ping path -> ', str_contains($body, 'pong') ? "pong\n" : "UNEXPECTE
 $tester->terminate();
 $tester->close();
 
+/* Issue #388 finding 2: on the gateway the operator paths DEFAULT to /status
+ * and /metrics, and an explicit `operator.status = off` must stay off. The
+ * flag parses to 0, which by value alone is indistinguishable from "unset", so
+ * the code has to ask whether the directive was SET. Here the listener exists
+ * (operator.metrics_path is explicit) and /status must be a 404: if `off` were
+ * treated as unset, the default would register /status and answer JSON. */
+$cfgOff = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+
+[gw2]
+pool.type = gateway
+listen = {{ADDR[public2]}}
+chdir = $root
+http.route[app2] = /
+http.front_controller =
+operator.status = off
+operator.metrics_path = /m2
+operator.status_listen = {{ADDR[operator2]}}
+operator.metrics_listen = {{ADDR[operator2]}}
+
+[app2]
+pool.type = fastcgi
+listen = {{ADDR[app2]}}
+pm = static
+pm.max_children = 1
+chdir = $root
+EOT;
+
+$tester2 = new FPM\Tester($cfgOff, '<?php');
+$tester2->start();
+$tester2->expectLogStartNotices();
+$operator2 = $tester2->getListen('{{ADDR[operator2]}}');
+
+$body = httpGet($operator2, '/status');
+echo 'operator.status = off -> ', str_starts_with($body, 'HTTP/1.1 404') ? "404, no default\n" : "UNEXPECTED: $body\n";
+$body = httpGet($operator2, '/m2');
+echo 'operator.metrics_path = /m2 -> ', str_starts_with($body, 'HTTP/1.1 200') ? "200\n" : "UNEXPECTED: $body\n";
+
+$tester2->terminate();
+$tester2->close();
+
 @unlink($root . '/gw-status.php');
 @unlink($root . '/index.php');
 @rmdir($root);
@@ -109,6 +152,8 @@ echo "Done\n";
 public status path -> the application
 operator status path -> json for pool gw, type gateway
 public ping path -> pong
+operator.status = off -> 404, no default
+operator.metrics_path = /m2 -> 200
 Done
 --CLEAN--
 <?php

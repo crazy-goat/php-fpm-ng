@@ -154,6 +154,15 @@ there is no base to forward under. `http.operator = yes` with both bases empty
 is a configuration error. Publicly nothing is exposed until `http.operator =
 yes`, which is the switch that matters.
 
+Because those two paths default, two gateways with no `operator.*_listen` both
+land on `127.0.0.1:9253`. That still starts (issue #388): the first gateway to
+register a default path keeps it, and a later one whose *derived* `/status` or
+`/metrics` would collide drops that page with a NOTICE rather than refusing the
+whole configuration. An **explicit** path is not offered in that way -- an
+explicit collision is still a startup error, as for any pool. An explicit
+`operator.status = off` / `operator.metrics = off` is honoured too and
+suppresses only the default.
+
 Two gateways with `http.operator = yes` expose the same set of pools, each
 under its own base. To keep one gateway out of it, turn its `http.operator` off
 or empty its base paths. To keep one *pool* out of it, do not expose the pool.

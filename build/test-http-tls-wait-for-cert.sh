@@ -117,21 +117,26 @@ daemonize = no
 error_log = $DIR/error.log
 pid = $DIR/fpm.pid
 log_level = notice
-[www]
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:$HTTP_PORT
 chdir = $DIR/docroot
-listen = 127.0.0.1:$FCGI_PORT
-pm = static
-pm.max_children = 4
-pool.type = http
 http.gateways = $GATEWAYS
 http.reuseport = $reuseport
-http.listen = 127.0.0.1:$HTTP_PORT
 http.plain_listen = 127.0.0.1:$PLAIN_PORT
 http.front_controller = /index.php
 http.tls_cert = $DIR/certs/fullchain.pem
 http.tls_key = $DIR/certs/privkey.pem
 http.tls_reload_check = 1
 http.tls_wait_for_cert = $optin
+http.route[www] = /
+
+[www]
+pool.type = fastcgi
+chdir = $DIR/docroot
+listen = 127.0.0.1:$FCGI_PORT
+pm = static
+pm.max_children = 4
 EOF
 }
 

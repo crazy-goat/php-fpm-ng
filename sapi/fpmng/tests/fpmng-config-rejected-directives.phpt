@@ -279,6 +279,25 @@ expectConfigFailure(
     gatewayConfig("env[APP_ENV] = production\n"),
     ["'env' is not supported by pool.type = gateway"]
 );
+/* Worker-output, worker-identity and resource directives are read only by
+ * fpm_unix_init_child()/fpm_php_init_child()/fpm_stdio_init_child() for a PHP
+ * worker, which a gateway never runs; accepted, they would silently do
+ * nothing, so they are refused like the php_* families. */
+expectConfigFailure(
+    'gateway-catch-workers-output',
+    gatewayConfig("catch_workers_output = yes\n"),
+    ["'catch_workers_output' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-clear-env',
+    gatewayConfig("clear_env = no\n"),
+    ["'clear_env' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-chroot',
+    gatewayConfig("chroot = /\n"),
+    ["'chroot' is not supported by pool.type = gateway"]
+);
 
 /* `listen` is the public HTTP(S) port on this type, so http.listen has nothing
  * left to override. Refused as redundant rather than accepted as a second way
@@ -325,6 +344,9 @@ gateway-pm: rejected
 gateway-php-admin-value: rejected
 gateway-php-value: rejected
 gateway-environment: rejected
+gateway-catch-workers-output: rejected
+gateway-clear-env: rejected
+gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
 Done

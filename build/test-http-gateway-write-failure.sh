@@ -91,15 +91,20 @@ error_log = $DIR/error.log
 pid = $DIR/fpm.pid
 daemonize = no
 [gw]
-listen = $DIR/fcgi.sock
-pool.type = http
-pm = static
-pm.max_children = 2
+pool.type = gateway
+listen = 127.0.0.1:$HTTP_PORT
 chdir = $DIR/docroot
 http.static = 1
 http.gateways = 1
-http.listen = 127.0.0.1:$HTTP_PORT
 http.fault_upstream_write = $1
+http.route[app] = /
+
+[app]
+pool.type = fastcgi
+listen = $DIR/fcgi.sock
+pm = static
+pm.max_children = 2
+chdir = $DIR/docroot
 EOF
 }
 

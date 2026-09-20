@@ -246,7 +246,24 @@ EOF
         echo "error_log = $dir/error.log"
         echo "pid = $dir/fpm.pid"
         echo "log_level = notice"
+        # The gateway keeps the pool name [www] so the process-title assertions
+        # below ("http gateway www [...]") still name it; the PHP workers move to
+        # their own [app] section (issue #388).
         echo "[www]"
+        echo "pool.type = gateway"
+        if [ "$pool_has_user" = "yes" ]; then
+            echo "user = nobody"
+            echo "group = $NOBODY_GROUP"
+        fi
+        echo "chdir = $dir/docroot"
+        echo "listen = 127.0.0.1:$http_port"
+        echo "http.gateways = $EXPECTED_GATEWAYS"
+        echo "http.reuseport = $reuseport"
+        echo "http.front_controller = /index.php"
+        echo "http.access_log = $dir/access.log"
+        echo "http.route[app] = /"
+        echo "[app]"
+        echo "pool.type = fastcgi"
         if [ "$pool_has_user" = "yes" ]; then
             echo "user = nobody"
             echo "group = $NOBODY_GROUP"
@@ -255,12 +272,6 @@ EOF
         echo "listen = 127.0.0.1:$fcgi_port"
         echo "pm = static"
         echo "pm.max_children = 1"
-        echo "pool.type = http"
-        echo "http.gateways = $EXPECTED_GATEWAYS"
-        echo "http.reuseport = $reuseport"
-        echo "http.listen = 127.0.0.1:$http_port"
-        echo "http.front_controller = /index.php"
-        echo "http.access_log = $dir/access.log"
     } > "$dir/fpm.conf"
 
     extra_opt=""

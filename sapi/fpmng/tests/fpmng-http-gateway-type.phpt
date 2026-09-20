@@ -84,6 +84,45 @@ $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
 
+/* Issue #388 finding 1: http.reuseport = on must work for a gateway. Every
+ * member of a SO_REUSEPORT group has to set the option BEFORE bind(), so the
+ * gateway can no longer inherit the master's socket (fpm_sockets_new_
+ * listening_socket() sets only SO_REUSEADDR and is already listening): it
+ * binds its own through fpm_http_listen(), which sets SO_REUSEPORT before
+ * bind. This would fail every child's bind with EADDRINUSE before the fix. */
+$cfgReuse = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 2
+http.reuseport = on
+http.route[app] = /
+[app]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 1
+chdir = $docroot
+EOT;
+
+$testerR = new FPM\Tester($cfgReuse, '<?php echo "unused";');
+$testerR->start();
+$testerR->expectLogStartNotices();
+$httpR = $testerR->getAddr('ipv4', '[http]');
+$bodyR = @file_get_contents("http://$httpR/index.php");
+if ($bodyR !== 'gateway-ok') {
+    echo "FAIL: reuseport gateway body=" . var_export($bodyR, true) . "\n";
+    exit(1);
+}
+echo "reuseport-serves: gateway-ok\n";
+$testerR->terminate();
+$testerR->expectLogTerminatingNotices();
+$testerR->close();
+
 @unlink($docroot . '/index.php');
 @rmdir($docroot);
 
@@ -93,6 +132,7 @@ Done
 serves: gateway-ok
 gateways: exactly 2
 own-php-children: none
+reuseport-serves: gateway-ok
 Done
 --CLEAN--
 <?php

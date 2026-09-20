@@ -132,15 +132,11 @@ not. That is an operator error, not an unfinished issuance.
 - The master logs the state once at startup, naming the path it is waiting
   for and the re-check interval.
 
-  **Caveat, gateway only (issue #388).** On `pool.type = gateway` the public
-  socket is the pool's own `listen`, which the master binds *and* `listen()`s
-  before any child is forked (it is the socket the gateway process inherits).
-  So in NO_CERT a TCP connect to `listen` is *accepted* and then not
-  answered -- the gateway simply does not hand the socket to evhttp until a
-  certificate exists. The "connection refused, not a handshake failure"
-  property above still holds for a pool whose TLS socket the gateway binds
-  itself, but not for the gateway's `listen`. ACME HTTP-01 is unaffected: it
-  is answered on `http.plain_listen`. Tracked as a follow-up.
+  On `pool.type = gateway` the same holds (issue #388): the gateway binds its
+  public `listen` through `fpm_http_listen()` with `do_listen = 0` while it is
+  in NO_CERT, so the port is bound but not listening and a TCP connect is
+  refused. With `http.reuseport = on` each gateway child binds its own socket
+  in the SO_REUSEPORT group the same way.
 
 **READY** — the certificate has appeared.
 

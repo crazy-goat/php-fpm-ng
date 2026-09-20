@@ -2155,7 +2155,18 @@ static ZEND_FUNCTION(fpmng_worker_stream_has_buffered)
 			 * buffered any more. */
 			RETURN_FALSE;
 		}
-		RETURN_BOOL(!ctx->eof && evbuffer_get_length(bufferevent_get_input(ctx->bev)) > 0);
+		/* Issue #456: this answers "is there data to read", and nothing else.
+		 * It used to be `!ctx->eof && …`, which made it lie exactly when the
+		 * peer sent its last frame(s) and immediately FINed: the event callback
+		 * flags ctx->eof *before* firing the read watcher, with the frame bytes
+		 * still unread in the input evbuffer, so the predicate said "nothing
+		 * buffered" while fread() would still return them — a codec that gates
+		 * its reads on this predicate (Fiber suspension, a backpressure await)
+		 * dropped the peer's close frame. "The peer is gone" is already
+		 * available to userland exactly via feof() and
+		 * PHP_STREAM_OPTION_CHECK_LIVENESS (see the stream's ops below); the
+		 * predicate must not double as an EOF signal. */
+		RETURN_BOOL(evbuffer_get_length(bufferevent_get_input(ctx->bev)) > 0);
 	}
 	RETURN_BOOL(fpm_worker_stream_buffered(php_stream_handle) > 0);
 }

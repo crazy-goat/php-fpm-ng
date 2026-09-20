@@ -14,7 +14,7 @@
 #
 # See docs/fpm-phpt.md.
 
-status-listen.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
-status-listen-expose-php-on.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
-status-listen-expose-php-off.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now pm.status_path on the pool it describes
+status-listen.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now operator.status_path on the pool it describes (renamed in #386)
+status-listen-expose-php-on.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now operator.status_path on the pool it describes (renamed in #386)
+status-listen-expose-php-off.phpt	issue #278 removed pm.status_listen and the shared status pool; a status page is now operator.status_path on the pool it describes (renamed in #386)
 status-ping.phpt	issue #278 removed pm.status_listen and the shared status pool; ping.path stays on the pool's own listener

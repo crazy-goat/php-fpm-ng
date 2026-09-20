@@ -44,15 +44,15 @@ daemonize = no
 pool.type = supervisor
 supervisor.script = $work/beating.php
 supervisor.restart = always
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /beating-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /beating-status
 
 [silent]
 pool.type = supervisor
 supervisor.script = $work/silent.php
 supervisor.restart = never
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /silent-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /silent-status
 EOT;
 
 function pool_row(string $address, string $path): array

@@ -47,8 +47,8 @@ pm = static
 pm.max_children = 2
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 [solo]
 listen = 127.0.0.1:$solo
 pool.type = http-direct
@@ -56,8 +56,8 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /solo-status
-pm.status_listen = $ops
+operator.status_path = /solo-status
+operator.status_listen = $ops
 ; Also the bound on how long a retiring child waits for the connections it
 ; holds, which is what this pool exercises: the reader keeps one open.
 http.read_timeout = 1000

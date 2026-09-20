@@ -2056,7 +2056,7 @@ responses, with nothing in the log. Only a custom stderr logger showed
 **Superseded 2026-09-13 (issue #278).** The pool type is gone. Everything below
 stays because it records what it did and why, and because the two pages
 survived it unchanged in shape — but they are now per-pool directives
-(`pm.status_path`, `pm.metrics_path`) answered by the operator endpoint
+(`operator.status_path`, `operator.metrics_path`) answered by the operator endpoint
 (issues #274/#275) rather than by a pool of their own, and a configuration that still says
 `pool.type = status` fails to start with a message naming the replacement.
 `fpm_pool_status.c` is `fpm_operator_pages.c`; the two renderers kept their

@@ -67,24 +67,24 @@ pm = static
 pm.max_children = 2
 chdir = $root
 http.front_controller = /front.php
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /web-metrics
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /web-metrics
 
 [tick]
 pool.type = cron
 cron.schedule = @hourly
 cron.script = $root/loop.php
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /tick-status
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /tick-metrics
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /tick-status
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /tick-metrics
 
 [sup]
 pool.type = supervisor
 supervisor.script = $root/loop.php
 supervisor.processes = 1
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /sup-status
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /sup-status
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');

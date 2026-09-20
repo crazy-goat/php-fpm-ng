@@ -18,7 +18,7 @@ PHP);
 $base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
 $port = $base + 16;
 $denied = $base + 17;
-/* Where pm.status_path is answered since issue #275: an operator listener of
+/* Where operator.status_path is answered since issue #275: an operator listener of
  * its own, not the pool's public one. ping.path deliberately stayed on the
  * public listener -- it is a liveness probe for whatever is in front of the
  * pool (#273, point 9) -- so this test reads the two from two places, which is
@@ -42,8 +42,8 @@ chdir = $root
 http.front_controller = /front.php
 ping.path = /ping
 ping.response = alive
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 access.log = $access
 access.format = "%R %m %r%Q%q %s %{milli}d %M %{X-Marker}o"
 access.suppress_path[] = /ping

@@ -184,7 +184,7 @@ above come from one sitting on one toolchain for that reason.
   only — [WebSocket](#websocket-poolexecutor--worker-issue-343); the classic
   executor keeps refusing them, and TLS is supported — see below. Static
   files are too, opt-in and on the classic executor only — see below as well.
-  The pool-level operator directives (`ping.path`, `pm.status_path`,
+  The pool-level operator directives (`ping.path`, `operator.status_path`,
   `access.log`, `listen.allowed_clients`, `chroot`) are supported as well — see
   [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
@@ -1187,8 +1187,8 @@ http.front_controller = /index.php
 
 ping.path = /ping
 ping.response = pong
-pm.status_path = /status
-pm.status_listen = 127.0.0.1:8080
+operator.status_path = /status
+operator.status_listen = 127.0.0.1:9253
 access.log = /var/log/php-fpm/app.access.log
 access.format = "%R - %u %t \"%m %r%Q%q\" %s %{milli}d %{kilo}M"
 access.suppress_path[] = /ping
@@ -1196,7 +1196,7 @@ listen.allowed_clients = 10.0.0.4,10.0.0.5
 chroot = /srv/jail
 ```
 
-### `ping.path` and `pm.status_path`
+### `ping.path` and `operator.status_path`
 
 **They are on two different sockets.**
 
@@ -1205,8 +1205,8 @@ before any PHP request is started, and does not count against
 `pm.max_requests`. It is a liveness probe for whatever is in front of the pool,
 so that is where it belongs.
 
-`pm.status_path` is answered by the pool's **operator endpoint**, on
-`pm.status_listen` (default `127.0.0.1:8080`) — see
+`operator.status_path` is answered by the pool's **operator endpoint**, on
+`operator.status_listen` (default `127.0.0.1:9253`) — see
 [`docs/operator-endpoint.md`](operator-endpoint.md). It used to be on the pool's
 own listener; issue #275 moved it, unchanged. The page, its fields, its two
 flags and its headers are exactly what they were; what changed is that the
@@ -1220,7 +1220,7 @@ the directive is a literal in the pool file and upstream matches it literally
 too, so `/%73tatus` is not a way past a proxy rule written against the
 documented spelling.
 
-`pm.status_path` answers plain text, or JSON for `?json`, with the same
+`operator.status_path` answers plain text, or JSON for `?json`, with the same
 `Expires`/`Cache-Control` headers upstream's `fpm_status.c` sends. The fields:
 
 | Field | Where it comes from |
@@ -1369,10 +1369,10 @@ Upstream's fastcgi `?full` reports a per-process *request* detail (the URI, the
 method, the duration). That part is still absent: the scoreboard's per-process
 slots describe a FastCGI request, and a direct child's request is not one.
 
-`pm.status_listen` names where the page is served since issue #275. It was
+`operator.status_listen` names where the page is served since issue #275. It was
 rejected before that, when it could only have asked for a second FastCGI socket
 a direct child has nowhere to put. On `pool.executor = worker` the page is not
-served at all, because `pm.status_path` is rejected there for the reason below.
+served at all, because `operator.status_path` is rejected there for the reason below.
 
 The page is rendered by a process that is not one of this pool's children, which
 is why every number on it comes from shared memory: the per-slot counters the
@@ -1471,18 +1471,18 @@ What differs from a fastcgi pool:
 - Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
   are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
   left at zero or `-` rather than carried over from whatever this child served
-  last. Scrapes of `pm.status_path` are not among them: since issue #275 they
+  last. Scrapes of `operator.status_path` are not among them: since issue #275 they
   never reach this pool.
 
 - `access.suppress_path[]` matches the same request path.
 
-Under `pool.executor = worker` all three of `ping.path`, `pm.status_path` and
+Under `pool.executor = worker` all three of `ping.path`, `operator.status_path` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
 that executor calls `fpm_request_accepting(false)` once for the life of the
 child, so there is no per-request stage, duration, CPU or peak memory to
 report. Refusing the directive is better than answering it with placeholders.
 
-That does not make `pm.metrics_path` (which this executor does not reject)
+That does not make `operator.metrics_path` (which this executor does not reject)
 untruthful. Since issue #333 its `requests` total is a real count, incremented
 once per request this executor actually answers — both through the buffered
 `fpmng_worker_respond()` and through the streaming completion of
@@ -1495,8 +1495,8 @@ this pool's workers currently have registered via
 published synchronously on every change rather than on a tick, and both drop
 back down — pending on every `fpm_worker_reap()` path (answered, timed out by
 `worker.request_timeout`, or the connection going away), watchers on
-`fpmng_worker_event_free()` — so neither one only grows. What `pm.metrics_path`
-still cannot say for this executor is the same thing `pm.status_path` cannot:
+`fpmng_worker_event_free()` — so neither one only grows. What `operator.metrics_path`
+still cannot say for this executor is the same thing `operator.status_path` cannot:
 idle vs. active per request, a request's duration, or its CPU/peak memory —
 the scoreboard's `idle`/`active` pair for a worker pool therefore keeps reading
 `idle=N, active=0` regardless of how many requests are actually in flight,

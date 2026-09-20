@@ -57,15 +57,15 @@ struct fpm_http_direct_labels {
  * and the per-request observability) without holding a second copy of the
  * common entries.
  *
- * pm.status_listen and pm.metrics_listen are deliberately NOT here. Since issue
- * #275 both of this type's operator pages are served by the operator endpoint
- * (fpm_operator_endpoint.h) on a listener of its own, so both directives have
- * something to name. The upstream meaning of pm.status_listen -- a second
+ * operator.status_listen and operator.metrics_listen are deliberately NOT here.
+ * Since issue #275 both of this type's operator pages are served by the
+ * operator endpoint (fpm_operator_endpoint.h) on a listener of its own, so both
+ * directives have something to name. (Upstream's pm.status_listen -- a second
  * FastCGI socket served by a second pool -- is gone from fpm-ng, and a direct
  * child still owns exactly one request listener; what changed is that the
- * operator page is no longer on it.
+ * operator page is no longer on it.)
  *
- * pm.status_path on the pool's own listener was supported by the classic
+ * operator.status_path on the pool's own listener was supported by the classic
  * executor between issues #59 and #275; it is now answered on the operator
  * listener instead, unchanged. The worker executor rejects it still (see
  * fpm_http_direct_worker_rejects) for reasons of its own.

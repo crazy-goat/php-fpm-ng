@@ -11,7 +11,7 @@ $root = sys_get_temp_dir() . '/fpmng-operator-off-' . getmypid();
 @mkdir($root, 0700, true);
 file_put_contents($root . '/front.php', '<?php echo "php:" . $_SERVER["REQUEST_URI"];');
 
-/* pm.metrics_listen is set and no path is: issue #273, point 4 -- there is no
+/* operator.metrics_listen is set and no path is: issue #273, point 4 -- there is no
  * separate on/off directive, the endpoint exists iff a path is set. So the
  * address below must stay unbound, and this is the configuration where getting
  * that wrong would be invisible: an address named in the config looks like an
@@ -32,7 +32,7 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.metrics_listen = {{ADDR[operator]}}
+operator.metrics_listen = {{ADDR[operator]}}
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');

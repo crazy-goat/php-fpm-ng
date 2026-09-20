@@ -163,7 +163,7 @@ struct fpm_http_direct_ops *fpm_http_direct_ops_init_child(struct fpm_worker_poo
 		ops->ping_path = wp->config->ping_path;
 		ops->ping_response = wp->config->ping_response ? wp->config->ping_response : "pong";
 	}
-	/* pm.status_path is deliberately NOT read here. Issue #275 moved this
+	/* operator.status_path is deliberately NOT read here. Issue #275 moved this
 	 * pool's status page onto the operator endpoint's listener
 	 * (fpm_operator_endpoint.c), which renders it from the same shared counters
 	 * through fpm_pool_type_s.operator_status -- so the page is unchanged and
@@ -757,7 +757,7 @@ static void fpm_http_direct_ops_send(struct evhttp_request *http, const char *co
  * too, so "/%70ing" is not a way past a proxy rule written against the
  * documented spelling.
  *
- * Only ping.path is here. pm.status_path left this listener in issue #275 and
+ * Only ping.path is here. operator.status_path left this listener in issue #275 and
  * is answered by the operator endpoint -- see the note in
  * fpm_http_direct_ops_init_child(). */
 int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp_request *http,

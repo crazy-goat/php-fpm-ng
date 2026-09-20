@@ -29,8 +29,8 @@ chdir = $root
 http.front_controller = $script
 php_admin_value[session.auto_start] = 1
 php_admin_value[session.save_path] = $sessionDir
-pm.metrics_listen = 127.0.0.1:$statusPort
-pm.metrics_path = /metrics
+operator.metrics_listen = 127.0.0.1:$statusPort
+operator.metrics_path = /metrics
 CFG;
 $tester = new FPM\Tester($cfg, '<?php');
 try {
@@ -45,7 +45,7 @@ try {
     }
     /* Read through the pool's own operator endpoint: issue #278 removed the
      * pool.type = status that used to aggregate every pool on its own port, so
-     * the scoreboard now comes off this pool's pm.metrics_path. Prometheus
+     * the scoreboard now comes off this pool's operator.metrics_path. Prometheus
      * rather than JSON because an http-direct pool's status page is the type's
      * own text page (issue #275), while the scoreboard series are the same
      * three numbers under labelled names. */

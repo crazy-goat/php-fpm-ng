@@ -133,7 +133,7 @@ seconds ago and the pool has not started a fresh run since), the pool is
   fast-restart warning ([`supervisor.md`](supervisor.md#the-fast-restart-warning))
   uses, so a schedule that recovers and later slips again is reported each
   time rather than only the first.
-- The status page (`pm.status_path`) gains a `stale` field (`true`/`false`,
+- The status page (`operator.status_path`) gains a `stale` field (`true`/`false`,
   plus `stale_since` — the schedule's due time — while `stale` is `true`), and
   the metrics page gains `fpmng_pool_stale` (`1`/`0`, plus
   `fpmng_pool_stale_since_seconds` while it is `1`). Both are present as soon
@@ -145,7 +145,7 @@ seconds ago and the pool has not started a fresh run since), the pool is
 **Staleness is computed when the status/metrics page is rendered, not on a
 timer of its own.** There is no independent master-side clock ticking away
 checking every cron pool's schedule; the check above (and the `WARNING` log
-line) only runs as part of answering a request to `pm.status_path` or the
+line) only runs as part of answering a request to `operator.status_path` or the
 metrics endpoint. A pool with `cron.expect_within` set but nothing ever
 scraping its operator endpoint can sit stale, undetected, indefinitely — the
 directive makes staleness *visible to whoever looks*, it does not make fpm-ng
@@ -167,7 +167,7 @@ large and a genuinely stuck job goes unnoticed for that much longer.
 
 ## Run history
 
-The pool's status page (`pm.status_path`) shows the last run only: whether it
+The pool's status page (`operator.status_path`) shows the last run only: whether it
 is running right now, when it last started, the exit code of the last completed run, and how
 many times in a row it has failed. It does not keep a count of total runs,
 and it cannot tell "waiting for a legitimately near scheduled time" apart

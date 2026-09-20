@@ -1,15 +1,18 @@
 # The per-pool operator endpoint
 
-> **Planned change (v0.10.0):** the four `pm.*` directives on this page are
-> being renamed to an `operator.*` namespace, and a new `pool.type = gateway`
-> will expose every pool's pages under `<base>/<pool name>` on its public port.
-> This page describes what runs today; the target is in
-> [`gateway.md`](gateway.md).
+> **Namespace note (v0.10.0, issue #386):** the four directives on this page
+> used to be spelled `pm.status_path`, `pm.metrics_path`, `pm.status_listen` and
+> `pm.metrics_listen`. They are now `operator.*`, with `operator.metrics` /
+> `operator.status` as shorthands. The old spellings are refused by name. A new
+> `pool.type = gateway` will expose every pool's pages under `<base>/<pool name>`
+> on its public port; that part is still the target in [`gateway.md`](gateway.md).
 
 A `cron`, `supervisor`, `http` or `http-direct` pool has nothing in front of it
 that could answer a monitoring scrape. A `fastcgi` pool does — the web server
 that speaks FastCGI to it — which is why upstream FPM answers `pm.status_path`
-inside a request and why that arrangement is left alone here.
+inside a request and why that arrangement is left alone here. `pm.status_path`
+is therefore the one name that stays: it keeps its upstream meaning on
+`pool.type = fastcgi` only.
 
 For the four types above, php-fpm-ng serves the answer itself, from a small
 HTTP listener of its own:
@@ -20,26 +23,56 @@ pool.type = cron
 cron.schedule = */5 * * * *
 cron.script = /srv/app/bin/tick.php
 
-pm.status_listen = 127.0.0.1:8080
-pm.status_path   = /tick/status
-pm.metrics_listen = 127.0.0.1:8080
-pm.metrics_path   = /tick/metrics
+operator.status_listen = 127.0.0.1:9253
+operator.status_path   = /tick/status
+operator.metrics_listen = 127.0.0.1:9253
+operator.metrics_path   = /tick/metrics
 ```
 
-| Directive | Meaning |
-| --- | --- |
-| `pm.status_path` | Path answering JSON for this pool. Unset: off. |
-| `pm.metrics_path` | Path answering Prometheus text for this pool. Unset: off. |
-| `pm.status_listen` | Where `pm.status_path` binds. Default `127.0.0.1:8080`. |
-| `pm.metrics_listen` | Where `pm.metrics_path` binds. Default `127.0.0.1:8080`. |
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `operator.status_path` | Path answering JSON for this pool. Unset: off. | unset = off |
+| `operator.metrics_path` | Path answering Prometheus text for this pool. Unset: off. | unset = off |
+| `operator.status` | Shorthand: expose status at `/status/<pool name>`. | `off` |
+| `operator.metrics` | Shorthand: expose metrics at `/metrics/<pool name>`. | `off` |
+| `operator.status_listen` | Where `operator.status_path` binds. | `127.0.0.1:9253` |
+| `operator.metrics_listen` | Where `operator.metrics_path` binds. | `127.0.0.1:9253` |
 
-There is **no on/off directive**. The endpoint exists exactly when a path is
-set. A `pm.status_listen` with no `pm.status_path` binds nothing — the address
-is where an endpoint would go, not an instruction to open one.
+`operator.status = on` and `operator.status_path = …` are two spellings of the
+same page. Setting the flag and an explicit path for the same format is a
+startup error naming both; setting neither leaves that format off. A path
+directive with no path (`operator.status_listen` alone) binds nothing — the
+address is where an endpoint *would* go, not an instruction to open one.
 
 The default is a loopback address on purpose. These pages describe the inside of
 your process tree, and `listen.allowed_clients` is a weaker boundary than not
-binding the port outward at all.
+binding the port outward at all. The port is the Prometheus registry's PHP-FPM
+exporter port, chosen so a scraper that already knows it needs no mapping.
+
+## The old names are refused, not aliased
+
+`pm.status_path` on any type but `fastcgi`, and `pm.status_listen`,
+`pm.metrics_path` and `pm.metrics_listen` on every type, are startup errors that
+name the replacement:
+
+```
+[pool tick] 'pm.metrics_path' was renamed to 'operator.metrics_path' (issue #386); update the configuration
+```
+
+Aliasing them would keep two names alive for one mechanism, which is the thing
+the rename removes. `fastcgi` is the single exception: there `pm.status_path`
+still keeps upstream's meaning (a path on the pool's own FastCGI socket, for the
+web server in front), and every `operator.*` directive is refused because that
+type has no operator listener — see #383.
+
+## Path-safe pool names
+
+A pool that exposes a page carries its name into a URL: `operator.metrics = on`
+derives `/metrics/<pool name>`, and a gateway later forwards `<base>/<pool
+name>`. Such a pool's section name must therefore contain only the characters
+`[alphanum]/_-.~`. A name with anything else (`[bad name]`, a space) is refused
+at startup, naming the pool and the offending character. A pool that exposes
+nothing keeps whatever name it had.
 
 ## One socket, many pools
 
@@ -53,12 +86,12 @@ identify one endpoint, so:
 
 ```ini
 [a]
-pm.status_listen = 127.0.0.1:8080
-pm.status_path   = /status
+operator.status_listen = 127.0.0.1:9253
+operator.status_path   = /status
 
 [b]
-pm.status_listen = 127.0.0.1:8080
-pm.status_path   = /status
+operator.status_listen = 127.0.0.1:9253
+operator.status_path   = /status
 ```
 
 fails at startup, naming both pools. Give one of them a different path, or a
@@ -98,30 +131,33 @@ pool.type = status
 ; after
 [api]
 ; …
-pm.status_listen = 127.0.0.1:9001
-pm.status_path = /api/status
-pm.metrics_path = /api/metrics
+operator.status_listen = 127.0.0.1:9001
+operator.status_path = /api/status
+operator.metrics_path = /api/metrics
 
 [worker]
 ; …
-pm.status_listen = 127.0.0.1:9001
-pm.status_path = /worker/status
-pm.metrics_path = /worker/metrics
+operator.status_listen = 127.0.0.1:9001
+operator.status_path = /worker/status
+operator.metrics_path = /worker/metrics
 ```
 
-`pm.metrics_listen` defaults to `pm.status_listen`, so the four paths above
-share the one port the scraper was already pointed at. What changes for that
-scraper is the path: one target per pool instead of one target holding every
-pool. The JSON body is unchanged in shape — still `{"pools":[…]}` — but the
-array is one element long, so a client that iterated it keeps working.
+Both `*_listen` directives default to `127.0.0.1:9253`, so the four
+paths above share the one port the scraper was already pointed at. What changes
+for that scraper is the path: one target per pool instead of one target holding
+every pool. The JSON body is unchanged in shape — still `{"pools":[…]}` — but
+the array is one element long, so a client that iterated it keeps working.
 
 ## Upgrading an `http` pool that already set `pm.status_path`
 
-On `pool.type = http` this directive used to be answered by upstream FPM's
-in-child handler, on the pool's **public** listener — reachable whenever
+On the classic `pool.type = http` this directive used to be answered by upstream
+FPM's in-child handler, on the pool's **public** listener — reachable whenever
 `http.front_controller` was empty, because that is what makes `SCRIPT_NAME` the
-request path. It is now answered on the operator listener instead, and the
-public listener hands the path to your application like any other.
+request path. On the types that carry an operator endpoint it is answered on the
+operator listener instead, and the public listener hands the path to your
+application like any other. (The classic `http` type is retired in favour of
+`pool.type = gateway`, #388; this paragraph is for configurations predating
+both changes.)
 
 The page is not the same page: it is the per-pool JSON described below, not
 upstream's `text`/`html`/`json`/`xml` status body. A scraper pointed at the
@@ -131,12 +167,13 @@ untouched, and keeps `pm.status_path` with its upstream meaning in full.
 ## Upgrading an `http-direct` pool that already set `pm.status_path`
 
 The page is the same page — the one described in
-[`docs/http-direct.md`](http-direct.md#pingpath-and-pmstatus_path), with the
-per-connection counters, the `direct schema` version and the per-child rows on
-`?full`, unchanged field for field and byte for byte. What changed is the socket
-it is on: the operator listener instead of the pool's own, so a scraper moves
-from `http://<listen>/status` to `http://<pm.status_listen>/status` and keeps
-parsing exactly what it parsed before. `?json` and `?full` work there too.
+[`docs/http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path), with
+the per-connection counters, the `direct schema` version and the per-child rows
+on `?full`, unchanged field for field and byte for byte. What changed is the
+socket it is on: the operator listener instead of the pool's own, so a scraper
+moves from `http://<listen>/status` to `http://<operator.status_listen>/status`
+and keeps parsing exactly what it parsed before. `?json` and `?full` work there
+too.
 
 Two consequences worth knowing before you compare numbers across the upgrade:
 
@@ -147,7 +184,7 @@ Two consequences worth knowing before you compare numbers across the upgrade:
 - The path is free on the public listener again. A request for `/status` there
   goes to your application like any other URL.
 
-`pm.status_listen` is accepted on this type since the move; it used to be
+`operator.status_listen` is accepted on this type since the move; it used to be
 refused, because under its upstream meaning it asked for a second FastCGI socket
 a direct child has nowhere to put.
 
@@ -163,7 +200,7 @@ purpose — a scraper reads one endpoint and compares labelled series across poo
 A pool that serves requests (`http`, `http-direct`) reports its worker counts
 and request total. On `pool.type = http-direct` with `pool.executor = worker`
 that request total is a real, per-request count since issue #333 — see
-[`http-direct.md`](http-direct.md#pingpath-and-pmstatus_path) for what else
+[`http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path) for what else
 that executor does and does not report, including the two extra gauges
 (`fpmng_pool_worker_pending`, `fpmng_pool_worker_watchers`) it adds on top of
 the shape below, and [Per-slot worker metrics](#per-slot-worker-metrics-issue-339)
@@ -208,7 +245,7 @@ that is flapping silently, and reading the two together is how you see it.
 
 ### Per-slot worker metrics (issue #339)
 
-On `pool.type = http-direct` with `pool.executor = worker`, `pm.metrics_path`
+On `pool.type = http-direct` with `pool.executor = worker`, `operator.metrics_path`
 also carries a set of series keyed by `slot` (this pool's scoreboard index,
 one worker child per slot) or by a `reason`/`type` label, on top of the
 pool-wide `fpmng_pool_worker_pending` and `fpmng_pool_worker_watchers` gauges
@@ -216,9 +253,9 @@ issue #333 already added. They exist to answer three questions issue #333's
 two gauges cannot: which slot is under pressure, why a worker was refused or
 recycled, and how long its event loop has gone quiet.
 
-`pm.status_path` stays unsupported on this executor (see
-[`http-direct.md`](http-direct.md#pingpath-and-pmstatus_path)) — only
-`pm.metrics_path` reports these.
+`operator.status_path` stays unsupported on this executor (see
+[`http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path)) — only
+`operator.metrics_path` reports these.
 
 Per-slot gauges. Each is only meaningful for a slot currently holding a live
 worker; a slot with no worker in it (not yet spawned, or between an exit and
@@ -255,7 +292,7 @@ because what they count outlives any one worker occupying any one slot:
 
 ## Application metrics on a per-pool metrics path
 
-`pm.metrics_path` carries the series your PHP code registered with
+`operator.metrics_path` carries the series your PHP code registered with
 `fpm_metric_register()` and fed with `fpm_metric_inc()`, `fpm_metric_set()` and
 `fpm_metric_observe()`, appended to the pool metrics above in the same
 exposition format.
@@ -276,14 +313,14 @@ There is no aggregate endpoint. Until issue #278 a `pool.type = status` pool
 answered `/metrics` with every pool's series at once; it was removed, because
 one pool that reported on all the others is the same listener the operator
 endpoint already runs, with a second configuration language for it. A scraper
-that wants several pools reads several paths — on one port if they share a
-`pm.metrics_listen`, which is the usual arrangement.
+that wants several pools reads several paths — on one port if they share an
+`operator.metrics_listen`, which is the usual arrangement.
 
 ### Turning metrics off
 
-Unset `pm.metrics_path`. That is the off switch, and it is a real one: the path
-is not answered, and if nothing else on that address needs a listener the port
-is not bound at all.
+Unset `operator.metrics_path` (and do not set `operator.metrics`). That is the
+off switch, and it is a real one: the path is not answered, and if nothing else
+on that address needs a listener the port is not bound at all.
 
 What it does **not** switch off is the API. `fpm_metric_register()` and the rest
 keep working in every pool, keep writing to the same shared slots, and keep
@@ -294,9 +331,9 @@ decision about exposure, not a change to what the application may call.
 ### `?openmetrics` is not an alias
 
 Upstream FPM emits OpenMetrics as a query flag on the status page. php-fpm-ng
-does not. `GET <pm.status_path>?openmetrics` is the status page being asked for
-a variant it does not have, exactly like `?json` or `?xml`; metrics live on
-`pm.metrics_path` and nowhere else. Two paths are what gives the two pages
+does not. `GET <operator.status_path>?openmetrics` is the status page being asked
+for a variant it does not have, exactly like `?json` or `?xml`; metrics live on
+`operator.metrics_path` and nowhere else. Two paths are what gives the two pages
 independent on/off switches, since "on" means "the path is set".
 
 ## What is not here yet
@@ -311,4 +348,6 @@ independent on/off switches, since "on" means "the path is set".
   locally answered ping never touches the scoreboard, `pm.max_requests` or a
   queue counter — it is not a request of the pool. See
   [`docs/gateway.md`](gateway.md) and
-  [`docs/http-direct.md`](http-direct.md#pingpath-and-pmstatus_path).
+  [`docs/http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path).
+- `pool.type = fastcgi` joining this listener on an explicit
+  `operator.*_listen` is #383.

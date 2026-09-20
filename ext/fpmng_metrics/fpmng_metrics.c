@@ -2,7 +2,7 @@
  *
  * Two backends, one piece of PHP code:
  *  - under fpm-ng: series arrays in shared memory, one per worker (see
- *    php_fpmng_metrics.h), exposed on a pool's pm.metrics_path —
+ *    php_fpmng_metrics.h), exposed on a pool's operator.metrics_path —
  *    the application serves nothing by itself;
  *  - under CLI (and every other SAPI): a process-local array; the text to
  *    expose is returned by fpm_metric_render().

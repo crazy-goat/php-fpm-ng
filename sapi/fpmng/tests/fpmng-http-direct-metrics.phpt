@@ -52,8 +52,8 @@ pm.max_children = 2
 http.max_connections = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 ; Short enough that a connection which sends nothing is dropped inside this
 ; test's patience, long enough that a connection this test means to hold open
 ; between two reads of the page is not dropped under it.
@@ -70,8 +70,8 @@ http.front_controller = /front.php
 ; share one listener as long as the triple (address, port, path) is unique
 ; (issue #273, point 7), and a test that reads both pages is the cheapest place
 ; to keep saying so.
-pm.status_path = /recycle-status
-pm.status_listen = $ops
+operator.status_path = /recycle-status
+operator.status_listen = $ops
 CFG;
 
 function expect(string $what, $actual, $expected): void

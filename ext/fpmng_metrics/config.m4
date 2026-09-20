@@ -3,7 +3,7 @@ PHP_ARG_ENABLE([fpmng-metrics],
   [AS_HELP_STRING([--enable-fpmng-metrics],
     [Enable fpmng_metrics: application metrics from PHP (fpm_metric_*,
      NOTES 3k). Under fpm-ng the store lives in shared memory and is
-     exposed on a pool's pm.metrics_path; elsewhere (CLI) it is
+     exposed on a pool's operator.metrics_path; elsewhere (CLI) it is
      process-local and fpm_metric_render() returns the text])],
   [yes])
 

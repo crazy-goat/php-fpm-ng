@@ -4,13 +4,18 @@
  * operator's scrape -- cron, supervisor, http, http-direct -- serves its own
  * stats and metrics from a small HTTP listener of its own:
  *
- *   pm.status_path     the pool's status page,   unset = off
- *   pm.metrics_path    Prometheus text,          unset = off
- *   pm.status_listen   where the above bind, default 127.0.0.1:8080
- *   pm.metrics_listen  the same, for the metrics path
+ *   operator.status_path     the pool's status page,   unset = off
+ *   operator.metrics_path    Prometheus text,          unset = off
+ *   operator.status_listen   where the above bind, default 127.0.0.1:9253
+ *   operator.metrics_listen  the same, for the metrics path
+ *   operator.status = on     shorthand: /status/<pool name>, default off
+ *   operator.metrics = on    shorthand: /metrics/<pool name>, default off
  *
- * There is no separate on/off directive: the endpoint exists iff a path is set
- * (#273, point 4). With both paths unset nothing is bound at all.
+ * There is no mandatory on/off directive: with no flag and no path, nothing is
+ * bound at all (#273, point 4). A flag is an alternative spelling of the path
+ * it derives, so setting both is refused at startup (issue #386). A pool that
+ * exposes anything this way must have a path-safe section name, because on
+ * every type but its own listener the name IS a URL segment (issue #386).
  *
  * The metrics page is the same exposition format on every type, so that one
  * scraper can compare labelled series across pools. The status page is the
@@ -23,7 +28,9 @@
  * fpm_pool_type_s.operator_endpoint. On fastcgi the flag is off
  * and pm.status_path keeps its upstream meaning -- a path answered on the pool's
  * own FastCGI socket, with a web server in front of it -- because there the
- * front end is exactly what an operator already has (#273, point 2).
+ * front end is exactly what an operator already has (#273, point 2). The
+ * operator.* directives are refused there until #383 gives that type a way to
+ * join this listener explicitly.
  *
  * WHOSE PROCESS ANSWERS. Not the master: a scrape does blocking I/O and
  * rendering, and the master is the one process in the tree whose death is
@@ -57,13 +64,10 @@ extern const char *const fpm_operator_endpoint_rejects[];
  * has no operator endpoint, or which set no path, registers nothing.
  *
  * Returns -1 if two pools claim the same (address, port, path) -- the collision
- * rule from #273, point 7 -- or if a path is malformed. */
+ * rule from #273, point 7 -- or if a path is malformed, a flag and its explicit
+ * path are both set, or an exposing pool has a name that is not path-safe
+ * (issue #386). */
 int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
-
-/* The four directives an operator endpoint owns, as they appear in a reject
- * list's .reject_exceptions. cron and supervisor reject the whole "pm."
- * namespace and carve these out (issue #283). */
-extern const char *const fpm_operator_endpoint_directives[];
 
 /* fpm_pool_type_s.validate / .child_main for the internal listener pool. */
 int fpm_operator_endpoint_validate(struct fpm_worker_pool_s *wp);

@@ -137,8 +137,8 @@ pm.min_spare_servers = 1
 pm.max_spare_servers = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 ; The bound the scaled-down child gets before the master escalates to
 ; SIGKILL: comfortably longer than one idle-server-maintenance pass
 ; (~1 second), which is exactly the margin the old code did not grant.

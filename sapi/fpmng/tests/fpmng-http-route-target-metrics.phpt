@@ -39,8 +39,8 @@ http.gateways = 1
 http.listen = {{ADDR[http]}}
 http.front_controller = /index.php
 http.route[events] = /sse
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /metrics
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /metrics
 
 [events]
 listen = {{ADDR[events]}}

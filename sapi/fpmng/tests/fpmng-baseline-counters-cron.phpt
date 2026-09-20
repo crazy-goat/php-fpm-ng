@@ -46,10 +46,10 @@ daemonize = no
 pool.type = cron
 cron.schedule = * * * * *
 cron.script = $work/job.php
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /tick-metrics
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /tick-status
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /tick-metrics
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /tick-status
 EOT;
 
 function series(string $body, string $name, string $pool): ?float

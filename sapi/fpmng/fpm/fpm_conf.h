@@ -84,10 +84,16 @@ struct fpm_worker_pool_config_s {
 	int pm_max_spawn_rate;
 	int pm_process_idle_timeout;
 	int pm_max_requests;
-	char *pm_status_path;
-	char *pm_status_listen;
-	char *pm_metrics_path;		/* fpm-ng: Prometheus text on the operator endpoint; see fpm_operator_endpoint.h */
-	char *pm_metrics_listen;	/* fpm-ng: where that path binds; default 127.0.0.1:8080 */
+	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every other type refuses it and uses operator.status_path below (issue #386). */
+	/* fpm-ng: the per-pool operator endpoint's directives. Issue #386 moved
+	 * these out of the "pm." namespace, which never described them. See
+	 * fpm_operator_endpoint.h for the model and the defaults. */
+	char *operator_status_path;	/* JSON status page, unset = off */
+	char *operator_status_listen;	/* where operator.status_path binds, default 127.0.0.1:9253 */
+	char *operator_metrics_path;	/* Prometheus text, unset = off */
+	char *operator_metrics_listen;	/* where operator.metrics_path binds, default 127.0.0.1:9253 */
+	int operator_status;		/* operator.status = on -> derive /status/<pool name> */
+	int operator_metrics;		/* operator.metrics = on -> derive /metrics/<pool name> */
 	char *ping_path;
 	char *ping_response;
 	char *access_log;

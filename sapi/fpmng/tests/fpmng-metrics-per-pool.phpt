@@ -8,7 +8,7 @@ fpm-ng: a pool's metrics endpoint carries that pool's application series and nob
 require_once "tester.inc";
 require_once "fpmng-operator.inc";
 
-/* pm.metrics_path exposes the series ext/fpmng_metrics collects from PHP, and
+/* operator.metrics_path exposes the series ext/fpmng_metrics collects from PHP, and
  * the endpoint is per pool. The extension stores them in per-worker slots keyed
  * by a global index, and rendering used to aggregate every slot in the region,
  * so the thing worth testing is that a per-pool scrape is a filter and not a
@@ -58,10 +58,10 @@ pm = static
 pm.max_children = 2
 pool.type = http-direct
 http.front_controller = /alpha.php
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /alpha-status
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /alpha-metrics
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /alpha-status
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /alpha-metrics
 
 [beta]
 listen = {{ADDR[beta]}}
@@ -70,8 +70,8 @@ pm = static
 pm.max_children = 2
 pool.type = http-direct
 http.front_controller = /beta.php
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /beta-metrics
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /beta-metrics
 
 [quiet]
 listen = {{ADDR[quiet]}}
@@ -166,7 +166,7 @@ try {
     /* Upstream spells metrics as a flag on the status page. We do not, and this
      * pins it: ?openmetrics is the status page being asked for a variant it does
      * not have, exactly like ?json and ?xml, never an undocumented alias for
-     * pm.metrics_path. On http-direct that page is the type's own text body
+     * operator.metrics_path. On http-direct that page is the type's own text body
      * (issue #275), which is why the assertion is on its shape rather than on
      * JSON. */
     $status_page = fpmng_operator_body($operator, '/alpha-status?openmetrics');

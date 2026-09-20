@@ -48,7 +48,7 @@ $cases = [
      * the same slot untouched for the whole life of the child, so there the
      * directives are refused rather than answered with placeholders. */
     'worker-ping' => [$base . "\npool.executor = worker\nping.path = /ping", "'ping.path' is not supported"],
-    'worker-status' => [$base . "\npool.executor = worker\npm.status_path = /status", "'pm.status_path' is not supported"],
+    'worker-status' => [$base . "\npool.executor = worker\noperator.status_path = /status", "'operator.status_path' is not supported"],
     'worker-access-log' => [$base . "\npool.executor = worker\naccess.log = /dev/null", "'access.log' is not supported"],
     'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
     'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
@@ -90,13 +90,13 @@ foreach ($cases as $label => [$config, $needle]) {
 foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no",
           "\nlisten.allowed_clients = 127.0.0.1",
           "\nping.path = /ping\nping.response = alive",
-          "\npm.status_path = /status",
+          "\noperator.status_path = /status",
           /* Accepted since issue #275: the status page moved onto the operator
            * endpoint, so the directive that names where that endpoint binds has
            * something to name. It was refused before, when it could only have
            * asked for a second FastCGI socket a direct child has nowhere to
            * put. */
-          "\npm.status_path = /status\npm.status_listen = 127.0.0.1:9001",
+          "\noperator.status_path = /status\noperator.status_listen = 127.0.0.1:9001",
           "\naccess.log = /dev/null",
           "\naccess.log = /dev/null\naccess.format = %R %m %r %s\naccess.suppress_path[] = /ping",
           "\nchroot = /"] as $extra) {

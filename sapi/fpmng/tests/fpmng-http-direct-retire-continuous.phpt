@@ -129,8 +129,8 @@ pm = static
 pm.max_children = 2
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 ; Short enough to keep the test quick, long enough that a handful of
 ; back-to-back local exchanges land comfortably inside one grant of it.
 http.read_timeout = 700

@@ -104,8 +104,8 @@ pm.max_children = 1
 pm.max_requests = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 ; The bound on how long the held-but-idle connection below has to still be
 ; answered once this child starts draining.
 http.read_timeout = 3000

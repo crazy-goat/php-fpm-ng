@@ -49,8 +49,8 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /status
-pm.status_listen = $ops
+operator.status_path = /status
+operator.status_listen = $ops
 ; Long enough that the drain is ended by this test closing the connection and
 ; not by the read timeout: a timeout would hide a child that never retired.
 http.read_timeout = 30000
@@ -61,8 +61,8 @@ pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-pm.status_path = /stop-status
-pm.status_listen = $ops
+operator.status_path = /stop-status
+operator.status_listen = $ops
 http.read_timeout = 30000
 CFG;
 

@@ -107,7 +107,7 @@ struct fpm_direct_worker {
 	/* Whether this child is inside a request, i.e. whether its event loop is
 	 * blocked. Drives the accept gate, see fpm_direct_accept_enable(). */
 	int in_request;
-	/* issue #59: listen.allowed_clients, ping.path, pm.status_path and the
+	/* issue #59: listen.allowed_clients, ping.path and the
 	 * pool-wide counters behind the status page. NULL only if the child could
 	 * not set them up, which is fatal there. */
 	struct fpm_http_direct_ops *ops;
@@ -2254,7 +2254,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_send_error(http, 503, "Worker unavailable");
 		return;
 	}
-	/* ping.path and pm.status_path, issue #59. Ahead of the static server and
+	/* ping.path, issue #59. Ahead of the static server and
 	 * of PHP, and after the 503 gate: a pool that has stopped accepting work
 	 * is not healthy, so answering "pong" there would be the one wrong answer
 	 * this endpoint can give. */

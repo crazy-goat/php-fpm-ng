@@ -18,7 +18,7 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp);
 
 /* Issue #341: fpm_pool_type_s.render_metrics_prometheus for pool.type = http --
  * fpmng_gateway_{upstreams_used,upstreams_max,requests_total,rejected_total}
- * per target, on wp's own pm.metrics_path. Called from the operator endpoint's
+ * per target, on wp's own operator.metrics_path. Called from the operator endpoint's
  * own child (see fpm_pool_type_s's comment on render_metrics_prometheus): the
  * counters it reads are shared memory, allocated once in the master before any
  * child -- including the operator endpoint's -- forks. A wp with no gateway of

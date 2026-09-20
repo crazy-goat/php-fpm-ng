@@ -44,18 +44,18 @@ pm.max_children = 2
 pm.max_requests = 2
 pool.type = http-direct
 http.front_controller = /front.php
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /web-metrics
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /web-metrics
 
 [flap]
 pool.type = supervisor
 supervisor.script = $root/flap.php
 supervisor.processes = 1
 supervisor.restart = always
-pm.metrics_listen = {{ADDR[operator]}}
-pm.metrics_path = /flap-metrics
-pm.status_listen = {{ADDR[operator]}}
-pm.status_path = /flap-status
+operator.metrics_listen = {{ADDR[operator]}}
+operator.metrics_path = /flap-metrics
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /flap-status
 EOT;
 
 function expect(string $what, $actual, $expected): void

@@ -19,7 +19,7 @@ file_put_contents($root . '/.backup.css', 'DOTFILE');
 file_put_contents($root . '/archive.bin', 'UNKNOWN-EXTENSION');
 symlink($outside . '/secret.css', $root . '/escape.css');
 /* The front controller counts its own invocations into a file, because a direct
- * pool has no pm.status_path to ask (it is refused there). "PHP never ran" is
+ * pool has no operator.status_path to ask (it is refused there). "PHP never ran" is
  * what "no PHP request" means from the outside, and this is how the test sees
  * it. */
 file_put_contents($root . '/front.php', <<<'PHP'

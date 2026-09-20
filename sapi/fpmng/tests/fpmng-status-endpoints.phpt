@@ -12,8 +12,8 @@ require_once "fpmng-operator.inc";
  * off its listener. That pool aggregated every pool in the master from a
  * listener of its own, which is the one thing the operator endpoint (#274)
  * also does, so #278 removed it. The two pages did not go with it: the same
- * two formats are now configured per pool, with pm.status_path and
- * pm.metrics_path.
+ * two formats are now configured per pool, with operator.status_path and
+ * operator.metrics_path (the names since issue #386; this test predates them).
  *
  * So this asserts what replaced it and, before that, that the old spelling
  * fails loudly. A config that used to start and now silently reports nothing
@@ -49,13 +49,15 @@ listen = {{ADDR}}
 pool.type = status
 EOT, [
     "pool.type 'status' no longer exists",
-    "set 'pm.status_path' and 'pm.metrics_path' on the pool you want to watch",
+    "set 'operator.status_path' and 'operator.metrics_path' on the pool you want to watch",
 ]);
 
 /* fastcgi has a web server in front of it, which is where a path is
  * restricted, so it gets no operator listener and the address directives have
- * nothing to name. Refused rather than ignored, for the same reason. */
-expectRejected('pm.status_listen on fastcgi', <<<EOT
+ * nothing to name. The old spelling is refused by name with its replacement
+ * (issue #386); the operator.* spelling is refused by the type (see
+ * fpmng-operator-endpoint-config.phpt). */
+expectRejected('pm.status_listen renamed', <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
@@ -67,8 +69,7 @@ pm.max_children = 1
 pm.status_path = /status
 pm.status_listen = {{ADDR[operator]}}
 EOT, [
-    "'pm.status_listen' is not supported by pool.type = fastcgi",
-    "keep 'pm.status_path' on the pool's own socket and restrict it there",
+    "'pm.status_listen' was renamed to 'operator.status_listen' (issue #386)",
 ]);
 
 /* And the replacement, on a type whose whole state comes through
@@ -87,10 +88,10 @@ pid = {{FILE:PID}}
 pool.type = supervisor
 supervisor.script = $root/loop.php
 supervisor.processes = 1
-pm.status_listen = {{ADDR}}
-pm.status_path = /status
-pm.metrics_listen = {{ADDR}}
-pm.metrics_path = /metrics
+operator.status_listen = {{ADDR}}
+operator.status_path = /status
+operator.metrics_listen = {{ADDR}}
+operator.metrics_path = /metrics
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -134,7 +135,7 @@ $tester->close();
 Done
 --EXPECT--
 pool.type = status: rejected
-pm.status_listen on fastcgi: rejected
+pm.status_listen renamed: rejected
 /status: ok
 /metrics: ok
 Done

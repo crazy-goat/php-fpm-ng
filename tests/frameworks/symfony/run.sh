@@ -219,6 +219,14 @@ error_log = $error_log
 pid = $RUN_ROOT/fpm.pid
 log_level = notice
 
+[gw]
+pool.type = gateway
+user = $(id -un)
+group = $(id -gn)
+listen = 127.0.0.1:$http_port
+http.front_controller = /index.php
+http.route[probe] = /
+
 [probe]
 user = $(id -un)
 group = $(id -gn)
@@ -228,10 +236,8 @@ pm = static
 pm.max_children = $children
 catch_workers_output = yes
 clear_env = no
-pool.type = http
+pool.type = fastcgi
 pool.executor = $executor
-http.listen = 127.0.0.1:$http_port
-http.front_controller = /index.php
 php_admin_value[max_execution_time] = 0
 php_admin_value[opcache.enable] = 0
 EOF

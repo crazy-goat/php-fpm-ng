@@ -173,11 +173,12 @@ Description: $SUMMARY
  distribution's libphp$PHP_VERSION rather than embedding a PHP of its own, so
  installing it compiles nothing.
  .
- Two pool types are supported here: pool.type = fastcgi, which is classic FPM,
- and pool.type = http-direct, in which the worker speaks HTTP itself and needs
- no web server in front of it. pool.type = http is refused at startup: it needs
- a patch inside Zend/ that a distribution libphp does not carry, and running it
- without it would change signal behaviour silently. Build from source for it.
+ Three pool types are supported here: pool.type = fastcgi, which is classic
+ FPM; pool.type = http-direct, in which the worker speaks HTTP itself and needs
+ no web server in front of it; and pool.type = gateway, a pure HTTP proxy in
+ front of other pools (issue #388). The retired pool.type = http is refused at
+ startup by name and must be split into a gateway section plus a fastcgi
+ section.
 $EXTRA
 EOT
 

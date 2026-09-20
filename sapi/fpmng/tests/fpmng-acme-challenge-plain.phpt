@@ -3,7 +3,7 @@ fpm-ng: the plain :80 companion answers the HTTP-01 challenge instead of redirec
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_no_acme();
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
@@ -14,15 +14,19 @@ if (trim((string) shell_exec('command -v openssl 2>/dev/null')) === '') {
 $probe = new FPM\Tester(<<<'EOT'
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = /tmp
+http.tls_cert = /nonexistent-cert.pem
+http.tls_key = /nonexistent-key.pem
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
 chdir = /tmp
-http.listen = {{ADDR[http]}}
-http.tls_cert = /nonexistent-cert.pem
-http.tls_key = /nonexistent-key.pem
 EOT, '<?php');
 $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
@@ -108,18 +112,22 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
-[web]
-listen = {{ADDR}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[https]}}
 chdir = $root
-pm = static
-pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[https]}}
 http.plain_listen = {{ADDR[plain]}}
 http.gateways = 2
 http.front_controller = /index.php
 http.tls_cert = $root/tls.crt
 http.tls_key = $root/tls.key
+http.route[web] = /
+[web]
+pool.type = fastcgi
+listen = {{ADDR}}
+chdir = $root
+pm = static
+pm.max_children = 1
 [publisher]
 pool.type = supervisor
 supervisor.script = $root/publisher.php

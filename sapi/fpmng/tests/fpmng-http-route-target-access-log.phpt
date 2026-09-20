@@ -3,7 +3,7 @@ fpm-ng: http.access_log carries the target pool as a trailing field (issue #341)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -17,14 +17,14 @@ require_once "tester.inc";
  * so this test also doubles as the format-stability check for everything
  * BEFORE that field: it still parses as plain Combined Log Format.
  *
- * One gateway, two prefixes: "/" falls through to the gateway's own pool
- * (targets[0], the implicit target http.route[] does not override) and
- * "/sse/..." is routed to the "events" pool. Both are targets fpm_http_route()
- * can return, so both get a real "target=<pool>" trailer -- "target=-" is
- * reserved for a gateway that never configured http.route[] at all (see
- * fpmng-http-gateway-no-route-unchanged.phpt) and for requests this gateway
- * answers without going through fpm_http_route() at all (ping, static, ACME,
- * an ACL rejection before routing runs). */
+ * One gateway, two prefixes: "/" routes to the "web" pool (an explicit target
+ * since issue #388 removed the implicit own-pool row) and "/sse/..." to the
+ * "events" pool. Both are targets fpm_http_route() can return, so both get a
+ * real "target=<pool>" trailer -- "target=-" is reserved for a request that
+ * matched no route at all (see fpmng-http-gateway-no-route-unchanged.phpt)
+ * and for requests this gateway answers without going through
+ * fpm_http_route() at all (ping, static, ACME, an ACL rejection before
+ * routing runs). */
 $docroot = sys_get_temp_dir() . '/fpmng-http-route-acclog-' . getmypid();
 @mkdir($docroot, 0700, true);
 file_put_contents($docroot . '/index.php', '<?php echo "web-ok";');
@@ -33,17 +33,21 @@ $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 1
+http.front_controller = /index.php
+http.access_log = {{FILE:LOG:ACC}}
+http.route[events] = /sse
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docroot
 pm = static
 pm.max_children = 2
-pool.type = http
-http.gateways = 1
-http.listen = {{ADDR[http]}}
-http.front_controller = /index.php
-http.access_log = {{FILE:LOG:ACC}}
-http.route[events] = /sse
 
 [events]
 listen = {{ADDR[events]}}

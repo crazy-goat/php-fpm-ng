@@ -3,7 +3,7 @@ FPM http gateway: pool_full_policy = wait still bounds queue depth and wait time
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -30,17 +30,21 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
-[full]
-listen = {{ADDR[fastcgi]}}
-pool.type = http
-pm = static
-pm.max_children = 1
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
 chdir = $docroot
 http.gateways = 1
-http.listen = {{ADDR[http]}}
 http.pool_full_policy = wait
 http.pool_full_queue_max = 1
 http.pool_full_wait_ms = 300
+http.route[full] = /
+[full]
+pool.type = fastcgi
+listen = {{ADDR[fastcgi]}}
+pm = static
+pm.max_children = 1
+chdir = $docroot
 EOT;
 
 // The one worker sleeps far longer than the wait bound (300ms), standing in

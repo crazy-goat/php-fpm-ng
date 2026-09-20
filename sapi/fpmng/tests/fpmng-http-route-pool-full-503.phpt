@@ -3,7 +3,7 @@ fpm-ng: an http.route target runs out of budget on its own, per pool and not per
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -30,16 +30,20 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 1
+http.front_controller = /index.php
+http.route[events] = /sse,/stream
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docroot
 pm = static
 pm.max_children = 2
-pool.type = http
-http.gateways = 1
-http.listen = {{ADDR[http]}}
-http.front_controller = /index.php
-http.route[events] = /sse,/stream
 env[FPMNG_ROUTE_POOL] = web
 
 [events]

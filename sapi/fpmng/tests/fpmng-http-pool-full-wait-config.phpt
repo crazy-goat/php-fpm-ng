@@ -3,7 +3,7 @@ fpm-ng: http.pool_full_policy = wait requires both bounds set (issue #309)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -45,15 +45,22 @@ function expectConfigOk(string $label, string $cfg): void
     echo "$label: accepted\n";
 }
 
+/* The cases below append http.pool_full_* directives to this text, and an
+ * appended directive lands in the LAST section -- so [gw] is written last
+ * (issue #388: those directives belong on the gateway, not on the fastcgi
+ * target). */
 $base = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 [pool]
-pool.type = http
+pool.type = fastcgi
 listen = {{ADDR[fastcgi]}}
 pm = static
 pm.max_children = 1
-http.listen = {{ADDR[http]}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+http.route[pool] = /
 EOT;
 
 expectConfigFailure(

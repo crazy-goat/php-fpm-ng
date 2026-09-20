@@ -33,18 +33,23 @@ run_scenario() {
 [global]
 daemonize = no
 error_log = $DIR/error.log
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:$tls_port
+chdir = $DIR/docroot
+http.gateways = 3
+http.reuseport = $reuseport
+http.plain_listen = 127.0.0.1:$plain_port
+http.tls_cert = $DIR/cert.pem
+http.tls_key = $DIR/key.pem
+http.route[www] = /
+
 [www]
+pool.type = fastcgi
 chdir = $DIR/docroot
 listen = 127.0.0.1:$fcgi_port
 pm = static
 pm.max_children = 3
-pool.type = http
-http.gateways = 3
-http.reuseport = $reuseport
-http.listen = 127.0.0.1:$tls_port
-http.plain_listen = 127.0.0.1:$plain_port
-http.tls_cert = $DIR/cert.pem
-http.tls_key = $DIR/key.pem
 EOF
     "$FPMNG_BIN" -n -R -F -y "$DIR/fpm.conf" >"$DIR/stdout.log" 2>&1 &
     MASTER_PID=$!

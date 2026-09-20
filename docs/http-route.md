@@ -1,23 +1,27 @@
 # Routing path prefixes to other pools: `http.route[]` (issue #340)
 
-A `pool.type = http` pool is a gateway with a pool of PHP workers behind it.
-Until now it had exactly one upstream: its own workers. `http.route[]` lets one
-gateway send different path prefixes to different pools, so that an API, a
-stream endpoint and the rest of an application can have separate worker counts,
+A `pool.type = gateway` is a proxy with no PHP of its own (issue #388; the
+proxy half of the retired `pool.type = http`). `http.route[]` lets one gateway
+send different path prefixes to different pools, so that an API, a stream
+endpoint and the rest of an application can have separate worker counts,
 separate PHP settings and separate failure behaviour without a separate
 listener (and a separate port, and a reverse proxy in front) for each.
 
 ```ini
-[web]
-listen = 127.0.0.1:9000
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:8080
 chdir = /srv/app/public
-pm = static
-pm.max_children = 8
-pool.type = http
-http.listen = 127.0.0.1:8080
 http.front_controller = /index.php
+http.route[web]    = /
 http.route[api]    = /api/v1,/api/v2
 http.route[events] = /sse
+
+[web]
+pool.type = fastcgi
+listen = 127.0.0.1:9000
+pm = static
+pm.max_children = 8
 
 [api]
 listen = 127.0.0.1:9001
@@ -31,7 +35,8 @@ pm.max_children = 4
 ```
 
 `http://127.0.0.1:8080/api/v1/users` is served by the `api` pool,
-`/sse/stream` by `events`, and everything else by `web`'s own workers.
+`/sse/stream` by `events`, and everything else by the `web` target named by
+`http.route[web] = /`.
 
 ## The directive
 
@@ -45,11 +50,10 @@ follow from: the thing on the left is the thing that has workers, a queue and a
 limit. Writing it the other way -- one line per prefix -- would suggest that two
 prefixes on the same pool are two independent things, which they are not.
 
-- Only a `fastcgi` pool may be a target. Routing to an
-  `http-direct` pool is not yet supported; issue #344 adds the HTTP/1.1 client
-  transport that makes it possible, and until then the configuration is refused
-  with a message that says so. Routing to another `pool.type = http` pool is a
-  gateway in front of a gateway and is refused outright.
+- A target is a `fastcgi` pool (FastCGI) or an `http-direct` pool (the HTTP/1.1
+  client transport, issue #344). Routing to another `pool.type = gateway` pool
+  is a gateway in front of a gateway and is refused outright; a type with no
+  request listener of its own (`cron`, `supervisor`) is refused too.
 - A pool may appear once. Give it all its prefixes in one comma-separated
   value; a second `http.route[api]` line is a configuration error, not an
   addition.
@@ -83,26 +87,25 @@ both `/api` and `/api/v1` in the table, `/api/v1/users` goes to whichever pool
 claimed `/api/v1`: the longer prefix wins regardless of the order the lines are
 written in.
 
-## `/` is an ordinary prefix
+## `/` is an ordinary prefix, and there is no implicit target
 
-There is no separate notion of a default target. `/` is a prefix like any other
-and, being the shortest, it is the row every path falls back to.
+Issue #388 removed the old weld's implicit own-pool target. On
+`pool.type = gateway` the route table is exactly `http.route[]`:
 
-- If **no** entry claims `/`, the gateway inserts its own pool as a row with
-  prefix `/`. That is the configuration at the top of this page, and it is why
-  a gateway with no `http.route[]` at all behaves exactly as it did before this
-  feature existed: a one-row table pointing at itself.
-- If an entry **does** claim `/`, that pool becomes the fallback and the
-  gateway's own workers are not in the table at all -- they receive nothing.
-  This is the useful shape when the gateway pool exists only to route:
+- At least one `http.route[]` entry is required. A gateway with none is a
+  configuration error (`-t` refuses it), because there is no pool behind it to
+  serve an unrouted request.
+- `/` is a prefix like any other. On this type it must be claimed explicitly,
+  as `http.route[web] = /` above; it is not inserted for you.
+- A request that matches **no** prefix is answered **404 by the gateway
+  itself** and is never forwarded. The access log's `target` field is `-`, the
+  same marker a locally answered ping or static file gets. If no entry claims
+  `/`, the gateway logs a startup NOTICE saying so -- an API-only gateway is
+  legal, but it is usually not what an operator meant.
 
-  ```ini
-  http.route[web] = /
-  http.route[api] = /api/v1
-  ```
-
-  Note that the gateway pool still starts its own PHP children; they simply sit
-  idle. Sizing `pm.max_children` down to 1 for such a pool is reasonable.
+`/` is the shortest prefix, so when it is present every unmatched path falls
+back to the pool that claimed it. Segment awareness still applies: `/apiary`
+does not fall under `/api`.
 
 ## The budget belongs to a pool, not to a prefix
 
@@ -127,7 +130,7 @@ the queue they govern.
 ## What the targets see
 
 The gateway builds the FastCGI request; the target pool only executes it.
-`DOCUMENT_ROOT` and `SCRIPT_FILENAME` therefore come from the **gateway pool's**
+`DOCUMENT_ROOT` and `SCRIPT_FILENAME` therefore come from the **gateway's**
 `chdir`/docroot for every target, and so do `http.static` and
 `http.front_controller`. All pools in a routed configuration must be able to see
 the same files. Routing splits the *workers*, not the *code*.
@@ -208,9 +211,9 @@ At startup a routed gateway prints its table in lookup order, longest prefix
 first:
 
 ```
-NOTICE: [pool web] http.route: '/api/v1' -> pool api (16 persistent connection(s))
-NOTICE: [pool web] http.route: '/sse' -> pool events (4 persistent connection(s))
-NOTICE: [pool web] http.route: '/' -> pool web (8 persistent connection(s))
+NOTICE: [pool gw] http.route: '/api/v1' -> pool api (16 persistent connection(s))
+NOTICE: [pool gw] http.route: '/sse' -> pool events (4 persistent connection(s))
+NOTICE: [pool gw] http.route: '/' -> pool web (8 persistent connection(s))
 ```
 
 Reading it top to bottom is reading it the way the gateway matches it.
@@ -221,4 +224,4 @@ Reading it top to bottom is reading it the way the gateway matches it.
   target does with the request.
 - [`operator-endpoint.md`](operator-endpoint.md) -- status and metrics are per
   pool and are not routed; each target answers on its own operator listener.
-- [`gateway.md`](gateway.md) -- where this is heading in v0.10.0.
+- [`gateway.md`](gateway.md) -- the gateway type that owns this routing table.

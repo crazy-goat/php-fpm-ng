@@ -3,7 +3,7 @@ fpm-ng: a gateway child's own line is decorated like a master line in the same e
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -27,13 +27,17 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 4
-pool.type = http
-http.listen = {{ADDR[http]}}
 EOT;
 
 $tester = new FPM\Tester($cfg);
@@ -51,7 +55,9 @@ $http = $tester->getAddr('ipv4', '[http]');
  * the decoration zlog() gives a line written by the master. */
 $decorated = '/^\[\d\d-[A-Za-z]{3}-\d{4} \d\d:\d\d:\d\d\] WARNING: ';
 
-$gatewayLine = $decorated . '\[pool web\] http: /m';
+/* Issue #388: the gateway pool is [gw]; the worker it killed is [web], the
+ * target the "/" route names. */
+$gatewayLine = $decorated . '\[pool gw\] http: /m';
 $masterLine  = $decorated . '\[pool web\] child \d+ exited on signal 9/m';
 
 function logWait(string $errorLog, string $pattern, int $seconds = 10): string

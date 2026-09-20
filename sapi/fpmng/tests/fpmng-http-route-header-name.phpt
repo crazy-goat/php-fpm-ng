@@ -3,7 +3,7 @@ fpm-ng: http.route[] HTTP transport forwards response header names up to FPM_HTT
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_pool_type_unsupported('http-direct');
 ?>
 --FILE--
@@ -44,16 +44,20 @@ $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 1
+http.front_controller = /index.php
+http.route[direct] = /direct
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docroot
 pm = static
 pm.max_children = 2
-pool.type = http
-http.gateways = 1
-http.listen = {{ADDR[http]}}
-http.front_controller = /index.php
-http.route[direct] = /direct
 
 [direct]
 listen = {{ADDR[direct]}}

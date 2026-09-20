@@ -3,7 +3,7 @@ fpm-ng: a bad http.route[] table is refused at startup, naming the pool and the 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -50,13 +50,17 @@ function gateway(string $routes, string $extra = ''): string
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+http.route[web] = /
+$routes
+
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-$routes
 
 [api]
 listen = {{ADDR[api]}}
@@ -96,28 +100,32 @@ expectConfigFailure(
     ['http.route[api]', 'empty value']
 );
 
-/* An http target is a gateway in front of a gateway; nothing about this issue
- * makes that work, so it is refused as a target type. */
+/* A gateway target is a gateway in front of a gateway; nothing about issue
+ * #388 makes that work (a gateway serves neither FastCGI nor HTTP/1.1 on a
+ * listener a target could speak to), so it is refused as a target type. */
 expectConfigFailure(
-    'http target',
+    'gateway target',
     <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+http.route[web] = /
+http.route[other] = /x
+
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.route[other] = /x
 
 [other]
-listen = {{ADDR[api]}}
-pm = static
-pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http2]}}
+pool.type = gateway
+listen = {{ADDR[http2]}}
+http.route[web] = /
+
 EOT,
     ['http.route[other]', 'cannot use as a target']
 );
@@ -141,7 +149,7 @@ pool named twice: rejected
 duplicate prefix: rejected
 prefix without a leading slash: rejected
 empty value: rejected
-http target: rejected
+gateway target: rejected
 http-direct TLS target: rejected
 Done
 --CLEAN--

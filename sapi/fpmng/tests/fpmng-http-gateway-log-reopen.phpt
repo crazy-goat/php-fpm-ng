@@ -3,7 +3,7 @@ fpm-ng: a gateway child follows error_log across a SIGUSR1 reopen (issue #134)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -27,13 +27,17 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 4
-pool.type = http
-http.listen = {{ADDR[http]}}
 EOT;
 
 function logWait(string $file, string $pattern, int $seconds = 10): string

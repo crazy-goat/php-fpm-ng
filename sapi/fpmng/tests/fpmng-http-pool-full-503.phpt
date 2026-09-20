@@ -3,7 +3,7 @@ FPM http gateway: a full pool answers 503 + Retry-After, not 502 (task 031)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -24,14 +24,18 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 1
+http.route[full] = /
 [full]
+pool.type = fastcgi
 listen = {{ADDR[fastcgi]}}
-pool.type = http
 pm = static
 pm.max_children = 1
 chdir = $docroot
-http.gateways = 1
-http.listen = {{ADDR[http]}}
 EOT;
 
 /* sleep(2), not 5 (issue #399): the worker only has to still be busy when

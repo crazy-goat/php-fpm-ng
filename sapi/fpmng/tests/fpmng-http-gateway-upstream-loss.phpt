@@ -3,7 +3,7 @@ fpm-ng: HTTP gateway logs an upstream that took the whole request and never answ
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -26,13 +26,17 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 4
-pool.type = http
-http.listen = {{ADDR[http]}}
 EOT;
 
 /* No script for the tester to generate: every request in this test goes to

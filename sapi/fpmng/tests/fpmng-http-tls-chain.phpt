@@ -3,7 +3,7 @@ FPM http gateway: TLS serves the full certificate chain from http.tls_cert (task
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }
@@ -13,14 +13,17 @@ if (trim((string) shell_exec('command -v openssl 2>/dev/null')) === '') {
 $probe = new FPM\Tester(<<<'EOT'
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[probe]}}
+http.tls_cert = /nonexistent-cert.pem
+http.tls_key = /nonexistent-key.pem
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[probe]}}
-http.tls_cert = /nonexistent-cert.pem
-http.tls_key = /nonexistent-key.pem
 EOT, '<?php');
 $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
@@ -126,15 +129,19 @@ $dir = __DIR__;
 $cfg1 = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[chain]}}
+chdir = $dir
+http.tls_cert = $certDir/fullchain.pem
+http.tls_key = $certDir/leaf.key
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
 chdir = $dir
-pool.type = http
-http.listen = {{ADDR[chain]}}
-http.tls_cert = $certDir/fullchain.pem
-http.tls_key = $certDir/leaf.key
 EOT;
 
 $code = <<<'EOT'
@@ -178,14 +185,17 @@ $tester1->close();
 $cfg2 = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[leafonly]}}
+http.tls_cert = $certDir/leafonly.pem
+http.tls_key = $certDir/leaf.key
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[leafonly]}}
-http.tls_cert = $certDir/leafonly.pem
-http.tls_key = $certDir/leaf.key
 EOT;
 
 $tester2 = new FPM\Tester($cfg2, $code);

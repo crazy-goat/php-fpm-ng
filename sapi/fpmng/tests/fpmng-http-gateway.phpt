@@ -3,7 +3,7 @@ fpm-ng: HTTP gateway serves static files without PHP, runs scripts, and routes f
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -33,15 +33,23 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+; One gateway process: with pm.max_children = 1 on the target, a second
+; gateway would race for the single upstream connection and answer 503. The
+; gateway count is not what this test asserts.
+http.gateways = 1
+http.static = 1
+http.front_controller = /index.php
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.static = 1
-http.front_controller = /index.php
 EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$docRoot/hit.php"));
@@ -89,15 +97,20 @@ $cfgOff = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.gateways = 1
+http.static = 1
+http.front_controller =
+http.route[web2] = /
 [web2]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.static = 1
-http.front_controller =
 EOT;
 
 $tester2 = new FPM\Tester($cfgOff, file_get_contents("$docRoot/hit.php"));

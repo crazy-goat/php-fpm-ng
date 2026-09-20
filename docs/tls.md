@@ -1,8 +1,10 @@
 # HTTP gateway TLS — operator reference
 
 This is the operator-facing reference for TLS termination on `pool.type =
-http`'s gateway: the directives that turn it on, and how a renewed
-certificate reaches every gateway process (task 040). For the internal
+gateway` (the proxy half of the retired `pool.type = http`, issue #388): the
+directives that turn it on, and how a renewed certificate reaches every
+gateway process (task 040). On this type the TLS port is `listen`; the
+now-refused `http.listen` was the old two-socket spelling. For the internal
 design rationale, see the header comments in `sapi/fpmng/fpm/fpm_tls_http.c`
 and `sapi/fpmng/fpm/fpm_tls_reload.c`, and
 task 040 (done; see [`task-archive.md`](task-archive.md)) for why each choice
@@ -119,7 +121,7 @@ not. That is an operator error, not an unfinished issuance.
 
 **NO_CERT** — the certificate is not there yet.
 
-- `http.listen` (the TLS port) is **bound but not listening**. A client gets
+- `listen` (the TLS port) is **bound but not listening**. A client gets
   a connection refused, not a TLS handshake failure. This is deliberate: a
   refusal says "not ready", whereas answering the handshake with a
   self-signed or expired certificate teaches clients to distrust the name.
@@ -129,6 +131,12 @@ not. That is an operator error, not an unfinished issuance.
   a port that is not there.
 - The master logs the state once at startup, naming the path it is waiting
   for and the re-check interval.
+
+  On `pool.type = gateway` the same holds (issue #388): the gateway binds its
+  public `listen` through `fpm_http_listen()` with `do_listen = 0` while it is
+  in NO_CERT, so the port is bound but not listening and a TCP connect is
+  refused. With `http.reuseport = on` each gateway child binds its own socket
+  in the SO_REUSEPORT group the same way.
 
 **READY** — the certificate has appeared.
 
@@ -155,7 +163,7 @@ Two things are enough, and both are already there:
 - **The log.** `NO_CERT` at startup, then one `leaving NO_CERT` line per
   gateway process. Count them: the pool is fully in READY when that count
   equals `http.gateways`.
-- **The port itself.** A TCP connect to `http.listen` is refused in NO_CERT
+- **The port itself.** A TCP connect to `listen` is refused in NO_CERT
   and accepted in READY. `ss -lnt` shows the port only once it is listening.
 
 ### Caveat: binding early does not reserve the port

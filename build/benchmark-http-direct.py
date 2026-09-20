@@ -105,15 +105,24 @@ if (($_GET['work'] ?? '') === 'cpu') {
             directory.mkdir()
             pool_type = "fastcgi" if name == "nginx-fastcgi" else name
             listen = f"127.0.0.1:{port}" if name == "http-direct" else str(directory / "fpm.sock")
-            extra = f"http.listen = 127.0.0.1:{port}\nhttp.gateways = 1\nhttp.static = no\n" if name == "http" else ""
-            if name == "http-direct":
-                extra = "pool.executor = classic\n"
+            extra = "pool.executor = classic\n" if name == "http-direct" else ""
+            # Issue #388: the "http" arm is now a gateway in front of a fastcgi
+            # pool, not the retired pool.type = http. The public port is the
+            # gateway's `listen`; the workers stay on the unix socket.
+            gateway = ""
+            if name == "http":
+                pool_type = "fastcgi"
+                gateway = (
+                    f"[gw]\npool.type = gateway\nlisten = 127.0.0.1:{port}\n"
+                    f"chdir = {root}\nhttp.gateways = 1\nhttp.static = no\n"
+                    f"http.route[bench] = /\n\n"
+                )
             config = directory / "fpm.conf"
             config.write_text(f"""[global]
 error_log = {directory}/fpm.log
 pid = {directory}/fpm.pid
 daemonize = no
-[bench]
+{gateway}[bench]
 listen = {listen}
 pool.type = {pool_type}
 pm = static

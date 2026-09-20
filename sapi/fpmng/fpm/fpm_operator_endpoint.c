@@ -247,8 +247,14 @@ static void fpm_operator_listener_note_path(struct fpm_operator_listener_s *l, c
 }
 /* }}} */
 
+/* derived: this route was inserted by a type's DEFAULT path (issue #388: the
+ * gateway's /status and /metrics when the operator set nothing), not by a
+ * directive the operator wrote. A derived route that collides is dropped with
+ * a NOTICE instead of refusing startup: several gateways share the default
+ * operator address 127.0.0.1:9253, and only one of them can own /status there.
+ * An explicit path still collides loudly -- the operator chose it. */
 static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const char *directive,
-	const char *listen_address, const char *path, enum fpm_operator_format_e format) /* {{{ */
+	const char *listen_address, const char *path, enum fpm_operator_format_e format, int derived) /* {{{ */
 {
 	struct fpm_operator_listener_s *l;
 	struct fpm_operator_route_s *r, *tail;
@@ -279,6 +285,21 @@ static int fpm_operator_endpoint_add_route(struct fpm_worker_pool_s *wp, const c
 	for (r = l->routes; r; r = r->next) {
 		if (strcmp(r->path, path) != 0) {
 			continue;
+		}
+
+		if (derived) {
+			/* Issue #388: the gateway's default /status and /metrics are
+			 * offered, not demanded. When another pool already owns the path on
+			 * this address -- the normal case with two gateways on the default
+			 * 127.0.0.1:9253 -- this one keeps its page off rather than making
+			 * the whole configuration refuse to start. The operator can still
+			 * give it a page with an explicit operator.status_path/metrics_path
+			 * (or a listen address of its own). */
+			zlog(ZLOG_NOTICE, "[pool %s] the default %s = %s is already answered by pool '%s' "
+				"on %s; this pool keeps that page off -- set it explicitly for this pool, or give "
+				"it its own operator listen address", wp->config->name, directive, path,
+				r->pool->config->name, listen_address);
+			return 0;
 		}
 
 		/* The commonest way to hit this is one pool pointing both of its
@@ -379,9 +400,51 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 	const char *metrics_listen = wp->config->operator_metrics_listen;
 	char derived_status[192];
 	char derived_metrics[192];
+	int status_derived = 0;
+	int metrics_derived = 0;
 
 	if (!type->operator_endpoint) {
 		return 0;
+	}
+
+	/* Issue #388: on the gateway the two pages DEFAULT to being set, so a
+	 * fresh gateway binds its operator listener on loopback without being
+	 * asked (docs/gateway.md). Every other type keeps "unset = off". The flag
+	 * is data on the type, never a name test here.
+	 *
+	 * An explicit `operator.status = off` (or `operator.metrics = off`) must
+	 * stay off: the flag parses to 0, which is indistinguishable from "unset"
+	 * by value, so the decision is made on whether the directive was SET
+	 * (fpm_conf_directive_was_set), exactly as fpm_conf.c does elsewhere. An
+	 * explicit path, empty or not, also suppresses the default.
+	 *
+	 * An explicit "" is the way to turn an already-defaulted page off, and it
+	 * is a warning rather than silence because the operator wrote the
+	 * directive: on the gateway that also disables the <base>/<pool> forwarding
+	 * for that format (#389), which is easy to do by accident. */
+	if (type->operator_paths_default) {
+		if (!wp->config->operator_status
+				&& !fpm_conf_directive_was_set(wp->config, "operator.status")
+				&& !fpm_conf_directive_was_set(wp->config, "operator.status_path")) {
+			status_path = "/status";
+			status_derived = 1;
+		} else if (status_path && !*status_path) {
+			zlog(ZLOG_WARNING, "[pool %s] operator.status_path is empty: the gateway's "
+				"own status page and the /status/<pool> forwarding are disabled",
+				wp->config->name);
+			status_path = NULL;
+		}
+		if (!wp->config->operator_metrics
+				&& !fpm_conf_directive_was_set(wp->config, "operator.metrics")
+				&& !fpm_conf_directive_was_set(wp->config, "operator.metrics_path")) {
+			metrics_path = "/metrics";
+			metrics_derived = 1;
+		} else if (metrics_path && !*metrics_path) {
+			zlog(ZLOG_WARNING, "[pool %s] operator.metrics_path is empty: the gateway's "
+				"own metrics page and the /metrics/<pool> forwarding are disabled",
+				wp->config->name);
+			metrics_path = NULL;
+		}
 	}
 
 	/* #273, point 4: no mandatory on/off directive. The endpoint exists iff a
@@ -442,7 +505,7 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 			status_listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
 		}
 		if (0 > fpm_operator_endpoint_add_route(wp, "operator.status_path", status_listen, status_path,
-				FPM_OPERATOR_FORMAT_JSON)) {
+				FPM_OPERATOR_FORMAT_JSON, status_derived)) {
 			return -1;
 		}
 	}
@@ -452,7 +515,7 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 			metrics_listen = FPM_OPERATOR_ENDPOINT_DEFAULT_LISTEN;
 		}
 		if (0 > fpm_operator_endpoint_add_route(wp, "operator.metrics_path", metrics_listen, metrics_path,
-				FPM_OPERATOR_FORMAT_PROMETHEUS)) {
+				FPM_OPERATOR_FORMAT_PROMETHEUS, metrics_derived)) {
 			return -1;
 		}
 	}

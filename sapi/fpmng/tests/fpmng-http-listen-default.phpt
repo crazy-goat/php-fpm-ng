@@ -1,10 +1,9 @@
 --TEST--
-fpm-ng: pool.type = http with a TCP listen and no http.listen defaults to the
-FastCGI port + 1; a unix-socket listen is still refused (task 015)
+fpm-ng: pool.type = gateway serves the public port named by 'listen'; http.listen is refused as redundant (issue #388)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -30,35 +29,38 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
     echo "$label: rejected\n";
 }
 
-/* Acceptance criterion 1: a TCP pool with no http.listen starts and the
- * gateway listens on the FastCGI port + 1 — the documented default. Before
- * task 015, fpm_conf.c ran fpm_http_validate_pool() before the "listen" block
- * populated wp->listen_address_domain, so the domain was always unset (never
- * FPM_AF_INET) and http.listen was required for every http pool, TCP included. */
-$dir = __DIR__;
-$label = 'http-default-listen';
+/* Issue #388: on the gateway `listen` is the public HTTP port itself. Before
+ * the type existed this was http.listen, defaulting to the FastCGI port + 1;
+ * there is no FastCGI port now, so the address is exactly what `listen` says
+ * and http.listen has nothing left to override. */
+$docroot = sys_get_temp_dir() . '/fpmng-gateway-listen-' . getmypid();
+@mkdir($docroot, 0700, true);
+file_put_contents($docroot . '/index.php', '<?php echo "gateway-listen-public";');
+
+$label = 'gateway-listen-public';
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
-chdir = $dir
 pm = static
 pm.max_children = 1
-pool.type = http
+chdir = $docroot
 EOT;
 
-$tester = new FPM\Tester($cfg, '<?php echo "' . $label . '";');
+$tester = new FPM\Tester($cfg, '<?php echo "unused";');
 $tester->start();
 $tester->expectLogStartNotices();
 
-$addr = $tester->getAddr('ipv4');
-[$host, $port] = explode(':', $addr);
-$httpAddr = $host . ':' . ((int) $port + 1);
-
-$script = basename($tester->makeSourceFile($label . '-'));
-$body = @file_get_contents("http://$httpAddr/$script");
+$addr = $tester->getAddr('ipv4', '[http]');
+$body = @file_get_contents("http://$addr/index.php");
 if ($body !== $label) {
     echo "FAIL: $label body=" . var_export($body, true) . "\n";
     exit(1);
@@ -69,29 +71,34 @@ $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
 
-/* Acceptance criterion 2: a unix-socket pool still requires http.listen —
- * there is no FastCGI port to bump by one — with the same message as before,
- * which is now actually true for the case it fires on. */
-$sockPath = sys_get_temp_dir() . '/fpmng-http-listen-required-' . getmypid() . '.sock';
+/* http.listen is redundant on the gateway and refused by name. */
 expectConfigFailure(
-    'http-unix-socket-requires-http-listen',
+    'gateway-http-listen-redundant',
     <<<EOT
 [global]
 error_log = {{FILE:LOG}}
-[uxweb]
-listen = $sockPath
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+http.listen = {{ADDR[redundant]}}
+http.route[web] = /
+[web]
+pool.type = fastcgi
+listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
 EOT,
-    ['pool.type = http requires http.listen when listen is a unix socket']
+    ['http.listen is redundant on pool.type = gateway']
 );
+
+@unlink($docroot . '/index.php');
+@rmdir($docroot);
 
 ?>
 Done
 --EXPECT--
-http-default-listen: ok
-http-unix-socket-requires-http-listen: rejected
+gateway-listen-public: ok
+gateway-http-listen-redundant: rejected
 Done
 --CLEAN--
 <?php

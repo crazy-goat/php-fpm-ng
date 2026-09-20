@@ -2213,6 +2213,27 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 		*error = 1;
 		return;
 	}
+
+	/* Issue #388: note the array families a reject list needs to see. "env"
+	 * and the four php_* families are directives named by their FAMILY in
+	 * fpm_pool_gateway_rejects (a gateway runs no PHP, so none of them may be
+	 * set on it), but fpm_conf_directive_was_set() matches the exact directive
+	 * name and the value that used to reach it was the bracket form
+	 * ("php_admin_value[memory_limit]"), which no reject entry can enumerate.
+	 * Noting the family here -- exactly what fpm_conf_ini_parser_array already
+	 * does for http.route -- is what lets the reject list name it once.
+	 * access.suppress_path is deliberately NOT noted: no reject list names it,
+	 * and adding a note would change which types refuse it. */
+	if ((zend_string_equals_literal(Z_STR_P(name), "env")
+			|| zend_string_equals_literal(Z_STR_P(name), "php_value")
+			|| zend_string_equals_literal(Z_STR_P(name), "php_admin_value")
+			|| zend_string_equals_literal(Z_STR_P(name), "php_flag")
+			|| zend_string_equals_literal(Z_STR_P(name), "php_admin_flag"))
+			&& 0 > fpm_conf_note_directive(current_wp->config, Z_STRVAL_P(name))) {
+		zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry '%s'", ini_filename, ini_lineno, Z_STRVAL_P(name));
+		*error = 1;
+		return;
+	}
 }
 /* }}} */
 

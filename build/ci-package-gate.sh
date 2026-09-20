@@ -66,12 +66,15 @@ esac
 RELEASE=${FPMNG_RELEASE:-$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)}
 command -v docker >/dev/null || fail "docker is not available; this script drives containers"
 
-# The expected score, per distribution. 47 of the 136 owned tests skip on the
-# default (non-TLS) deb package and 49 on the default apk package: the six
-# http.route[] HTTP-transport tests ask their pool type and skip because a
-# distribution libphp does not support it (issue #214, issue #230's mechanism),
-# and the two Alpine-only session skips below stay. That number is a property
-# of this build path.
+# The expected score, per distribution. Issue #388 moved these constants; see
+# the derivation next to EXPECT_TOTAL below for exactly why and by how much.
+# The historical sentence was: 47 of the 136 owned tests skip on the default
+# (non-TLS) deb package and 49 on the default apk package -- six http.route[]
+# HTTP-transport tests plus the rest of the pool.type = http suite, which a
+# distribution libphp did not support (issue #214, issue #230's mechanism), and
+# the two Alpine-only session skips. With http retired none of that library
+# guard fires any more, so 14 (deb) and 16 (apk) skips are what remain on the
+# default packages.
 #
 # It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
 # added four tests: three exercise cron, supervisor and http-direct pools and run
@@ -433,13 +436,39 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # PASS+WARN sum (issue #301): fpmng-supervisor-jitter.phpt wobbles between a
 # bare pass and a warning (issue #398), and the sum holds either way.
 EXPECT_FAIL=0
-EXPECT_TOTAL=140
+EXPECT_TOTAL=141
+
+# Issue #388 retired pool.type = http and split its proxy half into pool.type =
+# gateway. That changes the classification this whole block exists to pin,
+# because the reason the affected tests skip here is gone: a distribution libphp
+# does not carry patches/0006, which the http type needed, but gateway runs no
+# PHP child at all and needs nothing from the engine -- and neither does any
+# other type any more, so no test skips for the libphp guard. The only test
+# added is fpmng-http-gateway-type.phpt, one more PASS on every flavour.
+#
+# The 40 owned tests that configured pool.type = http split in two:
+#   - 33 use neither TLS nor ACME. On the old binary they skipped for the http
+#     type on every flavour; now they PASS on every flavour.
+#   - 7 are the TLS/ACME ones (acme-challenge-plain/-challenge/-handover/
+#     -issue/-renew-failure and http-tls-alpn-sni/-tls-chain). They still SKIP
+#     on the default (non-TLS) packages for the TLS probe, unchanged, and PASS
+#     on the TLS ones.
+# So every flavour gains 33 PASSes, each non-TLS flavour loses 33 SKIPs, and the
+# new test adds 1 PASS. These numbers are DERIVED from that classification
+# change, rebased onto the current main's pinned counts, and have NOT been
+# re-measured on a package-gate run (no docker available here); a real gate run
+# must confirm them.
+#
+#   deb non-TLS 93/47 + 33 + 1 -> 127/14
+#   deb TLS     100/40 + 33 + 1 -> 134/7
+#   apk non-TLS 91/49 + 33 + 1 -> 125/16
+#   apk TLS     97/43 + 33 + 1 -> 131/10
 
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=100; EXPECT_SKIP=40
-    else EXPECT_PASS=93; EXPECT_SKIP=47; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=134; EXPECT_SKIP=7
+    else EXPECT_PASS=127; EXPECT_SKIP=14; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -472,8 +501,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=97; EXPECT_SKIP=43
-    else EXPECT_PASS=91; EXPECT_SKIP=49; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=131; EXPECT_SKIP=10
+    else EXPECT_PASS=125; EXPECT_SKIP=16; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -3,7 +3,7 @@ fpm-ng: http.route[] sends path prefixes to other pools, longest prefix first (i
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -47,19 +47,24 @@ $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
-[web]
-listen = {{ADDR}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
 chdir = $docroot
-pm = static
-pm.max_children = 2
-pool.type = http
 http.gateways = 1
-http.listen = {{ADDR[http]}}
 http.front_controller = /index.php
+http.route[web] = /
 http.route[api] = /api/v1
 http.route[events] = /sse
 ping.path = /api/v1/ping
 ping.response = pong
+
+[web]
+pool.type = fastcgi
+listen = {{ADDR}}
+chdir = $docroot
+pm = static
+pm.max_children = 2
 env[FPMNG_ROUTE_POOL] = web
 
 [api]
@@ -83,7 +88,8 @@ $http = $tester->getAddr('ipv4', '[http]');
 expectPool($http, '/api/v1/x', 'api');
 expectPool($http, '/api/v1', 'api');
 /* The segment rule: /apiary is not under /api/v1 and is not under /api either,
- * so it falls to the row the gateway inserted for itself. */
+ * so it falls to the "/" row routing to the explicit web target (issue #388
+ * removed the implicit own-pool row, so web is now a target like any other). */
 expectPool($http, '/apiary', 'web');
 expectPool($http, '/', 'web');
 expectPool($http, '/sse/stream', 'events');
@@ -99,24 +105,20 @@ $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
 
-/* Criterion 3: when an entry claims "/" itself, the gateway's own pool is not
- * in the table at all and must never see a request. */
+/* Issue #388 criterion: the gateway needs no pool of its own; every target is
+ * named by http.route[], and "/" here routes to web like any other prefix. */
 $config2 = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 [gw]
-listen = {{ADDR}}
+pool.type = gateway
+listen = {{ADDR[http]}}
 chdir = $docroot
-pm = static
-pm.max_children = 2
-pool.type = http
 http.gateways = 1
-http.listen = {{ADDR[http]}}
 http.front_controller = /index.php
 http.route[web] = /
 http.route[api] = /api/v1
-env[FPMNG_ROUTE_POOL] = gateway
 
 [web]
 listen = {{ADDR[web]}}

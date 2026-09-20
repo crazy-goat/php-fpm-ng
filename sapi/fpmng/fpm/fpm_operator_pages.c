@@ -8,8 +8,8 @@
  *
  * THE DATA SHAPE DIFFERS between pool types (this is the substance, not a
  * detail) -- branch on fpm_pool_type_s.serves_requests:
- *   - serves_requests = 1 (fcgi, http): idle/active workers and the type's
- *     baseline counter, read from that pool's scoreboard with
+ *   - serves_requests = 1 (fastcgi, http-direct): idle/active workers and the
+ *     type's baseline counter, read from that pool's scoreboard with
  *     fpm_scoreboard_copy() -- a copy, because the renderer runs in the
  *     operator endpoint's process and not in one of the pool's own children.
  *   - serves_requests = 0 (supervisor, cron): state/last_start/exit_code/
@@ -18,6 +18,9 @@
  *     memory (fpm_pool_supervisor.c, fpm_pool_cron.c). This file does not know
  *     the internal structure of those states -- exactly as required by the
  *     contract in docs/NOTES.md 3h.
+ *   - serves_requests = 0 with a baseline_counter and no .status() (gateway,
+ *     issue #388): fpmng_pool_info plus the baseline counter from the shared
+ *     scoreboard, and no state block (row.has_state is false).
  *
  * The metric label is the pool name -- cardinality is naturally bounded (the
  * number of pools in the config). No labels with unbounded cardinality (no
@@ -84,6 +87,12 @@ struct fpm_operator_page_row_s {
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
+	/* 1 when .st was filled by fpm_pool_type_s.status(). A serves_requests = 0
+	 * type may instead carry a baseline_counter with no state of its own (the
+	 * gateway, issue #388), and then the state block must not be rendered from
+	 * a zeroed struct -- that would read as a measured "running" rather than
+	 * as "this type has no state to report". */
+	int has_state;
 
 	/* fpm_pool_type_s.live_gauges() (issue #333): extra per-pool gauges no
 	 * other field above has room for, additive on top of whichever shape
@@ -129,7 +138,24 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		fpm_scoreboard_free_copy(copy);
 	} else if (type->status) {
 		type->status(wp, &row.st);
+		row.has_state = 1;
 		row.counter_value = row.st.baseline;
+	} else if (type->baseline_counter) {
+		/* Issue #388: the gateway has a baseline counter and no per-pool
+		 * state. Until #390 gives it counters of its own, the counter is the
+		 * shared scoreboard's `requests` -- exactly the number a
+		 * serves_requests type reads -- so this is the same source, not a
+		 * second one. It is zero today (no PHP child ever bumps it) and that
+		 * is the honest value, not a missing page: the row still carries
+		 * fpmng_pool_info and the type's own series (the per-target
+		 * fpmng_gateway_* lines fpm_http_render_metrics_prometheus() adds).
+		 * No state block is emitted -- see row.has_state. */
+		struct fpm_scoreboard_s *copy = wp->scoreboard ? fpm_scoreboard_copy(wp->scoreboard, 0) : NULL;
+
+		row.counter_value = copy ? copy->requests : 0;
+		if (copy) {
+			fpm_scoreboard_free_copy(copy);
+		}
 	} else {
 		/* A type with no worker counts and no state to report. Nothing has
 		 * this shape since issue #278 removed pool.type = status, which did --
@@ -214,6 +240,13 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 	if (row->counter) {
 		fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
 			row->counter, row->name, row->counter_value);
+	}
+
+	/* Issue #388: a type with a baseline counter but no .status() (the
+	 * gateway) has no state block to print -- see row.has_state. */
+	if (!row->has_state) {
+		fpm_operator_page_row_prometheus_live(b, row);
+		return;
 	}
 
 	for (i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
@@ -380,6 +413,24 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":true,"
 			"\"idle\":%d,\"active\":%d",
 			row->name, row->type_name, row->idle, row->active);
+		if (row->counter) {
+			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
+		}
+		fpm_operator_page_row_json_live(b, row);
+		fpm_operator_buf_appendf(b, "}");
+		return;
+	}
+
+	/* Issue #388: a type with a baseline counter and no .status() (the
+	 * gateway) has no state to report. The gate has to come BEFORE any state
+	 * key is written: row.st is a zeroed struct, and enum state 0 is
+	 * FPM_POOL_STATE_RUNNING, so writing it would report a measured "running"
+	 * that nothing measured. Same reasoning as the Prometheus renderer's
+	 * has_state gate. */
+	if (!row->has_state) {
+		fpm_operator_buf_appendf(b,
+			"{\"name\":\"%s\",\"type\":\"%s\",\"serves_requests\":false",
+			row->name, row->type_name);
 		if (row->counter) {
 			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
 		}

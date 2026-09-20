@@ -3,7 +3,7 @@ fpm-ng: the HTTP gateway bounds the whole request header block like HTTP-direct 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -90,14 +90,21 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $root
+http.front_controller = /env.php
+; One gateway process: the target is pm.max_children = 1, so a second gateway
+; would race for its single upstream connection and answer 503. Not asserted.
+http.gateways = 1
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $root
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.front_controller = /env.php
 EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$root/env.php"));

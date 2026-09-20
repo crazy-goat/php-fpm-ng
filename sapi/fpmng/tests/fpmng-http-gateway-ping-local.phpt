@@ -3,7 +3,7 @@ fpm-ng: http gateway answers ping.path itself, before routing, even with http.fr
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -40,16 +40,20 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.front_controller = /index.php
+ping.path = /ping
+ping.response = pong
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.front_controller = /index.php
-ping.path = /ping
-ping.response = pong
 EOT;
 
 $tester = new FPM\Tester($cfg, file_get_contents("$docRoot/index.php"));

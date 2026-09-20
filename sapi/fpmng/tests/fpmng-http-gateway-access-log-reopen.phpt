@@ -3,7 +3,7 @@ fpm-ng: a gateway reopens http.access_log on a SIGUSR1 after a logrotate (issue 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -25,15 +25,19 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docRoot
+http.gateways = 1
+http.access_log = {{FILE:LOG:ACC}}
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $docRoot
 pm = static
 pm.max_children = 2
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.gateways = 1
-http.access_log = {{FILE:LOG:ACC}}
 EOT;
 
 function fileWait(string $file, string $pattern, int $seconds = 10): string

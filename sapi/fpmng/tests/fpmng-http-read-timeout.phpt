@@ -3,7 +3,7 @@ FPM http gateway: http.read_timeout cuts off a client that trickles its request 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -24,14 +24,18 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.read_timeout = 2000
+http.route[read] = /
 [read]
+pool.type = fastcgi
 listen = {{ADDR[fastcgi]}}
-pool.type = http
 pm = static
 pm.max_children = 1
 chdir = $docroot
-http.listen = {{ADDR[http]}}
-http.read_timeout = 2000
 EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "ok";');

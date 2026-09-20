@@ -3,7 +3,7 @@ fpm-ng: a certificate is obtained end to end over ACME HTTP-01, answered by the 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_no_acme();
 if (!extension_loaded('openssl')) {
     die('skip requires the openssl extension');
@@ -121,14 +121,18 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $root
+http.front_controller = /env.php
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $root
 pm = static
 pm.max_children = 2
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.front_controller = /env.php
 [acme]
 pool.type = supervisor
 supervisor.script = $root/runner.php

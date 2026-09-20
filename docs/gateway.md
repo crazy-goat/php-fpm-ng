@@ -1,12 +1,16 @@
 # The gateway: ping, metrics and status across pool types
 
-> **Status: design for v0.10.0; the `operator.*` rename landed in #386, the
-> gateway type has not.** The operator directives are `operator.*` now (see
-> [`operator-endpoint.md`](operator-endpoint.md)); what does not exist yet is
-> `pool.type = gateway`, which forwards every pool's operator pages under
-> `<base>/<pool name>` and answers `ping.path` in the gateway process. This page
-> is the target, decided 2026-09-17; the issues that carry the rest are listed at
-> the end. When the last of them lands this banner goes and the two pages merge.
+> **Status: `pool.type = gateway` landed in #388 and `pool.type = http` is
+> retired; two pieces of this design are still open.** The type, its explicit
+> `http.route[]`-only routing, `ping.path` answered in the gateway process and
+> its own `operator.metrics_path`/`operator.status_path` defaults are
+> implemented. Still to come: `http.operator` and the `<base>/<pool name>`
+> forwarding of every exposed pool's pages (#389), and the gateway's own
+> shared-memory counters rendered on its `/metrics` page (#390). The operator
+> directives are `operator.*` since #386 (see
+> [`operator-endpoint.md`](operator-endpoint.md)). This page is the target,
+> decided 2026-09-17; the issues that carry the rest are listed at the end.
+> When the last of them lands this banner goes and the two pages merge.
 
 ## Why
 
@@ -149,6 +153,15 @@ and disables the `<base>/<pool>` forwarding for that format with it, because
 there is no base to forward under. `http.operator = yes` with both bases empty
 is a configuration error. Publicly nothing is exposed until `http.operator =
 yes`, which is the switch that matters.
+
+Because those two paths default, two gateways with no `operator.*_listen` both
+land on `127.0.0.1:9253`. That still starts (issue #388): the first gateway to
+register a default path keeps it, and a later one whose *derived* `/status` or
+`/metrics` would collide drops that page with a NOTICE rather than refusing the
+whole configuration. An **explicit** path is not offered in that way -- an
+explicit collision is still a startup error, as for any pool. An explicit
+`operator.status = off` / `operator.metrics = off` is honoured too and
+suppresses only the default.
 
 Two gateways with `http.operator = yes` expose the same set of pools, each
 under its own base. To keep one gateway out of it, turn its `http.operator` off

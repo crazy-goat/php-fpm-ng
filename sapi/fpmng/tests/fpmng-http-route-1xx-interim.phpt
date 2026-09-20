@@ -3,7 +3,7 @@ fpm-ng: http.route[] HTTP transport does not let a 1xx interim response complete
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_pool_type_unsupported('http-direct');
 ?>
 --FILE--
@@ -47,14 +47,17 @@ $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+http.gateways = 1
+http.route[d] = /d
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 2
-pool.type = http
-http.gateways = 1
-http.listen = {{ADDR[http]}}
-http.route[d] = /d
 
 [d]
 listen = {{ADDR[d]}}

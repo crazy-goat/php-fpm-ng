@@ -7,10 +7,11 @@ fpm-ng: operator endpoint configuration -- collisions, the internal type, the op
 
 require_once "tester.inc";
 
-/* A binary linked against a distribution libphp refuses pool.type = http
- * before any directive of that pool is read
- * (fpm_pool_type_check_build_support()). None of the cases below use that
- * type, so every one of them runs on both builds. */
+/* A binary linked against a distribution libphp refuses a type whose children
+ * need patches/0006, before any directive of that pool is read
+ * (fpm_pool_type_check_build_support()). Issue #388 retired pool.type = http,
+ * the last type that needed it, so the cases below -- cron, supervisor and
+ * http-direct pools -- all run on both builds. */
 
 function expectRejected(string $label, string $cfg, array $needles): void
 {

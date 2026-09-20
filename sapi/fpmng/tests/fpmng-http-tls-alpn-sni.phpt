@@ -3,7 +3,7 @@ FPM http gateway: TLS advertises ALPN http/1.1 and selects a certificate by SNI 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }
@@ -16,14 +16,17 @@ if (trim((string) shell_exec('command -v timeout 2>/dev/null')) === '' && trim((
 $probe = new FPM\Tester(<<<'EOT'
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[probe]}}
+http.tls_cert = /nonexistent-cert.pem
+http.tls_key = /nonexistent-key.pem
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[probe]}}
-http.tls_cert = /nonexistent-cert.pem
-http.tls_key = /nonexistent-key.pem
 EOT, '<?php');
 $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
@@ -117,16 +120,20 @@ $dir = __DIR__;
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[gw]}}
+chdir = $dir
+http.tls_cert = $certDir/default.crt
+http.tls_key = $certDir/default.key
+http.tls_sni_cert = "  other.test : $certDir/other.crt : $certDir/other.key  "
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
 chdir = $dir
-pool.type = http
-http.listen = {{ADDR[gw]}}
-http.tls_cert = $certDir/default.crt
-http.tls_key = $certDir/default.key
-http.tls_sni_cert = "  other.test : $certDir/other.crt : $certDir/other.key  "
 EOT;
 
 $code = <<<'EOT'

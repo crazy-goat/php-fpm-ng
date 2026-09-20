@@ -3,7 +3,7 @@ fpm-ng: HTTP gateway survives a synchronous write failure while handing a reques
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -44,14 +44,18 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 [gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 1
+http.fault_upstream_write = 1
+http.route[gw_app] = /
+[gw_app]
+pool.type = fastcgi
 listen = {{ADDR:UDS}}
-pool.type = http
 pm = static
 pm.max_children = 2
 chdir = $docroot
-http.gateways = 1
-http.listen = {{ADDR[http]}}
-http.fault_upstream_write = 1
 EOT;
 
 $tester = new FPM\Tester($config);

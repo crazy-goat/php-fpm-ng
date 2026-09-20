@@ -1,34 +1,29 @@
 --TEST--
-fpm-ng: pool.type = http answers operator.status_path on the operator listener and no longer on the public one (issue #274)
+fpm-ng: pool.type = gateway answers operator.status_path on the operator listener and not on the public one (issues #274, #388)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
 
 require_once "tester.inc";
 
-/* The rule from #273: one directive, one page, one socket. On pool.type = http
- * that had two halves to enforce and only one of them is in the operator
- * endpoint's own code.
+/* The rule from #273: one directive, one page, one socket. On the gateway
+ * (issue #388; pool.type = http before it) the status path names the gateway's
+ * OWN page on the operator listener and nothing on the public port.
  *
- * The half this test exists for is the other one. Upstream's in-child handler
- * matches operator.status_path against SG(request_info).request_uri, which the
- * gateway fills from SCRIPT_NAME. With http.front_controller set -- the default
- * -- every unmatched path falls back to the front controller and SCRIPT_NAME is
- * never the request path, so the handler is invisible. With the fallback turned
- * OFF, as below, SCRIPT_NAME *is* the request path and the handler answers on
- * the pool's public listener. That is the configuration in which the same
- * directive used to name two different pages on two different sockets, so it is
- * the configuration worth pinning: the application sees the path now, and the
- * page is on the operator listener instead.
+ * The public half is shown with the front controller turned OFF and the path
+ * routed to an ordinary fastcgi target: the same URL on the public port is an
+ * ordinary request the application answers, not a second copy of the operator
+ * page. With the front controller on, an unmatched path would fall back to it
+ * and the application would answer there too; the point is the same.
  *
  * ping.path is checked in the same run for the opposite reason: #273, point 9,
- * leaves it on the public listener, and it travels through the same in-child
- * handler the status page just left. If suppressing one silently took the other
- * with it, this is where that shows up. */
+ * leaves it on the public listener, answered by the gateway process itself
+ * (#382). If moving the status page silently took ping with it, this is where
+ * that shows up. */
 
 $root = sys_get_temp_dir() . '/fpmng-operator-http-' . getmypid();
 @mkdir($root, 0700, true);
@@ -44,17 +39,22 @@ error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 
 [gw]
-listen = {{ADDR}}
-pool.type = http
-pm = static
-pm.max_children = 2
+pool.type = gateway
+listen = {{ADDR[public]}}
 chdir = $root
-http.listen = {{ADDR[public]}}
+http.route[app] = /
 http.front_controller =
 operator.status_path = /gw-status.php
 operator.status_listen = {{ADDR[operator]}}
 ping.path = /gw-ping
 ping.response = pong
+
+[app]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 2
+chdir = $root
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -89,8 +89,8 @@ echo 'public status path -> ', str_contains($body, 'app:/gw-status.php') ? "the 
 $body = httpGet($operator, '/gw-status.php');
 $json = json_decode(substr($body, strpos($body, "\r\n\r\n") + 4), true);
 $pools = $json['pools'] ?? [];
-echo 'operator status path -> ', count($pools) === 1 && $pools[0]['name'] === 'gw' && $pools[0]['type'] === 'http'
-    ? "json for pool gw, type http\n" : "UNEXPECTED: $body\n";
+echo 'operator status path -> ', count($pools) === 1 && $pools[0]['name'] === 'gw' && $pools[0]['type'] === 'gateway'
+    ? "json for pool gw, type gateway\n" : "UNEXPECTED: $body\n";
 
 /* ping did not move. */
 $body = httpGet($public, '/gw-ping');
@@ -107,7 +107,7 @@ echo "Done\n";
 ?>
 --EXPECT--
 public status path -> the application
-operator status path -> json for pool gw, type http
+operator status path -> json for pool gw, type gateway
 public ping path -> pong
 Done
 --CLEAN--

@@ -630,6 +630,16 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 
 int fpm_children_create_initial(struct fpm_worker_pool_s *wp) /* {{{ */
 {
+	/* Issue #388: a proxy_only type (the gateway) has no PHP workers, but its
+	 * validate() sets pm_max_children = 1 so upstream's scoreboard allocator
+	 * accepts the pool (see fpm_http_validate_pool()). Its processes are
+	 * forked by the type's own init_main() into the fpm_children_extra
+	 * registry, so this pm.*-driven path must stay out of the way. Data on
+	 * the type, not a name here, like every other per-type decision. */
+	if (fpm_pool_type_of(wp)->proxy_only) {
+		return 1;
+	}
+
 	/* Issue #330: adopt any children a selective reload carried over for this
 	 * pool BEFORE the ordinary fork loop below runs, so that loop's own
 	 * running_children < max check (fpm_children_make()) naturally forks only

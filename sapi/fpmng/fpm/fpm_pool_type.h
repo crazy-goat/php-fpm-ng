@@ -138,6 +138,31 @@ struct fpm_pool_type_s {
 	unsigned requires_pm:1;			/* pool must have meaningful pm/pm.max_children */
 	unsigned serves_requests:1;		/* counted in the request scoreboard */
 
+	/* Issue #388: this type IS an HTTP proxy and nothing else. It runs no
+	 * PHP and has no process manager, so:
+	 *   - `listen` is the PUBLIC HTTP(S) port the type's own child serves,
+	 *     not a FastCGI socket. The child accepts on the master's listening
+	 *     socket directly (fpm_http.c) and `http.listen` is refused as
+	 *     redundant.
+	 *   - routing is exactly http.route[]: there is no implicit "own pool"
+	 *     target at "/" (the target-0 row #340 adds for pool.type = http),
+	 *     at least one route is required at startup, and a request matching
+	 *     none is a local 404, never a forward.
+	 *   - the process count comes from http.gateways alone; there are no
+	 *     pm.max_children children to tie it to.
+	 * This is data on the type, not a name comparison in fpm_http.c: the
+	 * proxy machinery asks the flag, the way every other per-type decision
+	 * here is asked. */
+	unsigned proxy_only:1;
+
+	/* Issue #388: operator.metrics_path and operator.status_path default to
+	 * "/metrics" and "/status" on this type rather than to "off". Only the
+	 * gateway sets it: on it the operator listener is the one place its own
+	 * (and, since #389, every target's) pages can be scraped, so binding it
+	 * without being asked is the useful default. On every other type an
+	 * unset path means the pool is not exposed. */
+	unsigned operator_paths_default:1;
+
 	/* What a pool of this type speaks on its own listener, asked by the HTTP
 	 * gateway's router when http.route[] names it as a target (issue #340).
 	 * Data on the type, not a name comparison in fpm_http.c, for the same

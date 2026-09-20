@@ -1,9 +1,9 @@
 --TEST--
-fpm-ng: a gateway with no http.route[] keeps its pre-#341 log/metric shape, plus target=- (issue #341)
+fpm-ng: a gateway with no route claiming '/' answers 404 locally, logs target=-, and still serves routed prefixes (issue #388)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -11,60 +11,56 @@ fpmng_skip_if_pool_type_unsupported('http');
 require_once "tester.inc";
 require_once "fpmng-operator.inc";
 
-/* Issue #341's acceptance criteria ask for a check that a gateway WITHOUT
- * http.route[] gets NO format change anywhere, beyond the one documented
- * optional field (a trailing "target=-" in the access log, and "target=<own
- * pool>" elsewhere since an unrouted gateway's only target is itself --
- * fpm_http_routes_build() always puts the pool's own listener in targets[0]).
- * This is the negative control for fpmng-http-route-target-access-log.phpt
- * and fpmng-http-route-target-metrics.phpt: nothing here mentions
- * http.route[] at all. */
+/* Issue #388: the old pool.type = http gateway always had an implicit target 0
+ * -- the pool's own listener at "/" -- so "no http.route[]" was a meaningful,
+ * supported shape (issue #341 pinned its log/metric shape). The gateway type
+ * has no own pool: the route table is exactly http.route[], a request that
+ * matches none is a local 404 (never a forward; 502/503 would mean a target
+ * exists and failed or is full), and the access log's target field is "-".
+ * This test is that shape's positive control: nothing routes "/", yet the
+ * gateway starts and serves the prefix that is routed. */
 
 $docroot = sys_get_temp_dir() . '/fpmng-http-noroute-' . getmypid();
 @mkdir($docroot, 0700, true);
-file_put_contents($docroot . '/index.php',
-    '<?php if (str_contains($_SERVER["REQUEST_URI"] ?? "", "slow")) { sleep(2); } echo "ok";');
+file_put_contents($docroot . '/index.php', '<?php echo "ok";');
 
 $config = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
-[solo]
-listen = {{ADDR}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
 chdir = $docroot
-pm = static
-pm.max_children = 1
-pool.type = http
 http.gateways = 1
-http.listen = {{ADDR[http]}}
 http.front_controller = /index.php
+http.route[api] = /api
 http.access_log = {{FILE:LOG:ACC}}
 operator.metrics_listen = {{ADDR[operator]}}
 operator.metrics_path = /metrics
+
+[api]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 1
+chdir = $docroot
 EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "unused";');
 /* forceStderr = false: the assertions below read error_log back from the FILE
- * the config points at (the reject-path WARNING and the startup NOTICE), the
- * same arrangement fpmng-http-gateway-access-log-reopen.phpt uses -- with the
- * default forceStderr = true, -O sends everything to the master's stdout pipe
- * instead and the configured file stays empty. */
+ * the config points at (the startup NOTICE), the same arrangement
+ * fpmng-http-gateway-access-log-reopen.phpt uses. */
 $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
 
-/* Requirement 4: one NOTICE line per target. An unrouted gateway has exactly
- * one target -- itself -- so this is still exactly one line, same as before
- * #341, just present now where it previously was not printed at all. */
+/* The startup NOTICE says no route claims "/". */
 $errorLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
 $errors = (string) @file_get_contents($errorLog);
-if (!preg_match('/http target: pool solo at \S+, \d+ persistent connection\(s\)/', $errors)) {
-    echo "FAIL: no per-target startup NOTICE line:\n$errors\n";
-    exit(1);
-}
-if (substr_count($errors, 'http target: pool') !== 1) {
-    echo "FAIL: expected exactly one http target NOTICE line:\n$errors\n";
+if (!preg_match('/no http\.route\[\] entry claims \'\/\'/', $errors)) {
+    echo "FAIL: no 'no route claims /' NOTICE:\n$errors\n";
     exit(1);
 }
 echo "startup-notice: ok\n";
@@ -113,74 +109,44 @@ function fileWait(string $file, string $pattern, int $seconds = 10): string
     return $content;
 }
 
-// A plain served request: the access log line is unchanged CLF plus the
-// trailing target=- field.
-$body = readAll(request($host, (int) $port, '/index.php?r=plain'));
-if (!str_contains($body, ' 200 ')) {
-    echo "FAIL: plain request did not succeed:\n$body\n";
+// A routed request still reaches its target.
+$routed = readAll(request($host, (int) $port, '/api/index.php'));
+if (!str_contains($routed, ' 200 ')) {
+    echo "FAIL: routed request did not succeed:\n$routed\n";
     exit(1);
 }
+echo "routed-prefix: 200\n";
+
+// An unrouted request is a local 404, never a forward.
+$unrouted = readAll(request($host, (int) $port, '/other?r=unrouted'));
+if (!str_starts_with($unrouted, 'HTTP/1.1 404') && !str_starts_with($unrouted, 'HTTP/1.0 404')) {
+    echo "FAIL: expected 404 for an unrouted path, got:\n$unrouted\n";
+    exit(1);
+}
+echo "unrouted: 404\n";
 
 $accessLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
-$content = fileWait($accessLog, '/r=plain/');
-$plainLine = null;
-foreach (explode("\n", $content) as $line) {
-    if (str_contains($line, 'r=plain')) {
-        $plainLine = $line;
-    }
-}
-if ($plainLine === null) {
-    echo "FAIL: no access log line for the plain request:\n$content\n";
-    exit(1);
-}
-if (!preg_match('/^\S+ - \S+ \[[^\]]+\] "GET \S+ HTTP\/\d\.\d" \d+ \d+ "[^"]*" "[^"]*" target=-$/', $plainLine)) {
-    echo "FAIL: plain access log line is not CLF+target=-:\n$plainLine\n";
+$content = fileWait($accessLog, '/r=unrouted/');
+if (substr_count($content, 'target=-') < 1) {
+    echo "FAIL: unrouted access log line did not carry target=-:\n$content\n";
     exit(1);
 }
 echo "access-log: target=-\n";
 
-// Pin the only worker, then trigger the reject-path WARNING.
-$slow = request($host, (int) $port, '/index.php?slow=1');
-stream_set_blocking($slow, false);
-usleep(500000);
-
-$rejected = readAll(request($host, (int) $port, '/index.php?r=rejected'));
-if (!str_starts_with($rejected, 'HTTP/1.1 503') && !str_starts_with($rejected, 'HTTP/1.0 503')) {
-    echo "FAIL: expected 503 on the full pool, got:\n$rejected\n";
-    exit(1);
-}
-echo "reject: 503\n";
-
-$errors = fileWait($errorLog, '/pool full, rejecting a queued request/');
-if (!preg_match('/pool full, rejecting a queued request target=solo/', $errors)) {
-    echo "FAIL: reject WARNING has no target=solo:\n$errors\n";
-    exit(1);
-}
-echo "reject-warning: target=solo\n";
-
-// Metrics: the only target is the gateway's own pool.
+// Metrics: one target, api; the gateway's own pool is not a target at all.
 $metrics = fpmng_operator_body($operator, '/metrics');
-foreach (['fpmng_gateway_upstreams_used{pool="solo",target="solo"}',
-          'fpmng_gateway_upstreams_max{pool="solo",target="solo"}',
-          'fpmng_gateway_requests_total{pool="solo",target="solo"}',
-          'fpmng_gateway_rejected_total{pool="solo",target="solo"}'] as $needle) {
+foreach (['fpmng_gateway_requests_total{pool="gw",target="api"}',
+          'fpmng_gateway_rejected_total{pool="gw",target="api"}'] as $needle) {
     if (!str_contains($metrics, $needle)) {
         echo "FAIL: metrics missing $needle:\n$metrics\n";
         exit(1);
     }
 }
-if (!preg_match('/fpmng_gateway_rejected_total\{pool="solo",target="solo"\} (\d+)/', $metrics, $m) || (int) $m[1] < 1) {
-    echo "FAIL: rejected_total{target=solo} did not rise:\n$metrics\n";
+if (!str_contains($metrics, 'fpmng_pool_info{pool="gw",type="gateway"}')) {
+    echo "FAIL: metrics missing the gateway's own fpmng_pool_info:\n$metrics\n";
     exit(1);
 }
 echo "metrics: ok\n";
-
-$first = readAll($slow);
-if (!str_contains($first, ' 200 ')) {
-    echo "FAIL: the in-flight slow request did not complete:\n$first\n";
-    exit(1);
-}
-echo "slow-request-completed: ok\n";
 
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
@@ -193,11 +159,10 @@ $tester->close();
 Done
 --EXPECT--
 startup-notice: ok
+routed-prefix: 200
+unrouted: 404
 access-log: target=-
-reject: 503
-reject-warning: target=solo
 metrics: ok
-slow-request-completed: ok
 Done
 --CLEAN--
 <?php

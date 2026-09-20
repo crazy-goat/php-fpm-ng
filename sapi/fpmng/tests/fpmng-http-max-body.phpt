@@ -3,7 +3,7 @@ FPM http gateway: http.max_body rejects an oversized request with 413 (task 031)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -23,14 +23,18 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.max_body = 1k
+http.route[body] = /
 [body]
+pool.type = fastcgi
 listen = {{ADDR[fastcgi]}}
-pool.type = http
 pm = static
 pm.max_children = 1
 chdir = $docroot
-http.listen = {{ADDR[http]}}
-http.max_body = 1k
 EOT;
 
 $tester = new FPM\Tester($config, '<?php echo "len=", $_SERVER["CONTENT_LENGTH"] ?? "none";');

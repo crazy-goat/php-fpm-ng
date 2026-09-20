@@ -25,8 +25,9 @@
 #include "fpm_scoreboard.h"
 #include "zlog.h"
 
-/* http.* tunes the gateway, which starts only under pool.type = http — on every
- * other type these directives have nothing to tune. worker.* applies only to
+/* http.* tunes the gateway, which starts only under pool.type = gateway (issue
+ * #388, formerly pool.type = http) — on every other type these directives have
+ * nothing to tune. worker.* applies only to
  * pool.executor = worker (issue #331) -- fpm_http_direct_worker_accepts
  * further down carves its two directives back out on that one type.
  *
@@ -42,15 +43,39 @@ static const char *const fpm_pool_fastcgi_rejects[] = {
 	NULL
 };
 
-static const char *const fpm_pool_http_classic_rejects[] = {
+/* Issue #388: a gateway runs no PHP, so nothing that configures PHP has
+ * anything to configure. Rejected loudly rather than ignored: a config written
+ * for pool.type = http carries the pm. and php_ families on the same section as the gateway,
+ * and the gateway cut moves the PHP half to the fastcgi target (see the
+ * retirement message for "http" below). An operator who moves the pool and
+ * forgets a directive must be told, not left with a proxy that silently has no
+ * process manager.
+ *
+ * http.listen is deliberately NOT here: it is redundant rather than
+ * meaningless, and fpm_http_validate_pool() refuses it with a message that says
+ * `listen` is the public port. Everything the type keeps -- listen, user/group,
+ * chdir, access.*, ping.*, operator.*, http.* -- is simply absent from this
+ * list, which is a rejection list and not an allow-list (see the field comment
+ * in fpm_pool_type.h). The php_* families are noted to set_directives by
+ * fpm_conf.c, so the exact name matches the entry here. */
+static const char *const fpm_pool_gateway_rejects[] = {
+	"pm",
+	"pm.",
+	"php_value",
+	"php_admin_value",
+	"php_flag",
+	"php_admin_flag",
+	"env",
+	"request_terminate_timeout",
+	"request_terminate_timeout_track_finished",
+	"request_slowlog_timeout",
+	"request_slowlog_trace_depth",
+	"slowlog",
+	"security.limit_extensions",
+	"fiber.",
 	"worker.",
 	NULL
 };
-
-static int fpm_pool_type_http_init(struct fpm_worker_pool_s *wp)
-{
-	return fpm_http_init_pool(wp);
-}
 
 /* Both http-direct executors share it: the certificate is read and the reload
  * machinery armed once per pool in the master, before any child forks, and
@@ -207,34 +232,13 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.live_gauges                  = fpm_http_direct_worker_live_gauges,
 };
 
-/* pool.executor values, as data. "classic" is spelled out here like any other
- * executor so that fpm_pool_type_resolve() looks a name up instead of
- * comparing against one; it resolves to the base type, hence .resolves_to_base.
- *
- * fiber and async do not exist on this branch at all (issue #373 cut them,
- * along with --enable-fpmng-fiber / --enable-fpmng-async, out to branch
- * async). The entries stay in the list so that a configuration asking for one
- * still gets told where it went instead of that the name is unknown.
- *
- * .type stays NULL forever on this branch: fpm_pool_type_install_coop_variants()
- * below is the hook that used to fill it in from the fiber/async structs
- * before #373; it is now a no-op kept for the day those structs come back.
- * fpm_pool_type_validate_executor() reads .type being NULL to report the
- * pointer at branch async. */
-static struct fpm_pool_executor_s fpm_http_executors[] = {
-	{ .name = "classic", .resolves_to_base = 1 },
-	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
-	{ .name = "async", .build_flag = "--enable-fpmng-async" },
-	{ .name = NULL }
-};
-
-/* Used to fill in the .type pointers above from the fiber/async structs,
- * through a lookup that lived in fpm_pool_type_coop.c. Issue #373 cut those
- * structs out to branch async, so there is nothing left to install: the
- * fiber/async entries above keep .type == NULL forever on this branch, which
- * is exactly what fpm_pool_type_validate_executor() needs to point an
- * operator at branch async. Kept as a no-op call site rather than deleted so
- * a future variant source has one designated place to hook back in. */
+/* Used to fill in executor .type pointers from the fiber/async structs, through
+ * a lookup that lived in fpm_pool_type_coop.c. Issue #373 cut those structs out
+ * to branch async. Issue #388 then retired pool.type = http, the last type that
+ * offered a pool.executor list with the fiber/async entries, so there is no
+ * list left to fill and no entry left to point at branch async. Kept as a no-op
+ * call site rather than deleted so a future variant source has one designated
+ * place to hook back in. */
 static void fpm_pool_type_install_coop_variants(void)
 {
 }
@@ -247,13 +251,16 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
 	{ .name = NULL }
 };
 
-/* Types visible in configuration. http starts the built-in gateway and
- * defaults to the classic executor; fpm_pool_type_resolve() selects the
- * effective variant. The optimized FastCGI path "fastcgi-ng" used to sit next
- * to "fastcgi" here and was removed in 0.9.0 (issue #376): once fiber/async
- * had left, its only content was the reuses_request_runtime bit, measured at
+/* Types visible in configuration. gateway is the built-in HTTP proxy (issue
+ * #388); fpm_pool_type_resolve() selects the effective variant for the types
+ * that offer one. The optimized FastCGI path "fastcgi-ng" used to sit next to
+ * "fastcgi" here and was removed in 0.9.0 (issue #376): once fiber/async had
+ * left, its only content was the reuses_request_runtime bit, measured at
  * 9.5 us per request (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to
- * "http", which sets the same bit. It is kept as a retired name below. */
+ * "http", which set the same bit. Issue #388 retired "http" itself: it was two
+ * things in one section (a pool of PHP workers and the proxy in front of them)
+ * and the proxy is now the type it always should have been. Both names are
+ * kept as retired names below. */
 static const struct fpm_pool_type_s fpm_pool_types[] = {
 	{
 		.name            = "fastcgi",
@@ -268,30 +275,50 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
-		.name                   = "http",
-		/* Issue #295: the gateway has shipped since v0.1.0 and CI drives it on
+		/* Issue #388: the gateway is the HTTP proxy that used to be welded
+		 * onto pool.type = http. It runs no PHP and has no process manager --
+		 * .proxy_only carries both facts, so fpm_http.c can tell which
+		 * listener it is starting and which routing table it is building
+		 * without ever comparing a type name.
+		 *
+		 * Issue #295: the gateway has shipped since v0.1.0 and CI drives it on
 		 * every PR (the gateway-* cells in build-matrix.yml). TLS termination
 		 * in front of it is beta, but that is a property of the TLS code and
 		 * is announced by it -- see fpm_tls_http.c. */
+		.name                   = "gateway",
 		.tier                   = FPM_TIER_SUPPORTED,
+		/* listen is the PUBLIC HTTP(S) port -- see .proxy_only. */
 		.requires_listen        = 1,
-		.requires_pm            = 1,
-		.serves_requests        = 1,
-		.reuses_request_runtime = 1,
-		.baseline_counter       = "requests",
-		.executors              = fpm_http_executors,
+		.requires_pm            = 0,
+		.serves_requests        = 0,
+		.proxy_only             = 1,
+		/* Issue #388: the gateway's own operator pages default to /metrics
+		 * and /status; on every other type an unset path means "not exposed". */
+		.operator_paths_default = 1,
+		/* Same socket options as the old http type's gateway processes: the
+		 * child answers the client directly, so O_NONBLOCK in the master and
+		 * TCP_NODELAY on the listening socket before any fork -- see the two
+		 * field comments in fpm_pool_type.h for why not in the child. */
+		.listening_socket_nonblocking = 1,
+		.listening_socket_nodelay     = 1,
 		.operator_endpoint      = 1,
 		/* Issue #341: fpmng_gateway_{upstreams_used,upstreams_max,
-		 * requests_total,rejected_total}{pool,target} on operator.metrics_path, one
-		 * row per http.route[] target (or the pool's own listener when
-		 * http.route[] is unset) -- see fpm_http.h. Write-into-a-buffer shape,
-		 * same reason the worker executor's per-slot hook below uses it: a
-		 * target label multiplies every series, which does not fit
+		 * requests_total,rejected_total}{pool,target} on operator.metrics_path,
+		 * one row per http.route[] target -- see fpm_http.h. Write-into-a-buffer
+		 * shape, same reason the worker executor's per-slot hook below uses it:
+		 * a target label multiplies every series, which does not fit
 		 * live_gauges' fixed scalar array. */
 		.render_metrics_prometheus = fpm_http_render_metrics_prometheus,
-		.rejects                = fpm_pool_http_classic_rejects,
+		/* Issue #277/#388: until #390 gives the gateway its own routed-request
+		 * counters in shared memory, its baseline counter is the shared
+		 * scoreboard's `requests`, exactly as for a serves_requests type --
+		 * zero, because no PHP child ever bumps it. The type therefore keeps
+		 * .baseline_counter and fpm_operator_page_collect() reads the
+		 * scoreboard for a type with this and no .status. */
+		.baseline_counter       = "requests",
+		.rejects                = fpm_pool_gateway_rejects,
 		.validate               = fpm_http_validate_pool,
-		.init_main              = fpm_pool_type_http_init,
+		.init_main              = fpm_http_init_pool,
 	},
 	{
 		.name                         = "http-direct",
@@ -443,11 +470,13 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
  *
  * There is exactly one build where the answer can be no:
  * build/libphp-build.sh links against a distribution's libphp (issue #212) so
- * that `pool.type = fastcgi` and `pool.type = http-direct` can ship as a
- * package with no compilation on the user's side. A distribution libphp is
- * built from unpatched php-src, so patches/0006 -- which lives inside Zend/ --
- * is not in it, and zend_signal_use_persistent_handlers() does not exist
- * there.
+ * that `pool.type = fastcgi`, `pool.type = gateway` and `pool.type =
+ * http-direct` can ship as a package with no compilation on the user's side. A
+ * distribution libphp is built from unpatched php-src, so patches/0006 --
+ * which lives inside Zend/ -- is not in it, and
+ * zend_signal_use_persistent_handlers() does not exist there. Since issue #388
+ * retired pool.type = http (the last type that set the bit) nothing in this
+ * tree triggers this refusal; it stays for the next type that needs the patch.
  *
  * Keyed off the capability bit, not off a list of type names. A name list
  * would be a second copy of the same fact and would drift the first time a
@@ -480,9 +509,9 @@ int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct
 		"against a distribution libphp, which does not carry patches/0006 (persistent Zend "
 		"signal handlers) -- a pool of this type would run with upstream signal behaviour "
 		"without saying so", wp->config->name, type->name);
-	zlog(ZLOG_ALERT, "[pool %s] use 'pool.type = fastcgi' or 'pool.type = http-direct', which this "
-		"binary supports in full, or a build from patched source (build/static-full.sh)",
-		wp->config->name);
+	zlog(ZLOG_ALERT, "[pool %s] use 'pool.type = fastcgi', 'pool.type = gateway' or "
+		"'pool.type = http-direct', which this binary supports in full, or a build from patched "
+		"source (build/static-full.sh)", wp->config->name);
 	return -1;
 #endif
 }
@@ -576,8 +605,13 @@ static const struct {
 	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
 	{ "fastcgi-ng",
 	  "it was removed in 0.9.0 (issue #376): the optimized transport it selected lives on under "
-	  "pool.type = http; use pool.type = fastcgi, or pool.type = http-direct for a pool with "
+	  "pool.type = fastcgi; use pool.type = fastcgi, or pool.type = http-direct for a pool with "
 	  "no web server in front" },
+	{ "http",
+	  "it was split in two (issue #388): a pool of PHP workers is 'pool.type = fastcgi' and the "
+	  "HTTP proxy in front of it is 'pool.type = gateway'. Move the php/pm.* directives to the "
+	  "fastcgi section, give the gateway section 'listen = <public port>', and route to the "
+	  "workers explicitly, e.g. 'http.route[<pool>] = /'" },
 };
 
 /* NULL when the name is not a retired one. */

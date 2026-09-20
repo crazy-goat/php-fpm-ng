@@ -3,7 +3,7 @@ FPM http gateway: front-controller fallback for a directory, and its containment
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -55,13 +55,21 @@ file_put_contents("$www/withindex/index.php", $script);
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[gw]}}
+chdir = $www
+; One gateway process: the target is pm.max_children = 1, so a second gateway
+; would race for its single upstream connection and answer 503. The gateway
+; count is not what this test asserts.
+http.gateways = 1
+http.route[main] = /
 [main]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
 chdir = $www
-pool.type = http
-http.listen = {{ADDR[gw]}}
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -112,14 +120,18 @@ symlink("$outside/real.php", "$badRoot/escape.php");
 $cfg2 = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[gw2]}}
+chdir = $badRoot
+http.front_controller = /escape.php
+http.route[badpool] = /
 [badpool]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
 chdir = $badRoot
-pool.type = http
-http.listen = {{ADDR[gw2]}}
-http.front_controller = /escape.php
 EOT;
 
 $tester2 = new FPM\Tester($cfg2, '<?php');
@@ -131,9 +143,11 @@ $tester2->expectLogStartNotices();
 // %s (not a literal '/escape.php'): LogTool's matcher builds a '/'-delimited
 // regex out of this string, so an actual slash in the expected message breaks
 // the pattern -- %s is its own placeholder mechanism for exactly this case.
+/* Issue #388: the warning is emitted by the GATEWAY pool, which owns
+ * http.front_controller; badpool is only the route target. */
 $tester2->expectLogWarning(
     "http: http.front_controller '%s' resolves outside the document root, fallback disabled",
-    'badpool',
+    'gw',
     1,
     true
 );

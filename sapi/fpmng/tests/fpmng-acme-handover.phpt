@@ -3,7 +3,7 @@ ACME: a certificate installed by the renewer reaches every gateway process, thro
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 if (!function_exists('openssl_x509_parse')) {
     die('skip requires the openssl extension');
 }
@@ -13,14 +13,17 @@ if (trim((string) shell_exec('command -v openssl 2>/dev/null')) === '') {
 $probe = new FPM\Tester(<<<'EOT'
 [global]
 error_log = {{FILE:LOG}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[probe]}}
+http.tls_cert = /nonexistent-cert.pem
+http.tls_key = /nonexistent-key.pem
+http.route[unconfined] = /
 [unconfined]
+pool.type = fastcgi
 listen = {{ADDR}}
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[probe]}}
-http.tls_cert = /nonexistent-cert.pem
-http.tls_key = /nonexistent-key.pem
 EOT, '<?php');
 $messages = $probe->testConfig(true, null, false, false);
 FPM\Tester::clean();
@@ -140,17 +143,21 @@ $testDir = __DIR__;
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
-[unconfined]
-listen = {{ADDR}}
-pm = static
-pm.max_children = 1
+[gw]
+pool.type = gateway
+listen = {{ADDR[tls]}}
 chdir = $testDir
-pool.type = http
-http.listen = {{ADDR[tls]}}
 http.gateways = 4
 http.tls_cert = $dir/fullchain.pem
 http.tls_key = $dir/privkey.pem
 http.tls_reload_check = 1s
+http.route[unconfined] = /
+[unconfined]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 1
+chdir = $testDir
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php echo "worker\n";');

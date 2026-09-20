@@ -10,9 +10,11 @@ and keeping a single renewer is
 
 ## What answers, and where
 
-Both sockets of a `pool.type = http` pool answer the challenge namespace:
+Both sockets of a `pool.type = gateway` answer the challenge namespace (the
+type was the proxy half of `pool.type = http` before issue #388):
 
-- `http.listen`, before static files and before the front controller;
+- its `listen` (the public port), before static files and before the front
+  controller;
 - `http.plain_listen`, the redirect-only companion, *instead of* redirecting.
   The companion is the interesting one: HTTP-01 is plain HTTP by definition,
   and during a fresh bootstrap there is no certificate on `:443` to redirect
@@ -39,7 +41,7 @@ fpmng_acme_challenge_list(): array   // tokens only, never key authorizations
 ```
 
 A published token is immediately visible to every gateway process of every
-`http` pool in the same master, because the store is shared memory allocated
+`gateway` pool in the same master, because the store is shared memory allocated
 before the first fork. That is the point: with `http.gateways > 1` the
 process that answers the CA's single request is not the process that
 published the token, and the CA gives no retry guarantee.
@@ -49,11 +51,18 @@ gateway can never execute the ACME client.
 
 ```ini
 [web]
-pool.type = http
-http.listen = 0.0.0.0:443
+pool.type = gateway
+listen = 0.0.0.0:443
 http.plain_listen = 0.0.0.0:80
 http.tls_cert = /state/acme/example.com/fullchain.pem
 http.tls_key  = /state/acme/example.com/privkey.pem
+http.route[app] = /
+
+[app]
+pool.type = fastcgi
+listen = /run/php-fpm-ng/app.sock
+pm = static
+pm.max_children = 4
 
 [acme]
 pool.type = cron

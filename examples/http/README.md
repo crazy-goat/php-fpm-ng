@@ -1,7 +1,8 @@
-# Example: `pool.type = http`
+# Example: `pool.type = gateway` in front of one `fastcgi` pool
 
-One pool (`fpm-ng.conf`), TLS, one static file, one PHP request. Whole
-config fits on one screen.
+Two sections in `fpm-ng.conf` (issue #388): the gateway terminates TLS on the
+public port and routes every path to the FastCGI application behind it. One
+static file, one PHP request; still fits on one screen.
 
 ## Run it
 

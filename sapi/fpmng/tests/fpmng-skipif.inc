@@ -4,10 +4,13 @@
  * the one gate that is ours.
  *
  * A binary built by build/libphp-build.sh links against a distribution's
- * libphp and therefore refuses `pool.type = http`
- * at configuration time -- see fpm_pool_type_check_build_support(). A test
- * whose pool needs one of those cannot pass there, and must not pretend to
- * fail either: the binary is telling it the truth. It skips.
+ * libphp and therefore refuses a pool type whose children need patches/0006
+ * (inside Zend/) at configuration time -- see
+ * fpm_pool_type_check_build_support(). A test whose pool needs one of those
+ * cannot pass there, and must not pretend to fail either: the binary is
+ * telling it the truth. It skips. Since issue #388 no type in this tree needs
+ * that patch, so the probe below succeeds for every type and nothing skips on
+ * this reason any more -- the mechanism stays for the next type that does.
  *
  * The decision is asked OF THE BINARY UNDER TEST, by running the same `-t`
  * configuration test a real start runs and reading what comes back. Nothing
@@ -29,14 +32,23 @@ const FPMNG_MISSING_PATCH_0006 = 'does not carry patches/0006';
 
 function fpmng_pool_type_probe_config(string $type, string $root): string
 {
+    /* -t validates, it does not bind, so the ports below need not be free. Each
+     * branch is the MINIMAL well-formed configuration for the type: the
+     * gateway (issue #388) rejects pm.* and requires at least one http.route[],
+     * so it needs a target pool of its own; http-direct needs a real front
+     * controller. */
+    $common = "[global]\nerror_log = /dev/null\n";
     switch ($type) {
-        case 'http':
-            /* -t validates, it does not bind, so the port need not be free. */
-            return "http.listen = 127.0.0.1:9\n";
+        case 'gateway':
+            return $common
+                . "[probe]\npool.type = gateway\nlisten = 127.0.0.1:9\nhttp.route[app] = /\n"
+                . "[app]\nlisten = 127.0.0.1:8\npm = static\npm.max_children = 1\n";
         case 'http-direct':
-            return "chdir = $root\nhttp.front_controller = /index.php\n";
+            return $common . "[probe]\nlisten = 127.0.0.1:9\npm = static\npm.max_children = 1\n"
+                . "pool.type = http-direct\nchdir = $root\nhttp.front_controller = /index.php\n";
         default:
-            return '';
+            return $common . "[probe]\nlisten = 127.0.0.1:9\npm = static\npm.max_children = 1\n"
+                . "pool.type = $type\n";
     }
 }
 
@@ -52,9 +64,7 @@ function fpmng_skip_if_pool_type_unsupported(string $type): void
     file_put_contents($root . '/index.php', '<?php');
     $conf = $root . '/probe.conf';
 
-    file_put_contents($conf, "[global]\nerror_log = /dev/null\n"
-        . "[probe]\nlisten = 127.0.0.1:9\npm = static\npm.max_children = 1\n"
-        . "pool.type = $type\n" . fpmng_pool_type_probe_config($type, $root));
+    file_put_contents($conf, fpmng_pool_type_probe_config($type, $root));
 
     $output = [];
     $status = 0;

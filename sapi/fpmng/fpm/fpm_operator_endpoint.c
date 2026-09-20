@@ -384,6 +384,38 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 		return 0;
 	}
 
+	/* Issue #388: on the gateway the two pages DEFAULT to being set, so a
+	 * fresh gateway binds its operator listener on loopback without being
+	 * asked (docs/gateway.md). Every other type keeps "unset = off". The flag
+	 * is data on the type, never a name test here.
+	 *
+	 * An explicit "" is the way to turn one off, and it is a warning rather
+	 * than silence because the operator wrote the directive: on the gateway
+	 * that also disables the <base>/<pool> forwarding for that format (#389),
+	 * which is easy to do by accident with an empty value. */
+	if (type->operator_paths_default) {
+		if (!wp->config->operator_status) {
+			if (!fpm_conf_directive_was_set(wp->config, "operator.status_path")) {
+				status_path = "/status";
+			} else if (!status_path || !*status_path) {
+				zlog(ZLOG_WARNING, "[pool %s] operator.status_path is empty: the gateway's "
+					"own status page and the /status/<pool> forwarding are disabled",
+					wp->config->name);
+				status_path = NULL;
+			}
+		}
+		if (!wp->config->operator_metrics) {
+			if (!fpm_conf_directive_was_set(wp->config, "operator.metrics_path")) {
+				metrics_path = "/metrics";
+			} else if (!metrics_path || !*metrics_path) {
+				zlog(ZLOG_WARNING, "[pool %s] operator.metrics_path is empty: the gateway's "
+					"own metrics page and the /metrics/<pool> forwarding are disabled",
+					wp->config->name);
+				metrics_path = NULL;
+			}
+		}
+	}
+
 	/* #273, point 4: no mandatory on/off directive. The endpoint exists iff a
 	 * path -- or the flag that spells one -- is set, so a pool that configured
 	 * neither binds nothing and no internal listener pool is created for it.

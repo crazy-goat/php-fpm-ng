@@ -151,11 +151,10 @@ struct fpm_http_gw_slot_s {
  * Two prefixes routed to the same pool therefore share one budget and one
  * queue; a prefix is a routing key, a target is a pool.
  *
- * A gateway with no http.route[] has exactly one target -- the pool's own
- * FastCGI listener -- at prefix "/", so it is the gateway this file has always
- * had, with the table walked once per request instead of not at all. "/" is an
- * ordinary row and not a special case, which is what lets a future
- * gateway-only pool (#345) have no row 0 at all.
+ * Issue #388 removed the old weld's implicit target 0: pool.type = gateway
+ * routes by http.route[] alone, at least one route is required at startup, and
+ * a request matching none is a local 404. A row for "/" is an ordinary row like
+ * any other, not a fallback the table always gains.
  * ------------------------------------------------------------------------ */
 
 struct fpm_http_target_s;
@@ -242,7 +241,15 @@ struct fpm_http_route_s {
 struct fpm_http_gateway_s {
 	struct fpm_http_gateway_s *next;
 	char *pool;
-	char *listen_address;			/* where the pool takes FastCGI */
+	char *listen_address;			/* where the gateway listens when pool.type = gateway (the public port)
+						 * or, for the retired weld's routing, where the pool takes FastCGI */
+	/* Issue #388: copied from fpm_pool_type_s.proxy_only at settings time, so
+	 * every branch below asks this flag instead of re-resolving the type. A
+	 * proxy_only gateway's `listen` is its PUBLIC port (the child accepts on
+	 * the master's listening_socket directly), its routing table is exactly
+	 * http.route[] with no implicit own-pool row, and its process count is
+	 * http.gateways alone. */
+	int proxy_only;
 	char *docroot;
 	int listen_fd;
 	int plain_listen_fd;

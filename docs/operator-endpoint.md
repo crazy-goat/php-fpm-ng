@@ -7,7 +7,7 @@
 > `pool.type = gateway` will expose every pool's pages under `<base>/<pool name>`
 > on its public port; that part is still the target in [`gateway.md`](gateway.md).
 
-A `cron`, `supervisor`, `http` or `http-direct` pool has nothing in front of it
+A `cron`, `supervisor`, `gateway` or `http-direct` pool has nothing in front of it
 that could answer a monitoring scrape. A `fastcgi` pool does — the web server
 that speaks FastCGI to it — which is why upstream FPM answers `pm.status_path`
 inside a request and why that arrangement is left alone here. `pm.status_path`
@@ -197,7 +197,7 @@ answers the page described above, and every other type answers the per-pool JSON
 described here. The metrics page is the same exposition format on every type, on
 purpose — a scraper reads one endpoint and compares labelled series across pools.
 
-A pool that serves requests (`http`, `http-direct`) reports its worker counts
+A pool that serves requests (`fastcgi`, `http-direct`) reports its worker counts
 and request total. On `pool.type = http-direct` with `pool.executor = worker`
 that request total is a real, per-request count since issue #333 — see
 [`http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path) for what else
@@ -213,6 +213,15 @@ script has called `fpmng_supervisor_heartbeat()` also reports `heartbeat_age`
 [`cron.md`](cron.md#cronexpect_within-issue-327) and
 [`supervisor.md`](supervisor.md#fpmng_supervisor_heartbeat-issue-327).
 
+A `pool.type = gateway` runs no PHP child at all, so it has no state to report:
+its page carries `fpmng_pool_info` and its baseline counter, and no state block.
+On `operator.metrics_path` it also carries its own per-target series,
+`fpmng_gateway_{upstreams_used,upstreams_max,requests_total,rejected_total}{pool,
+target}` (issue #341), one row per `http.route[]` target. The rest of the
+gateway's numbers — its own routed-request totals and the index of exposed
+pools — is issue #390; until then the baseline counter reads the shared
+scoreboard, which no gateway child bumps, so it is zero and is the honest value.
+
 ### The baseline counter
 
 Every pool reports one counter of its own invocations whether or not its PHP
@@ -221,7 +230,8 @@ the counter's name does too:
 
 | Pool type | Counter | Counts |
 |---|---|---|
-| `http`, `http-direct`, `fastcgi` | `requests` | Requests served. |
+| `fastcgi`, `http-direct` | `requests` | Requests served. |
+| `gateway` | `requests` | Requests routed (shared scoreboard until #390). |
 | `cron` | `runs` | Scheduled runs started. |
 | `supervisor` | `restarts` | Times the supervised script was started again. |
 
@@ -342,8 +352,9 @@ independent on/off switches, since "on" means "the path is set".
   It is a liveness probe for whatever is in front of the pool, so that is
   where it belongs — and on `http-direct` "in front of the pool" already is
   the pool's own listener, so it was answered locally from the start. On
-  `pool.type = http`, "in front of the pool" is the gateway process, and since
-  issue #382 that is exactly who answers it: the gateway matches `ping.path`
+  `pool.type = gateway` (the retired `pool.type = http` before issue #388),
+  "in front of the pool" is the gateway process, and since issue #382 that is
+  exactly who answers it: the gateway matches `ping.path`
   itself, before routing and before the request ever reaches a worker, so a
   locally answered ping never touches the scoreboard, `pm.max_requests` or a
   queue counter — it is not a request of the pool. See

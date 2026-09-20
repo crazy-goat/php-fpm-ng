@@ -145,23 +145,24 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 |---|---|---|---|
 | `fastcgi` | yes | yes | upstream FPM's protocol handling; needs nothing from the engine that a distribution `libphp` does not export. |
 | `http-direct` | yes | yes | including `pool.executor = worker`. The HTTP listener lives entirely in this SAPI. |
-| `http` | **no** | yes | `http` keeps a request runtime alive across requests, which is what `zend_signal_use_persistent_handlers()` -- added by `patches/0006` **inside `Zend/`** -- exists for. That is the distribution's file, not ours, so a distribution `libphp` does not export it. |
+| `gateway` | yes | yes | issue #388: the proxy is a type of its own and runs no PHP child, so it needs nothing from the engine. `pool.type = http` (the proxy welded to its own workers) is retired and refused by name. |
 | fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
 | async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
 | TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the single package terminated TLS. |
 | the ACME client (`fpmng-dist://acme/...`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme`. The default package carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
 
 The default package's binary does not silently degrade: a pool it cannot honour is
-refused before the master forks anything, by name and with the reason.
+refused before the master forks anything, by name and with the reason. Since
+issue #388 no pool type needs a patch of ours, so the refusal a packaged binary
+most often produces now is for a retired name:
 
 ```console
 # php-fpm-ng -t -y /etc/php-fpm-ng/php-fpm-ng.conf
-ALERT: [pool www] 'pool.type = http' is not supported by this binary: it was linked
-against a distribution libphp, which does not carry patches/0006 (persistent Zend
-signal handlers) -- a pool of this type would run with upstream signal behaviour
-without saying so
-ALERT: [pool www] use 'pool.type = fastcgi' or 'pool.type = http-direct', which this
-binary supports in full, or a build from patched source (build/static-full.sh)
+ALERT: [pool www] pool.type 'http' no longer exists: it was split in two (issue
+#388): a pool of PHP workers is 'pool.type = fastcgi' and the HTTP proxy in front
+of it is 'pool.type = gateway'. Move the php/pm.* directives to the fastcgi
+section, give the gateway section 'listen = <public port>', and route to the
+workers explicitly, e.g. 'http.route[<pool>] = /'
 ERROR: failed to post process the configuration
 ```
 
@@ -185,7 +186,7 @@ apk add --allow-untrusted ./php-fpm-ng-tls-v0.4.0-php8.5-x86_64.apk
 
 Everything else on this page applies unchanged: same paths, same
 `/etc/php-fpm-ng`, same service file, same dependency on the distribution
-`libphp`, same refusal of `pool.type = http`.
+`libphp`.
 
 **The two cannot be co-installed**, and they say so to the package manager
 rather than fighting over `/usr/sbin/php-fpm-ng`: each declares `Conflicts` and

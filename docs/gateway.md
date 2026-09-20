@@ -1,12 +1,16 @@
 # The gateway: ping, metrics and status across pool types
 
-> **Status: design for v0.10.0; the `operator.*` rename landed in #386, the
-> gateway type has not.** The operator directives are `operator.*` now (see
-> [`operator-endpoint.md`](operator-endpoint.md)); what does not exist yet is
-> `pool.type = gateway`, which forwards every pool's operator pages under
-> `<base>/<pool name>` and answers `ping.path` in the gateway process. This page
-> is the target, decided 2026-09-17; the issues that carry the rest are listed at
-> the end. When the last of them lands this banner goes and the two pages merge.
+> **Status: `pool.type = gateway` landed in #388 and `pool.type = http` is
+> retired; two pieces of this design are still open.** The type, its explicit
+> `http.route[]`-only routing, `ping.path` answered in the gateway process and
+> its own `operator.metrics_path`/`operator.status_path` defaults are
+> implemented. Still to come: `http.operator` and the `<base>/<pool name>`
+> forwarding of every exposed pool's pages (#389), and the gateway's own
+> shared-memory counters rendered on its `/metrics` page (#390). The operator
+> directives are `operator.*` since #386 (see
+> [`operator-endpoint.md`](operator-endpoint.md)). This page is the target,
+> decided 2026-09-17; the issues that carry the rest are listed at the end.
+> When the last of them lands this banner goes and the two pages merge.
 
 ## Why
 

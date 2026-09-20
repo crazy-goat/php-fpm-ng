@@ -22,11 +22,13 @@ Verified 2026-09-07 against `sapi/fpmng`:
   + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
 - runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
   33,885,546 bytes with the full, unstripped binary
-- the frontend selects `pool.type = fastcgi | http`; no directive means
-  classic `fastcgi` and stays compatible with upstream FPM
-- `http` accepts an optional `pool.executor` (default `classic`); the `fiber`
-  and `async` executors moved to branch `async` (issue #373) and are not
-  available on `main`
+- the frontend selects `pool.type = gateway | fastcgi | http-direct`; no
+  directive means classic `fastcgi` and stays compatible with upstream FPM.
+  Issue #388 retired `pool.type = http`: the proxy is `gateway` (its `listen`
+  is the public port, `http.route[]` says what it forwards to) and the PHP
+  workers are an ordinary `fastcgi` pool behind it
+- the `fiber` and `async` executors moved to branch `async` (issue #373) and
+  are not available on `main`
 - metrics: `operator.status_path` (JSON) and `operator.metrics_path`
   (Prometheus) expose one pool on an operator listener named by
   `operator.status_listen` / `operator.metrics_listen`, one target per pool
@@ -54,7 +56,7 @@ Where things stand today:
 
 | | tier |
 | --- | --- |
-| `pool.type = fastcgi`, `http`, `supervisor`, `cron` | supported |
+| `pool.type = fastcgi`, `gateway`, `supervisor`, `cron` | supported |
 | `pool.type = http-direct` with the default `classic` executor | supported |
 | the operator endpoint (`operator.status_path`, `operator.metrics_path`) | supported |
 | `pool.type = http-direct` with `pool.executor = worker` | beta |
@@ -80,10 +82,11 @@ fourth of those.
 
 There is a `.deb` and an `.apk` that contain no PHP: they depend on the
 distribution's `libphp` (`libphp8.5-embed`, `php85-embed`), so a machine needs
-no compiler and no php-src to run `pool.type = fastcgi` or
-`pool.type = http-direct`. The other pool types need patches that apply inside
-`libphp` and still need a build from source. Commands, the supported matrix and
-what happens on a version mismatch: [`docs/install.md`](docs/install.md).
+no compiler and no php-src to run `pool.type = fastcgi`, `pool.type =
+gateway` or `pool.type = http-direct`. No pool type needs a patch applied
+inside `libphp` any more (issue #388 retired the last one, `pool.type = http`),
+so the packages run everything this tree ships. Commands, the supported matrix
+and what happens on a version mismatch: [`docs/install.md`](docs/install.md).
 
 Each release carries **two** of each (#294): `php-fpm-ng`, which terminates no
 TLS, and `php-fpm-ng-tls`, the same commit built with `--enable-fpmng-tls
@@ -139,7 +142,7 @@ purpose — the script sets the pace, and a script that returns instead of
 looping now says so in the log. Who decides the interval, and the fast-restart
 warning: [`docs/supervisor.md`](docs/supervisor.md).
 
-A `cron`, `supervisor`, `http` or `http-direct` pool answers
+A `cron`, `supervisor`, `gateway` or `http-direct` pool answers
 `operator.status_path`
 and `operator.metrics_path` on an operator listener of its own rather than on the
 socket carrying its traffic — the directives, the default of `127.0.0.1:9253`,
@@ -151,11 +154,13 @@ Shutdown grace (`process_control_timeout`, `supervisor.stop_timeout`,
 `docker stop` are documented in
 [`docs/shutdown-timeouts.md`](docs/shutdown-timeouts.md).
 
-One gateway can serve several pools: `http.route[<pool>] = <prefix>[,...]`
-sends a path prefix to another `fastcgi` pool, so an API or a
-stream endpoint gets its own workers and its own saturation behaviour without
-its own listener. The longest-prefix rule, why `/` is an ordinary entry, and
-why the connection budget belongs to a target pool rather than to a prefix:
+A gateway serves several pools: `http.route[<pool>] = <prefix>[,...]` sends a
+path prefix to a `fastcgi` or `http-direct` pool, so an API or a stream
+endpoint gets its own workers and its own saturation behaviour without its own
+listener. Every route is explicit (issue #388): there is no implicit own-pool
+target, a request matching none is a local 404, and at least one route is
+required. The longest-prefix rule and why the connection budget belongs to a
+target pool rather than to a prefix:
 [`docs/http-route.md`](docs/http-route.md).
 
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
@@ -164,8 +169,8 @@ without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS
 termination is a build flag -- `./configure --enable-fpmng-tls`, off by
 default and not in the packages (issue #280).
 
-The gateway answers the ACME HTTP-01 challenge itself, on both `http.listen`
-and the plain `http.plain_listen` companion, from state a `cron` or
+The gateway answers the ACME HTTP-01 challenge itself, on both its own
+`listen` and the plain `http.plain_listen` companion, from state a `cron` or
 `supervisor` pool publishes with `fpmng_acme_challenge_set()` — see
 [`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
 renew a given certificate, and the result reaches every gateway through the

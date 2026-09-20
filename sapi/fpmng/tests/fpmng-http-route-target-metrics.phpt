@@ -3,7 +3,7 @@ fpm-ng: a gateway's metrics carry rejected_total per target, not blended togethe
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 ?>
 --FILE--
 <?php
@@ -29,18 +29,22 @@ $config = <<<EOT
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 process_control_timeout = 5
-[web]
-listen = {{ADDR}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
 chdir = $docroot
-pm = static
-pm.max_children = 2
-pool.type = http
 http.gateways = 1
-http.listen = {{ADDR[http]}}
 http.front_controller = /index.php
 http.route[events] = /sse
 operator.metrics_listen = {{ADDR[operator]}}
 operator.metrics_path = /metrics
+http.route[web] = /
+[web]
+pool.type = fastcgi
+listen = {{ADDR}}
+chdir = $docroot
+pm = static
+pm.max_children = 2
 
 [events]
 listen = {{ADDR[events]}}
@@ -84,7 +88,9 @@ function readAll($fp): string
 
 function rejectedTotal(string $metrics, string $target): ?int
 {
-    if (preg_match('/fpmng_gateway_rejected_total\{pool="web",target="' . preg_quote($target, '/') . '"\} (\d+)/', $metrics, $m)) {
+    /* Issue #388: the gateway pool is [gw] now, and the old implicit own-pool
+     * target is the explicit [web] fastcgi target routed at "/". */
+    if (preg_match('/fpmng_gateway_rejected_total\{pool="gw",target="' . preg_quote($target, '/') . '"\} (\d+)/', $metrics, $m)) {
         return (int) $m[1];
     }
     return null;

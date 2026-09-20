@@ -3,7 +3,7 @@ fpm-ng: the gateway answers the HTTP-01 challenge from shared state, before stat
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-fpmng_skip_if_pool_type_unsupported('http');
+fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_no_acme();
 ?>
 --FILE--
@@ -95,25 +95,40 @@ $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $root
+http.gateways = 4
+http.static = 1
+http.front_controller = /env.php
+http.route[web] = /
 [web]
+pool.type = fastcgi
 listen = {{ADDR}}
 chdir = $root
 pm = static
 pm.max_children = 2
-pool.type = http
-http.listen = {{ADDR[http]}}
-http.gateways = 4
-http.static = 1
+
+[gw2]
+pool.type = gateway
+listen = {{ADDR[nostatic]}}
+chdir = $root
+http.static = 0
 http.front_controller = /env.php
+http.route[nostatic] = /
+; Two gateways share the default operator address 127.0.0.1:9253, and both
+; would default to the same /status and /metrics paths there (issue #388 made
+; them defaults on this type), which the endpoint refuses as a collision. This
+; test scrapes neither, so give the second one addresses of its own.
+operator.status_listen = {{ADDR[op2]}}
+operator.metrics_listen = {{ADDR[op2]}}
 [nostatic]
+pool.type = fastcgi
 listen = {{ADDR[fcgi2]}}
 chdir = $root
 pm = static
 pm.max_children = 1
-pool.type = http
-http.listen = {{ADDR[nostatic]}}
-http.static = 0
-http.front_controller = /env.php
 [publisher]
 pool.type = supervisor
 supervisor.script = $root/publisher.php

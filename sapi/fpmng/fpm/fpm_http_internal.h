@@ -237,6 +237,19 @@ struct fpm_http_route_s {
 	struct fpm_http_target_s *target;
 };
 
+/* Issue #389: one row of the gateway's http.operator forwarding map: a public
+ * path this gateway answers with an operator listener's page. Built once in the
+ * master before the gateway forks (fpm_http_operator_build()), copied into every
+ * gateway process by fork(), rebuilt by a reload like every other http.*
+ * setting. `path` is "<gateway base>/<pool name>", or the bare base for the
+ * gateway's own page. The target is shared by every entry naming one operator
+ * listener address. */
+struct fpm_http_operator_entry_s {
+	char *path;				/* the public path, exact-matched after the query is cut; owned by this entry */
+	const char *local_uri;			/* the local operator path the request line is rewritten to; owned by the operator endpoint's route table */
+	struct fpm_http_target_s *target;	/* the operator listener this entry forwards to */
+};
+
 /* one gateway family per pool */
 struct fpm_http_gateway_s {
 	struct fpm_http_gateway_s *next;
@@ -380,6 +393,39 @@ struct fpm_http_gateway_s {
 	 * table it already built. */
 	int has_routes;
 
+	/* Issue #389: http.operator. When on, this gateway's public port also
+	 * serves every exposed pool's operator pages at <base>/<pool name>, from
+	 * the map below, built once in the master and copied into every gateway
+	 * process by fork(). operator_allowed_clients is the separate ACL that
+	 * guards those paths (required when http.operator = yes); it is checked
+	 * BEFORE the map lookup so a denied client gets the same 403 for a pool
+	 * that exists and one that does not. */
+	int operator_enabled;
+	char *operator_allowed_clients;
+	struct fpm_http_acl_s *operator_acl;
+	/* This gateway's OWN effective operator base for each format, which is the
+	 * root the forwarding keys hang under: /metrics -> /metrics/<pool>. NULL =
+	 * that format is off (operator.metrics_path = "", or an explicit off),
+	 * which turns its forwarding off with it. The gateway's own page is the
+	 * bare base. */
+	char *operator_metrics_base;
+	char *operator_status_base;
+	/* One transport target per distinct operator listener address (several
+	 * pages can share one listener), plus the exact-match map itself.
+	 *
+	 * INVARIANT: every row in operator_entries[0 .. noperator_entries) is
+	 * fully published -- .path, .local_uri and .target are all non-NULL.
+	 * fpm_http_operator_build() increments noperator_entries only after it has
+	 * all three (and never counts a row whose target could not be created), so
+	 * rows beyond the count are the calloc zeros and no published row has a
+	 * NULL .target. Consumers still check .target defensively -- see the
+	 * startup log loop and fpm_http_operator_lookup() -- so a future change
+	 * that breaks the invariant produces a skipped row, not a crash. */
+	struct fpm_http_target_s *operator_targets;
+	unsigned noperator_targets;
+	struct fpm_http_operator_entry_s *operator_entries;
+	unsigned noperator_entries;
+
 	/* gateway process only */
 	struct event_base *base;
 	struct evhttp *http;
@@ -464,6 +510,19 @@ struct _fpm_http_conn {
 	 * entry (issue #107). */
 	int queued;
 	TAILQ_ENTRY(_fpm_http_conn) link;
+
+	/* Issue #389: set only for a request forwarded to an operator listener,
+	 * whose public path is rewritten to that listener's local path. NULL for
+	 * every routed request, where the HTTP transport uses the client's own URI
+	 * (fpm_http_client.c). upstream_uri_owned is the allocation behind
+	 * upstream_uri (the local path plus the client's query string) and is freed
+	 * with the connection; upstream_uri may also point at a literal. */
+	const char *upstream_uri;
+	char *upstream_uri_owned;
+	/* Issue #389: the access log's target when the request did not go to a
+	 * routed pool -- the literal "operator" for a forwarded operator request,
+	 * NULL otherwise (fpm_http_finish() then uses c->target->pool). Not owned. */
+	const char *log_target;
 
 	smart_str params;					/* FCGI_PARAMS payload being assembled */
 	smart_str out;						/* records ready to go upstream */

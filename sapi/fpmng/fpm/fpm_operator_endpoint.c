@@ -524,6 +524,26 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 }
 /* }}} */
 
+int fpm_operator_endpoint_route(struct fpm_worker_pool_s *wp, int metrics,
+	const char **address, const char **path) /* {{{ */
+{
+	struct fpm_operator_listener_s *l;
+	struct fpm_operator_route_s *r;
+	enum fpm_operator_format_e want = metrics ? FPM_OPERATOR_FORMAT_PROMETHEUS : FPM_OPERATOR_FORMAT_JSON;
+
+	for (l = fpm_operator_listeners; l; l = l->next) {
+		for (r = l->routes; r; r = r->next) {
+			if (r->pool == wp && r->format == want) {
+				*address = l->address;
+				*path = r->path;
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+/* }}} */
+
 static void fpm_operator_endpoint_dispatch(void *ctx, const char *path, const char *query,
 	struct fpm_operator_reply_s *reply) /* {{{ */
 {

@@ -224,6 +224,12 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.max_body",             &fpm_conf_set_bytes,       WPO(http_max_body) },
 	{ "http.max_connections",      &fpm_conf_set_integer,     WPO(http_max_connections) },
 	{ "http.max_connections_per_client", &fpm_conf_set_integer, WPO(http_max_connections_per_client) },
+	/* Issue #389: http.operator and http.operator_allowed_clients stay in
+	 * "http." on purpose -- they do not configure the operator listener (that
+	 * is operator.*, #386), they configure what the gateway does with its own
+	 * public port. See the field comment in fpm_conf.h. */
+	{ "http.operator",             &fpm_conf_set_boolean,     WPO(http_operator) },
+	{ "http.operator_allowed_clients", &fpm_conf_set_string,  WPO(http_operator_allowed_clients) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
@@ -1117,6 +1123,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_listen);
 	free(wpc->http_plain_listen);
 	free(wpc->http_allowed_clients);
+	free(wpc->http_operator_allowed_clients);
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);

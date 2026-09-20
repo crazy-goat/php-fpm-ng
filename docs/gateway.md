@@ -1,12 +1,14 @@
 # The gateway: ping, metrics and status across pool types
 
 > **Status: `pool.type = gateway` landed in #388 and `pool.type = http` is
-> retired; two pieces of this design are still open.** The type, its explicit
-> `http.route[]`-only routing, `ping.path` answered in the gateway process and
-> its own `operator.metrics_path`/`operator.status_path` defaults are
-> implemented. Still to come: `http.operator` and the `<base>/<pool name>`
-> forwarding of every exposed pool's pages (#389), and the gateway's own
-> shared-memory counters rendered on its `/metrics` page (#390). The operator
+> retired; one piece of this design is still open.** The type, its explicit
+> `http.route[]`-only routing, `ping.path` answered in the gateway process, its
+> own `operator.metrics_path`/`operator.status_path` defaults and -- since #389
+> -- `http.operator` with the `<base>/<pool name>` forwarding of every exposed
+> pool's pages are implemented. Still to come: the gateway's own shared-memory
+> counters rendered on its `/metrics` page (#390), and `fastcgi` joining the
+> operator listener (#383) -- the example below still shows a `fastcgi` pool
+> exposing itself, which no build does yet. The operator
 > directives are `operator.*` since #386 (see
 > [`operator-endpoint.md`](operator-endpoint.md)). This page is the target,
 > decided 2026-09-17; the issues that carry the rest are listed at the end.
@@ -120,6 +122,10 @@ No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,
 and the front controller), `access.*`, `ping.*`, `operator.*`, `http.*`.
 
 ## URLs: local and through the gateway
+
+Landed in #389: `http.operator = yes` builds the map described here once, in
+the master at configuration time, before the first gateway forks; `fork()`
+copies it into every gateway process and a reload rebuilds it.
 
 A pool's operator pages have a **local** URL, on the operator listener, at the
 path the pool declared. Through the gateway they have a **second** URL, which

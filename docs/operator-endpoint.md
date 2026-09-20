@@ -3,9 +3,10 @@
 > **Namespace note (v0.10.0, issue #386):** the four directives on this page
 > used to be spelled `pm.status_path`, `pm.metrics_path`, `pm.status_listen` and
 > `pm.metrics_listen`. They are now `operator.*`, with `operator.metrics` /
-> `operator.status` as shorthands. The old spellings are refused by name. A new
-> `pool.type = gateway` will expose every pool's pages under `<base>/<pool name>`
-> on its public port; that part is still the target in [`gateway.md`](gateway.md).
+> `operator.status` as shorthands. The old spellings are refused by name. A
+> `pool.type = gateway` exposes every pool's pages under `<base>/<pool name>`
+> on its public port since issue #389 with `http.operator = yes`; see
+> [`gateway.md`](gateway.md#urls-local-and-through-the-gateway).
 
 A `cron`, `supervisor`, `gateway` or `http-direct` pool has nothing in front of it
 that could answer a monitoring scrape. A `fastcgi` pool does — the web server

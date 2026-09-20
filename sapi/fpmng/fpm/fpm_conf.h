@@ -210,6 +210,16 @@ struct fpm_worker_pool_config_s {
 	 * no hot reload of routes, a reload restarts the gateway as it always did.
 	 * NULL/empty = today's gateway: one target, the pool's own listener, at
 	 * prefix "/". */
+	/* Issue #389: what the gateway does with its OWN public port. Both stay in
+	 * the "http." namespace on purpose: they do not configure the operator
+	 * listener (that is operator.*, issue #386), they configure whether the
+	 * gateway's public listener also answers with every exposed pool's operator
+	 * pages. http.operator = yes serves them at <operator base>/<pool name> and
+	 * requires http.operator_allowed_clients (a separate ACL from
+	 * http.allowed_clients). See docs/gateway.md, "URLs: local and through the
+	 * gateway". */
+	int http_operator;			/* http.operator = yes|no; default no */
+	char *http_operator_allowed_clients;	/* who may reach the forwarded operator pages; required when http.operator = yes */
 	struct key_value_s *http_routes;
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */

@@ -73,4 +73,19 @@ int fpm_operator_endpoint_configure(struct fpm_worker_pool_s *wp, const struct f
 int fpm_operator_endpoint_validate(struct fpm_worker_pool_s *wp);
 void fpm_operator_endpoint_child_main(struct fpm_worker_pool_s *wp);
 
+/* Issue #389: where (address, local path) the operator endpoint answers `wp`'s
+ * page for one format, for the gateway's http.operator forwarding. metrics
+ * selects operator.metrics_path (1) or operator.status_path (0). Returns 1 and
+ * sets both out pointers when the pool exposes that format on a listener, 0
+ * when it does not -- no path at all, or a gateway's DERIVED default page that
+ * another pool on the same address already owned (issue #388), in which case
+ * the pool is not in the forwarding map and its <base>/<pool> is a local 404.
+ *
+ * The strings belong to the config-time route table, which lives for the
+ * master's whole life and is copied by fork() into every child; the caller must
+ * not free them. Call after fpm_operator_endpoint_configure() has run for every
+ * pool (the master's init_main pass is such a point). */
+int fpm_operator_endpoint_route(struct fpm_worker_pool_s *wp, int metrics,
+	const char **address, const char **path);
+
 #endif

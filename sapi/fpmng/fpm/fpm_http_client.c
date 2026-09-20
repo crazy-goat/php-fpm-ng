@@ -181,8 +181,14 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	/* The request-target as received, route prefix included -- the FastCGI
 	 * transport passes REQUEST_URI whole too (fpm_http_build_request()); the
 	 * prefix is routing information for the GATEWAY, not something to strip
-	 * from the target's view of the path. */
-	smart_str_appends(&c->out, evhttp_request_get_uri(req));
+	 * from the target's view of the path.
+	 *
+	 * Issue #389: an operator-forwarded request is the one exception. It sets
+	 * c->upstream_uri to the operator listener's local path (plus the client's
+	 * query string), because the public path it arrived on is the gateway's
+	 * <base>/<pool name> and the operator listener knows only the pool's own
+	 * local path. Everything else about the request is unchanged. */
+	smart_str_appends(&c->out, c->upstream_uri ? c->upstream_uri : evhttp_request_get_uri(req));
 	smart_str_appends(&c->out, " HTTP/1.1\r\n");
 
 	/* Host: preserve. An HTTP/1.1 request without one is not valid, but

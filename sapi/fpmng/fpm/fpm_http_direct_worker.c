@@ -1632,11 +1632,44 @@ static void fpm_ws_writecb(struct bufferevent *bev, void *arg)
 	fpm_ws_fire(arg, FPM_WORKER_EV_WRITE);
 }
 
+/* Issue #460: an EOF'd descriptor is permanently readable, so a level-triggered
+ * EV_PERSIST read watcher bound to it (fpmng_worker_event_create() binds read
+ * watchers to the stream's descriptor) fires on every event-loop iteration
+ * forever -- thousands of empty wakeups at 100% CPU until the stream is
+ * closed. Deliver the EOF wakeup to every read watcher on this connection ONCE
+ * and then take each off its descriptor. The input evbuffer is left untouched,
+ * so fread() still drains whatever arrived with the FIN (that is issue #456's
+ * half of the contract); only the level-triggered re-fire loop ends.
+ *
+ * event_del() then event_active(), in that order: event_del() would cancel a
+ * pending activation, while event_active() works on an event that is no longer
+ * pending -- it runs once and is not rescheduled. */
+static void fpm_ws_eof_wakeup_once(struct fpm_ws_ctx *ctx)
+{
+	zend_ulong *ids;
+	unsigned n = ctx->watchers_n, i;
+
+	if (!n) {
+		return;
+	}
+	ids = emalloc(n * sizeof(*ids));
+	memcpy(ids, ctx->watchers, n * sizeof(*ids));
+	for (i = 0; i < n; i++) {
+		struct fpm_worker_watcher *watcher = zend_hash_index_find_ptr(&fw.watchers, ids[i]);
+
+		if (!watcher || watcher->ws != ctx || watcher->type != FPM_WORKER_EV_READ) {
+			continue;
+		}
+		event_del(watcher->ev);
+		event_active(watcher->ev, EV_READ, 0);
+	}
+	efree(ids);
+}
+
 static void fpm_ws_eventcb(struct bufferevent *bev, short what, void *arg)
 {
 	struct fpm_ws_ctx *ctx = arg;
 
-	(void) bev;
 	if (what & (BEV_EVENT_EOF | BEV_EVENT_ERROR)) {
 		ctx->eof = true;
 		/* The userspace answer to "did the peer go away": the next fread()
@@ -1646,7 +1679,12 @@ static void fpm_ws_eventcb(struct bufferevent *bev, short what, void *arg)
 		if (ctx->stream) {
 			ctx->stream->eof = 1;
 		}
-		fpm_ws_fire(ctx, FPM_WORKER_EV_READ);
+		/* Stop the bufferevent reading this fd too (issue #460): fpm_ws_read()
+		 * answers from the input evbuffer, so disabling EV_READ here does not
+		 * hide any buffered byte, it only stops readcb() from re-firing on the
+		 * EOF-readable descriptor. */
+		bufferevent_disable(bev, EV_READ);
+		fpm_ws_eof_wakeup_once(ctx);
 	}
 }
 

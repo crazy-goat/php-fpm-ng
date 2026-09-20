@@ -87,6 +87,10 @@ code on. Re-registering one is a decision, not a convenience.
   (`ss -lntp`) or by the pid file of your own pool.
 - MySQL (3306) and Redis (6379) are shared: use your own database and Redis
   index, never `FLUSHALL`.
+- The Laravel framework runner's negative controls are *designed* to corrupt
+  their database (empty static lists). Under `SERVICE_MODE=external` they are
+  skipped (issue #51); run them with `SERVICE_MODE=docker`, or set
+  `LARAVEL_NEGATIVE_ALLOW_EXTERNAL=1` only for a private MySQL/Redis.
 - `pgrep -f "<pattern>"` matches its own command line. Do not use it to wait for
   a job to finish.
 
@@ -205,6 +209,10 @@ The box is **shared**. Other work runs concurrently.
   by port (`ss -lntp`) or your pool’s pid file.
 - MySQL (3306) and Redis (6379) are shared: own database / Redis DB index, never
   `FLUSHALL`.
+- The Laravel framework runner's negative controls corrupt their database by
+  design; under `SERVICE_MODE=external` they are skipped (issue #51). Run them
+  with `SERVICE_MODE=docker`, or set `LARAVEL_NEGATIVE_ALLOW_EXTERNAL=1` only
+  for a private MySQL/Redis.
 - Confirm the binary under test with `strings` on a distinctive literal before
   measuring.
 - **Clean up** when done: stop your processes, remove temp dirs you created.

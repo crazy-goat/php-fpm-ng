@@ -13,6 +13,13 @@ HTTP_PORT=${HTTP_PORT:-22726}
 # behaviour of pointing at already-running services via the LARAVEL_DB_*
 # and LARAVEL_REDIS_* variables below (e.g. the shared test box).
 SERVICE_MODE=${SERVICE_MODE:-docker}
+# Issue #51: the negative controls are DESIGNED to corrupt their database (with
+# an empty static list, concurrent requests share state and the probe writes
+# garbage at whatever MySQL it can reach). They must therefore never point at a
+# MySQL other work shares. SERVICE_MODE=docker already provisions a private one;
+# in SERVICE_MODE=external the operator must assert the services are private
+# before the negative phase will run, or it is skipped.
+LARAVEL_NEGATIVE_ALLOW_EXTERNAL=${LARAVEL_NEGATIVE_ALLOW_EXTERNAL:-0}
 MYSQL_PORT=${MYSQL_PORT:-13307}
 REDIS_PORT=${REDIS_PORT:-16380}
 MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-fpmng-laravel-root}
@@ -449,6 +456,7 @@ LARAVEL_DB_PASSWORD="$LARAVEL_DB_PASSWORD" \
 
 configured_status=0
 negative_status=0
+negative_skipped=0
 
 configured_scenarios=(
     session-rounds
@@ -488,8 +496,21 @@ negative_scenarios=(
 if ! run_scenarios configured "$STATIC_LIST" "${configured_scenarios[@]}"; then
     configured_status=1
 fi
-if ! run_scenarios negative "" "${negative_scenarios[@]}"; then
-    negative_status=1
+if [ "$SERVICE_MODE" = docker ] || [ "$LARAVEL_NEGATIVE_ALLOW_EXTERNAL" = 1 ]; then
+    if ! run_scenarios negative "" "${negative_scenarios[@]}"; then
+        negative_status=1
+    fi
+else
+    # Issue #51: external services are assumed shared until the operator says
+    # otherwise. The configured phase is read-mostly and fine either way; the
+    # negative phase is not, so it is skipped rather than aimed at the shared
+    # test-box MySQL (which logged RSET_HEADER protocol corruption when this
+    # ran against it on 2026-09-08).
+    negative_skipped=1
+    echo "SKIP: negative scenarios not run under SERVICE_MODE=$SERVICE_MODE." >&2
+    echo "      The negative controls are designed to corrupt their database, so they must not" >&2
+    echo "      point at shared services. Use SERVICE_MODE=docker (the default), or set" >&2
+    echo "      LARAVEL_NEGATIVE_ALLOW_EXTERNAL=1 if the external MySQL/Redis are private (issue #51)." >&2
 fi
 
 # Systematic statics audit (task 025). ONE run of the /statics-audit probe
@@ -515,8 +536,8 @@ fi
 unset LARAVEL_AUDIT_EXPECT LARAVEL_ISOLATED_LIST
 
 printf 'RUN_STATUS configured=%s negative=%s audit=%s\n' "$configured_status" "$negative_status" "$audit_status"
-printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s not_measured=0 audit_status=%s\n' \
-    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR" "$audit_status"
+printf 'SUMMARY configured_pass=%s configured_error=%s negative_pass=%s negative_error=%s negative_skipped=%s not_measured=0 audit_status=%s\n' \
+    "$CONFIGURED_PASS" "$CONFIGURED_ERROR" "$NEGATIVE_PASS" "$NEGATIVE_ERROR" "$negative_skipped" "$audit_status"
 if [ "$configured_status" -ne 0 ] || [ "$negative_status" -ne 0 ] || [ "$audit_status" -ne 0 ]; then
     exit 1
 fi

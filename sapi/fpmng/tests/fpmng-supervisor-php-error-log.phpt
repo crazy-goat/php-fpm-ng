@@ -9,6 +9,14 @@ require_once "tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-phperr-' . getmypid();
 @mkdir($work, 0700, true);
+/* Issue #353: on macOS sys_get_temp_dir() is /var/folders/... while /var is a
+ * symlink to /private/var, and PHP's fatal-error reporting resolves the real
+ * path, so the log line carries /private/var/... and a pattern built from the
+ * unresolved path never matches. Resolve it here, before it is written into
+ * the config and the expected pattern, so both name the same file. Linux is
+ * unaffected (its temp dir is not a symlinked path), which is why CI never saw
+ * this. */
+$work = realpath($work) ?: $work;
 
 $cleanup = function () use ($work) {
     foreach (glob("$work/*") as $file) {

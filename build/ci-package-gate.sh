@@ -441,8 +441,21 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # ACME and every type they configure (gateway, http-direct, cron) is supported
 # by a distribution libphp, so they PASS on every flavour: +5 PASS everywhere
 # and no SKIP change. 141 -> 146 total.
+#
+# Issue #390 added three more (fpmng-gateway-counters.phpt,
+# fpmng-gateway-counters-503.phpt, fpmng-gateway-status.phpt): the gateway's own
+# shared-memory counters rendered by the operator child, the per-target 503
+# count, and its JSON status page. None touches TLS or ACME, and the types they
+# configure (gateway, http-direct, fastcgi) are supported by a distribution
+# libphp, so they PASS on every flavour: +3 PASS everywhere and no SKIP change.
+# 146 -> 149 total.
+#
+# The review of #390 added a fourth (fpmng-gateway-counters-respawn-gauge.phpt):
+# a gateway killed with a connection open must not leak its per-process gauges.
+# Same type support and no TLS/ACME, so +1 PASS everywhere and no SKIP change.
+# 149 -> 150 total.
 EXPECT_FAIL=0
-EXPECT_TOTAL=146
+EXPECT_TOTAL=150
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -473,8 +486,8 @@ EXPECT_TOTAL=146
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=139; EXPECT_SKIP=7
-    else EXPECT_PASS=132; EXPECT_SKIP=14; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=143; EXPECT_SKIP=7
+    else EXPECT_PASS=136; EXPECT_SKIP=14; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -507,8 +520,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=136; EXPECT_SKIP=10
-    else EXPECT_PASS=130; EXPECT_SKIP=16; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=140; EXPECT_SKIP=10
+    else EXPECT_PASS=134; EXPECT_SKIP=16; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -113,13 +113,39 @@ function gatewayFetch(string $url): array
     return [$status, $type, $body === false ? '' : $body];
 }
 
-function expectSame(string $what, string $gatewayUrl, string $operatorAddr, string $localPath): void
+/* Issue #390: reading the gateway's OWN page through the gateway is the one
+ * case where the two bodies cannot be byte-identical. That request is itself a
+ * connection to the gateway, so at render time `fpmng_gateway_connections_open`
+ * counts it, and the forward to the operator listener holds that listener's
+ * upstream open, so `fpmng_gateway_upstreams_used{target="operator"}` is 1
+ * rather than 0. Both are live gauges about the very connection the scrape is
+ * happening over; normalise those sample lines and the rest must still match.
+ * A pool's OWN page (app, api) is rendered by the operator child and reads none
+ * of the gateway's segment, so it is compared byte for byte. */
+function stripLiveConnectionGauges(string $body): string
+{
+    $out = [];
+    foreach (explode("\n", $body) as $line) {
+        if (preg_match('/^fpmng_gateway_(connections_open|upstreams_used)\{/', $line)) {
+            continue;
+        }
+        $out[] = $line;
+    }
+    return implode("\n", $out);
+}
+
+function expectSame(string $what, string $gatewayUrl, string $operatorAddr, string $localPath,
+    bool $ownGatewayPage = false): void
 {
     [$status, $public] = gatewayGet($gatewayUrl);
     if ($status !== 200) {
         throw new RuntimeException("$what: gateway answered $status\n$public");
     }
     $local = fpmng_operator_body($operatorAddr, $localPath);
+    if ($ownGatewayPage) {
+        $public = stripLiveConnectionGauges($public);
+        $local = stripLiveConnectionGauges($local);
+    }
     if ($public !== $local) {
         throw new RuntimeException("$what: gateway body differs from the operator page\n" .
             "--- gateway ---\n$public\n--- operator ---\n$local");
@@ -144,7 +170,7 @@ try {
     expectSame('api', "http://$http/metrics/api", $operator, '/_m');
 
     /* The gateway's own page is in the map too, at the bare base. */
-    expectSame('gateway own metrics', "http://$http/metrics", $operator, '/metrics');
+    expectSame('gateway own metrics', "http://$http/metrics", $operator, '/metrics', true);
 
     /* Status follows the same rule; its JSON carries a couple of values that
      * move on their own (times), so compare the identifying fields rather than

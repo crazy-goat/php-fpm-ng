@@ -85,11 +85,19 @@ $body = httpGet($public, '/gw-status.php');
 echo 'public status path -> ', str_contains($body, 'app:/gw-status.php') ? "the application\n" : "UNEXPECTED: $body\n";
 
 /* ...and on the operator listener it is the per-pool JSON, reporting this pool
- * and no other. */
+ * and no other. Since issue #390 a gateway's page is its own pool row plus one
+ * row per target label (the routed pool, "operator", "-"), all naming the pool
+ * it reports on -- the shape is still {"pools":[...]}, still only this pool. */
 $body = httpGet($operator, '/gw-status.php');
 $json = json_decode(substr($body, strpos($body, "\r\n\r\n") + 4), true);
 $pools = $json['pools'] ?? [];
-echo 'operator status path -> ', count($pools) === 1 && $pools[0]['name'] === 'gw' && $pools[0]['type'] === 'gateway'
+$onlyGw = $pools !== [];
+foreach ($pools as $row) {
+    if (($row['name'] ?? null) !== 'gw') {
+        $onlyGw = false;
+    }
+}
+echo 'operator status path -> ', $onlyGw && $pools[0]['type'] === 'gateway'
     ? "json for pool gw, type gateway\n" : "UNEXPECTED: $body\n";
 
 /* ping did not move. */

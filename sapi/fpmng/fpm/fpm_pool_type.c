@@ -325,13 +325,18 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * a target label multiplies every series, which does not fit
 		 * live_gauges' fixed scalar array. */
 		.render_metrics_prometheus = fpm_http_render_metrics_prometheus,
-		/* Issue #277/#388: until #390 gives the gateway its own routed-request
-		 * counters in shared memory, its baseline counter is the shared
-		 * scoreboard's `requests`, exactly as for a serves_requests type --
-		 * zero, because no PHP child ever bumps it. The type therefore keeps
-		 * .baseline_counter and fpm_operator_page_collect() reads the
-		 * scoreboard for a type with this and no .status. */
+		/* Issue #390: the gateway's own /status -- one row per target plus a
+		 * pool row, in the generic {"pools":[...]} shape. Without this the
+		 * generic per-pool JSON would report a gateway that has no state and
+		 * none of the per-target numbers. */
+		.operator_status        = fpm_http_gateway_operator_status,
+		/* Issue #277/#388/#390: the gateway's baseline counter is `requests`,
+		 * now the total in its OWN shared segment (fpm_http.c allocates it in
+		 * .init_main) rather than the shared scoreboard no gateway child ever
+		 * bumped. .baseline is how fpm_operator_pages.c reads it without the
+		 * type needing a .status() state block it does not have. */
 		.baseline_counter       = "requests",
+		.baseline               = fpm_http_gateway_baseline_requests,
 		.rejects                = fpm_pool_gateway_rejects,
 		.validate               = fpm_http_validate_pool,
 		.init_main              = fpm_http_init_pool,

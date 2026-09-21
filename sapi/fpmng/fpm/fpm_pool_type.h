@@ -477,6 +477,20 @@ struct fpm_pool_type_s {
 	 * respawned does not touch it. */
 	const char *baseline_counter;
 
+	/* Issue #390: the VALUE of .baseline_counter for a serves_requests = 0 type
+	 * whose counter does not live in the shared scoreboard. The alternative --
+	 * moving the number into .status()'s fpm_pool_status_s.baseline -- would
+	 * work for the gateway only by giving it a state block it does not have, and
+	 * fpm_operator_pages.c would then have to render that zeroed state as a
+	 * measured one. This callback reports the counter and nothing else.
+	 *
+	 * NULL = read the shared scoreboard's `requests` (a serves_requests type,
+	 * or a types-less count that never happens). Only the gateway sets it today:
+	 * fpm_http_gateway_baseline_requests(). Called from the operator endpoint's
+	 * own child, so -- same contract as .status() and .live_gauges() -- shared
+	 * memory and configuration only. */
+	unsigned long (*baseline)(struct fpm_worker_pool_s *wp);
+
 	/* Extra per-pool gauges the fixed row shape above has no field for --
 	 * issue #333, the worker executor's currently-pending and watcher counts.
 	 * Orthogonal to serves_requests: unlike .status(), which is the WHOLE

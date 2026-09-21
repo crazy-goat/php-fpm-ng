@@ -139,7 +139,7 @@ static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
 	return fpm_http_direct_worker_metrics_init_main(wp);
 }
 
-/* POC, task 073: pool.type = http-direct with pool.executor = worker. Same
+/* pool.type = http-direct with pool.executor = worker. Same
  * transport, same listener, same master-side bookkeeping; only the CHILD loop
  * is inverted. Classic http-direct runs one script per request from inside an
  * evhttp callback, so a userland event loop's driver would have to call
@@ -149,10 +149,11 @@ static int fpm_pool_type_http_direct_worker_init(struct fpm_worker_pool_s *wp)
  * the base itself through fpmng_worker_loop(), so Revolt (and therefore amphp)
  * can suspend. See docs/http-direct-revolt-integration.md.
  *
- * An executor rather than a second pool.type for the same reason "fiber" is
- * (was, on branch async) an executor: the transport is unchanged and only
- * the child's execution model differs. .name stays "http-direct" so
- * diagnostics keep naming the type the operator actually configured. */
+ * An executor rather than a second pool.type for the same reason the fiber
+ * executor was one (fiber itself now lives on branch async, issue #373): the
+ * transport is unchanged and only the child's execution model differs. .name
+ * stays "http-direct" so diagnostics keep naming the type the operator
+ * actually configured. */
 /* issue #331: the two directives worker. is a prefix for. FPM_HTTP_DIRECT_REJECTS_COMMON
  * (fpm_http_direct_request.h) rejects the whole "worker." namespace for every
  * http-direct pool, including this one -- these are the exact names carved
@@ -182,16 +183,32 @@ static const char *const fpm_http_direct_worker_accepts[] = {
 static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.name                         = "http-direct",
 	.serves_http11                = 1,
-	/* Issue #295, and the one judgement in this file that needed making rather
-	 * than reading off #269. Beta, not supported: it is covered by CI on every
-	 * PR, it is documented, and nothing is open against its correctness -- but
-	 * its long-lived-connection behaviour is the open question of spikes #180
-	 * to #183, the cross-worker primitive it is missing is #191, and a spike
-	 * that has not run yet may well change a directive. Beta is exactly the
-	 * tier that reserves that, and criterion 2 of #269's bar -- measured under
-	 * a load resembling use -- is what those spikes will produce.
+	/* Issue #295, re-read in #380. Beta, not supported. Criterion 1 of the
+	 * #269 bar holds -- it is covered by CI on every PR (the
+	 * fpmng-http-direct-worker-*.phpt cells) -- and criterion 3 holds: the
+	 * one open item that gates this surface (#191) is a missing primitive,
+	 * not a correctness defect against what the tier promises. What keeps
+	 * it out of supported is criterion 2, "measured under a load resembling
+	 * use", for the long-lived fan-out shape specifically.
 	 *
-	 * Not experimental: it will not disappear. The examples ship against it. */
+	 * The spikes that named this exit condition (#180-#183) are closed, and
+	 * their headline blocker -- the absence of a streaming primitive, not
+	 * the absence of concurrency -- is gone: v0.7.0 shipped streaming with
+	 * backpressure (fpmng_worker_respond_start()/_chunk()/_end(),
+	 * worker.send_buffer_limit, issue #332), honest metrics (#333),
+	 * memory/lifetime recycling (#334) and connection info (#335). #337
+	 * then dropped the stale "POC / not a supported feature" framing.
+	 *
+	 * What remains is one primitive: the cross-worker wakeup (#191, still
+	 * open). A worker cannot wake a sibling's loop, so a request held open
+	 * while other workers push to it is not expressible on this executor
+	 * yet. #191 is a `decision` gated behind #182/#53 and says "not
+	 * measured, deliberately" until a consumer exists, so no measurement of
+	 * that shape is coming before the primitive does; beta is exactly the
+	 * tier that reserves the directive such a measurement may change.
+	 *
+	 * Not experimental: it will not disappear. The examples ship against it
+	 * and it is the only live BETA pool type on main (#380). */
 	.tier                         = FPM_TIER_BETA,
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
@@ -282,7 +299,15 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.name            = "fastcgi",
 		/* issue #340: reachable as an http.route[] target. */
 		.serves_fastcgi  = 1,
-		/* Issue #295: upstream FPM's own type, unchanged by this project. */
+		/* Issue #295, re-read in #380: upstream FPM's own FastCGI
+		 * behaviour is unchanged by this project -- transport, protocol,
+		 * process manager and scoreboard are upstream's. The project adds
+		 * one thing upstream does not have, fpm_pool_fastcgi_rejects,
+		 * which refuses the "http." and "worker." namespaces: directives
+		 * of this tree that tune a gateway or a worker executor this type
+		 * does not have, and that upstream would not recognise at all.
+		 * Supported, because those rejects can only refuse configuration
+		 * that could do nothing on this type anyway. */
 		.tier            = FPM_TIER_SUPPORTED,
 		.requires_listen = 1,
 		.requires_pm     = 1,
@@ -297,10 +322,14 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * listener it is starting and which routing table it is building
 		 * without ever comparing a type name.
 		 *
-		 * Issue #295: the gateway has shipped since v0.1.0 and CI drives it on
-		 * every PR (the gateway-* cells in build-matrix.yml). TLS termination
-		 * in front of it is beta, but that is a property of the TLS code and
-		 * is announced by it -- see fpm_tls_http.c. */
+		 * Issue #295, re-read in #380: a pure proxy that runs no PHP
+		 * child and has no process manager, so it has far less that can go
+		 * wrong than a pool of workers, and CI drives it on every PR (the
+		 * fpmng-http-gateway-*.phpt and fpmng-gateway-*.phpt cells, plus
+		 * the gateway integration scripts). TLS termination in front of it
+		 * is beta, but that is a property of the TLS code and is announced
+		 * by it -- see fpm_tls_http.c; the build-flag surfaces are audited
+		 * separately, not here. */
 		.name                   = "gateway",
 		.tier                   = FPM_TIER_SUPPORTED,
 		/* listen is the PUBLIC HTTP(S) port -- see .proxy_only. */
@@ -346,7 +375,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.name                         = "http-direct",
 		/* issue #340/#344: a legal target in principle, refused for now. */
 		.serves_http11                = 1,
-		/* Issue #295: the classic executor, which is what this entry is. The
+		/* Issue #295, re-read in #380: this is the classic executor, and
+		 * the type's default (.executors[classic].resolves_to_base). The
 		 * worker executor is a variant with a tier of its own (beta, see
 		 * fpm_http_direct_worker above) -- an executor variant replaces the
 		 * whole struct, so the two are classified separately, which is the
@@ -381,8 +411,12 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                    = "supervisor",
-		/* Issue #295: directives frozen since v0.2.0, failure modes covered by
-		 * the fpmng-supervisor-* tests on every PR. */
+		/* Issue #295, re-read in #380: directives frozen since v0.2.0,
+		 * failure modes covered by the fpmng-supervisor-* tests on every PR.
+		 * The one open correctness issue against it in this milestone (#347:
+		 * the one-shot restart decision was pool-wide, so a
+		 * supervisor.processes > 1 one-shot pool ran its script only once)
+		 * is fixed and merged, so criterion 3 of the #269 bar holds again. */
 		.tier                    = FPM_TIER_SUPPORTED,
 		.requires_listen         = 0,
 		.requires_pm             = 1,	/* pm.* is generated from supervisor.processes; see fpm_pool_supervisor.c */
@@ -411,7 +445,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 	},
 	{
 		.name                    = "cron",
-		/* Issue #295: as supervisor above, and the ACME process runs on it. */
+		/* Issue #295, re-read in #380: as supervisor above, and the ACME
+		 * process runs on it. */
 		.tier                    = FPM_TIER_SUPPORTED,
 		.requires_listen         = 0,
 		.requires_pm             = 0,	/* validate() always sets pm=static+max_children=1 programmatically */
@@ -452,10 +487,10 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * child and a place in reload without a second supervision path being
 		 * invented for it. */
 		.name                      = "operator-endpoint",
-		/* Issue #295: supported, and therefore silent -- which is what an
-		 * internal pool an operator did not write has to be. A tier line
-		 * naming a pool nobody configured would be a line with no action
-		 * behind it. */
+		/* Issue #295, re-read in #380: supported, and therefore silent --
+		 * which is what an internal pool an operator did not write has to
+		 * be. A tier line naming a pool nobody configured would be a line
+		 * with no action behind it. */
 		.tier                      = FPM_TIER_SUPPORTED,
 		.internal_only             = 1,
 		.requires_listen           = 1,	/* its whole purpose */

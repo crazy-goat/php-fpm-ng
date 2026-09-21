@@ -211,6 +211,11 @@ static struct fpm_http_gateway_s *gateways = NULL;
 void fpm_http_pump(struct fpm_http_gateway_s *gw);
 /* Issue #390: referenced by fpm_http_client_track() before its definition. */
 static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
+/* Issue #390 review: the budget helpers below also maintain this process's own
+ * upstreams_held gauge, defined with the other counter helpers further down. */
+static void fpm_http_counter_incr(atomic_t *counter);
+static void fpm_http_counter_decr(atomic_t *counter);
+static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
 static void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl);
 static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg);
@@ -229,6 +234,12 @@ int fpm_http_budget_take(struct fpm_http_target_s *t)
 			return 0;
 		}
 		if (atomic_cmp_set(t->upstreams_used, used, used + 1)) {
+			/* Issue #390 review: the shared reservation first, then this
+			 * process's own held gauge. The order is what lets the master
+			 * reconcile a process killed in the window between the two: with
+			 * the shared half already charged it fails closed (a leaked
+			 * reservation, never a stolen one). */
+			fpm_http_counter_incr(fpm_http_target_held(t));
 			return 1;
 		}
 	}
@@ -236,6 +247,10 @@ int fpm_http_budget_take(struct fpm_http_target_s *t)
 
 void fpm_http_budget_give_back(struct fpm_http_target_s *t)
 {
+	/* The mirror of take's order, and for the same reason: drop this process's
+	 * gauge first, so a death in the window leaves the shared budget charged
+	 * (fail closed) rather than charged twice when the master reconciles. */
+	fpm_http_counter_decr(fpm_http_target_held(t));
 	while (1) {
 		unsigned long used = *t->upstreams_used;	/* atomic_t is an integer of some width on every branch of fpm_atomic.h */
 
@@ -283,6 +298,62 @@ static void fpm_http_counter_decr(atomic_t *counter)
 	} while (!atomic_cmp_set(counter, value, value - 1));
 }
 
+/* Issue #390 review: return a whole reservation to the shared budget when the
+ * master discovers that the process that made it is gone. `amount` is that
+ * process's final upstreams_held count; the value can exceed the budget only
+ * if the process died inside fpm_http_budget_take()'s one-instruction window
+ * between the shared increment and its own gauge's (take does the shared half
+ * first, precisely so any such window fails closed), so the subtraction is
+ * clamped rather than allowed to wrap. Same cmp-set loop as its siblings. */
+static void fpm_http_counter_sub(atomic_t *counter, unsigned long amount)
+{
+	unsigned long value, dec;
+
+	if (!counter || amount == 0) {
+		return;
+	}
+	do {
+		value = *counter;
+		dec = amount < value ? amount : value;
+		if (dec == 0) {
+			return;
+		}
+	} while (!atomic_cmp_set(counter, value, value - dec));
+}
+
+/* Issue #390: the counters segment's two variable-length regions. The segment
+ * is ONE flat atomic_t array because C lets a struct have only one flexible
+ * array; these two accessors are the only place the layout arithmetic lives.
+ * FPM_HTTP_COUNTERS_SLOT_CELLS is the slot stride (the three cells of
+ * fpm_http_counters_slot), and the process blocks follow the slots, each
+ * (1 + nslots) cells: [connections_open, upstreams_held[0 .. nslots)]. */
+#define FPM_HTTP_COUNTERS_SLOT_CELLS 3u
+
+/* First cell of target row i: [requests_total, rejected_total, shared budget]. */
+static atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i)
+{
+	return &c->cells[(size_t) i * FPM_HTTP_COUNTERS_SLOT_CELLS];
+}
+
+/* First cell of gateway process p's own gauge block. */
+static atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p)
+{
+	return &c->cells[(size_t) c->nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
+		+ (size_t) p * (1u + c->nslots)];
+}
+
+static size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc)
+{
+	return sizeof(struct fpm_http_counters_s)
+		+ ((size_t) nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
+			+ (size_t) nproc * (1u + nslots)) * sizeof(atomic_t);
+}
+
+static size_t fpm_http_counters_size(const struct fpm_http_counters_s *c)
+{
+	return fpm_http_counters_size_of(c->nslots, c->nproc);
+}
+
 static int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 
 /* Issue #390: the row a request this gateway answered itself belongs to --
@@ -293,7 +364,7 @@ static int fpm_http_listen(const char *pool, const char *listen_address, const c
 static void fpm_http_count_local(struct fpm_http_gateway_s *gw)
 {
 	if (gw && gw->counters) {
-		fpm_http_counter_incr(&gw->counters->slots[gw->counters->nslots - 1].requests_total);
+		fpm_http_counter_incr(&fpm_http_counters_slot_cells(gw->counters, gw->counters->nslots - 1)[0]);
 	}
 }
 
@@ -304,6 +375,74 @@ static void fpm_http_count_ping(struct fpm_http_gateway_s *gw)
 	fpm_http_count_local(gw);
 	if (gw && gw->counters) {
 		fpm_http_counter_incr(&gw->counters->ping_total);
+	}
+}
+
+/* Issue #390 review: this process's own upstreams_held cell for target t, or
+ * NULL before the process has claimed its gauge block (a request cannot reach
+ * here before fpm_http_gateway_run() sets gw->gauges, so this is defensive).
+ * Only this process ever writes its cells -- the master zeroes them after it is
+ * gone -- so no shared atomic is involved. */
+static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t)
+{
+	if (!t->gw || !t->gw->gauges) {
+		return NULL;
+	}
+	return &t->gw->gauges[1 + t->slot_index];
+}
+
+/* Issue #390: the pool-wide connections_open the renderer reports: the sum of
+ * every gateway process's own cell. A process that died with connections open
+ * has had its block zeroed by the master, so its connections left the sum with
+ * it -- the whole reason the gauge is per-process (see fpm_http_counters_s). */
+static unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
+{
+	unsigned p;
+	unsigned long open = 0;
+
+	if (!gw || !gw->counters) {
+		return 0;
+	}
+	for (p = 0; p < gw->counters->nproc; p++) {
+		open += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[0];
+	}
+	return open;
+}
+
+/* Issue #390 review: a gateway process is gone (SIGKILL, OOM, crash), and the
+ * OS has closed its sockets -- but its per-process cells still count the
+ * connections it held, because a killed process runs no close callback. The
+ * master calls this from fpm_http_gateway_on_exit(), before it respawns the
+ * slot, to make the renderer's sums drop with the process and to give its
+ * upstream reservations back to the shared budget:
+ *
+ *   - connections_open: zeroing the cell is enough, the renderer sums cells.
+ *   - upstreams_held[row]: return each to that row's shared upstreams_budget,
+ *     so a crash does not shrink the pool's admission budget for the life of
+ *     the segment; then zero the cell so the rendered gauge follows.
+ *
+ * The subtraction is clamped (fpm_http_counter_sub()) because a process killed
+ * inside budget_take()'s shared-then-own window can have charged the shared
+ * budget without its own gauge; the ordering there makes that leak by at most
+ * one, never an under-count of another process's reservation. */
+static void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned index)
+{
+	atomic_t *gauges;
+	unsigned i;
+
+	if (!gw || !gw->counters || index >= gw->counters->nproc) {
+		return;
+	}
+	gauges = fpm_http_counters_gauges(gw->counters, index);
+	gauges[0] = 0;
+	for (i = 0; i < gw->counters->nslots; i++) {
+		unsigned long held = (unsigned long) gauges[1 + i];
+		atomic_t *budget = &fpm_http_counters_slot_cells(gw->counters, i)[2];
+
+		if (held) {
+			fpm_http_counter_sub(budget, held);
+			gauges[1 + i] = 0;
+		}
 	}
 }
 
@@ -1533,13 +1672,14 @@ void fpm_http_pump(struct fpm_http_gateway_s *gw)
 
 /* Issue #390: claims (or finds) the gateway-process node for one accepted
  * connection and registers the connection's one close callback on it. Called
- * first thing in fpm_http_request(), so it runs for every request however it is
- * answered, and the gauge therefore counts a connection whether it proxied,
- * pinged or 404ed. Incrementing the shared gauge exactly once per connection is
- * why the node is keyed by evcon instead of doing this in the bevcb: evhttp
- * hands the bevcb a bufferevent, not the connection, and the connection is what
- * outlives a keep-alive request. NULL when there is no evcon or on OOM: the
- * request still works, its connection is just not counted. */
+ * first thing in fpm_http_request() and in fpm_http_plain_request(), so it runs
+ * for every request however it is answered, and the process's connections_open
+ * gauge therefore counts a connection whether it proxied, pinged, redirected or
+ * 404ed. Incrementing it exactly once per connection is why the node is keyed
+ * by evcon instead of doing this in the bevcb: evhttp hands the bevcb a
+ * bufferevent, not the connection, and the connection is what outlives a
+ * keep-alive request. NULL when there is no evcon or on OOM: the request still
+ * works, its connection is just not counted. */
 static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s *gw,
 	struct evhttp_connection *evcon)
 {
@@ -1561,8 +1701,8 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 	cl->evcon = evcon;
 	cl->next = gw->clients;
 	gw->clients = cl;
-	if (gw->counters) {
-		fpm_http_counter_incr(&gw->counters->connections_open);
+	if (gw->gauges) {
+		fpm_http_counter_incr(&gw->gauges[0]);
 	}
 	evhttp_connection_set_closecb(evcon, fpm_http_client_closed, cl);
 	return cl;
@@ -1570,11 +1710,11 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 
 /* The client connection is gone, with or without a request in flight. Stops
  * writing to it, lets the pool finish so the connection stays usable when there
- * is one, and releases the connection's node plus the shared gauge's increment.
- * arg is the fpm_http_client_s registered by fpm_http_client_track(), not the
- * request: a connection that closed between two keep-alive requests has no
- * request to point at, and the old per-request callback would have leaked its
- * increment instead. */
+ * is one, and releases the connection's node plus this process's own
+ * connections_open cell. arg is the fpm_http_client_s registered by
+ * fpm_http_client_track(), not the request: a connection that closed between
+ * two keep-alive requests has no request to point at, and the old per-request
+ * callback would have leaked its increment instead. */
 static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 {
 	struct fpm_http_client_s *cl = arg;
@@ -1599,8 +1739,8 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 			break;
 		}
 	}
-	if (gw->counters) {
-		fpm_http_counter_decr(&gw->counters->connections_open);
+	if (gw->gauges) {
+		fpm_http_counter_decr(&gw->gauges[0]);
 	}
 	free(cl);
 }
@@ -1933,12 +2073,29 @@ static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
 
 static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 {
+	struct fpm_http_gateway_s *gw = arg;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
 	const char *host = evhttp_find_header(evhttp_request_get_input_headers(req), "Host");
 	const char *uri = evhttp_request_get_uri(req);
 	struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
 	char *location;
 	char *redirect_host = NULL;
 	size_t len;
+
+	/* Issue #390 review: this listener bypassed all of the gateway's own
+	 * accounting. Every plain request is answered locally -- the ACME
+	 * challenge, the 308 redirect, the NO_CERT 503, a 400 -- and it is the
+	 * ONLY listener serving in NO_CERT, so an uncounted plain path reported
+	 * baseline 0 while answering the CA and broke the rule that the baseline
+	 * equals the sum of the target rows. Count it exactly like the main
+	 * listener: one accepted request, one local ("-") answer, and the
+	 * connection into this process's connections_open. ping.path is not
+	 * served here, so ping_total is untouched. */
+	if (gw && gw->counters) {
+		fpm_http_counter_incr(&gw->counters->requests_total);
+	}
+	(void) fpm_http_client_track(gw, evcon);
+	fpm_http_count_local(gw);
 
 	/* HTTP-01 before anything else, including the redirect: the CA speaks
 	 * plain HTTP on purpose and must not be sent to :443 for a certificate
@@ -1950,8 +2107,6 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 		return;
 	}
 	{
-		struct fpm_http_gateway_s *gw = arg;
-
 		/* NO_CERT (issue #172 criterion 2): redirecting to https:// would
 		 * send the client to a port that is refusing connections, which
 		 * reads to a browser as "the site is broken" rather than "the site
@@ -2921,6 +3076,21 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	snprintf(title, sizeof(title), "http gateway %s [%u]", gw->pool, index);
 	fpm_env_setproctitle(title);
 
+	/* Issue #390: claim this process's own block of the pool's counters
+	 * segment, indexed by the slot the master spawned it as. Only this process
+	 * ever writes these cells, so no atomic is needed; zeroing them here (they
+	 * should already be zero -- the master zeroes a dead process's block -- but
+	 * a fresh process must never inherit a stale gauge) is the child's half of
+	 * the #333 pattern. */
+	if (gw->counters && index < gw->counters->nproc) {
+		unsigned g;
+
+		gw->gauges = fpm_http_counters_gauges(gw->counters, index);
+		for (g = 0; g < 1u + gw->counters->nslots; g++) {
+			gw->gauges[g] = 0;
+		}
+	}
+
 	/* Where this process starts on the issue #172 state machine. Provisional
 	 * on purpose, and used below for one thing only: whether the reuseport
 	 * bind should listen() immediately. The authoritative value is assigned
@@ -3239,6 +3409,13 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 	struct fpm_http_gw_slot_s *slot = arg;
 	struct fpm_http_gateway_s *gw = slot->gw;
 	time_t now = time(NULL);
+
+	/* Issue #390 review: this process's sockets are closed now, but no close
+	 * callback ran for them. Reconcile its per-process gauges and its share of
+	 * the shared upstream budget before anything else -- including before the
+	 * gave_up early return below, so the death that sets gave_up also releases
+	 * what it held. */
+	fpm_http_counters_process_gone(gw, slot->index);
 
 	/* The process behind it is reaped; a slot that is respawned below gets a
 	 * fresh channel in fpm_http_gateway_spawn(), and one that is not must not
@@ -3583,7 +3760,7 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
 	unsigned slot_index, const char *pool, const char *listen_address,
 	enum fpm_http_transport_e transport, unsigned capacity)
 {
-	struct fpm_http_counters_slot *slot;
+	atomic_t *slot;
 
 	t->gw = gw;
 	t->pool = strdup(pool);
@@ -3603,10 +3780,11 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate shared memory", gw->pool);
 		return -1;
 	}
-	slot = &gw->counters->slots[slot_index];
-	t->upstreams_used = &slot->upstreams_used;
-	t->requests_total = &slot->requests_total;
-	t->rejected_total = &slot->rejected_total;
+	slot = fpm_http_counters_slot_cells(gw->counters, slot_index);
+	t->slot_index = slot_index;
+	t->upstreams_used = &slot[2];
+	t->requests_total = &slot[0];
+	t->rejected_total = &slot[1];
 	return 0;
 }
 
@@ -3620,17 +3798,20 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
  * not a fallback branch somewhere else -- which is what makes a gateway with no
  * routes exactly today's gateway and what leaves room for #345 to run one with
  * no row 0 at all. */
-/* Issue #390: allocates the pool's one counters segment, sized exactly from
- * the route table: one row per routed target, plus one for "operator" and one
- * for "-" (the requests answered locally). Called before any target is
+/* Issue #390: allocates the pool's one counters segment. The pool-wide,
+ * monotonic part is sized from the route table: one slot per routed target,
+ * plus one for "operator" and one for "-" (the requests answered locally). The
+ * per-process gauge part is sized from http.gateways, because connections_open
+ * and upstreams_held are "currently open" and must be summed over live
+ * processes, not held once for the pool. Called before any target is
  * initialised, because every target's upstreams_used/requests_total/
- * rejected_total now name a row here. ntargets is what
- * fpm_http_routes_build() already counted; nslots = ntargets + 2 is the layout
- * fpm_http_counters_s documents. */
+ * rejected_total name a slot here; nslots = ntargets + 2 and nproc =
+ * gw->nproc, which fpm_http_init_pool_ex() set just above. */
 static int fpm_http_counters_alloc(struct fpm_http_gateway_s *gw, unsigned ntargets)
 {
 	unsigned nslots = ntargets + 2;
-	size_t size = sizeof(*gw->counters) + nslots * sizeof(gw->counters->slots[0]);
+	unsigned nproc = gw->nproc ? gw->nproc : 1;
+	size_t size = fpm_http_counters_size_of(nslots, nproc);
 
 	gw->counters = fpm_shm_alloc(size);
 	if (!gw->counters) {
@@ -3642,6 +3823,7 @@ static int fpm_http_counters_alloc(struct fpm_http_gateway_s *gw, unsigned ntarg
 	 * anything but zeroes in the segment it did not create. */
 	memset(gw->counters, 0, size);
 	gw->counters->nslots = nslots;
+	gw->counters->nproc = nproc;
 	return 0;
 }
 
@@ -3767,11 +3949,10 @@ static void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
 		free(gw->targets[i].pool);
 		free(gw->targets[i].listen_address);
 	}
-	/* Issue #390: the one counters segment, freed once. nslots is read before
-	 * the munmap because the size is not stored anywhere else. */
+	/* Issue #390: the one counters segment, freed once. nslots/nproc are read
+	 * before the munmap because the size is not stored anywhere else. */
 	if (gw->counters) {
-		fpm_shm_free(gw->counters,
-			sizeof(*gw->counters) + gw->counters->nslots * sizeof(gw->counters->slots[0]));
+		fpm_shm_free(gw->counters, fpm_http_counters_size(gw->counters));
 		gw->counters = NULL;
 	}
 	free(gw->routes);
@@ -4933,12 +5114,19 @@ struct fpm_http_gateway_row_s {
 static void fpm_http_counters_row(struct fpm_http_gateway_s *gw, unsigned i,
 	struct fpm_http_gateway_row_s *out)
 {
-	const struct fpm_http_counters_slot *slot = &gw->counters->slots[i];
+	atomic_t *slot = fpm_http_counters_slot_cells(gw->counters, i);
+	unsigned p;
 
 	out->target = fpm_http_counters_slot_label(gw, i);
-	out->requests = (unsigned long) slot->requests_total;
-	out->rejected = (unsigned long) slot->rejected_total;
-	out->upstreams_used = (unsigned long) slot->upstreams_used;
+	out->requests = (unsigned long) slot[0];
+	out->rejected = (unsigned long) slot[1];
+	/* The gauge, not the shared budget: sum what every gateway process
+	 * currently holds for this row, so a dead process's connections (its
+	 * block was zeroed by the master) are no longer in the number. */
+	out->upstreams_used = 0;
+	for (p = 0; p < gw->counters->nproc; p++) {
+		out->upstreams_used += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[1 + i];
+	}
 	out->max_upstreams = i < gw->ntargets ? gw->targets[i].max_upstreams
 		: (i == gw->ntargets ? FPM_HTTP_OPERATOR_UPSTREAMS : 0);
 }
@@ -5037,7 +5225,7 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 	fpm_operator_buf_appendf(b,
 		"fpmng_gateway_connections_open{pool=\"%s\"} %lu\n"
 		"fpmng_gateway_ping_total{pool=\"%s\"} %lu\n",
-		gw->pool, (unsigned long) gw->counters->connections_open,
+		gw->pool, fpm_http_connections_open(gw),
 		gw->pool, (unsigned long) gw->counters->ping_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {
@@ -5086,7 +5274,7 @@ void fpm_http_gateway_operator_status(struct fpm_worker_pool_s *wp, const char *
 		"{\"pools\":[{\"name\":\"%s\",\"type\":\"gateway\",\"serves_requests\":false,"
 		"\"requests\":%lu,\"connections_open\":%lu,\"ping_total\":%lu}",
 		gw->pool, (unsigned long) gw->counters->requests_total,
-		(unsigned long) gw->counters->connections_open,
+		fpm_http_connections_open(gw),
 		(unsigned long) gw->counters->ping_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {

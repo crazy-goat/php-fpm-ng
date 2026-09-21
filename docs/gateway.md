@@ -191,16 +191,35 @@ invented for it.
 
 Gateway processes are not workers and have no scoreboard slot. Their numbers
 live in **one shared-memory segment per gateway pool** that the master
-allocates in `.init_main`, before the first fork, sized from the route table
-(`#targets + 2` rows), and that every gateway process bumps with cmp-set
-atomics and no locking -- the discipline `upstreams_used` already used, and the
-#333 pattern one level up. The operator child renders them; it is not a gateway
-process, so it reads shared memory and configuration only.
+allocates in `.init_main`, before the first fork. It holds two kinds of data,
+and the difference is the point:
+
+- **Pool-wide monotonic counters** -- the baseline `requests` and ping totals,
+  and the per-target request/rejection counts. Every gateway process bumps them
+  with cmp-set atomics and no locking, and they **survive a respawned gateway
+  process**: the segment belongs to the pool, not the process.
+- **Per gateway process gauges** -- `connections_open` and the per-target
+  `upstreams_used`. Each process writes only its own block, the renderer
+  **sums** every block (the #333 live-gauges shape), and the master **zeroes a
+  dead process's block** in `fpm_http_gateway_on_exit()`. A gauge is "currently
+  open", and a process killed with connections open runs no close callback, so
+  a single shared gauge could only ever leak; per process, its connections
+  leave the sum with it. The master also returns that process's upstream
+  reservations to the shared admission budget, so a crash does not shrink the
+  pool's budget for the life of the segment. (A process killed inside the one
+  instruction between reserving the shared budget and publishing its own gauge
+  can leak a single reservation; the ordering fails closed rather than
+  over-spending.)
+
+The operator child renders all of it; it is not a gateway process, so it reads
+shared memory and configuration only.
 
 `fpmng_pool_requests_total{pool="<gw>"}` is the pool's **baseline counter** --
 the `requests` key the status page reports -- bumped for every request the
-gateway accepts, before the ACL, so a denied request still counts. Its own
-series label a **target**:
+gateway accepts, before the ACL, so a denied request still counts. Both public
+listeners feed it: the TLS one and `http.plain_listen`, whose redirects, ACME
+HTTP-01 answers, NO_CERT 503s and 400s are all local. So the baseline always
+equals the sum of the target rows below. Its own series label a **target**:
 
 | series | `target` | counts |
 |---|---|---|
@@ -212,8 +231,9 @@ series label a **target**:
 | `fpmng_gateway_requests_total` | `-` | requests the gateway answered itself (ping, static, ACME, 404, 403) |
 
 `fpmng_gateway_connections_open{pool="<gw>"}` and
-`fpmng_gateway_ping_total{pool="<gw>"}` are the pool-wide numbers no target
-owns. The `/metrics` page also carries an **index**: one
+`fpmng_gateway_ping_total{pool="<gw>"}` are the numbers no target owns: the
+first is the per-process sum described above, the second a pool-wide counter.
+The `/metrics` page also carries an **index**: one
 `fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`
 line per pool the gateway forwards for (#389), so a scraper that found the
 gateway knows where `<base>/<pool>` points. It is a discovery aid, not an
@@ -221,10 +241,10 @@ aggregate of their series; that endpoint was removed in #278 and stays removed.
 `/status` on the gateway is the same numbers as JSON, one row per target plus a
 pool row, in the generic `{"pools":[...]}` shape.
 
-A gateway process the master respawns does **not** zero the segment -- it
-belongs to the pool, not the process. A reload re-execs the master and the
-mapping is `MAP_ANONYMOUS` (#330), so like every other pool's counters, the
-gateway's reset on reload.
+Only the monotonic counters survive a respawned gateway; the gauges are
+reconciled when a process dies, and the whole segment is rebuilt by a reload:
+an exec-reload re-execs the master and the allocation is `MAP_ANONYMOUS`
+(#330), so like every other pool's counters, the gateway's reset on reload.
 
 ## A complete configuration
 

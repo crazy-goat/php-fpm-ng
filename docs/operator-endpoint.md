@@ -233,11 +233,12 @@ the master allocates in `.init_main` and the operator child renders: the
 baseline counter is the requests the gateway accepted, and the page adds
 `fpmng_gateway_{upstreams_used,upstreams_max,requests_total,rejected_total}{pool,
 target}`, one row per `http.route[]` target plus `target="operator"` for
-forwarded operator pages (#389) and `target="-"` for local answers, the
-pool-wide `fpmng_gateway_connections_open` gauge and `fpmng_gateway_ping_total`
-counter, and one `fpmng_gateway_exposed_pool` line per pool the gateway forwards
-for. `/status` on the gateway is the same numbers as JSON, one row per target
-plus the pool row.
+forwarded operator pages (#389) and `target="-"` for local answers (including
+every request on `http.plain_listen`), the `fpmng_gateway_connections_open`
+gauge (per gateway process, summed by the renderer) and the pool-wide
+`fpmng_gateway_ping_total` counter, and one `fpmng_gateway_exposed_pool` line
+per pool the gateway forwards for. `/status` on the gateway is the same numbers
+as JSON, one row per target plus the pool row.
 
 ### The baseline counter
 

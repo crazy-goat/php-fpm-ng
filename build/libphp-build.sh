@@ -9,15 +9,14 @@
 # the full php-src build.
 #
 # WHAT IT IS NOT. It cannot speak for static-musl (no distribution ships a
-# static libphp). More importantly, no pool type in this tree needs
-# zend_signal_use_persistent_handlers() (patches/0006, inside Zend/) any more:
-# issue #376 retired `fastcgi-ng`, issue #373 moved the fiber/async executors
-# (patches 0007/0008) to branch async, and issue #388 retired `pool.type =
-# http` and split its proxy half into `pool.type = gateway`, which runs no PHP
-# child and needs nothing from the engine. The refusal mechanism in
-# fpm_pool_type_check_build_support() stays for the next type that does; this
-# run asserts no type triggers it, and that the accepted types really do pass a
-# configuration test on this binary.
+# static libphp). More importantly, no pool type in this tree needs anything
+# from inside Zend/ any more: issue #376 retired `fastcgi-ng`, issue #373 moved
+# the fiber/async executors (patches 0007/0008) to branch async, and issue #388
+# retired `pool.type = http` and split its proxy half into `pool.type =
+# gateway`, which runs no PHP child and needs nothing from the engine. Issue
+# #420 removed patches/0006 (persistent Zend signal handlers) and the
+# build-support refusal that guarded it, so this run asserts every configurable
+# type really does pass a configuration test on this binary.
 #
 # Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
 # 58 sources out of config.m4 plus 5. (The suite counts in that line are a
@@ -155,8 +154,6 @@ off_reason() {
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
   HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; it exists for the test suite and must never be in a shipped package, so this one has no FPMNG_* toggle to turn it on (issue #396)" ;;
-  HAVE_FPMNG_PERSISTENT_SIGNALS)
-                                echo "patches/0006 applies inside Zend/, which is the distribution's file; leaving it unset is what makes any type that needs it refuse to start here instead of running on a no-op (issue #214). Issue #388 retired pool.type = http, the last such type, so nothing in this tree triggers it today" ;;
   *) return 1 ;;
   esac
 }
@@ -402,12 +399,13 @@ else
 fi
 
 # --- assert what is accepted, and that the retired name is refused -------------
-# Issue #214, re-aimed by #388. HAVE_FPMNG_PERSISTENT_SIGNALS being absent is no
-# longer what any type keys on: #388 retired pool.type = http, the last type
-# whose children needed patches/0006, and pool.type = gateway runs no PHP child
-# at all. So this is now a positive check -- every type this build exists to
-# ship (fastcgi, gateway, http-direct) passes -t on this binary -- plus the one
-# negative that still means something: the retired name is refused by name.
+# Issue #214, re-aimed by #388 and #420. No type keys on a build capability any
+# more: #388 retired pool.type = http, the last type whose children needed
+# patches/0006, and pool.type = gateway runs no PHP child at all; #420 then
+# removed the patch and the build-support refusal outright. So this is a
+# positive check -- every type this build exists to ship (fastcgi, gateway,
+# http-direct) passes -t on this binary -- plus the one negative that still
+# means something: the retired name is refused by name.
 # -t runs the same fpm_conf_post_process() a real start runs.
 # FPM refuses to run as root without a user/group to drop to, and the two
 # distributions this build targets do not agree on what that pair is called
@@ -472,13 +470,13 @@ done
 if ! out=$(conf_test_gateway); then
   fail "pool.type = gateway is one of the types this build exists to ship, and it does not even pass a configuration test: $out"
 fi
-# pool.type = http is retired (issue #388): refused by name on every build. It
-# is no longer the libphp guard -- nothing sets the capability bit -- so only
-# the refusal itself is asserted here.
+# pool.type = http is retired (issue #388): refused by name on every build.
+# #420 removed the capability bit and its libphp guard, so only the refusal
+# itself is asserted here.
 if out=$(conf_test http); then
   fail "the retired 'pool.type = http' was accepted: $out"
 fi
-echo "libphp-build.sh: pool.type fastcgi, gateway and http-direct accepted, http retired (issues #214, #388)"
+echo "libphp-build.sh: pool.type fastcgi, gateway and http-direct accepted, http retired (issues #214, #388, #420)"
 
 ldd "$BIN" | grep -qi "libphp" || fail "the binary does not link a distribution libphp; this is not the build this script is for"
 echo "libphp-build.sh: $(ldd "$BIN" | grep -i libphp | tr -s ' ')"

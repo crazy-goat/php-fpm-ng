@@ -232,26 +232,6 @@ struct fpm_pool_type_s {
 	 * execute the ACME client (issue #48, criterion 7). */
 	unsigned publishes_acme_challenges:1;
 
-	/* A child of this type keeps its FastCGI transport state and its signal
-	 * handlers across requests instead of tearing them down and rebuilding
-	 * them per request. It turns on two things in the child, both of which
-	 * exist because upstream assumes a worker may be handed to an arbitrary
-	 * front end between requests and we know it is not:
-	 *
-	 *   fcgi_set_optimized_transport()    patches 0004/0005: keep the
-	 *     connection's buffers and use writev for large responses, instead of
-	 *     the conservative per-request path main/fastcgi.c takes otherwise.
-	 *   zend_signal_use_persistent_handlers()   patch 0006: install the Zend
-	 *     signal handlers once instead of on every zend_signal_activate().
-	 *
-	 * Set it for a type whose children speak FastCGI over a connection the
-	 * type itself owns for the child's lifetime -- the workers behind "http",
-	 * including their fiber and async variants. NOT for
-	 * plain "fastcgi", whose connection comes from whatever front end dialled
-	 * in, and not for "http-direct", which speaks HTTP itself and never
-	 * touches main/fastcgi.c. See fpm.c, which reads this in the child. */
-	unsigned reuses_request_runtime:1;
-
 	/* This type's own SIGUSR1 handler drains a single child instead of
 	 * treating it as a log-reopen: stop accepting, finish what is already
 	 * open, exit on its own within http.read_timeout (issue #65). Data for
@@ -549,11 +529,5 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 
 /* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
-
-/* Reject a type this BINARY cannot honour, as opposed to one this
- * CONFIGURATION misuses. 0 or -1. Always present; on the ordinary build it has
- * nothing to reject. See the definition for why it is keyed off the capability
- * bits rather than off type names. */
-int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
 
 #endif

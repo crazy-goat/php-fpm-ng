@@ -228,18 +228,6 @@ run_child: /* only workers reach this point */
 		/* Assign the metrics slot BEFORE cleanup — afterwards the pool list and
 		 * earlier pools' pm.max_children disappear (see fpm_metrics.c). */
 		fpm_metrics_child_init();
-		if (type && type->reuses_request_runtime) {
-			fcgi_set_optimized_transport(true);
-#ifdef HAVE_FPMNG_PERSISTENT_SIGNALS
-			zend_signal_use_persistent_handlers(true);
-#else
-			/* Without patches/0006 this symbol does not exist (build against a
-			 * distribution libphp, build/libphp-build.sh). Nothing is lost here:
-			 * the same define makes every type with reuses_request_runtime set
-			 * refuse to start, so this branch is unreachable in such a build --
-			 * see fpm_pool_type_check_build_support(). */
-#endif
-		}
 
 		if (type && type->child_main) {
 			/* This type takes over the entire process permanently — it does not

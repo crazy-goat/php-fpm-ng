@@ -15,11 +15,9 @@ require_once "tester.inc";
  * refusal: a route naming a pool that is not there would otherwise be a 502
  * per request on a prefix the operator believes is configured.
  *
- * A binary linked against a distribution libphp refuses `pool.type = http`
- * before it reads any directive of the pool, so that refusal counts as a
- * rejection here -- the same accommodation fpmng-config-rejected-directives.phpt
- * makes, and for the same reason (issue #215). */
-const FPMNG_TYPE_UNSUPPORTED = 'does not carry patches/0006';
+ * These are gateway pools, which a distribution libphp has always supported;
+ * issue #420 removed the libphp capability guard entirely, so there is no
+ * "type unsupported" refusal left to accommodate here. */
 
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
@@ -30,10 +28,6 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
         exit(1);
     }
     $text = implode("\n", $messages);
-    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
-        echo "$label: rejected\n";
-        return;
-    }
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";

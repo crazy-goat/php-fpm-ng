@@ -270,9 +270,10 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
  * #388); fpm_pool_type_resolve() selects the effective variant for the types
  * that offer one. The optimized FastCGI path "fastcgi-ng" used to sit next to
  * "fastcgi" here and was removed in 0.9.0 (issue #376): once fiber/async had
- * left, its only content was the reuses_request_runtime bit, measured at
- * 9.5 us per request (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to
- * "http", which set the same bit. Issue #388 retired "http" itself: it was two
+ * left, its only content was the capability bit that selected the optimized
+ * transport, measured at 9.5 us per request
+ * (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to "http", which set the
+ * same bit. Issue #388 retired "http" itself: it was two
  * things in one section (a pool of PHP workers and the proxy in front of them)
  * and the proxy is now the type it always should have been. Both names are
  * kept as retired names below. */
@@ -482,60 +483,6 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * name. */
 	},
 };
-
-/* Two different questions get answered in the same place at startup and it is
- * worth keeping them apart. fpm_pool_type_check_directives() above asks "does
- * this TYPE support this directive" -- a configuration mistake, identical on
- * every build of this project. This one asks "does this BINARY carry what this
- * type needs" -- the configuration is fine, the executable is not.
- *
- * There is exactly one build where the answer can be no:
- * build/libphp-build.sh links against a distribution's libphp (issue #212) so
- * that `pool.type = fastcgi`, `pool.type = gateway` and `pool.type =
- * http-direct` can ship as a package with no compilation on the user's side. A
- * distribution libphp is built from unpatched php-src, so patches/0006 --
- * which lives inside Zend/ -- is not in it, and
- * zend_signal_use_persistent_handlers() does not exist there. Since issue #388
- * retired pool.type = http (the last type that set the bit) nothing in this
- * tree triggers this refusal; it stays for the next type that needs the patch.
- *
- * Keyed off the capability bit, not off a list of type names. A name list
- * would be a second copy of the same fact and would drift the first time a
- * type gains or loses the behaviour; this way a new type that sets
- * reuses_request_runtime is covered on the day it is written, by the person
- * who set the bit.
- *
- * Why refuse instead of degrading: patch 0006 is invisible when it is missing.
- * Such a pool would start, serve traffic and pass its own tests, while the
- * Zend signal handlers were reinstalled on every request -- upstream
- * behaviour under a name that promises the opposite. That makes every
- * measurement taken on it wrong and says nothing while doing it. The fiber and
- * async executors needed patches 0007/0008 and were handled differently, by
- * being compiled out entirely: on this branch they do not exist at all
- * (issue #373; they live on branch async), and their entries stay rejected
- * by name, so there is nothing to add here for them.
- */
-int fpm_pool_type_check_build_support(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
-{
-#ifdef HAVE_FPMNG_PERSISTENT_SIGNALS
-	(void) wp;
-	(void) type;
-	return 0;
-#else
-	if (!type->reuses_request_runtime) {
-		return 0;
-	}
-
-	zlog(ZLOG_ALERT, "[pool %s] 'pool.type = %s' is not supported by this binary: it was linked "
-		"against a distribution libphp, which does not carry patches/0006 (persistent Zend "
-		"signal handlers) -- a pool of this type would run with upstream signal behaviour "
-		"without saying so", wp->config->name, type->name);
-	zlog(ZLOG_ALERT, "[pool %s] use 'pool.type = fastcgi', 'pool.type = gateway' or "
-		"'pool.type = http-direct', which this binary supports in full, or a build from patched "
-		"source (build/static-full.sh)", wp->config->name);
-	return -1;
-#endif
-}
 
 /* Is this directive one of the type's declared exceptions to its own reject
  * list? Called with the name as it appears in set_directives, which is not

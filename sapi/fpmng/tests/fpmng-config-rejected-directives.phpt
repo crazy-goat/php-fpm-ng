@@ -10,12 +10,10 @@ include "fpmng-skipif.inc";
 require_once "tester.inc";
 
 /* Issue #388 retired pool.type = http and pool.type = gateway is a proxy-only
- * type that needs no patch of ours (it runs no PHP child, so it never sets
- * reuses_request_runtime). No type in this suite needs patches/0006 any more,
- * so on the libphp path the FPMNG_TYPE_UNSUPPORTED short-circuit below no
- * longer fires for these cases -- but it is kept so a future type that does
- * need the patch is counted as rejected here rather than failing the file. */
-const FPMNG_TYPE_UNSUPPORTED = 'does not carry patches/0006';
+ * type that needs no patch of ours (it runs no PHP child). Issue #420 removed
+ * patches/0006 and the per-type build-support guard, so every case below is
+ * decided by the type's own reject list and nothing else; there is no
+ * "type unsupported by this binary" refusal left to short-circuit on. */
 
 function expectConfigFailure(string $label, string $cfg, array $needles): void
 {
@@ -26,10 +24,6 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
         exit(1);
     }
     $text = implode("\n", $messages);
-    if (str_contains($text, FPMNG_TYPE_UNSUPPORTED)) {
-        echo "$label: rejected\n";
-        return;
-    }
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";
@@ -81,9 +75,8 @@ expectConfigFailure(
 
 /* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
  * unknown one -- a config file outlives the release that broke it, so the
- * message has to say what happened and where the transport went. The libphp
- * guard below (FPMNG_TYPE_UNSUPPORTED) counts as a rejection on its own, so
- * this case reads the same on both builds. */
+ * message has to say what happened and where the transport went. It reads the
+ * same on every build: issue #420 removed the libphp guard entirely. */
 expectConfigFailure(
     'retired-fastcgi-ng',
     $base . "\npool.type = fastcgi-ng",

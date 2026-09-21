@@ -3,6 +3,14 @@
 Measured 2026-09-11 on the poligon (192.168.8.50, Ubuntu 26.04.1 LTS) and in an
 `alpine:edge` container on the same host. Artifacts: `~/spike198/` on that host.
 
+**Amended by issue #420.** `patches/0006` and the
+`zend_signal_use_persistent_handlers()` shim it required are gone, along with
+the pool types that used them (`fastcgi-ng` retired by #376, `http` retired by
+#388 into `pool.type = gateway`). Mentions of 0006 and of those pool types
+below are historical measurements, not current requirements; the NTS
+`zend_signal_init()` compatibility layer this report is about is unchanged and
+still in scope.
+
 ## Result
 
 **It links, it starts, and it serves requests on both modes the spike asked

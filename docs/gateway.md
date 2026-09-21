@@ -107,6 +107,13 @@ is honest for a type called `gateway`. Two are new:
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.
 
+`http.allowed_clients` is this listener's ACL. `listen.allowed_clients` is a
+FastCGI-worker ACL and is **refused** on a gateway (issue #493): a gateway has
+no worker socket -- `listen` *is* the public port -- so accepting it would leave
+an operator who wrote it believing the public listener was restricted while it
+served everyone. On the retired combined `http` pool it restricted the FastCGI
+half, never the public port; use `http.allowed_clients` here.
+
 `http.route[]` is keyed by pool name (#340): the key validates itself against
 the configured sections, the value is free to grow a pattern syntax later, and
 an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one

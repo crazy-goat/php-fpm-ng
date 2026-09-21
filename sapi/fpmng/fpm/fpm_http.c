@@ -4756,6 +4756,22 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			"'listen' is the public HTTP(S) port this gateway serves", wp->config->name);
 		return -1;
 	}
+	/* Issue #493: listen.allowed_clients is a FastCGI-worker ACL. On every
+	 * other listening type it restricts the worker socket -- on the retired
+	 * combined `http` pool it restricted the FastCGI half, never the public
+	 * port, which used http.allowed_clients. A gateway has no worker socket:
+	 * `listen` IS the public port, and accepting the directive would leave an
+	 * operator who wrote it believing the public listener was restricted while
+	 * it served everyone. Refused by name with the replacement rather than
+	 * ignored; http.allowed_clients is the ACL that actually guards this
+	 * listener (see fpm_http_gateway_settings()). */
+	if (proxy_only && fpm_conf_directive_was_set(wp->config, "listen.allowed_clients")
+			&& wp->config->listen_allowed_clients && *wp->config->listen_allowed_clients) {
+		zlog(ZLOG_ERROR, "[pool %s] listen.allowed_clients is not enforced on pool.type = gateway: "
+			"it is a FastCGI-worker ACL and a gateway runs no worker; use http.allowed_clients to "
+			"restrict this gateway's public listener", wp->config->name);
+		return -1;
+	}
 	/* Issue #388: with no implicit own-pool target there is nothing to serve
 	 * an unrouted request with, so a gateway with no http.route[] at all is a
 	 * configuration error rather than a proxy that answers 404 to everything.

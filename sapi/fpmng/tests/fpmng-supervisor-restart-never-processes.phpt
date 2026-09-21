@@ -87,6 +87,18 @@ if (count($pids) !== 4) {
 }
 echo "supervisor-restart-never: 4 copies, 4 distinct pids\n";
 
+/* Issue #492 review: the pool-wide count must reach 4, not stop at 3. The old
+ * shared counter was a plain read-modify-write, so two copies finishing in the
+ * same microsecond could both read the same value and both store +1; the pool
+ * then stayed one short of processes and terminal was never set (status stuck
+ * in "backoff" forever). The count is now derived by scanning the per-copy
+ * bytes, and the log line prints that scan, so "4 of 4" is the observable
+ * invariant that every completion was counted and the pool reached FINISHED.
+ * The lost update itself is not deterministically forceable from a test (the
+ * window is a few instructions wide); this asserts the invariant instead. */
+$tester->expectLogPattern('/this copy is done: 4 of 4/');
+echo "supervisor-restart-never: pool counted all 4 copies done\n";
+
 /* restart = never means the pool is FINISHED once every copy has run, and the
  * copies park instead of exiting, so the master must still shut down cleanly. */
 $tester->terminate();
@@ -99,6 +111,7 @@ $cleanup();
 Done
 --EXPECT--
 supervisor-restart-never: 4 copies, 4 distinct pids
+supervisor-restart-never: pool counted all 4 copies done
 Done
 --CLEAN--
 <?php

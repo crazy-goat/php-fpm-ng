@@ -462,8 +462,15 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # gateway refuses listen.allowed_clients with the replacement named, and
 # http.allowed_clients denies a peer outside its list. Same type support and no
 # TLS/ACME, so +1 PASS everywhere and no SKIP change. 150 -> 151 total.
+#
+# Issue #492 added two more (fpmng-supervisor-restart-never-killed.phpt and
+# fpmng-supervisor-restart-onfailure-killed.phpt): a completed, parked
+# supervisor copy that is SIGKILLed must not be respawned into a second
+# invocation while its sibling is still running. They configure pool.type =
+# supervisor with no TLS/ACME directive, so both PASS on every flavour: +2 PASS
+# everywhere and no SKIP change. 151 -> 153 total.
 EXPECT_FAIL=0
-EXPECT_TOTAL=151
+EXPECT_TOTAL=153
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -495,8 +502,8 @@ EXPECT_TOTAL=151
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=144; EXPECT_SKIP=7
-    else EXPECT_PASS=137; EXPECT_SKIP=14; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=146; EXPECT_SKIP=7
+    else EXPECT_PASS=139; EXPECT_SKIP=14; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -529,8 +536,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=141; EXPECT_SKIP=10
-    else EXPECT_PASS=135; EXPECT_SKIP=16; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=143; EXPECT_SKIP=10
+    else EXPECT_PASS=137; EXPECT_SKIP=16; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

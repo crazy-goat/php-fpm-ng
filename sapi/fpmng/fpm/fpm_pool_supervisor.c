@@ -68,6 +68,7 @@
 #include "fpm_shm.h"
 #include "fpm_children.h"
 #include "fpm_children_extra.h"
+#include "fpm_scoreboard.h"
 #include "fpm_events.h"
 #include "fpm_debug_clock.h"
 #include "zlog.h"
@@ -125,7 +126,19 @@ struct fpm_supervisor_shared_s {
 	 * time; terminal is set only once this counter reaches
 	 * supervisor_processes, so the pool as a whole still reports FINISHED and
 	 * every copy still parks for good. restart_max exhaustion and
-	 * supervisor.fatal stay pool-wide and keep using terminal + gave_up. */
+	 * supervisor.fatal stay pool-wide and keep using terminal + gave_up.
+	 *
+	 * Issue #492: this counter alone is not enough, because it does not say
+	 * WHICH copy finished. A completed copy parks, but a SIGKILL (OOM, an
+	 * operator's kill, ...) ends the park and fpm_children.c respawns the
+	 * slot; the replacement then read only the pool-wide terminal (still 0
+	 * while a sibling runs) and executed the script AGAIN despite
+	 * restart = never -- a third invocation for a two-copy pool. The fix is
+	 * one_shot_done_by_slot[] below: completion is recorded per copy, and a
+	 * respawned process whose own slot is already recorded parks instead of
+	 * running. This counter stays as the pool-wide total (bumped only when a
+	 * slot flips from unrecorded to recorded) so terminal is still set exactly
+	 * when the LAST copy finishes. */
 	unsigned long one_shot_done;
 
 	/* Fields added solely for the operator status page (docs/NOTES.md 3u) —
@@ -205,6 +218,22 @@ struct fpm_supervisor_shared_s {
 	 * stored here, so a clock step does not have to be reconciled against a
 	 * cached duration. */
 	time_t last_heartbeat;
+
+	/* Issue #492: per-copy completion, one byte per SCOREBOARD SLOT of this
+	 * pool, sized supervisor_processes at allocation time (see
+	 * fpm_pool_supervisor_init_main()). Index = this process's own slot in
+	 * wp->scoreboard (see fpm_pool_supervisor_own_slot()); 1 = the logical copy
+	 * occupying that slot has finished its one-shot. This is the stable
+	 * identity the issue asks for: fpm_children.c frees a dead child's
+	 * scoreboard slot and hands exactly that slot back to the replacement
+	 * (fpm_scoreboard_proc_free() sets scoreboard->free_proc, and
+	 * fpm_scoreboard_proc_alloc() tries free_proc first), so a respawn lands in
+	 * the same slot as the copy it replaces -- the common, single-death case
+	 * this issue is about. A respawn whose slot is already marked therefore
+	 * parks instead of running the script a second time, and one_shot_done /
+	 * terminal stay exactly as issue #347 left them. Must stay the LAST member:
+	 * it is a flexible array sized with the shared allocation. */
+	unsigned char one_shot_done_by_slot[];
 };
 
 /* A run this short did no useful work of its own: it is one PHP startup and
@@ -802,7 +831,15 @@ static void fpm_pool_supervisor_exit_main(int which, void *arg) /* {{{ */
 int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *entry;
-	struct fpm_supervisor_shared_s *shared = fpm_shm_alloc(sizeof(*shared));
+	/* Issue #492: the shared block carries one completion byte per copy, so it
+	 * is sized by supervisor.processes, not by sizeof(*shared) alone. A pool
+	 * with processes < 1 is clamped to 1 by validate(); the same clamp here
+	 * keeps the allocation from ever being zero-sized on a path that somehow
+	 * skipped validate(). */
+	unsigned long processes = wp->config->supervisor_processes > 0
+		? (unsigned long) wp->config->supervisor_processes : 1;
+	struct fpm_supervisor_shared_s *shared =
+		fpm_shm_alloc(sizeof(*shared) + processes * sizeof(unsigned char));
 
 	if (!shared) {
 		zlog(ZLOG_ERROR, "[pool %s] supervisor: cannot allocate shared memory", wp->config->name);
@@ -965,12 +1002,38 @@ static unsigned fpm_pool_supervisor_jitter(unsigned max_value) /* {{{ */
 }
 /* }}} */
 
+/* Issue #492: the scoreboard slot index of THIS process, or -1 when it cannot be
+ * determined. A supervisor child's slot is stamped by fpm_children.c before it
+ * reaches child_main() (fpm_child_resources_use() -> fpm_scoreboard_child_use()
+ * sets the process-static fpm_scoreboard and its index), and fpm_scoreboard_proc_get()
+ * with child_index < 0 returns that own slot -- so proc - scoreboard->procs is
+ * this process's stable per-copy identity. It survives respawn because
+ * fpm_scoreboard_proc_free() hands the dead child's exact slot to the next
+ * fpm_scoreboard_proc_alloc() through scoreboard->free_proc. The -1 fallback
+ * keeps a process whose scoreboard is somehow absent on the old pool-wide
+ * behaviour rather than dereferencing NULL. */
+static int fpm_pool_supervisor_own_slot(void) /* {{{ */
+{
+	struct fpm_scoreboard_s *scoreboard = fpm_scoreboard_get();
+	struct fpm_scoreboard_proc_s *proc;
+
+	if (!scoreboard) {
+		return -1;
+	}
+	proc = fpm_scoreboard_proc_get(scoreboard, -1);
+	if (!proc) {
+		return -1;
+	}
+	return (int) (proc - scoreboard->procs);
+}
+/* }}} */
+
 /* Backoff and the "should we try again?" decision, applied between subsequent
  * script executions in the SAME process and also by every fresh respawn after a
  * crash (because shared memory survives process death). */
 static int fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		struct fpm_supervisor_shared_s *shared, int exit_code, time_t duration,
-		unsigned long duration_ms) /* {{{ */
+		unsigned long duration_ms, int slot) /* {{{ */
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
 	int wants_retry;
@@ -987,11 +1050,24 @@ static int fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 		unsigned long processes = c->supervisor_processes > 0
 			? (unsigned long) c->supervisor_processes : 1;
 
-		/* Issue #347: this copy is done; the pool is done only when every copy
-		 * is. The caller parks this process on a 1 return, so it stays alive
-		 * (no respawn, no second run) and terminal is set exactly when the last
-		 * copy finishes. */
-		shared->one_shot_done++;
+		/* Issue #347/#492: this copy is done; the pool is done only when every
+		 * copy is. The caller parks this process on a 1 return, so it stays
+		 * alive (no respawn, no second run). Record completion against THIS
+		 * process's scoreboard slot (the stable per-copy identity), and bump the
+		 * pool-wide total only when that slot flips from unrecorded to recorded
+		 * -- so a respawn of an already-completed copy cannot count twice and
+		 * terminal is still set exactly when the last copy finishes. A process
+		 * that cannot name its slot (slot < 0) falls back to the old pool-wide
+		 * increment; that is the only case where one_shot_done can over-count,
+		 * and it is unreachable for a normal supervisor child. */
+		if (slot >= 0 && (unsigned long) slot < processes) {
+			if (!shared->one_shot_done_by_slot[slot]) {
+				shared->one_shot_done_by_slot[slot] = 1;
+				shared->one_shot_done++;
+			}
+		} else {
+			shared->one_shot_done++;
+		}
 		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script finished (exit code %d), restart = %s -> not restarting (this copy is done: %lu of %lu)",
 			c->name, exit_code, c->supervisor_restart, shared->one_shot_done, processes);
 		if (shared->one_shot_done >= processes) {
@@ -1131,6 +1207,9 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	struct fpm_worker_pool_config_s *c = wp->config;
 	struct fpm_supervisor_shared_s *shared = fpm_pool_supervisor_shared_for(wp);
 	struct sigaction sa;
+	/* Issue #492: this process's own scoreboard slot -- the stable per-copy
+	 * identity a respawn keeps (see fpm_pool_supervisor_own_slot()). */
+	int slot;
 
 	if (!shared) {
 		/* Should not happen — init_main allocates this for every supervisor pool
@@ -1139,6 +1218,8 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		zlog(ZLOG_ERROR, "[pool %s] supervisor: no shared state, refusing to run", c->name);
 		exit(FPM_EXIT_SOFTWARE);
 	}
+
+	slot = fpm_pool_supervisor_own_slot();
 
 	supervisor_stop_timeout = c->supervisor_stop_timeout;
 	supervisor_current_shared = shared;
@@ -1192,6 +1273,20 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 		fpm_pool_supervisor_park();
 		exit(shared->gave_up ? FPM_EXIT_SOFTWARE : FPM_EXIT_OK);
+	}
+
+	/* Issue #492: the pool is not finished (a sibling is still running), but
+	 * THIS logical copy already completed its one-shot before it was killed and
+	 * respawned into the same scoreboard slot. Run nothing: park exactly like a
+	 * completed copy does, so restart = never / on-failure produce one
+	 * invocation per copy even across a process death. gave_up is 0 here (only a
+	 * planned completion marks a slot), so this is a normal FPM_EXIT_OK. */
+	if (slot >= 0 && (unsigned long) slot < (unsigned long) (c->supervisor_processes > 0 ? c->supervisor_processes : 1)
+			&& shared->one_shot_done_by_slot[slot]) {
+		zlog(ZLOG_NOTICE, "[pool %s] supervisor: this copy (scoreboard slot %d) already finished its "
+			"one-shot; parking instead of running it again (issue #492)", c->name, slot);
+		fpm_pool_supervisor_park();
+		exit(FPM_EXIT_OK);
 	}
 
 	/* issue #323: supervisor.start_jitter spreads the fork+exec+bootstrap cost
@@ -1346,7 +1441,7 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * apply_policy() below runs unmodified with whatever exit_code the
 		 * script actually returned (including one set by a script that trapped
 		 * the max_runtime stop signal and exited on its own). */
-		if (fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms)) {
+		if (fpm_pool_supervisor_apply_policy(wp, shared, exit_code, duration, duration_ms, slot)) {
 			/* Issue #347: this copy finished its one-shot. If terminal is set
 			 * too, this was the pool's LAST copy and the break below ends it
 			 * like any other terminal. Otherwise the pool still has copies to

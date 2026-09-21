@@ -52,7 +52,7 @@ code feels (decided in issue #269).
 | **beta** | may change in a minor release, with a release-note entry | fixed, no response-time commitment | in scope, no response-time commitment | no, but may be redesigned |
 | **experimental** | may change in any release | best effort | best effort, offered as-is | yes, in any release |
 
-Where things stand today:
+Where things stand today (audited against the bar below in issue #380):
 
 | | tier |
 | --- | --- |
@@ -63,6 +63,20 @@ Where things stand today:
 | TLS termination (`--enable-fpmng-tls`, `http.tls_*`) | beta |
 | ACME certificate issuance (`--enable-fpmng-acme`) | beta |
 | `pool.executor = fiber` / `async` | moved to branch `async` (issue #373) |
+
+`pool.type = http`, `pool.type = fastcgi-ng` and `pool.type = status` are
+retired names, not tiers: `http` was split into `gateway` plus an ordinary
+`fastcgi` pool and `fastcgi-ng` folded into `fastcgi` (issues #388, #376), and
+`status` became the operator endpoint (issue #278). A configuration that still
+names one is refused with its replacement rather than "unknown pool.type".
+
+The worker executor is the only live beta pool type. The #180-#183 spikes named
+its exit condition -- the absence of a streaming primitive, not concurrency --
+and that was resolved in v0.7.0 (`fpmng_worker_respond_start()/_chunk()/_end()`
+with backpressure, honest metrics, memory recycling, connection info). What is
+still missing is the cross-worker wakeup (issue #191, open), so the long-lived
+fan-out shape has no measurement under a load resembling use yet; that is the
+criterion that keeps it beta, not any open correctness issue.
 
 A pool that is not supported says so in `error_log` once at startup: a `NOTICE`
 for beta, a `WARNING` for experimental, naming the pool and the tier. A

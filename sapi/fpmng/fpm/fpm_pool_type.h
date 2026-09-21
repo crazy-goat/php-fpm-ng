@@ -122,15 +122,17 @@ struct fpm_pool_type_s {
 	const char *name;
 
 	/* What this type promises, and therefore what it withholds (issue #269,
-	 * implemented in #295). Data on the type like everything else here, so
-	 * that nothing anywhere compares a type NAME to decide how loudly to
-	 * announce it. The default, FPM_TIER_EXPERIMENTAL, is 0: a type added
-	 * without a thought about this field announces itself as the least
-	 * promised of the three, which is the honest reading of code nobody has
-	 * classified. Every type below states its tier explicitly all the same,
-	 * so that the value is a decision someone made rather than a field left
-	 * alone. Announced once per pool at startup by fpm_run(); see
-	 * fpm_tier.h. */
+	 * implemented in #295 and re-read against the same bar in #380). The
+	 * per-type rationale for each value is the comment next to its .tier
+	 * initialiser in fpm_pool_type.c. Data on the type like everything else
+	 * here, so that nothing anywhere compares a type NAME to decide how
+	 * loudly to announce it. The default, FPM_TIER_EXPERIMENTAL, is 0: a
+	 * type added without a thought about this field announces itself as the
+	 * least promised of the three, which is the honest reading of code
+	 * nobody has classified. Every type below states its tier explicitly
+	 * all the same, so that the value is a decision someone made rather
+	 * than a field left alone. Announced once per pool at startup by
+	 * fpm_run(); see fpm_tier.h. */
 	enum fpm_tier tier;
 
 	/* Configuration requirements — read by fpm_conf.c, which does not know types. */

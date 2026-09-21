@@ -457,8 +457,13 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # a gateway killed with a connection open must not leak its per-process gauges.
 # Same type support and no TLS/ACME, so +1 PASS everywhere and no SKIP change.
 # 149 -> 150 total.
+#
+# The v0.10.0 review added fpmng-http-gateway-listen-acl.phpt (issue #493): a
+# gateway refuses listen.allowed_clients with the replacement named, and
+# http.allowed_clients denies a peer outside its list. Same type support and no
+# TLS/ACME, so +1 PASS everywhere and no SKIP change. 150 -> 151 total.
 EXPECT_FAIL=0
-EXPECT_TOTAL=150
+EXPECT_TOTAL=151
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -490,8 +495,8 @@ EXPECT_TOTAL=150
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=143; EXPECT_SKIP=7
-    else EXPECT_PASS=136; EXPECT_SKIP=14; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=144; EXPECT_SKIP=7
+    else EXPECT_PASS=137; EXPECT_SKIP=14; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -524,8 +529,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=140; EXPECT_SKIP=10
-    else EXPECT_PASS=134; EXPECT_SKIP=16; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=141; EXPECT_SKIP=10
+    else EXPECT_PASS=135; EXPECT_SKIP=16; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

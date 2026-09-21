@@ -3,12 +3,12 @@
 > **Status: `pool.type = gateway` landed in #388 and `pool.type = http` is
 > retired; one piece of this design is still open.** The type, its explicit
 > `http.route[]`-only routing, `ping.path` answered in the gateway process, its
-> own `operator.metrics_path`/`operator.status_path` defaults and -- since #389
-> -- `http.operator` with the `<base>/<pool name>` forwarding of every exposed
-> pool's pages are implemented. Still to come: the gateway's own shared-memory
-> counters rendered on its `/metrics` page (#390), and `fastcgi` joining the
-> operator listener (#383) -- the example below still shows a `fastcgi` pool
-> exposing itself, which no build does yet. The operator
+> own `operator.metrics_path`/`operator.status_path` defaults, `http.operator`
+> with the `<base>/<pool name>` forwarding of every exposed pool's pages (#389),
+> and -- since #390 -- the gateway's own shared-memory counters rendered on its
+> `/metrics` and `/status` pages are implemented. Still to come: `fastcgi`
+> joining the operator listener (#383) -- the example below still shows a
+> `fastcgi` pool exposing itself, which no build does yet. The operator
 > directives are `operator.*` since #386 (see
 > [`operator-endpoint.md`](operator-endpoint.md)). This page is the target,
 > decided 2026-09-17; the issues that carry the rest are listed at the end.
@@ -189,14 +189,42 @@ invented for it.
 
 ## The gateway's own numbers
 
-Gateway processes are not workers and have no scoreboard slot. What they know
--- requests routed, per target; 503s, per target; open client connections;
-which pools are exposed -- lives in shared memory the master allocates, as
-`upstreams_used` already does, and is rendered by the operator child from
-there, the way `live_gauges` renders the worker executor's own segment (#333).
-The `/metrics` page on the gateway is therefore its own series plus an index of
-the exposed pools' paths -- small on purpose. It is **not** an aggregate of the
-pools' series; that endpoint was removed in #278 and stays removed.
+Gateway processes are not workers and have no scoreboard slot. Their numbers
+live in **one shared-memory segment per gateway pool** that the master
+allocates in `.init_main`, before the first fork, sized from the route table
+(`#targets + 2` rows), and that every gateway process bumps with cmp-set
+atomics and no locking -- the discipline `upstreams_used` already used, and the
+#333 pattern one level up. The operator child renders them; it is not a gateway
+process, so it reads shared memory and configuration only.
+
+`fpmng_pool_requests_total{pool="<gw>"}` is the pool's **baseline counter** --
+the `requests` key the status page reports -- bumped for every request the
+gateway accepts, before the ACL, so a denied request still counts. Its own
+series label a **target**:
+
+| series | `target` | counts |
+|---|---|---|
+| `fpmng_gateway_requests_total` | a routed pool | requests routed to that target |
+| `fpmng_gateway_rejected_total` | a routed pool | of those, 503s from a full target (the #341 series) |
+| `fpmng_gateway_upstreams_used` | a routed pool | persistent connections currently held to it |
+| `fpmng_gateway_upstreams_max` | a routed pool | the target's own `pm.max_children` |
+| `fpmng_gateway_requests_total` | `operator` | operator pages forwarded through `http.operator` (#389) |
+| `fpmng_gateway_requests_total` | `-` | requests the gateway answered itself (ping, static, ACME, 404, 403) |
+
+`fpmng_gateway_connections_open{pool="<gw>"}` and
+`fpmng_gateway_ping_total{pool="<gw>"}` are the pool-wide numbers no target
+owns. The `/metrics` page also carries an **index**: one
+`fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`
+line per pool the gateway forwards for (#389), so a scraper that found the
+gateway knows where `<base>/<pool>` points. It is a discovery aid, not an
+aggregate of their series; that endpoint was removed in #278 and stays removed.
+`/status` on the gateway is the same numbers as JSON, one row per target plus a
+pool row, in the generic `{"pools":[...]}` shape.
+
+A gateway process the master respawns does **not** zero the segment -- it
+belongs to the pool, not the process. A reload re-execs the master and the
+mapping is `MAP_ANONYMOUS` (#330), so like every other pool's counters, the
+gateway's reset on reload.
 
 ## A complete configuration
 

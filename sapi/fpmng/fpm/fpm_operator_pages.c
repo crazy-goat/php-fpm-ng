@@ -19,8 +19,10 @@
  *     the internal structure of those states -- exactly as required by the
  *     contract in docs/NOTES.md 3h.
  *   - serves_requests = 0 with a baseline_counter and no .status() (gateway,
- *     issue #388): fpmng_pool_info plus the baseline counter from the shared
- *     scoreboard, and no state block (row.has_state is false).
+ *     issue #388): fpmng_pool_info plus the baseline counter, and no state
+ *     block (row.has_state is false). Since issue #390 the counter comes from
+ *     the type's own shared segment through fpm_pool_type_s.baseline; the
+ *     shared scoreboard is the fallback for a type without that hook.
  *
  * The metric label is the pool name -- cardinality is naturally bounded (the
  * number of pools in the config). No labels with unbounded cardinality (no
@@ -141,20 +143,25 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		row.has_state = 1;
 		row.counter_value = row.st.baseline;
 	} else if (type->baseline_counter) {
-		/* Issue #388: the gateway has a baseline counter and no per-pool
-		 * state. Until #390 gives it counters of its own, the counter is the
-		 * shared scoreboard's `requests` -- exactly the number a
-		 * serves_requests type reads -- so this is the same source, not a
-		 * second one. It is zero today (no PHP child ever bumps it) and that
-		 * is the honest value, not a missing page: the row still carries
-		 * fpmng_pool_info and the type's own series (the per-target
-		 * fpmng_gateway_* lines fpm_http_render_metrics_prometheus() adds).
-		 * No state block is emitted -- see row.has_state. */
-		struct fpm_scoreboard_s *copy = wp->scoreboard ? fpm_scoreboard_copy(wp->scoreboard, 0) : NULL;
+		/* Issue #388/#390: the gateway has a baseline counter and no per-pool
+		 * state. Since #390 its own segment holds the number, through the
+		 * .baseline hook; a type without the hook (none today) falls back to
+		 * the shared scoreboard's `requests`, exactly the number a
+		 * serves_requests type reads. It is zero for such a type (no PHP child
+		 * bumps it) and that is the honest value, not a missing page: the row
+		 * still carries fpmng_pool_info and the type's own series (the
+		 * per-target fpmng_gateway_* lines
+		 * fpm_http_render_metrics_prometheus() adds). No state block is
+		 * emitted -- see row.has_state. */
+		if (type->baseline) {
+			row.counter_value = type->baseline(wp);
+		} else {
+			struct fpm_scoreboard_s *copy = wp->scoreboard ? fpm_scoreboard_copy(wp->scoreboard, 0) : NULL;
 
-		row.counter_value = copy ? copy->requests : 0;
-		if (copy) {
-			fpm_scoreboard_free_copy(copy);
+			row.counter_value = copy ? copy->requests : 0;
+			if (copy) {
+				fpm_scoreboard_free_copy(copy);
+			}
 		}
 	} else {
 		/* A type with no worker counts and no state to report. Nothing has

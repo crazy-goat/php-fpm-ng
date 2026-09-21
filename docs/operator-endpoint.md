@@ -228,12 +228,16 @@ script has called `fpmng_supervisor_heartbeat()` also reports `heartbeat_age`
 
 A `pool.type = gateway` runs no PHP child at all, so it has no state to report:
 its page carries `fpmng_pool_info` and its baseline counter, and no state block.
-On `operator.metrics_path` it also carries its own per-target series,
+Since issue #390 both come from the gateway's own shared-memory segment, which
+the master allocates in `.init_main` and the operator child renders: the
+baseline counter is the requests the gateway accepted, and the page adds
 `fpmng_gateway_{upstreams_used,upstreams_max,requests_total,rejected_total}{pool,
-target}` (issue #341), one row per `http.route[]` target. The rest of the
-gateway's numbers — its own routed-request totals and the index of exposed
-pools — is issue #390; until then the baseline counter reads the shared
-scoreboard, which no gateway child bumps, so it is zero and is the honest value.
+target}`, one row per `http.route[]` target plus `target="operator"` for
+forwarded operator pages (#389) and `target="-"` for local answers, the
+pool-wide `fpmng_gateway_connections_open` gauge and `fpmng_gateway_ping_total`
+counter, and one `fpmng_gateway_exposed_pool` line per pool the gateway forwards
+for. `/status` on the gateway is the same numbers as JSON, one row per target
+plus the pool row.
 
 ### The baseline counter
 
@@ -244,7 +248,7 @@ the counter's name does too:
 | Pool type | Counter | Counts |
 |---|---|---|
 | `fastcgi`, `http-direct` | `requests` | Requests served. |
-| `gateway` | `requests` | Requests routed (shared scoreboard until #390). |
+| `gateway` | `requests` | Requests accepted (its own shm segment since #390). |
 | `cron` | `runs` | Scheduled runs started. |
 | `supervisor` | `restarts` | Times the supervised script was started again. |
 

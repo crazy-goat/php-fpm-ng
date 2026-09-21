@@ -159,6 +159,38 @@ struct fpm_http_gw_slot_s {
 
 struct fpm_http_target_s;
 
+/* Issue #390: the gateway's own numbers, in ONE segment per gateway pool that
+ * the master allocates before the first fork and every gateway process bumps
+ * without locking (the same "one writer per field, cmp-set loops" discipline
+ * upstreams_used already used). The operator endpoint's child reads it because
+ * gateway processes have no scoreboard slot -- exactly the #333 pattern, one
+ * level up: there the segment is the worker executor's, here it is the pool's.
+ *
+ * Layout: a small header with the pool-wide counter, gauge and ping count,
+ * followed by nslots rows, one per target label. nslots is #targets + 2:
+ * rows [0, ntargets) are the routed targets in gw->targets order,
+ * row [ntargets] is target="operator" (#389's forwarded operator requests, and
+ * the budget/rejection accounting of every operator listener this gateway
+ * forwards to), row [ntargets + 1] is target="-", the requests this gateway
+ * answered itself. The segment is sized at configuration time from the route
+ * table, which a reload rebuilds: an exec-reload reruns the master and the
+ * allocation is MAP_ANONYMOUS, so the counters reset on reload the way every
+ * other pool's do (see docs/gateway.md). A gateway process the master respawns
+ * does NOT zero it -- the segment belongs to the pool, not to the process. */
+struct fpm_http_counters_slot {
+	atomic_t requests_total;	/* requests for this target label */
+	atomic_t rejected_total;	/* of those, answer 503 because the target was full */
+	atomic_t upstreams_used;	/* persistent connections currently held to this target */
+};
+
+struct fpm_http_counters_s {
+	atomic_t requests_total;	/* every request the gateway accepted */
+	atomic_t connections_open;	/* client connections currently open in the gateway processes */
+	atomic_t ping_total;		/* ping.path answers */
+	unsigned nslots;
+	struct fpm_http_counters_slot slots[];
+};
+
 /* Which wire protocol the gateway speaks to a target. Only FastCGI is
  * implemented here; HTTP/1.1 towards a pool.type = http-direct target is #344,
  * and the vtable below exists so that it is a new set of four functions rather
@@ -206,17 +238,17 @@ struct fpm_http_target_s {
 	 * to THIS target together; sized from the target pool's own
 	 * pm.max_children, the number its workers actually enforce */
 	unsigned max_upstreams;
-	atomic_t *upstreams_used;		/* shared between the gateway processes */
 
-	/* Issue #341: per-target counters, shared memory for the same reason
-	 * upstreams_used is -- fpm_operator_pages.c's
-	 * fpm_pool_type_s.render_metrics_prometheus hook runs in the operator
-	 * endpoint's OWN child, a fork() taken after fpm_http_routes_build() has
-	 * already allocated these, so that child's copy of `gw->targets` points
-	 * at the same shared segment every gateway process updates. Never NULL
-	 * once fpm_http_target_init() has returned 0 -- checked defensively at
-	 * the two read sites anyway, the same caution upstreams_used itself
-	 * takes at fpm_operator_pages.c. */
+	/* Issue #390: these three point into gw->counters->slots[], the one
+	 * shared segment the master allocated for the whole pool -- issue #341
+	 * gave each target its own fpm_shm_alloc() calls; they now name a row in
+	 * that segment instead (upstreams_used "moved from where it is today",
+	 * as #390 puts it). Written by every gateway process, read by the
+	 * operator endpoint's own child, which is a fork() of the master taken
+	 * after the segment exists. Never NULL once fpm_http_target_init() has
+	 * returned 0; the read sites still check, the same caution the fields
+	 * always took. Several operator targets share the one "operator" row. */
+	atomic_t *upstreams_used;		/* persistent connections held to this target */
 	atomic_t *requests_total;		/* requests routed to this target, whatever they answered */
 	atomic_t *rejected_total;		/* of those, how many found no budget and got 503 */
 
@@ -248,6 +280,33 @@ struct fpm_http_operator_entry_s {
 	char *path;				/* the public path, exact-matched after the query is cut; owned by this entry */
 	const char *local_uri;			/* the local operator path the request line is rewritten to; owned by the operator endpoint's route table */
 	struct fpm_http_target_s *target;	/* the operator listener this entry forwards to */
+	/* Issue #390: enough identity for the /metrics index to name the pool this
+	 * entry forwards for without re-parsing `path` (pool names may contain
+	 * '/', so "everything after the last slash" is not the pool name). `pool`
+	 * points at the pool's own config name (never owned here); `metrics` is
+	 * which of the two formats this entry is, and `own` marks the gateway's
+	 * own page -- the index lists what it FORWARDS, so its own row is skipped. */
+	const char *pool;
+	unsigned metrics:1;
+	unsigned own:1;
+};
+
+/* Issue #390: one accepted client connection, gateway-process-local bookkeeping
+ * behind the shared connections_open gauge. libevent gives evhttp exactly one
+ * per-connection notification -- the connection's close callback -- and the
+ * request callback is the first place the gateway meets the connection. This
+ * node is what the close callback carries, so the per-request state the old
+ * fpm_http_client_closed(c) callback held can be cleared without unregistering
+ * the callback (which is what let the gauge leak: a connection that closed
+ * while idle between two keep-alive requests had no callback left).
+ *
+ * `c` is the request currently in flight on this connection, or NULL between
+ * requests; fpm_http_conn_free() clears it rather than the close callback. */
+struct fpm_http_client_s {
+	struct fpm_http_gateway_s *gw;
+	struct evhttp_connection *evcon;
+	fpm_http_conn *c;
+	struct fpm_http_client_s *next;
 };
 
 /* one gateway family per pool */
@@ -384,6 +443,12 @@ struct fpm_http_gateway_s {
 	unsigned ntargets;
 	struct fpm_http_route_s *routes;
 	unsigned nroutes;
+	/* Issue #390: the pool's own counters segment, allocated once in the master
+	 * by fpm_http_routes_build() and shared by every gateway process and the
+	 * operator endpoint's child. NULL when the allocation failed (the gateway
+	 * then refuses to start -- see fpm_http_target_init()). slots[0..ntargets)
+	 * are the routed targets, [ntargets] is "operator", [ntargets+1] is "-". */
+	struct fpm_http_counters_s *counters;
 	/* Issue #341: true when THIS pool set http.route[] at all (even if every
 	 * entry claims "/" and leaves ntargets == 1). Gates the access log's
 	 * target field: a pool that never opted into routing must log "-" on
@@ -429,6 +494,10 @@ struct fpm_http_gateway_s {
 	/* gateway process only */
 	struct event_base *base;
 	struct evhttp *http;
+	/* Issue #390: every accepted client connection of THIS process, so the
+	 * shared connections_open gauge is incremented once per connection in
+	 * fpm_http_client_track() and decremented once in its close callback. */
+	struct fpm_http_client_s *clients;
 	/* http.fault_upstream_write, see fpm_http_upstream_write_must_fail().
 	 * 0 = off, which is the value every real deployment has. The counter is
 	 * per gateway process: fork() copies a zero into each one. */
@@ -490,6 +559,11 @@ struct _fpm_http_conn {
 	struct fpm_http_target_s *target;
 	struct evhttp_request *req;
 	struct evhttp_connection *evcon;
+	/* Issue #390: the accepted connection behind evcon, so fpm_http_conn_free()
+	 * clears the in-flight pointer on it instead of unregistering the
+	 * connection's close callback (see fpm_http_client_s). NULL for a request
+	 * whose connection could not be tracked (no evcon, or OOM). */
+	struct fpm_http_client_s *client;
 	fpm_http_upstream *upstream;		/* while in flight */
 	/* 1 exactly while this connection is linked into gw->waiting, so
 	 * fpm_http_conn_free() knows whether it still has to unlink it.

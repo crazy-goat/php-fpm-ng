@@ -5,10 +5,12 @@ measured gain was 114.53 us upstream against 105.01 us per request ("Worker
 CPU without saturating the machine" below) -- 9.5 us, 8.3% of a hello-world
 request and 0.02-0.2% of a 5-50 ms framework request; throughput at
 saturation moved +0.41%, within noise ("Throughput at saturation" below).
-The optimizations themselves (patches 0004/0005/0006) survive
-under `pool.type = http`, which sets the same capability bit; the numbers
-below still apply there. This document is the measurement that justified the
-removal and stays as written.
+The transport optimizations themselves (patches 0004/0005) survive and are
+still in the tree; `patches/0006` (persistent Zend signal handlers) and the
+capability bit that selected it were removed by issue #420, after #388 retired
+`pool.type = http`, the last type that set it. The numbers below are the
+measurement that justified the removal and stay as written -- they describe
+the tree the experiment ran against, not a current requirement.
 
 ## Goal
 

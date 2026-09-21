@@ -1906,7 +1906,8 @@ that could simply be relaxed.
 Reaching a truly arbitrary method would mean either patching libevent itself
 or bypassing its HTTP request-line parser entirely for a raw
 `bufferevent`-level implementation. This project patches php-src for its own
-worker/fiber transport needs (`patches/0001`–`0008`) but has never carried a
+worker/fiber transport needs (`patches/0001`–`0005`; 0006 was removed by issue
+#420 and 0007/0008 live on branch async) but has never carried a
 libevent patch, and vendoring or patching a system HTTP parsing library is a
 materially larger commitment (a new patch surface to track across
 distributions' own libevent updates, plus request-line parsing security

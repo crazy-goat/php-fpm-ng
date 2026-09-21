@@ -1,83 +1,31 @@
 <?php
 /**
  * The fpm-ng SKIPIF preamble: everything upstream's skipif.inc gates on, plus
- * the one gate that is ours.
+ * the gates that are ours.
  *
- * A binary built by build/libphp-build.sh links against a distribution's
- * libphp and therefore refuses a pool type whose children need patches/0006
- * (inside Zend/) at configuration time -- see
- * fpm_pool_type_check_build_support(). A test whose pool needs one of those
- * cannot pass there, and must not pretend to fail either: the binary is
- * telling it the truth. It skips. Since issue #388 no type in this tree needs
- * that patch, so the probe below succeeds for every type and nothing skips on
- * this reason any more -- the mechanism stays for the next type that does.
- *
- * The decision is asked OF THE BINARY UNDER TEST, by running the same `-t`
- * configuration test a real start runs and reading what comes back. Nothing
- * here keeps a list of which types are supported; such a list would be a
- * second copy of a fact that already lives in fpm_pool_type.c and it would
- * drift the first time a type changes side.
- *
- * The map below is not that list. It holds the MINIMAL VALID configuration for
- * each type -- what that type's own validate() insists on before it will
- * consider a configuration well-formed at all. Without it the probe would be
- * refused for a missing directive and a supported type would look unsupported.
+ * fpmng_skip_if_pool_type_unsupported() is a no-op since issue #420. It used to
+ * run a `-t` probe of the pool type and skip when the binary was linked against
+ * a distribution libphp, which refuses a type whose children need patches/0006
+ * (inside Zend/) -- see fpm_pool_type_check_build_support(), removed by #420.
+ * Issue #376 retired `fastcgi-ng`, issue #388 retired `pool.type = http` and
+ * split it into `pool.type = gateway` (which runs no PHP child and needs
+ * nothing from the engine), so no type in this tree needs a build-time
+ * capability any more. The symbol stays so the ~52 callers do not have to be
+ * edited, and so a future type with a capability has one designated place to
+ * gate on it: ask the binary under test, do not keep a list of supported types
+ * here.
  */
 
 require_once "skipif.inc";
 
-/* The refusal this file skips on, and only this one. A pool refused for any
- * other reason is a real failure of a real test and is left to fail. */
-const FPMNG_MISSING_PATCH_0006 = 'does not carry patches/0006';
-
-function fpmng_pool_type_probe_config(string $type, string $root): string
-{
-    /* -t validates, it does not bind, so the ports below need not be free. Each
-     * branch is the MINIMAL well-formed configuration for the type: the
-     * gateway (issue #388) rejects pm.* and requires at least one http.route[],
-     * so it needs a target pool of its own; http-direct needs a real front
-     * controller. */
-    $common = "[global]\nerror_log = /dev/null\n";
-    switch ($type) {
-        case 'gateway':
-            return $common
-                . "[probe]\npool.type = gateway\nlisten = 127.0.0.1:9\nhttp.route[app] = /\n"
-                . "[app]\nlisten = 127.0.0.1:8\npm = static\npm.max_children = 1\n";
-        case 'http-direct':
-            return $common . "[probe]\nlisten = 127.0.0.1:9\npm = static\npm.max_children = 1\n"
-                . "pool.type = http-direct\nchdir = $root\nhttp.front_controller = /index.php\n";
-        default:
-            return $common . "[probe]\nlisten = 127.0.0.1:9\npm = static\npm.max_children = 1\n"
-                . "pool.type = $type\n";
-    }
-}
-
 /**
  * Skip the test unless the binary under test can honour this pool type.
+ *
+ * A no-op today: every configurable type is supported by every build. See the
+ * file comment above for why the probe was removed in issue #420.
  */
 function fpmng_skip_if_pool_type_unsupported(string $type): void
 {
-    $binary = FPM\Tester::findExecutable();
-
-    $root = sys_get_temp_dir() . '/fpmng-type-probe-' . getmypid();
-    @mkdir($root);
-    file_put_contents($root . '/index.php', '<?php');
-    $conf = $root . '/probe.conf';
-
-    file_put_contents($conf, fpmng_pool_type_probe_config($type, $root));
-
-    $output = [];
-    $status = 0;
-    exec(escapeshellarg($binary) . ' -n -t -y ' . escapeshellarg($conf) . ' 2>&1', $output, $status);
-
-    @unlink($conf);
-    @unlink($root . '/index.php');
-    @rmdir($root);
-
-    if ($status !== 0 && str_contains(implode("\n", $output), FPMNG_MISSING_PATCH_0006)) {
-        die("skip pool.type = $type is not supported by this binary "
-            . '(linked against a distribution libphp, which does not carry patches/0006)');
-    }
 }
 
 /* The refusal a build without --enable-fpmng-acme answers with (issue #281),

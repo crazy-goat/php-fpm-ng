@@ -6,6 +6,14 @@ Investigation only: no production code was changed. The task breakdown in §8 is
 a proposal; nothing in it is filed, and §8's T0 is the decision that gates the
 rest.
 
+**Amended by issue #420 (after #376/#388).** `patches/0006`, the capability bit
+it was selected by and `zend_signal_use_persistent_handlers()` are gone: #376
+retired `fastcgi-ng`, #388 retired `pool.type = http` and split its proxy half
+into `pool.type = gateway`, and #420 then removed the patch with the last type
+that needed it. Mentions of 0006 and of that symbol below are historical
+measurements of the tree this spike was written against, not current
+requirements.
+
 **Amended 2026-09-13 (issue #278).** `pool.type = status` no longer exists, so
 §6.1 -- "`status` stays in the CORE, always compiled" -- is moot as written, and
 every count that treats it as a pool type is off by one pool. What it was

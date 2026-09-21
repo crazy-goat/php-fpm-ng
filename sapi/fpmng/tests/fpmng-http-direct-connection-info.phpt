@@ -90,12 +90,12 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-/* pool.type = http would need patches/0006 (fpmng_skip_if_pool_type_unsupported's
- * FPMNG_MISSING_PATCH_0006), which a package built against a distribution
- * libphp does not carry -- unlike this test's TLS assertions, which that
- * build DOES support. A supervisor pool needs no patch and no listener at
- * all, and answers the same question this case is actually asking (does a
- * pool that is not pool.type = http-direct see the function): it runs once
+/* pool.type = http used to need patches/0006, which a package built against a
+ * distribution libphp did not carry; issue #388 retired the name and issue
+ * #420 removed the patch and its guard, so no type has that constraint any
+ * more. A supervisor pool needs no listener at all, and answers the same
+ * question this case is actually asking (does a pool that is not pool.type =
+ * http-direct see the function): it runs once
  * (supervisor.restart = never) and drops its answer in a file instead of
  * serving it over a socket. */
 file_put_contents("$root/gateway.php", <<<'PHP'

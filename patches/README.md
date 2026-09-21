@@ -32,13 +32,18 @@ patches/php-8.4/*.patch      only for that version; overrides the same-named pat
 | `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (different `safe_read` signature) |
 | `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5.9, 8.6.0-dev |
 | `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5.9, 8.6.0-dev |
-| `0006-zend-persistent-signal-handlers.patch` | `Zend/zend_signal.c`, `zend_signal.h` | move the switch behind an API owned by `sapi/fpmng`, or propose it upstream | 8.5; older versions and master to verify |
 
 The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the
 context around `accept()`), although they are independent in substance.
 `prepare.sh` applies everything in order to an untouched tree, and checks
 "already applied" for the whole stack at once (in reverse, from copies of the
 touched files) — a per-patch test lies when two patches occupy the same location.
+
+`fcgi_set_optimized_transport()` (0004) has no caller in the tree after issue
+#420: #376 retired `fastcgi-ng`, #388 retired `pool.type = http`, and #420
+removed the last capability bit together with 0006. The function and 0004 stay
+— the transport it switches on is still shipped, and the switch keeps the
+protocol changes behind one API — but nothing selects the optimized path today.
 
 ### Why 0001 is necessary
 
@@ -70,21 +75,6 @@ section 3t. Our `sapi/fpmng/config.m4` detects `accept4`
 (`AC_CHECK_FUNCS([accept4])`) because upstream checks it only in `ext/sockets`;
 without `HAVE_ACCEPT4`, the old path is compiled. An upstream version would
 need to add this check to `configure.ac`.
-
-### Why 0006 (persistent signal handlers)
-
-Zend normally checks and registers seven handlers again when every request is
-activated. `fastcgi-ng` and `http` enable a process-wide switch after which full
-registration happens only for the worker's first request; `SIGPROF` for the
-timeout is still set later. Classic `fastcgi` does not enable this path. The
-change reduces `fastcgi-ng` from about 25.2 to 18.2 syscalls/request and
-repeatedly produced about 7% less CPU/request.
-
-Logical Zend handlers are still reset per request, confirmed with
-`pcntl_signal()`. The trade-off is that an extension replacing a handler through
-direct libc `sigaction()` is not automatically repaired with the default
-`zend.signal_check=0`; explicit `zend.signal_check=1` still detects the change
-during request shutdown.
 
 ### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
 

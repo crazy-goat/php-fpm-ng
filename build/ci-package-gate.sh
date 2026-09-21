@@ -161,8 +161,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # package: it reads the two lines the binary prints about its own build flags.
 # So both flavours gain exactly four passes and lose exactly four skips.
 # The rest of the ACME and TLS suite still skips here and for an older reason
-# than the build flags: it needs pool.type = http, which needs patches/0006
-# inside Zend/ (issue #230).
+# than the build flags: on the pre-#388 suite it needed pool.type = http (issue
+# #230), a type a distribution libphp refused because its children wanted
+# patches/0006 inside Zend/. Issue #388 retired that name (the tests are gateway
+# pools now) and issue #420 removed patches/0006 and the guard with it, so the
+# only reason left is the TLS/ACME probe itself -- see the #388 block below.
 #
 # fpmng-http-direct-user-ini.phpt (issue #60) is the test added since the
 # count above was measured: it needs neither TLS nor ACME, so it passes on
@@ -194,9 +197,9 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # counts are unaffected.
 #
 # fpmng-http-direct-connection-info.phpt (issue #62) is a sixth addition: a
-# pool.type = http-direct pool with http.tls_cert configured, which needs no
-# patches/0006 support, so it is not one of the tests that skip for that
-# reason. What it does need is a binary built with --enable-fpmng-tls: its
+# pool.type = http-direct pool with http.tls_cert configured. It never asked
+# for a build capability, and issue #420 removed the only one there was. What
+# it does need is a binary built with --enable-fpmng-tls: its
 # SKIPIF probes that directly and skips naming issue #280 when it is missing.
 # The default packages are built without the flag (FPMNG_TLS=0), so it joins
 # the skips there; the php-fpm-ng-tls packages have it, so it passes there
@@ -460,10 +463,11 @@ EXPECT_TOTAL=150
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
 # because the reason the affected tests skip here is gone: a distribution libphp
-# does not carry patches/0006, which the http type needed, but gateway runs no
+# did not carry patches/0006, which the http type needed, but gateway runs no
 # PHP child at all and needs nothing from the engine -- and neither does any
-# other type any more, so no test skips for the libphp guard. The only test
-# added is fpmng-http-gateway-type.phpt, one more PASS on every flavour.
+# other type any more, so no test skips for a libphp guard. (Issue #420 then
+# removed patches/0006 and the guard outright.) The only test added is
+# fpmng-http-gateway-type.phpt, one more PASS on every flavour.
 #
 # The 40 owned tests that configured pool.type = http split in two:
 #   - 33 use neither TLS nor ACME. On the old binary they skipped for the http

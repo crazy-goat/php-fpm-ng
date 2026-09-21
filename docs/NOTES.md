@@ -3411,6 +3411,12 @@ additional `epoll_wait`, and `shutdown`.
 
 ### Persistent signal handlers in optimized frontends
 
+**Removed by issue #420 (after #376 and #388).** `fastcgi-ng` was retired in
+0.9.0 (#376), `http` was retired by #388 into `pool.type = gateway`, and #420
+removed `patches/0006` with the last type that selected it. The paragraph and
+numbers below are the historical measurement of that optimization, not a
+current feature.
+
 `fastcgi-ng` and `http` install the Zend handler set during the first request,
 then leave it in place for the worker lifetime. Resetting the logical handler
 table still happens per request, as does installing `SIGPROF` for

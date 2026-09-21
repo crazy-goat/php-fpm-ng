@@ -32,8 +32,8 @@ operator.metrics_path   = /tick/metrics
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
-| `operator.status_path` | Path answering JSON for this pool. Unset: off. | unset = off (`/status` on `gateway`) |
-| `operator.metrics_path` | Path answering Prometheus text for this pool. Unset: off. | unset = off (`/metrics` on `gateway`) |
+| `operator.status_path` | Path answering JSON for this pool. Unset: off. | unset = off, except `gateway` (`/status`; `operator.status = off` to disable) |
+| `operator.metrics_path` | Path answering Prometheus text for this pool. Unset: off. | unset = off, except `gateway` (`/metrics`; `operator.metrics = off` to disable) |
 | `operator.status` | Shorthand: expose status at `/status/<pool name>`. | `off` |
 | `operator.metrics` | Shorthand: expose metrics at `/metrics/<pool name>`. | `off` |
 | `operator.status_listen` | Where `operator.status_path` binds. | `127.0.0.1:9253` |
@@ -346,11 +346,35 @@ that wants several pools reads several paths — on one port if they share an
 
 ### Turning metrics off
 
-Unset `operator.metrics_path` (and do not set `operator.metrics`). That is the
-off switch, and it is a real one: the path is not answered, and if nothing else
-on that address needs a listener the port is not bound at all.
+For every type except `gateway`, unset `operator.metrics_path` (and do not set
+`operator.metrics`). That is the off switch, and it is a real one: the path is
+not answered, and if nothing else on that address needs a listener the port is
+not bound at all.
 
-What it does **not** switch off is the API. `fpm_metric_register()` and the rest
+**On `pool.type = gateway` that is not the off switch** (issue #491). Its paths
+*default* to being set (`/status` and `/metrics`, the paragraph above), so
+leaving both `operator.metrics_path` and `operator.metrics` unset leaves
+`/metrics` answered. Turn it off explicitly with `operator.metrics = off`, or
+with an explicitly empty `operator.metrics_path =`. (The same holds for
+`operator.status` and `operator.status_path`.) Verified on a running gateway:
+with both unset, `GET /metrics` on the public port returns the real metrics
+page; with `operator.metrics = off` it is not answered — and because the format
+is off and nothing else needs the listener, the operator metrics listener is
+not bound either — while `/status` and ordinary application traffic are
+untouched.
+
+Turning the format off also turns off the gateway's *forwarding* of it: with
+`http.operator = yes`, `<base>/<pool>` for that format stops being served too
+(`fpm_http_operator_base()`).
+
+It does **not** necessarily make the public URL return 404. With
+`http.operator = yes` the gateway stops treating the path as an operator page,
+but `http.route[]` still sees the request, so a route that claims the prefix
+(for example `/`) answers it as an ordinary application request. A `200` with
+the application's body is not a metrics response — assert on the body, not the
+status, when checking that metrics are off.
+
+What none of this switches off is the API. `fpm_metric_register()` and the rest
 keep working in every pool, keep writing to the same shared slots, and keep
 costing exactly what they cost. A script cannot tell whether its pool exposes a
 metrics path, which is deliberate: turning off an endpoint is an operator's

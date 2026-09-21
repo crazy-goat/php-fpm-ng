@@ -123,23 +123,31 @@ struct fpm_supervisor_shared_s {
 	 * fastest copy stop every other copy before it had run even once. A copy
 	 * that finishes its one-shot PARKS (fpm_pool_supervisor_park()) instead of
 	 * exiting, so the master does not respawn it and it cannot run a second
-	 * time; terminal is set only once this counter reaches
-	 * supervisor_processes, so the pool as a whole still reports FINISHED and
-	 * every copy still parks for good. restart_max exhaustion and
-	 * supervisor.fatal stay pool-wide and keep using terminal + gave_up.
+	 * time; terminal is set only once every copy is done, so the pool as a
+	 * whole still reports FINISHED and every copy still parks for good.
+	 * restart_max exhaustion and supervisor.fatal stay pool-wide and keep using
+	 * terminal + gave_up.
 	 *
-	 * Issue #492: this counter alone is not enough, because it does not say
+	 * Issue #492: a pool-wide COUNT is not enough, because it does not say
 	 * WHICH copy finished. A completed copy parks, but a SIGKILL (OOM, an
-	 * operator's kill, ...) ends the park and fpm_children.c respawns the
-	 * slot; the replacement then read only the pool-wide terminal (still 0
-	 * while a sibling runs) and executed the script AGAIN despite
-	 * restart = never -- a third invocation for a two-copy pool. The fix is
-	 * one_shot_done_by_slot[] below: completion is recorded per copy, and a
-	 * respawned process whose own slot is already recorded parks instead of
-	 * running. This counter stays as the pool-wide total (bumped only when a
-	 * slot flips from unrecorded to recorded) so terminal is still set exactly
-	 * when the LAST copy finishes. */
-	unsigned long one_shot_done;
+	 * operator's kill, ...) ends the park and fpm_children.c respawns the slot;
+	 * the replacement then read only the pool-wide terminal (still 0 while a
+	 * sibling runs) and executed the script AGAIN despite restart = never -- a
+	 * third invocation for a two-copy pool. Completion is therefore recorded in
+	 * one_shot_done_by_slot[] below, one byte per copy, and a respawned process
+	 * whose own slot is already recorded parks instead of running.
+	 *
+	 * The bytes are the SINGLE SOURCE OF TRUTH: there is deliberately no
+	 * separately-maintained shared counter. A read-modify-write `done++` on a
+	 * shared scalar is not atomic, so two copies finishing in the same
+	 * microsecond both read the same value and both store +1 (lost update), and
+	 * a process SIGKILLed between "mark my slot" and "bump the counter" leaves
+	 * its byte set with the count one short. Either way the count never reaches
+	 * supervisor_processes and terminal is never set. The count is scanned from
+	 * the bytes instead (fpm_pool_supervisor_one_shot_done_count()), which
+	 * cannot lose a completion: see that helper and
+	 * fpm_pool_supervisor_one_shot_maybe_finish(). */
+	unsigned long one_shot_done_no_slot;
 
 	/* Fields added solely for the operator status page (docs/NOTES.md 3u) —
 	 * exactly what that page shows, not one field more. "failures"/"terminal"/
@@ -230,9 +238,15 @@ struct fpm_supervisor_shared_s {
 	 * fpm_scoreboard_proc_alloc() tries free_proc first), so a respawn lands in
 	 * the same slot as the copy it replaces -- the common, single-death case
 	 * this issue is about. A respawn whose slot is already marked therefore
-	 * parks instead of running the script a second time, and one_shot_done /
-	 * terminal stay exactly as issue #347 left them. Must stay the LAST member:
-	 * it is a flexible array sized with the shared allocation. */
+	 * parks instead of running the script a second time.
+	 *
+	 * These bytes are the pool's one-shot completion state, and the pool-wide
+	 * "N of M" and terminal decision are DERIVED from them by scanning (never
+	 * from a separate counter -- see the field comment above for why). Each byte
+	 * is written only by the single process currently occupying its slot and
+	 * only ever goes 0 -> 1, so the set is monotonic and a scan cannot lose a
+	 * completion. Must stay the LAST member: it is a flexible array sized with
+	 * the shared allocation. */
 	unsigned char one_shot_done_by_slot[];
 };
 
@@ -1028,6 +1042,72 @@ static int fpm_pool_supervisor_own_slot(void) /* {{{ */
 }
 /* }}} */
 
+/* Issue #492: the pool-wide number of one-shot completions, derived by scanning
+ * the per-slot bytes. This replaces the read-modify-write counter issue #347
+ * used, which is not safe in shared memory: two copies finishing in the same
+ * microsecond can both read the same value and both store +1 (a lost update),
+ * and a process SIGKILLed between marking its slot and bumping the counter
+ * leaves the count permanently one short -- either way terminal is never set
+ * and the pool reports "backoff" forever even though every copy has finished.
+ *
+ * The bytes are written by different processes with no lock, and that is
+ * deliberate. Each byte belongs to exactly one scoreboard slot and is written
+ * only by the process currently occupying it, and only ever 0 -> 1, so the set
+ * of set bytes grows monotonically and no completion can be lost. A single pass
+ * could still observe a concurrent 0 -> 1 store only after it has moved past
+ * that byte, so this RE-READS until a pass adds nothing: because the bytes are
+ * monotonic the loop is bounded by supervisor_processes increases and it
+ * returns a stable count rather than one behind a completion that is already
+ * recorded. The process that writes the LAST byte therefore sees all the
+ * earlier ones and sets terminal; if it is killed before its scan, the next
+ * process to look -- the respawn of an already-completed slot, which parks --
+ * re-scans and sets terminal (fpm_pool_supervisor_one_shot_maybe_finish() is
+ * called on that path too). `one_shot_done_no_slot` is added in only for the
+ * defensive no-scoreboard case below, where there are no bytes to scan; it is
+ * not the gate on any path a normal supervisor child takes. */
+static unsigned long fpm_pool_supervisor_one_shot_done_count(
+		struct fpm_supervisor_shared_s *shared, unsigned long processes) /* {{{ */
+{
+	unsigned long i, done, previous = 0;
+
+	do {
+		done = shared->one_shot_done_no_slot;
+		for (i = 0; i < processes; i++) {
+			if (shared->one_shot_done_by_slot[i]) {
+				done++;
+			}
+		}
+		if (done == previous) {
+			break;
+		}
+		previous = done;
+	} while (1);
+
+	return done;
+}
+/* }}} */
+
+/* Scans for completions and marks the pool FINISHED (terminal, not gave_up) once
+ * every copy is done. Called after this process marks its own slot and again by
+ * a respawn that finds its own slot already marked, so a terminal decision that
+ * the last completer was killed before making is recovered. A terminal that is
+ * already set is left alone: it can only be a gave_up from restart_max
+ * exhaustion, and a successful completion must not launder that. Returns the
+ * scanned count for the caller's log line. */
+static unsigned long fpm_pool_supervisor_one_shot_maybe_finish(
+		struct fpm_supervisor_shared_s *shared, unsigned long processes) /* {{{ */
+{
+	unsigned long done = fpm_pool_supervisor_one_shot_done_count(shared, processes);
+
+	if (done >= processes && !shared->terminal) {
+		shared->terminal = 1;
+		shared->gave_up = 0;
+		shared->failures = 0;
+	}
+	return done;
+}
+/* }}} */
+
 /* Backoff and the "should we try again?" decision, applied between subsequent
  * script executions in the SAME process and also by every fresh respawn after a
  * crash (because shared memory survives process death). */
@@ -1049,32 +1129,29 @@ static int fpm_pool_supervisor_apply_policy(struct fpm_worker_pool_s *wp,
 	if (!wants_retry) {
 		unsigned long processes = c->supervisor_processes > 0
 			? (unsigned long) c->supervisor_processes : 1;
+		unsigned long done;
 
 		/* Issue #347/#492: this copy is done; the pool is done only when every
 		 * copy is. The caller parks this process on a 1 return, so it stays
 		 * alive (no respawn, no second run). Record completion against THIS
-		 * process's scoreboard slot (the stable per-copy identity), and bump the
-		 * pool-wide total only when that slot flips from unrecorded to recorded
-		 * -- so a respawn of an already-completed copy cannot count twice and
-		 * terminal is still set exactly when the last copy finishes. A process
-		 * that cannot name its slot (slot < 0) falls back to the old pool-wide
-		 * increment; that is the only case where one_shot_done can over-count,
-		 * and it is unreachable for a normal supervisor child. */
+		 * process's scoreboard slot (the stable per-copy identity). The byte is
+		 * only ever 0 -> 1 by its single occupant, so the store is idempotent
+		 * and a respawn of an already-completed copy cannot count twice. A
+		 * process that cannot name its slot (slot < 0, no scoreboard -- not
+		 * reachable for a normal supervisor child) falls back to the defensive
+		 * pool-wide counter, which is the only place that scalar is touched.
+		 *
+		 * The pool-wide total and the terminal decision are then DERIVED from
+		 * the bytes, never from a read-modify-write counter: see
+		 * fpm_pool_supervisor_one_shot_maybe_finish(). */
 		if (slot >= 0 && (unsigned long) slot < processes) {
-			if (!shared->one_shot_done_by_slot[slot]) {
-				shared->one_shot_done_by_slot[slot] = 1;
-				shared->one_shot_done++;
-			}
+			shared->one_shot_done_by_slot[slot] = 1;
 		} else {
-			shared->one_shot_done++;
+			shared->one_shot_done_no_slot++;
 		}
+		done = fpm_pool_supervisor_one_shot_maybe_finish(shared, processes);
 		zlog(ZLOG_NOTICE, "[pool %s] supervisor: script finished (exit code %d), restart = %s -> not restarting (this copy is done: %lu of %lu)",
-			c->name, exit_code, c->supervisor_restart, shared->one_shot_done, processes);
-		if (shared->one_shot_done >= processes) {
-			shared->terminal = 1;
-			shared->gave_up = 0;
-			shared->failures = 0;
-		}
+			c->name, exit_code, c->supervisor_restart, done, processes);
 		return 1;
 	}
 
@@ -1280,9 +1357,17 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * respawned into the same scoreboard slot. Run nothing: park exactly like a
 	 * completed copy does, so restart = never / on-failure produce one
 	 * invocation per copy even across a process death. gave_up is 0 here (only a
-	 * planned completion marks a slot), so this is a normal FPM_EXIT_OK. */
+	 * planned completion marks a slot), so this is a normal FPM_EXIT_OK.
+	 *
+	 * Before parking, re-derive terminal from the bytes: if this was the last
+	 * copy and the process that completed it was killed after marking its slot
+	 * but before its own scan could set terminal, this respawn is what recovers
+	 * the pool-wide FINISHED state (see
+	 * fpm_pool_supervisor_one_shot_maybe_finish()). */
 	if (slot >= 0 && (unsigned long) slot < (unsigned long) (c->supervisor_processes > 0 ? c->supervisor_processes : 1)
 			&& shared->one_shot_done_by_slot[slot]) {
+		fpm_pool_supervisor_one_shot_maybe_finish(shared,
+			c->supervisor_processes > 0 ? (unsigned long) c->supervisor_processes : 1);
 		zlog(ZLOG_NOTICE, "[pool %s] supervisor: this copy (scoreboard slot %d) already finished its "
 			"one-shot; parking instead of running it again (issue #492)", c->name, slot);
 		fpm_pool_supervisor_park();

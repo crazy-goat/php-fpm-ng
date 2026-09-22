@@ -474,17 +474,28 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # everywhere and no SKIP change. 151 -> 153 total.
 #
 # The v0.10.0 release rehearsal (2026-09-22, ubuntu-latest, php-8.5.4) is the
-# first real gate run of the numbers derived since #388, and it moved exactly
-# one test: fpmng-http-route-http-direct-fail.phpt (#344) SKIPs instead of
-# PASSing. Its SKIPIF needs posix_kill(), and neither distribution's CLI has
-# ext/posix under the -n the suite runs every test with: Ubuntu ships posix.so
-# but loads it through ini, and Alpine ships no posix module at all (measured
-# in both images -- see the 138/15 line below). Before #388 the test skipped
-# for the retired http type anyway, so the #388 block above counted it as one
-# of the 33 that would start passing; it does not, and it is a statement about
-# the test rig rather than about the package. So every flavour carries one more
-# SKIP and one fewer PASS than derived: deb non-TLS 138/15, deb TLS 145/8, apk
-# non-TLS 136/17, apk TLS 142/11. Measured, not derived.
+# first real gate run of the numbers derived since #388, and it moved two
+# things.
+#
+# One is a single test on every flavour: fpmng-http-route-http-direct-fail.phpt
+# (#344) SKIPs instead of PASSing. Its SKIPIF needs posix_kill(), and neither
+# distribution's CLI has ext/posix under the -n the suite runs every test with:
+# Ubuntu ships posix.so but loads it through ini, and Alpine ships no posix
+# module at all (measured in both images). Before #388 the test skipped for the
+# retired http type anyway, so the #388 block above counted it as one of the 33
+# that would start passing; it does not, and the reason is the test rig, not
+# the package. Non-TLS rows: deb 138/15, apk 136/17 (both measured).
+#
+# The other is the TLS rows, which the #388 block derived wrong by more than
+# that one test. It added only 33 of the retired-http tests to them, but on a
+# package built with --enable-fpmng-tls --enable-fpmng-acme all 40 run -- the 7
+# TLS/ACME ones included -- so the derived 146/7 (deb) and 143/10 (apk) carry
+# far too many skips. Measured: deb TLS 152/1 (run 35696982966) and apk TLS
+# 149/4 (a local gate run of the same commit). The TLS skips that remain are
+# the posix test above plus, on apk only, the three that need an extension the
+# Alpine -n CLI does not load: fpmng-http-direct-session-status.phpt,
+# fpmng-http-direct-worker-buffered-streams.phpt and
+# fpmng-http-direct-worker-tls-and-client-tls.phpt.
 EXPECT_FAIL=0
 EXPECT_TOTAL=153
 
@@ -518,7 +529,7 @@ EXPECT_TOTAL=153
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=145; EXPECT_SKIP=8
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=152; EXPECT_SKIP=1
     else EXPECT_PASS=138; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
@@ -552,7 +563,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=142; EXPECT_SKIP=11
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=149; EXPECT_SKIP=4
     else EXPECT_PASS=136; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by

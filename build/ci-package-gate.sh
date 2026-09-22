@@ -73,8 +73,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # HTTP-transport tests plus the rest of the pool.type = http suite, which a
 # distribution libphp did not support (issue #214, issue #230's mechanism), and
 # the two Alpine-only session skips. With http retired none of that library
-# guard fires any more, so 14 (deb) and 16 (apk) skips are what remain on the
-# default packages.
+# guard fires any more, so 15 (deb) and 17 (apk) skips are what remain on the
+# default packages. One of them is not a pool-type skip at all:
+# fpmng-http-route-http-direct-fail.phpt needs posix_kill(), and neither
+# distribution's CLI has ext/posix under the -n the suite runs it with -- see
+# the v0.10.0 rehearsal note next to EXPECT_TOTAL below.
 #
 # It moved from 31 of 72 with the per-pool operator endpoint (issue #274), which
 # added four tests: three exercise cron, supervisor and http-direct pools and run
@@ -469,6 +472,19 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # invocation while its sibling is still running. They configure pool.type =
 # supervisor with no TLS/ACME directive, so both PASS on every flavour: +2 PASS
 # everywhere and no SKIP change. 151 -> 153 total.
+#
+# The v0.10.0 release rehearsal (2026-09-22, ubuntu-latest, php-8.5.4) is the
+# first real gate run of the numbers derived since #388, and it moved exactly
+# one test: fpmng-http-route-http-direct-fail.phpt (#344) SKIPs instead of
+# PASSing. Its SKIPIF needs posix_kill(), and neither distribution's CLI has
+# ext/posix under the -n the suite runs every test with: Ubuntu ships posix.so
+# but loads it through ini, and Alpine ships no posix module at all (measured
+# in both images -- see the 138/15 line below). Before #388 the test skipped
+# for the retired http type anyway, so the #388 block above counted it as one
+# of the 33 that would start passing; it does not, and it is a statement about
+# the test rig rather than about the package. So every flavour carries one more
+# SKIP and one fewer PASS than derived: deb non-TLS 138/15, deb TLS 145/8, apk
+# non-TLS 136/17, apk TLS 142/11. Measured, not derived.
 EXPECT_FAIL=0
 EXPECT_TOTAL=153
 
@@ -502,8 +518,8 @@ EXPECT_TOTAL=153
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=146; EXPECT_SKIP=7
-    else EXPECT_PASS=139; EXPECT_SKIP=14; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=145; EXPECT_SKIP=8
+    else EXPECT_PASS=138; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -536,8 +552,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=143; EXPECT_SKIP=10
-    else EXPECT_PASS=137; EXPECT_SKIP=16; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=142; EXPECT_SKIP=11
+    else EXPECT_PASS=136; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

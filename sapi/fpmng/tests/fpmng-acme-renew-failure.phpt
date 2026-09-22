@@ -11,6 +11,16 @@ if (!extension_loaded('openssl')) {
 if (!function_exists('openssl_csr_new')) {
     die('skip requires an OpenSSL build with CSR support');
 }
+/* The renewer runs INSIDE the pool, and the FPM binary is started with -n:
+ * on a distribution that ships openssl as a shared module (Alpine), only this
+ * CLI has it, loaded through TEST_PHP_ARGS, and the pool child does not --
+ * preflight() then refuses the ACME client inside the pool. Skip rather than
+ * assert on a build whose pool cannot reach a CA. Same probe shape as
+ * fpmng-http-direct-worker-buffered-streams.phpt. */
+exec(PHP_BINARY . ' -n -r ' . escapeshellarg('exit(extension_loaded("openssl") ? 0 : 1);'), $o, $st);
+if ($st !== 0) {
+    die('skip the -n CLI has no openssl (shared ext loaded via ini here), so the pool cannot run the ACME client');
+}
 ?>
 --FILE--
 <?php

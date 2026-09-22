@@ -491,11 +491,14 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # package built with --enable-fpmng-tls --enable-fpmng-acme all 40 run -- the 7
 # TLS/ACME ones included -- so the derived 146/7 (deb) and 143/10 (apk) carry
 # far too many skips. Measured: deb TLS 152/1 (run 35696982966) and apk TLS
-# 149/4 (a local gate run of the same commit). The TLS skips that remain are
-# the posix test above plus, on apk only, the three that need an extension the
-# Alpine -n CLI does not load: fpmng-http-direct-session-status.phpt,
-# fpmng-http-direct-worker-buffered-streams.phpt and
-# fpmng-http-direct-worker-tls-and-client-tls.phpt.
+# 147/6 (run 35701046526 plus issue #500's two in-pool ACME skips). The TLS
+# skips that remain are the posix test above plus, on apk only, the five that
+# need an extension the Alpine -n CLI or its -n FPM pool does not load:
+# fpmng-http-direct-session-status.phpt,
+# fpmng-http-direct-worker-buffered-streams.phpt,
+# fpmng-http-direct-worker-tls-and-client-tls.phpt and -- because the renewer
+# runs inside the pool and the pool child has no openssl either --
+# fpmng-acme-issue.phpt and fpmng-acme-renew-failure.phpt (issue #500).
 EXPECT_FAIL=0
 EXPECT_TOTAL=153
 
@@ -563,7 +566,7 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=149; EXPECT_SKIP=4
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=147; EXPECT_SKIP=6
     else EXPECT_PASS=136; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by

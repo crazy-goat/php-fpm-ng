@@ -319,6 +319,9 @@ static int supervisor_cleanup_registered = 0;
  * ambiguity to resolve in the first place. */
 static struct fpm_supervisor_shared_s *supervisor_current_shared = NULL;
 
+/* Shared by the child-side recycle check and the master-side startup warning. */
+static size_t fpm_pool_supervisor_memory_bytes(void);
+
 /* fpmng_supervisor_heartbeat() -- issue #327. A long-running supervisor script
  * that does not naturally return between units of work (the case the fast-run
  * warning above assumes is rare) has otherwise no way to distinguish "still
@@ -882,6 +885,36 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			">= %ds in [global] if SIGTERM/docker stop should give this pool time to finish its job",
 			wp->config->name, wp->config->supervisor_stop_timeout, fpm_global_config.process_control_timeout,
 			wp->config->supervisor_stop_timeout);
+	}
+
+	/* issue #350: a limit at or below what the MASTER already holds is not a
+	 * budget, it is a guaranteed recycle loop. A child forks from the master,
+	 * so it starts at roughly the master's resident set; if supervisor.max_memory
+	 * is at or below that, the very first iteration is over budget, every time,
+	 * forever: fork -> one script run -> recycle NOTICE -> exit, at full CPU.
+	 * fpm_children.c respawns unconditionally, so nothing throttles it.
+	 *
+	 * Warned here, at startup, rather than left to the FPM_SUPERVISOR_FAST_RUN_STREAK
+	 * warning in the child: that one needs 1000 runs and each run here includes a
+	 * fork plus a full php_request_startup(), so it fires far too late to be the
+	 * operator's first notice.
+	 *
+	 * A WARNING and not a rejection, deliberately: ru_maxrss is a high-water
+	 * mark, so the baseline below can overstate this master's steady-state RSS
+	 * (it never goes down, even after memory is freed) and a hard reject could
+	 * refuse a configuration that would have worked. The warning still reaches
+	 * the operator before the loop starts, which is the whole point. */
+	if (wp->config->supervisor_max_memory > 0) {
+		size_t baseline = fpm_pool_supervisor_memory_bytes();
+
+		if (baseline > 0 && wp->config->supervisor_max_memory <= baseline) {
+			zlog(ZLOG_WARNING,
+				"[pool %s] supervisor.max_memory = %zu bytes is at or below this master's own "
+				"resident set size at startup (%zu bytes); a child forks from the master and starts "
+				"at roughly that much, so every iteration will recycle and be respawned in a loop. "
+				"Set supervisor.max_memory well above %zu bytes, or remove it (issue #350)",
+				wp->config->name, wp->config->supervisor_max_memory, baseline, baseline);
+		}
 	}
 
 	entry = calloc(1, sizeof(*entry));

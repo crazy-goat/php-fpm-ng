@@ -460,7 +460,7 @@ static unsigned fpm_pool_cron_jitter_delay(const struct fpm_worker_pool_config_s
  * state and a design of its own that nobody has asked for yet; see
  * docs/cron.md. Format is fixed and grep-able, not configurable: ISO 8601
  * UTC start time, exit code, duration in whole seconds. */
-static void fpm_pool_cron_log_run(const char *path, time_t started, time_t ended, int exit_code) /* {{{ */
+static void fpm_pool_cron_log_run(const char *pool_name, const char *path, time_t started, time_t ended, int exit_code) /* {{{ */
 {
 	int fd;
 	struct tm tmv;
@@ -479,7 +479,7 @@ static void fpm_pool_cron_log_run(const char *path, time_t started, time_t ended
 
 	fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
 	if (fd < 0) {
-		zlog(ZLOG_WARNING, "cron.log: cannot open '%s' (%s)", path, strerror(errno));
+		zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot open '%s' (%s)", pool_name, path, strerror(errno));
 		return;
 	}
 
@@ -494,7 +494,7 @@ static void fpm_pool_cron_log_run(const char *path, time_t started, time_t ended
 				if (errno == EINTR) {
 					continue;
 				}
-				zlog(ZLOG_WARNING, "cron.log: write to '%s' failed (%s)", path, strerror(errno));
+				zlog(ZLOG_WARNING, "[pool %s] cron.log: write to '%s' failed (%s)", pool_name, path, strerror(errno));
 				break;
 			}
 			p += n;
@@ -595,7 +595,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	if (c->cron_log && *c->cron_log) {
-		fpm_pool_cron_log_run(c->cron_log, started, FPM_NOW(), exit_code);
+		fpm_pool_cron_log_run(c->name, c->cron_log, started, FPM_NOW(), exit_code);
 	}
 
 	/* exit_code != 0 must be visible at warning level, not debug — a single

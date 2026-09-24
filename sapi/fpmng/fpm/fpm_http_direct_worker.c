@@ -242,6 +242,7 @@ struct fpm_worker_watcher {
 /* issue #343: defined in the fpmng_worker_upgrade() block below; the dtor
  * above calls it, which is why the declaration exists. */
 static void fpm_ws_unregister_watcher(struct fpm_worker_watcher *watcher);
+static void fpm_ws_prepare_shutdown(bool log_failure);
 /* issue #343: fpmng_worker_upgrade() reuses these; both are defined further
  * down, after the pending table's own helpers. */
 static struct fpm_worker_pending *fpm_worker_pending_get(zend_long id);
@@ -309,6 +310,12 @@ static struct {
 	/* Replies handed to libevent whose bytes are not on the socket yet. Only
 	 * the shutdown path reads it; see fpm_worker_finish_output(). */
 	unsigned unflushed;
+	/* issue #461: upgraded WebSocket connections whose queued output still has
+	 * to reach the socket through fpm_ws_close_after_write(). Kept separate
+	 * from unflushed above: the latter counts ordinary HTTP replies and feeds
+	 * the abandoned-request metric, while these are already hijacked requests
+	 * whose handshake or close frame is on the wire path. */
+	unsigned ws_unflushed;
 	bool running;
 	/* True for the whole of fpm_worker_finish_output()'s teardown walk (issue
 	 * #444): that walk iterates fw.pending un-snapshotted, so a close callback
@@ -986,6 +993,8 @@ static void fpm_worker_finish_output(void)
 	unsigned streams_ended = 0;
 	struct event *deadline;
 	struct timeval budget = {FPM_WORKER_FLUSH_BUDGET, 0};
+	bool report_exception = EG(exit_status) != 0;
+	bool unexpected_exit = !fpm_worker_stopping || report_exception;
 
 	/* No new connection may join the set we are about to answer. A request
 	 * arriving on an already-open keep-alive connection still can, and
@@ -995,6 +1004,14 @@ static void fpm_worker_finish_output(void)
 		fw.listener = NULL;
 	}
 	fpm_worker_stopping = 1;
+	/* An uncaught userland error can leave an upgraded stream retained in
+	 * fpm_ws_all. Its request was reaped at the hijack, so this abnormal-exit
+	 * path is the last place to name it and give its queued 101 a flush. A
+	 * status-zero unexpected return gets the same transport cleanup, but the
+	 * generic script-returned warning -- not this exception-specific log. */
+	if (unexpected_exit) {
+		fpm_ws_prepare_shutdown(report_exception);
+	}
 
 	ZEND_HASH_FOREACH_PTR(&fw.pending, p) {
 		if (!p->http) {
@@ -1047,7 +1064,7 @@ static void fpm_worker_finish_output(void)
 			"clients can reconnect (issue #342)",
 			fw.wp->config->name, streams_ended);
 	}
-	if (!fw.unflushed) {
+	if (!fw.unflushed && !fw.ws_unflushed) {
 		return;
 	}
 	fpm_worker_flush_expired = false;
@@ -1056,7 +1073,7 @@ static void fpm_worker_finish_output(void)
 		/* EVLOOP_ONCE blocks, so the deadline timer is what guarantees this
 		 * returns; a non-zero result means libevent has nothing left to wait
 		 * on, which for our purposes is also "done". */
-		while (fw.unflushed && !fpm_worker_flush_expired &&
+		while ((fw.unflushed || fw.ws_unflushed) && !fpm_worker_flush_expired &&
 			event_base_loop(fw.base, EVLOOP_ONCE) == 0) {
 		}
 	}
@@ -1072,6 +1089,11 @@ static void fpm_worker_finish_output(void)
 		 * but it never reached the wire, which from the client's side is
 		 * indistinguishable from never having been answered at all. */
 		fpm_http_direct_ops_worker_abandoned(fw.ops, fw.unflushed);
+	}
+	if (fw.ws_unflushed) {
+		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u upgraded WebSocket connection(s) still had "
+			"queued output after %d s; those connections are closed without a complete final payload",
+			fw.wp->config->name, fw.ws_unflushed, FPM_WORKER_FLUSH_BUDGET);
 	}
 }
 
@@ -1585,7 +1607,14 @@ static void fpm_worker_register_variables(zval *array)
 struct fpm_ws_ctx {
 	struct bufferevent *bev;
 	php_stream *stream;
+	/* The pending request is reaped at the hijack and evhttp frees its request
+	 * before a retained stream closes. Keep a copy of the identity needed to
+	 * name that request when userland unwinds before the 101 can flush (#461). */
+	zend_ulong request_id;
+	char *request_uri;
 	bool eof;			/* the event callback saw BEV_EVENT_EOF or BEV_EVENT_ERROR */
+	bool close_after_write;		/* the close tail is counted in fw.ws_unflushed */
+	bool failure_logged;		/* the failed-upgrade warning was emitted */
 	bool orphaned;		/* teardown: the bufferevent was (or is being) freed by evhttp_free() */
 	/* watcher ids bound to this connection, fired by the bufferevent
 	 * callbacks; ids only -- the table re-lookup and the ->ws check happen at
@@ -1779,6 +1808,44 @@ static ssize_t fpm_ws_write(php_stream *stream, const char *buf, size_t count)
 static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *arg);
 static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg);
 
+static void fpm_ws_log_failed_upgrade(struct fpm_ws_ctx *ctx, int ws_fd, size_t queued)
+{
+	if (ctx->failure_logged) {
+		return;
+	}
+	ctx->failure_logged = true;
+	zlog(ZLOG_WARNING, "[pool %s] http-direct worker: fpmng_worker_upgrade() request id=%lu "
+		"method=GET uri=%s was followed by a userland exception; outcome=%s queued_bytes=%zu",
+		fw.wp->config->name, (unsigned long) ctx->request_id,
+		ctx->request_uri ? ctx->request_uri : "(unknown)",
+		ws_fd >= 0 && queued > 0 ? "close_after_write" : "close", queued);
+}
+
+static void fpm_ws_start_close_after_write(struct fpm_ws_ctx *ctx)
+{
+	if (ctx->close_after_write) {
+		return;
+	}
+	ctx->close_after_write = true;
+	fw.ws_unflushed++;
+	bufferevent_setcb(ctx->bev, NULL, fpm_ws_close_after_write_cb, fpm_ws_close_after_write, ctx->bev);
+	bufferevent_enable(ctx->bev, EV_WRITE);
+}
+
+static void fpm_ws_shutdown_now(struct fpm_ws_ctx *ctx)
+{
+	int ws_fd = (int) bufferevent_getfd(ctx->bev);
+
+	/* Disarm before shutdown: the context may be freed immediately after this
+	 * helper returns, while evhttp still owns the bufferevent. */
+	bufferevent_setcb(ctx->bev, NULL, NULL, NULL, NULL);
+	bufferevent_disable(ctx->bev, EV_READ | EV_WRITE);
+	if (ws_fd >= 0) {
+		shutdown(ws_fd, SHUT_RDWR);
+	}
+	ctx->eof = true;
+}
+
 static int fpm_ws_close(php_stream *stream, int close_handle)
 {
 	struct fpm_ws_ctx *ctx = stream->abstract;
@@ -1818,27 +1885,28 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 	 * the wire -- the last thing this connection ever does. */
 	if (!ctx->orphaned) {
 		int ws_fd = (int) bufferevent_getfd(ctx->bev);
+		size_t queued = evbuffer_get_length(bufferevent_get_output(ctx->bev));
 
-		if (ws_fd >= 0 && evbuffer_get_length(bufferevent_get_output(ctx->bev)) > 0) {
-			bufferevent_setcb(ctx->bev, NULL, fpm_ws_close_after_write_cb, fpm_ws_close_after_write, ctx->bev);
-			bufferevent_enable(ctx->bev, EV_WRITE);
-		} else {
-			/* Disarm BEFORE the shutdown(): the ctx is efree()d below while
-			 * the bev stays evhttp's and enabled, and shutdown() makes the
-			 * fd readable (EOF pending) -- on the very next loop dispatch
-			 * fpm_ws_eventcb() would run with this ctx as its argument, on
-			 * freed heap (issue #442: confirmed worker SIGSEGV, respawn).
-			 * The buffer is empty here, so disabling EV_WRITE strands
-			 * nothing. Covers ws_fd < 0 too: no fd to shut down, the same
-			 * armed callbacks on a still-live bev. */
-			bufferevent_setcb(ctx->bev, NULL, NULL, NULL, NULL);
-			bufferevent_disable(ctx->bev, EV_READ | EV_WRITE);
-			if (ws_fd >= 0) {
-				shutdown(ws_fd, SHUT_RDWR);
+		/* An uncaught userland throw destroys its local stream here, before
+		 * child_main() can run its generic fatal path. The pending entry was
+		 * reaped at the hijack, so this is the last place that can name the
+		 * request and the close outcome instead of leaving both silent (#461). */
+		if (EG(exception)) {
+			fpm_ws_log_failed_upgrade(ctx, ws_fd, queued);
+		}
+		if (!ctx->close_after_write) {
+			if (ws_fd >= 0 && queued > 0) {
+				/* fpm_worker_finish_output() must drive the base until this tail
+				 * drains. Without the separate counter, evhttp_free() would discard
+				 * the queued 101 as soon as an exception stopped worker execution. */
+				fpm_ws_start_close_after_write(ctx);
+			} else {
+				fpm_ws_shutdown_now(ctx);
 			}
 		}
 		ctx->eof = true;
 	}
+	efree(ctx->request_uri);
 	efree(ctx->watchers);
 	efree(ctx);
 	return 0;
@@ -1850,21 +1918,69 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
 static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *arg)
 {
 	int ws_fd;
+	size_t queued;
 
 	(void) arg;
-	if (!(what & (BEV_EVENT_EOF | BEV_EVENT_ERROR))
-		&& evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
-		return;	/* still writing; the write callback fires again */
+	queued = evbuffer_get_length(bufferevent_get_output(bev));
+	if (queued > 0) {
+		if (what & BEV_EVENT_EOF) {
+			/* EOF is the read side: a client that half-closes its writer can
+			 * still receive the queued 101 or close frame. Stop reading, but
+			 * leave EV_WRITE armed until the output is actually on the wire. */
+			bufferevent_disable(bev, EV_READ);
+		}
+		if (!(what & BEV_EVENT_ERROR)) {
+			return;	/* still writing; the write callback fires again */
+		}
 	}
+	/* Both the event and write callback can report the same final transition.
+	 * Disarm before shutdown so the count is settled once and a later EOF made
+	 * readable by shutdown() cannot deliver this tail through a stale callback. */
+	bufferevent_setcb(bev, NULL, NULL, NULL, NULL);
+	bufferevent_disable(bev, EV_READ | EV_WRITE);
 	ws_fd = (int) bufferevent_getfd(bev);
 	if (ws_fd >= 0) {
 		shutdown(ws_fd, SHUT_RDWR);
+	}
+	if (fw.ws_unflushed) {
+		fw.ws_unflushed--;
 	}
 }
 
 static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg)
 {
 	fpm_ws_close_after_write(bev, 0, arg);
+}
+
+/* A retained upgraded stream does not run fpm_ws_close() when userland
+ * unwinds. On an abnormal worker exit, visit those contexts before evhttp_free()
+ * so the same bounded close-after-write path covers both local and retained
+ * streams (#461). */
+static void fpm_ws_prepare_shutdown(bool log_failure)
+{
+	struct fpm_ws_ctx *ctx;
+
+	for (ctx = fpm_ws_all; ctx; ctx = ctx->next) {
+		int ws_fd;
+		size_t queued;
+
+		if (ctx->orphaned) {
+			continue;
+		}
+		ws_fd = (int) bufferevent_getfd(ctx->bev);
+		queued = evbuffer_get_length(bufferevent_get_output(ctx->bev));
+		if (log_failure) {
+			fpm_ws_log_failed_upgrade(ctx, ws_fd, queued);
+		}
+		if (ctx->close_after_write) {
+			continue;
+		}
+		if (ws_fd >= 0 && queued > 0) {
+			fpm_ws_start_close_after_write(ctx);
+		} else {
+			fpm_ws_shutdown_now(ctx);
+		}
+	}
 }
 
 static int fpm_ws_cast(php_stream *stream, int castas, void **ret)
@@ -2222,6 +2338,8 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 		RETURN_FALSE;
 	}
 	ctx->bev = bev;
+	ctx->request_id = p->id;
+	ctx->request_uri = estrdup(evhttp_request_get_uri(p->http));
 
 	/* Everything that can fail now happens BEFORE any of evhttp's callbacks
 	 * are replaced: a failure path below leaves the connection exactly as the
@@ -2230,6 +2348,7 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 	stream = php_stream_alloc(&fpm_ws_ops, ctx, 0, "r+b");
 	if (!stream) {
 		smart_str_free(&head);
+		efree(ctx->request_uri);
 		efree(ctx);
 		RETURN_FALSE;
 	}

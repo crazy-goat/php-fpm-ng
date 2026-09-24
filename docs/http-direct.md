@@ -764,6 +764,12 @@ Semantics worth knowing:
   `pm.max_requests` like any answered request. `http.read_timeout` no longer
   applies to it either (the bufferevent timeout is cleared at the hijack) —
   liveness is the codec's ping/pong.
+- **A successful upgrade is the point of no return for HTTP error reporting.**
+  If userland unwinds before the queued 101 or a close frame reaches the wire,
+  the transport gives that output one bounded shutdown flush and then closes
+  the connection. The warning names the request id, method, URI and selected
+  close outcome; the transport does not send a second HTTP status or synthesize
+  a WebSocket close frame after the hijack (issue #461).
 - **Framing is userland.** Masking, fragmentation, ping/pong, close codes are
   RFC 6455 byte manipulation, done by `amphp/websocket-server`,
   `ratchet/rfc6455` or a codec of your own (`examples/http-direct-worker-ws/`

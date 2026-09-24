@@ -24,6 +24,7 @@ through the normal PHP shutdown path.
 | pool type | pool-level limit | global limit on `docker stop` | hard cap (pool type) |
 |---|---|---|---|
 | `fastcgi`, `http` | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
+| `http-direct` with `pool.executor = worker` | none for the booted worker script; `worker.request_timeout` only bounds individual unanswered requests | reload sends SIGQUIT as a cooperative stop request; after `process_control_timeout` the master sends SIGTERM, then SIGKILL 1s later if still alive. Master termination sends SIGTERM immediately, then SIGKILL after `process_control_timeout` | global `process_control_timeout`; no worker-specific grace |
 | `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
 | `cron` | `cron.timeout` (default 0 = no limit on a running script) — the master sends `cron.stop_signal` (default `SIGTERM`, issue #325) to the child first | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
 | `status` | none (no PHP work to finish) | `process_control_timeout` only | none |
@@ -31,6 +32,19 @@ through the normal PHP shutdown path.
 `process_control_timeout` is a **`[global]`** directive. It applies to every
 pool in the file. `supervisor.stop_timeout`, `cron.timeout`, and
 `request_terminate_timeout` are **per-pool**.
+
+For `pool.executor = worker`, `fpmng_worker_stopping()` is a notification to the
+booted PHP script, not an interrupt: the bridge must check it and wind down its
+event loop. `fpmng_worker_may_exit()` also waits until the SAPI has no pending
+replies, but neither function makes userland code check itself. If a script
+ignores the notification, reload remains bounded by the master: SIGQUIT is
+followed by SIGTERM after `process_control_timeout`; if the worker is still
+alive, the master's final SIGKILL follows one second later. A master termination
+starts with SIGTERM and escalates to SIGKILL after `process_control_timeout`.
+The worker executor adds no separate script-level timeout;
+`worker.request_timeout` only applies to individual unanswered requests. A
+script can install its own SIGTERM handler, so the final master SIGKILL is the
+hard bound.
 
 `supervisor.max_runtime` (issue #326; see
 [`supervisor.md`](supervisor.md#supervisormax_runtime-a-cap-on-a-single-iteration-issue-326))

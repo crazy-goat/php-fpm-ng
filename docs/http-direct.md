@@ -426,6 +426,19 @@ close it for `pool.type = supervisor` — see `docs/supervisor.md`.
   has no per-request state isolation, so cutting a worker off mid-flight would
   lose whatever it was holding — exactly the outcome `worker.request_timeout`
   and `worker.max_pending`'s own drains already avoid.
+
+**The stop request is cooperative.** The master signals the worker (SIGQUIT on
+reload); `fpmng_worker_stopping()` / `fpmng_worker_may_exit()` let the booted
+script's event-loop driver notice and drain. They do not preempt PHP code. A
+script that never checks them can keep running until the master escalation:
+reload sends SIGTERM after the global `process_control_timeout`, then SIGKILL
+one second later if necessary. SIGTERM is normally the worker's immediate
+termination action; a script can install a handler, so the final SIGKILL is the
+hard bound. Master termination starts with SIGTERM and escalates to SIGKILL
+after `process_control_timeout`. This is bounded by the existing global policy,
+not by a worker-specific timer; `worker.request_timeout` applies to unanswered
+requests and does not bound the worker script itself. See
+[`shutdown-timeouts.md`](shutdown-timeouts.md#directives-by-pool-type).
 - **Only valid under `pool.executor = worker`,** rejected everywhere else the
   same way `worker.max_pending` is.
 - **Example:**

@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: fpmng_worker_upgrade() over TLS — the SSL bufferevent is hijacked whole, the stream speaks plaintext to the codec (issue #343)
+fpm-ng: fpmng_worker_upgrade() over TLS hijacks the whole SSL bufferevent and every server close sends close_notify (issues #343, #458)
 --SKIPIF--
 <?php
 include "skipif.inc";
@@ -137,7 +137,24 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
                     }
                     $data .= $chunk;
                 }
+                if ($data === '' && feof($ws)) {
+                    fclose($ws);
+                    $ws = null;
+                    return;
+                }
                 foreach (wsDecode($data) as $frame) {
+                    if ($frame['op'] === 0x8) {
+                        fwrite($ws, wsEncode(pack('n', 1000), 0x8));
+                        fclose($ws);
+                        $ws = null;
+                        return;
+                    }
+                    if (($frame['op'] === 0x1 || $frame['op'] === 0x2)
+                        && $frame['data'] === 'idle') {
+                        fclose($ws);
+                        $ws = null;
+                        return;
+                    }
                     if ($frame['op'] === 0x1 || $frame['op'] === 0x2) {
                         fwrite($ws, wsEncode('tls:' . $frame['data'], $frame['op']));
                     }
@@ -145,7 +162,7 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
             });
             fpmng_worker_event_enable($wsWatcher);
         } else {
-            fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], 'tls-hello');
+            fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], (string) getmypid());
         }
     }
 });
@@ -155,6 +172,132 @@ while (!fpmng_worker_may_exit() || $ws !== null) {
     fpmng_worker_loop(true);
 }
 PHP);
+
+function wsClientFrame(string $payload, int $op = 0x1): string
+{
+    $len = strlen($payload);
+    $mask = '1234';
+    $masked = '';
+    for ($i = 0; $i < $len; $i++) {
+        $masked .= $payload[$i] ^ $mask[$i % 4];
+    }
+    return chr($op | 0x80) . chr(0x80 | $len) . $mask . $masked;
+}
+
+function startSClient(int $port): array
+{
+    $process = proc_open(
+        ['openssl', 's_client', '-connect', "127.0.0.1:$port", '-quiet', '-msg'],
+        [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
+        $pipes
+    );
+    check(is_resource($process), 'could not start openssl s_client');
+    stream_set_blocking($pipes[1], false);
+    stream_set_blocking($pipes[2], false);
+    return [$process, $pipes[0], $pipes[1], $pipes[2]];
+}
+
+function drainUntil($pipe, string $needle, float $seconds, string &$buffer): bool
+{
+    $deadline = microtime(true) + $seconds;
+    while (microtime(true) < $deadline && !str_contains($buffer, $needle)) {
+        $read = [$pipe];
+        $write = null;
+        $except = null;
+        if (stream_select($read, $write, $except, 0, 100000) > 0) {
+            $chunk = fread($pipe, 65536);
+            if ($chunk === false || $chunk === '') {
+                break;
+            }
+            $buffer .= $chunk;
+        }
+    }
+    return str_contains($buffer, $needle);
+}
+
+function waitForCloseNotify(
+    $process,
+    $stdin,
+    $stdout,
+    $stderr,
+    string $outBuffer,
+    float $seconds = 6
+): array {
+    $errBuffer = '';
+    $deadline = microtime(true) + $seconds;
+    $pattern = '/<<<[^\r\n]*Alert[^\r\n]*close_notify/i';
+    while (microtime(true) < $deadline && !preg_match($pattern, $outBuffer . $errBuffer)) {
+        $read = [$stdout, $stderr];
+        $write = null;
+        $except = null;
+        $ready = @stream_select($read, $write, $except, 0, 100000);
+        if ($ready === false) {
+            break;
+        }
+        if ($ready === 0) {
+            continue;
+        }
+        foreach ($read as $pipe) {
+            $chunk = fread($pipe, 65536);
+            if ($chunk === false || $chunk === '') {
+                continue;
+            }
+            if ($pipe === $stdout) {
+                $outBuffer .= $chunk;
+            } else {
+                $errBuffer .= $chunk;
+            }
+        }
+    }
+    fclose($stdin);
+    for ($i = 0; $i < 20; $i++) {
+        $status = proc_get_status($process);
+        if (!$status['running']) {
+            break;
+        }
+        usleep(50000);
+    }
+    $status = proc_get_status($process);
+    if ($status['running']) {
+        proc_terminate($process);
+    }
+    proc_close($process);
+    return [$outBuffer, $errBuffer];
+}
+
+function assertCleanServerClose(string $label, string $out, string $err): void
+{
+    check((bool) preg_match('/<<<[^\r\n]*Alert[^\r\n]*close_notify/i', $out . $err),
+        "$label: no TLS close_notify from server\nstdout: " . var_export($out, true)
+        . "\nstderr: " . var_export($err, true));
+    check(!preg_match('/unexpected eof while reading|decode_error/i', $out . $err),
+        "$label: TLS close was still a truncated record\nstdout: " . var_export($out, true)
+        . "\nstderr: " . var_export($err, true));
+}
+
+function reserveLocalPort(): int
+{
+    $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+    check((bool) $server, "reserve control port: $error");
+    $name = stream_socket_get_name($server, false);
+    fclose($server);
+    return (int) substr($name, strrpos($name, ':') + 1);
+}
+
+function tlsGet(int $port, string $path): string
+{
+    $client = @stream_socket_client("ssl://127.0.0.1:$port", $errno, $error, 5,
+        STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => [
+            'verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => false,
+        ]]));
+    check((bool) $client, "TLS GET $path: $error");
+    stream_set_timeout($client, 5);
+    fwrite($client, "GET $path HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    $response = (string) stream_get_contents($client);
+    fclose($client);
+    $headerEnd = strpos($response, "\r\n\r\n");
+    return $headerEnd === false ? '' : substr($response, $headerEnd + 4);
+}
 
 $port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_TLS_PORT') ?: 28145);
 $config = <<<CFG
@@ -179,45 +322,109 @@ php_admin_value[display_errors] = 0
 CFG;
 
 $tester = new FPM\Tester($config, '<?php echo "unused";');
+$controlServer = null;
+$controlPipes = [];
+$fpmStarted = false;
 try {
+    /* Positive control for the detector. openssl s_server performs a normal
+     * TLS shutdown after its one HTTP response, so s_client -msg must show a
+     * RECEIVED close_notify. Without this, a detector that silently stopped
+     * reading diagnostics would make every negative assertion meaningless. */
+    $controlPort = reserveLocalPort();
+    $controlServer = proc_open([
+        'openssl', 's_server', '-accept', (string) $controlPort, '-naccept', '1', '-www',
+        '-cert', "$root/cert.pem", '-key', "$root/key.pem", '-quiet',
+    ], [['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']], $controlPipes);
+    check(is_resource($controlServer), 'could not start openssl s_server control');
+    usleep(200000);
+    [$controlClient, $controlIn, $controlOut, $controlErr] = startSClient($controlPort);
+    fwrite($controlIn, "GET / HTTP/1.1\r\nHost: control\r\nConnection: close\r\n\r\n");
+    $controlStdout = '';
+    drainUntil($controlOut, '</html>', 6, $controlStdout);
+    [$controlStdout, $controlStderr] = waitForCloseNotify(
+        $controlClient, $controlIn, $controlOut, $controlErr, $controlStdout
+    );
+    assertCleanServerClose('positive control', $controlStdout, $controlStderr);
+    echo "close-notify-detector-control: ok\n";
+    foreach ($controlPipes as $pipe) {
+        if (is_resource($pipe)) {
+            fclose($pipe);
+        }
+    }
+    proc_close($controlServer);
+    $controlServer = null;
+
     $tester->start();
+    $fpmStarted = true;
     $tester->expectLogStartNotices();
 
-    $client = @stream_socket_client("ssl://127.0.0.1:$port", $errno, $errstr, 5,
-        STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => [
-            'verify_peer' => false, 'verify_peer_name' => false, 'SNI_enabled' => false,
-        ]]));
-    check($client !== false, "TLS connect: $errstr");
-    stream_set_timeout($client, 10);
-
     $key = 'dGhlIHNhbXBsZSBub25jZQ==';
-    fwrite($client, "GET /ws HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-        . "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n");
-    $line = fgets($client);
-    check($line && str_starts_with($line, 'HTTP/1.1 101'), '101 over TLS: ' . var_export($line, true));
-    while (($line = fgets($client)) !== false && $line !== "\r\n");
+    $handshake = "GET %s HTTP/1.1\r\nHost: t\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+        . "Sec-WebSocket-Key: $key\r\nSec-WebSocket-Version: 13\r\n\r\n";
+
+    /* One connection proves the existing byte pipe, then drives the issue's
+     * first close path: a userland close frame gets its 1000 reply queued and
+     * fclose() runs before that reply reaches the socket. */
+    [$process, $stdin, $stdoutPipe, $stderrPipe] = startSClient($port);
+    $stdout = '';
+    fwrite($stdin, sprintf($handshake, '/ws-close'));
+    check(drainUntil($stdoutPipe, "\r\n\r\n", 6, $stdout), 'close frame: no 101');
+    check(str_contains($stdout, 'HTTP/1.1 101 Switching Protocols'), 'close frame: bad status');
     echo "upgrade-over-tls: ok\n";
-
-    /* A masked client frame, echoed plaintextly through the SSL bufferevent. */
-    $payload = 'over tls';
-    $mask = 'abcd';
-    $masked = '';
-    for ($i = 0; $i < strlen($payload); $i++) {
-        $masked .= $payload[$i] ^ $mask[$i % 4];
-    }
-    fwrite($client, chr(0x81) . chr(0x80 | strlen($payload)) . $mask . $masked);
-    $head = fread($client, 2);
-    check(strlen((string) $head) === 2 && (ord($head[0]) & 0x0f) === 0x1, 'expected a text frame back');
-    $len = ord($head[1]) & 0x7f;
-    $body = $len ? fread($client, $len) : '';
-    check($body === 'tls:over tls', "tls echo: " . var_export($body, true));
+    fwrite($stdin, wsClientFrame('over tls'));
+    check(drainUntil($stdoutPipe, 'tls:over tls', 6, $stdout), 'no TLS frame echo');
     echo "frames-over-tls: ok\n";
+    fwrite($stdin, wsClientFrame('', 0x8));
+    [$stdout, $stderr] = waitForCloseNotify($process, $stdin, $stdoutPipe, $stderrPipe, $stdout);
+    check(str_contains($stdout, "\x88\x02\x03\xe8"), 'close frame: no 1000 reply');
+    assertCleanServerClose('close frame', $stdout, $stderr);
+    echo "close-frame-tls-notify: ok\n";
 
-    fclose($client);
+    /* Empty-output close: the 101 has drained, userland says close without a
+     * frame, and fpm_ws_shutdown_now() must still perform TLS shutdown. */
+    [$process, $stdin, $stdoutPipe, $stderrPipe] = startSClient($port);
+    $stdout = '';
+    fwrite($stdin, sprintf($handshake, '/ws-idle'));
+    check(drainUntil($stdoutPipe, "\r\n\r\n", 6, $stdout), 'idle close: no 101');
+    check(str_contains($stdout, 'HTTP/1.1 101 Switching Protocols'), 'idle close: bad status');
+    fwrite($stdin, wsClientFrame('idle'));
+    [$stdout, $stderr] = waitForCloseNotify($process, $stdin, $stdoutPipe, $stderrPipe, $stdout);
+    assertCleanServerClose('idle close', $stdout, $stderr);
+    echo "idle-close-tls-notify: ok\n";
+
+    /* Retirement uses the same close-after-write tail, but the queued payload is
+     * the userland codec's 1001 frame rather than a close-handshake reply. */
+    $pidRaw = tlsGet($port, '/pid');
+    check(preg_match('/^\d+$/D', $pidRaw) === 1, 'pid probe: ' . var_export($pidRaw, true));
+    $pid = (int) $pidRaw;
+    [$process, $stdin, $stdoutPipe, $stderrPipe] = startSClient($port);
+    $stdout = '';
+    fwrite($stdin, sprintf($handshake, '/ws-retire'));
+    check(drainUntil($stdoutPipe, "\r\n\r\n", 6, $stdout), 'retire: no 101');
+    check(str_contains($stdout, 'HTTP/1.1 101 Switching Protocols'), 'retire: bad status');
+    $tester->signal('USR1', $pid);
+    [$stdout, $stderr] = waitForCloseNotify($process, $stdin, $stdoutPipe, $stderrPipe, $stdout);
+    check(str_contains($stdout, "\x88\x02\x03\xe9"), 'retire: no 1001 reply');
+    assertCleanServerClose('retire', $stdout, $stderr);
+    echo "retire-tls-notify: ok\n";
 } finally {
-    $tester->terminate();
-    $tester->expectLogTerminatingNotices();
-    $tester->close();
+    if ($fpmStarted) {
+        $tester->terminate();
+        $tester->expectLogTerminatingNotices();
+        $tester->close();
+    }
+    if (is_resource($controlServer)) {
+        $status = proc_get_status($controlServer);
+        if ($status['running']) {
+            proc_terminate($controlServer);
+        }
+        foreach ($controlPipes as $pipe) {
+            if (is_resource($pipe)) {
+                fclose($pipe);
+            }
+        }
+        proc_close($controlServer);
+    }
     @unlink("$root/worker.php");
     @unlink("$root/cert.pem");
     @unlink("$root/key.pem");
@@ -226,8 +433,12 @@ try {
 echo "Done\n";
 ?>
 --EXPECT--
+close-notify-detector-control: ok
 upgrade-over-tls: ok
 frames-over-tls: ok
+close-frame-tls-notify: ok
+idle-close-tls-notify: ok
+retire-tls-notify: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

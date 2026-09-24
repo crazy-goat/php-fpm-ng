@@ -740,8 +740,12 @@ The returned resource is a normal stream: `fread()`, `fwrite()`, `fclose()`,
 `feof()` work, and so do the existing primitives with no new API —
 `fpmng_worker_event_create(FPMNG_WORKER_READ|WRITE, $stream, $cb)` for
 readiness, `fpmng_worker_stream_has_buffered()` for the already-buffered case.
-`fclose()` tears the connection down (fd, and the `SSL*` on TLS), and the
-worker's own retirement closes it the same way.
+`fclose()` tears the connection down, and the worker's own retirement closes it
+the same way. Queued plaintext drains first. On TLS, the transport then performs
+a nonblocking `SSL_shutdown()` and sends `close_notify` before half-closing the
+socket; a partial nonblocking alert is retried on the same event loop and falls
+back to the existing bounded shutdown if the peer stops making progress (issue
+#458). The `SSL*` remains owned by evhttp and is freed with the connection.
 
 Semantics worth knowing:
 

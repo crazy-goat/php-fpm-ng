@@ -94,6 +94,13 @@ void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
 	(void) bev;
 }
 
+int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_events)
+{
+	(void) bev;
+	*poll_events = 0;
+	return FPM_HTTP_DIRECT_TLS_SHUTDOWN_NOT_APPLICABLE;
+}
+
 int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 {
 	(void) wp;

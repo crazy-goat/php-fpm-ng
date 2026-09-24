@@ -100,6 +100,16 @@ int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_
 
 ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events);
 
+/* Issue #458. The executor owns the bounded event-loop wait; the TLS layer owns
+ * the OpenSSL step. These values mirror fpm_tls_http.h's shutdown results so
+ * the executor carries no OpenSSL types or #ifdef. */
+#define FPM_HTTP_DIRECT_TLS_SHUTDOWN_NOT_APPLICABLE 0
+#define FPM_HTTP_DIRECT_TLS_SHUTDOWN_PENDING 1
+#define FPM_HTTP_DIRECT_TLS_SHUTDOWN_SENT 2
+#define FPM_HTTP_DIRECT_TLS_SHUTDOWN_FAILED 3
+
+int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_events);
+
 /* Issue #195. Tells libevent that a response written by fpm_http_direct_tls_write()
  * has left the buffer, which is what makes evhttp finish the request. Call it
  * only with the response complete AND the output buffer empty; per write, or

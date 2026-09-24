@@ -984,6 +984,34 @@ ev_ssize_t fpm_tls_http_write_output(struct bufferevent *bev, short *poll_events
 	return written;
 }
 
+int fpm_tls_http_shutdown_step(struct bufferevent *bev, short *poll_events)
+{
+	SSL *ssl = bufferevent_openssl_get_ssl(bev);
+	int ret, err;
+
+	*poll_events = 0;
+	if (!ssl) {
+		return FPM_TLS_HTTP_SHUTDOWN_NOT_APPLICABLE;
+	}
+	/* SSL_get_error() is meaningful only against the current operation's error
+	 * queue. The queue can still contain entries from an earlier nonblocking
+	 * attempt or from the connection's handshake. */
+	ERR_clear_error();
+	ret = SSL_shutdown(ssl);
+	if (ret >= 0) {
+		/* A first unidirectional shutdown normally returns 0: our close_notify
+		 * is sent, and waiting for the peer's alert is deliberately not part
+		 * of closing our side. */
+		return FPM_TLS_HTTP_SHUTDOWN_SENT;
+	}
+	err = SSL_get_error(ssl, ret);
+	if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
+		*poll_events = err == SSL_ERROR_WANT_READ ? EV_READ : EV_WRITE;
+		return FPM_TLS_HTTP_SHUTDOWN_PENDING;
+	}
+	return FPM_TLS_HTTP_SHUTDOWN_FAILED;
+}
+
 struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg)
 {
 	SSL_CTX *ctx = arg;

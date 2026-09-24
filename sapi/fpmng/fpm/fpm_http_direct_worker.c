@@ -243,6 +243,8 @@ struct fpm_worker_watcher {
  * above calls it, which is why the declaration exists. */
 static void fpm_ws_unregister_watcher(struct fpm_worker_watcher *watcher);
 static void fpm_ws_prepare_shutdown(bool log_failure);
+static void fpm_ws_finish_close(struct bufferevent *bev, bool counted, bool transport_error);
+static void fpm_ws_tls_close_abort_all(void);
 /* issue #343: fpmng_worker_upgrade() reuses these; both are defined further
  * down, after the pending table's own helpers. */
 static struct fpm_worker_pending *fpm_worker_pending_get(zend_long id);
@@ -310,8 +312,8 @@ static struct {
 	/* Replies handed to libevent whose bytes are not on the socket yet. Only
 	 * the shutdown path reads it; see fpm_worker_finish_output(). */
 	unsigned unflushed;
-	/* issue #461: upgraded WebSocket connections whose queued output still has
-	 * to reach the socket through fpm_ws_close_after_write(). Kept separate
+	/* issue #461/#458: upgraded WebSocket connections whose queued output or
+	 * nonblocking TLS close_notify still has to reach the socket. Kept separate
 	 * from unflushed above: the latter counts ordinary HTTP replies and feeds
 	 * the abandoned-request metric, while these are already hijacked requests
 	 * whose handshake or close frame is on the wire path. */
@@ -1092,7 +1094,8 @@ static void fpm_worker_finish_output(void)
 	}
 	if (fw.ws_unflushed) {
 		zlog(ZLOG_WARNING, "[pool %s] http-direct worker: %u upgraded WebSocket connection(s) still had "
-			"queued output after %d s; those connections are closed without a complete final payload",
+			"queued output or a pending TLS close_notify after %d s; those connections are closed "
+			"without a complete final payload",
 			fw.wp->config->name, fw.ws_unflushed, FPM_WORKER_FLUSH_BUDGET);
 	}
 }
@@ -1586,9 +1589,10 @@ static void fpm_worker_register_variables(zval *array)
  * bufferevent, replaces ALL of its callbacks (evhttp's state machine on this
  * connection is never driven again), clears the closecb and the timeouts, and
  * leaves the request exactly where evhttp put it -- never answered, never
- * driven, freed with the connection at evhttp_free(). The stream's close
- * does shutdown(SHUT_RDWR) -- what the client sees -- and the registry below
- * (fpm_ws_all, walked in child_main() just before that free) tells a late
+ * driven, freed with the connection at evhttp_free(). The stream's close drains
+ * queued output, performs TLS shutdown when the bufferevent carries SSL*, and
+ * closes the fd; the registry below (fpm_ws_all, walked in child_main() just
+ * before evhttp_free()) tells a late
  * stream close the bufferevent is already gone. The cost, honestly stated:
  * one bufferevent plus one request per WebSocket connection ever accepted
  * stays allocated until the worker recycles (pm.max_requests,
@@ -1630,6 +1634,18 @@ struct fpm_ws_ctx {
  * is about to free the bufferevents it never let go of. The head is touched
  * only from this child's own single-threaded callbacks. */
 static struct fpm_ws_ctx *fpm_ws_all = NULL;
+
+/* issue #458: a nonblocking SSL_shutdown() may have written only part of
+ * close_notify. This state owns the retry event, never the bufferevent or
+ * SSL*: evhttp keeps owning both until child_main's teardown. Every node here
+ * contributes one fw.ws_unflushed close the bounded output flush must wait for. */
+struct fpm_ws_tls_close {
+	struct bufferevent *bev;
+	struct event *event;
+	struct fpm_ws_tls_close *next;
+};
+
+static struct fpm_ws_tls_close *fpm_ws_tls_closing = NULL;
 
 static void fpm_ws_unregister(struct fpm_ws_ctx *ctx)
 {
@@ -1834,15 +1850,11 @@ static void fpm_ws_start_close_after_write(struct fpm_ws_ctx *ctx)
 
 static void fpm_ws_shutdown_now(struct fpm_ws_ctx *ctx)
 {
-	int ws_fd = (int) bufferevent_getfd(ctx->bev);
-
 	/* Disarm before shutdown: the context may be freed immediately after this
 	 * helper returns, while evhttp still owns the bufferevent. */
 	bufferevent_setcb(ctx->bev, NULL, NULL, NULL, NULL);
 	bufferevent_disable(ctx->bev, EV_READ | EV_WRITE);
-	if (ws_fd >= 0) {
-		shutdown(ws_fd, SHUT_RDWR);
-	}
+	fpm_ws_finish_close(ctx->bev, false, false);
 	ctx->eof = true;
 }
 
@@ -1917,7 +1929,6 @@ static int fpm_ws_close(php_stream *stream, int close_handle)
  * fpm_ws_close() above), so this reads nothing but the buffer itself. */
 static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *arg)
 {
-	int ws_fd;
 	size_t queued;
 
 	(void) arg;
@@ -1938,18 +1949,145 @@ static void fpm_ws_close_after_write(struct bufferevent *bev, short what, void *
 	 * readable by shutdown() cannot deliver this tail through a stale callback. */
 	bufferevent_setcb(bev, NULL, NULL, NULL, NULL);
 	bufferevent_disable(bev, EV_READ | EV_WRITE);
-	ws_fd = (int) bufferevent_getfd(bev);
-	if (ws_fd >= 0) {
-		shutdown(ws_fd, SHUT_RDWR);
-	}
-	if (fw.ws_unflushed) {
-		fw.ws_unflushed--;
-	}
+	fpm_ws_finish_close(bev, true, (what & BEV_EVENT_ERROR) != 0);
 }
 
 static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg)
 {
 	fpm_ws_close_after_write(bev, 0, arg);
+}
+
+static void fpm_ws_close_now(struct bufferevent *bev, bool graceful, bool counted)
+{
+	int ws_fd = (int) bufferevent_getfd(bev);
+
+	if (ws_fd >= 0) {
+		/* A completed TLS shutdown keeps the read half open: closing it while
+		 * unread peer data is queued can turn the socket's FIN/RST choice into
+		 * a reset and discard the close_notify we just accepted. Plaintext keeps
+		 * the historical full shutdown. */
+		shutdown(ws_fd, graceful ? SHUT_WR : SHUT_RDWR);
+	}
+	if (counted && fw.ws_unflushed) {
+		fw.ws_unflushed--;
+	}
+}
+
+static void fpm_ws_tls_close_unlink(struct fpm_ws_tls_close *state)
+{
+	struct fpm_ws_tls_close **p = &fpm_ws_tls_closing;
+
+	while (*p && *p != state) {
+		p = &(*p)->next;
+	}
+	if (*p) {
+		*p = state->next;
+	}
+}
+
+static void fpm_ws_tls_close_complete(struct fpm_ws_tls_close *state, bool graceful)
+{
+	fpm_ws_tls_close_unlink(state);
+	/* The dependent retry event goes before shutdown(), which can make the fd
+	 * readable immediately. evhttp still owns both the bufferevent and SSL*. */
+	event_free(state->event);
+	fpm_ws_close_now(state->bev, graceful, true);
+	pefree(state, 1);
+}
+
+static void fpm_ws_tls_close_retry(evutil_socket_t fd, short events, void *arg)
+{
+	struct fpm_ws_tls_close *state = arg;
+	short poll_events = 0;
+	int result;
+
+	(void) events;
+	if (fd < 0 || (result = fpm_http_direct_tls_shutdown_step(state->bev, &poll_events))
+			== FPM_HTTP_DIRECT_TLS_SHUTDOWN_PENDING) {
+		if (fd >= 0 && poll_events
+			&& event_del(state->event) == 0
+			&& event_assign(state->event, fw.base, fd, poll_events, fpm_ws_tls_close_retry, state) == 0
+			&& event_add(state->event, NULL) == 0) {
+			return;
+		}
+		fpm_ws_tls_close_complete(state, false);
+		return;
+	}
+	fpm_ws_tls_close_complete(state,
+		result == FPM_HTTP_DIRECT_TLS_SHUTDOWN_SENT);
+}
+
+static void fpm_ws_tls_close_arm(struct bufferevent *bev, short poll_events, bool already_counted)
+{
+	struct fpm_ws_tls_close *state;
+	int fd = (int) bufferevent_getfd(bev);
+
+	if (fd < 0 || poll_events == 0) {
+		fpm_ws_close_now(bev, false, already_counted);
+		return;
+	}
+	state = pemalloc(sizeof(*state), 1);
+	if (!state) {
+		fpm_ws_close_now(bev, false, already_counted);
+		return;
+	}
+	state->bev = bev;
+	state->next = NULL;
+	state->event = event_new(fw.base, fd, poll_events, fpm_ws_tls_close_retry, state);
+	if (!state->event) {
+		pefree(state, 1);
+		fpm_ws_close_now(bev, false, already_counted);
+		return;
+	}
+	if (!already_counted) {
+		fw.ws_unflushed++;
+	}
+	/* The child is single-threaded, so event_add() cannot dispatch the callback
+	 * before the state is linked; link before returning to the owning loop. */
+	if (event_add(state->event, NULL) != 0) {
+		fpm_ws_close_now(bev, false, true);
+		event_free(state->event);
+		pefree(state, 1);
+		return;
+	}
+	state->next = fpm_ws_tls_closing;
+	fpm_ws_tls_closing = state;
+}
+
+static void fpm_ws_finish_close(struct bufferevent *bev, bool counted, bool transport_error)
+{
+	short poll_events = 0;
+	int result;
+
+	if (transport_error) {
+		/* The transport already reported a fatal read/write condition. Calling
+		 * SSL_shutdown() on it cannot produce a clean close_notify and risks
+		 * consuming unrelated OpenSSL error state. */
+		fpm_ws_close_now(bev, false, counted);
+		return;
+	}
+	result = fpm_http_direct_tls_shutdown_step(bev, &poll_events);
+	switch (result) {
+	case FPM_HTTP_DIRECT_TLS_SHUTDOWN_NOT_APPLICABLE:
+		fpm_ws_close_now(bev, false, counted);
+		break;
+	case FPM_HTTP_DIRECT_TLS_SHUTDOWN_PENDING:
+		fpm_ws_tls_close_arm(bev, poll_events, counted);
+		break;
+	case FPM_HTTP_DIRECT_TLS_SHUTDOWN_SENT:
+		fpm_ws_close_now(bev, true, counted);
+		break;
+	default:
+		fpm_ws_close_now(bev, false, counted);
+		break;
+	}
+}
+
+static void fpm_ws_tls_close_abort_all(void)
+{
+	while (fpm_ws_tls_closing) {
+		fpm_ws_tls_close_complete(fpm_ws_tls_closing, false);
+	}
 }
 
 /* A retained upgraded stream does not run fpm_ws_close() when userland
@@ -2316,10 +2454,10 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 	 *     by http.read_timeout; liveness is the codec's ping/pong);
 	 *   - the request is left exactly where evhttp put it: never answered,
 	 *     never driven, freed with the connection at evhttp_free();
-	 *   - the stream's close does NOT free the bufferevent -- it
-	 *     shutdown(fd, SHUT_RDWR)s, which is what tears the connection down
-	 *     from the client's side -- because evhttp still owns it and frees
-	 *     it (fd and SSL) at teardown; a registry of hijacked connections
+	 *   - the stream's close does NOT free the bufferevent -- it drains
+	 *     output, performs TLS shutdown when applicable, and closes the fd,
+	 *     because evhttp still owns the bufferevent and frees it (fd and SSL)
+	 *     at teardown; a registry of hijacked connections
 	 *     (fpm_ws_all, walked in child_main() just before evhttp_free())
 	 *     tells a late stream free the bufferevent is gone.
 	 *
@@ -4011,6 +4149,10 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * call into PHP after the worker script has already returned. */
 	fw.finishing = true;
 	fpm_worker_finish_output();
+	/* A TLS close_notify that still wants readiness after the bounded flush is
+	 * abandoned now, before evhttp frees the borrowed bufferevents. The retry
+	 * event depends on those objects, so this ordering is mandatory. */
+	fpm_ws_tls_close_abort_all();
 	fw.finishing = false;
 	/* After finish_output(), which may still drive the base and therefore let
 	 * this fire once more; before event_base_free() below, which the event

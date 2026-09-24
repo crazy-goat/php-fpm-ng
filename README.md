@@ -26,7 +26,10 @@ Verified 2026-09-07 against `sapi/fpmng`:
   directive means classic `fastcgi` and stays compatible with upstream FPM.
   Issue #388 retired `pool.type = http`: the proxy is `gateway` (its `listen`
   is the public port, `http.route[]` says what it forwards to) and the PHP
-  workers are an ordinary `fastcgi` pool behind it
+  workers are an ordinary `fastcgi` pool behind it. FastCGI pools may opt into
+  per-pool operator metrics on the shared HTTP listener while keeping upstream
+  `pm.status_path` on the FastCGI socket (`docs/gateway.md` and
+  `docs/operator-endpoint.md`).
 - the `fiber` and `async` executors moved to branch `async` (issue #373) and
   are not available on `main`
 - metrics: `operator.status_path` (JSON) and `operator.metrics_path`

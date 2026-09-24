@@ -84,12 +84,21 @@ function respondChunkWhenWritable(int $id, string $data): bool
 
 function endSseStream(int $id): void
 {
-    if (fpmng_worker_request_env($id) !== []) {
-        /* Best effort: if even this small chunk is refused, end still queues
-         * the terminal chunk and releases the slot instead of orphaning it. */
-        fpmng_worker_respond_chunk($id, "event: bye\ndata: reconnect\n\n");
-        fpmng_worker_respond_end($id);
+    if (fpmng_worker_request_env($id) === []) {
+        return;
     }
+    /* Give the terminal event its own short drain window even when the regular
+     * data chunk hit the retry ceiling; then always queue the end marker so the
+     * pending slot cannot be orphaned. */
+    $bye = "event: bye\ndata: reconnect\n\n";
+    $deadline = hrtime(true) + 5_000_000_000;
+    while (!fpmng_worker_respond_chunk($id, $bye)) {
+        if (fpmng_worker_request_env($id) === [] || hrtime(true) >= $deadline) {
+            break;
+        }
+        suspendFor(0.05);
+    }
+    fpmng_worker_respond_end($id);
 }
 
 $notify = fpmng_worker_notify_stream();
@@ -129,9 +138,11 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
             parse_str($env['QUERY_STRING'] ?? '', $query);
             $lastId = (int) ($env['HTTP_LAST_EVENT_ID'] ?? $query['last_event_id'] ?? 0);
             foreach ($broadcast->since($lastId) as $event) {
-                if (!fpmng_worker_respond_chunk($id, "id: {$event['id']}\ndata: {$event['data']}\n\n")) {
+                if (!respondChunkWhenWritable($id, "id: {$event['id']}\ndata: {$event['data']}\n\n")) {
+                    endSseStream($id);
                     return;
                 }
+                $lastId = $event['id'];
             }
             while (!fpmng_worker_stopping()) {
                 suspendFor(15.0);
@@ -140,6 +151,7 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
                         endSseStream($id); // gone, worker stopping, or retry ceiling reached
                         return;
                     }
+                    $lastId = $event['id'];
                 }
                 if (!respondChunkWhenWritable($id, ": ping\n\n")) {
                     endSseStream($id);

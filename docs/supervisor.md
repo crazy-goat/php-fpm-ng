@@ -353,23 +353,24 @@ gets the safe `false` from the runtime guard rather than a crash.
 
 The pool's status page and metrics page expose the result: `heartbeat_age`
 (status page) / `fpmng_pool_heartbeat_age_seconds` (metrics page) is the
-number of seconds since the last call, present only once the script has
-called `fpmng_supervisor_heartbeat()` at least once (a script that never
-calls it reports no heartbeat fields at all, rather than a misleading age of
-zero or since process start). It lives in the same shared memory as the
-fast-restart streak above, so it survives the script returning and being
-restarted, *and* survives the process itself being replaced by a new one on
-the next restart — it is pool-lifetime state, not process-lifetime state.
+number of seconds since the latest call by any child, present only once some
+child has called `fpmng_supervisor_heartbeat()` (a pool whose scripts never
+call it reports no heartbeat fields rather than a misleading age of zero or
+since process start). This pool-wide value preserves the original status and
+metrics contract.
 
-That shared memory is keyed by **pool**, not by child: with
-`supervisor.processes` > 1, every child of the pool reports into, and reads
-back, the same `last_heartbeat` — the age shown is "seconds since any child of
-this pool last called `fpmng_supervisor_heartbeat()`", not a separate age per
-child. A single stuck child among several healthy ones can therefore still
-show a fresh `heartbeat_age`, as long as a sibling keeps calling the function.
-Per-child granularity is a real gap, not a documentation nuance — tracked
-separately, since it needs its own per-child slot in shared memory rather than
-the one pool-wide field this issue added.
+The status JSON also exposes `heartbeat_children`, one entry per live child,
+with its PID and its own `heartbeat_age` (or `null` if that child has not yet
+called the function). A sibling's call cannot refresh another child's entry.
+The slot identity is the child's scoreboard slot, which the master reuses for
+that copy when it respawns; its per-child heartbeat starts empty again in the
+new process. The pool-wide timestamp remains pool-lifetime state, preserving
+the previous behavior across process replacement. Prometheus keeps only the
+pool-wide series; child PIDs are not labels, so a respawn does not churn time
+series.
+
+Heartbeats remain purely observational: neither the pool-wide nor per-child
+age changes restart, kill, backoff, or any other control decision.
 
 This is purely observational, exactly like `cron.expect_within`
 ([`cron.md`](cron.md#cronexpect_within-issue-327)): nothing here changes

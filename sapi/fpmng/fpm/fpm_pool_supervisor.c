@@ -216,16 +216,13 @@ struct fpm_supervisor_shared_s {
 	unsigned long fast_started_ms;		/* monotonic ms at the start of the current streak */
 	unsigned char fast_warned;		/* 1 = already warned about this streak */
 
-	/* fpmng_supervisor_heartbeat() (issue #327). Purely observational, exactly
-	 * like last_start/last_exit_code above: nothing in this file ever reads
-	 * last_heartbeat back to decide anything about restart/backoff policy.
-	 * Epoch of the most recent call, 0 = the script has never called it in this
-	 * pool's lifetime (not "in the current process" -- shared memory survives a
-	 * respawn, same reasoning as `starts`). What the status page derives from
-	 * it (an "age" since the last call) is computed where it is rendered, not
-	 * stored here, so a clock step does not have to be reconciled against a
-	 * cached duration. */
+	/* fpmng_supervisor_heartbeat() (issues #327, #356). Pool-wide last call is
+	 * retained for the existing status field and metric; the per-slot timestamps
+	 * below keep one child's heartbeat from refreshing its siblings. Neither is
+	 * read to decide restart/backoff policy. */
 	time_t last_heartbeat;
+	struct fpm_pool_heartbeat_s *heartbeat_by_slot;
+	unsigned long heartbeat_slots;
 
 	/* Issue #492: per-copy completion, one byte per SCOREBOARD SLOT of this
 	 * pool, sized supervisor_processes at allocation time (see
@@ -318,6 +315,7 @@ static int supervisor_cleanup_registered = 0;
  * process image with its own copy of this variable, so there is no cross-child
  * ambiguity to resolve in the first place. */
 static struct fpm_supervisor_shared_s *supervisor_current_shared = NULL;
+static int supervisor_current_slot = -1;
 
 /* Shared by the child-side recycle check and the master-side startup warning. */
 static size_t fpm_pool_supervisor_memory_bytes(void);
@@ -342,12 +340,19 @@ static size_t fpm_pool_supervisor_memory_bytes(void);
  * dereference. */
 static ZEND_FUNCTION(fpmng_supervisor_heartbeat)
 {
+	time_t now;
+
 	ZEND_PARSE_PARAMETERS_NONE();
 
 	if (!supervisor_current_shared) {
 		RETURN_FALSE;
 	}
-	supervisor_current_shared->last_heartbeat = FPM_NOW();
+	now = FPM_NOW();
+	supervisor_current_shared->last_heartbeat = now;
+	if (supervisor_current_slot >= 0 &&
+			(unsigned long) supervisor_current_slot < supervisor_current_shared->heartbeat_slots) {
+		supervisor_current_shared->heartbeat_by_slot[supervisor_current_slot].last_heartbeat = now;
+	}
 	RETURN_TRUE;
 }
 
@@ -862,6 +867,12 @@ int fpm_pool_supervisor_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		zlog(ZLOG_ERROR, "[pool %s] supervisor: cannot allocate shared memory", wp->config->name);
 		return -1;
 	}
+	shared->heartbeat_by_slot = fpm_shm_alloc(processes * sizeof(*shared->heartbeat_by_slot));
+	if (!shared->heartbeat_by_slot) {
+		zlog(ZLOG_ERROR, "[pool %s] supervisor: cannot allocate per-child heartbeat state", wp->config->name);
+		return -1;
+	}
+	shared->heartbeat_slots = processes;
 
 	/* MEASURED (docs/NOTES.md, "graceful stopping", scenario 3): when SIGTERM
 	 * goes to the MASTER (exactly what `docker stop`/systemd sends, without any
@@ -1333,6 +1344,10 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	supervisor_stop_timeout = c->supervisor_stop_timeout;
 	supervisor_current_shared = shared;
+	supervisor_current_slot = slot;
+	if (slot >= 0 && (unsigned long) slot < shared->heartbeat_slots) {
+		shared->heartbeat_by_slot[slot].last_heartbeat = 0;
+	}
 
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = fpm_pool_supervisor_sigterm;
@@ -1658,5 +1673,7 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
 		out->has_heartbeat = 1;
 		out->last_heartbeat = shared->last_heartbeat;
 	}
+	out->heartbeat_by_slot = (struct fpm_pool_heartbeat_s *) shared->heartbeat_by_slot;
+	out->heartbeat_slots = shared->heartbeat_slots;
 }
 /* }}} */

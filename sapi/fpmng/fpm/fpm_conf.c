@@ -1319,7 +1319,7 @@ static int fpm_conf_reject_renamed_operator_directives(struct fpm_worker_pool_s 
 		}
 	}
 
-	if (fpm_conf_directive_was_set(wp->config, "pm.status_path") && type->operator_endpoint) {
+	if (fpm_conf_directive_was_set(wp->config, "pm.status_path") && !type->serves_fastcgi) {
 		zlog(ZLOG_ALERT, "[pool %s] on pool.type = %s 'pm.status_path' was renamed to "
 			"'operator.status_path' (issue #386); 'pm.status_path' now has upstream's meaning "
 			"on pool.type = fastcgi only", wp->config->name, type->name);
@@ -1508,17 +1508,14 @@ static int fpm_conf_process_all_pools(void)
 		/* status and metrics -- the operator endpoint's directives (issue #386:
 		 * they left the "pm." namespace, which never described them).
 		 *
-		 * On a type that carries its own operator endpoint (#273, #274) the
+		 * On a type that carries its own operator endpoint (#273, #274), the
 		 * operator.* directives say where THAT endpoint binds, and the pool
-		 * they bind is created by fpm_operator_endpoint.c.
-		 *
-		 * On fastcgi there is no such listener, on purpose: it has a real web
-		 * server in front, which is where an operator already restricts who may
-		 * reach a path. pm.status_path therefore keeps its upstream meaning
-		 * there -- answered on the pool's own FastCGI socket -- and every
-		 * operator.* directive is refused, because there is no endpoint to
-		 * name. Whether a type has the listener is a flag on the type and never
-		 * a name compared here; see fpm_pool_type_s.operator_endpoint. */
+		 * they bind is created by fpm_operator_endpoint.c. FastCGI opts in via
+		 * fpm_pool_type_s.operator_endpoint (issue #383); its upstream
+		 * pm.status_path remains a separate FastCGI-socket handler, since that
+		 * directive is not in the operator.* namespace after issue #386.
+		 * Whether a type has the listener is data on the type, never a name
+		 * compared here. */
 		if (type->operator_endpoint) {
 			if (0 > fpm_operator_endpoint_configure(wp, type)) {
 				return -1;

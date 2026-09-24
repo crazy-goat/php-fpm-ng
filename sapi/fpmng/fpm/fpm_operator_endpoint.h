@@ -1,8 +1,9 @@
 /* fpm-ng: the per-pool operator endpoint (issue #274, decided in #273).
  *
- * A pool of a type that has nothing in front of it which could answer an
- * operator's scrape -- cron, supervisor, http, http-direct -- serves its own
- * stats and metrics from a small HTTP listener of its own:
+ * A pool whose type opts into this endpoint serves its own stats and metrics
+ * from a small HTTP listener. This is the natural choice for cron, supervisor,
+ * gateway and http-direct (nothing in front could answer the scrape), and an
+ * explicit opt-in for fastcgi so a gateway can expose its routed pools (#383):
  *
  *   operator.status_path     the pool's status page,   unset = off
  *   operator.metrics_path    Prometheus text,          unset = off
@@ -25,12 +26,10 @@
  * one is fpm_pool_type_s.operator_status, data like everything else here.
  *
  * Whether a type gets this at all is data, not a name comparison: it is
- * fpm_pool_type_s.operator_endpoint. On fastcgi the flag is off
- * and pm.status_path keeps its upstream meaning -- a path answered on the pool's
- * own FastCGI socket, with a web server in front of it -- because there the
- * front end is exactly what an operator already has (#273, point 2). The
- * operator.* directives are refused there until #383 gives that type a way to
- * join this listener explicitly.
+ * fpm_pool_type_s.operator_endpoint. FastCGI opts in to operator.* on this
+ * listener (issue #383); its separate upstream pm.status_path still answers on
+ * the pool's own FastCGI socket, with the web server in front (#273 point 2,
+ * preserved by the namespace split in #386).
  *
  * WHOSE PROCESS ANSWERS. Not the master: a scrape does blocking I/O and
  * rendering, and the master is the one process in the tree whose death is

@@ -239,18 +239,21 @@ operator.metrics_path = /two"),
     ['disagree on listen.mode', 'one listener is one process and one socket']
 );
 
-/* On fastcgi, pm.status_path keeps upstream's meaning and there is no operator
- * listener to name, so pm.status_path is fine and every operator.* directive is
- * an error rather than one that quietly does nothing. The old metrics spelling
- * is refused by its own name first, naming the replacement (issue #386). */
+/* On fastcgi, pm.status_path keeps upstream's meaning on the FastCGI socket,
+ * while operator.* independently opts into the shared HTTP operator listener
+ * (issue #383). The old metrics spelling is refused by its own name first,
+ * naming the replacement (issue #386). */
 expectAccepted(
     'upstream pm.status_path on fastcgi',
     $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\npm.status_path = /status\n"
 );
-expectRejected(
+expectAccepted(
     'operator.metrics_path on a fastcgi pool',
-    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\noperator.metrics_path = /metrics\n",
-    ["'operator.metrics_path' is not supported by pool.type = fastcgi"]
+    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\noperator.metrics_path = /metrics\n"
+);
+expectAccepted(
+    'operator.metrics_path without an explicit listener on a fastcgi pool',
+    $head . "\n[app]\nlisten = {{ADDR}}\npm = static\npm.max_children = 1\noperator.metrics_path = /metrics\npm.status_path = /fpm-status\n"
 );
 expectRejected(
     'old pm.metrics_path on http-direct',
@@ -285,7 +288,8 @@ both operator paths on http-direct: accepted
 status path claimed by two http-direct pools on one listener: rejected
 pools sharing a listener disagree on identity: rejected
 upstream pm.status_path on fastcgi: accepted
-operator.metrics_path on a fastcgi pool: rejected
+operator.metrics_path on a fastcgi pool: accepted
+operator.metrics_path without an explicit listener on a fastcgi pool: accepted
 old pm.metrics_path on http-direct: rejected
 Done
 --CLEAN--

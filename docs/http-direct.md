@@ -610,8 +610,14 @@ returning `false` rather than throwing, or blocking, or growing the queue
 without limit. Unlike `http.stream`'s synchronous high-water write (which
 blocks the whole worker until the client catches up), a refusal here is just a
 signal: the handler decides what to do with it — retry later, drop the
-connection itself, or apply its own flow control. Only valid under
-`pool.executor = worker`; every other pool type and executor of
+connection itself, or apply its own flow control. A successful later non-empty
+chunk clears the refusal. Once the worker is stopping, however,
+`fpmng_worker_may_exit()` no longer waits for a stream whose last chunk is still
+refused: the SAPI takes over and ends it with the normal `0\r\n\r\n` terminator
+during bounded shutdown. That prevents a non-reading client from holding the
+worker until the master's SIGKILL while preserving retryable backpressure
+before retirement. Only valid under `pool.executor = worker`; every other pool
+type and executor of
 `pool.type = http-direct` rejects it, the same way `worker.max_pending` and
 `worker.request_timeout` are rejected outside this executor.
 

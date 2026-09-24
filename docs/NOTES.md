@@ -156,45 +156,76 @@ is possible, but it is a new access pattern.
 
 ## 3a. Self-runner: one binary containing the application
 
-Goal: `fpm-ng pack app.phar php.ini fpm.conf -o myapp` produces one file that
-contains everything. The cherry on top, done last.
+Goal: `fpm-ng pack app.phar php.ini fpm.conf -o myapp` produces one file
+containing those three mandatory inputs and a ready fpm-ng executable. This is
+still a pack/append operation, not compilation: it must not require a compiler,
+php-src, Composer or execution of the user application.
 
-**This is not compilation, only appending data.** A payload at the end of the
-finished binary plus a footer at the very end: magic bytes, offset, and size.
-At startup fpm-ng reads `/proc/self/exe`, checks the final bytes, and if it finds
-the magic, takes `php.ini`, `fpm.conf`, and the phar from there. If it finds
-nothing, it works normally from disk.
+**Measured correction (issues #426/#427, 2026-09-24):** an FPMNG kind-2 payload
+appended after the ELF is not directly accessible as
+`phar://<executable>/app.phar/...`; PHP reports an invalid/nonexistent PHAR. The
+PHAR stub is not an application entrypoint and is never run by `pack`. At
+runtime, PHP-FPM must resolve explicitly configured entry files within the PHAR.
+The measured baseline is to materialize the unchanged PHAR as a regular file in
+a private, content-addressed runtime location, then use its `phar://` path; a
+future seekable wrapper/engine approach would need separate evidence. The
+runtime path must account for `http.front_controller` regular-file/root
+validation and OPcache's archive-path identity. Raw results are in
+`docs/spike-phar-runtime-report.md`.
 
-Consequence: **packaging requires no toolchain**. No compiler and no PHP source.
-It takes a second. This is an advantage over FrankenPHP, which can also embed an
-application, but rebuilds it with Go embed — meaning the user needs Go.
+No global entrypoint is required. The intended contract is for each existing
+script path in `fpm.conf` to select an archive entry: for example,
+`http.front_controller` selects `public/index.php`, `cron.script` selects
+`bin/console`, and `supervisor.script` selects its own entry. The proposed input
+spelling is a `phar://` URI to the selected entry. At runtime #430 must first
+materialize the archive; whether and how the selected URI is then mapped to a
+filesystem path is implementation work, because today's
+`http.front_controller` validator requires a real file under its root.
+HTTP worker executor uses the existing `http.front_controller`; FastCGI uses its
+normal request `SCRIPT_FILENAME`; gateway itself has no PHP entrypoint. The PHAR
+stub is not executed. Relative includes/autoload/resources are a required
+property of the access mechanism; #430/#431 must verify it before claiming
+framework compatibility.
 
-We are not inventing a format: phar works exactly this way (a stub is appended
-to the file, and phar can find itself inside a larger file).
+### Contract decided in #427
 
-### Things to consider
+1. **Immutable code, external writable state.** Cache, sessions, logs, uploads
+   and credentials are not embedded or inferred from arbitrary host paths. The
+   operator supplies writable state through the existing environment/config and
+   mounts it outside the immutable PHAR. The application has normal configured
+   pool permissions; this is not a sandbox.
+2. **Configuration is explicit.** Host `php.ini`, `conf.d` and host FPM
+   configuration are not silently merged with the embedded inputs. Dynamic
+   extensions, including `phar.so` when the linked libphp does not contain it,
+   must be available at PHP module startup through the selected INI/scan policy.
+   `-c`, `-d` and `--fpm-config` are explicit operator overrides with no silent
+   fallback; their exact precedence and replacement semantics are settled by
+   #428's observable startup tests. #428 also owns stream/buffer input.
+3. **PHAR files are not a static web root in the first release.** Gateway's
+   existing filesystem static serving remains unchanged; serving arbitrary
+   public assets from a PHAR is excluded until path traversal, ranges, MIME,
+   validators and cache behavior are designed and measured.
+4. **Script arguments are explicit tokens.** Cron and supervisor receive
+   configured arguments as argv elements, not a shell command string. The
+   maintainer-approved semantic requirement is one configured element per argv
+   token, with no shell expansion/splitting; exact directive names, INI
+   serialization and validation are implementation details for the runner
+   changes. The HTTP front controller receives request data, not argv.
+5. **Integrity is not authenticity.** Payload digest detects corruption, not
+   publisher identity. PHAR hashes/signatures are not a signing infrastructure
+   and do not change the trust model.
 
-1. **Writes — the biggest problem.** A phar cannot be written to. The
-   application needs cache, sessions, logs, and uploads. Configuration must
-   firmly separate "code, immutable, in the binary" from "state, on a volume".
-   It is healthy discipline, but it will surprise anyone using Laravel or
-   Symfony, because they write to the project directory by default. Solve and
-   document this as a design matter, or the first encounter with a real
-   application ends with "it does not work".
-2. Static files from a phar go through a stream wrapper — slower than disk. It is
-   irrelevant for our traffic, but loading them into memory at startup may be worth it.
-3. With `validate_timestamps=0`, code in the binary does not change, so OPcache
-   works perfectly and faster than from disk.
-4. `/proc/self/exe` is Linux; in a container `/proc` is mounted, so scratch is
-   OK. Keep a fallback through `argv[0]` for running outside a container.
-5. Optionally sign the payload (phar supports this) and refuse to start if the
-   application code has been replaced.
+### Remaining implementation boundaries
 
-### PROJECT CONSTRAINT FOR PLAN ITEM 1
+- #428 prepares PHP/FPM configuration bootstrap and verifies embedded configuration
+  plus host override policy without changing ordinary file-based startup.
+- #429 owns safe, generic packing of the three mandatory files without
+  executing the PHAR stub.
+- #430 owns extraction/materialization lifecycle, content-addressed identity,
+  permissions, reload/re-exec and cleanup.
+- #431 owns end-to-end runtime cells and user documentation. No application
+  runtime is implemented by the #426/#427 research/decision work.
 
-Configuration loading must accept data **from a stream or an in-memory buffer**,
-not only from a path on disk. If we hard-code `open(path)`, changing it later
-will hurt.
 
 
 ## 3b. Binary extensions from other vendors (New Relic, ionCube, ...)

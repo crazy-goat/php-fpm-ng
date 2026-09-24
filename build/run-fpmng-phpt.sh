@@ -455,11 +455,14 @@ set +e
 # argv entries, which is what SC2086 would otherwise stop. (The reason is on
 # its own line: shellcheck does not parse a "disable=CODE -- reason" directive,
 # which is where this repository's six existing SC1072/SC1073 errors come from.)
+# Repo-owned integration PHPTs may execute checked-in examples that are not
+# copied into the prepared php-src test tree (issue #454).
 # shellcheck disable=SC2086
 (
     cd "$PHPSRC" || exit 1
     TEST_PHP_EXECUTABLE="$HARNESS_CLI" \
     TEST_PHP_FPM_EXECUTABLE="$HARNESS_FPM" \
+    FPMNG_TEST_REPO_ROOT="$REPO" \
     "$CLI_BIN" -n run-tests.php \
         -q -n --offline --no-progress --no-color \
         --set-timeout "$TIMEOUT" \

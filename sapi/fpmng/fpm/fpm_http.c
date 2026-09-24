@@ -50,6 +50,8 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 /* musl does not ship <sys/queue.h>, and libevent's headers may pull in a partial
  * one, so include it when it exists and fill in only what is missing. */
@@ -3570,6 +3572,84 @@ static int fpm_http_route_next_prefix(const char **cursor, const char **out, siz
 	return 1;
 }
 
+/* The HTTP/1.1 transport is intentionally cleartext, so it may only connect to
+ * a target bound to a Unix socket or a numeric loopback IP literal. Refuse
+ * hostnames as well as public addresses: resolving DNS here and again in each
+ * gateway child would leave a rebinding window between validation and connect.
+ * The transport resolves once per child, but a numeric-only contract makes the
+ * result stable and auditable from the config. */
+static int fpm_http_target_listen_is_loopback(const char *address)
+{
+	char *copy, *host, *service, *end;
+	struct addrinfo hints, *res = NULL, *ai;
+	int rc, found = 0, safe = 1;
+
+	if (fpm_sockets_domain_from_address(address) == FPM_AF_UNIX) {
+		return 1;
+	}
+	copy = strdup(address);
+	if (!copy) {
+		return 0;
+	}
+	if (copy[0] == '[') {
+		end = strchr(copy, ']');
+		if (!end || end[1] != ':') {
+			free(copy);
+			return 0;
+		}
+		*end = '\0';
+		host = copy + 1;
+		service = end + 2;
+	} else {
+		service = strrchr(copy, ':');
+		if (!service) {
+			free(copy);
+			return 0;
+		}
+		*service++ = '\0';
+		host = copy;
+	}
+	if (!*host || !*service) {
+		free(copy);
+		return 0;
+	}
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_NUMERICHOST;
+	rc = getaddrinfo(host, service, &hints, &res);
+	if (rc != 0) {
+		free(copy);
+		return 0;
+	}
+	for (ai = res; ai; ai = ai->ai_next) {
+		found = 1;
+		if (ai->ai_family == AF_INET) {
+			const struct sockaddr_in *sa = (const struct sockaddr_in *) ai->ai_addr;
+			uint32_t host_order = ntohl(sa->sin_addr.s_addr);
+
+			if ((host_order >> 24) != 127) {
+				safe = 0;
+			}
+		} else if (ai->ai_family == AF_INET6) {
+			const struct sockaddr_in6 *sa6 = (const struct sockaddr_in6 *) ai->ai_addr;
+
+			/* Only the IPv6 loopback literal is admitted. In particular, reject
+			 * IPv4-mapped addresses rather than depending on the listener's
+			 * IPV6_V6ONLY setting to decide where they will route. */
+			if (!IN6_IS_ADDR_LOOPBACK(&sa6->sin6_addr)) {
+				safe = 0;
+			}
+		} else {
+			safe = 0;
+		}
+	}
+	freeaddrinfo(res);
+	free(copy);
+	return found && safe;
+}
+
 /* The pool one http.route[] key names, or NULL with the refusal already
  * logged. Every refusal here is a startup error: a route that names a pool
  * that does not exist, or one the gateway cannot speak to, would otherwise
@@ -3606,14 +3686,21 @@ static struct fpm_worker_pool_s *fpm_http_route_target_pool(struct fpm_worker_po
 		return w;
 	}
 	if (type->serves_http11) {
-		/* Issue #344: the HTTP/1.1 client transport (fpm_http_client.c). A
-		 * target that terminates TLS on its own listener stays refused: this
-		 * transport speaks cleartext to loopback and unix sockets only, and
-		 * "http.tls_cert" on the target pool is exactly that case. */
+		/* Issue #344: the HTTP/1.1 client transport (fpm_http_client.c) speaks
+		 * cleartext. Refuse both a target with its own TLS endpoint and any
+		 * target whose listen address is not a Unix socket or numeric loopback
+		 * IP, so routing cannot put client headers/payloads onto a public
+		 * network in plaintext (issue #450). */
 		if (w->config->http_tls_cert && *w->config->http_tls_cert) {
 			zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' terminates TLS on its own listener "
 				"(http.tls_cert); the gateway speaks cleartext to an http-direct target",
 				wp->config->name, pool_name, pool_name);
+			return NULL;
+		}
+		if (!fpm_http_target_listen_is_loopback(w->config->listen_address)) {
+			zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: pool '%s' listens on '%s'; the gateway speaks cleartext, "
+				"so an http-direct target must use a Unix socket or numeric loopback address",
+				wp->config->name, pool_name, pool_name, w->config->listen_address);
 			return NULL;
 		}
 		*transport = FPM_HTTP_TARGET_HTTP;

@@ -1,18 +1,11 @@
 # The gateway: ping, metrics and status across pool types
 
-> **Status: `pool.type = gateway` landed in #388 and `pool.type = http` is
-> retired; one piece of this design is still open.** The type, its explicit
-> `http.route[]`-only routing, `ping.path` answered in the gateway process, its
-> own `operator.metrics_path`/`operator.status_path` defaults, `http.operator`
-> with the `<base>/<pool name>` forwarding of every exposed pool's pages (#389),
-> and -- since #390 -- the gateway's own shared-memory counters rendered on its
-> `/metrics` and `/status` pages are implemented. Still to come: `fastcgi`
-> joining the operator listener (#383) -- the example below still shows a
-> `fastcgi` pool exposing itself, which no build does yet. The operator
-> directives are `operator.*` since #386 (see
-> [`operator-endpoint.md`](operator-endpoint.md)). This page is the target,
-> decided 2026-09-17; the issues that carry the rest are listed at the end.
-> When the last of them lands this banner goes and the two pages merge.
+This is the living gateway guide: it covers gateway routing, operator-page
+forwarding, ping, and the gateway's own metrics. The canonical directive table,
+listener defaults, collision rules, and per-pool operator-page contract live in
+[`operator-endpoint.md`](operator-endpoint.md); consult that page when
+configuring `operator.*`. `pool.type = http` is retired: configure a `pool.type = gateway`
+proxy plus a separate `fastcgi` or `http-direct` pool for PHP.
 
 ## Why
 
@@ -47,50 +40,32 @@ them differently.
    series across pools.
 
 3. **Status follows metrics onto the operator listener**, with the type's own
-   page where the type has one (`http-direct`). The one exception is
-   `pool.type = fastcgi`, where upstream's `pm.status_path` keeps upstream's
-   meaning -- a path on the pool's own FastCGI socket, for the web server in
-   front -- *in addition to* the operator page, under a different name.
+   page where the type has one (`http-direct`). On `pool.type = fastcgi`,
+   upstream's `pm.status_path` keeps its meaning -- a path on the pool's own
+   FastCGI socket, for the web server in front. The pool may separately opt in
+   to an operator status page with `operator.status_path` or `operator.status`.
 
 Rules 2 and 3 look symmetrical to rule 1 and are its exact opposite. That is
 the thing to remember.
 
 ## Directives
 
-### `operator.*` -- on every pool type
+### `operator.*` -- directive reference
 
-The operator listener has nothing to do with the process manager, so its
-directives leave the `pm.` namespace. The same four names on every type; `cron`
-and `supervisor` no longer need to carve them out of a rejected `pm.`
-namespace (#283).
+The operator listener is separate from the process manager, and the directives
+use the `operator.*` namespace on every supported pool type, including FastCGI.
+`operator-endpoint.md` is the canonical reference for path and listener
+directives, shorthand flags, defaults, path-safe pool names, and collision
+rules. `pm.status_path` remains upstream-only on FastCGI and is separate from
+`operator.status_path`.
 
-| Directive | Meaning | Default |
-| --- | --- | --- |
-| `operator.metrics_path` | This pool's Prometheus page, on the operator listener. | unset = off (gateway: `/metrics`) |
-| `operator.status_path` | This pool's status page, on the operator listener. | unset = off (gateway: `/status`) |
-| `operator.metrics` | `on` = expose metrics at `/metrics/<pool name>`. | `off` |
-| `operator.status` | `on` = expose status at `/status/<pool name>`. | `off` |
-| `operator.metrics_listen` | Where the metrics path binds. | `127.0.0.1:9253` |
-| `operator.status_listen` | Where the status path binds. | `127.0.0.1:9253` |
-
-`operator.metrics = on` and `operator.metrics_path = …` are two spellings of
-one switch. `on` picks the path for you, and picks the one the gateway will use
-(below), so direct and gateway URLs coincide. Setting both is a startup error.
-A pool that sets neither is not exposed and, if nothing else on the address
-needs a listener, binds nothing.
-
-The old names (`pm.status_path` on non-`fastcgi` types, `pm.metrics_path`,
-`pm.status_listen`, `pm.metrics_listen` everywhere) are **refused with a message
-naming the new directive**, not accepted as aliases. Two names for one
-mechanism is the disease this rename cures; keeping them as synonyms would be
-a small dose of it.
-
-**Pool names become URL components.** A pool that exposes anything must have a
-section name made of `[alphanum]/_-.~` -- the operator path character set
-(`fpm_operator_endpoint.c`). `[queue:high]` or `[api v2]` can exist, but
-cannot set `operator.*`. Startup refuses with the name and the character; it
-does not skip the pool with a warning, because a skipped pool is metrics you
-notice are missing only when you need them.
+Gateway-specific defaults: its own status and metrics pages are on by default
+at `/status` and `/metrics`; set `operator.status = off` or
+`operator.metrics = off` (or an empty path) to disable one. All gateway and
+pool operator listeners default to `127.0.0.1:9253`, so pools that omit
+`operator.*_listen` share one listener process. Explicit listen addresses are
+only needed to split endpoints across interfaces/firewall rules; they are not
+required for the gateway-first topology below.
 
 ### `http.*` -- on the gateway
 
@@ -182,10 +157,10 @@ or empty its base paths. To keep one *pool* out of it, do not expose the pool.
 There is no per-gateway pool list; if one is ever needed it is a list, not a
 flag.
 
-This is not the derived-membership design that was assessed and dropped
-(#383): membership is still declared by the pool -- exposed iff it set a path
-or a flag (#273, point 4) -- and nothing is inferred from `http.route[]`. The
-gateway renames what pools declared; it does not decide who is on the list.
+Membership is declared by the pool -- exposed iff it set an operator path or
+flag (#273, point 4) -- and is not inferred from `http.route[]`. The gateway
+forwards only the operator pages the target pool exposed; routing an application
+request does not implicitly expose its status or metrics.
 
 ## What the gateway forwards with
 
@@ -442,51 +417,50 @@ beside the gateway, with `/ping` and `/_fpm_status` in their upstream meaning.
   `operator.status = on` is the page on the operator listener. Two sockets,
   two answering processes, two different sets of numbers. Under the old names
   this could not be expressed at all -- which is what the rename buys.
-- **`[cronjobs]` sets `cron.expect_within`, and staleness has no timer of its
-  own** (#357): it is noticed at scrape time. With the gateway in front, that
-  scrape is `/metrics/cronjobs`, so the check depends on Prometheus asking for
-  that exact path.
+- **`[cronjobs]` sets `cron.expect_within`.** The master checks stale-enabled
+  cron pools once per second, so the `WARNING` fires even without a scrape
+  (#357). The `stale`/`stale_since` page fields still appear when you scrape
+  `/metrics/cronjobs` or `/status/cronjobs`; the gateway forwards them like any
+  other operator page.
 
-## The worker executor catches up (#387)
+## Worker-executor operator pages and ping (issue #387)
 
-`pool.type = http-direct` with `pool.executor = worker` refuses `ping.path`
-and `pm.status_path` today, both under one comment about the scoreboard having
-no per-request stage, duration or CPU to report. Decided 2026-09-17: that
-reason covers the access log, and only half of status.
+`pool.type = http-direct` with `pool.executor = worker` supports `ping.path` and
+`operator.status` even though it has no per-request scoreboard stage, duration
+or CPU accounting. `access.log` / `access.format` remain refused because they
+need per-request timing; the reduced status page reports only what this
+executor measures honestly.
 
-- **`ping.path` is answered.** It is a literal whole-path match in the
-  connection handler (`fpm_http_direct_ops_try_local()`), with no PHP and no
-  scoreboard involved; the worker executor already shares that file and
-  `ops->ping_path` is populated for it. It is answered from
-  `fpm_worker_accept()` **after** the ACL and **after** the saturation check,
-  so a worker whose queue is full answers `503` on the ping path as well: ping
-  means "would a real request be accepted right now", which is what it means
-  on the classic executor and what a load balancer needs. Pings do not consume
-  `pm.max_requests`.
-- **`operator.status` is a reduced page** -- only what the executor records
-  honestly: requests answered (#333), `worker_pending`, `worker_watchers`, the
-  http-direct totals, and per-child rows without stage, duration, CPU or peak
-  memory. The renderer is already wired on the worker struct
-  (`fpm_pool_type.c:262`); only the reject list keeps it dark.
-- **`access.log` / `access.format` stay refused.** There is no per-request
-  timing to log, and that was the honest half of the original comment.
+- **`ping.path` is answered by the worker on its request listener.** It is a
+  literal path match in the connection handler, requires no PHP or scoreboard
+  read, and is checked after the ACL and saturation gate. A worker whose pending
+  queue is full answers `503` on the ping path too: ping means "would this
+  worker accept a request now?" Pings do not consume `pm.max_requests`.
+- **The operator status page is reduced**, showing pool-level answered-request
+  counters, `worker_pending`, `worker_watchers`, HTTP-direct totals and per-child
+  rows without request stage, duration, CPU or peak memory.
+- **Gateway forwarding works for both pages.** When the pool exposes
+  `operator.status_path`/`operator.status` or `operator.metrics_path`/
+  `operator.metrics`, `http.operator = yes` can forward them under the gateway's
+  `<base>/<pool name>` URL just like any other exposed target.
 
-Rule 1 then holds on every type that has a request listener, and the gateway's
-`/status/<pool>` table has no gap.
+Thus the gateway-first topology has a ping on each request listener and status
+and metrics on operator listeners; the pages describe the process that owns
+them, not a synthetic aggregate inferred from `http.route[]`.
 
-## Issues
+## Related decisions
 
-| Issue | Carries |
+These issues established the gateway and operator-endpoint contract documented
+above; they are implementation history, not pending work:
+
+| Issue | Decision or feature |
 | --- | --- |
-| #340 (v0.8.0) | `http.route[<pool>] = <prefixes>`; today on `pool.type = http`, with target 0 |
-| #382 (v0.8.0) | ping answered in the gateway process, before routing |
-| #344 (v0.9.0) | HTTP/1.1 client transport; also the transport for operator forwarding |
-| #386 (v0.10.0) | `operator.*` rename, `on`/`off` flags, path-safe pool names, old names refused |
-| #388 (v0.10.0) | `pool.type = gateway`; `http` retired; target 0 gone; supersedes #345 |
-| #389 (v0.10.0) | `http.operator`, `http.operator_allowed_clients`, the `<base>/<pool>` map |
-| #390 (v0.10.0) | shm counters rendered by the operator child; the `/metrics` index |
-| #387 (v0.10.0) | worker executor: `ping.path` answered after the saturation check; reduced status page |
-| #383 (v0.11.0) | `fastcgi` on the operator listener -- simplified by the rename |
-| #385 (v0.11.0) | fold this page into `operator-endpoint.md` once the above has landed |
-
-#386 lands first: every later issue writes `operator.*`.
+| #340 | Explicit `http.route[<pool>]` path-prefix routing |
+| #382 | Gateway answers its own `ping.path` before routing |
+| #344 | HTTP/1.1 client transport used for routed HTTP-direct pools and operator forwarding |
+| #386 | `operator.*` namespace, shorthand flags, and path-safe pool names |
+| #387 | Worker executor ping and reduced status page |
+| #388 | Separate `pool.type = gateway`; retire the combined `http` type |
+| #389 | Optional `<base>/<pool>` operator-page forwarding through the gateway |
+| #390 | Gateway shared-memory counters and exposed-pool metrics index |
+| #383 | FastCGI pools may opt into the shared operator listener while retaining upstream `pm.status_path` |

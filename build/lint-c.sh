@@ -14,8 +14,8 @@
 # expect missing-header noise — useful only as a smoke check of the config.
 #
 # Exit status: clang-tidy's. With WarningsAsErrors: '*' in .clang-tidy
-# (issue #414) any finding in our TUs/headers fails the run; the CI job
-# propagates it (pipefail in the workflow step).
+# (issue #414) any finding in our TUs/headers fails this script; the CI step
+# runs under sh (dash, no pipefail) and propagates its status via rc=$?; exit $rc.
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"

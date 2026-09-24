@@ -191,7 +191,8 @@ static struct fpm_event_s cron_stale_timer;
 static int cron_stale_timer_started = 0;
 
 static void fpm_pool_cron_check_stale(struct fpm_worker_pool_s *wp,
-		struct fpm_cron_shared_s *shared, time_t now, struct fpm_pool_status_s *out);
+		struct fpm_cron_shared_s *shared, time_t now, struct fpm_pool_status_s *out,
+		int master_tick);
 
 static struct fpm_cron_shared_s *fpm_pool_cron_shared_for(struct fpm_worker_pool_s *wp) /* {{{ */
 {
@@ -207,9 +208,10 @@ static struct fpm_cron_shared_s *fpm_pool_cron_shared_for(struct fpm_worker_pool
 /* }}} */
 
 /* One shared master timer checks stale-enabled cron pools even when their
- * operator endpoints are never scraped. The status renderer calls the same
- * evaluator below, so the once-per-episode latch and warning are identical
- * whether a scrape or this timer notices the stale transition first. */
+ * operator endpoints are never scraped. It is the sole writer of the shared
+ * warning latch and the sole source of stale WARNINGs; status/metrics renderers
+ * call the same evaluator read-only, so parallel operator children cannot race
+ * to log the same stale episode. */
 static void fpm_pool_cron_stale_tick(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
 {
 	struct fpm_cron_registry_s *entry;
@@ -225,14 +227,15 @@ static void fpm_pool_cron_stale_tick(struct fpm_event_s *ev, short which, void *
 	now = FPM_NOW();
 	for (entry = cron_registry; entry; entry = entry->next) {
 		if (entry->wp->config->cron_expect_within > 0) {
-			fpm_pool_cron_check_stale(entry->wp, entry->shared, now, NULL);
+			fpm_pool_cron_check_stale(entry->wp, entry->shared, now, NULL, 1);
 		}
 	}
 }
 /* }}} */
 
 static void fpm_pool_cron_check_stale(struct fpm_worker_pool_s *wp,
-		struct fpm_cron_shared_s *shared, time_t now, struct fpm_pool_status_s *out) /* {{{ */
+		struct fpm_cron_shared_s *shared, time_t now, struct fpm_pool_status_s *out,
+		int master_tick) /* {{{ */
 {
 	struct fpm_worker_pool_config_s *c = wp->config;
 	time_t expected_next, threshold;
@@ -244,7 +247,7 @@ static void fpm_pool_cron_check_stale(struct fpm_worker_pool_s *wp,
 		out->has_expect_within = 1;
 	}
 	if (!shared || shared->last_run == 0) {
-		if (shared) {
+		if (master_tick && shared) {
 			shared->stale_warned = 0;
 		}
 		return;
@@ -261,15 +264,15 @@ static void fpm_pool_cron_check_stale(struct fpm_worker_pool_s *wp,
 			out->stale = 1;
 			out->stale_since = expected_next;
 		}
-		if (!shared->stale_warned) {
+		if (master_tick && !shared->stale_warned) {
 			shared->stale_warned = 1;
 			zlog(ZLOG_WARNING,
 				"[pool %s] cron: stale -- the schedule's next run after the last one "
 				"was due at %ld, and it is now more than cron.expect_within = %ds past that",
 				c->name, (long) expected_next, c->cron_expect_within);
 		}
-	} else {
-		/* Reset on recovery even if no operator page is being scraped. */
+	} else if (master_tick) {
+		/* The master timer is the sole writer of the shared warning latch. */
 		shared->stale_warned = 0;
 	}
 }
@@ -729,7 +732,7 @@ void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s
 		out->next_run = (n == (time_t) -1) ? 0 : n;
 	}
 
-	fpm_pool_cron_check_stale(wp, shared, FPM_NOW(), out);
+	fpm_pool_cron_check_stale(wp, shared, FPM_NOW(), out, 0);
 	if (!shared) {
 		out->state = FPM_POOL_STATE_IDLE;
 		return;

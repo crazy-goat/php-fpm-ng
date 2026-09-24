@@ -146,8 +146,9 @@ The master checks stale-enabled pools independently of status/metrics scrapes,
 once per second. The existing `WARNING` therefore appears even if nothing is
 requesting the operator endpoints. Status and metrics pages still calculate and
 expose the current `stale` fields when scraped; the timer does not cache page
-state. The once-per-episode warning latch is shared by the timer and the page
-renderer, so a scrape cannot duplicate a warning the timer already emitted.
+state. The master timer alone owns the once-per-episode warning latch and emits
+the warning. Page renderers are read-only, so separate status and metrics
+endpoint children cannot race to emit the same warning.
 
 What "stale" does **not** do: it never starts a run, never touches
 `cron_term_requested`, the pool's own sleep loop, or `fpm_children.c`'s

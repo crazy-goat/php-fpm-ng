@@ -142,17 +142,12 @@ seconds ago and the pool has not started a fresh run since), the pool is
   an always-`false` one that looks like a check that ran and passed; a pool
   that did ask always reports at least `stale`, never only sometimes.
 
-**Staleness is computed when the status/metrics page is rendered, not on a
-timer of its own.** There is no independent master-side clock ticking away
-checking every cron pool's schedule; the check above (and the `WARNING` log
-line) only runs as part of answering a request to `operator.status_path` or the
-metrics endpoint. A pool with `cron.expect_within` set but nothing ever
-scraping its operator endpoint can sit stale, undetected, indefinitely — the
-directive makes staleness *visible to whoever looks*, it does not make fpm-ng
-notice on its own. In practice this means: point something (even an
-occasional cron-job-watching-the-cron-job, or your existing metrics scraper)
-at the pool's status or metrics page if you want the `WARNING` line and the
-`stale` field to actually appear when they should.
+The master checks stale-enabled pools independently of status/metrics scrapes,
+once per second. The existing `WARNING` therefore appears even if nothing is
+requesting the operator endpoints. Status and metrics pages still calculate and
+expose the current `stale` fields when scraped; the timer does not cache page
+state. The once-per-episode warning latch is shared by the timer and the page
+renderer, so a scrape cannot duplicate a warning the timer already emitted.
 
 What "stale" does **not** do: it never starts a run, never touches
 `cron_term_requested`, the pool's own sleep loop, or `fpm_children.c`'s

@@ -3578,7 +3578,7 @@ static int fpm_http_route_next_prefix(const char **cursor, const char **out, siz
  * gateway child would leave a rebinding window between validation and connect.
  * The transport resolves once per child, but a numeric-only contract makes the
  * result stable and auditable from the config. */
-static int fpm_http_target_listen_is_loopback(const char *address)
+static int fpm_http_target_listen_is_loopback(char *address)
 {
 	char *copy, *host, *service, *end;
 	struct addrinfo hints, *res = NULL, *ai;

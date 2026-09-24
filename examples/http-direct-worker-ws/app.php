@@ -108,9 +108,12 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
             continue;
         }
 
-        /* The one builtin: 101 out, connection in, as a php_stream. Throws
-         * ValueError for a non-upgrade request, which then stays answerable. */
+        /* The builtin validates RFC 6455 and returns null after answering a
+         * malformed handshake (400/426); valid requests become php_streams. */
         $ws = fpmng_worker_upgrade($id, []);
+        if ($ws === null) {
+            continue; // the transport already sent the 400/426 handshake refusal
+        }
 
         $drain = function () use (&$ws): void {
             if ($ws === null) {

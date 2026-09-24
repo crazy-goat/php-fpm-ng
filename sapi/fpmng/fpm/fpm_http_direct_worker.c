@@ -58,6 +58,16 @@
 #include <event2/http_struct.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/buffer.h>
+#ifndef TAILQ_FIRST
+#define TAILQ_FIRST(head) ((head)->tqh_first)
+#endif
+#ifndef TAILQ_NEXT
+#define TAILQ_NEXT(elm, field) ((elm)->field.tqe_next)
+#endif
+#ifndef TAILQ_FOREACH
+#define TAILQ_FOREACH(var, head, field) \
+	for ((var) = TAILQ_FIRST(head); (var); (var) = TAILQ_NEXT(var, field))
+#endif
 #include <event2/bufferevent.h>
 /* issue #338: evconnlistener_enable()/_disable() for the accept ceiling -- the
  * same libevent API classic's accept gate uses. */
@@ -236,6 +246,7 @@ static void fpm_ws_unregister_watcher(struct fpm_worker_watcher *watcher);
  * down, after the pending table's own helpers. */
 static struct fpm_worker_pending *fpm_worker_pending_get(zend_long id);
 static void fpm_worker_count_scoreboard_request(void);
+static void fpm_worker_account_answered_request(void);
 
 static struct {
 	struct fpm_worker_pool_s *wp;
@@ -1918,6 +1929,129 @@ static bool fpm_ws_is_ws_stream(php_stream *stream)
 	return stream->ops == &fpm_ws_ops;
 }
 
+static bool fpm_ws_header_has_token(struct evkeyvalq *headers, const char *name, const char *token)
+{
+	struct evkeyval *header;
+	size_t token_len = strlen(token);
+
+	TAILQ_FOREACH(header, headers, next) {
+		const char *p, *start, *end;
+
+		if (strcasecmp(header->key, name) != 0) {
+			continue;
+		}
+		p = header->value;
+		while (*p) {
+			while (*p == ',' || *p == ' ' || *p == '\t') {
+				p++;
+			}
+			start = p;
+			while (*p && *p != ',') {
+				p++;
+			}
+			end = p;
+			while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+				end--;
+			}
+			if ((size_t) (end - start) == token_len && strncasecmp(start, token, token_len) == 0) {
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+static int fpm_ws_base64_value(unsigned char c)
+{
+	if (c >= 'A' && c <= 'Z') return c - 'A';
+	if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+	if (c >= '0' && c <= '9') return c - '0' + 52;
+	if (c == '+') return 62;
+	if (c == '/') return 63;
+	return -1;
+}
+
+/* RFC 6455 section 4.2.1 requires canonical base64 which decodes to exactly 16
+ * bytes. The worker child has no Zend MM, so validate into a fixed stack buffer. */
+static bool fpm_ws_key_valid(const char *key)
+{
+	unsigned char decoded[16];
+	int values[4];
+	size_t i, out = 0;
+
+	if (strlen(key) != 24 || key[22] != '=' || key[23] != '=') {
+		return false;
+	}
+	for (i = 0; i < 20; i++) {
+		values[i % 4] = fpm_ws_base64_value((unsigned char) key[i]);
+		if (values[i % 4] < 0) {
+			return false;
+		}
+		if (i % 4 == 3) {
+			decoded[out++] = (unsigned char) ((values[0] << 2) | (values[1] >> 4));
+			decoded[out++] = (unsigned char) ((values[1] << 4) | (values[2] >> 2));
+			decoded[out++] = (unsigned char) ((values[2] << 6) | values[3]);
+		}
+	}
+	/* The final pair of base64 sextets encodes one byte; its low four padding
+	 * bits must be zero for the representation to be canonical. */
+	values[0] = fpm_ws_base64_value((unsigned char) key[20]);
+	values[1] = fpm_ws_base64_value((unsigned char) key[21]);
+	if (values[0] < 0 || values[1] < 0 || (values[1] & 0x0f) != 0) {
+		return false;
+	}
+	decoded[out++] = (unsigned char) ((values[0] << 2) | (values[1] >> 4));
+	return out == sizeof(decoded);
+}
+
+static unsigned fpm_ws_header_count(struct evkeyvalq *headers, const char *name, const char **value)
+{
+	struct evkeyval *header;
+	unsigned count = 0;
+
+	*value = NULL;
+	TAILQ_FOREACH(header, headers, next) {
+		if (strcasecmp(header->key, name) == 0) {
+			count++;
+			*value = header->value;
+		}
+	}
+	return count;
+}
+
+/* Answer a malformed/unsupported upgrade before changing connection ownership.
+ * These are ordinary completed requests: keep scoreboard and pm.max_requests
+ * accounting identical to fpmng_worker_respond(). */
+static void fpm_ws_reject_upgrade(struct fpm_worker_pending *p, int status, bool version_required)
+{
+	struct evhttp_request *http = p->http;
+	struct evhttp_connection *connection = evhttp_request_get_connection(http);
+	struct evbuffer *body;
+
+	if (!connection) {
+		fpm_worker_reap(p);
+		return;
+	}
+	if (version_required && evhttp_add_header(evhttp_request_get_output_headers(http),
+			"Sec-WebSocket-Version", "13") != 0) {
+		status = 500;
+	}
+	if (fpm_worker_stopping || (fw.wp->config->pm_max_requests &&
+			fw.answered + 1 >= (unsigned) fw.wp->config->pm_max_requests)) {
+		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
+	}
+	evhttp_connection_set_closecb(connection, NULL, NULL);
+	body = evbuffer_new();
+	if (body) {
+		fpm_worker_send_reply(http, status, body);
+		evbuffer_free(body);
+	} else {
+		fpm_worker_send_error(http, 500, NULL);
+	}
+	fpm_worker_reap(p);
+	fpm_worker_account_answered_request();
+}
+
 /* Sec-WebSocket-Accept: base64(SHA1(key || GUID)), RFC 6455 section 4.2.1.
  * ext/standard's SHA1 and base64 are PHPAPI and always linked. */
 static zend_string *fpm_ws_accept_key(const char *ws_key)
@@ -1939,18 +2073,17 @@ static zend_string *fpm_ws_accept_key(const char *ws_key)
 	return php_base64_encode(digest, sizeof(digest));
 }
 
-ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_upgrade, 0, 2, IS_RESOURCE, 0)
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_upgrade, 0, 2, IS_RESOURCE, 1)
 	ZEND_ARG_TYPE_INFO(0, id, IS_LONG, 0)
 	ZEND_ARG_TYPE_INFO(0, response_headers, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
 /* Returns an ordinary bidirectional php_stream over the hijacked connection:
  * fread()/fwrite()/fclose()/feof()/stream_has_buffered() work on it, and so do
- * the watcher primitives, which see the underlying fd. Throws (before any
- * state changed, so the request stays answerable by fpmng_worker_respond())
- * when the id is unknown/answered, the client is gone, or the request is not
- * an RFC 6455 upgrade candidate: a GET with "Upgrade: websocket" and a
- * Sec-WebSocket-Key. */
+ * the watcher primitives, which see the underlying fd. Throws before state
+ * changes when the id is unknown/answered or the client is gone. A malformed
+ * WebSocket handshake is answered here (400, or RFC-required 426 for an
+ * unsupported/missing version) and returns NULL. */
 static ZEND_FUNCTION(fpmng_worker_upgrade)
 {
 	zend_long id;
@@ -1960,8 +2093,9 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 	struct evhttp_connection *connection;
 	struct bufferevent *bev;
 	struct evkeyvalq *in;
-	const char *upgrade, *key;
+	const char *upgrade, *key, *version;
 	zend_string *accept;
+	unsigned upgrade_count, key_count, version_count;
 	smart_str head = {0};
 	zend_string *name;
 	zval *value;
@@ -1978,12 +2112,22 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 		RETURN_THROWS();
 	}
 	in = evhttp_request_get_input_headers(p->http);
-	upgrade = evhttp_find_header(in, "Upgrade");
-	key = evhttp_find_header(in, "Sec-WebSocket-Key");
-	if (evhttp_request_get_command(p->http) != EVHTTP_REQ_GET || !upgrade
-		|| evutil_ascii_strcasecmp(upgrade, "websocket") != 0 || !key || !*key) {
+	upgrade_count = fpm_ws_header_count(in, "Upgrade", &upgrade);
+	key_count = fpm_ws_header_count(in, "Sec-WebSocket-Key", &key);
+	version_count = fpm_ws_header_count(in, "Sec-WebSocket-Version", &version);
+	if (evhttp_request_get_command(p->http) != EVHTTP_REQ_GET || upgrade_count != 1 || !upgrade
+		|| evutil_ascii_strcasecmp(upgrade, "websocket") != 0) {
 		zend_argument_value_error(1, "is not a WebSocket upgrade request");
 		RETURN_THROWS();
+	}
+	if (!fpm_ws_header_has_token(in, "Connection", "Upgrade")
+		|| key_count != 1 || !key || !fpm_ws_key_valid(key)) {
+		fpm_ws_reject_upgrade(p, 400, false);
+		RETURN_NULL();
+	}
+	if (version_count != 1 || !version || strcmp(version, "13") != 0) {
+		fpm_ws_reject_upgrade(p, 426, true);
+		RETURN_NULL();
 	}
 
 	accept = fpm_ws_accept_key(key);
@@ -2110,14 +2254,7 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 	 * tail is fpmng_worker_respond_end()'s, without the reply counting (the
 	 * 101 never goes through fpm_worker_count_reply()). */
 	fpm_worker_reap(p);
-	fw.answered++;
-	fpm_worker_count_scoreboard_request();
-	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
-		!fpm_worker_stopping) {
-		fpm_worker_stopping = 1;
-		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
-		fpm_worker_notify();
-	}
+	fpm_worker_account_answered_request();
 
 	RETURN_RES(stream->res);
 }
@@ -2449,6 +2586,22 @@ static void fpm_worker_count_scoreboard_request(void)
 	fpm_scoreboard_update(0, 0, 0, 0, 1, 0, 0, 0, FPM_SCOREBOARD_ACTION_INC, NULL);
 }
 
+/* A request answered by either userland or the transport-level WebSocket
+ * validator is one completed worker request and may trip pm.max_requests. */
+static void fpm_worker_account_answered_request(void)
+{
+	fw.answered++;
+	fpm_worker_count_scoreboard_request();
+	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
+		!fpm_worker_stopping) {
+		/* Recycling is the master's contract with pm.max_requests; the worker
+		 * script sees it as an ordinary stop request and drains. */
+		fpm_worker_stopping = 1;
+		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
+		fpm_worker_notify();
+	}
+}
+
 /* Answers a request, possibly long after the loop iteration that produced it —
  * that deferred reply is the whole point of the mode. false means the client is
  * gone or the id is unknown; the handler decides whether that is worth
@@ -2541,16 +2694,7 @@ static ZEND_FUNCTION(fpmng_worker_respond)
 	evbuffer_free(out);
 	fpm_worker_reap(p);
 
-	fw.answered++;
-	fpm_worker_count_scoreboard_request();
-	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
-		!fpm_worker_stopping) {
-		/* Recycling is the master's contract with pm.max_requests; the worker
-		 * script sees it as an ordinary stop request and drains. */
-		fpm_worker_stopping = 1;
-		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
-		fpm_worker_notify();
-	}
+	fpm_worker_account_answered_request();
 	RETURN_TRUE;
 }
 
@@ -2773,16 +2917,7 @@ static ZEND_FUNCTION(fpmng_worker_respond_end)
 	evhttp_send_reply_end(p->http);
 	fpm_worker_reap(p);
 
-	fw.answered++;
-	fpm_worker_count_scoreboard_request();
-	if (fw.wp->config->pm_max_requests && fw.answered >= (unsigned) fw.wp->config->pm_max_requests &&
-		!fpm_worker_stopping) {
-		/* Recycling is the master's contract with pm.max_requests; the worker
-		 * script sees it as an ordinary stop request and drains. */
-		fpm_worker_stopping = 1;
-		fpm_http_direct_ops_worker_recycle(fw.ops, FPM_WORKER_RECYCLE_MAX_REQUESTS);
-		fpm_worker_notify();
-	}
+	fpm_worker_account_answered_request();
 	RETURN_TRUE;
 }
 

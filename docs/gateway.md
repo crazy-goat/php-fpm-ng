@@ -95,6 +95,15 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+**Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
+`http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
+be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
+`::1`. Public and wildcard addresses, hostnames (which could resolve or rebind
+to a public address), IPv4-mapped IPv6 addresses and other non-loopback targets
+are refused by `php-fpm-ng -t`; TLS-terminating
+`http-direct` targets remain refused too. To route over the network, use a
+transport with TLS rather than exposing the gateway's cleartext target hop.
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,

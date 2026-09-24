@@ -313,6 +313,7 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_pm     = 1,
 		.serves_requests = 1,
 		.baseline_counter = "requests",
+		.operator_endpoint = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{

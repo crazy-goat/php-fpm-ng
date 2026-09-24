@@ -12,11 +12,13 @@ A `cron`, `supervisor`, `gateway` or `http-direct` pool has nothing in front of 
 that could answer a monitoring scrape. A `fastcgi` pool does — the web server
 that speaks FastCGI to it — which is why upstream FPM answers `pm.status_path`
 inside a request and why that arrangement is left alone here. `pm.status_path`
-is therefore the one name that stays: it keeps its upstream meaning on
-`pool.type = fastcgi` only.
+stays an upstream directive answered on the pool's own FastCGI socket.
 
-For the four types above, php-fpm-ng serves the answer itself, from a small
-HTTP listener of its own:
+A FastCGI pool may separately opt in to the operator listener using `operator.*`;
+that does not move or replace `pm.status_path`. The operator pages are still
+served by the internal HTTP listener, never by a handler on the FastCGI socket.
+For pools that expose a page, php-fpm-ng serves the answer from a small HTTP
+listener of its own:
 
 ```ini
 [tick]
@@ -61,10 +63,11 @@ name the replacement:
 ```
 
 Aliasing them would keep two names alive for one mechanism, which is the thing
-the rename removes. `fastcgi` is the single exception: there `pm.status_path`
-still keeps upstream's meaning (a path on the pool's own FastCGI socket, for the
-web server in front), and every `operator.*` directive is refused because that
-type has no operator listener — see #383.
+the rename removes. `fastcgi` is the single exception for `pm.status_path`: it
+keeps upstream's meaning (a path on the pool's own FastCGI socket, for the web
+server in front). Since issue #383, a FastCGI pool may also opt into the
+separate `operator.*` listener; those paths are answered over HTTP and do not
+replace `pm.status_path`.
 
 ## Path-safe pool names
 
@@ -174,8 +177,9 @@ both changes.)
 
 The page is not the same page: it is the per-pool JSON described below, not
 upstream's `text`/`html`/`json`/`xml` status body. A scraper pointed at the
-public listener has to move to the operator address. `pool.type = fastcgi` is
-untouched, and keeps `pm.status_path` with its upstream meaning in full.
+public listener has to move to the operator address. A FastCGI pool still keeps
+`pm.status_path` with its upstream meaning in full; issue #383 separately lets
+it opt into `operator.*` without moving that FastCGI-socket page.
 
 ## Upgrading an `http-direct` pool that already set `pm.status_path`
 
@@ -402,5 +406,5 @@ independent on/off switches, since "on" means "the path is set".
   queue counter — it is not a request of the pool. See
   [`docs/gateway.md`](gateway.md) and
   [`docs/http-direct.md`](http-direct.md#pingpath-and-operatorstatus_path).
-- `pool.type = fastcgi` joining this listener on an explicit
-  `operator.*_listen` is #383.
+- `pool.type = fastcgi` can opt into this listener with `operator.*` (issue
+  #383); `pm.status_path` remains on its FastCGI socket.

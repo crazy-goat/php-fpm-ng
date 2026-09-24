@@ -84,7 +84,7 @@ struct fpm_worker_pool_config_s {
 	int pm_max_spawn_rate;
 	int pm_process_idle_timeout;
 	int pm_max_requests;
-	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every other type refuses it and uses operator.status_path below (issue #386). */
+	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every non-fastcgi type refuses it; operator.status_path is the separate HTTP endpoint (issue #386). */
 	/* fpm-ng: the per-pool operator endpoint's directives. Issue #386 moved
 	 * these out of the "pm." namespace, which never described them. See
 	 * fpm_operator_endpoint.h for the model and the defaults. */

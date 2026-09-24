@@ -20,11 +20,12 @@ require_once "fpmng-operator.inc";
  *
  * Through the gateway each is reached at the SAME public URL regardless of what
  * the pool declared locally: /metrics/app, /metrics/api, /status/tick. The
- * gateway's own page sits at the bare base (/metrics). The issue's example
- * names a `fastcgi` pool for `app`; that type has no operator listener at all
- * until #383 (fpm_operator_endpoint.h), so this uses the two types that can
- * expose today and still exercises "explicit local path" (api) next to
- * "derived same-as-gateway path" (app). */
+ * gateway's own page sits at the bare base (/metrics). FastCGI pools can now
+ * also opt into their own operator listener (#383); this test keeps the two
+ * HTTP-direct pools because it specifically exercises "explicit local path"
+ * (api) next to "derived same-as-gateway path" (app). The FastCGI listener
+ * path and upstream pm.status_path separation are covered by
+ * fpmng-fastcgi-operator-metrics.phpt. */
 
 $root = sys_get_temp_dir() . '/fpmng-gw-operator-' . getmypid();
 @mkdir($root, 0700, true);

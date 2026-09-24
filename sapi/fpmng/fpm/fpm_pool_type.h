@@ -286,17 +286,11 @@ struct fpm_pool_type_s {
 	 * because for such a type the name may well be valid elsewhere. */
 	unsigned executors_type_specific:1;
 
-	/* This type has nothing in front of it that could answer an operator's
-	 * scrape, so a pool of it serves its own stats and metrics from a small
-	 * HTTP listener of its own -- see fpm_operator_endpoint.h and issue #273.
-	 * Set for cron, supervisor, http and http-direct.
-	 *
-	 * Off for fastcgi, where it changes what pm.status_path
-	 * means: with the flag off the path keeps its upstream meaning, answered on
-	 * the pool's own FastCGI socket by whatever web server is already in front
-	 * of it, which on those types is exactly what an operator has (#273,
-	 * point 2). The flag is therefore not cosmetic and not a default -- adding
-	 * it to a type moves that type's status endpoint onto another socket.
+	/* This type can opt in to a small HTTP operator listener of its own -- see
+	 * fpm_operator_endpoint.h and issue #273. Set for cron, supervisor, gateway,
+	 * http-direct and fastcgi. On fastcgi this enables only operator.*; upstream
+	 * pm.status_path keeps its separate meaning on the pool's own FastCGI socket
+	 * (issue #383 after the namespace split in #386).
 	 *
 	 * Data rather than a name comparison in fpm_conf.c, which must not learn
 	 * the name of a pool type. */

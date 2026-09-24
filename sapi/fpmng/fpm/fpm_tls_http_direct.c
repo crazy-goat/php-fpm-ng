@@ -92,6 +92,21 @@ void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
 	fpm_tls_http_notify_written(bev);
 }
 
+int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_events)
+{
+	/* The two public headers meet here, as they already do for the write-step's
+	 * shared idle value. Assert the result mapping stays mechanical. */
+	enum { shutdown_values_match =
+		1 / (FPM_HTTP_DIRECT_TLS_SHUTDOWN_NOT_APPLICABLE == FPM_TLS_HTTP_SHUTDOWN_NOT_APPLICABLE
+			&& FPM_HTTP_DIRECT_TLS_SHUTDOWN_PENDING == FPM_TLS_HTTP_SHUTDOWN_PENDING
+			&& FPM_HTTP_DIRECT_TLS_SHUTDOWN_SENT == FPM_TLS_HTTP_SHUTDOWN_SENT
+			&& FPM_HTTP_DIRECT_TLS_SHUTDOWN_FAILED == FPM_TLS_HTTP_SHUTDOWN_FAILED) };
+	int result = fpm_tls_http_shutdown_step(bev, poll_events);
+
+	(void) shutdown_values_match;
+	return result;
+}
+
 int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 {
 	struct fpm_worker_pool_config_s *c = wp->config;

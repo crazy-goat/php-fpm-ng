@@ -164,6 +164,18 @@ struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg);
 
 ev_ssize_t fpm_tls_http_write_output(struct bufferevent *bev, short *poll_events);
 
+/* Issue #458. One nonblocking step of TLS shutdown. NOT_APPLICABLE means the
+ * bufferevent is plaintext; SENT includes SSL_shutdown() == 0, where our
+ * close_notify was sent but the peer's has not arrived. PENDING reports the fd
+ * readiness SSL_ERROR_WANT_READ/WRITE asks for. FAILED is a fatal SSL/BIO
+ * error for which the caller must use its abrupt-close fallback. */
+#define FPM_TLS_HTTP_SHUTDOWN_NOT_APPLICABLE 0
+#define FPM_TLS_HTTP_SHUTDOWN_PENDING 1
+#define FPM_TLS_HTTP_SHUTDOWN_SENT 2
+#define FPM_TLS_HTTP_SHUTDOWN_FAILED 3
+
+int fpm_tls_http_shutdown_step(struct bufferevent *bev, short *poll_events);
+
 /* Tells libevent -- and through it evhttp -- that a response this module wrote
  * itself has left the buffer, which is what finishes the request. Call it once
  * the response is complete and the buffer is empty, NOT after each write; see

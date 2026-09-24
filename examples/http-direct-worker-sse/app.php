@@ -60,6 +60,38 @@ function suspendFor(float $seconds): void
     Fiber::suspend();
 }
 
+/* A false chunk result is ambiguous: the SAPI also uses it when the live
+ * connection's output buffer reached worker.send_buffer_limit. Retry the same
+ * chunk after a short timer; an empty request_env means the client is gone or
+ * reaped, while a live request is retried until it drains, the worker stops, or
+ * the 10s retry ceiling expires. The caller then closes the stream cleanly. */
+function respondChunkWhenWritable(int $id, string $data): bool
+{
+    $deadline = hrtime(true) + 10_000_000_000;
+    while (true) {
+        if (fpmng_worker_stopping()) {
+            return false;
+        }
+        if (fpmng_worker_respond_chunk($id, $data)) {
+            return true;
+        }
+        if (fpmng_worker_request_env($id) === [] || hrtime(true) >= $deadline) {
+            return false;
+        }
+        suspendFor(0.05);
+    }
+}
+
+function endSseStream(int $id): void
+{
+    if (fpmng_worker_request_env($id) !== []) {
+        /* Best effort: if even this small chunk is refused, end still queues
+         * the terminal chunk and releases the slot instead of orphaning it. */
+        fpmng_worker_respond_chunk($id, "event: bye\ndata: reconnect\n\n");
+        fpmng_worker_respond_end($id);
+    }
+}
+
 $notify = fpmng_worker_notify_stream();
 $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use ($notify, $broadcast, &$streams): void {
     /* Level-triggered: drain or the watcher fires on every loop iteration. */
@@ -104,19 +136,20 @@ $watcher = fpmng_worker_event_create(FPMNG_WORKER_READ, $notify, function () use
             while (!fpmng_worker_stopping()) {
                 suspendFor(15.0);
                 foreach ($broadcast->since($lastId) as $event) {
-                    if (!fpmng_worker_respond_chunk($id, "id: {$event['id']}\ndata: {$event['data']}\n\n")) {
-                        return;    // false: client gone (or backpressure) — the entry is reaped
+                    if (!respondChunkWhenWritable($id, "id: {$event['id']}\ndata: {$event['data']}\n\n")) {
+                        endSseStream($id); // gone, worker stopping, or retry ceiling reached
+                        return;
                     }
                 }
-                if (!fpmng_worker_respond_chunk($id, ": ping\n\n")) {
+                if (!respondChunkWhenWritable($id, ": ping\n\n")) {
+                    endSseStream($id);
                     return;
                 }
             }
             /* The worker is retiring. Ending cleanly here — not waiting for
              * the SAPI's shutdown path — is what lets the EventSource
              * reconnect with its Last-Event-ID (docs semantics 2). */
-            fpmng_worker_respond_chunk($id, "event: bye\ndata: reconnect\n\n");
-            fpmng_worker_respond_end($id);
+            endSseStream($id);
         });
         $streams[$id]->start();
     }

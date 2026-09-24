@@ -19,6 +19,13 @@ free: no Composer, no amphp — the raw `fpmng_worker_*` primitives and one
   `fpmng_worker_closed_requests()` — not one heartbeat later, which is what
   the pre-#342 "learn it from the next `_chunk()` returning false" behaviour
   cost.
+- During live heartbeat updates, a `false` from `_chunk()` is checked against
+  `fpmng_worker_request_env()`: a gone/reaped client ends that Fiber, while a
+  live client retries the same chunk after yielding to the event loop. This is
+  how `worker.send_buffer_limit` applies backpressure without abandoning an
+  open stream (#454). After 10 seconds without progress, the example attempts
+  an `event: bye` and ends the response. Large synchronous reconnect replay
+  remains tracked separately in #455.
 
 ## Running it
 

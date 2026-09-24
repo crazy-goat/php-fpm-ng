@@ -2245,7 +2245,18 @@ static ZEND_FUNCTION(fpmng_worker_upgrade)
 	evhttp_connection_set_closecb(connection, NULL, NULL);
 	p->http = NULL;
 
-	bufferevent_write(bev, ZSTR_VAL(head.s), ZSTR_LEN(head.s));
+	if (bufferevent_write(bev, ZSTR_VAL(head.s), ZSTR_LEN(head.s)) != 0) {
+		/* The callback swap above is the point of no return. An evbuffer
+		 * allocation failure at this exact write is not black-box reachable,
+		 * but returning a live-looking stream without a queued 101 would
+		 * silently strand the client. This guard is deliberate insurance, as
+		 * recorded in #440 item 7. */
+		php_stream_close(stream);
+		smart_str_free(&head);
+		fpm_worker_reap(p);
+		fpm_worker_account_answered_request();
+		RETURN_FALSE;
+	}
 	smart_str_free(&head);
 
 	/* The connection leaves the pending world: worker.max_pending and

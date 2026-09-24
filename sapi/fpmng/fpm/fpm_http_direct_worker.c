@@ -195,6 +195,11 @@ struct fpm_worker_pending {
 	 * where the entry is still there but a status line may already be on the
 	 * wire. */
 	bool streaming;
+	/* issue #459: a nonempty chunk was refused by worker.send_buffer_limit.
+	 * This is retryable flow control, not client-gone: the request remains live
+	 * while the worker is healthy. During retirement it is the one state that
+	 * may_exit() hands to fpm_worker_finish_output() to terminate cleanly. */
+	bool backpressured;
 	/* issue #335: caches fpmng_worker_request_body()'s drained result so a
 	 * second call for the same id sees the body it already read instead of an
 	 * empty evbuffer. NULL until the first call; released in
@@ -931,11 +936,12 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	p = pemalloc(sizeof(*p), 1);
 	p->http = http;
 	p->id = fw.next_id++;
-	/* pemalloc() does not zero: every fresh entry starts life not streaming,
-	 * set explicitly rather than left to whatever garbage this allocation
-	 * happened to contain (issue #332). Same for body_cache (issue #335): NULL
-	 * until fpmng_worker_request_body()'s first call for this id. */
+	/* pemalloc() does not zero: every fresh entry starts life not streaming and
+	 * not backpressured, set explicitly rather than left to whatever garbage
+	 * this allocation happened to contain (issues #332, #459). Same for
+	 * body_cache (issue #335): NULL until request_body()'s first call. */
 	p->streaming = false;
+	p->backpressured = false;
 	p->body_cache = NULL;
 	gettimeofday(&p->accepted_at, NULL);
 	zend_hash_index_add_new_ptr(&fw.pending, p->id, p);
@@ -2572,18 +2578,37 @@ ZEND_END_ARG_INFO()
  * flight" then closes it with no response (task 080).
  *
  * fw.pending is the whole truth — every accepted request that has not been
- * answered, queued or handed over — so this is the entire condition. A bridge
- * built on it carries no counter and needs to know nothing about the queue.
+ * answered, queued or handed over. The one exception is a live stream whose last
+ * nonempty chunk was refused by worker.send_buffer_limit: retrying cannot make
+ * progress while that client is not reading, so after a stop request the SAPI
+ * takes ownership of that entry and fpm_worker_finish_output() ends it with the
+ * normal terminating chunk. A bridge still needs no counter and no timeout.
  *
- * Deliberate caveat: a handler that never answers keeps this false for ever.
- * That is the pending-table leak fpm_worker_accept() already describes,
- * bounded by the master's stop timeout, and holding the worker open is the
- * better failure — fpm_worker_finish_output() answers whatever is still
- * unanswered on the way out. */
+ * Deliberate caveat: a handler that never answers and was not backpressured
+ * keeps this false for ever. That is the pending-table leak fpm_worker_accept()
+ * already describes, bounded by the master's stop timeout, and holding the
+ * worker open is the better failure — fpm_worker_finish_output() answers
+ * whatever is still unanswered on the way out. */
 static ZEND_FUNCTION(fpmng_worker_may_exit)
 {
+	struct fpm_worker_pending *p;
+
 	ZEND_PARSE_PARAMETERS_NONE();
-	RETURN_BOOL(fpm_worker_stopping && zend_hash_num_elements(&fw.pending) == 0);
+	if (!fpm_worker_stopping) {
+		RETURN_FALSE;
+	}
+	/* Only retirement walks the table. The normal event-loop hot path keeps the
+	 * old O(1) stopping short-circuit. */
+	ZEND_HASH_FOREACH_PTR(&fw.pending, p) {
+		if (!p->http) {
+			continue;
+		}
+		if (p->streaming && p->backpressured) {
+			continue;
+		}
+		RETURN_FALSE;
+	} ZEND_HASH_FOREACH_END();
+	RETURN_TRUE;
 }
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_fpmng_worker_stream_has_buffered, 0, 1, _IS_BOOL, 0)
@@ -3126,6 +3151,7 @@ static ZEND_FUNCTION(fpmng_worker_respond_chunk)
 		bev = evhttp_connection_get_bufferevent(evhttp_request_get_connection(p->http));
 		if (bev && evbuffer_get_length(bufferevent_get_output(bev)) + ZSTR_LEN(data) >
 				fw.wp->config->worker_send_buffer_limit) {
+			p->backpressured = true;
 			RETURN_FALSE;
 		}
 	}
@@ -3138,6 +3164,10 @@ static ZEND_FUNCTION(fpmng_worker_respond_chunk)
 		 * connection: the same convention fpmng_worker_respond() uses for its
 		 * one-shot body, not a buffer kept across calls. */
 		evbuffer_add(out, ZSTR_VAL(data), ZSTR_LEN(data));
+		/* A delivered nonempty chunk is progress: if this stream had been
+		 * refused earlier, userland gets one more retirement turn to retry or
+		 * end it normally instead of the SAPI abandoning it on the stale bit. */
+		p->backpressured = false;
 		evhttp_send_reply_chunk(p->http, out);
 		evbuffer_free(out);
 	}

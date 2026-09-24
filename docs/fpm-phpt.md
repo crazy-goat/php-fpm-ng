@@ -68,10 +68,12 @@ Before any test is started, the runner records and verifies:
 
 - resolved path and `-v` output for the CLI and FPM binaries;
 - SHA-256 for both binaries; and
-- distinctive `strings` output containing an `fpmng_` marker and a
-  `pool.type`, `php-fpm-ng` or `fpmng_` marker.
+- distinctive `strings` output containing an `fpmng_` marker and either a
+  `pool.type` or `php-fpm-ng` marker. Both runners implement this as two checks
+  over `grep -E 'php-fpm-ng|pool\.type|fpmng_'`: one `grep -q 'fpmng_'`,
+  followed by `grep -Eq 'php-fpm-ng|pool\.type'`.
 
-A binary that does not pass this fingerprint check produces a `NOT MEASURED`
+A binary that does not pass both fingerprint predicates produces a `NOT MEASURED`
 result instead of a measurement.
 
 ## Result files

@@ -711,22 +711,30 @@ stream *on the worker* — cross-worker publish/subscribe is a different problem
 
 ## WebSocket (`pool.executor = worker`) (issue #343)
 
-`fpmng_worker_upgrade(int $id, array $responseHeaders): resource` turns a
-pending request into an ordinary bidirectional PHP stream:
+`fpmng_worker_upgrade(int $id, array $responseHeaders): resource|null` turns a
+valid pending request into an ordinary bidirectional PHP stream:
 
-1. It validates the request is an RFC 6455 upgrade candidate — a `GET` with
-   `Upgrade: websocket` and a `Sec-WebSocket-Key` — and throws `ValueError`
-   otherwise, **before any state changes**: the request stays answerable by
-   `fpmng_worker_respond()`.
-2. It writes the `101 Switching Protocols` response straight to the
-   connection's bufferevent, with `Sec-WebSocket-Accept` computed in C
+1. Before changing connection ownership, it requires a `GET`, `Upgrade:
+   websocket`, a `Connection` token list containing `Upgrade`, exactly one
+   canonical base64 `Sec-WebSocket-Key` decoding to 16 bytes, and exactly one
+   `Sec-WebSocket-Version: 13`.
+2. A malformed method/upgrade/Connection/key is answered by the transport with
+   `400 Bad Request`. A missing, duplicate or unsupported version is answered
+   with RFC 6455's `426 Upgrade Required` and `Sec-WebSocket-Version: 13` so a
+   client can retry. These protocol refusals reap and account the request and
+   return `null`; callers should continue their accept loop. They do not throw a
+   `ValueError` or leave a pending request to answer.
+3. A valid handshake writes `101 Switching Protocols` to the connection's
+   bufferevent, with `Sec-WebSocket-Accept` computed in C
    (`base64(sha1(key || GUID))`) and `$responseHeaders` appended after
    validation — pass `Sec-WebSocket-Protocol` there. Hop-by-hop headers are
    refused, the same list every response on this executor obeys.
-3. It hijacks the connection away from evhttp (the same three steps libevent
-   2.2's own `evws_new_session()` performs, reduced to the public 2.1 API),
-   wraps the bufferevent — the OpenSSL one on a TLS pool, whole, since the fd
-   carries only ciphertext — in a `php_stream` and returns it.
+4. The valid path hijacks the connection away from evhttp (the same three steps
+   libevent 2.2's own `evws_new_session()` performs, reduced to the public 2.1
+   API), wraps the bufferevent — the OpenSSL one on a TLS pool, whole, since
+   the fd carries only ciphertext — in a `php_stream` and returns it. Other
+   programming errors (unknown id, already-answered request, invalid response
+   headers) still throw before the handshake changes state.
 
 The returned resource is a normal stream: `fread()`, `fwrite()`, `fclose()`,
 `feof()` work, and so do the existing primitives with no new API —

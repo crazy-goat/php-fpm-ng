@@ -30,8 +30,15 @@ enum fpm_pool_state_e {
 	FPM_POOL_STATE_IDLE		/* doing nothing now, waiting for the next due time (cron between runs) */
 };
 
+/* One supervisor child's observational heartbeat, keyed by its stable
+ * scoreboard slot. */
+struct fpm_pool_heartbeat_s {
+	time_t last_heartbeat; /* epoch, 0 = this child has not called yet */
+};
+
 /* Filled by fpm_pool_type_s.status() for types with serves_requests = 0.
- * Exactly the fields the operator pages show — see docs/NOTES.md section 3u. */
+ * Shared state consumed by the operator page renderers; see docs/NOTES.md
+ * section 3u. Format-specific fields are rendered only where they apply. */
 struct fpm_pool_status_s {
 	enum fpm_pool_state_e state;
 	time_t last_start;		/* epoch, 0 = never started */
@@ -57,24 +64,16 @@ struct fpm_pool_status_s {
 	unsigned stale:1;		/* 1 = a scheduled run is overdue past cron.expect_within */
 	time_t stale_since;		/* the schedule's due time this is stale against; 0 if not stale */
 
-	/* fpmng_supervisor_heartbeat() (issue #327), supervisor only.
-	 * has_heartbeat = the script has called it at least once in this process's
-	 * lifetime (shared memory, so it also survives this process being
-	 * respawned -- the shared struct is keyed by pool, not by process, see
-	 * fpm_pool_supervisor_shared_for()). last_heartbeat is the raw timestamp;
-	 * the age an operator cares about ("stuck since...") is
-	 * FPM_NOW() - last_heartbeat, computed where it is rendered rather than
-	 * stored, exactly like next_run/uptime. FPM_NOW() on both sides, never
-	 * time(NULL) on one of them: see issue #396 and fpm_debug_clock.h.
-	 *
-	 * NOTE: the shared struct this is stored in is allocated once per POOL, not
-	 * per child, so with supervisor.processes > 1 every child of the pool
-	 * shares and overwrites the same has_heartbeat/last_heartbeat pair --
-	 * "last call from any child in this pool", not "per child". Tracking it per
-	 * child would need a per-child key into shared memory that does not exist
-	 * today; see the supervisor heartbeat granularity follow-up issue. */
+	/* fpmng_supervisor_heartbeat() (issues #327, #356), supervisor only.
+	 * has_heartbeat/last_heartbeat retain the pool-wide latest call for
+	 * backward-compatible status and metrics. The operator JSON also receives
+	 * a slot-indexed timestamp array so it can associate each live child PID
+	 * with that child's independent heartbeat. Timestamps are raw FPM_NOW()
+	 * epochs; ages are derived when rendered, never stored. */
 	unsigned has_heartbeat:1;
 	time_t last_heartbeat;
+	struct fpm_pool_heartbeat_s *heartbeat_by_slot;
+	unsigned long heartbeat_slots;
 };
 
 /* One extra Prometheus/JSON gauge from fpm_pool_type_s.live_gauges() below

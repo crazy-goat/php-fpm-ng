@@ -44,6 +44,7 @@
 #include "fpm.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_children.h"
 #include "fpm_operator_pages.h"
 #include "fpm_operator_http.h"
 #include "fpm_pool_type.h"
@@ -95,6 +96,7 @@ struct fpm_operator_page_row_s {
 	 * a zeroed struct -- that would read as a measured "running" rather than
 	 * as "this type has no state to report". */
 	int has_state;
+	struct fpm_child_s *children;
 
 	/* fpm_pool_type_s.live_gauges() (issue #333): extra per-pool gauges no
 	 * other field above has room for, additive on top of whichever shape
@@ -142,6 +144,9 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		type->status(wp, &row.st);
 		row.has_state = 1;
 		row.counter_value = row.st.baseline;
+		if (row.st.heartbeat_by_slot && row.st.heartbeat_slots > 0) {
+			row.children = wp->children;
+		}
 	} else if (type->baseline_counter) {
 		/* Issue #388/#390: the gateway has a baseline counter and no per-pool
 		 * state. Since #390 its own segment holds the number, through the
@@ -477,6 +482,34 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 	if (row->st.has_heartbeat) {
 		fpm_operator_buf_appendf(b, ",\"heartbeat_age\":%ld",
 			(long) (now > row->st.last_heartbeat ? now - row->st.last_heartbeat : 0));
+	}
+	if (row->st.heartbeat_by_slot && row->st.heartbeat_slots > 0) {
+		struct fpm_child_s *child;
+		int first = 1;
+
+		fpm_operator_buf_appendf(b, ",\"heartbeat_children\":[");
+		for (child = row->children; child; child = child->next) {
+			time_t last_heartbeat;
+			int slot = child->scoreboard_i;
+
+			if (slot < 0 || (unsigned long) slot >= row->st.heartbeat_slots) {
+				continue;
+			}
+			if (!first) {
+				fpm_operator_buf_appendf(b, ",");
+			}
+			first = 0;
+			last_heartbeat = row->st.heartbeat_by_slot[slot].last_heartbeat;
+			if (last_heartbeat > 0) {
+				fpm_operator_buf_appendf(b, "{\"pid\":%d,\"heartbeat_age\":%ld}",
+					(int) child->pid,
+					(long) (now > last_heartbeat ? now - last_heartbeat : 0));
+			} else {
+				fpm_operator_buf_appendf(b, "{\"pid\":%d,\"heartbeat_age\":null}",
+					(int) child->pid);
+			}
+		}
+		fpm_operator_buf_appendf(b, "]");
 	}
 	fpm_operator_page_row_json_live(b, row);
 	fpm_operator_buf_appendf(b, "}");

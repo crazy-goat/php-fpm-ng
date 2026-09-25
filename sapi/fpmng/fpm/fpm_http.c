@@ -43,6 +43,7 @@
 #ifdef HAVE_FPM_HTTP
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include <errno.h>
@@ -1672,6 +1673,124 @@ void fpm_http_pump(struct fpm_http_gateway_s *gw)
 	gw->pumping = 0;
 }
 
+/* Issue #490: process-local index for the nodes introduced by #390. evcon is
+ * the exact live object identity and is available both when a request arrives
+ * and when its close callback fires. A mixed pointer hash keeps aligned heap
+ * addresses from bunching into the same buckets; the explicit links in each node
+ * make close an exact removal rather than another lookup. */
+#define FPM_HTTP_CLIENT_INDEX_INITIAL_BUCKETS 64U
+
+static size_t fpm_http_client_hash(const struct evhttp_connection *evcon)
+{
+	uint64_t x = (uintptr_t) evcon;
+
+	/* splitmix64's finalizer: evcon addresses are aligned, so using low bits
+	 * directly would systematically discard the bits that vary. */
+	x += UINT64_C(0x9e3779b97f4a7c15);
+	x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+	x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+	return (size_t) (x ^ (x >> 31));
+}
+
+static struct fpm_http_client_s *fpm_http_client_index_find(
+	struct fpm_http_client_index_s *index, const struct evhttp_connection *evcon)
+{
+	struct fpm_http_client_s *cl;
+	size_t bucket;
+
+	if (!index->bucket_count) {
+		return NULL;
+	}
+	bucket = fpm_http_client_hash(evcon) & (index->bucket_count - 1);
+	for (cl = index->buckets[bucket]; cl; cl = cl->hash_next) {
+		if (cl->evcon == evcon) {
+			return cl;
+		}
+	}
+	return NULL;
+}
+
+static bool fpm_http_client_index_grow(struct fpm_http_client_index_s *index)
+{
+	struct fpm_http_client_s **buckets;
+	size_t bucket_count = index->bucket_count
+		? index->bucket_count * 2 : FPM_HTTP_CLIENT_INDEX_INITIAL_BUCKETS;
+	size_t i;
+
+	if (bucket_count < index->bucket_count || bucket_count > SIZE_MAX / sizeof(struct fpm_http_client_s *)) {
+		return false;
+	}
+	buckets = calloc(bucket_count, sizeof(struct fpm_http_client_s *));
+	if (!buckets) {
+		return false;
+	}
+	for (i = 0; i < index->bucket_count; i++) {
+		struct fpm_http_client_s *cl = index->buckets[i];
+
+		while (cl) {
+			struct fpm_http_client_s *next = cl->hash_next;
+			size_t bucket = fpm_http_client_hash(cl->evcon) & (bucket_count - 1);
+
+			cl->hash_bucket = bucket;
+			cl->hash_prev = NULL;
+			cl->hash_next = buckets[bucket];
+			if (buckets[bucket]) {
+				buckets[bucket]->hash_prev = cl;
+			}
+			buckets[bucket] = cl;
+			cl = next;
+		}
+	}
+	free(index->buckets);
+	index->buckets = buckets;
+	index->bucket_count = bucket_count;
+	return true;
+}
+
+static bool fpm_http_client_index_insert(struct fpm_http_client_index_s *index,
+	struct fpm_http_client_s *cl)
+{
+	struct fpm_http_client_s *head;
+
+	if (!index->bucket_count && !fpm_http_client_index_grow(index)) {
+		return false;
+	}
+	/* Grow before crossing 75%. If that allocation fails, the old table remains
+	 * valid and the request can still be tracked, albeit above the preferred
+	 * load factor. Only the initial table is a hard tracking failure. */
+	if (index->count >= index->bucket_count - index->bucket_count / 4) {
+		(void) fpm_http_client_index_grow(index);
+	}
+	cl->hash_bucket = fpm_http_client_hash(cl->evcon) & (index->bucket_count - 1);
+	head = index->buckets[cl->hash_bucket];
+	cl->hash_prev = NULL;
+	cl->hash_next = head;
+	if (head) {
+		head->hash_prev = cl;
+	}
+	index->buckets[cl->hash_bucket] = cl;
+	index->count++;
+	return true;
+}
+
+static void fpm_http_client_index_remove(struct fpm_http_client_index_s *index,
+	struct fpm_http_client_s *cl)
+{
+	if (cl->hash_prev) {
+		cl->hash_prev->hash_next = cl->hash_next;
+	} else {
+		index->buckets[cl->hash_bucket] = cl->hash_next;
+	}
+	if (cl->hash_next) {
+		cl->hash_next->hash_prev = cl->hash_prev;
+	}
+	cl->hash_prev = NULL;
+	cl->hash_next = NULL;
+	if (index->count) {
+		index->count--;
+	}
+}
+
 /* Issue #390: claims (or finds) the gateway-process node for one accepted
  * connection and registers the connection's one close callback on it. Called
  * first thing in fpm_http_request() and in fpm_http_plain_request(), so it runs
@@ -1687,13 +1806,12 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 {
 	struct fpm_http_client_s *cl;
 
-	if (!evcon) {
+	if (!gw || !evcon) {
 		return NULL;
 	}
-	for (cl = gw->clients; cl; cl = cl->next) {
-		if (cl->evcon == evcon) {
-			return cl;
-		}
+	cl = fpm_http_client_index_find(&gw->client_index, evcon);
+	if (cl) {
+		return cl;
 	}
 	cl = calloc(1, sizeof(*cl));
 	if (!cl) {
@@ -1701,8 +1819,10 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 	}
 	cl->gw = gw;
 	cl->evcon = evcon;
-	cl->next = gw->clients;
-	gw->clients = cl;
+	if (!fpm_http_client_index_insert(&gw->client_index, cl)) {
+		free(cl);
+		return NULL;
+	}
 	if (gw->gauges) {
 		fpm_http_counter_incr(&gw->gauges[0]);
 	}
@@ -1722,9 +1842,10 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	struct fpm_http_client_s *cl = arg;
 	struct fpm_http_gateway_s *gw = cl->gw;
 	fpm_http_conn *c = cl->c;
-	struct fpm_http_client_s **p;
 
-	(void) evcon;
+	/* One close notification owns this node. Clearing the slot first also keeps
+	 * a nested libevent close path from seeing the same callback as current. */
+	evhttp_connection_set_closecb(evcon, NULL, NULL);
 	if (c) {
 		c->evcon = NULL;
 		c->client = NULL;
@@ -1733,16 +1854,15 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 			c->upstream->current = NULL;
 			c->upstream = NULL;
 		}
-		fpm_http_conn_free(c);
 	}
-	for (p = &gw->clients; *p; p = &(*p)->next) {
-		if (*p == cl) {
-			*p = cl->next;
-			break;
-		}
-	}
+	/* Remove before fpm_http_conn_free(): timer teardown or a future request
+	 * cleanup can re-enter, and must not find this connection still indexed. */
+	fpm_http_client_index_remove(&gw->client_index, cl);
 	if (gw->gauges) {
 		fpm_http_counter_decr(&gw->gauges[0]);
+	}
+	if (c) {
+		fpm_http_conn_free(c);
 	}
 	free(cl);
 }

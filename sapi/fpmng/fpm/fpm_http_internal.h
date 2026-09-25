@@ -340,7 +340,23 @@ struct fpm_http_client_s {
 	struct fpm_http_gateway_s *gw;
 	struct evhttp_connection *evcon;
 	fpm_http_conn *c;
-	struct fpm_http_client_s *next;
+	/* issue #490: exact links inside the process-local hash bucket. The close
+	 * callback already carries this node, so removal does not search by evcon
+	 * and there is no second list that could diverge from the index. */
+	struct fpm_http_client_s *hash_prev;
+	struct fpm_http_client_s *hash_next;
+	size_t hash_bucket;
+};
+
+/* Process-local open-connection index, copied empty into each gateway child by
+ * fork(). Power-of-two bucket_count makes the mixed-pointer hash a mask; the
+ * table grows before the 0.75 load threshold and never shrinks on churn. The
+ * pointer count is independent of the shared gauge: an allocation failure
+ * leaves this new connection untracked rather than skewing the gauge. */
+struct fpm_http_client_index_s {
+	struct fpm_http_client_s **buckets;
+	size_t bucket_count;
+	size_t count;
 };
 
 /* one gateway family per pool */
@@ -535,10 +551,11 @@ struct fpm_http_gateway_s {
 	 * process's block and the master zeroes a dead one, so each process
 	 * maintains only its own cells and no atomic is needed. */
 	atomic_t *gauges;
-	/* Issue #390: every accepted client connection of THIS process, so its
-	 * connections_open cell is incremented once per connection in
-	 * fpm_http_client_track() and decremented once in its close callback. */
-	struct fpm_http_client_s *clients;
+	/* Issue #390/#490: every established client connection of THIS process,
+	 * indexed by evcon so keep-alive requests and closes do not scan unrelated
+	 * idle connections. Its connections_open cell changes once per successful
+	 * insertion and once in the node's close callback. */
+	struct fpm_http_client_index_s client_index;
 	/* http.fault_upstream_write, see fpm_http_upstream_write_must_fail().
 	 * 0 = off, which is the value every real deployment has. The counter is
 	 * per gateway process: fork() copies a zero into each one. */

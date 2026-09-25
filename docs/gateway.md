@@ -237,6 +237,42 @@ reconciled when a process dies, and the whole segment is rebuilt by a reload:
 an exec-reload re-execs the master and the allocation is `MAP_ANONYMOUS`
 (#330), so like every other pool's counters, the gateway's reset on reload.
 
+### Client-index scaling measurement (issue #490)
+
+`build/benchmark-gateway-client-index.py` measures the cost of keeping idle
+keep-alive clients out of the lookup path. On 2026-09-25 00:27 UTC it ran on
+the test box with one gateway, `http.reuseport = off`, both gateway timeouts
+set to `0`, and local `/ping`; the configured application was never called.
+For each connection count the harness opened that many clients, kept the oldest
+socket, warmed it with 50 requests, then recorded three batches of 500
+sequential pings. It then performed three rounds of up to 500 close/reopen
+operations. Each arm ran twice, once in each order, and the table averages all
+six ping batches plus the two setup/churn totals.
+
+Before is commit `91a254c`; after is the #490 working-tree build. Both used
+php-src `php-8.5.9` resolved to `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36`,
+gcc 15.2.0, libevent 2.1.12-stable, Python 3.14.4, and Linux
+`7.0.0-31-generic`. Binary SHA-256 values were
+`6232bbd195acb34f3959e6f57700c03ac582f63ca4a854b5c3e88e5b167883b1`
+and `6b6b428e2a2cecb7f6f05b003bb3fb9238641069b63816d75e6d017e39599364`.
+The harness verifies the gateway marker with `strings` before every run and
+records the complete configuration and raw per-request samples in its JSON
+output.
+
+| live clients | before mean ms | after mean ms | before p95 ms | after p95 ms | setup before/after ms | churn before/after ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.127 | 0.128 | 0.151 | 0.150 | 0.5 / 0.5 | 0.8 / 0.8 |
+| 1,000 | 0.148 | 0.127 | 0.174 | 0.150 | 223.6 / 215.4 | 375.9 / 345.7 |
+| 5,000 | 0.227 | 0.160 | 0.301 | 0.194 | 1,334.7 / 1,148.3 | 498.3 / 347.4 |
+| 10,000 | 0.330 | 0.129 | 0.382 | 0.154 | 3,266.6 / 2,258.3 | 705.1 / 346.8 |
+
+The setup and churn columns include Python socket setup and loopback network
+time, so they are end-to-end costs rather than an isolated C timing. At 10,000
+idle clients the after-arm mean stayed within 0.0011 ms of its one-client mean;
+the before-arm mean was 2.56 times the after-arm mean, and the after-arm p95 was
+60% lower.
+These are local scaling measurements, not a production capacity claim.
+
 ## A complete configuration
 
 ```ini

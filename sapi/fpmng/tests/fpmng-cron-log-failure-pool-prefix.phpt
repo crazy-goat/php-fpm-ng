@@ -9,12 +9,15 @@ if (!file_exists('/dev/full')) {
 ?>
 --ENV--
 FPMNG_DEBUG_CLOCK_RATE=60
+TEST_TIMEOUT=180
 --FILE--
 <?php
 /* /dev/full opens successfully but fails writes with ENOSPC, so together with
  * a path below a nonexistent directory it drives both failure branches in
  * fpm_pool_cron_log_run() without permissions, disk pressure, or shared state.
- * Both cron jobs use every-minute schedules accelerated by the debug clock. */
+ * Both cron jobs use every-minute schedules. The debug clock only speeds up a
+ * binary built with it; the shipped package runs at real speed, so the deadline
+ * below is in real seconds and covers up to a full minute for the first tick. */
 require_once "tester.inc";
 
 $work = sys_get_temp_dir() . '/fpmng-cron-log-failure-' . getmypid();
@@ -53,7 +56,7 @@ $tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
 
 $errorLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR);
-$deadline = microtime(true) + 20;
+$deadline = microtime(true) + 150;
 do {
     $log = (string) @file_get_contents($errorLog);
     $openLogged = preg_match('/\[pool openfail\] cron\.log: cannot open/', $log);

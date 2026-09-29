@@ -4,7 +4,7 @@ fpm-ng: cron.expect_within logs stale without an operator page scrape (issue #35
 <?php include "skipif.inc"; ?>
 --ENV--
 FPMNG_DEBUG_CLOCK_RATE=60
-TEST_TIMEOUT=60
+TEST_TIMEOUT=180
 --FILE--
 <?php
 require_once "tester.inc";
@@ -14,14 +14,18 @@ $work = sys_get_temp_dir() . '/fpmng-cron-stale-no-scrape-' . getmypid();
 $marker = "$work/runs.log";
 @unlink($marker);
 
-/* With the test clock at 60x, a schedule minute and its one-second
- * cron.expect_within grace elapse in about one real second. The same run is
- * kept alive well beyond that threshold so the master timer, not a scrape,
- * must notice the stale episode. */
+/* FPMNG_DEBUG_CLOCK_RATE only speeds up a binary built with
+ * --enable-fpmng-debug-clock. The release package gate runs the shipped binary,
+ * which ignores it, so every deadline here is in REAL seconds and is sized for
+ * real speed: up to 60 s for the first tick plus about a minute past the next
+ * boundary. The job outlives both, so the same run is still going when the
+ * schedule says it is overdue. */
+/* The master timer, not a scrape, must notice the stale episode. */
 $script = <<<PHP
 <?php
 file_put_contents('{$marker}', "run\\n", FILE_APPEND);
-sleep(10);
+set_time_limit(0);
+sleep(75);
 PHP;
 file_put_contents("$work/job.php", $script);
 
@@ -45,7 +49,7 @@ try {
 
     $pattern = '/WARNING: .*\[pool tick\] cron: stale -- the schedule\'s next run after the last one was '
         . 'due at \d+, and it is now more than cron\.expect_within = 1s past that/';
-    $tester->expectLogPattern($pattern, false, 8);
+    $tester->expectLogPattern($pattern, false, 150);
     echo "stale warning without scrape: ok\n";
 
     /* The child is still in its first ten-second run; timer ticks must not

@@ -499,8 +499,11 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # fpmng-http-direct-worker-tls-and-client-tls.phpt and -- because the renewer
 # runs inside the pool and the pool child has no openssl either --
 # fpmng-acme-issue.phpt and fpmng-acme-renew-failure.phpt (issue #500).
+# Measured on the v0.11.0 rehearsal (2026-09-29): 166 owned tests, none failing.
+# The three cron tests from #355, #357 and #358 assumed the debug clock, which
+# the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
-EXPECT_TOTAL=153
+EXPECT_TOTAL=166
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -532,8 +535,8 @@ EXPECT_TOTAL=153
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=152; EXPECT_SKIP=1
-    else EXPECT_PASS=138; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=165; EXPECT_SKIP=1
+    else EXPECT_PASS=151; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -566,8 +569,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=147; EXPECT_SKIP=6
-    else EXPECT_PASS=136; EXPECT_SKIP=17; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=160; EXPECT_SKIP=6
+    else EXPECT_PASS=149; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

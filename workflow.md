@@ -20,7 +20,9 @@ Two exceptions, both about files we do not own:
 
 - Comments inherited from upstream in files that `build/prepare.sh` copies from
   `sapi/fpm/` are left alone. That script re-copies them on every run, so any
-  edit there is lost anyway.
+  edit there is lost anyway. The same applies to the vendored copies under
+  `third_party/php-src/`: `build/vendor-php-src.sh check` refuses any edit
+  made to them.
 - Quoted material stays verbatim: error strings, log lines, command output,
   measurements. Never translate something that appears in the output of a
   program.

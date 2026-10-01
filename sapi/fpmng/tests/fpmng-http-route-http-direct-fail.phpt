@@ -5,8 +5,8 @@ fpm-ng: the http-direct target's failure matrix through the gateway — 502 dead
 include "fpmng-skipif.inc";
 fpmng_skip_if_pool_type_unsupported('gateway');
 fpmng_skip_if_pool_type_unsupported('http-direct');
-if (!function_exists('posix_kill')) {
-    die("skip ext/posix is required to kill a worker mid-request");
+if (!function_exists('exec') || !is_executable('/bin/sh')) {
+    die("skip exec() and /bin/sh are required to kill a worker mid-request");
 }
 ?>
 --FILE--
@@ -30,19 +30,25 @@ $root = sys_get_temp_dir() . '/fpmng-route-direct-fail-' . getmypid();
 @mkdir($root, 0700, true);
 $script = '/front-' . getmypid() . '.php';
 $sock = "$root/direct.sock";
-file_put_contents($root . $script, <<<'PHP'
+$source = <<<'PHP'
 <?php
 header('Content-Type: text/plain');
 if (($_GET['mode'] ?? '') === 'die') {
     /* Not a clean end: the connection goes away with nothing written, which
-     * is the "closed without one byte of a reply" forensic case (#118). */
-    posix_kill(getmypid(), SIGKILL);
+     * is the "closed without one byte of a reply" forensic case (#118).
+     * Killed through sh(1) rather than posix_kill(): ext/posix is not in
+     * the CI configure flags and is a shared module that a packaged CLI
+     * run with -n does not load, so a posix-based test skipped everywhere
+     * (#467). */
+    exec('kill -9 ' . getmypid());
+    sleep(5);
 }
 /* Long enough to hold the target's single budget slot while the second
  * request of the saturation pair is refused. */
 if (($_GET['mode'] ?? '') === 'slow') { usleep(700000); }
 echo 'direct';
-PHP);
+PHP;
+file_put_contents($root . $script, $source);
 
 $config = <<<EOT
 [global]
@@ -96,7 +102,7 @@ try {
      * 502, and the log names the target's address. */
     [$head] = fetchStatus("http://$http/direct/index.php?mode=die");
     check(str_starts_with((string) $head[0], 'HTTP/1.1 502'), 'dead worker: ' . var_export($head[0] ?? null, true));
-    $tester->expectLogPattern("/closed .*after the complete request was written.*upstream|upstream '$sock'/", false, null, 5000000);
+    $tester->expectLogPattern('~upstream \'' . preg_quote($sock, '~') . '\' closed .*after the complete request was written~', true);
     echo "no-answer-502: ok\n";
 
     /* Upgrade: answered 501 by the transport, not stripped and forwarded. */
@@ -115,10 +121,14 @@ try {
 
 /* Saturation needs a second run of its own: the first request must still be
  * in flight when the second arrives. */
+/* The first run's cleanup removed the docroot. */
+@mkdir($root, 0700, true);
+file_put_contents($root . $script, $source);
+
 $config2 = <<<EOT
 [global]
-error_log = {{FILE:LOG2}}
-pid = {{FILE:PID2}}
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
 [gw]
 pool.type = gateway
 listen = {{ADDR[http]}}

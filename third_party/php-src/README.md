@@ -74,8 +74,10 @@ vendored file is not read by any translation unit.
     vendored anyway because `fpm_events.c` calls `fpm_event_kqueue_module()`
     and `fpm_event_port_module()` unconditionally.
 - **`fpm_trace.c` and `fpm_trace_pread.c`**: the `/proc/<pid>/mem` slowlog
-  backend. Upstream's `config.m4` adds a trace backend conditionally, and on
-  Linux it picks this one.
+  backend. Upstream's `config.m4` adds one trace backend conditionally and
+  prefers ptrace where it works. This build uses pread instead: it needs no
+  ptrace permission, and it is what the libphp build has always compiled
+  (`HAVE_PTRACE` is off in `build/libphp-build.sh`).
 - **`sapi/fpm/fpm/*.h` and `events/*.h`, 30 headers**: the headers those
   sources and the overlay include.
   - `fpm_main_arginfo.h` is generated upstream by `gen_stub.php` from
@@ -100,7 +102,7 @@ From upstream `sapi/fpm/`:
 |---|---|
 | `fpm.c`, `fpm_children.c`, `fpm_conf.c`, `fpm_conf.h`, `fpm_process_ctl.c`, `fpm_request.c`, `fpm_request.h`, `fpm_stdio.c`, `zlog.h` | `sapi/fpmng/fpm/` owns them. `vendor-php-src.sh check` refuses a vendored file that has the same name as an overlay file. |
 | `fpm_systemd.c`, `fpm_systemd.h` | `HAVE_SYSTEMD` is off (it would add a libsystemd link, `build/libphp-build.sh`). |
-| `fpm_trace_mach.c`, `fpm_trace_ptrace.c` | The macOS and ptrace trace backends; Linux uses `fpm_trace_pread.c`. |
+| `fpm_trace_mach.c`, `fpm_trace_ptrace.c` | The macOS and ptrace trace backends; this build uses `fpm_trace_pread.c`. |
 | `fpm_main.stub.php` | The input of the generated `fpm_main_arginfo.h`, which is vendored as generated. |
 | `config.m4`, `Makefile.frag` | Build glue of the php-src build. This SAPI has its own in `sapi/fpmng/`. |
 | `*.in` (`php-fpm.conf.in`, `www.conf.in`, `php-fpm.service.in`, `init.d.php-fpm.in`, `php-fpm.8.in`, `status.html.in`) | Installation templates. Packaging ships its own (`packaging/`). |

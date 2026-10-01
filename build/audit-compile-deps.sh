@@ -59,6 +59,13 @@ while read -r p; do
     case "$p" in "$a"/*) hit=1; break ;; esac
   done
   [ -z "$hit" ] || continue
+  # PHP headers of another installation -- /usr/include/php84/Zend/...,
+  # /usr/local/include/php/... -- sit under system directories, and must not
+  # pass as "system" for that.
+  case "$p" in
+    */php*/main/*|*/php*/Zend/*|*/php*/TSRM/*|*/php*/ext/*|*/php*/sapi/*)
+      echo "$p" >> "$all.bad"; continue ;;
+  esac
   case "$p" in
     /usr/include/*|/usr/lib/gcc/*|/usr/lib/clang/*|/usr/lib/llvm*|/usr/local/include/*) continue ;;
   esac
@@ -78,7 +85,7 @@ if grep -qx "$SDK_C/main/fastcgi.h" "$all"; then
   problems=$((problems + 1))
 fi
 # main/*.h from anywhere but the SDK, except the vendored fastcgi.h.
-shadow=$(grep '/main/[^/]*\.h$\|/main/streams/' "$all" | grep -v "^$SDK_C/" | grep -v '/main/fastcgi\.h$' || true)
+shadow=$(grep -E '/main/[^/]*\.h$|/main/streams/' "$all" | grep -v "^$SDK_C/" | grep -v '/main/fastcgi\.h$' || true)
 if [ -n "$shadow" ]; then
   echo "  php-src main/ headers read from outside the SDK (header shadowing):" >&2
   echo "$shadow" | sed 's/^/    /' >&2

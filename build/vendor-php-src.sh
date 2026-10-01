@@ -15,8 +15,8 @@
 # THE MANIFEST IS THE INVENTORY. third_party/php-src/MANIFEST lists every
 # vendored file with its upstream path, the SHA-256 of the pristine upstream
 # file at the pinned tag, and the SHA-256 of the copy in this tree. The two
-# hashes differ only where patches/ changes the file (main/fastcgi.c and .h)
-# or where the content is identical but the name is not (zlog_upstream.h).
+# hashes differ only where patches/ changes the file (main/fastcgi.c and .h);
+# zlog_upstream.h is renamed, not changed, so its two hashes are equal.
 # Why each file is in, and why the rest of upstream's sapi/fpm/ is out, is in
 # third_party/php-src/README.md.
 #
@@ -106,7 +106,16 @@ manifest_files() {
   awk -F '\t' '!/^#/ && NF == 4 { print }' "$MANIFEST"
 }
 
+# do_check [preimport]
+#
+# preimport is the guard import runs before it overwrites anything. It looks
+# only for what an import would destroy -- an in-place edit, an unlisted file,
+# a shadowed one -- and skips the three things an import exists to fix: lines
+# not imported yet ("-" hashes, a file just added to the list), files no
+# longer listed (import deletes them), and a patch stack that moved on. It returns instead of exiting, so the caller can say
+# why it refuses.
 do_check() {
+  mode=${1:-}
   [ -f "$MANIFEST" ] || fail "no manifest at ${MANIFEST#"$REPO"/}"
   tag=$(manifest_value tag)
   [ -n "$tag" ] || fail "the manifest has no 'tag' line"
@@ -118,6 +127,9 @@ do_check() {
   while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
     echo "$path" >> "$listed"
     f=$TP/$path
+    if [ "$mode" = preimport ] && [ "$local_sha" = - ]; then
+      continue
+    fi
     if [ ! -f "$f" ]; then
       echo "  missing: third_party/php-src/$path" >&2
       errors=$((errors + 1))
@@ -150,20 +162,26 @@ do_check() {
   (cd "$TP" && find . -type f | sed 's|^\./||' | grep -vx 'MANIFEST' | grep -vx 'README.md' | LC_ALL=C sort) > "$listed.disk"
   LC_ALL=C sort -o "$listed" "$listed"
   extra=$(LC_ALL=C comm -13 "$listed" "$listed.disk")
-  if [ -n "$extra" ]; then
+  # An import removes these itself (a line dropped from the list), so the
+  # guard before it lets them through.
+  if [ -n "$extra" ] && [ "$mode" != preimport ]; then
     echo "$extra" | sed 's|^|  not in the manifest: third_party/php-src/|' >&2
     errors=$((errors + 1))
   fi
   rm -f "$listed" "$listed.lines" "$listed.disk"
   want=$(manifest_value patches)
   have=$(stack_fingerprint "$minor")
-  if [ "$want" != "$have" ]; then
+  if [ "$mode" != preimport ] && [ "$want" != "$have" ]; then
     echo "  patches/ changed since the last import (manifest $want, now $have):" >&2
     echo "    the vendored main/fastcgi.c and .h are no longer pristine $tag + patches/." >&2
     echo "    Re-run: build/vendor-php-src.sh import <php-src checkout at $tag>" >&2
     errors=$((errors + 1))
   fi
-  [ "$errors" = 0 ] || fail "$errors problem(s) in third_party/php-src (see above)"
+  if [ "$errors" != 0 ]; then
+    [ "$mode" = preimport ] && return 1
+    fail "$errors problem(s) in third_party/php-src (see above)"
+  fi
+  [ "$mode" = preimport ] && return 0
   echo "vendor-php-src.sh: third_party/php-src matches its manifest ($tag, $(manifest_files | wc -l | tr -d ' ') files, patch stack $have)"
 }
 
@@ -175,8 +193,9 @@ do_import() {
 
   # Refuse to overwrite local edits. A tree that was never imported has "-"
   # hashes and passes this part; a missing manifest is an error either way.
-  if [ -n "$(manifest_value tag)" ] && manifest_files | awk -F '\t' '$4 != "-"' | grep -q .; then
-    do_check || fail "refusing to import over the problems above"
+  if [ -n "$(manifest_value tag)" ]; then
+    do_check preimport ||
+      fail "refusing to import over the problems above: move each change into patches/ (or drop it), restore the vendored file, and import again"
   fi
 
   # Pristine input only. A prepared tree has our patches applied already and
@@ -242,6 +261,16 @@ $dirty"
     printf '%s\t%s\t%s\t%s\n' "$path" "$upstream" "$pristine" "$(sha256 "$TP/$path")" >> "$new"
   done
   mv "$new" "$MANIFEST"
+  # Files dropped from the list go with the import, so the directory and the
+  # manifest cannot drift apart. They are tracked in git, so this is visible
+  # in the diff and recoverable.
+  manifest_files | cut -f 1 | LC_ALL=C sort > "$work/.listed"
+  (cd "$TP" && find . -type f | sed 's|^\./||' | grep -vx 'MANIFEST' | grep -vx 'README.md' | LC_ALL=C sort) |
+    LC_ALL=C comm -13 "$work/.listed" - | while read -r f; do
+      rm -f "$TP/$f"
+      echo "  removed third_party/php-src/$f (no longer in the manifest)"
+    done
+  find "$TP" -type d -empty -delete 2>/dev/null || true
   trap - EXIT
   rm -rf "$work"
   echo "vendor-php-src.sh: imported $(manifest_files | wc -l | tr -d ' ') files from $tag ($commit)"

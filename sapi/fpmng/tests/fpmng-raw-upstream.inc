@@ -95,6 +95,14 @@ EOT;
         $this->server = $server;
     }
 
+    /** Stops listening on the target's address and removes its socket file: the target is gone. */
+    public function killTarget(): void
+    {
+        fclose($this->server);
+        $this->server = fopen('php://memory', 'r');	/* finish() fclose()s it */
+        @unlink($this->sockPath);
+    }
+
     public function log(): string
     {
         return (string) @file_get_contents($this->errorLog);

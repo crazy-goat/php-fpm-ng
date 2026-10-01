@@ -1446,6 +1446,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 	up->t = t;
 	up->fd = socket(t->upstream_addr.ss_family, SOCK_STREAM, 0);
 	if (up->fd < 0) {
+		t->connect_errno = errno;
 		free(up);
 		fpm_http_budget_give_back(t);
 		return NULL;
@@ -1461,6 +1462,7 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 
 	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
+			t->connect_errno = errno;
 			event_free(up->ev_read);
 			event_free(up->ev_write);
 			close(up->fd);
@@ -1526,6 +1528,16 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 	fpm_http_conn_free(c);
 }
 
+/* Answers one queued request 502 because the connection to its target could
+ * not even be opened (issue #465); the real reason is the log line, naming the
+ * target's address. Same unlink-first contract as fpm_http_reject_queued(). */
+static void fpm_http_reject_unreachable(fpm_http_conn *c, int err)
+{
+	zlog(ZLOG_WARNING, "[pool %s] http: cannot connect to target '%s' (%s) target=%s",
+		c->gw->pool, c->target->listen_address, strerror(err), c->target->pool);
+	fpm_http_finish(c, 1);
+}
+
 /* http.pool_full_policy = wait (issue #309): this request has been queued for
  * http.pool_full_wait_ms. The bound is on the wait, not on the request -- a
  * request already handed to an upstream has left gw->waiting and had its
@@ -1589,7 +1601,25 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			}
 		}
 		if (!idle) {
+			t->connect_errno = 0;
 			idle = t->ops->connect(t);
+		}
+		if (!idle && t->connect_errno) {
+			/* Not a full pool: the connection itself failed (the target's
+			 * socket is gone, refused, not accessible). Waiting would never
+			 * help -- no upstream will be released to pump the queue again --
+			 * so every queued request gets the real reason in the log and a
+			 * 502, whatever http.pool_full_policy says. */
+			int err = t->connect_errno;
+
+			while (!TAILQ_EMPTY(&t->waiting)) {
+				fpm_http_conn *w = TAILQ_FIRST(&t->waiting);
+
+				TAILQ_REMOVE(&t->waiting, w, link);
+				w->queued = 0;
+				fpm_http_reject_unreachable(w, err);
+			}
+			return;
 		}
 		if (!idle) {
 			/* The pool is FULL for this gateway: every upstream connection it

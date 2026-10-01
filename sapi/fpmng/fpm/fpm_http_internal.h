@@ -292,6 +292,11 @@ struct fpm_http_target_s {
 	TAILQ_HEAD(, _fpm_http_upstream) upstreams;
 	unsigned nupstreams;
 	TAILQ_HEAD(, _fpm_http_conn) waiting;	/* requests without a free connection yet */
+	/* Why the last ops->connect() returned NULL: 0 = no budget (the pool is
+	 * full), else the errno of the socket()/connect() that failed (the
+	 * target's socket is gone, refused, not accessible). Reset by the caller
+	 * before each attempt; written only by the transports' connect(). */
+	int connect_errno;
 };
 
 /* One row of the routing table: a path prefix and the target it selects. The

@@ -759,6 +759,7 @@ rescan:
 				if (ZSTR_LEN(st->head.s) > FPM_HTTP_HTTP_MAX_HEAD) {
 					zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' sent a response head above %d bytes",
 						up->gw->pool, up->t->listen_address, FPM_HTTP_HTTP_MAX_HEAD);
+					errno = EPROTO;	/* not the stale errno of the read() that got us here */
 					fpm_http_upstream_fail(up, 0);
 					break;
 				}
@@ -910,6 +911,12 @@ static void fpm_http_http_readcb(evutil_socket_t fd, short what, void *arg)
 		if (up->busy && up->current && st && st->head_done
 			&& !st->expect_eof && st->body != FPM_HTTP_HTTP_BODY_EOF) {
 			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' closed before the response was complete",
+				up->gw->pool, up->t->listen_address);
+		} else if (up->busy && up->current && st && !st->head_done
+			&& st->head.s && ZSTR_LEN(st->head.s) > 0) {
+			/* Head bytes arrived but never a complete head: the reply was
+			 * seen, so the generic "no answer" line stays silent. */
+			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' closed in the middle of the response head",
 				up->gw->pool, up->t->listen_address);
 		}
 		fpm_http_upstream_fail(up, 1);

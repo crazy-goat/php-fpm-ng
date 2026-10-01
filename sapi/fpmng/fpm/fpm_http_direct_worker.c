@@ -1979,6 +1979,24 @@ static void fpm_ws_close_after_write_cb(struct bufferevent *bev, void *arg)
  * freed with it, exactly as evhttp_free() would have. */
 #define FPM_WS_LINGER_SECONDS 5
 
+/* The bound is a hard deadline from the moment of release, not a read idle
+ * timeout: libevent restarts an idle timeout on every read, and a peer that
+ * keeps sending after our FIN would hold the fd (and the loop, discarding)
+ * indefinitely. */
+struct fpm_ws_linger {
+	struct evhttp_connection *evcon;
+	struct event *deadline;
+};
+
+static void fpm_ws_linger_end(struct fpm_ws_linger *linger)
+{
+	/* evhttp_connection_free() clears the bufferevent's callbacks, so nothing
+	 * can run on the freed connection afterwards. */
+	event_free(linger->deadline);
+	evhttp_connection_free(linger->evcon);
+	pefree(linger, 1);
+}
+
 static void fpm_ws_linger_read(struct bufferevent *bev, void *arg)
 {
 	(void) arg;
@@ -1989,18 +2007,34 @@ static void fpm_ws_linger_event(struct bufferevent *bev, short what, void *arg)
 {
 	(void) bev;
 	(void) what;
-	/* EOF, error or timeout all end the same way. Callbacks are cleared by the
-	 * bufferevent_free() inside, so nothing can run on the freed connection. */
-	evhttp_connection_free(arg);
+	fpm_ws_linger_end(arg);	/* EOF or error: the peer is done */
+}
+
+static void fpm_ws_linger_deadline(evutil_socket_t fd, short what, void *arg)
+{
+	(void) fd;
+	(void) what;
+	fpm_ws_linger_end(arg);
 }
 
 static void fpm_ws_release(struct evhttp_connection *evcon)
 {
 	struct bufferevent *bev = evhttp_connection_get_bufferevent(evcon);
-	struct timeval linger = { FPM_WS_LINGER_SECONDS, 0 };
+	struct timeval deadline = { FPM_WS_LINGER_SECONDS, 0 };
+	struct fpm_ws_linger *linger = pemalloc(sizeof(*linger), 1);
 
-	bufferevent_setcb(bev, fpm_ws_linger_read, NULL, fpm_ws_linger_event, evcon);
-	bufferevent_set_timeouts(bev, &linger, NULL);
+	linger->evcon = evcon;
+	linger->deadline = event_new(fw.base, -1, EV_TIMEOUT, fpm_ws_linger_deadline, linger);
+	if (!linger->deadline || event_add(linger->deadline, &deadline) != 0) {
+		/* No way to bound the linger: leave the connection to evhttp_free(),
+		 * as before #472. Callbacks stay disarmed. */
+		if (linger->deadline) {
+			event_free(linger->deadline);
+		}
+		pefree(linger, 1);
+		return;
+	}
+	bufferevent_setcb(bev, fpm_ws_linger_read, NULL, fpm_ws_linger_event, linger);
 	bufferevent_enable(bev, EV_READ);
 }
 

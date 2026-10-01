@@ -36,7 +36,13 @@ function check(bool $condition, string $message): void
 }
 
 $binary = FPM\Tester::findExecutable();
-$dir = sys_get_temp_dir() . '/fpmng-428-input-' . getmypid();
+$dir = sys_get_temp_dir() . '/fpmng-428-input';
+/* The CLEAN section runs in another process, so the name is fixed (a pid in it would never match) and a leftover from a killed run is removed here. */
+foreach (array_merge(glob("$dir/scan/*") ?: [], glob("$dir/*") ?: []) as $leftover) {
+    @unlink($leftover);
+}
+@rmdir("$dir/scan");
+@rmdir($dir);
 mkdir($dir);
 
 /** Runs the binary; $config goes to fd 3 through a pipe when not null. */
@@ -138,7 +144,7 @@ echo "Done\n";
 ?>
 --CLEAN--
 <?php
-$dir = sys_get_temp_dir() . '/fpmng-428-input-' . getmypid();
+$dir = sys_get_temp_dir() . '/fpmng-428-input';
 foreach (glob("$dir/*") ?: [] as $f) {
     @unlink($f);
 }

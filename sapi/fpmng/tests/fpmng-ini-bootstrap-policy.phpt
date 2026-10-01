@@ -39,7 +39,13 @@ function check(bool $condition, string $message): void
 }
 
 $binary = FPM\Tester::findExecutable();
-$dir = sys_get_temp_dir() . '/fpmng-428-ini-' . getmypid();
+$dir = sys_get_temp_dir() . '/fpmng-428-ini';
+/* The CLEAN section runs in another process, so the name is fixed (a pid in it would never match) and a leftover from a killed run is removed here. */
+foreach (array_merge(glob("$dir/scan/*") ?: [], glob("$dir/*") ?: []) as $leftover) {
+    @unlink($leftover);
+}
+@rmdir("$dir/scan");
+@rmdir($dir);
 mkdir($dir);
 mkdir("$dir/scan");
 file_put_contents("$dir/main.ini", "memory_limit=11M\nprecision=5\n");
@@ -117,7 +123,7 @@ echo "Done\n";
 ?>
 --CLEAN--
 <?php
-$dir = sys_get_temp_dir() . '/fpmng-428-ini-' . getmypid();
+$dir = sys_get_temp_dir() . '/fpmng-428-ini';
 foreach (array_merge(glob("$dir/scan/*") ?: [], glob("$dir/*") ?: []) as $f) {
     @unlink($f);
 }

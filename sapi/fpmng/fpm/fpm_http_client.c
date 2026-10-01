@@ -514,6 +514,23 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 	return 0;
 }
 
+/* A response completed with bytes still in the buffer: nothing legitimate
+ * follows a response on this connection (no pipelining, no unsolicited
+ * messages), and re-parsing them as the next head would hand a request that
+ * is merely waiting for this connection somebody else's answer. Say so, and
+ * make complete() end the connection after delivering this response instead
+ * of reusing it. */
+static void fpm_http_http_leftover(fpm_http_upstream *up)
+{
+	struct fpm_http_http_state_s *st = up->http;
+
+	zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' sent unsolicited bytes after a completed response",
+		up->gw->pool, up->t->listen_address);
+	if (st) {
+		st->expect_eof = 1;
+	}
+}
+
 /* One completed response. fpm_http_request_done() finishes the client reply
  * (headers are always sent by then), marks the upstream idle and pumps; a
  * response that consumed its connection is dropped instead, before that pump
@@ -839,6 +856,9 @@ rescan:
 						break;
 					}
 					if (rc > 0) {
+						if (tail > 0) {
+							fpm_http_http_leftover(up);
+						}
 						fpm_http_http_complete(up);
 						if (up->dead) {
 							break;
@@ -862,6 +882,9 @@ rescan:
 				break;
 			}
 			if (rc > 0) {
+				if (len > 0) {
+					fpm_http_http_leftover(up);
+				}
 				fpm_http_http_complete(up);
 				if (up->dead) {
 					break;

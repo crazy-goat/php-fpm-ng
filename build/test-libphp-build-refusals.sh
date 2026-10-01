@@ -63,16 +63,26 @@ for t in sh dirname mkdir cut grep cat; do
 done
 cp "$WORK/linux/uname" "$WORK/bare/uname"
 
+# A compiler that only records that it was called. Every probe and compile
+# goes through $CC, so "the spy was never called" is "nothing was compiled".
+cat > "$WORK/cc-spy" <<EOF
+#!/bin/sh
+echo "\$*" >> "$WORK/cc-calls"
+exit 0
+EOF
+chmod +x "$WORK/cc-spy"
+SPY=$WORK/cc-spy
+
 # expect <name> <message fragment> <env and command...>
-# The command must exit non-zero, print the fragment, and leave no object
-# file behind: a refusal that happens after compiling is not a refusal.
+# The command must exit non-zero, print the fragment, and must not have
+# called the compiler: a refusal that happens after compiling is not a
+# refusal.
 expect() {
   name=$1
   want=$2
   shift 2
   CASES=$((CASES + 1))
-  out=$WORK/out-$CASES
-  rm -rf "$out"
+  rm -f "$WORK/cc-calls"
   if env "$@" > "$WORK/log-$CASES" 2>&1; then
     echo "FAIL: $name: the build succeeded; it should have refused"
     FAILED=$((FAILED + 1))
@@ -84,8 +94,8 @@ expect() {
     FAILED=$((FAILED + 1))
     return 0
   fi
-  if [ -n "$(find "$WORK" -name '*.o' 2>/dev/null)" ]; then
-    echo "FAIL: $name: refused, but only after compiling something"
+  if [ -n "$REFUSAL" ] && [ -e "$WORK/cc-calls" ]; then
+    echo "FAIL: $name: refused, but only after calling the compiler"
     FAILED=$((FAILED + 1))
     return 0
   fi
@@ -93,37 +103,41 @@ expect() {
 }
 
 L="PATH=$WORK/linux:$PATH"
+REFUSAL=yes
 OK_SDK="PHP_CONFIG=$WORK/sdk85/bin/php-config"
 
 expect "the old two-argument call" "takes no php-src tree any more" \
-  "$L" "$OK_SDK" CC=true sh "$BUILD" /some/php-src "$WORK/out-legacy"
+  "$L" "$OK_SDK" CC="$SPY" sh "$BUILD" /some/php-src "$WORK/out-legacy"
 expect "a kernel other than Linux" "supports Linux only" \
-  "PATH=$WORK/darwin:$PATH" "$OK_SDK" CC=true sh "$BUILD" "$WORK/out-darwin"
+  "PATH=$WORK/darwin:$PATH" "$OK_SDK" CC="$SPY" sh "$BUILD" "$WORK/out-darwin"
 expect "no php-config anywhere" "no php-config found" \
-  "PATH=$WORK/bare" CC=true sh "$BUILD" "$WORK/out-bare"
+  "PATH=$WORK/bare" CC="$SPY" sh "$BUILD" "$WORK/out-bare"
 expect "PHP_CONFIG naming nothing" "is not an executable" \
-  "$L" PHP_CONFIG="$WORK/nonexistent/php-config" CC=true sh "$BUILD" "$WORK/out-noexec"
+  "$L" PHP_CONFIG="$WORK/nonexistent/php-config" CC="$SPY" sh "$BUILD" "$WORK/out-noexec"
 expect "a PHP 8.4 SDK" "supports PHP 8.5 only" \
-  "$L" PHP_CONFIG="$WORK/sdk84/bin/php-config" CC=true sh "$BUILD" "$WORK/out-84"
+  "$L" PHP_CONFIG="$WORK/sdk84/bin/php-config" CC="$SPY" sh "$BUILD" "$WORK/out-84"
 expect "a PHP 8.6 SDK" "supports PHP 8.5 only" \
-  "$L" PHP_CONFIG="$WORK/sdk86/bin/php-config" CC=true sh "$BUILD" "$WORK/out-86"
+  "$L" PHP_CONFIG="$WORK/sdk86/bin/php-config" CC="$SPY" sh "$BUILD" "$WORK/out-86"
 expect "a ZTS SDK" "is a ZTS (thread-safe) build of PHP" \
-  "$L" PHP_CONFIG="$WORK/sdkzts/bin/php-config" CC=true sh "$BUILD" "$WORK/out-zts"
+  "$L" PHP_CONFIG="$WORK/sdkzts/bin/php-config" CC="$SPY" sh "$BUILD" "$WORK/out-zts"
 expect "no C compiler" "no C compiler" \
   "$L" "$OK_SDK" CC=no-such-cc-422 sh "$BUILD" "$WORK/out-nocc"
 expect "a toggle that is not 0 or 1" "FPMNG_TLS must be 0 or 1, not 'yes'" \
-  "$L" "$OK_SDK" CC=true FPMNG_TLS=yes sh "$BUILD" "$WORK/out-toggle"
+  "$L" "$OK_SDK" CC="$SPY" FPMNG_TLS=yes sh "$BUILD" "$WORK/out-toggle"
 expect "the debug clock toggle checked too" "FPMNG_DEBUG_CLOCK must be 0 or 1" \
-  "$L" "$OK_SDK" CC=true FPMNG_DEBUG_CLOCK=on sh "$BUILD" "$WORK/out-clock"
+  "$L" "$OK_SDK" CC="$SPY" FPMNG_DEBUG_CLOCK=on sh "$BUILD" "$WORK/out-clock"
 expect "ACME without TLS" "FPMNG_ACME=1 needs FPMNG_TLS=1" \
-  "$L" "$OK_SDK" CC=true FPMNG_TLS=0 FPMNG_ACME=1 sh "$BUILD" "$WORK/out-acme"
+  "$L" "$OK_SDK" CC="$SPY" FPMNG_TLS=0 FPMNG_ACME=1 sh "$BUILD" "$WORK/out-acme"
+REFUSAL=
 
 # The positive control: the same fakes, inside the contract, get past every
-# guard above. CC=true makes each compile probe "succeed" without producing a
+# guard above. The spy makes each compile probe "succeed" without producing a
 # program, so the build stops at the first probe it runs, the /proc/<pid>/mem
-# one. Reaching that message proves no guard refused a supported setup.
+# one. Reaching that message, with the compiler called, proves no guard
+# refused a supported setup.
 expect "a supported setup passes every guard" "pread() on /proc/<pid>/mem does not work here" \
-  "$L" "$OK_SDK" CC=true FPMNG_TLS=1 FPMNG_ACME=1 sh "$BUILD" "$WORK/out-good"
+  "$L" "$OK_SDK" CC="$SPY" FPMNG_TLS=1 FPMNG_ACME=1 sh "$BUILD" "$WORK/out-good"
+[ -e "$WORK/cc-calls" ] || { echo "FAIL: the supported setup never reached the compiler"; FAILED=$((FAILED + 1)); }
 for refusal in "takes no php-src" "Linux only" "no php-config" "8.5 only" "ZTS" "no C compiler" "must be 0 or 1" "needs FPMNG_TLS"; do
   if grep -qF -- "$refusal" "$WORK/log-$CASES"; then
     echo "FAIL: the supported setup tripped the '$refusal' guard"

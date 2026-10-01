@@ -1,34 +1,37 @@
 #!/bin/sh
-# Build php-fpm-ng against the distribution's libphp instead of compiling
-# php-src (issue #212, from spike #198 -- docs/spike-libphp-link-report.md).
+# Build php-fpm-ng from this repository and a distribution's PHP SDK: its
+# headers and its prebuilt libphp. No php-src tree, no engine build
+# (issues #212, #422; the spike was #198, docs/spike-libphp-link-report.md).
 #
-# WHAT THIS BUILD IS. For `pool.type = fastcgi`, `pool.type = gateway` and
-# `pool.type = http-direct` this is the shipping path (issue #219): the
-# packages in #221/#222 are built from what this script produces, and a user
-# installs them without a compiler. 62 translation units, against 711 files for
-# the full php-src build.
+# WHAT THIS BUILD IS. It is the supported build of main (contract in #419:
+# PHP 8.5 NTS, Linux with glibc or musl, dynamic linking, SDKs from the
+# official Debian/Ubuntu/Alpine repositories). The packages are built from
+# what this script produces (#221/#222), and a user installs them without a
+# compiler. The inputs are:
 #
-# WHAT IT IS NOT. It cannot speak for static-musl (no distribution ships a
-# static libphp). More importantly, no pool type in this tree needs anything
-# from inside Zend/ any more: issue #376 retired `fastcgi-ng`, issue #373 moved
-# the fiber/async executors (patches 0007/0008) to branch async, and issue #388
-# retired `pool.type = http` and split its proxy half into `pool.type =
-# gateway`, which runs no PHP child and needs nothing from the engine. Issue
-# #420 removed patches/0006 (persistent Zend signal handlers) and the
-# build-support refusal that guarded it, so this run asserts every configurable
-# type really does pass a configuration test on this binary.
+#   - this repository's sapi/fpmng/fpm/, ext/fpmng_metrics/, build/libphp/;
+#   - third_party/php-src/, the bounded upstream subset (issue #421): the FPM
+#     files we do not override and the patched main/fastcgi.c/.h;
+#   - the SDK: `php-config --includes` and libphp, plus the PHP CLI of the
+#     same installation for the payload packer;
+#   - libevent, and OpenSSL for TLS builds.
 #
-# Measured on 2026-09-11, Ubuntu 26.04, php8.5-dev 8.5.4: 14 s wall clock for
-# 58 sources out of config.m4 plus 5. (The suite counts in that line are a
-# pre-#388 record; a package gate run re-derives them, and ci-package-gate.sh
-# carries the current numbers.)
+# Nothing is read from an upstream config.m4 or Makefile. The source list is
+# whatever build/standalone-tree.sh assembles; every preprocessor feature
+# macro those sources test is classified below, and the host capabilities the
+# build asserts are compile-probed rather than assumed. The build ends with an
+# audit of the compiler's own dependency output (build/audit-compile-deps.sh),
+# so "no php-src was read" is checked, not claimed. <outdir>/commands.log
+# records every compile and link command verbatim.
 #
-# Usage: build/libphp-build.sh [php-src-tree] [outdir]
-#   php-src-tree  a tree with our overlay applied (build/prepare.sh), default ./php-src
-#   outdir        default ./out-libphp
-#   PHP_CONFIG    php-config binary to build against; autodetected otherwise
-#   FPMNG_TLS     1 to build TLS termination in; default 0 (issue #280)
-#   FPMNG_ACME    1 to build ACME issuance in; default 0, needs FPMNG_TLS=1 (issue #281)
+# Usage: build/libphp-build.sh [outdir]
+#   outdir             default ./out-libphp
+#   PHP_CONFIG         php-config binary to build against; autodetected otherwise
+#   FPMNG_TLS          1 to build TLS termination in; default 0 (issue #280)
+#   FPMNG_ACME         1 to build ACME issuance in; default 0, needs FPMNG_TLS=1 (issue #281)
+#   FPMNG_DEBUG_CLOCK  1 to build the test-suite clock in; default 0, NEVER for a
+#                      shipped binary (issue #396; the packages assert it is off)
+#   CC, EXTRA_CFLAGS   compiler and extra flags
 set -eu
 
 fail() {
@@ -36,13 +39,25 @@ fail() {
   exit 1
 }
 
-SRC=$(cd "${1:-./php-src}" 2>/dev/null && pwd) || fail "no php-src tree at ${1:-./php-src}"
-OUT=${2:-./out-libphp}
-mkdir -p "$OUT"
-OUT=$(cd "$OUT" && pwd)
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 
-[ -f "$SRC/sapi/fpmng/config.m4" ] || fail "$SRC has no sapi/fpmng: run build/prepare.sh first"
+# The php-src tree argument this script used to take (issue #422). A caller
+# still passing one would otherwise get its outdir in the wrong place.
+if [ $# -gt 1 ]; then
+  fail "this build takes no php-src tree any more (issue #422): usage: build/libphp-build.sh [outdir]"
+fi
+OUT=${1:-./out-libphp}
+mkdir -p "$OUT"
+OUT=$(cd "$OUT" && pwd)
+
+# --- the platform -------------------------------------------------------------
+# Linux only (#419). The supplied capabilities below are Linux ones (epoll,
+# /proc/<pid>/mem, TCP_INFO); on another kernel the probes would fail one by
+# one with messages about a header, which says nothing about why.
+OS=$(uname -s)
+[ "$OS" = Linux ] || fail "this build supports Linux only (glibc or musl), and this is $OS.
+  macOS is a from-source development platform: build php-src with
+  build/prepare.sh as described in docs/install.md."
 
 # --- the toolchain we build against -------------------------------------------
 # php-config is version-namespaced on both distributions the spike measured
@@ -56,39 +71,115 @@ if [ -z "${PHP_CONFIG:-}" ]; then
   done
 fi
 [ -n "${PHP_CONFIG:-}" ] || fail "no php-config found; install php8.5-dev (Debian/Ubuntu) or php85-dev (Alpine)"
+command -v "$PHP_CONFIG" >/dev/null 2>&1 || fail "PHP_CONFIG=$PHP_CONFIG is not an executable"
 CORE_INC=$("$PHP_CONFIG" --includes)
 PHP_VER=$("$PHP_CONFIG" --version)
 INC_DIR=$("$PHP_CONFIG" --include-dir)
+PHP_MM=$(echo "$PHP_VER" | cut -d. -f1,2)
 PHP_CONFIG_H="$INC_DIR/main/php_config.h"
 [ -f "$PHP_CONFIG_H" ] || fail "$PHP_CONFIG points at $INC_DIR, which has no main/php_config.h"
 echo "libphp-build.sh: $PHP_CONFIG -> PHP $PHP_VER, headers in $INC_DIR"
+
+# PHP 8.5 only (#419). 8.4 lacks php_glob.h, which fpm_conf.c includes, and an
+# 8.6 SDK is a different set of struct layouts nobody has tested this tree
+# against. Either would fail somewhere in the middle of the compile, or worse
+# not fail; this says it up front.
+[ "$PHP_MM" = 8.5 ] || fail "$PHP_CONFIG is PHP $PHP_VER, and this tree supports PHP 8.5 only (issue #419).
+  Install php8.5-dev and libphp8.5-embed (Debian/Ubuntu) or php85-dev and
+  php85-embed (Alpine), or point PHP_CONFIG at an 8.5 php-config."
 
 # ZTS (issue #213). sapi/fpmng/fpm/fpm_libphp_compat.c substitutes the
 # unexported zend_signal_init() with zend_signal_startup(), which is idempotent
 # for a freshly forked NTS child and is NOT under ZTS: there it reaches
 # ts_allocate_fast_id() a second time and the engine ends up with two copies of
 # the signal globals. Refused here rather than compiled: the miscompile would
-# link, start and serve, and only lose signals.
+# link, start and serve, and only lose signals. ZTS is out of the contract
+# permanently (#419).
 if grep -q '^#define ZTS 1' "$PHP_CONFIG_H"; then
   fail "$PHP_CONFIG is a ZTS (thread-safe) build of PHP. This path substitutes zend_signal_init()
   with zend_signal_startup() (sapi/fpmng/fpm/fpm_libphp_compat.c), which is only
-  equivalent under NTS. Install the NTS embed package, or build from source."
+  equivalent under NTS, and ZTS is outside the supported contract (issue #419).
+  Install the NTS embed package."
 fi
 
-# --- the defines a configure run would have made -------------------------------
-# There is no configure on this path, so every AC_DEFINE has to be supplied by
-# hand -- and a missing one is not a build error, it is a silently smaller
-# binary. The spike's first attempt scored 26 PASS / 22 FAIL / 11 SKIP purely
-# because HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS were absent, which compiled the
-# gateway and TLS out without one warning.
-#
-# So the list below is checked against the config.m4 files rather than trusted:
-# every AC_DEFINE they make must appear in exactly one of the three lists, and
-# an unclassified name stops the build naming itself. That is what keeps this
-# script from drifting the next time sapi/fpmng/config.m4 learns a feature.
+CC=${CC:-gcc}
+command -v "$CC" >/dev/null 2>&1 || fail "no C compiler ($CC); install build-essential (Debian/Ubuntu) or build-base (Alpine)"
 
-# Supplied, because the FPM sources need them and the distribution's
-# php_config.h describes the distribution's build host, not ours.
+# --- options --------------------------------------------------------------------
+toggle() {
+  case "$2" in
+  0|1) ;;
+  *) fail "$1 must be 0 or 1, not '$2'" ;;
+  esac
+}
+FPMNG_TLS=${FPMNG_TLS:-0}
+FPMNG_ACME=${FPMNG_ACME:-0}
+FPMNG_DEBUG_CLOCK=${FPMNG_DEBUG_CLOCK:-0}
+toggle FPMNG_TLS "$FPMNG_TLS"
+toggle FPMNG_ACME "$FPMNG_ACME"
+toggle FPMNG_DEBUG_CLOCK "$FPMNG_DEBUG_CLOCK"
+# ACME needs TLS for the reason config.m4 gives -- a certificate this binary
+# could not serve -- and asking for one without the other is refused here
+# exactly as `configure` refuses it.
+[ "$FPMNG_ACME" = 0 ] || [ "$FPMNG_TLS" = 1 ] ||
+  fail "FPMNG_ACME=1 needs FPMNG_TLS=1: ACME obtains a certificate, and a binary built without TLS termination has nothing to serve it with (issue #281)"
+
+# --- the sources ----------------------------------------------------------------
+"$REPO/build/vendor-php-src.sh" check >/dev/null ||
+  fail "third_party/php-src does not match its manifest; see build/vendor-php-src.sh check"
+TREE=$OUT/src
+"$REPO/build/standalone-tree.sh" "$TREE"
+rm -rf "$OUT/obj" "$OUT/dep" "$OUT/compat" "$OUT/probe"
+mkdir -p "$OUT/obj" "$OUT/dep" "$OUT/compat" "$OUT/probe"
+
+# --- host capabilities, probed ---------------------------------------------------
+# There is no configure on this path, and the distribution's php_config.h
+# describes the distribution's build of PHP, not ours: Ubuntu's leaves
+# HAVE_EPOLL and HAVE_ACCEPT4 undefined because its embed build had no FPM and
+# no ext/sockets. So each capability the FPM sources test is compiled and
+# linked here, with the same test program upstream's configure uses, and a
+# missing one stops the build by name.
+PROBE_CFLAGS="-D_GNU_SOURCE ${EXTRA_CFLAGS:-}"
+probe() {
+  name=$1
+  shift
+  printf '%s\n' "$@" > "$OUT/probe/$name.c"
+  # shellcheck disable=SC2086
+  $CC $PROBE_CFLAGS "$OUT/probe/$name.c" -o "$OUT/probe/$name" >"$OUT/probe/$name.log" 2>&1 ||
+    fail "the host lacks $name, which this Linux build relies on; the probe and its compiler output are in $OUT/probe/$name.c and .log"
+}
+probe HAVE_EPOLL '#include <sys/epoll.h>' 'int main(void) { struct epoll_event e; (void) e; return epoll_create(1) < 0; }'
+probe HAVE_SELECT '#include <sys/select.h>' 'int main(void) { fd_set s; FD_ZERO(&s); return select(0, &s, 0, 0, 0); }'
+probe HAVE_BUILTIN_ATOMIC 'int main(void) { int v = 1; return (__sync_bool_compare_and_swap(&v, 1, 2) && __sync_add_and_fetch(&v, 1)) ? 1 : 0; }'
+probe HAVE_LQ_TCP_INFO '#include <netinet/tcp.h>' 'int main(void) { struct tcp_info ti; int x = TCP_INFO; (void) ti; return x < 0; }'
+probe HAVE_TIMES '#include <sys/times.h>' 'int main(void) { struct tms t; return times(&t) == (clock_t) -1; }'
+probe HAVE_CLEARENV '#include <stdlib.h>' 'int main(void) { return clearenv(); }'
+probe HAVE_CLOCK_GETTIME '#include <time.h>' 'int main(void) { struct timespec ts; return clock_gettime(CLOCK_MONOTONIC, &ts); }'
+# patches/0003: accept4(SOCK_CLOEXEC) saves two fcntl() calls per accepted
+# connection. Ubuntu's php_config.h does not define it, so before #422 the
+# Ubuntu packages silently compiled the accept()+fcntl() fallback.
+probe HAVE_ACCEPT4 '#include <sys/socket.h>' 'int main(void) { return accept4(-1, 0, 0, SOCK_CLOEXEC) == 0; }'
+# PROC_MEM_FILE: the slowlog reads a stuck child's stack through
+# /proc/<pid>/mem with pread() (fpm_trace_pread.c). Upstream's configure runs
+# this program; so does this build, because the answer is a property of the
+# kernel the build runs on and the packages run on the same kind.
+probe PROC_MEM_FILE '#define _FILE_OFFSET_BITS 64' '#include <stdint.h>' '#include <stdio.h>' '#include <unistd.h>' '#include <fcntl.h>' \
+  'int main(void) { long v1 = (unsigned int) -1, v2 = 0; char buf[128]; int fd;' \
+  '  snprintf(buf, sizeof(buf), "/proc/%d/mem", (int) getpid()); fd = open(buf, O_RDONLY);' \
+  '  if (fd < 0) return 1; if (pread(fd, &v2, sizeof(long), (uintptr_t) &v1) != sizeof(long)) return 1;' \
+  '  close(fd); return v1 != v2; }'
+"$OUT/probe/PROC_MEM_FILE" ||
+  fail "pread() on /proc/<pid>/mem does not work here, which the slowlog backend (fpm_trace_pread.c) relies on"
+echo "libphp-build.sh: probed epoll, select, __sync atomics, TCP_INFO, times, clearenv, clock_gettime, accept4, /proc/<pid>/mem"
+
+# --- the defines, classified -----------------------------------------------------
+# A missing define is not a build error, it is a silently smaller binary. The
+# spike's first attempt scored 26 PASS / 22 FAIL / 11 SKIP purely because
+# HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS were absent, and HAVE_ACCEPT4 was
+# missing from this build for months. So every feature macro the compiled
+# sources test in a preprocessor conditional must be accounted for: supplied
+# here, defined by the SDK or by the sources themselves, or deliberately off
+# with a reason. An unclassified name stops the build.
 SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_EPOLL=1
 -DHAVE_SELECT=1
@@ -97,6 +188,7 @@ SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_TIMES=1
 -DHAVE_CLEARENV=1
 -DHAVE_CLOCK_GETTIME=1
+-DHAVE_ACCEPT4=1
 -DHAVE_FPM_HTTP=1
 -DFPMNG_LIBPHP_BUILD=1
 -DPROC_MEM_FILE="mem"'
@@ -107,11 +199,6 @@ SUPPLIED='-DHAVE_CONFIG_H
 # nothing that ships. Off means three things at once, and all three are
 # asserted on the produced binary below: HAVE_FPM_HTTP_TLS unset, the
 # fpm_tls_*.c sources not compiled, and no OpenSSL on the link line.
-FPMNG_TLS=${FPMNG_TLS:-0}
-case "$FPMNG_TLS" in
-0|1) ;;
-*) fail "FPMNG_TLS must be 0 or 1, not '$FPMNG_TLS'" ;;
-esac
 if [ "$FPMNG_TLS" = 1 ]; then
   SUPPLIED="$SUPPLIED
 -DHAVE_FPM_HTTP_TLS=1"
@@ -119,24 +206,17 @@ if [ "$FPMNG_TLS" = 1 ]; then
 else
   echo "libphp-build.sh: FPMNG_TLS=0, building without TLS termination (set FPMNG_TLS=1 for it)"
 fi
-
-# ACME issuance, the same switch one level up (issue #281). It needs TLS for
-# the reason config.m4 gives -- a certificate this binary could not serve --
-# and asking for one without the other is refused here exactly as `configure`
-# refuses it, so the two build paths cannot disagree about what is buildable.
-FPMNG_ACME=${FPMNG_ACME:-0}
-case "$FPMNG_ACME" in
-0|1) ;;
-*) fail "FPMNG_ACME must be 0 or 1, not '$FPMNG_ACME'" ;;
-esac
 if [ "$FPMNG_ACME" = 1 ]; then
-  [ "$FPMNG_TLS" = 1 ] ||
-    fail "FPMNG_ACME=1 needs FPMNG_TLS=1: ACME obtains a certificate, and a binary built without TLS termination has nothing to serve it with (issue #281)"
   SUPPLIED="$SUPPLIED
 -DHAVE_FPMNG_ACME=1"
   echo "libphp-build.sh: FPMNG_ACME=1, building with ACME issuance"
 else
   echo "libphp-build.sh: FPMNG_ACME=0, building without ACME issuance (set FPMNG_ACME=1 for it)"
+fi
+if [ "$FPMNG_DEBUG_CLOCK" = 1 ]; then
+  SUPPLIED="$SUPPLIED
+-DHAVE_FPMNG_DEBUG_CLOCK=1"
+  echo "libphp-build.sh: FPMNG_DEBUG_CLOCK=1: this binary's clock can be made to run faster than real time by an environment variable. It is for the test suite, never for a server or a package."
 fi
 
 # Deliberately off, with the reason. These are not oversights, and anyone
@@ -147,40 +227,74 @@ off_reason() {
   HAVE_MACH_VM_READ)            echo "macOS trace backend; we use the pread one" ;;
   HAVE_PTRACE)                  echo "we compile fpm_trace_pread.c, not the ptrace backend" ;;
   HAVE_KQUEUE)                  echo "BSD event backend; HAVE_EPOLL is supplied instead" ;;
+  HAVE_PORT_CREATE)             echo "Solaris event ports; HAVE_EPOLL is supplied instead" ;;
   HAVE_LQ_TCP_CONNECTION_INFO)  echo "macOS listen-queue probe" ;;
   HAVE_LQ_SO_LISTENQ)           echo "BSD listen-queue probe" ;;
+  HAVE_SETPROCTITLE|HAVE_SETPROCTITLE_FAST) echo "BSD libc functions; on Linux fpm_env.c rewrites argv itself" ;;
+  HAVE_SETPFLAGS)               echo "Solaris privilege flags" ;;
+  HAVE_PROCCTL)                 echo "FreeBSD procctl(); Linux uses prctl()" ;;
+  HAVE_STRUCT_SOCKADDR_UN_SUN_LEN) echo "BSD sockaddr_un field; Linux has none" ;;
   HAVE_SYSTEMD)                 echo "would add a libsystemd link the packages do not want" ;;
   HAVE_APPARMOR|HAVE_SELINUX)   echo "would add a link-time dependency; not offered by the packages" ;;
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
-  HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; it exists for the test suite and must never be in a shipped package, so this one has no FPMNG_* toggle to turn it on (issue #396)" ;;
+  HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; FPMNG_DEBUG_CLOCK=1 is for the test suite only and the packages assert it is off (issue #396)" ;;
+  USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
+  PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
+  FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
   *) return 1 ;;
   esac
 }
+# Off by our choice but present in a distribution's php_config.h, and harmless
+# there. Alpine's header defines HAVE_PTRACE; in these sources it only feeds
+# fpm_config.h's HAVE_FPM_TRACE, which PROC_MEM_FILE turns on anyway. Any
+# other off-list name in the SDK header stops the build: it would switch on
+# code the list above says must stay off.
+SDK_TOLERATED='HAVE_PTRACE'
 
 # Taken from the distribution's php_config.h when it is there. HAVE_FPM_ACL is
 # the one that bites: Alpine's header carries it and Ubuntu's does not, and on
 # Alpine that means the build needs -lacl whether or not we want FPM's ACL
 # support. It describes their build host, so it is discovered, not decided.
-FROM_DISTRO='HAVE_FPM_ACL'
+FROM_DISTRO='HAVE_FPM_ACL HAVE_SYS_ACL_H'
 
-defines_in_config_m4() {
-  for m in "$SRC/sapi/fpmng/config.m4" "$SRC/sapi/fpm/config.m4"; do
-    [ -f "$m" ] && sed -n 's/.*AC_DEFINE\(_UNQUOTED\)\{0,1\}(\[\{0,1\}\([A-Z_0-9]\{1,\}\).*/\2/p' "$m"
-  done | sort -u
-}
+scan_dirs="$TREE $REPO/ext/fpmng_metrics $REPO/build/libphp"
+# Identifiers in #if/#ifdef/#ifndef/#elif lines with a feature-macro prefix.
+# Splitting on non-identifier characters, rather than grep -o with \b, keeps
+# this working on busybox and does not pick up ZEND_HAVE_X as HAVE_X.
+# shellcheck disable=SC2086
+referenced=$(find $scan_dirs -name '*.[ch]' -exec grep -hE '^[[:space:]]*#[[:space:]]*(if|ifdef|ifndef|elif)' {} + |
+  tr -c 'A-Za-z0-9_' '\n' | grep -E '^(HAVE|USE|FPMNG|PHP_FPM)_[A-Z0-9_]+$' | LC_ALL=C sort -u)
+# Every name some header in the SDK or in the sources #defines. The SDK's
+# php_config.h writes the ones it does not have as "/* #undef X */", which
+# this does not match.
+# shellcheck disable=SC2086
+defined=$(find "$INC_DIR" $scan_dirs -name '*.h' -exec grep -hE '^[[:space:]]*#[[:space:]]*define[[:space:]]+[A-Za-z_]' {} + |
+  sed 's/^[[:space:]]*#[[:space:]]*define[[:space:]]*\([A-Za-z0-9_]*\).*/\1/' | LC_ALL=C sort -u)
 
 unclassified=
-for name in $(defines_in_config_m4); do
-  case "$SUPPLIED" in *"-D$name"*) continue ;; esac
+sdk_conflict=
+for name in $referenced; do
+  case "$SUPPLIED" in *"-D$name="*|*"-D$name
+"*) continue ;; esac
+  [ "$name" = HAVE_CONFIG_H ] && continue
   case " $FROM_DISTRO " in *" $name "*) continue ;; esac
-  off_reason "$name" >/dev/null && continue
+  if off_reason "$name" >/dev/null; then
+    if grep -qE "^#define $name([[:space:]]|$)" "$PHP_CONFIG_H" 2>/dev/null; then
+      case " $SDK_TOLERATED " in *" $name "*) ;; *) sdk_conflict="$sdk_conflict $name" ;; esac
+    fi
+    continue
+  fi
+  echo "$defined" | grep -qx "$name" && continue
   unclassified="$unclassified $name"
 done
-[ -z "$unclassified" ] || fail "config.m4 defines these, and this script does not say what to do with them:$unclassified.
-  Add each to SUPPLIED, to FROM_DISTRO, or to off_reason() with a reason. Do not
-  guess: HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS once went missing here and cost 22
-  test failures with no build warning."
+[ -z "$unclassified" ] || fail "the sources test these macros, and this script does not say what to do with them:$unclassified.
+  Add each to SUPPLIED (with a probe if it is a host capability), to
+  FROM_DISTRO, or to off_reason() with a reason. Do not guess: HAVE_FPM_HTTP
+  and HAVE_FPM_HTTP_TLS once went missing here and cost 22 test failures
+  with no build warning."
+[ -z "$sdk_conflict" ] || fail "$PHP_CONFIG_H defines$sdk_conflict, which this build keeps off (see off_reason() in this script); building against it would switch that code on"
+echo "libphp-build.sh: $(echo "$referenced" | wc -l | tr -d ' ') feature macros tested by the sources, all classified"
 
 # HAVE_FPM_ACL: discovered from their header, and it decides a link flag.
 ACL_LIBS=
@@ -190,19 +304,14 @@ if grep -q '^#define HAVE_FPM_ACL' "$PHP_CONFIG_H"; then
 fi
 
 # --- include path --------------------------------------------------------------
-# Our patched main/fastcgi.h has to shadow the one php8.5-dev ships, which is
-# the unpatched upstream copy. One directory holding only that file: a blanket
-# -I$SRC/main would shadow php.h and every other main header with our tree's
-# copies, which belong to a different build than the .so we link against.
-rm -rf "$OUT/fcgi-inc"
-mkdir -p "$OUT/fcgi-inc" "$OUT/obj"
-cp "$SRC/main/fastcgi.h" "$OUT/fcgi-inc/fastcgi.h"
-
+# $TREE/main first, and it holds only fastcgi.c/.h: our patched fastcgi.h
+# has to shadow the unpatched one php8.5-dev ships, and nothing else in main/
+# may shadow the SDK's (build/standalone-tree.sh).
+#
 # ext/fpmng_metrics includes "config.h" under HAVE_CONFIG_H -- the autoconf
 # header a php-src build generates, which does not exist on this path. The
 # distribution's php_config.h is its equivalent, and HAVE_CONFIG_H has to stay
 # set because the rest of php-src's headers key off it.
-mkdir -p "$OUT/compat"
 cat > "$OUT/compat/config.h" <<'SHIM'
 /* Generated by build/libphp-build.sh. There is no configure run on the libphp
  * path, so the header php-src would have written does not exist; the
@@ -210,7 +319,7 @@ cat > "$OUT/compat/config.h" <<'SHIM'
 #include "php_config.h"
 SHIM
 
-INC="-I$OUT/fcgi-inc $CORE_INC -I$SRC/sapi/fpmng -I$SRC/sapi/fpmng/fpm -I$SRC/ext/fpmng_metrics -I$REPO/build/libphp -I$OUT/compat"
+INC="-I$TREE/main $CORE_INC -I$TREE/sapi/fpmng -I$TREE/sapi/fpmng/fpm -I$REPO/ext/fpmng_metrics -I$REPO/build/libphp -I$OUT/compat"
 # -D_GNU_SOURCE is required, not stylistic: Zend/zend_operators.h:235 uses
 # memrchr(), which glibc hides behind it.
 # EXTRA_CFLAGS exists for the version-guard demonstration in
@@ -219,81 +328,67 @@ INC="-I$OUT/fcgi-inc $CORE_INC -I$SRC/sapi/fpmng -I$SRC/sapi/fpmng/fpm -I$SRC/ex
 CFLAGS="-D_GNU_SOURCE -O2 -g -fno-strict-aliasing -Wno-deprecated-declarations ${EXTRA_CFLAGS:-}"
 DEFS=$(echo "$SUPPLIED" | tr '\n' ' ')
 
-# --- sources -------------------------------------------------------------------
-# Read out of config.m4 rather than copied into a second list here. A copy
-# drifts the first time a file is added to the SAPI, and the symptom would be a
-# link error in the best case and a missing feature in the worst.
-sources() {
-  sed -n '/PHP_FPMNG_FILES="/,/^[[:space:]]*"[[:space:]]*$/p' "$SRC/sapi/fpmng/config.m4" |
-    grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u
-}
-src_count=$(sources | wc -l)
-[ "$src_count" -gt 20 ] || fail "only $src_count sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_FILES block moved"
-
-# The TLS group, which build/prepare.sh keeps in a list of its own so that it
-# can be left out. Read from the same file for the same reason; the anchor is
-# the opening quote at end of line, because PHP_FPMNG_TLS_FILES="" appears
-# first and would otherwise start the range.
-tls_sources() {
-  sed -n '/PHP_FPMNG_TLS_FILES="$/,/^[[:space:]]*"[[:space:]]*$/p' "$SRC/sapi/fpmng/config.m4" |
-    grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u
-}
-TLS_SRC=$(tls_sources)
-[ -n "$TLS_SRC" ] || fail "no TLS sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_TLS_FILES block moved"
-# The base list must not contain them: that is exactly the failure the
-# fpm_tls_ name prefix exists to prevent (build/prepare.sh), and it would show
-# up here as a default build that links OpenSSL after all.
-for f in $TLS_SRC; do
-  sources | grep -qx "$f" && fail "$f is in both PHP_FPMNG_FILES and PHP_FPMNG_TLS_FILES; a TLS source in the base list ships in every binary"
-done
-[ "$FPMNG_TLS" = 1 ] || TLS_SRC=
-
-# The ACME group, read and checked the same way.
-acme_sources() {
-  sed -n '/PHP_FPMNG_ACME_FILES="$/,/^[[:space:]]*"[[:space:]]*$/p' "$SRC/sapi/fpmng/config.m4" |
-    grep -oE 'fpm/[A-Za-z0-9_/]+\.c' | sort -u
-}
-ACME_SRC=$(acme_sources)
-[ -n "$ACME_SRC" ] || fail "no ACME sources parsed out of sapi/fpmng/config.m4; the PHP_FPMNG_ACME_FILES block moved"
-for f in $ACME_SRC; do
-  sources | grep -qx "$f" && fail "$f is in both PHP_FPMNG_FILES and PHP_FPMNG_ACME_FILES; an ACME source in the base list ships in every binary"
-done
-[ "$FPMNG_ACME" = 1 ] || ACME_SRC=
-
-: > "$OUT/compile.log"
-OBJS=""
-compile() {
-  o="$OUT/obj/$(echo "${2:-$(basename "$1")}" | tr /. __).o"
-  # shellcheck disable=SC2086
-  ${CC:-gcc} $CFLAGS $DEFS $INC -c "$1" -o "$o" >>"$OUT/compile.log" 2>&1 ||
-    { echo "=== COMPILE FAILED: $1 ==="; tail -20 "$OUT/compile.log"; exit 1; }
-  OBJS="$OBJS $o"
-}
-for f in $(sources) $TLS_SRC $ACME_SRC; do compile "$SRC/sapi/fpmng/$f" "$f"; done
-# Not in PHP_FPMNG_FILES: config.m4 adds the trace backend conditionally, our
-# patched fastcgi.c belongs to main/, and the ABI guard is a property of this
-# build rather than of the SAPI. The zend_signal_init() stand-in is NOT here:
-# it lives in sapi/fpmng/fpm/fpm_libphp_compat.c and arrives through the source
-# list above, gated on -DFPMNG_LIBPHP_BUILD (issue #213).
+# --- compile -------------------------------------------------------------------
+# Every .c the assembly holds, by the name-prefix rule build/prepare.sh uses
+# for the optional groups: fpm_tls_*.c only with TLS, fpm_acme_*.c only with
+# ACME. Found, not listed, so a new source file needs no edit here. The ones
+# from outside sapi/: the patched fastcgi.c, the fpmng_metrics extension, and
+# the ABI guard, which is a property of this build rather than of the SAPI.
 #
 # ext/fpmng_metrics is compiled here but NOT registered here: on this path there
 # is no configure to put it in main/internal_functions.c, and the static module
-# list belongs to the distribution's libphp. The same FPMNG_LIBPHP_BUILD file
+# list belongs to the distribution's libphp. sapi/fpmng/fpm/fpm_libphp_compat.c
 # registers it at runtime from fpm_init(), so the userland fpm_metric_*()
 # functions exist in a worker on both builds (issue #216). What differs is
-# `php-fpm-ng -m` and `-i`, neither of which ever reaches fpm_init().
-for f in "$SRC/sapi/fpmng/fpm/fpm_trace.c" "$SRC/sapi/fpmng/fpm/fpm_trace_pread.c" \
-         "$SRC/main/fastcgi.c" "$SRC/ext/fpmng_metrics/fpmng_metrics.c" \
-         "$REPO/build/libphp/libphp_abi_check.c"; do
-  compile "$f"
+# `php-fpm-ng -m` and `-i`, neither of which ever reaches fpm_init() -- an
+# accepted limitation (#419, docs/install.md).
+sources() {
+  (cd "$TREE/sapi/fpmng" && find fpm -name '*.c' | LC_ALL=C sort) | while read -r f; do
+    case "$(basename "$f")" in
+      fpm_tls_*) [ "$FPMNG_TLS" = 1 ] || continue ;;
+      fpm_acme_*) [ "$FPMNG_ACME" = 1 ] || continue ;;
+    esac
+    echo "$TREE/sapi/fpmng/$f"
+  done
+  echo "$TREE/main/fastcgi.c"
+  echo "$REPO/ext/fpmng_metrics/fpmng_metrics.c"
+  echo "$REPO/build/libphp/libphp_abi_check.c"
+}
+
+{
+  echo "# $(uname -srm); $($CC --version | head -n 1)"
+  echo "# $PHP_CONFIG -> PHP $PHP_VER, $INC_DIR"
+  echo "# FPMNG_TLS=$FPMNG_TLS FPMNG_ACME=$FPMNG_ACME FPMNG_DEBUG_CLOCK=$FPMNG_DEBUG_CLOCK EXTRA_CFLAGS=${EXTRA_CFLAGS:-}"
+} > "$OUT/commands.log"
+: > "$OUT/compile.log"
+OBJS=""
+n_src=0
+for s in $(sources); do
+  case "$s" in
+    "$TREE"/*) rel=${s#"$TREE"/} ;;
+    *) rel=${s#"$REPO"/} ;;
+  esac
+  base=$(echo "$rel" | tr /. __)
+  cmd="$CC $CFLAGS $DEFS $INC -MD -MF $OUT/dep/$base.d -c $s -o $OUT/obj/$base.o"
+  echo "$cmd" >> "$OUT/commands.log"
+  # shellcheck disable=SC2086
+  $cmd >>"$OUT/compile.log" 2>&1 ||
+    { echo "=== COMPILE FAILED: $rel ==="; tail -n 20 "$OUT/compile.log"; exit 1; }
+  OBJS="$OBJS $OUT/obj/$base.o"
+  n_src=$((n_src + 1))
 done
+
+# What the compiler actually read: nothing outside the assembled tree, the
+# repository, the SDK and the system; not the SDK's unpatched fastcgi.h; no
+# main/ header from anywhere but the SDK; every vendored file used.
+"$REPO/build/audit-compile-deps.sh" "$OUT/dep" "$INC_DIR" "$TREE" "$REPO/ext/fpmng_metrics" "$REPO/build/libphp" "$OUT/compat" ||
+  fail "the compile consumed something it should not have (see above)"
 
 # --- link ----------------------------------------------------------------------
 # Where libphp lives and what it is called is a distribution decision, so it is
 # searched for rather than assumed: Ubuntu ships /usr/lib/libphp8.5.so, Alpine
 # ships /usr/lib/php85/libphp.so. Hard-coding either one produces "cannot find
 # -lphp8.5" on the other.
-PHP_MM=$(echo "$PHP_VER" | cut -d. -f1,2)
 LIBPHP_DIR= LIBPHP_NAME=
 for dir in "$(dirname "$("$PHP_CONFIG" --extension-dir)")" "$("$PHP_CONFIG" --prefix)/lib" /usr/lib /usr/lib64; do
   for name in "php$PHP_MM" php; do
@@ -308,20 +403,20 @@ echo "libphp-build.sh: linking $LIBPHP_DIR/lib$LIBPHP_NAME.so"
 # branching on the libc, which would be one more thing to get wrong per distro.
 OPT_LIBS=
 for l in dl rt pthread; do
-  echo 'int main(void){return 0;}' | ${CC:-gcc} -x c - "-l$l" -o /dev/null 2>/dev/null &&
+  echo 'int main(void){return 0;}' | $CC -x c - "-l$l" -o /dev/null 2>/dev/null &&
     OPT_LIBS="$OPT_LIBS -l$l"
 done
 
 BIN="$OUT/php-fpm-ng"
-# shellcheck disable=SC2086
 # -rpath: Alpine puts libphp.so in a version-namespaced directory that is not
 # on the default search path, so without it the binary links and then cannot
 # start. On Ubuntu the directory is already default and the flag is inert.
 TLS_LIBS=
 [ "$FPMNG_TLS" = 1 ] && TLS_LIBS="-levent_openssl -lssl -lcrypto"
-${CC:-gcc} -o "$BIN" $OBJS -L"$LIBPHP_DIR" -Wl,-rpath,"$LIBPHP_DIR" "-l$LIBPHP_NAME" $ACL_LIBS \
-  -levent $TLS_LIBS -lm $OPT_LIBS -Wl,-E \
-  >"$OUT/link.log" 2>&1 || {
+cmd="$CC -o $BIN $OBJS -L$LIBPHP_DIR -Wl,-rpath,$LIBPHP_DIR -l$LIBPHP_NAME $ACL_LIBS -levent $TLS_LIBS -lm $OPT_LIBS -Wl,-E"
+echo "$cmd" >> "$OUT/commands.log"
+# shellcheck disable=SC2086
+$cmd >"$OUT/link.log" 2>&1 || {
   echo "=== LINK FAILED ==="
   grep "undefined reference" "$OUT/link.log" | sed 's/.*undefined reference to //' | sort -u | head -20
   exit 1
@@ -344,16 +439,25 @@ FPMNG_ACME="$FPMNG_ACME" "$REPO/build/embed-payload.sh" "$BIN" "$PHP_BIN" ||
   fail "the distribution payload could not be embedded"
 
 # --- assert the binary, not the flags ------------------------------------------
-# Same reasoning as build/static-full.sh (issue #77): the flags above are
-# exactly what was wrong when this went wrong, so a check that reads them would
-# have passed. HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS compile whole files out, and
-# the only honest evidence that they were set is a symbol from those files.
+# Issue #77's reasoning: the flags above are exactly what was wrong when this
+# went wrong, so a check that reads them would have passed. HAVE_FPM_HTTP and
+# HAVE_FPM_HTTP_TLS compile whole files out, and the only honest evidence that
+# they were set is a symbol from those files.
 assert_symbol() {
   nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1" ||
     fail "the binary has no '$1': $2"
 }
+refute_symbol() {
+  ! nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1" ||
+    fail "the binary has '$1': $2"
+}
 assert_symbol fpm_http_init_pool "HAVE_FPM_HTTP was not set, so the http gateway is compiled out"
 assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
+assert_symbol zif_fpm_metric_inc "the fpmng_metrics extension's userland functions are missing"
+# The accept4() path of patches/0003 is inlined into fcgi_accept_request(), so
+# its evidence is the call in the binary's dynamic symbol table.
+nm -D --undefined-only "$BIN" 2>/dev/null | grep -qw accept4 ||
+  fail "the binary does not call accept4(): HAVE_ACCEPT4 did not reach main/fastcgi.c (patches/0003)"
 
 # TLS, in whichever direction was asked for. Both halves are asserted on the
 # binary: the symbol says the sources were compiled, and the dynamic section
@@ -365,7 +469,7 @@ tls_linkage() {
   # closure, and libphp.so itself links OpenSSL for ext/openssl. A default
   # build correctly shows libssl there through libphp and it means nothing
   # about this binary. readelf comes from binutils, which this path already
-  # needs for objdump.
+  # needs for nm.
   readelf -d "$BIN" 2>/dev/null | grep NEEDED |
     grep -cE 'libssl|libcrypto|libevent_openssl' || true
 }
@@ -373,8 +477,7 @@ if [ "$FPMNG_TLS" = 1 ]; then
   assert_symbol fpm_tls_http_validate "FPMNG_TLS=1 was asked for, but the TLS sources were not compiled in"
   [ "$(tls_linkage)" -gt 0 ] || fail "FPMNG_TLS=1 was asked for, but the binary links no OpenSSL"
 else
-  nm --defined-only "$BIN" 2>/dev/null | grep -qw -- fpm_tls_http_validate &&
-    fail "a default build carries fpm_tls_http_validate: an fpm_tls_*.c source reached the base object list (issue #280)"
+  refute_symbol fpm_tls_http_validate "a default build carries it: an fpm_tls_*.c source reached the base object list (issue #280)"
   [ "$(tls_linkage)" = 0 ] ||
     fail "a default build links OpenSSL: $(tls_linkage) OpenSSL entries in the dynamic section, and there should be none (issue #280)"
 fi
@@ -392,10 +495,18 @@ if [ "$FPMNG_ACME" = 1 ]; then
   [ "$(acme_payload_entries)" -gt 0 ] ||
     fail "FPMNG_ACME=1 was asked for, but the binary carries no distribution payload, so fpmng-dist://acme/renew.php would not resolve"
 else
-  nm --defined-only "$BIN" 2>/dev/null | grep -qw -- fpm_acme_challenge_init_main &&
-    fail "a default build carries fpm_acme_challenge_init_main: an fpm_acme_*.c source reached the base object list (issue #281)"
+  refute_symbol fpm_acme_challenge_init_main "a default build carries it: an fpm_acme_*.c source reached the base object list (issue #281)"
   [ "$(acme_payload_entries)" = 0 ] ||
     fail "a default build carries a distribution payload, and the only thing the payload holds is the ACME client (issue #281)"
+fi
+
+# The test-suite clock, both directions, because the packages assert its
+# absence on this same symbol and a toggle that did not reach the sources
+# would make the clock-scaled tests pass for the wrong reason (issue #396).
+if [ "$FPMNG_DEBUG_CLOCK" = 1 ]; then
+  assert_symbol fpm_debug_clock_now "FPMNG_DEBUG_CLOCK=1 was asked for, but fpm_debug_clock.c compiled to nothing"
+else
+  refute_symbol fpm_debug_clock_now "the test-suite clock is in a build that did not ask for it (issue #396)"
 fi
 
 # --- assert what is accepted, and that the retired name is refused -------------
@@ -480,5 +591,5 @@ echo "libphp-build.sh: pool.type fastcgi, gateway and http-direct accepted, http
 
 ldd "$BIN" | grep -qi "libphp" || fail "the binary does not link a distribution libphp; this is not the build this script is for"
 echo "libphp-build.sh: $(ldd "$BIN" | grep -i libphp | tr -s ' ')"
-"$BIN" -v | head -1
-echo "libphp-build.sh: PASS ($src_count sources from config.m4 + $(echo $OBJS | wc -w | tr -d " ") objects total, -> $BIN)"
+"$BIN" -v | head -n 1
+echo "libphp-build.sh: PASS ($n_src translation units, commands in $OUT/commands.log -> $BIN)"

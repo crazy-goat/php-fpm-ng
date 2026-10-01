@@ -54,6 +54,13 @@ has_symbol() { nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1"; }
 HAS_TLS=0; has_symbol fpm_tls_http_validate && HAS_TLS=1
 HAS_ACME=0; has_symbol fpm_acme_challenge_init_main && HAS_ACME=1
 
+# The test-suite clock (issue #396): an environment variable can make it run
+# faster than real time, so it must never ship. build/libphp-build.sh builds it
+# only with FPMNG_DEBUG_CLOCK=1, and that is a CI switch; this is the gate
+# that keeps such a binary from being packaged anyway.
+has_symbol fpm_debug_clock_now &&
+  fail "this binary was built with FPMNG_DEBUG_CLOCK=1 (it has fpm_debug_clock_now), which is for the test suite only and is never packaged (issue #396)"
+
 case "$HAS_TLS$HAS_ACME" in
 00) PKGNAME=php-fpm-ng
     PKGDESC="FPM process manager with HTTP-direct pools, on the distribution PHP; no TLS, no ACME" ;;

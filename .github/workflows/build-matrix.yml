@@ -286,6 +286,12 @@ jobs:
       - name: verify the vendored php-src subset (issue #421)
         run: ./build/vendor-php-src.sh check
 
+      # Issue #422: every refusal of the SDK build (wrong minor, ZTS, not
+      # Linux, bad toggles, the retired two-argument call) triggered on
+      # purpose against a fake php-config. Hermetic: no SDK, no compiler.
+      - name: libphp-build.sh refuses builds outside the contract (issue #422)
+        run: ./build/test-libphp-build-refusals.sh
+
       # Task 013: clang-tidy over our C sources only (never a prepared php-src
       # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
       # build on day one for pre-existing findings teaches people to ignore the

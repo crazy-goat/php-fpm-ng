@@ -647,7 +647,11 @@ export FPMNG_RELEASE
 # binary is built with. Everything downstream -- the package name, its
 # description, the expected counts -- follows from the artefact this produces.
 export $BUILD_FLAGS
-/repo/build/libphp-build.sh /src /out
+# The version guard the packaged binary carries (issue #220), in all three of
+# its outcomes, against this SDK (issue #422). It needs nothing but the SDK, so
+# it runs here, where the SDK is.
+/repo/build/test-libphp-abi-guard.sh
+/repo/build/libphp-build.sh /out
 $PACKAGE_CMD
 $NEGATIVE_CONTROL
 

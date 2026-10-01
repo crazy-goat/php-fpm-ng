@@ -64,8 +64,9 @@ edited by hand.
 ## What is included, and why
 
 Each file is here for one reason only: a translation unit of the shipped build
-reads it. `build/probe-standalone-compile.sh` checks this. It fails when a
-vendored file is not read by any translation unit.
+reads it. `build/libphp-build.sh` checks this through
+`build/audit-compile-deps.sh`. The build fails when a vendored file is not
+read by any translation unit.
 
 - **`sapi/fpm/fpm/*.c`, 21 base sources**: upstream's `PHP_FPM_FILES`, minus
   the files `sapi/fpmng/fpm/` replaces.
@@ -142,7 +143,7 @@ import cannot judge.
 
 **Adding or dropping a file.** Edit the file list in `MANIFEST`: add a line
 with `-` in both hash columns, or delete a line. Then run the import.
-`build/probe-standalone-compile.sh` shows whether the change was needed: it
+`build/libphp-build.sh` shows whether the change was needed: it
 fails on a vendored file that no translation unit reads, and on a missing one
 the compile or the link fails.
 
@@ -151,4 +152,4 @@ the compile or the link fails.
 | Command | What it shows |
 |---|---|
 | `build/vendor-php-src.sh check` | The directory matches its manifest and the patch stack (CI checks job; needs no php-src and no network). |
-| `build/probe-standalone-compile.sh <outdir>` | The set is sufficient: everything compiles and links against the SDK, with every command line in `<outdir>/commands.log`, and the dependency audit passes. |
+| `build/libphp-build.sh <outdir>` | The set is sufficient: everything compiles and links against the SDK, with every command line in `<outdir>/commands.log`, and the dependency audit passes. |

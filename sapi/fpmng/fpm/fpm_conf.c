@@ -5,6 +5,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <limits.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <string.h>
@@ -86,6 +87,8 @@ struct fpm_global_config_s fpm_global_config = {
 	.log_limit = ZLOG_DEFAULT_LIMIT
 };
 static struct fpm_worker_pool_s *current_wp = NULL;
+#define FPM_CONF_FD_PREFIX "fd:"
+
 static int ini_recursion = 0;
 static char *ini_filename = NULL;
 static int ini_lineno = 0;
@@ -2261,16 +2264,141 @@ static void fpm_conf_ini_parser(zval *arg1, zval *arg2, zval *arg3, int callback
 }
 /* }}} */
 
-int fpm_conf_load_ini_file(char *filename) /* {{{ */
+/* Reads everything `fd` will give, into one NUL-terminated heap buffer.
+ * A regular file, a pipe, /dev/stdin and a memfd all read the same way: this
+ * is the whole of "configuration from a stream" (issue #428). */
+static int fpm_conf_slurp_fd(int fd, char **out, size_t *out_len)
+{
+	char *buf = NULL, *newbuf;
+	size_t len = 0, cap = 0;
+
+	for (;;) {
+		ssize_t r;
+
+		if (len == cap) {
+			cap = cap ? cap * 2 : 4096;
+			newbuf = realloc(buf, cap + 1);
+			if (!newbuf) {
+				free(buf);
+				return -1;
+			}
+			buf = newbuf;
+		}
+		r = read(fd, buf + len, cap - len);
+		if (r < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			free(buf);
+			return -1;
+		}
+		if (r == 0) {
+			break;
+		}
+		len += (size_t) r;
+	}
+	buf[len] = '\0';
+	*out = buf;
+	*out_len = len;
+	return 0;
+}
+
+/* Parses configuration text that is already in memory. `name` is the LOGICAL
+ * name of the input and is what every "[name:line]" diagnostic prints -- a path
+ * for a file, "<stdin>" (or whatever an embedded input is called) for anything
+ * that has no path. Lines are fed to the INI parser one at a time, exactly as
+ * the file reader always did, so a file and the same bytes from any other
+ * source take the same route and produce the same settings.
+ *
+ * `allow_include` is 0 for an input that is not a file: it has no directory
+ * for a relative include= to resolve against, and resolving it against the
+ * host's working directory would make the result depend on where the binary
+ * was started. Such an input refuses include= with a diagnostic naming it
+ * (docs/NOTES.md section 3a, "Configuration is explicit"). */
+static int fpm_conf_load_ini_buffer(char *name, const char *data, size_t len, int allow_include)
 {
 	int error = 0;
 	char *buf = NULL, *newbuf = NULL;
-	int bufsize = 0;
-	int fd, n;
-	int nb_read = 1;
-	char c = '*';
+	size_t bufsize = 0;
+	size_t pos = 0;
 
-	int ret = 1;
+	if (ini_recursion++ > 4) {
+		zlog(ZLOG_ERROR, "failed to include more than 5 files recursively");
+		return -1;
+	}
+
+	ini_lineno = 0;
+	while (pos < len) {
+		int tmp;
+		size_t n;
+		const char *nl = memchr(data + pos, '\n', len - pos);
+
+		n = nl ? (size_t) (nl - (data + pos)) : len - pos;
+		ini_lineno++;
+		ini_filename = name;
+		if (n == 0) {
+			pos++;
+			continue;
+		}
+		if (n + 2 > bufsize) {
+			bufsize = n + 2;
+			newbuf = (char*) realloc(buf, bufsize);
+			if (newbuf == NULL) {
+				ini_recursion--;
+				free(buf);
+				return -1;
+			}
+			buf = newbuf;
+		}
+		memcpy(buf, data + pos, n);
+		pos += n + (nl ? 1 : 0);
+		/* always append newline and null terminate */
+		buf[n++] = '\n';
+		buf[n] = '\0';
+		tmp = zend_parse_ini_string(buf, 1, ZEND_INI_SCANNER_NORMAL, (zend_ini_parser_cb_t)fpm_conf_ini_parser, &error);
+		ini_filename = name;
+		if (error || tmp == FAILURE) {
+			if (ini_include) {
+				free(ini_include);
+				ini_include = NULL;
+			}
+			ini_recursion--;
+			free(buf);
+			return -1;
+		}
+		if (ini_include) {
+			char *tmp = ini_include;
+			ini_include = NULL;
+			if (!allow_include) {
+				zlog(ZLOG_ERROR, "[%s:%d] include = %s: this configuration is not a file, so an include has nothing to resolve against; put the settings in the input itself",
+					name, ini_lineno, tmp);
+				free(tmp);
+				ini_recursion--;
+				free(buf);
+				return -1;
+			}
+			fpm_evaluate_full_path(&tmp, NULL, NULL, 0);
+			fpm_conf_ini_parser_include(tmp, &error);
+			if (error) {
+				free(tmp);
+				ini_recursion--;
+				free(buf);
+				return -1;
+			}
+			free(tmp);
+		}
+	}
+	free(buf);
+
+	ini_recursion--;
+	return 1;
+}
+
+int fpm_conf_load_ini_file(char *filename) /* {{{ */
+{
+	int fd, ret;
+	char *data;
+	size_t len;
 
 	if (!filename || !filename[0]) {
 		zlog(ZLOG_ERROR, "configuration filename is empty");
@@ -2283,72 +2411,64 @@ int fpm_conf_load_ini_file(char *filename) /* {{{ */
 		return -1;
 	}
 
-	if (ini_recursion++ > 4) {
-		zlog(ZLOG_ERROR, "failed to include more than 5 files recursively");
+	if (fpm_conf_slurp_fd(fd, &data, &len) < 0) {
+		zlog(ZLOG_SYSERROR, "failed to read configuration file '%s'", filename);
 		close(fd);
 		return -1;
 	}
-
-	ini_lineno = 0;
-	while (nb_read > 0) {
-		int tmp;
-		ini_lineno++;
-		ini_filename = filename;
-		for (n = 0; (nb_read = read(fd, &c, sizeof(char))) == sizeof(char) && c != '\n'; n++) {
-			if (n == bufsize) {
-				bufsize += 1024;
-				newbuf = (char*) realloc(buf, sizeof(char) * (bufsize + 2));
-				if (newbuf == NULL) {
-					ini_recursion--;
-					close(fd);
-					free(buf);
-					return -1;
-				}
-				buf = newbuf;
-			}
-
-			buf[n] = c;
-		}
-		if (n == 0) {
-			continue;
-		}
-		/* always append newline and null terminate */
-		buf[n++] = '\n';
-		buf[n] = '\0';
-		tmp = zend_parse_ini_string(buf, 1, ZEND_INI_SCANNER_NORMAL, (zend_ini_parser_cb_t)fpm_conf_ini_parser, &error);
-		ini_filename = filename;
-		if (error || tmp == FAILURE) {
-			if (ini_include) {
-				free(ini_include);
-				ini_include = NULL;
-			}
-			ini_recursion--;
-			close(fd);
-			free(buf);
-			return -1;
-		}
-		if (ini_include) {
-			char *tmp = ini_include;
-			ini_include = NULL;
-			fpm_evaluate_full_path(&tmp, NULL, NULL, 0);
-			fpm_conf_ini_parser_include(tmp, &error);
-			if (error) {
-				free(tmp);
-				ini_recursion--;
-				close(fd);
-				free(buf);
-				return -1;
-			}
-			free(tmp);
-		}
-	}
-	free(buf);
-
-	ini_recursion--;
 	close(fd);
+
+	ret = fpm_conf_load_ini_buffer(filename, data, len, 1);
+	free(data);
 	return ret;
 }
 /* }}} */
+
+/* The configuration-from-a-stream driver (issue #428): `-y fd:N` reads the
+ * whole configuration from the already-open descriptor N and names it "fd:N"
+ * in every diagnostic. It exists so that the memory path has a caller a test
+ * can reach without the application payload, which is not activated yet; the
+ * payload loader will call fpm_conf_load_ini_buffer() with its own logical name
+ * and the bytes it carries.
+ *
+ * Not "-y -": fpm_stdio_init_main() runs before the configuration is read and
+ * replaces standard input with /dev/null, so by then there is nothing left on
+ * fd 0 to read. Not a path such as /dev/fd/N either, because that is a file
+ * name: it would be allowed its include= and would be reported as a path.
+ *
+ * Returns 0 and fills `fd` when `spec` is a descriptor spelling, -1 when it is
+ * not one (an ordinary path), -2 when it is one and malformed. */
+static int fpm_conf_parse_fd_spec(const char *spec, int *fd)
+{
+	char *end;
+	long v;
+
+	if (strncmp(spec, FPM_CONF_FD_PREFIX, sizeof(FPM_CONF_FD_PREFIX) - 1) != 0) {
+		return -1;
+	}
+	errno = 0;
+	v = strtol(spec + sizeof(FPM_CONF_FD_PREFIX) - 1, &end, 10);
+	if (errno || end == spec + sizeof(FPM_CONF_FD_PREFIX) - 1 || *end || v < 3 || v > INT_MAX) {
+		return -2;
+	}
+	*fd = (int) v;
+	return 0;
+}
+
+static int fpm_conf_load_ini_fd(char *name, int fd)
+{
+	char *data;
+	size_t len;
+	int ret;
+
+	if (fpm_conf_slurp_fd(fd, &data, &len) < 0) {
+		zlog(ZLOG_SYSERROR, "failed to read configuration from '%s'", name);
+		return -1;
+	}
+	ret = fpm_conf_load_ini_buffer(name, data, len, 0);
+	free(data);
+	return ret;
+}
 
 static void fpm_conf_dump(void)
 {
@@ -2472,6 +2592,7 @@ static void fpm_conf_dump(void)
 int fpm_conf_init_main(int test_conf, int force_daemon) /* {{{ */
 {
 	int ret;
+	int fd_spec, config_fd = -1;
 
 	if (fpm_globals.prefix && *fpm_globals.prefix) {
 		if (!fpm_conf_is_dir(fpm_globals.prefix)) {
@@ -2507,7 +2628,24 @@ int fpm_conf_init_main(int test_conf, int force_daemon) /* {{{ */
 		}
 	}
 
-	ret = fpm_conf_load_ini_file(fpm_globals.config);
+	fd_spec = fpm_conf_parse_fd_spec(fpm_globals.config, &config_fd);
+	if (fd_spec == -2) {
+		zlog(ZLOG_ERROR, "'%s': a configuration descriptor is spelled fd:N with N >= 3", fpm_globals.config);
+		return -1;
+	}
+	if (fd_spec == 0) {
+		/* A descriptor is consumed by the first read. A reload re-executes
+		 * the binary with the same arguments and would find it at its end, and
+		 * fpm_conf_diff_snapshot_current() reopens the config by name, so a
+		 * running master cannot be driven by this input. */
+		if (!test_conf) {
+			zlog(ZLOG_ERROR, "'%s': configuration from a descriptor is only accepted together with -t, because it cannot be read again on reload", fpm_globals.config);
+			return -1;
+		}
+		ret = fpm_conf_load_ini_fd(fpm_globals.config, config_fd);
+	} else {
+		ret = fpm_conf_load_ini_file(fpm_globals.config);
+	}
 
 	if (0 > ret) {
 		zlog(ZLOG_ERROR, "failed to load configuration file '%s'", fpm_globals.config);

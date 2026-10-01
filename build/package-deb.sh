@@ -66,6 +66,13 @@ has_symbol() { nm --defined-only "$BIN" 2>/dev/null | grep -qw -- "$1"; }
 HAS_TLS=0; has_symbol fpm_tls_http_validate && HAS_TLS=1
 HAS_ACME=0; has_symbol fpm_acme_challenge_init_main && HAS_ACME=1
 
+# The test-suite clock (issue #396): an environment variable can make it run
+# faster than real time, so it must never ship. build/libphp-build.sh builds it
+# only with FPMNG_DEBUG_CLOCK=1, and that is a CI switch; this is the gate
+# that keeps such a binary from being packaged anyway.
+has_symbol fpm_debug_clock_now &&
+  fail "this binary was built with FPMNG_DEBUG_CLOCK=1 (it has fpm_debug_clock_now), which is for the test suite only and is never packaged (issue #396)"
+
 # Only two combinations have a name. A binary with TLS but no ACME is a
 # perfectly good thing to build by hand and not a thing this repository
 # publishes, so it is refused here rather than shipped under one of the two

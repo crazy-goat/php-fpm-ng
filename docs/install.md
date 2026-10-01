@@ -257,6 +257,41 @@ At runtime the binary checks again, and the two cases differ:
   The binary carries the struct layouts of the version it was built against, so
   continuing would corrupt memory rather than fail cleanly.
 
+## Building the package binary yourself
+
+The packages are built by `build/libphp-build.sh`. It needs this repository
+and a distribution's PHP 8.5 SDK. It needs no php-src tree and does not build
+PHP.
+
+| | Debian / Ubuntu | Alpine |
+|---|---|---|
+| SDK | `php8.5-dev libphp8.5-embed php8.5-cli` | `php85-dev php85-embed php85` |
+| toolchain and libraries | `build-essential libevent-dev libacl1-dev` | `build-base libevent-dev acl-dev` |
+| for `FPMNG_TLS=1` | `libssl-dev` | `openssl-dev` |
+
+```sh
+./build/libphp-build.sh out                         # out/php-fpm-ng
+FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out  # the php-fpm-ng-tls binary
+```
+
+PHP's own sources come from the SDK's headers. The FPM sources and the patched
+FastCGI layer this repository does not own come from `third_party/php-src/`
+(see its `README.md`). `out/commands.log` records every compile and link
+command. The build audits the compiler's dependency output, so a header read
+from anywhere other than the SDK, this repository or the system fails the
+build.
+
+It refuses, before compiling anything, to build:
+
+- on a kernel other than Linux;
+- against a PHP SDK other than 8.5;
+- against a ZTS SDK;
+- `FPMNG_ACME=1` without `FPMNG_TLS=1`.
+
+Each refusal says what to install instead. `build/test-libphp-build-refusals.sh`
+triggers each one on purpose. `build/test-libphp-abi-guard.sh` exercises the
+version check from [Version skew](#version-skew) against the installed SDK.
+
 ## If you need what the package cannot give
 
 `http`, fibers and async need patches that apply inside `libphp`,

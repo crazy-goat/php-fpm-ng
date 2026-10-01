@@ -100,6 +100,13 @@ cleanup() {
         rm -rf "$HARNESS_DIR"
     fi
     if [ -n "$TREE_DIR" ]; then
+        # run-tests.php leaves .diff/.out/.exp/.log next to each failed test;
+        # keep them, they are the only record of why it failed.
+        if [ -n "${RESULTS_DIR:-}" ] && [ -d "$TREE_DIR/sapi/fpmng/tests" ]; then
+            mkdir -p "$RESULTS_DIR/failed-artifacts"
+            find "$TREE_DIR/sapi/fpmng/tests" -maxdepth 1 \( -name '*.diff' -o -name '*.out' -o -name '*.exp' -o -name '*.log' \) \
+                -exec cp {} "$RESULTS_DIR/failed-artifacts/" \; 2>/dev/null || true
+        fi
         rm -rf "$TREE_DIR"
     fi
     exit "$status"

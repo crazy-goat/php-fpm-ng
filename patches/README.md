@@ -23,6 +23,21 @@ patches/*.patch              always applied
 patches/php-8.4/*.patch      only for that version; overrides the same-named patch
 ```
 
+## Two consumers
+
+`build/prepare.sh` applies the stack to a php-src checkout. That is the
+from-source build, and it is what branch async uses. `third_party/php-src/`
+holds `main/fastcgi.c` and `main/fastcgi.h` with the stack **already applied**
+at a pinned tag (issue #421), so a build against a distribution SDK needs no
+php-src tree.
+
+The manifest there records a fingerprint of this directory. A change here
+therefore has to be followed by
+`build/vendor-php-src.sh import <php-src checkout at the pinned tag>`. Until
+then, `build/vendor-php-src.sh check` fails, and with it the CI checks job.
+Never edit the vendored copies directly: the next import refuses to run
+rather than overwrite the edit.
+
 ## Status
 
 | patch | touches | waiting for | checked on |

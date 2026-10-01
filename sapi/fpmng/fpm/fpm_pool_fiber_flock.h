@@ -29,22 +29,26 @@
 #ifndef FPM_POOL_FIBER_FLOCK_H
 #define FPM_POOL_FIBER_FLOCK_H 1
 
-/* Wraps php_stream_stdio_ops.set_option in place. Call once per process,
- * after php_module_startup() (same timing as fpm_pool_fiber_xport_install(),
- * see fpm_pool_fiber_child_main()). No-op if called twice. */
-void fpm_pool_fiber_flock_install(void);
+#include "fpm_pool_fiber_io.h"
+
+/* Registry entry "flock" (fpm_pool_fiber_intercept.c). Its install wraps
+ * php_stream_stdio_ops.set_option in place, once per process, after
+ * php_module_startup(); no-op if called twice. Its request_end is
+ * fpm_pool_fiber_flock_release_owner() below. */
+extern struct fpm_fiber_intercept_s fpm_fiber_flock_intercept;
 
 /* Releases every lock-registry entry (bookkeeping only, NOT the OS-level
  * flock — that is released by the kernel whenever the underlying fd is
  * closed, independently of this) currently attributed to the fiber
- * identified by `owner` (an opaque handle from fpm_pool_fiber_waiter(),
+ * identified by `owner` (an opaque handle from fpm_fiber_io_waker(),
  * i.e. the SAME value the request's fiber used while it was live) and wakes
  * any other fiber waiting on those files. Call this exactly once when a
  * request's fiber ends, HOWEVER it ends (normal completion, a caught fatal,
  * or "suspended outside the scheduler" / dropped) — a request that never
  * calls this after having taken any lock leaves a permanent phantom holder
  * in the registry, which deadlocks every future request that wants the same
- * file in this process. Safe / cheap no-op if `owner` holds nothing. */
+ * file in this process. Safe / cheap no-op if `owner` holds nothing. The
+ * scheduler reaches it through fpm_fiber_intercept_request_end(). */
 void fpm_pool_fiber_flock_release_owner(void *owner);
 
 #endif

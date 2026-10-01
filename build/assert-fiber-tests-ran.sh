@@ -25,13 +25,15 @@ TSV="$RESULTS/results.tsv"
     exit 2
 }
 
-# The ten named in issue #97, all gated on "php-fpm-ng was not built with
+# The ten named in issue #97 plus later additions (#531:
+# fpmng-fiber-disable-interceptions), all gated on "php-fpm-ng was not built with
 # --enable-fpmng-fiber" or on an extension this cell's configure line
 # provides. Listed literally, not globbed on 'fiber': two of them
 # (fpmng-reload-listening-flags, fpmng-unrelated-listening-flags) do not carry
 # the word, and a glob would also silently shrink to nothing if the files were
 # renamed -- which is one of the regressions this is here to catch.
-TESTS="fpmng-fiber-dropped-request.phpt
+TESTS="fpmng-fiber-disable-interceptions.phpt
+fpmng-fiber-dropped-request.phpt
 fpmng-fiber-exceptions.phpt
 fpmng-fiber-flock.phpt
 fpmng-fiber-request-isolation.phpt
@@ -43,7 +45,9 @@ fpmng-reload-listening-flags.phpt
 fpmng-unrelated-listening-flags.phpt"
 
 rc=0
+count=0
 for t in $TESTS; do
+    count=$((count + 1))
     line=$(awk -F'\t' -v name="$t" '$1 ~ ("/" name "$") { print; exit }' "$TSV" || true)
     if [ -z "$line" ]; then
         echo "FAIL: $t is not in $TSV at all -- renamed, deleted, or never discovered" >&2
@@ -81,4 +85,4 @@ done
     echo "assert-fiber-tests-ran.sh: the fiber cell did not actually exercise the fiber tests" >&2
     exit 1
 }
-echo "assert-fiber-tests-ran.sh: all 10 fiber-gated tests ran on this cell"
+echo "assert-fiber-tests-ran.sh: all $count fiber-gated tests ran on this cell"

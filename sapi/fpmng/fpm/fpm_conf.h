@@ -367,6 +367,10 @@ struct fpm_worker_pool_config_s {
 	 * Class\Name::property (declaring class, PHP property syntax without the
 	 * '$'); empty = mechanism off, see FPM_COOP_STATICS_MAX. */
 	char *fiber_isolate_statics;
+	/* fpm-ng: pool.executor = fiber, IO interceptions to leave out in this
+	 * pool (comma-separated registry names); see fpm_pool_fiber_intercept.c.
+	 * NULL/empty = all on. */
+	char *fiber_disable_interceptions;
 };
 
 struct ini_value_parser_s {

@@ -14,12 +14,12 @@
 #include "main/php_streams.h"
 #include "main/streams/php_stream_plain_wrapper.h"
 
-#include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_io.h"
 #include "fpm_pool_fiber_flock.h"
 #include "zlog.h"
 
 /* One process = one OS thread; the scheduler switches Fibers ONLY at explicit
- * suspension points (fpm_pool_fiber_wait_wake/wait_fd). Nothing else touches
+ * suspension points (fpm_fiber_io_run() and nothing else). Nothing else touches
  * this registry between two such points — no locks are needed. If this file
  * ever also runs under an executor other than fiber (async with OS threads?),
  * THIS assumption must be reconsidered from scratch. */
@@ -180,7 +180,7 @@ static void fpm_flock_wake_all(struct fpm_flock_entry_s *e) /* {{{ */
 	int i;
 
 	for (i = 0; i < e->n_waiters; i++) {
-		fpm_pool_fiber_wake(e->waiters[i]);
+		fpm_fiber_io_wake(e->waiters[i]);
 	}
 	e->n_waiters = 0;
 }
@@ -297,7 +297,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 		return fpm_flock_orig_set_option(stream, option, value, ptrparam);
 	}
 
-	owner = fpm_pool_fiber_waiter();
+	owner = fpm_fiber_io_waker();
 	if (!owner) {
 		/* Outside a Fiber request context (for example, the container script
 		 * before the first request) — a process registry is not meaningful; retain
@@ -344,7 +344,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 	 * phases: (1) check the in-process conflict ONCE, (2) if there was no
 	 * conflict, poll the real flock() until attempts were exhausted, then block
 	 * in the real flock(). Between retries in phase (2), the Fiber YIELDS the
-	 * processor (fpm_pool_fiber_wait_wake). During that window ANOTHER Fiber IN
+	 * processor (a TIMER operation through the IO seam). During that window ANOTHER Fiber IN
 	 * THE SAME process could enter, also see no conflict (because the first
 	 * Fiber held nothing yet), win the real flock(), and suspend on a socket
 	 * (correctly). When the first Fiber returned from polling, it still saw
@@ -370,7 +370,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 				errno = EWOULDBLOCK;
 				return -1;	/* caller requested LOCK_NB — do not suspend or block */
 			}
-			if (!fpm_pool_fiber_can_wait() || !fpm_flock_add_waiter(entry, owner)) {
+			if (!fpm_fiber_io_can_suspend(&fpm_fiber_flock_intercept) || !fpm_flock_add_waiter(entry, owner)) {
 				/* FIX (was: fall through to a real BLOCKING flock() here).
 				 * We just confirmed, above, that another fiber IN THIS SAME
 				 * PROCESS holds a conflicting lock. That holder cannot run
@@ -407,7 +407,13 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 				errno = EWOULDBLOCK;
 				return -1;
 			}
-			fpm_pool_fiber_wait_wake(NULL);
+			{
+				struct fpm_fiber_io_op_s op;
+
+				memset(&op, 0, sizeof(op));
+				op.type = FPM_FIBER_IO_OP_WAKE;	/* no deadline: until the holder's LOCK_UN */
+				fpm_fiber_io_run(&fpm_fiber_flock_intercept, &op);
+			}
 			/* After waking, return to the VERY START of this inner loop — check
 			 * the conflict again (several waiters may wake at once, but only one
 			 * actually wins). */
@@ -441,15 +447,19 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 		 * holder in fpm_flock_conflict() and enter a real suspension instead of
 		 * polling/blocking on flock(). That is the entire fix. */
 		attempts++;
-		if (attempts >= max_attempts || !fpm_pool_fiber_can_wait()) {
+		if (attempts >= max_attempts || !fpm_fiber_io_can_suspend(&fpm_fiber_flock_intercept)) {
 			break;
 		}
 		{
 			struct timeval iv;
+			struct fpm_fiber_io_op_s op;
 
 			iv.tv_sec = FPM_FLOCK_POLL_INTERVAL_USEC / 1000000;
 			iv.tv_usec = FPM_FLOCK_POLL_INTERVAL_USEC % 1000000;
-			fpm_pool_fiber_wait_wake(&iv);	/* suspend the Fiber without blocking the process; returns on timeout */
+			memset(&op, 0, sizeof(op));
+			op.type = FPM_FIBER_IO_OP_TIMER;
+			op.timeout = &iv;
+			fpm_fiber_io_run(&fpm_fiber_flock_intercept, &op);	/* suspend the Fiber without blocking the process; returns on timeout */
 		}
 	}
 
@@ -472,7 +482,7 @@ static int fpm_fiber_flock_set_option(php_stream *stream, int option, int value,
 }
 /* }}} */
 
-void fpm_pool_fiber_flock_install(void) /* {{{ */
+static void fpm_pool_fiber_flock_install(void) /* {{{ */
 {
 	if (fpm_flock_installed) {
 		return;
@@ -482,3 +492,15 @@ void fpm_pool_fiber_flock_install(void) /* {{{ */
 	php_stream_stdio_ops.set_option = fpm_fiber_flock_set_option;
 }
 /* }}} */
+
+struct fpm_fiber_intercept_s fpm_fiber_flock_intercept = {
+	.name = "flock",
+	.install = fpm_pool_fiber_flock_install,
+	.request_end = fpm_pool_fiber_flock_release_owner,
+	/* The in-process conflict above: with the stock set_option, the blocking
+	 * flock(2) waits for a holder that is a fiber of this same process and
+	 * can never run again. Nothing ends that wait (no request_terminate_timeout,
+	 * max_execution_time = 0 under this executor). */
+	.disabled_hazard = "a flock() that conflicts with a lock held by another request of this process "
+		"never returns and hangs this child until it is killed",
+};

@@ -110,8 +110,18 @@
 
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_session_patch.h"
-#include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_io.h"
 #include "zlog.h"
+
+/* The arbiter waits through the IO seam like every interception, but it is NOT
+ * an entry of the registry (fpm_pool_fiber_intercept.c) and so cannot be
+ * named in fiber.disable_interceptions: switching it off would not give the
+ * stock blocking behaviour, it would give either no in-process session lock
+ * or a whole-process deadlock on mod_files' flock(2) (see the header above).
+ * Zero-initialised = never disabled. */
+static struct fpm_fiber_intercept_s psw_intercept = {
+	.name = "session-lock",
+};
 
 typedef struct psw_waiter_s {
 	void *handle;
@@ -184,7 +194,7 @@ static bool psw_wake_one(psw_entry *e) /* {{{ */
 	if (!e->waiters_head) {
 		e->waiters_tail = NULL;
 	}
-	fpm_pool_fiber_wake(w->handle);
+	fpm_fiber_io_wake(w->handle);
 	efree(w);
 	return true;
 }
@@ -219,8 +229,9 @@ static bool psw_lock_acquire(zend_string *key) /* {{{ */
 
 	while (e->held) {
 		void *waiter;
+		struct fpm_fiber_io_op_s op;
 
-		if (!fpm_pool_fiber_can_wait()) {
+		if (!fpm_fiber_io_can_suspend(&psw_intercept)) {
 			if (!psw_nowait_warned) {
 				psw_nowait_warned = true;
 				zlog(ZLOG_WARNING, "[pool %s] coop-session-patch: cannot suspend the current fiber to wait "
@@ -230,9 +241,11 @@ static bool psw_lock_acquire(zend_string *key) /* {{{ */
 			return false;
 		}
 
-		waiter = fpm_pool_fiber_waiter();
+		waiter = fpm_fiber_io_waker();
 		psw_waiter_enqueue(e, waiter);
-		fpm_pool_fiber_wait_wake(NULL);
+		memset(&op, 0, sizeof(op));
+		op.type = FPM_FIBER_IO_OP_WAKE;	/* no deadline: until psw_wake_one() */
+		fpm_fiber_io_run(&psw_intercept, &op);
 	}
 
 	e->held = true;

@@ -9,7 +9,24 @@
 #ifndef FPM_POOL_FIBER_XPORT_H
 #define FPM_POOL_FIBER_XPORT_H 1
 
+#include <sys/time.h>
+
 #include "php_streams.h"
+#include "php_network.h"
+
+#include "fpm_pool_fiber_io.h"
+
+/* Registry entry "xport" (fpm_pool_fiber_intercept.c). */
+extern struct fpm_fiber_intercept_s fpm_fiber_xport_intercept;
+
+/* For patch 0007: may the TLS code suspend right now (a request fiber, and
+ * the "xport" entry is not disabled)? Non-zero = yes. */
+int fpm_fiber_xport_tls_active(void);
+
+/* For patch 0007: php_pollfd_for() replacement. poll_events are poll(2) bits
+ * (POLLIN/POLLOUT/POLLPRI); 1 ready, 0 timeout, -1 did not wait — the caller
+ * then polls exactly as upstream. */
+int fpm_fiber_xport_tls_wait(php_socket_t fd, int poll_events, struct timeval *timeout);
 
 /* Wrap an ops table with the fiber-suspending variant (read/write/connect
  * wait on the scheduler instead of blocking). NULL = the wrapper map is full
@@ -18,7 +35,7 @@
 const php_stream_ops *fpm_fiber_xport_wrap(const php_stream_ops *orig);
 
 /* Wrap the ssl/sslv3/tls/tlsv1.x transports. Called from
- * fpm_pool_fiber_xport_install() under HAVE_FPMNG_FIBER_TLS. Its log line is
+ * the "xport" entry's install under HAVE_FPMNG_FIBER_TLS. Its log line is
  * the "stream transports hooked: ssl=..." one. */
 void fpm_fiber_tls_xport_install(void);
 

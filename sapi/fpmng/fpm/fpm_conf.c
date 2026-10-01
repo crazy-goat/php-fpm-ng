@@ -261,6 +261,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	 * above it. */
 	{ "fiber.revalidate_freq",     &fpm_conf_set_time,        WPO(fiber_revalidate_freq) },
 	{ "fiber.isolate_statics",     &fpm_conf_set_string,      WPO(fiber_isolate_statics) },
+	{ "fiber.disable_interceptions", &fpm_conf_set_string,    WPO(fiber_disable_interceptions) },
 	{ 0, 0, 0 }
 };
 
@@ -1136,6 +1137,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
 	free(wpc->fiber_isolate_statics);
+	free(wpc->fiber_disable_interceptions);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif

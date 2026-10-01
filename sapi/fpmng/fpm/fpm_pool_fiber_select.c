@@ -11,14 +11,11 @@
  * else in that function (argument parsing, building rfds/wfds/efds from the
  * stream arrays, narrowing them back afterwards) is untouched upstream code.
  *
- * Mechanism: one libevent event per candidate fd, registered on the
- * scheduler's event_base (fpm_pool_fiber_event_base()) exactly like the evdns
- * requests in fpm_pool_fiber_xport.c. Waking uses the existing external-wake
- * pair (fpm_pool_fiber_waiter/wait_wake/wake) instead of a new state machine:
- * whichever event fires first calls fpm_pool_fiber_wake(), and wait_wake()
- * returns as soon as any of them (or the timeout) does. Multiple events firing
- * in the same libevent loop pass is not a race (single-threaded event loop);
- * each just accumulates its own bits before the Fiber actually resumes.
+ * Mechanism: one ANY operation through the IO seam (fpm_pool_fiber_io.h), one
+ * member per candidate fd. The seam's backend registers one event per member
+ * and resumes the Fiber when the first one fires or the timeout passes
+ * (fpm_pool_fiber_io.c, "ANY"); this file only translates fd_sets to members
+ * and back.
  *
  * Not handled here, on purpose:
  * - efds (the "exceptional conditions" set): select()'s meaning for it is
@@ -36,32 +33,19 @@
 #include <string.h>
 #include <sys/select.h>
 
-#include <event2/event.h>
-
 #include "php.h"
 
 #include "fpm_pool_coop.h"
-#include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_io.h"
 #include "fpm_pool_fiber_select.h"
 #include "zlog.h"
 
-struct fpm_fiber_select_entry {
-	int fd;
-	short want;		/* EV_READ and/or EV_WRITE requested for this fd */
-	short got;		/* bits actually observed ready */
-	void *waiter;
-	struct event *ev;	/* NULL once freed, or if never created (event_add failed) */
+/* Nothing to install: patch 0008 compiles the call to fpm_fiber_select() into
+ * stream_select(). The registry entry exists so fiber.disable_interceptions =
+ * select reaches that call site through fpm_fiber_io_can_suspend(). */
+struct fpm_fiber_intercept_s fpm_fiber_select_intercept = {
+	.name = "select",
 };
-
-static void fpm_fiber_select_cb(evutil_socket_t fd, short what, void *arg) /* {{{ */
-{
-	struct fpm_fiber_select_entry *e = arg;
-
-	(void) fd;
-	e->got |= what;
-	fpm_pool_fiber_wake(e->waiter);
-}
-/* }}} */
 
 /* Once per process: efds is rare enough (neither Predis nor php-amqplib use
  * it) that falling back silently every time would be surprising in the log,
@@ -70,10 +54,9 @@ static bool fpm_fiber_select_efds_warned = false;
 
 int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struct timeval *timeout) /* {{{ */
 {
-	struct event_base *base;
-	struct fpm_fiber_select_entry *entries = NULL;
-	void *waiter;
-	int fd, n = 0, ready;
+	struct fpm_fiber_io_poll_s *members;
+	struct fpm_fiber_io_op_s op;
+	int fd, i, n = 0, ready;
 	bool poll_only = timeout && timeout->tv_sec == 0 && timeout->tv_usec == 0;
 	bool have_efds = false;
 
@@ -86,7 +69,7 @@ int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struc
 		}
 	}
 
-	if (have_efds || poll_only || !fpm_pool_fiber_can_wait()) {
+	if (have_efds || poll_only || !fpm_fiber_io_can_suspend(&fpm_fiber_select_intercept)) {
 		if (have_efds && !fpm_fiber_select_efds_warned) {
 			fpm_fiber_select_efds_warned = true;
 			zlog(ZLOG_DEBUG, "[pool %s] fiber: stream_select() with a non-empty "
@@ -96,88 +79,51 @@ int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struc
 		return select(max_fd, rfds, wfds, efds, timeout);
 	}
 
-	base = fpm_pool_fiber_event_base();
-	if (!base) {
-		return select(max_fd, rfds, wfds, efds, timeout);
-	}
-
-	entries = ecalloc(max_fd, sizeof(*entries));
-	waiter = fpm_pool_fiber_waiter();
+	members = ecalloc(max_fd > 0 ? max_fd : 1, sizeof(*members));
 
 	for (fd = 0; fd < max_fd; fd++) {
-		short want = 0;
-		struct fpm_fiber_select_entry *e;
+		unsigned want = 0;
 
 		if (rfds && FD_ISSET(fd, rfds)) {
-			want |= EV_READ;
+			want |= FPM_FIBER_IO_READ;
 		}
 		if (wfds && FD_ISSET(fd, wfds)) {
-			want |= EV_WRITE;
+			want |= FPM_FIBER_IO_WRITE;
 		}
 		if (!want) {
 			continue;
 		}
-
-		e = &entries[n++];
-		e->fd = fd;
-		e->want = want;
-		e->waiter = waiter;
-		e->ev = event_new(base, fd, want, fpm_fiber_select_cb, e);
-		if (!e->ev || event_add(e->ev, NULL) < 0) {
-			/* Not watchable through epoll (an ordinary file, most likely) or
-			 * out of memory: select() reports a regular file as always ready
-			 * on Linux, so do the same rather than waiting on it forever. */
-			if (e->ev) {
-				event_free(e->ev);
-				e->ev = NULL;
-			}
-			e->got = want;
-		}
+		members[n].fd = fd;
+		members[n].events = want;
+		n++;
 	}
 
 	if (n == 0) {
 		/* stream_array_to_fd_set already refused an empty set of arrays
 		 * before this is reached; this is defensive, not a real path. */
-		efree(entries);
+		efree(members);
 		return select(max_fd, rfds, wfds, efds, timeout);
 	}
 
-	{
-		bool any_ready = false;
-		int i;
+	memset(&op, 0, sizeof(op));
+	op.type = FPM_FIBER_IO_OP_ANY;
+	op.timeout = timeout;
+	op.u.any.members = members;
+	op.u.any.count = n;
 
-		for (i = 0; i < n; i++) {
-			if (entries[i].got) {
-				any_ready = true;
-				break;
-			}
-		}
-
-		/* An entry already resolved (the not-watchable-through-epoll case
-		 * above) before we ever call wait_wake(): a wake arriving before the
-		 * wait starts is a documented no-op (fpm_pool_fiber.h), so waiting
-		 * here would lose it and block for the full timeout instead of
-		 * returning promptly, as select() would for a descriptor that is
-		 * already ready. */
-		if (!any_ready) {
-			int w = fpm_pool_fiber_wait_wake(timeout);
-
-			if (w < 0) {
-				/* can_wait() changed its mind between the check above and
-				 * here (should not happen in single-threaded code) — do not
-				 * lose the wait, fall back to the real, blocking select(). */
-				for (i = 0; i < n; i++) {
-					if (entries[i].ev) {
-						event_del(entries[i].ev);
-						event_free(entries[i].ev);
-					}
-				}
-				efree(entries);
-				return select(max_fd, rfds, wfds, efds, timeout);
-			}
-		}
+	if (fpm_fiber_io_run(&fpm_fiber_select_intercept, &op) == FPM_FIBER_IO_UNSUPPORTED) {
+		/* Nothing was waited for (can_suspend() changed its mind between the
+		 * check above and here, which should not happen in single-threaded
+		 * code) — do not lose the wait, fall back to the real, blocking
+		 * select(). */
+		efree(members);
+		return select(max_fd, rfds, wfds, efds, timeout);
 	}
 
+	/* READY or TIMEOUT: the sets become the ready subset (empty on TIMEOUT).
+	 * CANCELLED is never produced for ANY by the libevent backend; treating it
+	 * like TIMEOUT (nothing ready, return 0) is select()'s own answer to a
+	 * wait that ended without an event. */
 	if (rfds) {
 		FD_ZERO(rfds);
 	}
@@ -189,28 +135,18 @@ int fpm_fiber_select(int max_fd, fd_set *rfds, fd_set *wfds, fd_set *efds, struc
 	}
 
 	ready = 0;
-	{
-		int i;
-
-		for (i = 0; i < n; i++) {
-			struct fpm_fiber_select_entry *e = &entries[i];
-
-			if (e->ev) {
-				event_del(e->ev);
-				event_free(e->ev);
-			}
-			if ((e->got & EV_READ) && rfds) {
-				FD_SET(e->fd, rfds);
-				ready++;
-			}
-			if ((e->got & EV_WRITE) && wfds) {
-				FD_SET(e->fd, wfds);
-				ready++;
-			}
+	for (i = 0; i < n; i++) {
+		if ((members[i].revents & FPM_FIBER_IO_READ) && rfds) {
+			FD_SET(members[i].fd, rfds);
+			ready++;
+		}
+		if ((members[i].revents & FPM_FIBER_IO_WRITE) && wfds) {
+			FD_SET(members[i].fd, wfds);
+			ready++;
 		}
 	}
 
-	efree(entries);
+	efree(members);
 	return ready;
 }
 /* }}} */

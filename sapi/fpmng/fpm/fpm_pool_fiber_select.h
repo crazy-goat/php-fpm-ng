@@ -16,6 +16,13 @@
 #include <sys/select.h>
 #include <sys/time.h>
 
+#include "fpm_pool_fiber_io.h"
+
+/* Registry entry "select" (fpm_pool_fiber_intercept.c). No install: the call
+ * site is compiled in by patch 0008. Disabled, fpm_fiber_select() is plain
+ * select(). */
+extern struct fpm_fiber_intercept_s fpm_fiber_select_intercept;
+
 /* Drop-in replacement for php_select()/select(): same signature, same
  * postconditions (rfds/wfds/efds narrowed to the ready subset, return count of
  * ready descriptors, 0 on timeout, -1 on error with errno set). Outside a

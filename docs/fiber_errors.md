@@ -376,7 +376,8 @@ In the transport factory (`fpm_pool_fiber_xport.c`), not in `validate()` —
 persistent is a connection attribute given in application code, not a
 configuration directive, so there is nothing to check at pool-validation
 time. The refusal applies only to the fiber executor
-(`fpm_pool_fiber_can_wait()`); `fastcgi` and `http/classic` are untouched —
+(`fpm_pool_fiber_can_wait()`, reached through the IO seam's
+`fpm_fiber_io_can_suspend()` since #531); `fastcgi` and `http/classic` are untouched —
 measured, `classic` with persistent still works as before.
 
 ### The message: two recipients
@@ -421,6 +422,38 @@ than a loud error.
 Not refused, still blocking (as before): a build with a **shared**
 `openssl.so` — configure prints a warning that the fiber TLS interception is
 off, and TLS simply stays upstream-blocking.
+
+## `fiber.disable_interceptions`: one interception back to stock blocking (#531)
+
+If one IO interception misbehaves in production (a library that relies on
+blocking semantics, a suspected scheduler bug), name it and the pool falls
+back to stock PHP for that call only:
+
+```ini
+[app]
+pool.executor = fiber
+fiber.disable_interceptions = sleep
+```
+
+Names: `xport` (tcp/unix streams, DNS in connect, TLS from patch 0007),
+`flock`, `sleep`, `select`. An unknown name fails the start with
+`fiber.disable_interceptions: unknown interception '<name>'; known
+interceptions: xport, flock, sleep, select`. Each child logs one `NOTICE`
+per disabled entry. A disabled call blocks the **whole process**, so every
+other request in flight waits for it — the trade the directive exists to
+make visible. **`flock` is worse than blocking**: the stock `flock()`
+against a lock that another request of the same process holds waits for a
+holder that can never run again, so the child hangs until it is killed
+(nothing times it out under this executor). The child logs a `WARNING`
+saying so. Disable `flock` only in a pool whose requests never lock the same
+file concurrently. The persistent-connection and TLS refusals above belong to
+`xport`: disabling it lifts them too. That is safe for TLS (the stream is
+upstream's and blocks), but **not** for persistent connections while any
+other interception is on: a request that suspends in `sleep()` or
+`stream_select()` between two queries of one transaction lets the next
+request reuse the same socket inside that transaction. Keep
+`PDO::ATTR_PERSISTENT` off in a fiber pool either way.
+Design and the full list: [fiber_async_io.md](fiber_async_io.md#the-io-seam).
 
 ## REJECTED: fiber executor only in ZTS, per-request TSRM context
 

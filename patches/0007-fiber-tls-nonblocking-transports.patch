@@ -10,8 +10,10 @@ underlying TCP connect) suspend the fpm-ng request fiber instead of blocking
 the process. With pool.executor != fiber, in CLI, and outside a request fiber
 the code paths are upstream's, call for call.
 
-How: php_pollfd_for is re-pointed at fpm_pool_fiber_wait_fd for the duration
-of the handshake/IO (fpm_fiber_tls_wait). OpenSSL gets SSL_MODE_AUTO_RETRY,
+How: php_pollfd_for is re-pointed at fpm_fiber_xport_tls_wait for the duration
+of the handshake/IO (fpm_fiber_tls_wait); that helper waits through fpm-ng's
+IO seam as the "xport" interception, so fiber.disable_interceptions = xport
+turns these paths back into upstream's too. OpenSSL gets SSL_MODE_AUTO_RETRY,
 so SSL_read/SSL_write re-drive an in-progress renegotiation themselves and
 SSL_want keeps reporting real socket state; upstream cannot use it because a
 plain PHP stream must surface the WANT_* condition. The reneg rate limiter
@@ -58,7 +60,7 @@ index c8ca39ad..16ef1464 100644
  
 +#ifdef HAVE_FPMNG_FIBER_TLS
 +	/* fpm-ng: in a fiber-executor worker these ssl/tls registrations are
-+	 * REPLACED after all MINITs ran (fpm_pool_fiber_xport_install ->
++	 * REPLACED after all MINITs ran (the "xport" interception's install ->
 +	 * fpm_fiber_tls_xport_install in xp_ssl.c). The order here is unchanged
 +	 * and no other SAPI ever sees the fiber variants. */
 +#endif
@@ -70,14 +72,11 @@ diff --git a/ext/openssl/xp_ssl.c b/ext/openssl/xp_ssl.c
 index 269de954..fe0c4fb2 100644
 --- a/ext/openssl/xp_ssl.c
 +++ b/ext/openssl/xp_ssl.c
-@@ -51,6 +51,89 @@
+@@ -51,6 +51,83 @@
  # define MSG_DONTWAIT 0
  #endif
  
 +#ifdef HAVE_FPMNG_FIBER_TLS
-+#include <event2/event.h>
-+
-+#include "sapi/fpmng/fpm/fpm_pool_fiber.h"
 +#include "sapi/fpmng/fpm/fpm_pool_fiber_xport.h"
 +#include "sapi/fpmng/fpm/fpm_pool_coop.h"
 +/* zlog.h lives with FPM; the fpmng build adds sapi/fpm to the include path of
@@ -87,11 +86,12 @@ index 269de954..fe0c4fb2 100644
 +/* ext/openssl objects are linked into EVERY binary in the tree (cli, fpmng,
 + * ...), but the fiber scheduler exists only in fpm-ng. Weak references keep
 + * cli linkable: there they resolve to NULL and every fpm_fiber_tls_* call is
-+ * skipped because can_wait is NULL. The indirection is per call site, not a
-+ * function table, so a future LTO build cannot invent a non-NULL can_wait
-+ * with a NULL wait_fd behind it — both are checked where used. */
-+extern int fpm_pool_fiber_can_wait(void) __attribute__((weak));
-+extern int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) __attribute__((weak));
++ * skipped because tls_active is NULL. The indirection is per call site, not a
++ * function table, so a future LTO build cannot invent a non-NULL tls_active
++ * with a NULL tls_wait behind it — both are checked where used. Both come
++ * from fpm_pool_fiber_xport.c: this file never talks to the scheduler. */
++extern int fpm_fiber_xport_tls_active(void) __attribute__((weak));
++extern int fpm_fiber_xport_tls_wait(php_socket_t fd, int poll_events, struct timeval *timeout) __attribute__((weak));
 +extern const php_stream_ops *fpm_fiber_xport_wrap(const php_stream_ops *orig) __attribute__((weak));
 +extern const char *fpm_coop_pool_name(void) __attribute__((weak));
 +extern void zlog_ex(const char *function, int line, int flags, const char *fmt, ...) __attribute__((weak));
@@ -100,7 +100,7 @@ index 269de954..fe0c4fb2 100644
 + * against its address. */
 +static const php_stream_ops php_openssl_socket_ops;
 +
-+#define FPM_FIBER_TLS_ACTIVE (fpm_pool_fiber_can_wait && fpm_pool_fiber_can_wait())
++#define FPM_FIBER_TLS_ACTIVE (fpm_fiber_xport_tls_active && fpm_fiber_xport_tls_active())
 +
 +/* Wait for the socket instead of php_pollfd_for: suspend the fpm-ng request
 + * fiber on the scheduler when we can (in a request fiber), poll exactly as
@@ -109,16 +109,12 @@ index 269de954..fe0c4fb2 100644
 +{
 +	int r;
 +
-+	if (FPM_FIBER_TLS_ACTIVE && fpm_pool_fiber_wait_fd) {
++	if (FPM_FIBER_TLS_ACTIVE && fpm_fiber_xport_tls_wait) {
 +		/* Upstream passes POLLOUT|POLLPRI for WANT_WRITE and POLLIN|POLLPRI
-+		 * for WANT_READ — POLLPRI rides along in BOTH, so it must not decide
-+		 * the direction. Test POLLOUT first; POLLOUT|POLLPRI ("writable or
-+		 * priority data") has no exact libevent equivalent, so use both
-+		 * events there. */
-+		short ev = (events & POLLOUT)
-+			? ((events & POLLIN) ? (EV_READ | EV_WRITE) : EV_WRITE)
-+			: EV_READ;
-+		return fpm_pool_fiber_wait_fd(fd, ev, timeout);
++		 * for WANT_READ; the helper picks the direction (POLLPRI must not
++		 * decide it, see fpm_pool_fiber_xport.c) and returns 1/0/-1 like
++		 * php_pollfd_for. */
++		return fpm_fiber_xport_tls_wait(fd, events, timeout);
 +	}
 +	do {
 +		r = php_pollfd_for(fd, events, timeout);
@@ -160,7 +156,7 @@ index 269de954..fe0c4fb2 100644
  #ifdef HAVE_ARPA_INET_H
  #include <arpa/inet.h>
  #endif
-@@ -2974,6 +3057,9 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -2974,6 +3051,9 @@ static int php_openssl_enable_crypto(php_stream *stream,
  	sslsock->last_status = STREAM_CRYPTO_STATUS_NONE;
  
  	if (cparam->inputs.activate && !sslsock->ssl_active) {
@@ -170,7 +166,7 @@ index 269de954..fe0c4fb2 100644
  		struct timeval start_time, *timeout;
  		bool blocked = sslsock->s.is_blocked, has_timeout = false;
  
-@@ -3015,6 +3101,17 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3015,6 +3095,17 @@ static int php_openssl_enable_crypto(php_stream *stream,
  
  		SSL_set_mode(sslsock->ssl_handle, SSL_MODE_RELEASE_BUFFERS);
  
@@ -188,7 +184,7 @@ index 269de954..fe0c4fb2 100644
  		if (SUCCESS == php_openssl_set_blocking(sslsock, 0)) {
  			/* The following mode are added only if we are able to change socket
  			 * to non blocking mode which is also used for read and write */
-@@ -3047,6 +3144,21 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3047,6 +3138,21 @@ static int php_openssl_enable_crypto(php_stream *stream,
  			if (n <= 0) {
  				/* in case of SSL_ERROR_WANT_READ/WRITE, do not retry in non-blocking mode */
  				retry = php_openssl_handle_ssl_error(stream, n, blocked);
@@ -210,7 +206,7 @@ index 269de954..fe0c4fb2 100644
  				if (retry) {
  					/* wait until something interesting happens in the socket. It may be a
  					 * timeout. Also consider the unlikely of possibility of a write block  */
-@@ -3056,8 +3168,13 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3056,8 +3162,13 @@ static int php_openssl_enable_crypto(php_stream *stream,
  					if (has_timeout) {
  						left_time = php_openssl_subtract_timeval(*timeout, elapsed_time);
  					}
@@ -224,7 +220,7 @@ index 269de954..fe0c4fb2 100644
  				}
  			} else {
  				retry = 0;
-@@ -3074,6 +3191,16 @@ static int php_openssl_enable_crypto(php_stream *stream,
+@@ -3074,6 +3185,16 @@ static int php_openssl_enable_crypto(php_stream *stream,
  				cert_captured = php_openssl_capture_peer_certs(stream, sslsock, peer_cert);
  			}
  
@@ -241,7 +237,7 @@ index 269de954..fe0c4fb2 100644
  			if (FAILURE == php_openssl_apply_peer_verification_policy(sslsock->ssl_handle, peer_cert, stream)) {
  				SSL_shutdown(sslsock->ssl_handle);
  				n = -1;
-@@ -3129,6 +3256,10 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3129,6 +3250,10 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  {
  	php_openssl_netstream_data_t *sslsock = (php_openssl_netstream_data_t*)stream->abstract;
  
@@ -252,7 +248,7 @@ index 269de954..fe0c4fb2 100644
  	/* Only do this if SSL is active. */
  	if (sslsock->ssl_active) {
  		/* We have already returned some buffered data. Don't retry and don't
-@@ -3236,11 +3367,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3236,11 +3361,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  				 */
  				if (retry) {
  					if (read) {
@@ -274,7 +270,7 @@ index 269de954..fe0c4fb2 100644
  					}
  				}
  			} else {
-@@ -3255,11 +3396,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
+@@ -3255,11 +3390,21 @@ static ssize_t php_openssl_sockop_io(int read, php_stream *stream, char *buf, si
  				/* Otherwise, we need to wait again (up to time_left or we get an error) */
  				if (began_blocked) {
  					if (read) {
@@ -296,7 +292,7 @@ index 269de954..fe0c4fb2 100644
  					}
  				} else if (err == SSL_ERROR_WANT_READ) {
  					sslsock->last_status = STREAM_CRYPTO_STATUS_WANT_READ;
-@@ -3547,6 +3698,10 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3547,6 +3692,10 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  	php_stream_xport_crypto_param *cparam = (php_stream_xport_crypto_param *)ptrparam;
  	php_stream_xport_param *xparam = (php_stream_xport_param *)ptrparam;
  
@@ -307,7 +303,7 @@ index 269de954..fe0c4fb2 100644
  	switch (option) {
  		case PHP_STREAM_OPTION_META_DATA_API:
  			if (sslsock->ssl_active) {
-@@ -3788,8 +3943,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3788,8 +3937,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  
  			break;
  
@@ -317,7 +313,7 @@ index 269de954..fe0c4fb2 100644
  
  				case STREAM_XPORT_OP_CONNECT:
  				case STREAM_XPORT_OP_CONNECT_ASYNC:
-@@ -3848,6 +4002,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3848,6 +3996,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  					/* fall through */
  					break;
  			}
@@ -330,7 +326,7 @@ index 269de954..fe0c4fb2 100644
  	}
  
  	return php_stream_socket_ops.set_option(stream, option, value, ptrparam);
-@@ -3924,6 +4084,137 @@ static const php_stream_ops php_openssl_socket_ops = {
+@@ -3924,6 +4078,137 @@ static const php_stream_ops php_openssl_socket_ops = {
  	php_openssl_sockop_set_option,
  };
  

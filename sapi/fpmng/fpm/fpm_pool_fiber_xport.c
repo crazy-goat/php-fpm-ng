@@ -6,8 +6,9 @@
  * compiled in — it overrides "tcp" in MINIT) and replaces the ops table in the
  * created stream with a wrapper. Before every read/write/connect, the wrapper
  * checks whether the operation would block and, if so, suspends the request
- * Fiber until the descriptor is ready (fpm_pool_fiber_wait_fd), then calls the
- * original operation, which no longer blocks.
+ * Fiber until the descriptor is ready (a POLL operation through the IO seam,
+ * fpm_pool_fiber_io.h), then calls the original operation, which no longer
+ * blocks.
  *
  * The identity of ops matters: xp_socket.c recognizes unix/udp from the table
  * address (PHP_STREAM_XPORT_IS_UNIX), while ext/sockets checks
@@ -18,11 +19,10 @@
  * DNS: getaddrinfo() lives inside php_network_connect_socket_to_host, that is,
  * INSIDE the delegated connect, and blocks the whole process. Therefore, for the
  * tcp transport, when the host is not an IP literal, connect first resolves the
- * name through evdns (libevent, which we already link) on the scheduler's
- * event_base; the Fiber waits for the callback (fpm_pool_fiber_wait_wake), and
- * the original connect receives an IP literal, making its getaddrinfo() trivial.
- * The evdns base is created once per process from /etc/resolv.conf and
- * /etc/hosts (evdns_getaddrinfo checks hosts before the network). We try
+ * name with a GETADDRINFO operation through the IO seam (its libevent backend
+ * is evdns on the scheduler's event_base, created once per process from
+ * /etc/resolv.conf and /etc/hosts — see fpm_pool_fiber_io.c), and the original
+ * connect receives an IP literal, making its getaddrinfo() trivial. We try
  * subsequent A/AAAA addresses in order, as upstream does. What this does not
  * change: peer_name/SNI in ext/openssl takes the name from resourcename in the
  * factory, not from the name passed to connect; stream_socket_get_name() is
@@ -35,7 +35,9 @@
  * HAVE_FPMNG_FIBER_TLS), which wraps the ext/openssl ops table through our
  * fpm_fiber_xport_wrap() and re-arms the ssl/tls transports with its own
  * factory. That keeps every upstream behavior change in a gated patch with an
- * expiry path; this file only lends it the wrapper.
+ * expiry path; this file only lends it the wrapper and its waits
+ * (fpm_fiber_xport_tls_active/_wait), so the patch, too, suspends only through
+ * the seam and is switched off with this entry ("xport").
  *
  * What this does NOT catch (because it does not go through stream transports):
  * sleep(), curl, libpq (pdo_pgsql), ordinary files, DNS outside connect
@@ -53,20 +55,27 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <netdb.h>
 #include <sys/socket.h>
-
-#include <event2/event.h>
-#include <event2/dns.h>
-#include <event2/util.h>
+#include <sys/time.h>
 
 #include "php.h"
 #include "php_network.h"
 #include "php_streams.h"
 
 #include "fpm_pool_coop.h"
-#include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_io.h"
 #include "fpm_pool_fiber_xport.h"
 #include "zlog.h"
+
+static void fpm_pool_fiber_xport_install(void);
+
+/* Registry entry "xport" (fpm_pool_fiber_intercept.c): tcp/unix streams, the
+ * DNS lookup inside their connect, and the TLS transports of patch 0007. */
+struct fpm_fiber_intercept_s fpm_fiber_xport_intercept = {
+	.name = "xport",
+	.install = fpm_pool_fiber_xport_install,
+};
 
 /* Ops wrapper per original table (generic tcp, unix, OpenSSL).
  * dns: streams from this table connect to host:port (the "tcp" factory), so
@@ -128,9 +137,32 @@ static int fpm_fiber_ready_now(int fd, int pollev) /* {{{ */
 }
 /* }}} */
 
+/* One POLL operation through the seam. 1 = ready, 0 = timeout, -1 = did not
+ * wait (the caller blocks as usual). CANCELLED (never produced by the libevent
+ * backend) counts as "not ready", like a timeout. */
+static int fpm_fiber_wait_fd(int fd, unsigned events, struct timeval *timeout) /* {{{ */
+{
+	struct fpm_fiber_io_op_s op;
+
+	memset(&op, 0, sizeof(op));
+	op.type = FPM_FIBER_IO_OP_POLL;
+	op.timeout = timeout;
+	op.u.poll.fd = fd;
+	op.u.poll.events = events;
+	switch (fpm_fiber_io_run(&fpm_fiber_xport_intercept, &op)) {
+		case FPM_FIBER_IO_READY:
+			return 1;
+		case FPM_FIBER_IO_UNSUPPORTED:
+			return -1;
+		default:
+			return 0;
+	}
+}
+/* }}} */
+
 /* Wait for the stream socket to become ready using its timeout. 1 = ready,
  * 0 = timeout, -1 = did not wait (block as usual). */
-static int fpm_fiber_wait_sock(php_netstream_data_t *sock, int pollev, short ev) /* {{{ */
+static int fpm_fiber_wait_sock(php_netstream_data_t *sock, int pollev, unsigned ev) /* {{{ */
 {
 	struct timeval *tv;
 
@@ -141,14 +173,14 @@ static int fpm_fiber_wait_sock(php_netstream_data_t *sock, int pollev, short ev)
 	if (sock->timeout.tv_sec == 0 && sock->timeout.tv_usec == 0) {
 		return -1;
 	}
-	if (!fpm_pool_fiber_can_wait()) {
+	if (!fpm_fiber_io_can_suspend(&fpm_fiber_xport_intercept)) {
 		return -1;
 	}
 	if (fpm_fiber_ready_now(sock->socket, pollev)) {
 		return 1;
 	}
 	tv = (sock->timeout.tv_sec == -1) ? NULL : &sock->timeout;
-	return fpm_pool_fiber_wait_fd(sock->socket, ev, tv);
+	return fpm_fiber_wait_fd(sock->socket, ev, tv);
 }
 /* }}} */
 
@@ -168,7 +200,7 @@ static ssize_t fpm_fiber_xop_read(php_stream *stream, char *buf, size_t count) /
 
 	/* has_buffered_data: xp_socket.c does not wait in this case anyway */
 	if (!stream->has_buffered_data) {
-		int w = fpm_fiber_wait_sock(sock, PHP_POLLREADABLE, EV_READ);
+		int w = fpm_fiber_wait_sock(sock, PHP_POLLREADABLE, FPM_FIBER_IO_READ);
 
 		if (w == 0) {
 			/* as php_sockop_read does after a timeout without buffered data */
@@ -186,7 +218,7 @@ static ssize_t fpm_fiber_xop_write(php_stream *stream, const char *buf, size_t c
 	const php_stream_ops *orig = fpm_fiber_orig_ops(stream->ops);
 	php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
 	ssize_t ret;
-	int w = fpm_fiber_wait_sock(sock, POLLOUT, EV_WRITE);
+	int w = fpm_fiber_wait_sock(sock, POLLOUT, FPM_FIBER_IO_WRITE);
 
 	if (w == 0) {
 		sock->timeout_event = true;
@@ -237,113 +269,38 @@ static int fpm_fiber_xop_stat(php_stream *stream, php_stream_statbuf *ssb) /* {{
 }
 /* }}} */
 
-/* --- DNS: evdns on the scheduler's event_base ------------------------------ */
-
-static struct evdns_base *fpm_fiber_dns;
-static bool fpm_fiber_dns_tried;
-
-/* evdns logs every query ("Resolve requested for", "Sending request for ...
- * on ipv4/ipv6") and nameserver failures; with log_level = debug it is
- * therefore visible which connects used DNS and which did not. */
-static void fpm_fiber_dns_log(int is_warning, const char *msg) /* {{{ */
-{
-	zlog(is_warning ? ZLOG_WARNING : ZLOG_DEBUG, "[pool %s] fiber: evdns: %s", fpm_coop_pool_name(), msg);
-}
-/* }}} */
-
-/* evdns base, once per process, initialized lazily on the first connect with a
- * host name. NULL = use blocking getaddrinfo. */
-static struct evdns_base *fpm_fiber_dns_base(void) /* {{{ */
-{
-	struct event_base *base;
-
-	if (fpm_fiber_dns_tried) {
-		return fpm_fiber_dns;
-	}
-	fpm_fiber_dns_tried = true;
-
-	base = fpm_pool_fiber_event_base();
-	if (!base) {
-		return NULL;
-	}
-	evdns_set_log_fn(fpm_fiber_dns_log);
-	/* INITIALIZE_NAMESERVERS = DNS_OPTIONS_ALL: nameserver/search/ndots from
-	 * /etc/resolv.conf AND /etc/hosts. Without resolv.conf or without any
-	 * nameserver, evdns_base_new returns NULL — the blocking path remains, which
-	 * also has nothing to query in that situation. */
-	fpm_fiber_dns = evdns_base_new(base, EVDNS_BASE_INITIALIZE_NAMESERVERS | EVDNS_BASE_DISABLE_WHEN_INACTIVE);
-	if (!fpm_fiber_dns) {
-		zlog(ZLOG_WARNING, "[pool %s] fiber: evdns_base_new() failed (no /etc/resolv.conf or no nameservers?); DNS stays blocking",
-			fpm_coop_pool_name());
-		return NULL;
-	}
-	/* getaddrinfo does not use 0x20 randomization; resolvers that do not preserve
-	 * letter case in the response would have their response rejected by evdns. */
-	evdns_base_set_option(fpm_fiber_dns, "randomize-case", "0");
-
-	zlog(ZLOG_DEBUG, "[pool %s] fiber: async DNS via evdns, %d nameserver(s)",
-		fpm_coop_pool_name(), evdns_base_count_nameservers(fpm_fiber_dns));
-	return fpm_fiber_dns;
-}
-/* }}} */
-
-struct fpm_fiber_dns_req_s {
-	void *waiter;
-	struct evutil_addrinfo *res;
-	int result;			/* EVUTIL_EAI_* code (0 = ok) */
-	bool done;
-};
-
-static void fpm_fiber_dns_cb(int result, struct evutil_addrinfo *res, void *arg) /* {{{ */
-{
-	struct fpm_fiber_dns_req_s *r = arg;
-
-	r->result = result;
-	r->res = res;
-	r->done = true;
-	fpm_pool_fiber_wake(r->waiter);
-}
-/* }}} */
+/* --- DNS: a GETADDRINFO operation through the seam ------------------------ */
 
 enum fpm_fiber_dns_status {
 	FPM_FIBER_DNS_OK,
-	FPM_FIBER_DNS_FAIL,		/* *gai_err = EVUTIL_EAI_* */
+	FPM_FIBER_DNS_FAIL,		/* *gai_err for fpm_fiber_io_gai_strerror */
 	FPM_FIBER_DNS_TIMEOUT,	/* connect timeout elapsed */
-	FPM_FIBER_DNS_NOWAIT	/* could not wait; caller must block */
+	FPM_FIBER_DNS_NOWAIT	/* could not wait, or no async resolver; caller must block */
 };
 
 /* Resolve a name without blocking the process. The caller frees the result
- * with evutil_freeaddrinfo. */
-static enum fpm_fiber_dns_status fpm_fiber_dns_resolve(struct evdns_base *dns, const char *host, struct timeval *timeout, struct evutil_addrinfo **res, int *gai_err) /* {{{ */
+ * with fpm_fiber_io_freeaddrinfo. */
+static enum fpm_fiber_dns_status fpm_fiber_dns_resolve(const char *host, struct timeval *timeout, struct addrinfo **res, int *gai_err) /* {{{ */
 {
-	struct fpm_fiber_dns_req_s r = { fpm_pool_fiber_waiter(), NULL, 0, false };
-	struct evutil_addrinfo hints;
-	struct evdns_getaddrinfo_request *req;
-	int w = 1;
+	struct fpm_fiber_io_op_s op;
 
-	memset(&hints, 0, sizeof(hints));
-	hints.ai_family = AF_UNSPEC;
-	hints.ai_socktype = SOCK_STREAM;
-	hints.ai_protocol = IPPROTO_TCP;
-
-	/* A hit in /etc/hosts or an immediate error: the callback arrives
-	 * synchronously, req == NULL, and r.done is already set. */
-	req = evdns_getaddrinfo(dns, host, NULL, &hints, fpm_fiber_dns_cb, &r);
-	if (!r.done) {
-		w = fpm_pool_fiber_wait_wake(timeout);
-		if (!r.done) {
-			/* Timeout or inability to wait: cancel calls the callback synchronously
-			 * with EVUTIL_EAI_CANCEL, so r is no longer in use. */
-			evdns_getaddrinfo_cancel(req);
-			return w == 0 ? FPM_FIBER_DNS_TIMEOUT : FPM_FIBER_DNS_NOWAIT;
-		}
+	memset(&op, 0, sizeof(op));
+	op.type = FPM_FIBER_IO_OP_GETADDRINFO;
+	op.timeout = timeout;
+	op.u.getaddrinfo.host = host;
+	switch (fpm_fiber_io_run(&fpm_fiber_xport_intercept, &op)) {
+		case FPM_FIBER_IO_READY:
+			if (op.u.getaddrinfo.gai_error != 0) {
+				*gai_err = op.u.getaddrinfo.gai_error;
+				return FPM_FIBER_DNS_FAIL;
+			}
+			*res = op.u.getaddrinfo.res;
+			return FPM_FIBER_DNS_OK;
+		case FPM_FIBER_IO_UNSUPPORTED:
+			return FPM_FIBER_DNS_NOWAIT;
+		default:
+			return FPM_FIBER_DNS_TIMEOUT;
 	}
-	if (r.result != 0) {
-		*gai_err = r.result;
-		return FPM_FIBER_DNS_FAIL;
-	}
-	*res = r.res;
-	return FPM_FIBER_DNS_OK;
 }
 /* }}} */
 
@@ -391,7 +348,7 @@ static char *fpm_fiber_dns_host_to_resolve(const char *name, size_t namelen, int
 
 /* "ip:port" or "[ip6]:port" for one address from the list; 0 = an unknown
  * family (upstream skips it too). */
-static size_t fpm_fiber_dns_format_name(const struct evutil_addrinfo *ai, int portno, char *buf, size_t buflen) /* {{{ */
+static size_t fpm_fiber_dns_format_name(const struct addrinfo *ai, int portno, char *buf, size_t buflen) /* {{{ */
 {
 	char ip[INET6_ADDRSTRLEN];
 	int n;
@@ -445,11 +402,11 @@ static bool fpm_fiber_time_left(const struct timeval *deadline, struct timeval *
 {
 	struct timeval now;
 
-	evutil_gettimeofday(&now, NULL);
-	if (!evutil_timercmp(&now, deadline, <)) {
+	gettimeofday(&now, NULL);
+	if (!timercmp(&now, deadline, <)) {
 		return false;
 	}
-	evutil_timersub(deadline, &now, left);
+	timersub(deadline, &now, left);
 	return true;
 }
 /* }}} */
@@ -476,7 +433,7 @@ static int fpm_fiber_xop_connect_once(php_stream *stream, const php_stream_ops *
 	}
 
 	sock = (php_netstream_data_t *) stream->abstract;
-	w = fpm_pool_fiber_wait_fd(sock->socket, EV_WRITE, fpm_fiber_connect_timeout(xparam->inputs.timeout));
+	w = fpm_fiber_wait_fd(sock->socket, FPM_FIBER_IO_WRITE, fpm_fiber_connect_timeout(xparam->inputs.timeout));
 	if (w < 0) {
 		/* Cannot wait: finish with blocking behavior as the original does. */
 		int events = PHP_POLLREADABLE | POLLOUT;
@@ -515,15 +472,14 @@ static int fpm_fiber_xop_connect_once(php_stream *stream, const php_stream_ops *
 }
 /* }}} */
 
-/* connect() with a host name: resolve it through evdns, then try subsequent
+/* connect() with a host name: resolve it through the seam, then try subsequent
  * addresses as php_network_connect_socket_to_host does — each with the
- * remaining shared timeout; the last error wins. An IP literal, unix, no evdns
- * base, or inability to wait: one attempt with the untouched name, exactly the
- * existing path. */
+ * remaining shared timeout; the last error wins. An IP literal, unix, no async
+ * resolver (UNSUPPORTED), or inability to wait: one attempt with the untouched
+ * name, exactly the existing path. */
 static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_map_s *m, int option, int value, php_stream_xport_param *xparam) /* {{{ */
 {
-	struct evdns_base *dns;
-	struct evutil_addrinfo *res = NULL, *ai;
+	struct addrinfo *res = NULL, *ai;
 	struct timeval *timeout, deadline, left;
 	char *host = NULL;
 	char name[INET6_ADDRSTRLEN + sizeof("[]:65535")];
@@ -533,19 +489,13 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 	if (!m->dns || !(host = fpm_fiber_dns_host_to_resolve(xparam->inputs.name, xparam->inputs.namelen, &portno))) {
 		return fpm_fiber_xop_connect_once(stream, m->orig, option, value, xparam);
 	}
-	dns = fpm_fiber_dns_base();
-	if (!dns) {
-		efree(host);
-		return fpm_fiber_xop_connect_once(stream, m->orig, option, value, xparam);
-	}
-
 	timeout = fpm_fiber_connect_timeout(xparam->inputs.timeout);
 	if (timeout) {
-		evutil_gettimeofday(&deadline, NULL);
-		evutil_timeradd(&deadline, timeout, &deadline);
+		gettimeofday(&deadline, NULL);
+		timeradd(&deadline, timeout, &deadline);
 	}
 
-	st = fpm_fiber_dns_resolve(dns, host, timeout, &res, &gai_err);
+	st = fpm_fiber_dns_resolve(host, timeout, &res, &gai_err);
 	switch (st) {
 		case FPM_FIBER_DNS_NOWAIT:
 			efree(host);
@@ -556,7 +506,7 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 			efree(host);
 			return PHP_STREAM_OPTION_RETURN_OK;
 		case FPM_FIBER_DNS_FAIL:
-			fpm_fiber_dns_report(xparam, host, evutil_gai_strerror(gai_err));
+			fpm_fiber_dns_report(xparam, host, fpm_fiber_io_gai_strerror(gai_err));
 			xparam->outputs.error_code = 0;	/* as upstream: getaddrinfo does not set the stream errno */
 			efree(host);
 			return PHP_STREAM_OPTION_RETURN_OK;
@@ -606,7 +556,7 @@ static int fpm_fiber_xop_connect(php_stream *stream, const struct fpm_fiber_ops_
 			timeout && !fpm_fiber_time_left(&deadline, &left) ? "timed out" : "no usable address");
 	}
 
-	evutil_freeaddrinfo(res);
+	fpm_fiber_io_freeaddrinfo(res);
 	efree(host);
 	return ret;
 }
@@ -620,7 +570,7 @@ static int fpm_fiber_xop_set_option(php_stream *stream, int option, int value, v
 	if (option == PHP_STREAM_OPTION_XPORT_API && ptrparam) {
 		php_stream_xport_param *xparam = (php_stream_xport_param *) ptrparam;
 
-		if (xparam->op == STREAM_XPORT_OP_CONNECT && fpm_pool_fiber_can_wait()) {
+		if (xparam->op == STREAM_XPORT_OP_CONNECT && fpm_fiber_io_can_suspend(&fpm_fiber_xport_intercept)) {
 			return fpm_fiber_xop_connect(stream, m, option, value, xparam);
 		}
 	}
@@ -691,7 +641,7 @@ static php_stream *fpm_fiber_xport_factory_ex(php_stream_transport_factory orig_
 	 * Refuse here rather than in validate() because persistent is a connection
 	 * attribute supplied in application code, not a configuration directive —
 	 * there is nothing to check when validating the pool. */
-	if (persistent_id && fpm_pool_fiber_can_wait()) {
+	if (persistent_id && fpm_fiber_io_can_suspend(&fpm_fiber_xport_intercept)) {
 		/* PDO catches the connection error and throws its own PDOException
 		 * ("Unknown error while connecting"), so the warning below does NOT reach
 		 * the code author — measured. To give the operator something to search for,
@@ -763,7 +713,31 @@ const php_stream_ops *fpm_fiber_xport_wrap(const php_stream_ops *orig) /* {{{ */
 }
 /* }}} */
 
-void fpm_pool_fiber_xport_install(void) /* {{{ */
+/* Exported for the TLS patch (0007): its replacement for php_pollfd_for() and
+ * its "are we in a request fiber" check, both through this entry, so the patch
+ * never sees the scheduler and fiber.disable_interceptions = xport turns it
+ * off too. poll_events are the poll(2) bits upstream passes: POLLOUT|POLLPRI
+ * for WANT_WRITE and POLLIN|POLLPRI for WANT_READ. POLLPRI rides along in
+ * BOTH, so it must not decide the direction: POLLOUT first, and POLLOUT|POLLIN
+ * waits for either. Returns as php_pollfd_for: 1 ready, 0 timeout, -1 = did
+ * not wait (the caller polls as upstream). */
+int fpm_fiber_xport_tls_active(void) /* {{{ */
+{
+	return fpm_fiber_io_can_suspend(&fpm_fiber_xport_intercept);
+}
+/* }}} */
+
+int fpm_fiber_xport_tls_wait(php_socket_t fd, int poll_events, struct timeval *timeout) /* {{{ */
+{
+	unsigned ev = (poll_events & POLLOUT)
+		? ((poll_events & POLLIN) ? (FPM_FIBER_IO_READ | FPM_FIBER_IO_WRITE) : FPM_FIBER_IO_WRITE)
+		: FPM_FIBER_IO_READ;
+
+	return fpm_fiber_wait_fd(fd, ev, timeout);
+}
+/* }}} */
+
+static void fpm_pool_fiber_xport_install(void) /* {{{ */
 {
 	HashTable *xports = php_stream_xport_get_hash();
 

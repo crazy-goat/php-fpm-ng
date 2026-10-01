@@ -2,8 +2,8 @@
  * blocking the whole process. SPIKE — see docs/spike-sleep-yield-report.md.
  *
  * Replaces the zif_handler of three internal functions in CG(function_table)
- * with a variant that, when fpm_pool_fiber_can_wait() permits, suspends the
- * request fiber through fpm_pool_fiber_wait_wake() instead of calling real
+ * with a variant that, when fpm_fiber_io_can_suspend() permits, suspends the
+ * request fiber with a TIMER operation through the IO seam instead of calling real
  * sleep()/usleep()/nanosleep() and blocking the whole event loop. Outside the
  * request fiber (or when switching is blocked), calls the original handler
  * unchanged — the real blocking behavior.
@@ -24,9 +24,11 @@
 #ifndef FPM_POOL_FIBER_SLEEP_H
 #define FPM_POOL_FIBER_SLEEP_H 1
 
-/* Call ONCE per Fiber-pool child, after fpm_pool_fiber_xport_install(). Missing
- * functions (for example, nanosleep unavailable on the platform) are skipped
- * with a log warning — never a fatal error. */
-void fpm_pool_fiber_sleep_install(void);
+#include "fpm_pool_fiber_io.h"
+
+/* Registry entry "sleep" (fpm_pool_fiber_intercept.c). Its install runs ONCE
+ * per Fiber-pool child; missing functions (for example, nanosleep unavailable
+ * on the platform) are skipped with a log warning — never a fatal error. */
+extern struct fpm_fiber_intercept_s fpm_fiber_sleep_intercept;
 
 #endif

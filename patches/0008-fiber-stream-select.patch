@@ -9,7 +9,8 @@ actual wait to fpm_fiber_select() (sapi/fpmng/fpm/fpm_pool_fiber_select.c)
 instead of calling php_select()/select() directly. Outside a request running
 on pool.executor = fiber — including CLI and every other pool type in the
 same binary — fpm_fiber_select() falls back to the real, process-blocking
-select() itself (fpm_pool_fiber_can_wait() is false there), so this patch
+select() itself (the IO seam's fpm_fiber_io_can_suspend() is false there,
+and also when fiber.disable_interceptions names "select"), so this patch
 changes nothing observable when the fiber executor is not in use.
 
 Weak declaration, not a header include: fpm_pool_fiber_select.c is linked

@@ -14,11 +14,18 @@
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_statics.h"
 #include "fpm_pool_fiber.h"
+#include "fpm_pool_fiber_intercept.h"
 
 #ifdef HAVE_FPMNG_FIBER
 static int fpm_pool_type_coop_fiber_validate(struct fpm_worker_pool_s *wp)
 {
 	if (fpm_coop_validate(wp, "fiber") < 0) {
+		return -1;
+	}
+	/* fiber.disable_interceptions: every name must be a registry entry --
+	 * master side, so a typo fails the start instead of silently leaving the
+	 * interception on (fpm_pool_fiber_intercept.c). */
+	if (fpm_fiber_intercept_validate(wp) < 0) {
 		return -1;
 	}
 	/* fiber.isolate_statics syntax check -- master side, before any fork.

@@ -5,8 +5,8 @@
  * Therefore we do not need the fork's switch handlers — request state enters
  * the globals immediately before zend_fiber_start/resume and leaves immediately
  * after they return (fpm_coop_req_enter/leave). The request Fiber suspends only
- * through fpm_pool_fiber_wait_fd()/wait_wake() (from fpm_pool_fiber_xport.c and
- * the TLS patch, 0007) and always returns here.
+ * through fpm_pool_fiber_wait_fd()/wait_wake(), which only the IO seam
+ * (fpm_pool_fiber_io.c) calls, and always returns here.
  */
 
 #include "fpm_config.h"
@@ -28,8 +28,7 @@
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_reval.h"
 #include "fpm_pool_fiber.h"
-#include "fpm_pool_fiber_flock.h"
-#include "fpm_pool_fiber_sleep.h"
+#include "fpm_pool_fiber_intercept.h"
 #include "fpm_stdio.h"
 #include "zlog.h"
 
@@ -50,7 +49,7 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 /* }}} */
 
 int fpm_pool_fiber_can_wait(void) { return 0; }
-int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) { (void) fd; (void) events; (void) timeout; return -1; }
+int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout, short *what) { (void) fd; (void) events; (void) timeout; (void) what; return -1; }
 void *fpm_pool_fiber_waiter(void) { return NULL; }
 int fpm_pool_fiber_wait_wake(struct timeval *timeout) { (void) timeout; return -1; }
 void fpm_pool_fiber_wake(void *waiter) { (void) waiter; }
@@ -159,8 +158,9 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 			 * fpm_coop_req_run() again (it will not return there). If it held an
 			 * flock() from the registry, it would remain there FOREVER and block
 			 * every future competitor in this process. This is EXACTLY the gap
-			 * that fpm_pool_fiber_flock_release_owner() closes — see its header. */
-			fpm_pool_fiber_flock_release_owner(fr);
+			 * that the flock interception's request_end hook
+			 * (fpm_pool_fiber_flock_release_owner()) closes — see its header. */
+			fpm_fiber_intercept_request_end(fr);
 			fcgi_finish_request(fr->ctx->req, 1);
 			fr->ctx->req = NULL;
 			/* Release the Fiber object when the process exits — destroying it in
@@ -175,7 +175,7 @@ static void fpm_fiber_after_switch(struct fpm_fiber_req_s *fr) /* {{{ */
 	/* SPIKE: normal request completion (including a fatal error from inside
 	 * zend_catch in fpm_coop_req_run — it still returns here in exactly the same
 	 * way). Belt-and-suspenders and idempotent: no-op when fr holds nothing. */
-	fpm_pool_fiber_flock_release_owner(fr);
+	fpm_fiber_intercept_request_end(fr);
 	req = fpm_coop_req_free(fr->ctx);
 	event_free(fr->ev);
 	OBJ_RELEASE(&fr->fiber->std);
@@ -339,7 +339,7 @@ int fpm_pool_fiber_can_wait(void) /* {{{ */
 }
 /* }}} */
 
-int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{ */
+int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout, short *what) /* {{{ */
 {
 	struct fpm_fiber_req_s *fr = fpm_fiber_current;
 	zval rv;
@@ -368,6 +368,9 @@ int fpm_pool_fiber_wait_fd(int fd, short events, struct timeval *timeout) /* {{{
 	zval_ptr_dtor(&rv);
 
 	event_del(fr->ev);
+	if (what) {
+		*what = fr->wait_result;
+	}
 	if (fr->wait_result & EV_TIMEOUT) {
 		return 0;
 	}
@@ -550,24 +553,11 @@ void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		exit(FPM_EXIT_SOFTWARE);
 	}
 
-	/* Transports: we are after MINIT (fpm_main.c: startup() before fpm_run()),
-	 * that is, after ext/openssl, which overrides "tcp" in its MINIT. */
-	fpm_pool_fiber_xport_install();
-
-	/* SPIKE (docs/flock-streams-spike-report.md): intercept
-	 * PHP_STREAM_OPTION_LOCKING for ordinary files so that flock()/
-	 * file_put_contents(..., LOCK_EX) on a file held by ANOTHER Fiber in this
-	 * process suspends on an in-memory queue instead of blocking the entire event
-	 * loop in the kernel (see docs/flock-fiber-deadlock-report.md,
-	 * spike/flock-fiber). Install it here, not in MINIT: the same rule as
-	 * xport_install above. */
-	fpm_pool_fiber_flock_install();
-
-	/* Sleep family (sleep/usleep/time_nanosleep): see fpm_pool_fiber_sleep.h.
-	 * The order relative to xport_install does not matter here (different
-	 * functions in the function table), but keep the same location in child_main
-	 * because this is the only installation point specific to the fiber pool type. */
-	fpm_pool_fiber_sleep_install();
+	/* IO interceptions, in the order and with the constraints recorded in
+	 * the registry table (fpm_pool_fiber_intercept.c). We are after MINIT
+	 * (fpm_main.c: startup() before fpm_run()), that is, after ext/openssl,
+	 * which overrides "tcp" in its MINIT — the table's first constraint. */
+	fpm_fiber_intercept_install_all(wp);
 
 	fpm_fiber_ev_accept = event_new(fpm_fiber_base, fpm_fiber_listen_fd, EV_READ | EV_PERSIST, fpm_fiber_accept_cb, NULL);
 	fpm_fiber_ev_tick = event_new(fpm_fiber_base, -1, EV_PERSIST, fpm_fiber_tick_cb, NULL);

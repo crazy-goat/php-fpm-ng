@@ -273,6 +273,12 @@ jobs:
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
 
+      # Issue #531: fiber IO interceptions suspend only through the IO seam
+      # (fpm_pool_fiber_io.h); no module or php-src patch calls the libevent
+      # scheduler directly. Hermetic grep -- checkout only.
+      - name: verify fiber IO seam boundary (#531)
+        run: ./build/test-fiber-io-seam.sh
+
       # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the
       # tests this repo owns, so a new test file cannot be silently
       # unreachable. Hermetic -- no build, no binary; the runner stops at its
@@ -781,7 +787,7 @@ jobs:
           ./build/run-fpmng-phpt.sh "$PHPSRC" "$PWD/fpmng-phpt-fiber-results"
 
       # The green/red of the step above is not the acceptance criterion: a run
-      # where all ten fiber tests SKIP passes it. See the script's header.
+      # where every fiber test SKIPs passes it. See the script's header.
       - name: assert the fiber-gated tests actually ran (issue #97)
         run: |
           chmod +x build/assert-fiber-tests-ran.sh

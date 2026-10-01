@@ -277,6 +277,15 @@ jobs:
       - name: verify fpmng .phpt coverage check (issue #95)
         run: ./build/test-fpmng-phpt-coverage.sh
 
+      # Issue #421: third_party/php-src/ is exactly what its MANIFEST says --
+      # no file edited in place, none unlisted, none shadowed by an overlay
+      # file of the same name, and main/fastcgi.c/.h still "pinned tag +
+      # patches/", so a patch change without a re-import fails here instead of
+      # building a FastCGI layer the patch stack does not describe. Hermetic:
+      # checkout only.
+      - name: verify the vendored php-src subset (issue #421)
+        run: ./build/vendor-php-src.sh check
+
       # Task 013: clang-tidy over our C sources only (never a prepared php-src
       # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
       # build on day one for pre-existing findings teaches people to ignore the

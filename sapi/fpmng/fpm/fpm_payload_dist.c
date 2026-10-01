@@ -195,6 +195,20 @@ int fpm_payload_dist_validate(const char *path, const char **why)
 	return 0;
 }
 
+/* php_stream_wrapper_log_error() gained (context, severity, terminating, code)
+ * ahead of the format string after 8.5 (main/streams/php_stream_errors.h in
+ * php-src PHP-8.6 and master). Both call sites here are wrapper open errors,
+ * so the new form carries the same warning the old one queued. The 8.5 branch
+ * expands to the original call unchanged. */
+#if PHP_VERSION_ID >= 80600
+# define FPM_PAYLOAD_DIST_LOG_ERROR(wrapper, options, code, msg) \
+	php_stream_wrapper_log_error(wrapper, context, options, E_WARNING, true, \
+		PHP_STREAM_EC(code), msg)
+#else
+# define FPM_PAYLOAD_DIST_LOG_ERROR(wrapper, options, code, msg) \
+	php_stream_wrapper_log_error(wrapper, options, msg)
+#endif
+
 static php_stream *fpm_payload_dist_opener(php_stream_wrapper *wrapper, const char *path,
 	const char *mode, int options, zend_string **opened_path,
 	php_stream_context *context STREAMS_DC)
@@ -212,7 +226,7 @@ static php_stream *fpm_payload_dist_opener(php_stream_wrapper *wrapper, const ch
 		/* NOTES.md:157-201, "Writes -- the biggest problem": embedded code is
 		 * immutable, and state belongs on a volume. Refused with a message
 		 * rather than silently opened read-only. */
-		php_stream_wrapper_log_error(wrapper, options,
+		FPM_PAYLOAD_DIST_LOG_ERROR(wrapper, options, Readonly,
 			"fpmng-dist:// is read-only: embedded files cannot be written to");
 		return NULL;
 	}
@@ -221,7 +235,7 @@ static php_stream *fpm_payload_dist_opener(php_stream_wrapper *wrapper, const ch
 	}
 	member = fpm_payload_dist_member(fpm_payload_dist_member_name(path));
 	if (!member) {
-		php_stream_wrapper_log_error(wrapper, options,
+		FPM_PAYLOAD_DIST_LOG_ERROR(wrapper, options, NotFound,
 			"no such file in the embedded distribution payload");
 		return NULL;
 	}

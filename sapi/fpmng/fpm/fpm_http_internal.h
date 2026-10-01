@@ -766,6 +766,7 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len);
 void fpm_http_finish(fpm_http_conn *c, int explained);
 fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t);
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
+void fpm_http_origin_form(smart_str *out, const char *uri);
 /* Issue #344: the HTTP/1.1 client transport's vtable, defined in
  * fpm_http_client.c. A function, not an extern const, so the definition can
  * stay static to its file and the header stays linkage-free. */

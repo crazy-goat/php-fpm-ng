@@ -619,6 +619,40 @@ static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value
 
 /* ---------------------------------------------------------------- request -> FastCGI */
 
+/* The request-target as an origin server wants to see it. RFC 9112 3.2.2: a
+ * server MUST accept the absolute-form ("GET http://host/path?q HTTP/1.1")
+ * even though only proxies are sent it, and a client talking to an origin
+ * server MUST send only path and query -- so the gateway, which is the client
+ * of its targets, forwards the origin-form, and a FastCGI application sees
+ * the same REQUEST_URI whichever transport the route uses (#462 bullet e:
+ * before, a fastcgi route handed the app the whole URL while an http-direct
+ * target answered the verbatim absolute-form with its own 400).
+ * Origin-form and "*" are copied verbatim. */
+void fpm_http_origin_form(smart_str *out, const char *uri)
+{
+	const char *p = uri;
+
+	if (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z')) {
+		p++;
+		while (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z') || (*p >= '0' && *p <= '9')
+			|| *p == '+' || *p == '-' || *p == '.') {
+			p++;
+		}
+		if (p[0] == ':' && p[1] == '/' && p[2] == '/') {
+			p += 3;
+			while (*p && *p != '/' && *p != '?' && *p != '#') {
+				p++;
+			}
+			if (*p != '/') {
+				smart_str_appendc(out, '/');
+			}
+			smart_str_appends(out, p);
+			return;
+		}
+	}
+	smart_str_appends(out, uri);
+}
+
 const char *fpm_http_method_name(enum evhttp_cmd_type type)
 {
 	switch (type) {
@@ -771,7 +805,14 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	fpm_http_param(c, "SERVER_PROTOCOL", buf);
 	fpm_http_param(c, "GATEWAY_INTERFACE", "CGI/1.1");
 	fpm_http_param(c, "SERVER_SOFTWARE", "PHP-FPM/" PHP_VERSION);
-	fpm_http_param(c, "REQUEST_URI", evhttp_request_get_uri(req));
+	{
+		smart_str request_uri = {0};
+
+		fpm_http_origin_form(&request_uri, evhttp_request_get_uri(req));
+		smart_str_0(&request_uri);
+		fpm_http_param(c, "REQUEST_URI", ZSTR_VAL(request_uri.s));
+		smart_str_free(&request_uri);
+	}
 	fpm_http_param(c, "QUERY_STRING", query ? query : "");
 	fpm_http_param(c, "DOCUMENT_ROOT", c->gw->docroot);
 	fpm_http_param(c, "SCRIPT_NAME", ZSTR_VAL(filename.s) + strlen(c->gw->docroot));

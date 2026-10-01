@@ -188,7 +188,13 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	 * query string), because the public path it arrived on is the gateway's
 	 * <base>/<pool name> and the operator listener knows only the pool's own
 	 * local path. Everything else about the request is unchanged. */
-	smart_str_appends(&c->out, c->upstream_uri ? c->upstream_uri : evhttp_request_get_uri(req));
+	if (c->upstream_uri) {
+		smart_str_appends(&c->out, c->upstream_uri);
+	} else {
+		/* RFC 9112 3.2.2: an origin server is sent origin-form only; see
+		 * fpm_http_origin_form() for the absolute-form contract (#462). */
+		fpm_http_origin_form(&c->out, evhttp_request_get_uri(req));
+	}
 	smart_str_appends(&c->out, " HTTP/1.1\r\n");
 
 	/* Host: preserve. An HTTP/1.1 request without one is not valid, but
@@ -274,6 +280,32 @@ static size_t fpm_http_http_value_ulong(const char *v, size_t len)
 	return value;
 }
 
+/* A Content-Length value: digits only, at least one, no wrap. RFC 9110 8.6
+ * makes anything else an invalid length; the lenient reader this replaced
+ * took "5abc" for 5 and let a wrapped number frame the body (#462). */
+static int fpm_http_http_content_length(const char *v, size_t len, size_t *out)
+{
+	size_t value = 0;
+
+	if (!len) {
+		return 0;
+	}
+	while (len--) {
+		size_t digit;
+
+		if (*v < '0' || *v > '9') {
+			return 0;
+		}
+		digit = (size_t) (*v++ - '0');
+		if (value > (SIZE_MAX - digit) / 10) {
+			return 0;
+		}
+		value = value * 10 + digit;
+	}
+	*out = value;
+	return 1;
+}
+
 /* One header line of the response head, split in place. Returns the key start
  * and length, and the value start and length (trimmed), or 0 when the line
  * carries no colon. */
@@ -307,7 +339,9 @@ static int fpm_http_http_split_header(const char *line, size_t len,
  * and start the reply. Does NOT free st->head: the caller slices the body
  * bytes that rode in with the head off it first. Returns 1 when the head was
  * a 1xx interim response -- it is discarded, the parser must reset and the
- * real final head is still to come -- 0 when the reply was started. */
+ * real final head is still to come -- 0 when the reply was started, -1 when
+ * the head's framing is invalid (nothing was started; the caller fails the
+ * connection with errno = EPROTO). */
 static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 {
 	fpm_http_conn *c = up->current;
@@ -315,6 +349,7 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 	const char *head = ZSTR_VAL(st->head.s), *end = head + head_len, *line;
 	size_t content_length = 0;
 	int has_length = 0, chunked = 0, close_seen = 0, no_body = 0, code = 200;
+	int length_forwarded = 0;
 
 	/* Pass 1 over the raw head: the status code and the framing headers.
 	 * These are read from the response's own headers, not from the rewritten
@@ -345,8 +380,21 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 
 			if (fpm_http_http_split_header(line, len, &key, &klen, &value, &vlen)) {
 				if (klen == 14 && strncasecmp(key, "Content-Length", 14) == 0) {
+					size_t this_length;
+
+					/* RFC 9112 6.3: a second Content-Length that differs, or
+					 * one that is not a plain number, is a smuggling-class
+					 * error -- the downstream client would pick its own
+					 * winner. Identical repeats are harmless and forwarded
+					 * once (pass 2). */
+					if (!fpm_http_http_content_length(value, vlen, &this_length)
+						|| (has_length && this_length != content_length)) {
+						zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' sent an invalid or conflicting Content-Length",
+							c->gw->pool, up->t->listen_address);
+						return -1;
+					}
 					has_length = 1;
-					content_length = fpm_http_http_value_ulong(value, vlen);
+					content_length = this_length;
 				} else if (klen == 17 && strncasecmp(key, "Transfer-Encoding", 17) == 0) {
 					chunked = fpm_http_http_token_in(value, vlen, "chunked");
 				} else if (klen == 10 && strncasecmp(key, "Connection", 10) == 0) {
@@ -378,7 +426,10 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 	 * (the one header it treats specially), then every header we forward,
 	 * verbatim, Content-Length included: the gateway honours the upstream's
 	 * length with identity framing instead of stripping it and forcing evhttp
-	 * to re-chunk what the upstream sent whole. */
+	 * to re-chunk what the upstream sent whole. Exceptions (#462): a repeated
+	 * Content-Length goes out once, and none goes out when chunked framing won
+	 * -- RFC 9112 6.1: the length of the dechunked body is not the number the
+	 * upstream wrote, and forwarding it desyncs any client that believes it. */
 	smart_str_free(&c->cgi_headers);
 	{
 		char status[48];
@@ -421,6 +472,13 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 				 * would fail every hop-by-hop match. */
 				memcpy(keybuf, key, klen);
 				keybuf[klen] = '\0';
+				if (strcasecmp(keybuf, "Content-Length") == 0) {
+					if (chunked || length_forwarded) {
+						line = nl ? nl + 1 : end;
+						continue;
+					}
+					length_forwarded = 1;
+				}
 				if (!fpm_http_http_header_dropped(keybuf)) {
 					smart_str_appends(&c->cgi_headers, keybuf);
 					smart_str_appends(&c->cgi_headers, ": ");
@@ -522,21 +580,35 @@ static int fpm_http_http_body(fpm_http_upstream *up, const char **buf, size_t *l
 				smart_str_appendl(&st->line, *buf, line_len);
 				smart_str_0(&st->line);
 				/* chunk sizes are hexadecimal, with optional extensions after
-				 * a ';' -- the digits run to the first non-hex character */
+				 * a ';'. At least one digit, nothing but an extension, blanks
+				 * or the CR after them, and no wrap of size_t: the lenient
+				 * parser this replaced read "zzz" as the zero chunk (a
+				 * truncated body passed as complete) and wrapped a 20-digit
+				 * size into a small one that re-read framing bytes as payload
+				 * (#462). */
 				digits = ZSTR_VAL(st->line.s);
 				st->remaining = 0;
 				for (i = 0; i < ZSTR_LEN(st->line.s); i++) {
-					int ch = (unsigned char) digits[i];
+					int ch = (unsigned char) digits[i], d;
 
 					if (ch >= '0' && ch <= '9') {
-						st->remaining = st->remaining * 16 + (size_t) (ch - '0');
+						d = ch - '0';
 					} else if (ch >= 'a' && ch <= 'f') {
-						st->remaining = st->remaining * 16 + (size_t) (ch - 'a' + 10);
+						d = ch - 'a' + 10;
 					} else if (ch >= 'A' && ch <= 'F') {
-						st->remaining = st->remaining * 16 + (size_t) (ch - 'A' + 10);
+						d = ch - 'A' + 10;
 					} else {
 						break;
 					}
+					if (st->remaining > (SIZE_MAX >> 4)) {
+						return -1;
+					}
+					st->remaining = st->remaining * 16 + (size_t) d;
+				}
+				if (i == 0
+					|| (i < ZSTR_LEN(st->line.s) && digits[i] != ';' && digits[i] != '\r'
+						&& digits[i] != ' ' && digits[i] != '\t')) {
+					return -1;
 				}
 				smart_str_free(&st->line);
 				*len -= line_len + 1;
@@ -595,29 +667,30 @@ static int fpm_http_http_body(fpm_http_upstream *up, const char **buf, size_t *l
 				/* after the zero chunk: zero or more trailer lines, then the
 				 * blank line. Our own servers send no trailers, so the first
 				 * line is normally already the blank one -- but read the
-				 * section properly rather than assume. */
+				 * section properly rather than assume. A line may arrive in
+				 * pieces, so it is assembled in st->line and judged blank
+				 * only as a whole: testing just the newly-arrived bytes read
+				 * the lone "\n" of a split "x: y\r" | "\n" as the blank line
+				 * and ended the response early, leaving the real terminator to
+				 * be taken for the next response (#462 bullet b). */
 				const char *nl = memchr(*buf, '\n', *len);
+				size_t piece = nl ? (size_t)(nl - *buf) : *len;
 
+				smart_str_appendl(&st->line, *buf, piece);
+				if (ZSTR_LEN(st->line.s) > 16384) {
+					return -1;
+				}
+				*buf += piece + (nl ? 1 : 0);
+				*len -= piece + (nl ? 1 : 0);
 				if (!nl) {
-					smart_str_appendl(&st->line, *buf, *len);
-					if (ZSTR_LEN(st->line.s) > 16384) {
-						return -1;
-					}
-					*buf += *len;
-					*len = 0;
 					return 0;
 				}
-				{
-					size_t line_len = (size_t)(nl - *buf);
-
-					*len -= line_len + 1;
-					if (line_len == 0 || (line_len == 1 && **buf == '\r')) {
-						/* the blank line: the response is complete */
-						*buf += line_len + 1;
-						return 1;
-					}
-					*buf += line_len + 1;
+				if (ZSTR_LEN(st->line.s) == 0
+					|| (ZSTR_LEN(st->line.s) == 1 && ZSTR_VAL(st->line.s)[0] == '\r')) {
+					smart_str_free(&st->line);
+					return 1;	/* the blank line: the response is complete */
 				}
+				smart_str_free(&st->line);
 				continue;
 			}
 
@@ -700,6 +773,11 @@ rescan:
 			tail = total > tail_off ? total - tail_off : 0;
 			interim = fpm_http_http_head_done(up, head_len);
 			if (up->dead) {
+				break;
+			}
+			if (interim < 0) {
+				errno = EPROTO;
+				fpm_http_upstream_fail(up, 0);
 				break;
 			}
 			if (interim) {

@@ -6,6 +6,12 @@ this repository and a distribution PHP SDK (`php8.5-dev` and
 `libphp8.5-embed`, or `php85-dev` and `php85-embed`) are enough to compile and
 link `php-fpm-ng`. No php-src checkout is needed.
 
+It also holds the test fixtures that the `.phpt` runners take from php-src
+(issue #423): upstream's `run-tests.php`, the FPM test harness and the retained
+upstream FPM `.phpt` suite, and one data file. With these, a candidate binary
+and a distribution CLI are enough to run both suites. Those are listed
+separately under "Test fixtures" below; nothing in the build reads them.
+
 The SDK supplies the engine headers (`Zend/`, `main/`, `TSRM/`, `ext/`) and
 `libphp`. The files here supply the rest: upstream FPM sources that
 `sapi/fpmng/fpm/` does not override, and the FastCGI layer. The build keeps
@@ -22,7 +28,7 @@ other php-src `main/` header can reach the compiler this way, so every
 | Upstream | https://github.com/php/php-src |
 | Tag | `php-8.5.9` |
 | Commit | `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36` |
-| Files | 57 (see `MANIFEST`) |
+| Files | 208 (see `MANIFEST`): 57 for the build, 151 test fixtures |
 
 `MANIFEST` lists every file, one per line, with four tab-separated columns:
 
@@ -63,8 +69,8 @@ edited by hand.
 
 ## What is included, and why
 
-Each file is here for one reason only: a translation unit of the shipped build
-reads it. `build/libphp-build.sh` checks this through
+Each of the 57 build files is here for one reason only: a translation unit of
+the shipped build reads it. `build/libphp-build.sh` checks this through
 `build/audit-compile-deps.sh`. The build fails when a vendored file is not
 read by any translation unit.
 
@@ -95,6 +101,45 @@ There is one generated input that is not here: `config.h`. php-src's
 configure writes it, and ext/fpmng_metrics includes it. On this path the build
 writes a one-line shim instead, which includes the SDK's `php_config.h`.
 
+## Test fixtures
+
+Issue #423. `build/phpt-tree.sh` assembles the tree that `build/run-fpmng-phpt.sh`
+and `build/run-fpm-phpt.sh` run in from the files below, this repository's own
+`sapi/fpmng/tests/` and `sapi/fpmng/acme/`. It lays them out the way
+`build/prepare.sh` does, without a php-src checkout. The runners take `-` in
+place of the tree to do that themselves.
+
+| Files | Why they are needed |
+|---|---|
+| `run-tests.php` | The test runner. Both runners drive the candidate through it. |
+| `sapi/fpm/tests/tester.inc`, `fcgi.inc`, `logreader.inc`, `logtool.inc`, `response.inc`, `skipif.inc`, `status.inc` | The FPM test harness. Our own `fpmng-*.phpt` use it as well (`require_once "tester.inc"`, `include "skipif.inc"`), so it is part of the owned suite's dependency closure, not only upstream's. |
+| `sapi/fpm/tests/*.phpt`, 141 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
+| `sapi/fpm/tests/CONFLICTS` | Read by `run-tests.php` when it runs in parallel (`-j`, issue #394); inert for a serial run, kept because it belongs to the directory. |
+| `ext/standard/tests/misc/browscap.ini` | `gh12621.phpt` sets `browscap` to `__DIR__/../../../ext/standard/tests/misc/browscap.ini`, so the test needs it at that relative path. 296 KB, the largest file here, for one test. |
+
+The fixtures are stored at their upstream paths and are not edited, like every
+other file here. `vendor-php-src.sh check` and `import` treat them like the
+build files. Only the harness side matters for the closure: the runners never
+read a php-src header or source file.
+
+The licenses of the fixtures, inventoried from the headers of each file:
+
+- `run-tests.php`: PHP License 3.01 (covered by `LICENSE` above). It embeds
+  `sebastian/diff`, which carries its own BSD 3-Clause notice in the file.
+- `tester.inc`, `logreader.inc`, `logtool.inc`, `response.inc`, `skipif.inc`,
+  `status.inc` and the `.phpt` files: no per-file notice. They are part of
+  php-src, so `LICENSE` (PHP License 3.01) is the license that applies.
+- `fcgi.inc`: MIT license, "This file is part of PHP-FastCGI-Client" by
+  Pierrick Charron. The notice is in the file.
+- `browscap.ini`: no license text. The header says "Provided courtesy of
+  http://browsers.garykeith.com", version 4091 of 2008-08-27. php-src has
+  shipped it unchanged under `ext/standard/tests/`, and it is test data that no
+  package installs. The terms of the original source are not stated in the
+  file, and this inventory does not establish them.
+
+None of these files is compiled, linked, packaged or installed. The deb and apk
+packages ship `php-fpm-ng`, its configuration and its service file only.
+
 ## What is excluded, and why
 
 From upstream `sapi/fpm/`:
@@ -108,9 +153,10 @@ From upstream `sapi/fpm/`:
 | `config.m4`, `Makefile.frag` | Build glue of the php-src build. This SAPI has its own in `sapi/fpmng/`. |
 | `*.in` (`php-fpm.conf.in`, `www.conf.in`, `php-fpm.service.in`, `init.d.php-fpm.in`, `php-fpm.8.in`, `status.html.in`) | Installation templates. Packaging ships its own (`packaging/`). |
 | `CREDITS` | Credits list for `php -i`; not a license notice. |
-| `tests/` | The test harness is a separate dependency set (issue #423). |
+| `tests/` | Vendored, but as test fixtures, not as build input: see the next section. |
 
-Everything else in php-src (the engine, `main/`, `ext/`) is excluded because
+Everything else in php-src (the engine, `main/`, `ext/`, apart from the test
+fixtures above) is excluded because
 the SDK provides it. Vendoring any of it would bring back the header
 shadowing described above.
 
@@ -152,4 +198,5 @@ the compile or the link fails.
 | Command | What it shows |
 |---|---|
 | `build/vendor-php-src.sh check` | The directory matches its manifest and the patch stack (CI checks job; needs no php-src and no network). |
+| `build/test-phpt-tree.sh` | The test tree assembles from this directory alone and an edited fixture is refused. It also covers the runners' refusal to test a binary other than the one they were given (CI checks job; hermetic). |
 | `build/libphp-build.sh <outdir>` | The set is sufficient: everything compiles and links against the SDK, with every command line in `<outdir>/commands.log`, and the dependency audit passes. |

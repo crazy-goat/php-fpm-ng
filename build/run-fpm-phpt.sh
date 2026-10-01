@@ -7,6 +7,10 @@
 #   TEST_PHP_FPM_EXECUTABLE=/path/to/php-fpm-ng \
 #   build/run-fpm-phpt.sh /path/to/prepared-php-src /path/to/results
 #
+# The tree is "-" (assembled from third_party/php-src/ by build/phpt-tree.sh,
+# no php-src checkout involved, issue #423) or a directory with that layout; a
+# tree from build/prepare.sh qualifies.
+#
 # tester.inc derives the FPM path from TEST_PHP_FPM_EXECUTABLE and expects the
 # upstream build layout. The temporary compatibility links are kept below the
 # results directory, so an external build tree is never modified.
@@ -30,8 +34,9 @@ Usage: TEST_PHP_EXECUTABLE=/path/to/php \
        build/run-fpm-phpt.sh /path/to/prepared-php-src /path/to/results
 
 Both executable paths are required and must point to the exact binaries to
-measure. The prepared source tree must contain sapi/fpmng/tests copied by
-build/prepare.sh. TEST_FPM_EXTENSION_DIR and TEST_FPM_RUN_AS_ROOT are passed
+measure. The tree is "-" for the one assembled from third_party/php-src/
+(build/phpt-tree.sh), or a directory with run-tests.php and sapi/fpmng/tests
+(build/prepare.sh makes one). TEST_FPM_EXTENSION_DIR and TEST_FPM_RUN_AS_ROOT are passed
 through when set. The results directory is created if necessary and should be
 dedicated to this run.
 EOF
@@ -48,6 +53,7 @@ fail() {
 PHPSRC_INPUT=$1
 RESULTS_INPUT=$2
 TEST_DIR=sapi/fpmng/tests
+REPO=$(cd "$(dirname "$0")/.." && pwd)
 
 CLI_BIN_INPUT=${TEST_PHP_EXECUTABLE-}
 FPM_BIN_INPUT=${TEST_PHP_FPM_EXECUTABLE-}
@@ -59,7 +65,9 @@ CLI_VERSION=not-measured
 FPM_VERSION=not-measured
 MARKERS=not-measured
 SOURCE_COMMIT=unknown
+TESTER_FPM=not-measured
 HARNESS_DIR=
+TREE_DIR=
 
 resolve_path() {
     input=$1
@@ -91,9 +99,22 @@ cleanup() {
     if [ -n "$HARNESS_DIR" ]; then
         rm -rf "$HARNESS_DIR"
     fi
+    if [ -n "$TREE_DIR" ]; then
+        rm -rf "$TREE_DIR"
+    fi
     exit "$status"
 }
 trap cleanup EXIT
+
+# "-" for the tree: assemble it from third_party/php-src/ (issue #423), no
+# php-src checkout involved. Lives below the results directory like .harness
+# does, and goes away with it: the tests write into their own directory.
+if [ "$PHPSRC_INPUT" = - ]; then
+    mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
+    TREE_DIR=$(resolve_path "$RESULTS_INPUT")/.tree
+    "$REPO/build/phpt-tree.sh" "$TREE_DIR" >&2 || fail "cannot assemble the test tree from third_party/php-src"
+    PHPSRC_INPUT=$TREE_DIR
+fi
 
 [ -d "$PHPSRC_INPUT" ] || fail "PHP source directory does not exist: $PHPSRC_INPUT"
 [ -f "$PHPSRC_INPUT/run-tests.php" ] || fail "run-tests.php not found below: $PHPSRC_INPUT"
@@ -103,6 +124,8 @@ trap cleanup EXIT
 PHPSRC=$(resolve_path "$PHPSRC_INPUT") || fail "cannot resolve PHP source directory: $PHPSRC_INPUT"
 mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
+
+FIXTURES=$(cat "$PHPSRC/FIXTURES" 2>/dev/null || printf '%s' 'none (a tree prepared from a php-src checkout)')
 
 DISCOVERED=$RESULTS_DIR/discovered.tsv
 STATUS_RAW=$RESULTS_DIR/statuses.raw.tsv
@@ -169,6 +192,9 @@ write_metadata() {
         printf '%s\n' "php_src=$PHPSRC"
         printf '%s\n' "php_src_commit=$SOURCE_COMMIT"
         printf '%s\n' "test_directory=$TEST_DIR"
+        printf '%s\n' 'fixtures_begin'
+        printf '%s\n' "$FIXTURES"
+        printf '%s\n' 'fixtures_end'
         printf '%s\n' "discovered_tests=$TEST_COUNT"
         printf '%s\n' "requested_php_cli=${CLI_BIN_INPUT:-not-supplied}"
         printf '%s\n' "php_cli=$CLI_BIN"
@@ -187,6 +213,7 @@ write_metadata() {
         printf '%s\n' 'php_fpm_ng_strings_end'
         printf '%s\n' "TEST_PHP_EXECUTABLE=$CLI_BIN"
         printf '%s\n' "TEST_PHP_FPM_EXECUTABLE=${HARNESS_FPM-unset}"
+        printf '%s\n' "tester_resolves_fpm_to=${TESTER_FPM-not-measured}"
         printf '%s\n' "TEST_FPM_EXTENSION_DIR=${TEST_FPM_EXTENSION_DIR-unset}"
         printf '%s\n' "TEST_FPM_RUN_AS_ROOT=${TEST_FPM_RUN_AS_ROOT-unset}"
         printf '%s\n' "TEST_FPM_TIMEOUT=${TEST_FPM_TIMEOUT-60}"
@@ -282,6 +309,18 @@ ln -s "$FPM_BIN" "$HARNESS_DIR/fpm/php-fpm"
 # under $HARNESS_DIR, not at the caller-supplied $CLI_BIN path.
 HARNESS_CLI=$HARNESS_DIR/bin/php
 ln -s "$CLI_BIN" "$HARNESS_CLI"
+
+# Ask the harness itself which binary it is going to start, instead of trusting
+# the links above to have been enough. findExecutable() falls back to
+# <php>/sbin/php-fpm and to a php-fpm next to the tests, so a harness that did
+# not take the link would quietly exercise some other FPM -- an installed
+# php-fpm8.5 above all -- and report its results as this binary's.
+if ! TESTER_FPM=$(TEST_PHP_EXECUTABLE="$HARNESS_CLI" FPMNG_TESTER_INC="$PHPSRC/$TEST_DIR/tester.inc" \
+    "$CLI_BIN" -n -r 'require getenv("FPMNG_TESTER_INC"); $p = FPM\Tester::findExecutable(); echo $p === false ? "" : realpath($p);' 2>/dev/null); then
+    TESTER_FPM=unknown
+    preflight_fail "cannot ask tester.inc which FPM binary it will start (php -r failed with $CLI_BIN)"
+fi
+[ "$TESTER_FPM" = "$FPM_BIN" ] || preflight_fail "tester.inc would start '${TESTER_FPM:-nothing}', not the requested $FPM_BIN"
 write_metadata
 
 TIMEOUT=${TEST_FPM_TIMEOUT-60}

@@ -20,8 +20,12 @@
 # tests ask the binary whether it supports their pool type and skip when it
 # says no, instead of failing).
 #
-# Usage: build/ci-package-gate.sh deb|apk <prepared-php-src> <outdir>
-#   prepared-php-src  a tree with our overlay applied (build/prepare.sh)
+# Usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>
+#   prepared-php-src  not read any more (issue #423): the build needs no php-src
+#                     (issue #422) and the test fixtures come from
+#                     third_party/php-src/ through build/phpt-tree.sh. Pass "-";
+#                     a directory is still accepted so the release workflow keeps
+#                     working until it is rewired (issue #424).
 #   outdir            package, results and logs land here
 #
 # Runs on the host, not in a container: it drives `docker run` with bind
@@ -30,15 +34,13 @@ set -eu
 
 fail() { echo "ci-package-gate.sh: FAIL: $*" >&2; exit 1; }
 
-FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src> <outdir>}
-SRC=${2:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src> <outdir>}
-OUT=${3:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src> <outdir>}
+FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
+SRC=${2:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
+OUT=${3:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-SRC=$(cd "$SRC" && pwd) || fail "no prepared php-src tree at $2"
+[ "$SRC" = - ] || echo "ci-package-gate.sh: note: $SRC is not read; the fixtures come from third_party/php-src (issue #423)" >&2
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
-
-[ -f "$SRC/sapi/fpmng/config.m4" ] || fail "$SRC has no sapi/fpmng: run build/prepare.sh first"
 
 # WHICH PACKAGE THIS RUN GATES (issue #294). The repository publishes two: the
 # default one, built without TLS and without ACME (issues #280, #281), and
@@ -655,17 +657,13 @@ export $BUILD_FLAGS
 $PACKAGE_CMD
 $NEGATIVE_CONTROL
 
-# The fixtures stage 2 needs to run the suite, staged the same way the build
-# job stages them for fpmng-phpt: run-tests.php next to the tests, plus the two
-# source-tree files individual tests reach for by relative path. Copied out of
-# the prepared tree here because stage 2 has no php-src and must not have one
-# -- it is standing in for a user's machine.
+# The fixtures stage 2 needs to run the suite: run-tests.php next to the tests,
+# plus the source-tree files individual tests reach for by relative path.
+# Assembled from this repository's bounded copy of them (issue #423), because
+# stage 2 has no php-src and must not have one -- it is standing in for a user's
+# machine.
 rm -rf /out/prepared
-mkdir -p /out/prepared/sapi/fpmng /out/prepared/ext/standard/tests/misc
-cp -r /src/sapi/fpmng/tests /out/prepared/sapi/fpmng/tests
-cp -r /src/sapi/fpmng/acme /out/prepared/sapi/fpmng/acme
-cp /src/run-tests.php /out/prepared/
-cp /src/ext/standard/tests/misc/browscap.ini /out/prepared/ext/standard/tests/misc/
+/repo/build/phpt-tree.sh /out/prepared
 EOF
 cat > "$OUT/stage1.sh" <<EOF
 set -eu
@@ -673,7 +671,7 @@ $BUILD_SETUP
 $RUN_PAYLOAD
 EOF
 docker run --rm \
-    -v "$SRC:/src:ro" -v "$REPO:/repo:ro" -v "$OUT:/out" \
+    -v "$REPO:/repo:ro" -v "$OUT:/out" \
     "$BUILD_IMAGE" sh /out/stage1.sh
 
 # Stage 1 ran as root, so everything under $OUT is root-owned and the

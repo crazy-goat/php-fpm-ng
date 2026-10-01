@@ -12,6 +12,12 @@
 # They are kept in third_party/php-src/, at their upstream paths, so that a
 # build needs this repository and the SDK and nothing else.
 #
+# The same mechanism holds the test fixtures (issue #423): upstream's
+# run-tests.php, the FPM test harness and the retained upstream FPM .phpt
+# suite, and one data file, so that the .phpt runners need no php-src checkout
+# either. They are listed in the same manifest, under the same rules; the build
+# never reads them (README.md has the list and the reason for each).
+#
 # THE MANIFEST IS THE INVENTORY. third_party/php-src/MANIFEST lists every
 # vendored file with its upstream path, the SHA-256 of the pristine upstream
 # file at the pinned tag, and the SHA-256 of the copy in this tree. The two
@@ -147,6 +153,16 @@ do_check() {
     # this copy would never be compiled while looking like it is.
     case "$path" in
       sapi/fpm/fpm/*)
+        rel=${path#sapi/fpm/}
+        if [ -e "$REPO/sapi/fpmng/$rel" ]; then
+          echo "  shadowed: $path is also owned as sapi/fpmng/$rel; drop it from the manifest" >&2
+          errors=$((errors + 1))
+        fi
+        ;;
+      # Same for a test fixture: build/phpt-tree.sh lays this repo's
+      # sapi/fpmng/tests/ over upstream's, so a same-named file of ours would
+      # replace the vendored one without anyone noticing.
+      sapi/fpm/tests/*)
         rel=${path#sapi/fpm/}
         if [ -e "$REPO/sapi/fpmng/$rel" ]; then
           echo "  shadowed: $path is also owned as sapi/fpmng/$rel; drop it from the manifest" >&2

@@ -15,9 +15,30 @@ task file).
 
 ## Prerequisites
 
-Same as [`fpm-phpt.md`](fpm-phpt.md): a prepared php-src tree, matching patch
-stack, built `php-fpm-ng` and CLI `php` from that tree, `strings`, and a
-SHA-256 tool.
+Same as [`fpm-phpt.md`](fpm-phpt.md): a `php-fpm-ng` binary, a CLI `php`,
+`strings`, and a SHA-256 tool. No php-src checkout is needed (see below); a
+prepared one is still accepted.
+
+## Run without a php-src checkout
+
+Give `-` in place of the source tree (issue #423):
+
+```sh
+TEST_PHP_EXECUTABLE=/usr/bin/php8.5 \
+TEST_PHP_FPM_EXECUTABLE=/usr/sbin/php-fpm-ng \
+TEST_FPM_TIMEOUT=120 \
+"$REPO/build/run-fpmng-phpt.sh" - /path/to/dedicated/fpmng-phpt-results
+```
+
+The tree is assembled by `build/phpt-tree.sh` from `third_party/php-src/`,
+`sapi/fpmng/tests/` and `sapi/fpmng/acme/`, and removed when the run ends. It
+carries `run-tests.php`, upstream's harness (`tester.inc` and friends) and
+`browscap.ini`, which is what the suite reads outside this repository.
+Tests that run checked-in examples find them through the repository the runner
+sits in (`FPMNG_TEST_REPO_ROOT`), so run the script from a checkout of this
+repository. `build/ci-package-gate.sh` stages the same tree for its install
+stage. See the section of the same name in [`fpm-phpt.md`](fpm-phpt.md) for how
+the runner makes sure the binary it was given is the one that gets tested.
 
 ## Run only the fpmng-owned suite
 

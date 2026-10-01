@@ -13,13 +13,53 @@ A few upstream tests cover behaviour `php-fpm-ng` removed on purpose, so they
 can only fail. They are named in `sapi/fpmng/tests/upstream-deviations.list`;
 see [Deliberate deviations](#deliberate-deviations).
 
+## Without a php-src checkout
+
+Issue #423. The runner needs `run-tests.php`, upstream's FPM test harness and
+the retained upstream `.phpt` files, and `third_party/php-src/` holds exactly
+those at the pinned tag (`php-8.5.9`, listed with hashes and licenses in its
+`MANIFEST` and `README.md`). Give `-` in place of the source tree and the
+runner assembles the tree it runs in from this repository
+(`build/phpt-tree.sh`):
+
+```sh
+TEST_PHP_EXECUTABLE=/usr/bin/php8.5 \
+TEST_PHP_FPM_EXECUTABLE=/usr/sbin/php-fpm-ng \
+"$REPO/build/run-fpm-phpt.sh" - /path/to/dedicated/fpm-phpt-results
+```
+
+The candidate is the binary, the CLI is any PHP 8.5 CLI: a distribution
+package is the intended one. Neither needs to come from the same build, and
+nothing is compiled or fetched. The tree is created below the results
+directory and removed again when the run ends; `metadata.txt` records the
+fixture provenance (`fixtures_begin` ... `fixtures_end`: tag, upstream commit,
+manifest hash).
+
+Run as an unprivileged user. php-fpm refuses to run as root, and every test
+then SKIPs: the run exits 0 and proves nothing. Read the counts, not the exit
+status.
+
+### The binary under test cannot be swapped silently
+
+`FPM\Tester::findExecutable()` ignores `TEST_PHP_FPM_EXECUTABLE`. It looks for
+`fpm/php-fpm` two levels above `TEST_PHP_EXECUTABLE`, then for `sbin/php-fpm`
+there, then for a `php-fpm` next to the tests, so a harness that missed the
+runner's links would start whichever FPM it found, for instance an installed
+`php-fpm8.5`. Before any test starts, the runner asks `tester.inc` itself which
+binary it would start and compares the answer with the file it was given. A
+difference is `NOT MEASURED` and the run stops. The answer is also recorded in
+`metadata.txt` as `tester_resolves_fpm_to`. `build/test-phpt-tree.sh` covers
+the refusal.
+
 ## Prerequisites
 
-- A PHP source checkout with `sapi/fpm/` and `run-tests.php`.
-- A source revision compatible with the patch stack in `patches/`. `prepare.sh`
-  stops instead of silently applying an incompatible or already-applied patch.
-- A completed `php-fpm-ng` build from the prepared source tree and a CLI PHP
-  executable from that same PHP build. Supply both as absolute paths.
+- Either `-` as above, or a PHP source checkout with `sapi/fpm/` and
+  `run-tests.php`, prepared with `build/prepare.sh`.
+- With a checkout: a source revision compatible with the patch stack in
+  `patches/`. `prepare.sh` stops instead of silently applying an incompatible
+  or already-applied patch.
+- A completed `php-fpm-ng` build and a CLI PHP executable. With a checkout, the
+  CLI is the one from that same PHP build. Supply both as absolute paths.
 - `strings` and either `shasum -a 256` or `sha256sum`.
 - A dedicated results directory. Tests create sockets, configuration files and
   logs below the copied test directory and may need root, users, IPv4/IPv6 and

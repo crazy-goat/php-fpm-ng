@@ -292,6 +292,13 @@ jobs:
       - name: libphp-build.sh refuses builds outside the contract (issue #422)
         run: ./build/test-libphp-build-refusals.sh
 
+      # Issue #423: the .phpt tree assembles from third_party/php-src/ and this
+      # repository alone, an edited fixture is refused, and the runners stop
+      # when tester.inc would launch another FPM than the one they were given.
+      # Hermetic: shell-script stand-ins for the CLI and the binary.
+      - name: phpt fixtures and binary-under-test guard (issue #423)
+        run: ./build/test-phpt-tree.sh
+
       # Task 013: clang-tidy over our C sources only (never a prepared php-src
       # tree's mixed upstream copies). It landed non-blocking on purpose -- a red
       # build on day one for pre-existing findings teaches people to ignore the

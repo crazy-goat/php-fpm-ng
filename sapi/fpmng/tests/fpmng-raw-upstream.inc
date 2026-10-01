@@ -103,6 +103,12 @@ EOT;
         @unlink($this->sockPath);
     }
 
+    /** The listening socket, for a select() that wants to know about a new dial. */
+    public function serverStream()
+    {
+        return $this->server;
+    }
+
     public function log(): string
     {
         return (string) @file_get_contents($this->errorLog);
@@ -204,7 +210,21 @@ EOT;
             }
             stream_set_blocking($this->client, false);
         }
-        fwrite($this->client, $request);
+        /* The socket is non-blocking: a request of tens of KiB takes several writes. */
+        $deadline = microtime(true) + 5;
+        while ($request !== '' && microtime(true) < $deadline) {
+            $n = @fwrite($this->client, $request);
+            if ($n === false) {
+                break;
+            }
+            $request = substr($request, $n);
+            if ($n === 0) {
+                $r = null;
+                $w = [$this->client];
+                $e = null;
+                stream_select($r, $w, $e, 0, 100000);
+            }
+        }
     }
 
     /** Length of the first complete response in $b, or null when more bytes are needed. */

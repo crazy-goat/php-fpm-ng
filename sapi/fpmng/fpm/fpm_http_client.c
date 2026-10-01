@@ -258,6 +258,34 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	 * (st->expect_eof). */
 	smart_str_appends(&c->out, "Connection: keep-alive\r\n\r\n");
 
+	/* The block just built is bigger than the one that came in: Host
+	 * (if absent), X-Forwarded-*, Content-Length and Connection are added to
+	 * a client block that may sit right at the gateway's own inbound bound.
+	 * The target enforces the same FPM_HTTP_HEADERS_MAX on what it receives,
+	 * counted the way libevent counts it (the request line and every header
+	 * line, without their CRLFs), and would answer 400 to a request this
+	 * gateway accepted. Refuse it here instead, so what the gateway accepts
+	 * the target does too (#466). */
+	{
+		const char *head = ZSTR_VAL(c->out.s);
+		const char *end = head + ZSTR_LEN(c->out.s);
+		size_t counted = 0;
+
+		while (head < end && !(head[0] == '\r' && head + 1 < end && head[1] == '\n')) {
+			const char *eol = memchr(head, '\n', (size_t) (end - head));
+
+			if (!eol) {
+				break;
+			}
+			counted += (size_t) (eol - head) - ((eol > head && eol[-1] == '\r') ? 1 : 0);
+			head = eol + 1;
+		}
+		if (counted > FPM_HTTP_HEADERS_MAX) {
+			smart_str_free(&c->out);
+			return 400;
+		}
+	}
+
 	if (body_len) {
 		const char *data = (const char *) evbuffer_pullup(evhttp_request_get_input_buffer(req), -1);
 

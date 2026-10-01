@@ -219,6 +219,24 @@ framework compatibility.
 
 - #428 prepares PHP/FPM configuration bootstrap and verifies embedded configuration
   plus host override policy without changing ordinary file-based startup.
+- #428 result (2026-10-01). **fpm.conf:** the parser now takes text, not a
+  path (`fpm_conf_load_ini_buffer()` in `sapi/fpmng/fpm/fpm_conf.c`); a file is
+  read into memory and parsed through it, and `-y fd:N -t` feeds it the bytes of
+  an open descriptor as the test driver (`fpmng-config-input-descriptor.phpt`).
+  Diagnostics print the input's logical name (`[fd:3:6] ...`), and an input that
+  is not a file refuses `include=` instead of resolving it against the working
+  directory. `-y -` cannot be the driver: `fpm_stdio_init_main()` replaces fd 0
+  with `/dev/null` before the configuration is read. The embedded loader calls
+  the same function with its own name and the payload bytes. **php.ini:** no new
+  code. PHP reads the SAPI `ini_entries` (`-d`) and honours `php_ini_ignore`
+  (`-n`) inside `php_module_startup()`, before module startup, and `fpm.conf` is
+  read after it (`fpm_init()`), so an embedded php.ini handed over as
+  `ini_entries` + `php_ini_ignore` is a startup input already.
+  `fpmng-ini-bootstrap-policy.phpt` pins the current `-n/-c/-d/-y`,
+  `PHP_INI_SCAN_DIR` and `fpm.config` behaviour; two cases are recorded as
+  CURRENT because they are host-dependent and the packed executable must decide
+  about them: `-c` still merges the host's `PHP_INI_SCAN_DIR`, and `-c` naming a
+  missing file is silent.
 - #429 owns safe, generic packing of the three mandatory files without
   executing the PHAR stub.
 - #430 owns extraction/materialization lifecycle, content-addressed identity,

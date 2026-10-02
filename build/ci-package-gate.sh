@@ -503,6 +503,7 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # The three cron tests from #355, #357 and #358 assumed the debug clock, which
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
+EXPECT_FAIL_NAMES=
 EXPECT_TOTAL=177
 
 # Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
@@ -597,6 +598,8 @@ deb)
 apk)
     IMAGE=alpine:edge
     EXPECT_FAIL=2 # issues #467 and #557, see the measurement block above
+    EXPECT_FAIL_NAMES='fpmng-config-input-descriptor.phpt
+fpmng-http-route-http-direct-fail.phpt'
     if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=169; EXPECT_SKIP=6
     else EXPECT_PASS=158; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
@@ -873,6 +876,17 @@ if [ "$GOT_OK" != "$EXPECT_PASS" ] || [ "$GOT_FAIL" != "$EXPECT_FAIL" ] \
   usually means the pool stopped starting, more passes means these expectations
   are stale.
   Per-test results are in $OUT/results/results.tsv."
+fi
+
+# The FAIL count alone cannot say WHICH tests fail: when a known defect is fixed
+# and a different test starts failing the numbers stay equal. So the names are
+# pinned as well (EXPECT_FAIL_NAMES, sorted, one per line).
+GOT_FAIL_NAMES=$(awk -F '\t' 'NR > 1 && $2 == "FAIL/ERROR" {n = split($1, a, "/"); print a[n]}' \
+    "$OUT/results/results.tsv" | sort)
+if [ "$GOT_FAIL_NAMES" != "$EXPECT_FAIL_NAMES" ]; then
+    fail "the failing tests are not the ones this cell pins.
+  expected: $(echo "$EXPECT_FAIL_NAMES" | tr '\n' ' ')
+  got:      $(echo "$GOT_FAIL_NAMES" | tr '\n' ' ')"
 fi
 
 echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL)"

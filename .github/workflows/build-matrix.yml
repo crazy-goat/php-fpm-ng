@@ -264,18 +264,18 @@ jobs:
       # would make every TLS test quietly SKIP. So it is asserted where it
       # lands, in the linked binary, and not on the command that asked for it.
       - name: assert TLS termination is really in this build (issue #280)
-        run: ldd "$PWD/out-libphp/php-fpm-ng" | grep -q libevent_openssl
+        run: ldd "$PWD/out-libphp/php-fpm-ng" | grep libevent_openssl >/dev/null
 
       # Issue #281, for the same reason: a symbol from the ACME code.
       - name: assert ACME issuance is really in this build (issue #281)
-        run: nm --defined-only "$PWD/out-libphp/php-fpm-ng" | grep -qw fpm_acme_challenge_init_main
+        run: nm --defined-only "$PWD/out-libphp/php-fpm-ng" | grep -w fpm_acme_challenge_init_main >/dev/null
 
       # Issue #171: fpmng-payload-distribution.phpt reads the payload out of
       # the binary under test. libphp-build.sh embeds it (FPMNG_ACME=1), so this
       # checks it is there rather than embedding it again.
       - name: assert the distribution payload is embedded (issue #171)
         run: |
-          php8.5 build/payload-pack.php list --binary="$PWD/out-libphp/php-fpm-ng" | grep -q '^kind=1'
+          php8.5 build/payload-pack.php list --binary="$PWD/out-libphp/php-fpm-ng" | grep '^kind=1' >/dev/null
 
       - name: stage artifact
         run: |
@@ -345,9 +345,13 @@ jobs:
         with:
           name: fpmng-canonical-build
           path: build-out
+      # download-artifact runs as root in the container, so the binary it wrote
+      # is root-owned and the unprivileged `ci` user cannot chmod it.
+      - name: hand the downloaded build to the ci user
+        shell: bash
+        run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng build/run-fpmng-phpt.sh
       - name: run fpmng-owned .phpt tests (task 003)
         run: |
-          chmod +x build-out/bin/php-fpm-ng build/run-fpmng-phpt.sh
           # TEST_FPM_EXTENSION_DIR: the distribution's shared ctype.so, which
           # fpmng-ini-bootstrap-extension.phpt loads (issue #428); it skips
           # without it.
@@ -403,8 +407,9 @@ jobs:
         with:
           name: fpmng-canonical-build
           path: build-out
-      - name: make the canonical build executable
-        run: chmod +x build-out/bin/php-fpm-ng
+      - name: make the canonical build executable (and the ci user's)
+        shell: bash
+        run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng
 
       # Task 003's sibling: the suite php-src itself ships for FPM, run
       # against our SAPI (upstream's tests, vendored in third_party/php-src).

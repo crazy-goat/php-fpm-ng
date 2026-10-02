@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 The history below is rebuilt from the GitHub releases. Most of them carry only the install
-boilerplate; those entries are summarized from the tagged commits and kept short. The tags
+boilerplate; those entries say so, and the few that could be checked against the tagged commits are summarized. The tags
 v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
@@ -47,13 +47,13 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [0.10.0] - 2026-09-22
 
-### Added
-- Gateway design from `docs/gateway.md` and the operator endpoint work behind it (#386, #388, #389, #390).
+### Changed
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.9.0] - 2026-09-19
 
 ### Changed
-- Milestone v0.9.0 release. The GitHub release notes list only the packaging boilerplate; the findings it produced were verified in v0.11.1 (#440, #441).
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.8.0] - 2026-09-19
 
@@ -75,22 +75,22 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [0.6.0] - 2026-09-17
 
 ### Changed
-- Build and packaging move to the distribution's PHP 8.5 SDK (cutover of epic #418, #424); the package gate runs only in the release workflow (#393).
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.5.2] - 2026-09-14
 
-### Fixed
-- Packaging fixes after the v0.5.0 and v0.5.1 tags, which were created without a GitHub release.
+### Changed
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.4.0] - 2026-09-13
 
 ### Changed
-- Release with the `.deb`, `.apk` and `SHA256SUMS` assets built by the package gate.
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.3.0] - 2026-09-13
 
 ### Changed
-- Release with the `.deb`, `.apk` and `SHA256SUMS` assets built by the package gate.
+- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
 
 ## [0.2.0] - 2026-09-12
 

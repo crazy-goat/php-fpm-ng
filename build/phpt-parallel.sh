@@ -9,7 +9,9 @@
 # (build/phpt-fixture-patches/README.md says why). Two changes, both idempotent:
 #
 #   1. build/phpt-fixture-patches/*.patch: run-tests.php tells each test which
-#      worker runs it, and tester.inc allocates ports from that worker's block.
+#      worker runs it, and tester.inc allocates ports from that worker's block;
+#      run-tests.php no longer retries a test whose output says "address already
+#      in use", so a port collision fails instead of passing as WARN (#562).
 #   2. sapi/fpmng/tests/CONFLICTS is removed. Upstream ships it with the single
 #      word "all" (spurious failures on Azure), and run-tests.php then pulls
 #      every test of that directory out of the parallel pool and runs them one
@@ -43,6 +45,7 @@ if ! grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc"; then
 fi
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"
+grep -q 'Issue #562 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php still retries a test on 'address already in use' after patching"
 
 rm -f "$TESTS/CONFLICTS"
 

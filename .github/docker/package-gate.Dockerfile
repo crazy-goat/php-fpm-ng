@@ -47,6 +47,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # for the library, libevent/libacl for what the SAPI needs. dpkg-dev stays out:
 # it pulls gcc in, and the two package sets are kept honest about who needs one.
 # libevent_openssl stays out too: the package is built without TLS (issue #280).
+# The gate images track what the distribution ships on the day they are built (issue #240), so versions are not pinned, and the package set mirrors build/ci-package-gate.sh.
+# hadolint ignore=DL3008,DL3015
 RUN apt-get update -qq \
     && apt-get install -y -qq binutils php8.5-dev libphp8.5-embed \
          libevent-dev libacl1-dev \
@@ -59,6 +61,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # is here for /usr/lib/ssl/openssl.cnf, without which openssl_pkey_new() fails
 # and the three ACME tests fail for a reason that has nothing to do with the
 # package. None of the four is a dependency of what we ship -- see the header.
+# The gate images track what the distribution ships on the day they are built (issue #240), so versions are not pinned, and the package set mirrors build/ci-package-gate.sh.
+# hadolint ignore=DL3008,DL3015
 RUN apt-get update -qq \
     && apt-get install -y -qq binutils patch php8.5-cli openssl \
     && rm -rf /var/lib/apt/lists/*
@@ -72,9 +76,13 @@ FROM alpine:edge AS apk-build
 # No openssl-dev, and no libevent_openssl on the Debian side either: the
 # packages are built without TLS (issue #280), so this stage cannot link
 # OpenSSL even by accident. build/libphp-build.sh asserts that on the binary.
+# The gate images track what Alpine edge ships on the day they are built (issue #240), so versions are not pinned.
+# hadolint ignore=DL3018
 RUN apk add --no-cache alpine-sdk php85-dev php85-embed \
       libevent-dev acl-dev
 
 FROM alpine:edge AS apk-test
 # Test rig only; php85-embed, the package's own dependency, is deliberately absent.
+# The gate images track what Alpine edge ships on the day they are built (issue #240), so versions are not pinned.
+# hadolint ignore=DL3018
 RUN apk add --no-cache binutils patch php85 php85-openssl openssl

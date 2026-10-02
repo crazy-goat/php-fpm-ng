@@ -4,6 +4,8 @@
 # arrived in one burst, a watcher that only ever fires once could still finish
 # the download and the route would prove nothing.
 FROM alpine:3.22 AS cert
+# An example origin; it follows the Alpine 3.22 package repository, so versions are not pinned.
+# hadolint ignore=DL3018
 RUN apk add --no-cache openssl \
 	&& mkdir -p /tls \
 	&& openssl req -x509 -newkey rsa:2048 -nodes -days 365 \

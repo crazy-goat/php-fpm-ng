@@ -29,6 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # libphp8.5-embed brings the PHP it runs on (openssl, filter and ctype
 # included, which amphp needs); libevent is the one library build/libphp-build.sh
 # links besides libphp (objdump -p: NEEDED libevent-2.1.so.7).
+# An example image; it follows the Ubuntu package repository, so versions are not pinned.
+# hadolint ignore=DL3008
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends libphp8.5-embed libevent-2.1-7t64 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*

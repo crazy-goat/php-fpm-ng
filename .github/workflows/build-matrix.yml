@@ -53,7 +53,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 # The workflow default is read-only. The heavy jobs add actions: write for
@@ -157,12 +156,12 @@ jobs:
       - name: build against the SDK, for the compile flags
         run: ./build/libphp-build.sh "$PWD/out-libphp-lint"
 
+      # $PWD, not github.workspace: in a container job the expression is the
+      # host path, which does not exist inside the container.
       - name: Lint
-        env:
-          FPMNG_LIBPHP_OUT: ${{ github.workspace }}/out-libphp-lint
         run: |
           export PATH="$HOME/.local/bin:$PATH"
-          bin/lint.sh
+          FPMNG_LIBPHP_OUT="$PWD/out-libphp-lint" bin/lint.sh
 
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()

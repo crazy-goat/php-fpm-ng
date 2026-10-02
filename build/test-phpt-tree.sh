@@ -44,7 +44,7 @@ echo "ok: tree assembled ($got upstream + owned .phpt, no php-src)"
 FAKE=$WORK/repo
 mkdir -p "$FAKE/sapi/fpmng"
 cp -R "$REPO/build" "$REPO/third_party" "$REPO/patches" "$FAKE/"
-cp -R "$REPO/sapi/fpmng/tests" "$REPO/sapi/fpmng/acme" "$FAKE/sapi/fpmng/"
+cp -R "$REPO/sapi/fpmng/tests" "$REPO/sapi/fpmng/acme" "$REPO/sapi/fpmng/fixtures" "$FAKE/sapi/fpmng/"
 echo '// edited' >> "$FAKE/third_party/php-src/run-tests.php"
 if "$FAKE/build/phpt-tree.sh" "$WORK/tree2" >"$WORK/out2.txt" 2>&1; then
   fail "phpt-tree.sh accepted an edited run-tests.php"

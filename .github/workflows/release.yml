@@ -57,7 +57,8 @@ jobs:
       - name: log in to ghcr.io for the package-gate images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GH_TOKEN" | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          GH_ACTOR: ${{ github.actor }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_ACTOR" --password-stdin
 
       # The version the packages call themselves. On a tag it is the tag; on a
       # manual rehearsal it is the commit, so a rehearsal artefact can never be
@@ -128,12 +129,64 @@ jobs:
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
       #
-      # curl, not `gh`: the script is what cut v0.1.0 and v0.2.0, it depends
-      # on nothing but curl and python3, and it runs the same way on a laptop
-      # as it does here. Rewriting a working release path around a CLI that
-      # only exists on the runner buys nothing.
+      # The notes are the CHANGELOG.md section of the tag, read from the tagged
+      # commit: merge the `## [X.Y.Z]` section before tagging
+      # (docs/release-workflow.md). A fixed install paragraph follows them.
+      # `gh` is on the runner image, and --verify-tag refuses to create a tag
+      # from a release.
+      - name: extract the release notes from CHANGELOG.md
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { found = (index($0, "[" v "]") > 0 || index($0, "[v" v "]") > 0); next }
+            found
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no non-empty section for ${version}"
+            exit 1
+          fi
+          cat >> release-notes.md <<'NOTE'
+
+          ## Install
+
+          The packages carry no PHP. They depend on the distribution's embed package for the
+          libphp they were linked against, which is named both in the file name and in the
+          dependency. Install them by path:
+
+              sudo apt install ./php-fpm-ng_*.deb
+              sudo apk add --allow-untrusted ./php-fpm-ng-*.apk
+
+          They are unsigned (decision on issue #223): check them against SHA256SUMS first. See
+          docs/install.md for what the packaged build supports.
+          NOTE
+          # GitHub rejects release notes over 125000 characters.
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import sys
+          limit = 120000
+          tag = sys.argv[1]
+          text = open('release-notes.md', encoding='utf-8').read()
+          if len(text) > limit:
+              tail = ("\n\n_The notes were shortened because of the GitHub size limit. "
+                      f"See [CHANGELOG.md](https://github.com/crazy-goat/php-fpm-ng/blob/{tag}/CHANGELOG.md) "
+                      "for the full text._\n")
+              text = text[:limit - len(tail)]
+              text = text[:text.rfind('\n')] + tail
+              open('release-notes.md', 'w', encoding='utf-8').write(text)
+              print(f"::warning::Release notes truncated to {len(text)} characters")
+          PY
+
       - name: publish the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: ./build/gh-release-create.sh "$GITHUB_REF_NAME" assets
+        run: |
+          set -euo pipefail
+          flags=()
+          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" assets/* \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag \
+            "${flags[@]}"

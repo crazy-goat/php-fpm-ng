@@ -120,7 +120,24 @@ int fpmng_libphp_register_bundled_modules(void)
 		return 0;
 	}
 
-	if (zend_startup_module(&fpmng_metrics_module_entry) == FAILURE) {
+	/* WHY THE STORAGE IS SWITCHED (issue #558). php_module_startup() ends by
+	 * switching interned-string storage to the REQUEST handlers, and this runs
+	 * after it, outside any request. The request table (CG(interned_strings))
+	 * is only initialised by zend_interned_strings_activate(), so interning a
+	 * name -- zend_register_functions() does it for every function -- looks the
+	 * string up in a table whose arData is NULL. It survives only while
+	 * OPcache has replaced the request handlers with its shared-memory ones;
+	 * a libphp with OPcache compiled in and opcache.enable=0 at startup has not,
+	 * and the master died here with SIGSEGV before logging anything (measured
+	 * on Ubuntu 26.04, php8.5 8.5.4: the fault is a hash lookup through
+	 * arData == NULL, reached from zend_register_module_ex(), and only
+	 * -dopcache.enable=0 triggers it; -dopcache.enable=1 and any other -d do not).
+	 * Permanent storage is what module startup uses, which is what this is. */
+	zend_interned_strings_switch_storage(0);
+	zend_result startup = zend_startup_module(&fpmng_metrics_module_entry);
+	zend_interned_strings_switch_storage(1);
+
+	if (startup == FAILURE) {
 		zlog(ZLOG_ERROR, "could not register the fpmng_metrics extension against this libphp; "
 				"see the E_CORE_WARNING above for what the engine rejected");
 		return -1;

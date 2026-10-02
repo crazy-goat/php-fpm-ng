@@ -61,7 +61,11 @@ foreach (['# HELP t_requests requests handled',
 PHP;
 
 $tester = new FPM\Tester($cfg, $code);
-$tester->start();
+/* opcache.enable=0 at startup is what issue #558 is about: on a libphp with
+ * OPcache compiled in (Ubuntu), registering the module after php_module_startup()
+ * used to crash the master in that one configuration, before any log line. A
+ * build without OPcache just sees an INI entry nobody reads. */
+$tester->start(iniEntries: ['opcache.enable' => '0']);
 $tester->expectLogStartNotices();
 $tester->request()->expectBody([
     'bool(true)',

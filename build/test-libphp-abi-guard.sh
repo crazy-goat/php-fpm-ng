@@ -72,7 +72,7 @@ build() {
 # run <name>: sets RC and ERR.
 run() {
   set +e
-  "$WORK/$1" 2> "$WORK/$1.err"
+  "$WORK/$1" > /dev/null 2> "$WORK/$1.err"
   RC=$?
   set -e
   ERR=$(cat "$WORK/$1.err")

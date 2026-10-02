@@ -54,6 +54,56 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The notes are the CHANGELOG.md section of the tag, read from the tagged
+      # commit (merge the `## [X.Y.Z]` section before tagging,
+      # docs/release-workflow.md). Done first, so a missing section fails in
+      # seconds and not after the package gate. The CHANGELOG part is cut to
+      # fit GitHub's 125000-character limit; the fixed install paragraph is
+      # appended after that cut, so it is never lost.
+      - name: extract the release notes from CHANGELOG.md
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '
+            /^## \[/ { found = (index($0, "[" v "]") > 0 || index($0, "[v" v "]") > 0); next }
+            found
+          ' CHANGELOG.md > release-notes.md
+          if ! grep -q '[^[:space:]]' release-notes.md; then
+            echo "::error::CHANGELOG.md has no non-empty section for ${version}"
+            exit 1
+          fi
+          cat > release-install.md <<'NOTE'
+
+          ## Install
+
+          The packages carry no PHP. They depend on the distribution's embed package for the
+          libphp they were linked against, which is named both in the file name and in the
+          dependency. Install them by path:
+
+              sudo apt install ./php-fpm-ng_*.deb
+              sudo apk add --allow-untrusted ./php-fpm-ng-*.apk
+
+          They are unsigned (decision on issue #223): check them against SHA256SUMS first. See
+          docs/install.md for what the packaged build supports.
+          NOTE
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import sys
+          limit = 120000
+          tag = sys.argv[1]
+          install = open('release-install.md', encoding='utf-8').read()
+          text = open('release-notes.md', encoding='utf-8').read()
+          room = limit - len(install)
+          if len(text) > room:
+              tail = ("\n\n_The notes were shortened because of the GitHub size limit. "
+                      f"See [CHANGELOG.md](https://github.com/crazy-goat/php-fpm-ng/blob/{tag}/CHANGELOG.md) "
+                      "for the full text._\n")
+              text = text[:room - len(tail)]
+              text = text[:text.rfind('\n')] + tail
+              print(f"::warning::Release notes truncated to {len(text)} characters")
+          open('release-notes.md', 'w', encoding='utf-8').write(text + install)
+          PY
+
       - name: log in to ghcr.io for the package-gate images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -128,65 +178,24 @@ jobs:
           retention-days: 14
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
-      #
-      # The notes are the CHANGELOG.md section of the tag, read from the tagged
-      # commit: merge the `## [X.Y.Z]` section before tagging
-      # (docs/release-workflow.md). A fixed install paragraph follows them.
-      # `gh` is on the runner image, and --verify-tag refuses to create a tag
-      # from a release.
-      - name: extract the release notes from CHANGELOG.md
-        if: github.ref_type == 'tag'
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '
-            /^## \[/ { found = (index($0, "[" v "]") > 0 || index($0, "[v" v "]") > 0); next }
-            found
-          ' CHANGELOG.md > release-notes.md
-          if ! grep -q '[^[:space:]]' release-notes.md; then
-            echo "::error::CHANGELOG.md has no non-empty section for ${version}"
-            exit 1
-          fi
-          cat >> release-notes.md <<'NOTE'
-
-          ## Install
-
-          The packages carry no PHP. They depend on the distribution's embed package for the
-          libphp they were linked against, which is named both in the file name and in the
-          dependency. Install them by path:
-
-              sudo apt install ./php-fpm-ng_*.deb
-              sudo apk add --allow-untrusted ./php-fpm-ng-*.apk
-
-          They are unsigned (decision on issue #223): check them against SHA256SUMS first. See
-          docs/install.md for what the packaged build supports.
-          NOTE
-          # GitHub rejects release notes over 125000 characters.
-          python3 - "$GITHUB_REF_NAME" <<'PY'
-          import sys
-          limit = 120000
-          tag = sys.argv[1]
-          text = open('release-notes.md', encoding='utf-8').read()
-          if len(text) > limit:
-              tail = ("\n\n_The notes were shortened because of the GitHub size limit. "
-                      f"See [CHANGELOG.md](https://github.com/crazy-goat/php-fpm-ng/blob/{tag}/CHANGELOG.md) "
-                      "for the full text._\n")
-              text = text[:limit - len(tail)]
-              text = text[:text.rfind('\n')] + tail
-              open('release-notes.md', 'w', encoding='utf-8').write(text)
-              print(f"::warning::Release notes truncated to {len(text)} characters")
-          PY
-
+      # --verify-tag refuses to create a tag from a release. Re-run safe: a
+      # leftover draft (an interrupted run) is completed and published, and a
+      # release that already exists gets its assets replaced.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          flags=()
-          case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
-          gh release create "$GITHUB_REF_NAME" assets/* \
-            --title "$GITHUB_REF_NAME" \
-            --notes-file release-notes.md \
-            --verify-tag \
-            "${flags[@]}"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" assets/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md --draft=false
+          else
+            flags=()
+            case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$GITHUB_REF_NAME" assets/* \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file release-notes.md \
+              --verify-tag \
+              "${flags[@]}"
+          fi

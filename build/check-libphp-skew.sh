@@ -26,7 +26,11 @@ BIN=${1:?usage: build/check-libphp-skew.sh <php-fpm-ng binary>}
 
 # -n: no ini file; -v prints the banner and exits. The notice is written by the
 # guard before main() runs, so it is on stderr whatever main() then does.
-NOTICE=$("$BIN" -n -v 2>&1 | grep 'php-fpm-ng: notice: built against PHP' || true)
+OUT=$("$BIN" -n -v 2>&1 || true)
+# No banner means the binary did not start (a FATAL from the guard, a missing
+# library): "no notice" would then say nothing about the versions.
+echo "$OUT" | grep -q '^PHP [0-9]' || { echo "check-libphp-skew.sh: FAIL: $BIN -v printed no version banner: $OUT" >&2; exit 1; }
+NOTICE=$(echo "$OUT" | grep 'php-fpm-ng: notice: built against PHP' || true)
 if [ -n "$NOTICE" ]; then
     BUILT=$(echo "$NOTICE" | sed -n 's/.*built against PHP \([^,]*\), running on libphp.*/\1/p')
     LOADED=$(echo "$NOTICE" | sed -n 's/.*running on libphp \([^ ]*\) .*/\1/p')

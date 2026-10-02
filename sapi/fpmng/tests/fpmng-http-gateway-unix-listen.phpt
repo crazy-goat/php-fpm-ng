@@ -24,6 +24,12 @@ function check(bool $condition, string $message): void
     if (!$condition) throw new RuntimeException($message);
 }
 
+/* The body may arrive chunked, so look for it rather than at the end. */
+function served(string $raw): bool
+{
+    return str_starts_with($raw, 'HTTP/1.1 200') && str_contains($raw, 'unix-ok');
+}
+
 function unixGet(string $sock, string $path): string
 {
     $fp = @stream_socket_client("unix://$sock", $errno, $error, 5);
@@ -73,14 +79,14 @@ try {
 
     for ($i = 1; $i <= 2; $i++) {
         $raw = unixGet($gwSock, '/index.php');
-        check(str_starts_with($raw, 'HTTP/1.1 200') && str_ends_with($raw, 'unix-ok'),
+        check(served($raw),
             "gateway on a unix listen, request $i: " . var_export($raw, true));
     }
     echo "gateway-unix-listen: ok\n";
 
     for ($i = 1; $i <= 2; $i++) {
         $raw = unixGet($directSock, '/index.php');
-        check(str_starts_with($raw, 'HTTP/1.1 200') && str_ends_with($raw, 'unix-ok'),
+        check(served($raw),
             "http-direct on a unix listen, request $i: " . var_export($raw, true));
     }
     echo "http-direct-unix-listen: ok\n";

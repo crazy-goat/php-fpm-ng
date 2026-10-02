@@ -504,7 +504,7 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
 EXPECT_FAIL_NAMES=
-EXPECT_TOTAL=177
+EXPECT_TOTAL=178
 
 # Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
 # alpine:edge with php85 8.5.10/8.5.11), 177 owned tests, from this script run
@@ -523,12 +523,16 @@ EXPECT_TOTAL=177
 # row is fpmng-ini-bootstrap-extension.phpt: it needs
 # TEST_FPM_EXTENSION_DIR, which build-matrix.yml sets and this gate does not.
 #
-# The apk FAIL is a real defect, pinned here by name so that the gate says
-# exactly what is wrong instead of an unexplained skip hiding it; it is
-# expected to disappear when its issue is fixed, and the gate will then ask for
-# these numbers to be lowered:
-#   - fpmng-http-route-http-direct-fail.phpt: issue #467, libevent's evhttp on
-#     musl exits 1 when getnameinfo(AF_UNIX) fails.
+# Issue #467 (musl's getnameinfo() failing for AF_UNIX, which made libevent
+# exit the process on the first unix-socket connection) was the one apk FAIL
+# above: fixed by sapi/fpmng/fpm/fpm_getnameinfo_unix.c, so the apk rows gain
+# that PASS, and the new fpmng-http-gateway-unix-listen.phpt is one more PASS
+# on every row (178 owned tests). MEASURED_467 below replaces the table.
+#
+#   deb non-TLS  PASS 163  FAIL 0  SKIP 15
+#   deb TLS      PASS 177  FAIL 0  SKIP  1
+#   apk non-TLS  PASS 161  FAIL 0  SKIP 17
+#   apk TLS      PASS 172  FAIL 0  SKIP  6
 # A first measurement also failed fpmng-config-input-descriptor.phpt, while
 # Alpine edge carried php85-dev 8.5.10 next to libphp 8.5.11 and every start
 # printed the patch-level notice (issue #557). By the release rehearsal of
@@ -564,8 +568,8 @@ EXPECT_TOTAL=177
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=176; EXPECT_SKIP=1
-    else EXPECT_PASS=162; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=177; EXPECT_SKIP=1
+    else EXPECT_PASS=163; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -598,10 +602,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_FAIL=1 # issue #467, see the measurement block above
-    EXPECT_FAIL_NAMES='fpmng-http-route-http-direct-fail.phpt'
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=170; EXPECT_SKIP=6
-    else EXPECT_PASS=159; EXPECT_SKIP=17; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=172; EXPECT_SKIP=6
+    else EXPECT_PASS=161; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -515,26 +515,24 @@ EXPECT_TOTAL=177
 #
 #   deb non-TLS  PASS 162  FAIL 0  SKIP 15
 #   deb TLS      PASS 176  FAIL 0  SKIP  1
-#   apk non-TLS  PASS 158  FAIL 2  SKIP 17
-#   apk TLS      PASS 169  FAIL 2  SKIP  6
+#   apk non-TLS  PASS 159  FAIL 1  SKIP 17
+#   apk TLS      PASS 170  FAIL 1  SKIP  6
 #
 # The +11 tests since the v0.11.0 count are the owned tests added after it
 # (the #428 ini-bootstrap pair among them). The one skip that survives on the deb TLS
 # row is fpmng-ini-bootstrap-extension.phpt: it needs
 # TEST_FPM_EXTENSION_DIR, which build-matrix.yml sets and this gate does not.
 #
-# The two apk FAILs are real defects, pinned here by name so that the gate says
-# exactly what is wrong instead of an unexplained skip hiding them; each is
+# The apk FAIL is a real defect, pinned here by name so that the gate says
+# exactly what is wrong instead of an unexplained skip hiding it; it is
 # expected to disappear when its issue is fixed, and the gate will then ask for
 # these numbers to be lowered:
 #   - fpmng-http-route-http-direct-fail.phpt: issue #467, libevent's evhttp on
-#     musl exits 1 when getnameinfo(AF_UNIX) fails;
-#   - fpmng-config-input-descriptor.phpt: issue #557, Alpine edge's php85-dev is
-#     8.5.10 and its libphp is 8.5.11, so every start prints the patch-level
-#     skew notice the test's expected output does not contain. This one can
-#     also end with no change here: once Alpine ships matching php85-dev and
-#     libphp, the test passes and a release gate fails on the stale pin, so
-#     re-measure the apk cells before tagging.
+#     musl exits 1 when getnameinfo(AF_UNIX) fails.
+# A first measurement also failed fpmng-config-input-descriptor.phpt, while
+# Alpine edge carried php85-dev 8.5.10 next to libphp 8.5.11 and every start
+# printed the patch-level notice (issue #557). By the release rehearsal of
+# 2026-10-02 both were 8.5.11 and the test passed.
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -600,11 +598,10 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    EXPECT_FAIL=2 # issues #467 and #557, see the measurement block above
-    EXPECT_FAIL_NAMES='fpmng-config-input-descriptor.phpt
-fpmng-http-route-http-direct-fail.phpt'
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=169; EXPECT_SKIP=6
-    else EXPECT_PASS=158; EXPECT_SKIP=17; fi
+    EXPECT_FAIL=1 # issue #467, see the measurement block above
+    EXPECT_FAIL_NAMES='fpmng-http-route-http-direct-fail.phpt'
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=170; EXPECT_SKIP=6
+    else EXPECT_PASS=159; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -115,7 +115,7 @@ $root = sys_get_temp_dir() . '/fpmng-retire-continuous-' . getmypid();
 @mkdir($root);
 file_put_contents($root . '/front.php', '<?php echo getmypid();');
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $port = $base + 61;
 $ops = '127.0.0.1:' . ($base + 62);
 $cfg = <<<CFG

@@ -63,7 +63,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_STREAMING_ABORT_PORT') ?: 28095);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_STREAMING_ABORT_PORT') ?: 28095 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

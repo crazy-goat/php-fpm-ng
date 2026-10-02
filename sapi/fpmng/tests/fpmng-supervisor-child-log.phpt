@@ -7,7 +7,7 @@ fpm-ng: a supervisor pool's own messages reach error_log without catch_workers_o
 
 require_once "tester.inc";
 
-$work = sys_get_temp_dir() . '/fpmng-suplog-' . getmypid();
+$work = sys_get_temp_dir() . '/fpmng-suplog-child-' . getmypid();
 @mkdir($work, 0700, true);
 
 $cleanup = function () use ($work) {
@@ -131,7 +131,7 @@ FPM\Tester::clean();
  * behind. Age, not pid: run-tests.php may be running another copy of this test
  * in parallel and its directory must not be touched. */
 $stale = time() - 300;
-foreach (glob(sys_get_temp_dir() . '/fpmng-suplog-*') as $dir) {
+foreach (glob(sys_get_temp_dir() . '/fpmng-suplog-child-*') as $dir) {
     if (@filemtime($dir) > $stale) {
         continue;
     }

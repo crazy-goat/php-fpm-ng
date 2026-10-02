@@ -30,7 +30,7 @@ $root = sys_get_temp_dir() . '/fpmng-conn-limits-' . getmypid();
 @mkdir($root);
 file_put_contents($root . '/front.php', "<?php echo 'ok';");
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $deadlinePort = $base + 18;
 $totalPort = $base + 19;
 $clientPort = $base + 20;

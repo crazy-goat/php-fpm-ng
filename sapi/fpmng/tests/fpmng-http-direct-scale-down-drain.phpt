@@ -120,7 +120,7 @@ if (isset($_GET['sleep'])) {
 echo getmypid();
 PHP);
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $port = $base + 51;
 $ops = '127.0.0.1:' . ($base + 52);
 $cfg = <<<CFG

@@ -120,7 +120,7 @@ while (!$quit && !fpmng_worker_may_exit()) {
 }
 PHP);
 
-$portA = (int) (getenv('FPMNG_DIRECT_WORKER_DRAIN_PORT') ?: 28080);
+$portA = (int) (getenv('FPMNG_DIRECT_WORKER_DRAIN_PORT') ?: 28080 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $portB = $portA + 1;
 
 function poolConfig(string $name, int $port, string $root, string $extra): string

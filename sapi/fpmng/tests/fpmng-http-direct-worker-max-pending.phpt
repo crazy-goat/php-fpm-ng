@@ -98,7 +98,7 @@ while (!fpmng_worker_may_exit() && !fpmng_worker_stopping()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_PENDING_PORT') ?: 28090);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_PENDING_PORT') ?: 28090 + 200 * (int) getenv('TEST_PHP_WORKER'));
 
 $config = <<<CFG
 [global]

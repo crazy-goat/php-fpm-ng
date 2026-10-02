@@ -52,7 +52,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_ACCEPT_THRESHOLD_PORT') ?: 28112);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_ACCEPT_THRESHOLD_PORT') ?: 28112 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

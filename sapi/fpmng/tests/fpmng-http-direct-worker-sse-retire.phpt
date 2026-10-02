@@ -96,7 +96,7 @@ while (true) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_SSE_PORT') ?: 28142);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_SSE_PORT') ?: 28142 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

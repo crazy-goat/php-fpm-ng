@@ -105,7 +105,7 @@ switch ($_GET['mode'] ?? 'plain') {
 }
 PHP);
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $streamPort = $base + 35;
 $stallPort = $base + 36;
 $respondPort = $base + 37;

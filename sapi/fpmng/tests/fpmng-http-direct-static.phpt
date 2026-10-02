@@ -29,7 +29,7 @@ $n = (int) @file_get_contents($counter) + 1;
 file_put_contents($counter, (string) $n);
 echo 'php:' . $n . ':' . $_SERVER['REQUEST_URI'];
 PHP);
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054) + 15;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 15;
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

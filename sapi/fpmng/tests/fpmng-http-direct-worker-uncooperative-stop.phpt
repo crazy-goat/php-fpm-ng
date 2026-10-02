@@ -24,7 +24,7 @@ PHP;
 $script = str_replace('PID_MARKER', $marker, $script);
 file_put_contents("$work/worker.php", $script);
 
-$port = (int) (getenv('FPMNG_WORKER_UNCOOPERATIVE_PORT') ?: 28165);
+$port = (int) (getenv('FPMNG_WORKER_UNCOOPERATIVE_PORT') ?: 28165 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $cfg = <<<EOT
 [global]
 error_log = {{FILE:LOG}}

@@ -57,7 +57,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $port = $base + 70;
 $portWorker = $base + 71;
 $cfg = <<<CFG

@@ -24,7 +24,7 @@ if (!is_file($source) || !copy($source, "$work/app.php")) {
     throw new RuntimeException("cannot copy shipped SSE example from $source");
 }
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_SSE_BACKPRESSURE_PORT') ?: 28156);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_SSE_BACKPRESSURE_PORT') ?: 28156 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

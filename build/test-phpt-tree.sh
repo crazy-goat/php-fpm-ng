@@ -95,3 +95,23 @@ for runner in run-fpmng-phpt.sh run-fpm-phpt.sh; do
     || fail "$runner: metadata.txt does not record the fixture provenance"
   echo "ok: $runner refuses a harness that would start another FPM and records the resolved binary"
 done
+
+# --- 4. a tree can be made safe for run-tests.php -j (issue #394) ------------
+P=$WORK/ptree
+"$REPO/build/phpt-tree.sh" "$P" >/dev/null
+"$REPO/build/phpt-parallel.sh" "$P" || fail "phpt-parallel.sh failed on an assembled tree"
+cp "$P/sapi/fpmng/tests/tester.inc" "$WORK/tester.once"
+cp "$P/run-tests.php" "$WORK/run-tests.once"
+"$REPO/build/phpt-parallel.sh" "$P" || fail "phpt-parallel.sh is not idempotent"
+cmp -s "$WORK/tester.once" "$P/sapi/fpmng/tests/tester.inc" && cmp -s "$WORK/run-tests.once" "$P/run-tests.php" \
+  || fail "a second phpt-parallel.sh run changed the tree"
+grep -q 'TEST_PHP_WORKER' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores TEST_PHP_WORKER"
+grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pass TEST_PHP_WORKER to the tests"
+[ ! -e "$P/sapi/fpmng/tests/CONFLICTS" ] || fail "the dir-wide CONFLICTS file is still there"
+grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"
+if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then fail "a non-gateway test got a conflict key"; fi
+# The serial run must stay what it was: worker 0 / unset allocates 9008 first.
+grep -q '9000 + PHP_INT_SIZE - 1 + \$worker \* 200' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc port base is not 9000 + PHP_INT_SIZE - 1 + 200 * worker"
+# The bundle itself is untouched.
+(cd "$REPO" && ./build/vendor-php-src.sh check >/dev/null) || fail "the pinned bundle was modified"
+echo "ok: phpt-parallel.sh is idempotent, adds worker port blocks and conflict keys, leaves the bundle alone"

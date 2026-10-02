@@ -55,7 +55,7 @@ switch ($_GET['mode'] ?? 'plain') {
 PHP);
 register_shutdown_function(static function () use ($root, $script) { @unlink($root . $script); });
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054);
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
 [$plainPort, $streamPort, $stallPort] = [$base + 12, $base + 13, $base + 14];
 $cfg = <<<CFG
 [global]

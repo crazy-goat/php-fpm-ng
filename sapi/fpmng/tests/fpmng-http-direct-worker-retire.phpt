@@ -81,7 +81,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_RETIRE_PORT') ?: 28104);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_RETIRE_PORT') ?: 28104 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

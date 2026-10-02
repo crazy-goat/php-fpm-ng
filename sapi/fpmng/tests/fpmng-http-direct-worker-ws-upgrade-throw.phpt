@@ -46,7 +46,7 @@ while (true) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_UPGRADE_THROW_PORT') ?: 28159);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_UPGRADE_THROW_PORT') ?: 28159 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

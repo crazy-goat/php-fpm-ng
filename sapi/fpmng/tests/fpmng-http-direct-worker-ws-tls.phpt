@@ -299,7 +299,7 @@ function tlsGet(int $port, string $path): string
     return $headerEnd === false ? '' : substr($response, $headerEnd + 4);
 }
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_TLS_PORT') ?: 28145);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_TLS_PORT') ?: 28145 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

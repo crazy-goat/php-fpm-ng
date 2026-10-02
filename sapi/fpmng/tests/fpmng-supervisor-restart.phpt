@@ -7,7 +7,7 @@ fpm-ng: supervisor pool respawns a script that exits (docs/NOTES.md §3o)
 
 require_once "tester.inc";
 
-$work = sys_get_temp_dir() . '/fpmng-sup-' . getmypid();
+$work = sys_get_temp_dir() . '/fpmng-sup-restart-' . getmypid();
 @mkdir($work, 0700, true);
 $runsFile = "$work/runs.log";
 @unlink($runsFile);
@@ -230,7 +230,7 @@ FPM\Tester::clean();
  * skips the cleanup in --FILE--, and these directories are named after a pid
  * this process does not know. */
 $stale = time() - 300;
-foreach (glob(sys_get_temp_dir() . '/fpmng-sup-*') as $dir) {
+foreach (glob(sys_get_temp_dir() . '/fpmng-sup-restart-*') as $dir) {
     /* Age check, not a pid check: the pid is another process's and may have
      * been recycled, and nothing here may touch the work directory of a run
      * that is still going -- run-tests.php can execute this test in parallel

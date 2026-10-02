@@ -14,7 +14,7 @@ $script = '/fpmng-http-direct-session-front-' . getmypid() . '.php';
 $sessionDir = sys_get_temp_dir() . '/fpmng-direct-session-' . getmypid();
 mkdir($sessionDir, 0700);
 file_put_contents($root . $script, '<?php $_SESSION["count"] = ($_SESSION["count"] ?? 0) + 1; echo session_id(), ":", $_SESSION["count"];');
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054) + 2;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 2;
 $statusPort = $port + 1;
 $cfg = <<<CFG
 [global]

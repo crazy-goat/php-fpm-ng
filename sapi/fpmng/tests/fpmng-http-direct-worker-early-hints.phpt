@@ -69,7 +69,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_EARLY_HINTS_PORT') ?: 28099);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_EARLY_HINTS_PORT') ?: 28099 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

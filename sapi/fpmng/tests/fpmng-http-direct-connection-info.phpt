@@ -205,7 +205,7 @@ function tlsHandshakeRejected(int $port, ?string $localCertPem, int $attempts = 
     return true;
 }
 
-$portNone = (int) (getenv('FPMNG_DIRECT_CONNINFO_PORT') ?: 28094);
+$portNone = (int) (getenv('FPMNG_DIRECT_CONNINFO_PORT') ?: 28094 + 200 * (int) getenv('TEST_PHP_WORKER'));
 $portOptional = $portNone + 1;
 $portRequire = $portNone + 2;
 $portWorker = $portNone + 3;

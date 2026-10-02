@@ -45,6 +45,10 @@ third_party/php-src/ (build/phpt-tree.sh), or a directory with run-tests.php
 and sapi/fpmng/tests/tester.inc (build/prepare.sh makes one). TEST_FPM_EXTENSION_DIR and
 TEST_FPM_RUN_AS_ROOT are passed through when set. TEST_FPM_TIMEOUT defaults to
 120 seconds because fpmng-cron-schedule.phpt may wait for the next minute tick.
+
+The tests run in parallel (run-tests.php -j, issue #394). TEST_FPM_JOBS sets the
+worker count; the default is the number of CPUs, at most 8. TEST_FPM_JOBS=1 runs
+the suite serially.
 EOF
     exit 2
 }
@@ -143,6 +147,10 @@ fi
 [ -f "$PHPSRC_INPUT/$TEST_DIR/tester.inc" ] || fail "tester.inc not found below: $PHPSRC_INPUT/$TEST_DIR"
 
 PHPSRC=$(resolve_path "$PHPSRC_INPUT") || fail "cannot resolve PHP source directory: $PHPSRC_INPUT"
+
+# Issue #394: make the tree safe for run-tests.php -j (per-worker port blocks in
+# tester.inc, no directory-wide CONFLICTS). Before anything reads tester.inc.
+"$REPO/build/phpt-parallel.sh" "$PHPSRC" >&2 || fail "cannot prepare the test tree for parallel runs"
 mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
 
@@ -319,6 +327,7 @@ write_metadata() {
         printf '%s\n' "TEST_FPM_RUN_AS_ROOT=${TEST_FPM_RUN_AS_ROOT-unset}"
         printf '%s\n' "TEST_FPM_TIMEOUT=${TEST_FPM_TIMEOUT-120}"
         printf '%s\n' "TEST_FPM_MIN_PASS=${TEST_FPM_MIN_PASS-unset}"
+        printf '%s\n' "TEST_FPM_JOBS=${TEST_FPM_JOBS-unset}"
     } > "$METADATA"
 }
 
@@ -428,16 +437,32 @@ case "$TIMEOUT" in
     0) preflight_fail 'TEST_FPM_TIMEOUT must be greater than zero' ;;
 esac
 
-# Per-test durations (--show-slow, run-tests.php:116). The suite is serial (no
-# -j: upstream's Tester::getPort() bases every instance at the same port, see
-# issue #394), so its wall clock is the sum of its tests and a handful of them
-# dominate it -- without this the log says only how long all 124 took together.
+# Per-test durations (--show-slow, run-tests.php:116). Each test is timed on its
+# own, so with -j the table still ranks tests by what they cost, but their sum is
+# no longer the suite's wall clock: a handful of tests still bound it.
 # 1000 ms rather than 0: at 0 every test is "slow" and the table stops ranking
 # anything. Set TEST_FPM_SHOW_SLOW_MS=0 to turn the table off entirely.
 SHOW_SLOW_MS=${TEST_FPM_SHOW_SLOW_MS-1000}
 case "$SHOW_SLOW_MS" in
     ''|*[!0-9]*) preflight_fail "TEST_FPM_SHOW_SLOW_MS must be a non-negative integer: $SHOW_SLOW_MS" ;;
 esac
+
+# Parallel workers (issue #394). Most of the 177 tests start a master and then
+# wait on it, so they cost wall clock, not CPU, and more workers than CPUs still
+# pay; the cap keeps a large box from loading itself into the timing tests'
+# bounds. tester.inc gives each worker its own block of ports
+# (build/phpt-fixture-patches/). 1 means serial, with no -j at all, so
+# TEST_PHP_WORKER stays unset and the ports are the upstream ones.
+JOBS=${TEST_FPM_JOBS-}
+if [ -z "$JOBS" ]; then
+    JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    [ "$JOBS" -le 8 ] 2>/dev/null || JOBS=8
+fi
+case "$JOBS" in
+    ''|*[!0-9]*|0) preflight_fail "TEST_FPM_JOBS must be a positive integer: $JOBS" ;;
+esac
+JOBS_ARGS=
+[ "$JOBS" -gt 1 ] && JOBS_ARGS="-j$JOBS"
 
 # The floor on PASS, and why this runner needs one at all.
 #
@@ -495,7 +520,7 @@ printf '%s\n' "Binary: $FPM_BIN" >&2
 TEST_FILES=$(tr '\n' ' ' < "$SELECTED")
 
 set +e
-# $SHOW_SLOW_ARGS and $TEST_FILES are both meant to word-split into separate
+# $SHOW_SLOW_ARGS, $JOBS_ARGS and $TEST_FILES are all meant to word-split into separate
 # argv entries, which is what SC2086 would otherwise stop. (The reason is on
 # its own line: shellcheck does not parse a "disable=CODE -- reason" directive,
 # which is where this repository's six existing SC1072/SC1073 errors come from.)
@@ -515,6 +540,7 @@ set +e
         -w "$FAILED" \
         -s "$OUTPUT_LOG" \
         $SHOW_SLOW_ARGS \
+        $JOBS_ARGS \
         $TEST_FILES
 ) > "$RUN_LOG" 2>&1
 RUN_STATUS=$?

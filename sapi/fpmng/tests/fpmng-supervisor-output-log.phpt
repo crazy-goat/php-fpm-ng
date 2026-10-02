@@ -9,7 +9,7 @@ that directive is also set (issue #328)
 
 require_once "tester.inc";
 
-$work = sys_get_temp_dir() . '/fpmng-suplog-' . getmypid();
+$work = sys_get_temp_dir() . '/fpmng-suplog-output-' . getmypid();
 @mkdir($work, 0700, true);
 $outputLog = "$work/output.log";
 @unlink($outputLog);
@@ -110,7 +110,7 @@ Done
 require_once "tester.inc";
 FPM\Tester::clean();
 $stale = time() - 300;
-foreach (glob(sys_get_temp_dir() . '/fpmng-suplog-*') as $dir) {
+foreach (glob(sys_get_temp_dir() . '/fpmng-suplog-output-*') as $dir) {
     if (@filemtime($dir) > $stale) {
         continue;
     }

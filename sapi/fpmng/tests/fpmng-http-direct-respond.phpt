@@ -120,7 +120,7 @@ function fetch(string $addr, string $case): array
     return [$status, $body, $ms];
 }
 
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054) + 13;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 13;
 $streamPort = $port + 1;
 $cfg = <<<CFG
 [global]

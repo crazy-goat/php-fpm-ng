@@ -136,8 +136,8 @@ foreach (['fd:2', 'fd:x', 'fd:', 'fd:3x'] as $spec) {
     check($st !== 0, "$spec was accepted");
     echo $out[0], "\n";
 }
-[$st, $out] = run($binary, ['-t', '-y', 'fd:9'], null);
-check($st !== 0 && str_contains(implode("\n", $out), "'fd:9'"), 'a closed descriptor was accepted or unnamed');
+[$st, $out] = run($binary, ['-t', '-y', 'fd:99'], null);
+check($st !== 0 && str_contains(implode("\n", $out), "'fd:99'"), 'a closed descriptor was accepted or unnamed');
 echo "closed descriptor: refused, named\n";
 
 echo "Done\n";

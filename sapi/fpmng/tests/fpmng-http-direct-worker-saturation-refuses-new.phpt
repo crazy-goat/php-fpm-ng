@@ -100,7 +100,7 @@ while (!fpmng_worker_may_exit() && !fpmng_worker_stopping()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_SATURATION_NEW_PORT') ?: 28101);
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_SATURATION_NEW_PORT') ?: 28101 + 200 * (int) getenv('TEST_PHP_WORKER'));
 
 $config = <<<CFG
 [global]

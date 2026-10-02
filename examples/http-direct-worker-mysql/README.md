@@ -33,7 +33,7 @@ The static musl artefact this example used to be built from was retired.
 **Not re-verified after the cutover:** the runtime stage is still
 `debian:bookworm-slim`, which has no PHP 8.5 `libphp`, so the image needs a
 base that does (Ubuntu 26.04 plus `libphp8.5-embed`) before a dynamic binary
-runs in it. This is tracked as a follow-up rather than guessed at here.
+runs in it. This is tracked as issue #564 rather than guessed at here.
 
 ```sh
 cp /usr/sbin/php-fpm-ng examples/http-direct-worker-mysql/php-fpm-ng

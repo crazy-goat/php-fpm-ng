@@ -54,12 +54,13 @@ RUN apt-get update -qq \
 
 FROM ubuntu:26.04 AS deb-test
 ENV DEBIAN_FRONTEND=noninteractive
-# Test rig only. binutils is strings(1); php8.5-cli runs run-tests.php; openssl
+# Test rig only. binutils is strings(1); patch applies build/phpt-parallel.sh's
+# fixture patches (issue #394); php8.5-cli runs run-tests.php; openssl
 # is here for /usr/lib/ssl/openssl.cnf, without which openssl_pkey_new() fails
 # and the three ACME tests fail for a reason that has nothing to do with the
-# package. None of the three is a dependency of what we ship -- see the header.
+# package. None of the four is a dependency of what we ship -- see the header.
 RUN apt-get update -qq \
-    && apt-get install -y -qq binutils php8.5-cli openssl \
+    && apt-get install -y -qq binutils patch php8.5-cli openssl \
     && rm -rf /var/lib/apt/lists/*
 # The gate asserts this image has no compiler before it installs anything. The
 # assertion is in build/ci-package-gate.sh, where it runs against whatever image
@@ -76,4 +77,4 @@ RUN apk add --no-cache alpine-sdk php85-dev php85-embed \
 
 FROM alpine:edge AS apk-test
 # Test rig only; php85-embed, the package's own dependency, is deliberately absent.
-RUN apk add --no-cache binutils php85 php85-openssl openssl
+RUN apk add --no-cache binutils patch php85 php85-openssl openssl

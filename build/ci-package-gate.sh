@@ -531,7 +531,10 @@ EXPECT_TOTAL=177
 #     musl exits 1 when getnameinfo(AF_UNIX) fails;
 #   - fpmng-config-input-descriptor.phpt: issue #557, Alpine edge's php85-dev is
 #     8.5.10 and its libphp is 8.5.11, so every start prints the patch-level
-#     skew notice the test's expected output does not contain.
+#     skew notice the test's expected output does not contain. This one can
+#     also end with no change here: once Alpine ships matching php85-dev and
+#     libphp, the test passes and a release gate fails on the stale pin, so
+#     re-measure the apk cells before tagging.
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -739,13 +742,14 @@ deb)
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 # binutils is strings(1), which build/run-fpmng-phpt.sh uses to identify the
-# binary under test; php8.5-cli is the harness that runs run-tests.php; openssl
+# binary under test; patch(1) is what build/phpt-parallel.sh applies its
+# fixture patches with (issue #394); php8.5-cli is the harness that runs run-tests.php; openssl
 # is not the library (that comes with the CLI) but its configuration file --
 # without /usr/lib/ssl/openssl.cnf openssl_pkey_new() fails with a bare
 # "No such file or directory" and the three ACME tests fail for a reason that
-# has nothing to do with the package. None of the three is a dependency of what
+# has nothing to do with the package. None of the four is a dependency of what
 # we ship: they belong to the test rig, and naming them here keeps that visible.
-apt-get install -y -qq binutils php8.5-cli openssl >/dev/null
+apt-get install -y -qq binutils patch php8.5-cli openssl >/dev/null
 apt-get install -y -qq "$(find /out -maxdepth 1 -name "${PKGNAME}_*.deb" ! -name 'wrong-minor*' | head -1)"
 dpkg -s "$PKGNAME" | grep -E '^(Package|Version|Depends|Conflicts|Replaces|Provides):'
 ldd /usr/sbin/php-fpm-ng | grep libphp
@@ -768,9 +772,9 @@ EOF
     ;;
 apk)
     cat >> "$OUT/stage2.sh" <<'EOF'
-# See the Debian branch: binutils and the CLI are the test rig, not package
+# See the Debian branch: binutils, patch and the CLI are the test rig, not package
 # dependencies.
-apk add --no-cache binutils php85 php85-openssl openssl >/dev/null
+apk add --no-cache binutils patch php85 php85-openssl openssl >/dev/null
 apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
 apk info -d "$PKGNAME"
 ldd /usr/sbin/php-fpm-ng | grep libphp

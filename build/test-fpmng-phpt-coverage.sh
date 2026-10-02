@@ -32,6 +32,10 @@ EXCLUDE=$TESTS/not-run-in-ci.list
 mkdir -p "$FAKE/build" "$TESTS"
 cp "$RUNNER" "$FAKE/build/run-fpmng-phpt.sh"
 chmod +x "$FAKE/build/run-fpmng-phpt.sh"
+# The runner prepares its tree for -j first (issue #394); that step has its own
+# check in test-phpt-tree.sh, and the empty stand-in tree here is not patchable.
+printf '#!/bin/sh\nexit 0\n' > "$FAKE/build/phpt-parallel.sh"
+chmod +x "$FAKE/build/phpt-parallel.sh"
 
 # The prepared tree is the same directory: prepare.sh overlays our tests onto
 # the copied upstream ones, so the runner sees the same file names there.

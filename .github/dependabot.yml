@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "ci(deps)"
+  # The scratch image and the package-gate images. Not covered, on purpose:
+  # examples/ (runnable demos) and tests/frameworks/ (probe harnesses whose
+  # framework versions are pinned by the tests that use them).
+  - package-ecosystem: docker
+    directories:
+      - "/docker"
+      - "/.github/docker"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
+    commit-message:
+      prefix: "chore(deps)"

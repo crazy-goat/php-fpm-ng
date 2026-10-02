@@ -23,8 +23,8 @@ That file has two parts:
   they stay diffable against upstream (`build/prepare.sh` diffs them against
   the originals);
 - legacy files that would be reflowed in a large way. Shrink that part, never
-  grow it; a new file must pass the check. A reformat of a legacy file is its
-  own commit, listed in `.git-blame-ignore-revs`.
+  grow it; a new file must pass the check. Reformat a legacy file in a commit of
+  its own, so the whitespace-only change is easy to review.
 
 ## clang-tidy: chosen subset
 

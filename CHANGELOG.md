@@ -21,7 +21,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 - License: own code is MIT (Crazy Goat Software); code taken from or patching php-src stays under the PHP License 3.01.
 - The development process lives in `docs/workflow.md`; project specifics moved to `AGENTS.md`.
 - Releases are published with `gh release create --verify-tag` and use the matching section of this file as notes.
-- Own C sources are formatted with clang-format 23 (whitespace only); the remaining files are listed in `build/clang-format-legacy.txt`.
+- Own C sources are formatted with clang-format 23 (whitespace only); the remaining files are listed in `build/clang-format-exclude.txt`.
 
 ### Removed
 - `build/gh-release-create.sh`, replaced by `gh release create` in `release.yml`.

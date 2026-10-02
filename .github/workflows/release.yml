@@ -179,15 +179,19 @@ jobs:
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
       # --verify-tag refuses to create a tag from a release. Re-run safe: a
-      # leftover draft (an interrupted run) is completed and published, and a
-      # release that already exists gets its assets replaced.
+      # leftover draft (an interrupted run) is completed and published. A
+      # published release is never touched: fix forward with a new tag.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then
+            if [ "$draft" != true ]; then
+              echo "::error::release $GITHUB_REF_NAME is already published; fix forward with a new tag"
+              exit 1
+            fi
             gh release upload "$GITHUB_REF_NAME" assets/* --clobber
             gh release edit "$GITHUB_REF_NAME" --notes-file release-notes.md --draft=false
           else

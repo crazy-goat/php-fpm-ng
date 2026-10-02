@@ -339,8 +339,9 @@ write_counts() {
             printf "FAIL/ERROR=%d\n", count["FAIL/ERROR"] + 0
             printf "SKIP=%d\n", count["SKIP"] + 0
             printf "WARN=%d\n", count["WARN"] + 0
+            printf "XFAIL=%d\n", count["XFAIL"] + 0
             printf "NOT MEASURED=%d\n", count["NOT MEASURED"] + 0
-            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["NOT MEASURED"]) + 0
+            printf "TOTAL=%d\n", (count["PASS"] + count["FAIL/ERROR"] + count["SKIP"] + count["WARN"] + count["XFAIL"] + count["NOT MEASURED"]) + 0
         }
     ' "$RESULTS"
 }
@@ -575,6 +576,14 @@ set -e
                 category = "SKIP"
             } else if (raw == "WARNED") {
                 category = "WARN"
+            } else if (raw == "XFAILED") {
+                # A known defect, reproduced by a test that carries an --XFAIL--
+                # section naming its issue (#384 -> #537). Its own bucket: not a
+                # pass (it does not count toward the floor below), not a failure
+                # (it must not fail the job). If the defect is fixed the test
+                # passes, run-tests.php reports WARNED, and a gate that pins the
+                # XFAIL count sees it drop.
+                category = "XFAIL"
             } else if (raw == "") {
                 raw = "NOT_MEASURED"
                 category = "NOT MEASURED"

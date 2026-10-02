@@ -561,6 +561,15 @@ set -e
             }
             return path
         }
+        function has_xfail(rel,    path, line, found) {
+            path = source_root "/" rel
+            found = 0
+            while ((getline line < path) > 0) {
+                if (line == "--XFAIL--") { found = 1; break }
+            }
+            close(path)
+            return found
+        }
         FILENAME == status_file {
             if (NF >= 2) {
                 status[normalize($2)] = $1
@@ -574,6 +583,13 @@ set -e
                 category = "PASS"
             } else if (raw == "SKIPPED") {
                 category = "SKIP"
+            } else if (raw == "WARNED" && has_xfail($0)) {
+                # run-tests.php reports an --XFAIL-- test that PASSES as WARNED,
+                # exactly like a test that passed on retry, and exits 0. That is
+                # the defect being fixed with the section left behind, so it is
+                # a failure here: delete the section.
+                raw = "XPASS"
+                category = "FAIL/ERROR"
             } else if (raw == "WARNED") {
                 category = "WARN"
             } else if (raw == "XFAILED") {
@@ -581,8 +597,7 @@ set -e
                 # section naming its issue (#384 -> #537). Its own bucket: not a
                 # pass (it does not count toward the floor below), not a failure
                 # (it must not fail the job). If the defect is fixed the test
-                # passes, run-tests.php reports WARNED, and a gate that pins the
-                # XFAIL count sees it drop.
+                # passes and is reported as XPASS below, which does fail it.
                 category = "XFAIL"
             } else if (raw == "") {
                 raw = "NOT_MEASURED"
@@ -693,6 +708,12 @@ fi
 # durations are exactly what someone debugging this failure needs to see.
 if [ -n "$LOW_PASS" ]; then
     printf '%s\n' "run-fpmng-phpt.sh: $LOW_PASS" >&2
+    [ "$RUN_STATUS" -ne 0 ] || RUN_STATUS=1
+fi
+XPASS_NAMES=$(awk -F '\t' 'NR > 1 && $3 == "XPASS" {print $1}' "$RESULTS")
+if [ -n "$XPASS_NAMES" ]; then
+    printf '%s\n' "run-fpmng-phpt.sh: expected-failure test(s) passed; the defect is fixed, delete the --XFAIL-- section:" >&2
+    printf '  %s\n' $XPASS_NAMES >&2
     [ "$RUN_STATUS" -ne 0 ] || RUN_STATUS=1
 fi
 

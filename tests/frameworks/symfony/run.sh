@@ -165,6 +165,7 @@ stop_pid() {
     [[ -n $pid ]] || return 0
     if kill -0 "$pid" >/dev/null 2>&1; then
         kill -TERM "$pid" >/dev/null 2>&1 || true
+        # shellcheck disable=SC2034 # loop counter: only the number of retries matters
         for attempt in {1..50}; do
             kill -0 "$pid" >/dev/null 2>&1 || break
             sleep 0.1
@@ -308,6 +309,7 @@ start_fpm() {
 wait_for_port() {
     local port=$1
     local attempt
+    # shellcheck disable=SC2034 # loop counter: only the number of retries matters
     for attempt in {1..300}; do
         if nc -z 127.0.0.1 "$port" >/dev/null 2>&1; then
             return 0
@@ -322,6 +324,7 @@ wait_for_port() {
 
 wait_for_health() {
     local attempt
+    # shellcheck disable=SC2034 # loop counter: only the number of retries matters
     for attempt in {1..100}; do
         if curl --silent --show-error --connect-timeout 1 --max-time 2 "$BASE_URL/health" \
             >/dev/null 2>&1; then
@@ -375,6 +378,7 @@ wait_for_gate_ready() {
     local length
     local attempt
     GATE_LAST_STATE="unknown"
+    # shellcheck disable=SC2034 # loop counter: only the number of retries matters
     for attempt in {1..900}; do
         if length=$(redis_cli llen "$GATE_READY_KEY" 2>/dev/null); then
             GATE_LAST_STATE="llen=$length"
@@ -737,6 +741,7 @@ setup_services() {
         MYSQL_ADMIN_PASSWORD=$MYSQL_ROOT_PASSWORD
         MYSQL_APP_USER=root
         MYSQL_APP_PASSWORD=$MYSQL_ROOT_PASSWORD
+        # shellcheck disable=SC2034 # loop counter: only the number of retries matters
         for attempt in {1..90}; do
             if "${COMPOSE[@]}" exec -T mysql mysqladmin ping --protocol=tcp -h 127.0.0.1 \
                 -uroot -p"$MYSQL_ROOT_PASSWORD" >/dev/null 2>&1 \
@@ -855,7 +860,8 @@ run_suite() {
     CURRENT_ENV=$environment
     mkdir -p "$ACTIVE_RESULT_ROOT"
     export APP_ENV=$environment
-    export APP_DEBUG=$([ "$environment" = prod ] && echo 0 || echo 1)
+    APP_DEBUG=$([ "$environment" = prod ] && echo 0 || echo 1)
+    export APP_DEBUG
     if ! start_pool "$children"; then
         local name
         for name in mix session stateful-auth object-identity; do

@@ -29,7 +29,7 @@ set -eu
 
 BIN=${1:?usage: embed-payload.sh <binary> <php-interpreter>}
 PHP=${2:?usage: embed-payload.sh <binary> <php-interpreter>}
-REPO=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+REPO=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 DIR=$REPO/sapi/fpmng/acme
 PREFIX=acme
 

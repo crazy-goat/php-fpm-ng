@@ -109,6 +109,7 @@ setup_services() {
         DOCKER_STARTED=1
         local attempt
         local ready=0
+        # shellcheck disable=SC2034 # loop counter: only the number of retries matters
         for attempt in $(seq 1 90); do
             if "${COMPOSE[@]}" exec -T mysql mysqladmin ping --protocol=tcp -h 127.0.0.1 \
                 -uroot -p"$MYSQL_ROOT_PASSWORD" >/dev/null 2>&1 \

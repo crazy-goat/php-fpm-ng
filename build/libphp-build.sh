@@ -389,7 +389,7 @@ done
 # searched for rather than assumed: Ubuntu ships /usr/lib/libphp8.5.so, Alpine
 # ships /usr/lib/php85/libphp.so. Hard-coding either one produces "cannot find
 # -lphp8.5" on the other.
-LIBPHP_DIR= LIBPHP_NAME=
+LIBPHP_DIR='' LIBPHP_NAME=''
 for dir in "$(dirname "$("$PHP_CONFIG" --extension-dir)")" "$("$PHP_CONFIG" --prefix)/lib" /usr/lib /usr/lib64; do
   for name in "php$PHP_MM" php; do
     if [ -e "$dir/lib$name.so" ]; then LIBPHP_DIR=$dir; LIBPHP_NAME=$name; break 2; fi

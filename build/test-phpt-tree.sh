@@ -31,7 +31,7 @@ for f in run-tests.php FIXTURES ext/standard/tests/misc/browscap.ini \
   [ -f "$T/$f" ] || fail "assembled tree lacks $f"
 done
 want=$(awk -F '\t' '$1 ~ /^sapi\/fpm\/tests\/.*\.phpt$/' "$REPO/third_party/php-src/MANIFEST" | wc -l | tr -d ' ')
-got=$(cd "$T/sapi/fpmng/tests" && ls | grep -v '^fpmng-' | grep -c '\.phpt$' || true)
+got=$(cd "$T/sapi/fpmng/tests" && find . -maxdepth 1 -name '*.phpt' ! -name 'fpmng-*' | grep -c . || true)
 [ "$want" = "$got" ] || fail "tree has $got upstream .phpt files, the manifest lists $want"
 grep -qx 'upstream_tag=php-8.5.9' "$T/FIXTURES" || fail "FIXTURES does not name the pinned tag"
 # What a prepared tree would hold and this one must not: any php-src source.

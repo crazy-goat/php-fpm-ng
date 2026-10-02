@@ -11,21 +11,42 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-10-02
+
 ### Added
+- `third_party/php-src/`: the bounded php-src subset the SAPI compiles (pinned to php-8.5.9), with a `MANIFEST` and `build/vendor-php-src.sh check` in CI (#421, #536).
+- `fpm.conf` can be parsed from memory, diagnostics name the configuration input, and the php.ini bootstrap policy is pinned by tests (#428).
+- The fpmng `.phpt` suite runs in parallel with `run-tests.php -j` (#394).
+- A selective-reload metrics test, landed as an expected failure for #537 (#384).
 - `bin/lint.sh` runs clang-tidy, clang-format, shellcheck and hadolint; CI runs it as the `lint` job (#571).
 - `CHANGELOG.md`, `AGENTS.md`, `docs/release-workflow.md`, `.github/dependabot.yml` and the organization's `bin/` worktree scripts.
 - CI: `changes`, `docs` and `ci-ok` jobs; the build workflow now also runs on push to `main`.
 - A registration stub `async-sync.yml` on `main`, so the weekly `async-sync-trigger` dispatch resolves (#528).
 
 ### Changed
+- Main, CI and the packages build with `build/libphp-build.sh` against a distribution PHP 8.5 SDK, without a php-src tree or `build/prepare.sh` (#418, #422, #424). Other PHP minor versions are refused up front.
+- The FPM regression tests run from a bounded fixture bundle and the packaged PHP, without a php-src checkout (#423).
+- The package gate refuses a build/test PHP patch-level skew up front; the apk SDK is upgraded (#557). Its expected counts are re-measured (#555); it now runs 179 owned tests.
+- `examples/http-direct-worker-mysql` runs on `ubuntu:26.04` with `libphp8.5-embed` (#564).
 - License: own code is MIT (Crazy Goat Software); code taken from or patching php-src stays under the PHP License 3.01.
 - The development process lives in `docs/workflow.md`; project specifics moved to `AGENTS.md`.
 - Releases are published with `gh release create --verify-tag` and use the matching section of this file as notes.
 - Own C sources are formatted with clang-format 23 (whitespace only); the remaining files are listed in `build/clang-format-exclude.txt`.
 
 ### Removed
+- The static musl build and its CI job, the `patches` CI job, `build/static-full.sh`, `build/ci-build-tree.sh` and the `php-fpm-ng-ci` image (#424).
 - `build/gh-release-create.sh`, replaced by `gh release create` in `release.yml`.
 - The local issue templates, in favour of the organization's.
+- The vendored upstream `browscap.ini`, replaced by a minimal self-written fixture (#559).
+
+### Fixed
+- `http.route[]` HTTP transport: hostile upstream framing is rejected with a log line and requests are forwarded in origin-form (#462); the true errno is logged for an oversize head, and a half head plus EOF is logged (#463); bytes after a completed response are logged and end the connection (#464); a forwarded header block over the target's bound is refused (#466).
+- Gateway: an unreachable route target answers 502 with the connect error instead of a pool-full 503 (#465).
+- http-direct on a UNIX listener no longer exits on the first connection on musl, and its failure-matrix test runs without ext/posix (#467).
+- Worker: a closed upgraded stream releases its connection, so fds no longer accumulate (#472).
+- `fpm_payload_dist.c` compiles against the php-src PHP-8.6/master stream error API (#435).
+- libphp build: no SIGSEGV with `opcache.enable=0` on a libphp with OPcache compiled in (#558).
+- phpt: a port collision now fails the test instead of passing as WARN on retry (#562).
 
 ## [0.11.1] - 2026-09-30
 
@@ -102,7 +123,8 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223).
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.11.1...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.10.0...v0.11.1
 [0.10.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.8.0...v0.9.0

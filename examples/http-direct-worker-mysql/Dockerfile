@@ -20,12 +20,18 @@ WORKDIR /build
 COPY ${APP_DIR}/composer.json ${APP_DIR}/composer.lock ./
 RUN composer install --no-dev --no-interaction --no-progress --optimize-autoloader
 
-FROM debian:bookworm-slim
+# ubuntu:26.04, not debian: php-fpm-ng links the distribution's libphp (#419),
+# and Debian bookworm has no PHP 8.5 libphp. The binary has to be built on this
+# same distribution release (see the README), because libphp8.5-embed is the
+# very library it was linked against.
+FROM ubuntu:26.04
 ARG APP_DIR
-# A dynamically linked php-fpm-ng needs these shared libraries (it also needs
-# the libphp it was built against; see the example README).
+ENV DEBIAN_FRONTEND=noninteractive
+# libphp8.5-embed brings the PHP it runs on (openssl, filter and ctype
+# included, which amphp needs); libevent is the one library build/libphp-build.sh
+# links besides libphp (objdump -p: NEEDED libevent-2.1.so.7).
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends libevent-2.1-7 libssl3 ca-certificates \
+	&& apt-get install -y --no-install-recommends libphp8.5-embed libevent-2.1-7t64 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY ${APP_DIR}/php-fpm-ng /usr/local/bin/php-fpm-ng
 # *.php rather than app.php: task 075's application ships its own classes

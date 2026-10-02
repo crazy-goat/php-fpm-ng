@@ -24,19 +24,23 @@ inside a single PHP process.
 ## Running it
 
 You need Docker and an **already built** `php-fpm-ng`. Nothing else on the
-host: Composer runs inside the image, because the binary has no phar.
+host: no PHP, no `composer install`. Composer runs inside the image.
 
-Since #424 `main` builds a dynamically linked binary against the distribution's
-PHP 8.5 SDK (`build/libphp-build.sh`, or the installed `php-fpm-ng` package).
-The static musl artefact this example used to be built from was retired.
-
-**Not re-verified after the cutover:** the runtime stage is still
-`debian:bookworm-slim`, which has no PHP 8.5 `libphp`, so the image needs a
-base that does (Ubuntu 26.04 plus `libphp8.5-embed`) before a dynamic binary
-runs in it. This is tracked as issue #564 rather than guessed at here.
+The image is `ubuntu:26.04` with the distribution's `libphp8.5-embed`, because
+`php-fpm-ng` links the distribution's libphp (#419) and Debian bookworm has no
+PHP 8.5. The binary must therefore be built on Ubuntu 26.04 as well: the image
+runs it against the very libphp it was linked with. `build/libphp-build.sh`
+needs no php-src, so a throwaway container is enough:
 
 ```sh
-cp /usr/sbin/php-fpm-ng examples/http-direct-worker-mysql/php-fpm-ng
+mkdir -p out-libphp
+docker run --rm -v "$PWD:/repo:ro" -v "$PWD/out-libphp:/out" ubuntu:26.04 sh -c '
+  apt-get update -qq &&
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq build-essential binutils \
+    php8.5-dev libphp8.5-embed libevent-dev libacl1-dev &&
+  sh /repo/build/libphp-build.sh /out'
+
+cp out-libphp/php-fpm-ng examples/http-direct-worker-mysql/php-fpm-ng
 
 cd examples/http-direct-worker-mysql
 docker compose up --build --wait

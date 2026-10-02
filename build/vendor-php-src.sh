@@ -14,7 +14,7 @@
 #
 # The same mechanism holds the test fixtures (issue #423): upstream's
 # run-tests.php, the FPM test harness and the retained upstream FPM .phpt
-# suite, and one data file, so that the .phpt runners need no php-src checkout
+# suite, so that the .phpt runners need no php-src checkout
 # either. They are listed in the same manifest, under the same rules; the build
 # never reads them (README.md has the list and the reason for each).
 #

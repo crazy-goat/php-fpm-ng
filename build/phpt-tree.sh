@@ -14,7 +14,8 @@
 #   <outdir>/sapi/fpmng/acme/                     what fpmng-acme-*.phpt require
 #                                                 by relative path
 #   <outdir>/ext/standard/tests/misc/browscap.ini what gh12621.phpt reads by
-#                                                 relative path
+#                                                 relative path (our own
+#                                                 sapi/fpmng/fixtures/browscap.ini)
 #   <outdir>/FIXTURES                             provenance of the above
 #
 # It is the layout build/prepare.sh leaves behind for the test side -- the
@@ -46,9 +47,10 @@ fail() { echo "phpt-tree.sh: FAIL: $*" >&2; exit 1; }
 # edited in place or is out of step with patches/. Same check CI runs.
 "$REPO/build/vendor-php-src.sh" check >/dev/null || fail "third_party/php-src does not match its manifest; run build/vendor-php-src.sh check"
 
-for f in run-tests.php sapi/fpm/tests/tester.inc ext/standard/tests/misc/browscap.ini; do
+for f in run-tests.php sapi/fpm/tests/tester.inc; do
   [ -f "$TP/$f" ] || fail "third_party/php-src/$f is missing"
 done
+[ -f "$REPO/sapi/fpmng/fixtures/browscap.ini" ] || fail "sapi/fpmng/fixtures/browscap.ini is missing"
 [ -d "$REPO/sapi/fpmng/acme" ] || fail "sapi/fpmng/acme is missing"
 
 mkdir -p "$OUT"
@@ -61,7 +63,7 @@ cp -R "$TP/sapi/fpm/tests" "$OUT/sapi/fpmng/tests"
 # today: upstream's names carry no fpmng- prefix and the runners rely on that.
 cp -R "$REPO/sapi/fpmng/tests/." "$OUT/sapi/fpmng/tests/"
 cp -R "$REPO/sapi/fpmng/acme" "$OUT/sapi/fpmng/acme"
-cp "$TP/ext/standard/tests/misc/browscap.ini" "$OUT/ext/standard/tests/misc/browscap.ini"
+cp "$REPO/sapi/fpmng/fixtures/browscap.ini" "$OUT/ext/standard/tests/misc/browscap.ini"
 
 manifest_sha=$(if command -v sha256sum >/dev/null 2>&1; then sha256sum "$TP/MANIFEST"; else shasum -a 256 "$TP/MANIFEST"; fi | awk '{print $1}')
 commit=$(git -C "$REPO" rev-parse --verify -q HEAD 2>/dev/null) || commit=unknown

@@ -33,7 +33,7 @@ TEST_FPM_TIMEOUT=120 \
 The tree is assembled by `build/phpt-tree.sh` from `third_party/php-src/`,
 `sapi/fpmng/tests/` and `sapi/fpmng/acme/`, and removed when the run ends. It
 carries `run-tests.php`, upstream's harness (`tester.inc` and friends) and
-`browscap.ini`, which is what the suite reads outside this repository.
+`browscap.ini` (our own minimal fixture, `sapi/fpmng/fixtures/browscap.ini`), which is what the suite reads outside this repository.
 Tests that run checked-in examples find them through the repository the runner
 sits in (`FPMNG_TEST_REPO_ROOT`), so run the script from a checkout of this
 repository. `build/ci-package-gate.sh` stages the same tree for its install

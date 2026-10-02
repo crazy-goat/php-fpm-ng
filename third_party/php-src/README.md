@@ -115,10 +115,10 @@ place of the tree to do that themselves.
 | `sapi/fpm/tests/tester.inc`, `fcgi.inc`, `logreader.inc`, `logtool.inc`, `response.inc`, `skipif.inc`, `status.inc` | The FPM test harness. Our own `fpmng-*.phpt` use it as well (`require_once "tester.inc"`, `include "skipif.inc"`), so it is part of the owned suite's dependency closure, not only upstream's. |
 | `sapi/fpm/tests/*.phpt`, 141 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
 | `sapi/fpm/tests/CONFLICTS` | Read by `run-tests.php` when it runs in parallel (`-j`, issue #394); inert for a serial run, kept because it belongs to the directory. |
-| `ext/standard/tests/misc/browscap.ini` | `gh12621.phpt` sets `browscap` to `__DIR__/../../../ext/standard/tests/misc/browscap.ini`, so the test needs it at that relative path. 296 KB, the largest file here, for one test. |
+| `ext/standard/tests/misc/browscap.ini` (not vendored) | `gh12621.phpt` sets `browscap` to `__DIR__/../../../ext/standard/tests/misc/browscap.ini`, so the test needs a file at that relative path. `build/phpt-tree.sh` writes this repository's own `sapi/fpmng/fixtures/browscap.ini` there (issue #559); see below. |
 
 The fixtures are stored at their upstream paths and are not edited, like every
-other file here. `vendor-php-src.sh check` and `import` treat them like the
+other file here, with one exception: the browscap data file is not vendored. `vendor-php-src.sh check` and `import` treat them like the
 build files. Only the harness side matters for the closure: the runners never
 read a php-src header or source file.
 
@@ -131,11 +131,13 @@ The licenses of the fixtures, inventoried from the headers of each file:
   php-src, so `LICENSE` (PHP License 3.01) is the license that applies.
 - `fcgi.inc`: MIT license, "This file is part of PHP-FastCGI-Client" by
   Pierrick Charron. The notice is in the file.
-- `browscap.ini`: no license text. The header says "Provided courtesy of
-  http://browsers.garykeith.com", version 4091 of 2008-08-27. php-src has
-  shipped it unchanged under `ext/standard/tests/`, and it is test data that no
-  package installs. The terms of the original source are not stated in the
-  file, and this inventory does not establish them.
+- `browscap.ini`: not vendored. php-src's copy (296 KB, from Gary Keith's
+  browscap project, 2008) states no license terms, so it is replaced by a
+  minimal file written for this repository, `sapi/fpmng/fixtures/browscap.ini`
+  (issue #559). This is the one place where the test tree is not a byte-exact
+  upstream subset. `gh12621.phpt` is unchanged and still passes the file through
+  `php_admin_value[browscap]`; it only needs a section that matches
+  `Konqueror/2.0`.
 
 None of these files is compiled, linked, packaged or installed. The deb and apk
 packages ship `php-fpm-ng`, its configuration and its service file only.

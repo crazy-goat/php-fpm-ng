@@ -54,7 +54,9 @@ OTHER_MINOR_ID=$((MAJOR * 10000 + (MINOR - 1) * 100 + PATCH))
 if [ "$PATCH" = 0 ]; then OTHER_PATCH=1; else OTHER_PATCH=$((PATCH - 1)); fi
 OTHER_PATCH_ID=$((MAJOR * 10000 + MINOR * 100 + OTHER_PATCH))
 
-printf 'int main(void) { return 42; }\n' > "$WORK/main.c"
+# The banner line stands in for `php-fpm-ng -v`, which build/check-libphp-skew.sh
+# insists on seeing before it believes that nothing was printed (issue #557).
+printf '#include <stdio.h>\nint main(void) { puts("PHP 0.0.0 (stub)"); return 42; }\n' > "$WORK/main.c"
 "$CC" -c "$WORK/main.c" -o "$WORK/main.o"
 
 # build <name> [-D...]: the guard object plus main, linked like the server is.

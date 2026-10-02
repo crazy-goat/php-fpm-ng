@@ -26,6 +26,11 @@ on:
     # landing mid-week.
     - cron: "41 4 * * 0"
   workflow_dispatch:
+    inputs:
+      allow_deletions:
+        description: "Paths the merge from main may delete from async (issue #520), whitespace-separated. Only for a run whose deletion report you have reviewed."
+        required: false
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}
@@ -70,21 +75,35 @@ jobs:
           git config user.name "php-fpm-ng-bot"
           git config user.email "actions@users.noreply.github.com"
 
-      - name: fetch main
-        run: git fetch origin main
-
-      - name: merge origin/main into async
+      # Issue #520: fetch, merge, refuse a merge that deletes async paths,
+      # and push the scratch ref only when none of that went wrong -- all in
+      # one script, so build/test-async-sync-guard.sh tests exactly this
+      # step. A clean `git merge` is not enough on its own: main's #373 cut
+      # merged into async cleanly and deleted all 46 fiber/async paths.
+      - name: merge origin/main into async and publish the scratch ref
         id: merge
+        env:
+          # workflow_dispatch only; empty on the schedule. Passed through the
+          # environment, never interpolated into the script.
+          ALLOW_DELETIONS: ${{ inputs.allow_deletions }}
         run: |
-          if git merge --no-edit origin/main; then
-            echo "conflict=false" >> "$GITHUB_OUTPUT"
-          else
-            git merge --abort
-            echo "conflict=true" >> "$GITHUB_OUTPUT"
+          chmod +x build/async-sync-merge.sh
+          allow=""
+          if [ -n "$ALLOW_DELETIONS" ]; then
+            printf '%s\n' "$ALLOW_DELETIONS" | tr -s '[:space:]' '\n' | sed '/^$/d' > /tmp/allow-deletions.txt
+            allow=/tmp/allow-deletions.txt
           fi
+          rc=0
+          ./build/async-sync-merge.sh origin main "$SCRATCH_REF" /tmp/deleted-paths.txt $allow || rc=$?
+          case "$rc" in
+            0) echo "result=clean" >> "$GITHUB_OUTPUT" ;;
+            2) echo "result=conflict" >> "$GITHUB_OUTPUT" ;;
+            3) echo "result=deletes" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$rc" ;;
+          esac
 
       - name: report the conflict (issue #374 step 1)
-        if: steps.merge.outputs.conflict == 'true'
+        if: steps.merge.outputs.result == 'conflict'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -106,22 +125,40 @@ jobs:
           } > /tmp/conflict-body.md
           ./build/ci-report-async-sync-failure.sh "merge conflict" /tmp/conflict-body.md
 
-      # Stop here on a conflict: the report above is the point of this run,
-      # and there is nothing for the build/test job to build.
-      - name: fail the job on conflict
-        if: steps.merge.outputs.conflict == 'true'
-        run: exit 1
+      - name: report the deletion (issue #520)
+        if: steps.merge.outputs.result == 'deletes'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x build/ci-report-async-sync-failure.sh
+          {
+            echo "\`git merge origin/main\` into \`async\` went through without"
+            echo "a conflict, but it would delete these paths that exist on"
+            echo "\`async\` (issue #520), so this run pushed nothing -- neither"
+            echo "\`async\` nor the scratch ref:"
+            echo
+            echo '```'
+            cat /tmp/deleted-paths.txt
+            echo '```'
+            echo
+            echo "Git cannot tell an async-only file main dropped (the #373 cut)"
+            echo "from a shared file main retired on purpose (patches/0006 in"
+            echo "#420). If every path above is a deliberate deletion, re-run"
+            echo "async-sync by hand with them in the \`allow_deletions\` input."
+            echo "Otherwise merge by hand and restore the paths that must stay."
+            echo
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          } > /tmp/deletion-body.md
+          ./build/ci-report-async-sync-failure.sh "merge would delete async paths" /tmp/deletion-body.md
 
-      # Publish the merge commit on a ref the container job (which does not
-      # have push credentials of its own reason to need) and the final job
-      # can both see by SHA.
-      - name: publish the merge commit to the scratch ref
-        if: steps.merge.outputs.conflict == 'false'
-        run: git push --force origin "HEAD:refs/heads/${SCRATCH_REF}"
+      # Stop here on a conflict or a deletion: the report above is the point
+      # of this run, and there is nothing for the build/test job to build.
+      - name: fail the job on conflict or deletion
+        if: steps.merge.outputs.result != 'clean'
+        run: exit 1
 
       - name: record the merge commit SHA
         id: sha
-        if: steps.merge.outputs.conflict == 'false'
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
@@ -228,8 +265,9 @@ jobs:
   # Step 4 (issue #374): push on full success; report and clean up on
   # failure. `if: always()` so this runs even when build-and-test failed --
   # that is exactly the case it exists to handle. It does not run at all when
-  # `merge` itself failed (a conflict), because that job already reported and
-  # left nothing on the scratch ref to push or clean up.
+  # `merge` itself failed (a conflict, or a merge that would delete async
+  # paths), because that job already reported and left nothing on the scratch
+  # ref to push or clean up.
   push-or-report:
     needs: [merge, build-and-test]
     if: always() && needs.merge.result == 'success'

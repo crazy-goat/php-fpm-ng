@@ -1,0 +1,35 @@
+name: async-sync-guard
+
+# Issue #520. Lives only on branch `async`, next to async-sync.yml, and runs
+# the regression test for that workflow's merge step on every PR into async.
+# A step in build-matrix.yml would also run here, but that file is shared
+# with main and every weekly merge would have to carry the edit; a file main
+# never has cannot conflict.
+#
+# Seconds of git, no PHP build and no CI image: the plain hosted runner,
+# whose `runner` account is not root.
+on:
+  pull_request:
+    branches: [async]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  async-sync-guard:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history: part 1 of the test replays the real #373 merge
+      # (be5570a + f982f37), and ASYNC_SYNC_REQUIRE_HISTORY turns a missing
+      # commit into a failure instead of a skip.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: async-sync merge refuses to delete async paths (#520)
+        env:
+          ASYNC_SYNC_REQUIRE_HISTORY: "1"
+        run: |
+          test "$(id -u)" != 0
+          sh build/test-async-sync-guard.sh

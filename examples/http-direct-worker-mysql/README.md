@@ -23,26 +23,20 @@ inside a single PHP process.
 
 ## Running it
 
-You need Docker and an **already built** `php-fpm-ng`. Nothing else — no PHP on
-the host, no `composer install`: Composer runs inside the image, because our
-own binary is built with `--disable-all` and has no phar.
+You need Docker and an **already built** `php-fpm-ng`. Nothing else on the
+host: Composer runs inside the image, because the binary has no phar.
 
-A static binary works everywhere; a dynamically linked one works too, as long
-as the runtime stage has its shared libraries. `build/static-full.sh` runs
-*inside* Alpine and installs its own build dependencies with `apk`, so it is
-invoked through Docker, never on the host — this is the same command the
-`static-musl` CI job runs:
+Since #424 `main` builds a dynamically linked binary against the distribution's
+PHP 8.5 SDK (`build/libphp-build.sh`, or the installed `php-fpm-ng` package).
+The static musl artefact this example used to be built from was retired.
+
+**Not re-verified after the cutover:** the runtime stage is still
+`debian:bookworm-slim`, which has no PHP 8.5 `libphp`, so the image needs a
+base that does (Ubuntu 26.04 plus `libphp8.5-embed`) before a dynamic binary
+runs in it. This is tracked as a follow-up rather than guessed at here.
 
 ```sh
-git clone --depth 1 -b php-8.5.9 https://github.com/php/php-src php-src
-./build/prepare.sh "$PWD/php-src"
-mkdir -p build-static out-static
-docker run --rm \
-  -v "$PWD/php-src:/src" -v "$PWD/build-static:/build" \
-  -v "$PWD:/repo" -v "$PWD/out-static:/out" \
-  alpine:3.22 sh /repo/build/static-full.sh
-
-cp out-static/php-fpm-ng-full examples/http-direct-worker-mysql/php-fpm-ng
+cp /usr/sbin/php-fpm-ng examples/http-direct-worker-mysql/php-fpm-ng
 
 cd examples/http-direct-worker-mysql
 docker compose up --build --wait
@@ -165,8 +159,10 @@ responses before being relied on.
 
 ### The build needs `ext-filter` and `ext-ctype`
 
-Found the hard way, and fixed in `build/static-full.sh` as part of this
-example. Under `--disable-all` neither is built, and neither absence is
+Historical: found the hard way while this example ran on the static musl build
+(retired in #424), which was configured with `--disable-all`. A distribution
+`libphp` ships both, but the finding still applies to any minimal PHP build.
+Under `--disable-all` neither is built, and neither absence is
 reported at startup — you get an exception from inside a library instead:
 
 - without `ext-filter`, `league/uri-interfaces` (a hard `ext-filter`

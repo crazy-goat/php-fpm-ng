@@ -2,8 +2,7 @@
 # fpm-ng: embed the distribution payload into a finished binary (issue #171).
 #
 # Every path that produces a php-fpm-ng anyone runs calls this: libphp-build.sh
-# (the packages), static-full.sh (the musl binary) and the CI build jobs (the
-# binary the .phpt suite tests). A payload that only some builds carry would
+# (the packages and the binary the CI .phpt suite tests). A payload that only some builds carry would
 # make `cron.script = fpmng-dist://...` work on a developer's machine and fail
 # in a container, which is the class of bug the whole mechanism exists to end.
 #

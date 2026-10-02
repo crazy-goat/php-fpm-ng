@@ -176,7 +176,7 @@ schedule's *next* occurrence has passed, which is one tick plus a further minute
 Five tests were spending well over a hundred seconds of the suite's wall clock
 this way.
 
-A binary configured with `--enable-fpmng-debug-clock` honours
+A binary built with `FPMNG_DEBUG_CLOCK=1` (`build/libphp-build.sh`) honours
 `FPMNG_DEBUG_CLOCK_RATE`, an integer from 1 to 600, and runs **both**
 `CLOCK_REALTIME` and `CLOCK_MONOTONIC` -- and the blocking waits derived from
 them -- that many times faster. The anchor is taken once in `fpm_init()`, before
@@ -185,7 +185,7 @@ anything forks, so the master and every child agree. Issue #396;
 constant time offset cannot work and why `libfaketime` was rejected.
 
 ```sh
-./configure --enable-fpmng --enable-fpmng-debug-clock ...
+FPMNG_DEBUG_CLOCK=1 ./build/libphp-build.sh out
 ```
 
 Three rules this facility lives by:
@@ -353,7 +353,8 @@ refused. See [`fpm-phpt.md`](fpm-phpt.md#deliberate-deviations).
 ## CI
 
 The `fpmng-phpt` job in `.github/workflows/build-matrix.yml` downloads the
-canonical build artifact and runs this runner. It is the only job that runs
+canonical build artifact (built by `build/libphp-build.sh` against the
+distribution SDK, no php-src) and runs this runner with tree `-`. It is the only job that runs
 these tests: before issue #95 the `phpt` job ran them a second time, because
 that runner swept the whole copied test directory.
 

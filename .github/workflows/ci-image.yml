@@ -1,6 +1,9 @@
 name: ci-image
 
-# Builds the image that build-matrix.yml runs its jobs in.
+# Builds the four package-gate images that build/ci-package-gate.sh (release.yml)
+# runs its stages in. build-matrix.yml no longer uses an image of ours: its jobs
+# run in a stock ubuntu:26.04 and install the PHP SDK in the job (issue #424), and
+# the php-fpm-ng-ci image was retired with that change.
 #
 # Runs on ubuntu-latest, like the rest of CI since this repository went public.
 # No container: -- this job needs the host's docker daemon, and it must not run
@@ -27,12 +30,10 @@ on:
   push:
     branches: [main]
     paths:
-      - .github/docker/ci.Dockerfile
       - .github/docker/package-gate.Dockerfile
       - .github/workflows/ci-image.yml
   pull_request:
     paths:
-      - .github/docker/ci.Dockerfile
       - .github/docker/package-gate.Dockerfile
       - .github/workflows/ci-image.yml
   schedule:
@@ -53,17 +54,6 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
-
-      # Plain `docker build`, no buildx setup step: the image is a single
-      # apt-get layer that gains nothing from BuildKit's parallelism, and
-      # ubuntu-latest's daemon builds it either way.
-      - name: build
-        run: |
-          docker build \
-            -t ghcr.io/crazy-goat/php-fpm-ng-ci:latest \
-            -t ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }} \
-            -f .github/docker/ci.Dockerfile \
-            .github/docker
 
       # The four package-gate stages (issue #240). One Dockerfile, four targets,
       # because they are two distributions x (build host, install host) and the
@@ -106,8 +96,6 @@ jobs:
       - name: push
         if: github.event_name != 'pull_request'
         run: |
-          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:latest
-          docker push ghcr.io/crazy-goat/php-fpm-ng-ci:${{ github.sha }}
           # No :sha tag for these four. They are a cache of what a distribution
           # ships on the day they were built, not an artefact of this commit, and
           # package-gate always wants the freshest one -- a pinned tag would be a

@@ -18,11 +18,11 @@ Decided 2026-09-06. English is the only language in this project:
 
 Two exceptions, both about files we do not own:
 
-- Comments inherited from upstream in files that `build/prepare.sh` copies from
-  `sapi/fpm/` are left alone. That script re-copies them on every run, so any
-  edit there is lost anyway. The same applies to the vendored copies under
-  `third_party/php-src/`: `build/vendor-php-src.sh check` refuses any edit
-  made to them.
+- Comments inherited from upstream in the vendored copies under
+  `third_party/php-src/` are left alone: `build/vendor-php-src.sh check`
+  refuses any edit made to them. The same holds for files that the retained
+  from-source tool `build/prepare.sh` copies from `sapi/fpm/`, which it
+  re-copies on every run.
 - Quoted material stays verbatim: error strings, log lines, command output,
   measurements. Never translate something that appears in the output of a
   program.
@@ -54,14 +54,16 @@ opportunistically, in the same commit as a real change to that code.
 - Per-pool-type behaviour is a **field, a callback, or data** in
   `fpm_pool_type_s` (`sapi/fpmng/fpm/fpm_pool_type.h`). Never
   `if (type == ...)`, never `strcmp(type->name, ...)`.
-- `sapi/fpmng/config.m4` is not hand-edited in its source-list part:
-  `build/prepare.sh` substitutes `@FPMNG_SOURCES@` from `find fpm -name '*.c'`.
-  An existing build directory has a frozen object list and will not see a new
-  `.c` file — `buildconf --force` plus `config.nice` is required. The script
-  warns about this at the end of its output; read that warning.
-- Patches against php-src live in `patches/` and are applied by `prepare.sh`.
-  Anything that must change in core belongs there, gated so that upstream
-  behaviour is the default.
+- The packages and CI build with `build/libphp-build.sh` against the
+  distribution's PHP 8.5 SDK; it globs `sapi/fpmng/fpm/*.c`, so a new `.c`
+  file is picked up with no extra step. `sapi/fpmng/config.m4` belongs only to
+  the retained from-source flow (`build/prepare.sh`, macOS development): its
+  source list is substituted from `find fpm -name '*.c'`, and an existing build
+  directory has a frozen object list (`buildconf --force` plus `config.nice`).
+- `patches/` (applied by `prepare.sh`) is retained for development, but the
+  patch stack that changes `libphp` (fibers, async) is shipped only on branch
+  `async`. `main` needs nothing from the engine that a distribution `libphp`
+  does not export.
 
 ## Evidence
 
@@ -170,8 +172,8 @@ issue per worktree. Branches from before the migration are named
   `if (type == ...)`.
 - Comments explain **why** — see [Comments: what earns one](#comments-what-earns-one)
   above.
-- After adding a `.c` file: `buildconf --force` + reconfigure in the build tree
-  (see `build/prepare.sh` warning).
+- After adding a `.c` file: nothing for `build/libphp-build.sh`; only a
+  from-source `prepare.sh` build tree needs `buildconf --force` + reconfigure.
 
 ### Findings during coding
 
@@ -219,20 +221,23 @@ The box is **shared**. Other work runs concurrently.
   measuring.
 - **Clean up** when done: stop your processes, remove temp dirs you created.
 
-Typical build path on the box:
+Typical build path on the box (Ubuntu 26.04 with `php8.5-dev libphp8.5-embed
+php8.5-cli libevent-dev libssl-dev libacl1-dev`; no php-src checkout):
 
 ```sh
 # on 192.168.8.50, in your scratch dir
 git clone /path/to/repo-or-fetch-from-origin .
-./build/prepare.sh "$PWD/php-src"
-cd php-src && ./buildconf --force && ./configure ... && make -j"$(nproc)" fpmng cli
+FPMNG_TLS=1 FPMNG_ACME=1 FPMNG_DEBUG_CLOCK=1 ./build/libphp-build.sh "$PWD/out"
+./build/run-fpmng-phpt.sh - "$PWD/results"   # TEST_PHP_EXECUTABLE=$(php-config8.5 --php-binary)
 # run tests / manual checks, then rm -rf the scratch dir if throwaway
 ```
 
 ### Locally (fallback)
 
 When the test box is unavailable, build and run tests on the dev machine using
-the same `build/prepare.sh` flow. CI still remains the authoritative merge gate
+the same flow where the platform allows it: `build/libphp-build.sh` needs
+Linux and the 8.5 NTS SDK, so on macOS use the retained `build/prepare.sh`
+from-source flow. CI still remains the authoritative merge gate
 for full matrix coverage.
 
 ### Tests
@@ -242,6 +247,10 @@ for full matrix coverage.
 - Run relevant suites before opening the PR (`build/run-fpmng-phpt.sh`,
   task-specific scripts, fast doc checks like `build/test-comment-content-rule.sh`).
 - Wire new checks into `.github/workflows/build-matrix.yml` when appropriate.
+  Jobs run in a stock `ubuntu:26.04` container, install the SDK with
+  `build/ci-install-deps.sh <role>` and run their steps as the unprivileged
+  `ci` user (php-fpm refuses root, which would skip every test while the job
+  stays green; check the PASS and SKIP counts in the log).
 
 ## 5. Code review (Bugbot subagent)
 

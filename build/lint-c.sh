@@ -1,31 +1,31 @@
 #!/bin/sh
 # Static-analysis pass over *our* C sources only (task 013).
 #
-# File list comes exclusively from this repository. Never walk a prepared
-# php-src tree: after build/prepare.sh that tree mixes untouched upstream
-# copies with our overlays, and linting it would report on code we do not own.
+# File list comes exclusively from this repository. Never walk the assembled
+# tree under a libphp build directory: it mixes our files with the vendored
+# upstream copies (third_party/php-src), and linting it would report on code we
+# do not own.
 #
 # Usage:
-#   ./build/lint-c.sh [prepared-php-src]
+#   ./build/lint-c.sh [libphp-build-outdir]
 #
-# If a prepared php-src path is given (configure already run), include paths
-# are taken from that tree's Makefile so php.h / fpm_config.h / config.h
-# resolve the same way a real build would. Without it, clang-tidy still runs;
-# expect missing-header noise — useful only as a smoke check of the config.
+# The directory is the one build/libphp-build.sh wrote (issue #424: there is no
+# configured php-src tree to ask any more). Its commands.log holds the exact
+# compile line of every translation unit, and the -I/-D flags are taken from
+# there, so php.h and the supplied feature macros resolve the way the real
+# build resolves them. Build it with the same FPMNG_TLS/FPMNG_ACME/
+# FPMNG_DEBUG_CLOCK toggles as the binary under test, or the files behind
+# those toggles are linted with their macros undefined. Without a directory
+# clang-tidy still runs; expect missing-header noise -- useful only as a smoke
+# check of the config.
 #
 # Exit status: clang-tidy's. With WarningsAsErrors: '*' in .clang-tidy
 # (issue #414) any finding in our TUs/headers fails this script; the CI step
-# runs under sh (dash, no pipefail) and propagates its status via rc=$?; exit $rc.
+# propagates its status via rc=$?; exit $rc.
 set -eu
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PHP_SRC="${1:-}"
-STUB=""
-
-cleanup() {
-	[ -n "$STUB" ] && rm -rf "$STUB"
-}
-trap cleanup EXIT INT TERM
+BUILD_OUT="${1:-}"
 
 if ! command -v clang-tidy >/dev/null 2>&1; then
 	echo "lint-c: clang-tidy not found in PATH" >&2
@@ -40,39 +40,26 @@ FILES=$(find "$REPO/sapi/fpmng" "$REPO/ext/fpmng_metrics" \
 [ -n "$FILES" ] || { echo "lint-c: no .c files under sapi/fpmng or ext/fpmng_metrics" >&2; exit 1; }
 
 EXTRA_ARGS="-std=gnu11 -Wno-unknown-warning-option"
-# Always prefer our overlay headers over anything prepare.sh copied.
+# Always prefer our own headers over the assembled tree's copies.
 EXTRA_ARGS="$EXTRA_ARGS -I$REPO/sapi/fpmng -I$REPO/sapi/fpmng/fpm"
 EXTRA_ARGS="$EXTRA_ARGS -I$REPO/ext/fpmng_metrics"
 
-if [ -n "$PHP_SRC" ]; then
-	[ -d "$PHP_SRC" ] || { echo "lint-c: not a directory: $PHP_SRC" >&2; exit 1; }
-	PHP_SRC="$(cd "$PHP_SRC" && pwd)"
-
-	if [ ! -f "$PHP_SRC/main/php_config.h" ] && [ ! -f "$PHP_SRC/php_config.h" ]; then
-		echo "lint-c: warning: no php_config.h under $PHP_SRC — run configure first" >&2
-	fi
-
-	# ext/* and some Zend headers do `#include "config.h"` under HAVE_CONFIG_H.
-	# The real build generates that next to each extension; for tidy we point at
-	# a stub that forwards to php_config.h (same content the in-tree build uses).
-	STUB=$(mktemp -d "${TMPDIR:-/tmp}/fpmng-lint.XXXXXX")
-	printf '%s\n' '#include "php_config.h"' > "$STUB/config.h"
-	EXTRA_ARGS="$EXTRA_ARGS -I$STUB -DHAVE_CONFIG_H"
-
-	# Prefer the include line the configured Makefile already computed — it
-	# knows about Zend/TSRM/main/sapi paths and any --with-* -I flags.
-	if [ -f "$PHP_SRC/Makefile" ]; then
-		# EXTRA_INCLUDES is space-separated -I... tokens on one assign line.
-		MAKE_INCLUDES=$(sed -n 's/^EXTRA_INCLUDES *= *//p' "$PHP_SRC/Makefile" | head -1)
-		if [ -n "$MAKE_INCLUDES" ]; then
-			EXTRA_ARGS="$EXTRA_ARGS $MAKE_INCLUDES"
-		fi
-	fi
-
-	# Fall back / supplement with the usual php-src layout (in-tree build).
-	for d in . main Zend TSRM sapi/fpmng sapi/fpmng/fpm ext/standard ext/date/lib; do
-		[ -d "$PHP_SRC/$d" ] && EXTRA_ARGS="$EXTRA_ARGS -I$PHP_SRC/$d"
+if [ -n "$BUILD_OUT" ]; then
+	LOG="$BUILD_OUT/commands.log"
+	[ -f "$LOG" ] || { echo "lint-c: no commands.log in $BUILD_OUT -- not a build/libphp-build.sh output directory" >&2; exit 1; }
+	# Every compile line carries the same -D/-I set; the first one is enough.
+	# A log with no compile line would lint with none of them, which is the
+	# silent no-op this guard exists to refuse.
+	CMD=$(grep -m1 ' -c ' "$LOG" || true)
+	[ -n "$CMD" ] || { echo "lint-c: $LOG holds no compile command" >&2; exit 1; }
+	FLAGS=""
+	for tok in $CMD; do
+		case "$tok" in
+		-I*|-D*) FLAGS="$FLAGS $tok" ;;
+		esac
 	done
+	EXTRA_ARGS="$EXTRA_ARGS $FLAGS"
+	echo "lint-c: compile flags from $LOG"
 fi
 
 # EXTRA_ARGS and FILES are intentionally word-split; paths have no spaces.
@@ -80,7 +67,7 @@ fi
 set -- $FILES
 echo "lint-c: $# translation units"
 # Header filter must be the absolute repo paths: a bare 'sapi/fpmng/' also
-# matches php-src/sapi/fpmng/ after prepare.sh (upstream copies we do not own).
+# matches the assembled tree's sapi/fpmng/ (upstream copies we do not own).
 # shellcheck disable=SC2086
 clang-tidy \
 	--config-file="$REPO/.clang-tidy" \

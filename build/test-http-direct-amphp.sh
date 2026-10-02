@@ -11,8 +11,8 @@
 #
 # Issue #75: wired into build-matrix.yml as its own job, but declared
 # OPTIONAL rather than gated -- it needs Composer and network, and the CI
-# image (.github/docker/ci.Dockerfile) has no PHP CLI/phar/Composer at all,
-# so this SKIPs (exit 0) on every run there today. That is safe to call
+# job (a stock ubuntu:26.04 container with php8.5-cli but no Composer) has no
+# Composer, so this SKIPs (exit 0) on every run there today. That is safe to call
 # unconditionally, and the skip() function above makes the reason show up in
 # the job's step summary instead of only in a log, so a green run is never
 # mistaken for a pass of the harness itself. The dependency-free half of the

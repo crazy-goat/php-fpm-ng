@@ -350,9 +350,9 @@ were not re-derived; the run above supersedes it with a fully identified build.
 
 A bundled extension is compatible with the single-binary design: `ext/fpmng_metrics`
 is forced on whenever `--enable-fpmng` is enabled (`ext/fpmng_metrics/config.m4`,
-the `PHP_FPMNG` gate), is copied by `build/prepare.sh`, and is included in the
-static musl artifact, where the extension set is asserted by
-`build/static-full.sh:114-160` (`assert_symbol`). It is not the right
+the `PHP_FPMNG` gate), is compiled into the binary by `build/libphp-build.sh`
+(the static musl artifact that used to assert the extension set was retired in
+#424). It is not the right
 container for worker event functions, however. Pool-type-specific capabilities
 are data on `fpm_pool_type_s` (for example, `publishes_acme_challenges`,
 `sapi/fpmng/fpm/fpm_pool_type.h:228-235`), while

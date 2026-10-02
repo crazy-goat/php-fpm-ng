@@ -22,9 +22,8 @@ RUN composer install --no-dev --no-interaction --no-progress --optimize-autoload
 
 FROM debian:bookworm-slim
 ARG APP_DIR
-# A static-pie php-fpm-ng (build/static-full.sh) needs none of these; a
-# dynamically linked one needs all of them, and the image should work for
-# whichever binary the operator drops in.
+# A dynamically linked php-fpm-ng needs these shared libraries (it also needs
+# the libphp it was built against; see the example README).
 RUN apt-get update \
 	&& apt-get install -y --no-install-recommends libevent-2.1-7 libssl3 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*

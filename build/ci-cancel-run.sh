@@ -20,11 +20,9 @@
 # answer is there without opening fifteen jobs. A cancelled run is still not a
 # passing check, so nothing can be merged by accident.
 #
-# A job killed mid-compile leaves a half-written build tree behind. That is
-# already handled and is not a new hazard: build/ci-build-tree.sh and
-# build/static-full.sh each write a dirty marker before compiling and clear it
-# only on success, so the next run discards the tree instead of linking objects
-# from two configurations.
+# A job killed mid-build leaves nothing behind that a later run reuses:
+# build/libphp-build.sh writes into the output directory it is given, and every
+# CI job starts from a fresh container and checkout.
 #
 # Limit, by design: this runs from the job's checkout, so a job that dies
 # before actions/checkout -- a registry 403 on the container image, a checkout
@@ -33,8 +31,8 @@
 # fifteen copies of a shell one-liner, which is the thing this script exists
 # to avoid.
 #
-# curl, not gh: the CI image has curl and no gh, and static-musl runs
-# uncontainerised on the host where gh is likewise not guaranteed.
+# curl, not gh: the stock ubuntu container the jobs run in gets curl from
+# build/ci-install-deps.sh and has no gh.
 set -eu
 
 : "${GITHUB_API_URL:=https://api.github.com}"

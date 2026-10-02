@@ -20,13 +20,12 @@
 # tests ask the binary whether it supports their pool type and skip when it
 # says no, instead of failing).
 #
-# Usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>
-#   prepared-php-src  not read any more (issue #423): the build needs no php-src
-#                     (issue #422) and the test fixtures come from
-#                     third_party/php-src/ through build/phpt-tree.sh. Pass "-";
-#                     a directory is still accepted so the release workflow keeps
-#                     working until it is rewired (issue #424).
+# Usage: build/ci-package-gate.sh deb|apk <outdir>
 #   outdir            package, results and logs land here
+#
+# There is no php-src argument (issue #424): the build needs no php-src (issue
+# #422) and the test fixtures come from third_party/php-src/ through
+# build/phpt-tree.sh (issue #423).
 #
 # Runs on the host, not in a container: it drives `docker run` with bind
 # mounts, and -v paths are resolved by the host daemon.
@@ -34,11 +33,10 @@ set -eu
 
 fail() { echo "ci-package-gate.sh: FAIL: $*" >&2; exit 1; }
 
-FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
-SRC=${2:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
-OUT=${3:?usage: build/ci-package-gate.sh deb|apk <prepared-php-src>|- <outdir>}
+FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <outdir>}
+OUT=${2:?usage: build/ci-package-gate.sh deb|apk <outdir>}
+[ $# -eq 2 ] || fail "usage: build/ci-package-gate.sh deb|apk <outdir> (the php-src argument was removed in issue #424)"
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-[ "$SRC" = - ] || echo "ci-package-gate.sh: note: $SRC is not read; the fixtures come from third_party/php-src (issue #423)" >&2
 mkdir -p "$OUT"
 OUT=$(cd "$OUT" && pwd)
 
@@ -505,7 +503,34 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # The three cron tests from #355, #357 and #358 assumed the debug clock, which
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
-EXPECT_TOTAL=166
+EXPECT_TOTAL=177
+
+# Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
+# alpine:edge with php85 8.5.10/8.5.11), 177 owned tests, from this script run
+# unmodified on each cell. These replace every derivation above, which are kept
+# as HISTORICAL record of how the numbers moved up to v0.11.0 and are no longer
+# the pinned values (this also absorbs issue #555, whose 152/14 and 166/0 were
+# measured on the 166-test suite):
+#
+#   deb non-TLS  PASS 162  FAIL 0  SKIP 15
+#   deb TLS      PASS 176  FAIL 0  SKIP  1
+#   apk non-TLS  PASS 158  FAIL 2  SKIP 17
+#   apk TLS      PASS 169  FAIL 2  SKIP  6
+#
+# The +11 tests since the v0.11.0 count are the owned tests added after it
+# (the #428 ini-bootstrap pair among them). The one skip that survives on the deb TLS
+# row is fpmng-ini-bootstrap-extension.phpt: it needs
+# TEST_FPM_EXTENSION_DIR, which build-matrix.yml sets and this gate does not.
+#
+# The two apk FAILs are real defects, pinned here by name so that the gate says
+# exactly what is wrong instead of an unexplained skip hiding them; each is
+# expected to disappear when its issue is fixed, and the gate will then ask for
+# these numbers to be lowered:
+#   - fpmng-http-route-http-direct-fail.phpt: issue #467, libevent's evhttp on
+#     musl exits 1 when getnameinfo(AF_UNIX) fails;
+#   - fpmng-config-input-descriptor.phpt: issue #557, Alpine edge's php85-dev is
+#     8.5.10 and its libphp is 8.5.11, so every start prints the patch-level
+#     skew notice the test's expected output does not contain.
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -537,8 +562,8 @@ EXPECT_TOTAL=166
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=165; EXPECT_SKIP=1
-    else EXPECT_PASS=151; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=176; EXPECT_SKIP=1
+    else EXPECT_PASS=162; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -571,8 +596,9 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=160; EXPECT_SKIP=6
-    else EXPECT_PASS=149; EXPECT_SKIP=17; fi
+    EXPECT_FAIL=2 # issues #467 and #557, see the measurement block above
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=169; EXPECT_SKIP=6
+    else EXPECT_PASS=158; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

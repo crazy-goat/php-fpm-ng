@@ -146,10 +146,10 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 | `fastcgi` | yes | yes | upstream FPM's protocol handling; needs nothing from the engine that a distribution `libphp` does not export. |
 | `http-direct` | yes | yes | including `pool.executor = worker`. The HTTP listener lives entirely in this SAPI. |
 | `gateway` | yes | yes | issue #388: the proxy is a type of its own and runs no PHP child, so it needs nothing from the engine. `pool.type = http` (the proxy welded to its own workers) is retired and refused by name. |
-| fibers (`pool.executor = fiber`) | **no** | yes | `patches/0007` applies inside `libphp`. |
-| async | **no** | yes | `patches/0008`, likewise inside `libphp`. |
-| TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `./configure --enable-fpmng --enable-fpmng-tls`. **This is a change against v0.2.0**, where the single package terminated TLS. |
-| the ACME client (`fpmng-dist://acme/...`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `./configure --enable-fpmng --enable-fpmng-tls --enable-fpmng-acme`. The default package carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
+| fibers (`pool.executor = fiber`) | **no** | branch `async` only | `patches/0007` applies inside `libphp`. |
+| async | **no** | branch `async` only | `patches/0008`, likewise inside `libphp`. |
+| TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `FPMNG_TLS=1 ./build/libphp-build.sh out`. **This is a change against v0.2.0**, where the single package terminated TLS. |
+| the ACME client (`fpmng-dist://acme/...`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out`. The default package carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
 
 The default package's binary does not silently degrade: a pool it cannot honour is
 refused before the master forks anything, by name and with the reason. Since
@@ -292,50 +292,60 @@ Each refusal says what to install instead. `build/test-libphp-build-refusals.sh`
 triggers each one on purpose. `build/test-libphp-abi-guard.sh` exercises the
 version check from [Version skew](#version-skew) against the installed SDK.
 
-## If you need what the package cannot give
+## Supported platform matrix
 
-`http`, fibers and async need patches that apply inside `libphp`,
-so they need a build from source. TLS termination needs only a flag, but the
-packaged binary is built without it, so it is the same answer:
+Decided in issue #419 and implemented by the no-php-src build contract
+(epic #418, cut over in #424):
 
-```sh
-./build/prepare.sh /path/to/php-src   # applies the overlay and the patch stack
-./build/static-full.sh                # or the dynamic build, see build/dynamic.sh
-```
+| | supported |
+|---|---|
+| PHP | 8.5, NTS only. ZTS is out permanently; `build/libphp-build.sh` refuses it. |
+| OS and libc | Linux, dynamic linking only: glibc (Debian, Ubuntu 26.04) and musl (Alpine). |
+| PHP provider | the distribution's own SDK and `libphp` (`php8.5-dev` + `libphp8.5-embed` + `php8.5-cli`, or `php85-dev` + `php85-embed` + `php85`). No self-built PHP, no third-party repository. |
+| static binary | retired from `main` (the `static-musl` job and `build/static-full.sh` are gone). |
+| patches | the `patches/` stack (fibers, async) lives only on branch `async`. |
 
-For TLS from a `configure` of your own, add `--enable-fpmng-tls`; it needs
-`libevent_openssl >= 2.1` and OpenSSL >= 1.1.1 development files, and
-`configure` fails naming the missing package rather than producing a binary
-without TLS. A pool with `http.tls_cert` on a binary built without the flag is
-refused at startup, naming the flag to rebuild with -- it never falls back to
-plain HTTP on a port configured as HTTPS.
+macOS remains a from-source development platform (`build/prepare.sh` against a
+php-src tree); it is not a release target and CI does not exercise it.
 
-For the ACME client on top of that, add `--enable-fpmng-acme`. It requires
-`--enable-fpmng-tls` and `configure` errors out if it is missing; see
-[`acme-renewal.md`](acme-renewal.md#the-build-flag) for what a build without
-it does with an ACME configuration.
+Every required CI path (lint, build, the fpmng phpt suite, integration,
+gateway privileges) and the release path build against the same prebuilt SDK
+with `build/libphp-build.sh`; none downloads php-src or compiles an engine.
 
-`--enable-fpmng-debug-clock` is **for running the test suite, not for a
-server**. It makes the master honour `FPMNG_DEBUG_CLOCK_RATE` and run its clocks
-faster than real time, so that tests waiting on a one-minute cron schedule or on
-a supervisor timeout do not have to wait in real seconds. No shipped package is
-built with it, and `configure` prints a warning when it is used. See
-[`fpmng-phpt.md`](fpmng-phpt.md#the-virtual-clock).
+## TLS, ACME and the debug clock
 
-`--enable-fpmng-http2` and `--enable-fpmng-quic` are **reserved names, not
-features**. Neither protocol exists in this tree, and `configure` refuses both
-flags with a message naming the issue that is deciding them (#186/#187 for
-HTTP/2, #188 for QUIC) rather than accepting a flag that switches nothing on.
-The names are settled early so they are settled once; that is not a commitment
-that either feature will arrive. #188 in particular may return "no": QUIC has
-no `accept()`, connection IDs have to be routed in userland, and this project
-hands each child a listening socket the kernel demultiplexes for it. Both
-would require `--enable-fpmng-tls` if they existed -- HTTP/2 is negotiated over
-ALPN, and QUIC carries TLS 1.3 inside the transport; there is no plaintext
-QUIC.
+TLS termination and the ACME client are build toggles of
+`build/libphp-build.sh`, not `configure` flags: `FPMNG_TLS=1` and
+`FPMNG_ACME=1` (which requires `FPMNG_TLS=1`; the build refuses the
+combination otherwise). They are what the `php-fpm-ng-tls` package is built
+with. For the ACME client see
+[`acme-renewal.md`](acme-renewal.md#the-build-flag) for what a build without it
+does with an ACME configuration. A pool with `http.tls_cert` on a binary built
+without TLS is refused at startup, naming what to rebuild with -- it never
+falls back to plain HTTP on a port configured as HTTPS.
 
-For the two pool types the package does support, the package is the normal
-case -- building from source to get `fastcgi` or `http-direct` buys nothing.
+`FPMNG_DEBUG_CLOCK=1` is **for running the test suite, not for a server**. It
+makes the master honour `FPMNG_DEBUG_CLOCK_RATE` and run its clocks faster than
+real time, so that tests waiting on a one-minute cron schedule or on a
+supervisor timeout do not have to wait in real seconds. No shipped package is
+built with it. See [`fpmng-phpt.md`](fpmng-phpt.md#the-virtual-clock).
+
+HTTP/2 and QUIC do not exist in this tree; their names were reserved
+(#186/#187, #188) and #188 in particular may return "no".
+
+## Known limitations of the libphp build
+
+* **`zend.signal_check` cannot see handler replacement.** Upstream
+  `php-fpm8.5` warns once per request when a handler was replaced; php-fpm-ng
+  stays silent, because the check lives in the engine's SAPI internals that a
+  `libphp` consumer cannot reach (`sapi/fpmng/fpm/fpm_libphp_compat.c`).
+* **`php-fpm-ng -m` and `-i` do not list `fpmng_metrics`.** The owned module is
+  registered at runtime in the master, after the module list those flags print
+  is built, although `fpm_metric_*()` work normally in workers
+  (`sapi/fpmng/fpm/fpm_libphp_compat.c`).
+
+If you need `pool.executor = fiber` or async, use branch `async`; they are not
+available on `main`.
 
 ## See also
 

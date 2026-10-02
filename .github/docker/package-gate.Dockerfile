@@ -37,7 +37,7 @@
 
 # --- Debian/Ubuntu ---------------------------------------------------------
 
-# ubuntu:26.04, not the 24.04 of ci.Dockerfile: this cell deliberately tracks
+# ubuntu:26.04, not an older release: this cell deliberately tracks
 # the distribution that ships PHP 8.5, which is the whole reason it can link
 # against a libphp nobody here built.
 FROM ubuntu:26.04 AS deb-build

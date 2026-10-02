@@ -61,8 +61,8 @@ time (for i in $(seq 8); do curl -s "localhost:8080/sleep?id=$i" & done; wait)
 
 `build/test-http-direct-amphp.sh` automates exactly the above, including the
 concurrency measurement. It needs Composer and a PHP CLI with `ext-phar` to
-run `composer install` — which the CI image
-(`.github/docker/ci.Dockerfile`) does not provide, so this integration is
+run `composer install` — which the CI job
+container (php8.5-cli, no Composer) does not provide, so this integration is
 **not gated** by the automated matrix. It does run there, as a step of the
 `integration` job in `.github/workflows/build-matrix.yml`, but that step SKIPs
 today by design; see the comment on it and issue #75 for the decision and its

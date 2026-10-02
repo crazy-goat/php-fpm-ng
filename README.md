@@ -16,12 +16,14 @@ whole thing and one binary to scan.
 The HTTP gateway POC on libevent works, as a branch in php-src:
 https://github.com/s2x/php-src/tree/fpm-http-poc
 
-Verified 2026-09-07 against `sapi/fpmng`:
+Historical measurement (2026-09-07, php-src tree build; the static musl
+artefact it describes was retired from `main` in #424): a full static
+`-static-pie` build on musl ran in a bare `FROM scratch` as PID 1 and answered
+HTTP 200. Current builds are dynamic only (Debian/Ubuntu glibc and Alpine musl,
+PHP 8.5 NTS) against the distribution's PHP SDK; see `docs/install.md`.
 
-- full static build on musl (`-static-pie`) with opcache, mbstring, curl
-  + OpenSSL, zlib, pdo_mysql, sockets, pcntl, posix
-- runs in a bare `FROM scratch`, php-fpm-ng as PID 1, HTTP 200, whole image
-  33,885,546 bytes with the full, unstripped binary
+Current state of `sapi/fpmng`:
+
 - the frontend selects `pool.type = gateway | fastcgi | http-direct`; no
   directive means classic `fastcgi` and stays compatible with upstream FPM.
   `pool.executor` is available on `http-direct`: `classic` is the default, and
@@ -43,8 +45,7 @@ Verified 2026-09-07 against `sapi/fpmng`:
   (`fpm_metric_register/inc/set/observe`, NOTES 3k/3w) through the
   `ext/fpmng_metrics/` extension, also from CLI via `fpm_metric_render()`
 - the `fiber` and `async` executors live on branch `async` of this repository
-  (issue #373), not on `main` — `./configure --enable-fpmng-fiber` /
-  `--enable-fpmng-async` refuse to build here and name that branch
+  (issue #373), not on `main`
 
 ## Support tiers
 
@@ -185,8 +186,8 @@ target pool rather than to a prefix:
 The HTTP gateway's TLS directives (`http.tls_cert`, `http.tls_reload_check`,
 ...), including how a renewed certificate reaches every gateway process
 without a restart, are documented in [`docs/tls.md`](docs/tls.md). TLS
-termination is a build flag -- `./configure --enable-fpmng-tls`, off by
-default and not in the packages (issue #280).
+termination is a build toggle -- `FPMNG_TLS=1 ./build/libphp-build.sh`, off by
+default and only in the `php-fpm-ng-tls` package (issue #280).
 
 The gateway answers the ACME HTTP-01 challenge itself, on both its own
 `listen` and the plain `http.plain_listen` companion, from state a `cron` or
@@ -194,9 +195,9 @@ The gateway answers the ACME HTTP-01 challenge itself, on both its own
 [`docs/acme-challenge.md`](docs/acme-challenge.md). Only one process may
 renew a given certificate, and the result reaches every gateway through the
 existing no-restart certificate reload —
-[`docs/acme-renewal.md`](docs/acme-renewal.md). ACME is a build flag of its
-own on top of the TLS one -- `./configure --enable-fpmng-tls
---enable-fpmng-acme`, off by default and not in the packages (issue #281);
+[`docs/acme-renewal.md`](docs/acme-renewal.md). ACME is a build toggle of its
+own on top of the TLS one -- `FPMNG_TLS=1 FPMNG_ACME=1`, off by default and only
+in the `php-fpm-ng-tls` package (issue #281);
 a build without it carries neither the challenge state nor the client, and
 refuses an ACME `cron.script` at startup.
 
@@ -268,33 +269,24 @@ request_cpu_tracking = no            ; if nobody reads "last request cpu" or %C
 
 ## Building
 
-First prepare a pinned php-src tree with this repository's `sapi/fpmng`, then
-run the static build in Alpine, building out-of-tree:
+`main` builds against the distribution's prebuilt PHP 8.5 SDK (NTS, Linux,
+dynamic). It needs no php-src tree and does not compile PHP:
 
 ```sh
-./build/prepare.sh /path/to/php-src
-rm -rf "$PWD/build-dir" "$PWD/out"
-mkdir "$PWD/build-dir" "$PWD/out"
+# Debian / Ubuntu 26.04
+apt-get install build-essential libevent-dev libacl1-dev \
+    php8.5-dev libphp8.5-embed php8.5-cli
+# Alpine: build-base libevent-dev acl-dev php85-dev php85-embed php85
 
-docker run --rm \
-  -v /path/to/php-src:/src \
-  -v "$PWD/build-dir:/build" \
-  -v "$PWD:/repo" \
-  -v "$PWD/out:/out" \
-  alpine:3.22 sh /repo/build/static-full.sh
-
-./build/test-static-full.sh "$PWD/out/php-fpm-ng-full"
+./build/libphp-build.sh out        # out/php-fpm-ng, out/commands.log
+FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out   # needs libssl-dev
 ```
 
-Two flags without which this looks broken for no reason:
-
-- `LDFLAGS=-static-pie` — plain `-static` does not work, because the Alpine
-  toolchain defaults to PIE and the linker silently produces a dynamic
-  binary, and the build still succeeds
-- `PKG_CONFIG="pkg-config --static"` — otherwise static curl fails the
-  configure test, because its dependencies are missing from the link line
-
-Alpine has no `oniguruma-static`, so mbstring is built with `--disable-mbregex`.
+The platform matrix, the packages and the known limitations of this build are
+in `docs/install.md`. The test suites run against this binary:
+`./build/run-fpmng-phpt.sh - out-results` (see `docs/fpmng-phpt.md`). macOS is a
+from-source development platform only (`build/prepare.sh` against a php-src
+tree).
 
 ## Contributing
 

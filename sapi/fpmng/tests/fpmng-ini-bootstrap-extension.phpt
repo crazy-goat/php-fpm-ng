@@ -3,10 +3,10 @@ fpm-ng: a startup-only extension named by supplied ini entries is loaded at PHP 
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
-/* Needs a shared extension built for this exact PHP: the stock CI build is
- * static (--disable-all) and has none, so there TEST_FPM_EXTENSION_DIR is
- * unset and this skips. Point it at a directory holding ctype.so built from the
- * same php-src with --enable-ctype=shared (issue #428 recorded the commands).
+/* Needs a shared extension built for this exact PHP. CI points
+ * TEST_FPM_EXTENSION_DIR at `php-config8.5 --extension-dir`, where the
+ * distribution's ctype.so lives (issue #424); a run that leaves it unset skips
+ * here.
  * The policy test next to this one covers the stage on every build; this one
  * is the positive proof with a real module. */
 $dir = getenv('TEST_FPM_EXTENSION_DIR');

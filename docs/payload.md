@@ -76,8 +76,8 @@ do not strip at all — which is what this repository's packaging does:
 strips.
 
 `build/embed-payload.sh` is the one step every build path calls after linking
-(`build/libphp-build.sh` for the packages, `build/static-full.sh` for the musl
-binary, the CI build jobs for the binary the test suite runs), and it reads
+(`build/libphp-build.sh`, for the packages and for the binary the test suite
+runs), and it reads
 the entry back to prove the append landed. It is idempotent: a binary that
 already carries the archive it would write is left alone, so a reused build
 tree does not collect one archive per run.

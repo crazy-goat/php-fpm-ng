@@ -56,7 +56,13 @@ function run(string $binary, array $args, array $env = []): array
 {
     $base = getenv();
     unset($base['PHP_INI_SCAN_DIR'], $base['PHPRC']);
-    $proc = proc_open(array_merge([$binary], $args), [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env + $base);
+    $command = array_merge([$binary], $args);
+    /* proc_open() drops an environment entry whose value is empty, so "set but empty" has to be handed over by env(1). Without it the case below passes only on a libphp with no compiled-in scan directory; a distribution's libphp has one (/etc/php/8.5/embed/conf.d) and the scan would silently stay on (issue #424). */
+    if (($env['PHP_INI_SCAN_DIR'] ?? null) === '') {
+        unset($env['PHP_INI_SCAN_DIR']);
+        $command = array_merge(['env', 'PHP_INI_SCAN_DIR='], $command);
+    }
+    $proc = proc_open($command, [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env + $base);
     $out = stream_get_contents($pipes[1]);
     fclose($pipes[1]);
     $status = proc_close($proc);

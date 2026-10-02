@@ -1,16 +1,17 @@
+## What changed
+
+<!-- One or two sentences: what and why. -->
+
 Closes #
 
-## Summary
+## How it was tested
 
-<!-- What changed and why. -->
+<!-- Commands you ran, new tests. -->
 
-## Test plan
+## Checklist
 
-- [ ] Built (say where: local, container, or a test box)
-- [ ] Relevant suites run, named here with their result
-- [ ] Bugbot review on added/changed code; valid findings acted on or opened as issues
-
-## Measured
-
-<!-- Numbers, or "not measured" — that is a complete answer and is preferred
-     over an estimate presented as a result. -->
+- [ ] Tests added or updated, and all checks pass
+- [ ] `CHANGELOG.md` updated under `[Unreleased]`
+- [ ] Documentation updated
+- [ ] Everything is written in English
+- [ ] The PR title is a Conventional Commit (`feat: ...`, `fix: ...`)

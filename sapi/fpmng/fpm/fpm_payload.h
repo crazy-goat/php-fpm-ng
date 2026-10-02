@@ -63,7 +63,7 @@
  * kinds rather than two files in one archive precisely so that repacking an
  * application cannot replace ACME code. */
 #define FPM_PAYLOAD_KIND_DISTRIBUTION 1u
-#define FPM_PAYLOAD_KIND_APPLICATION  2u
+#define FPM_PAYLOAD_KIND_APPLICATION 2u
 
 /* "FPMNGPY" plus a format version digit. The version is in the magic, not in a
  * field, so a reader from a future format sees a mismatched magic and reports
@@ -80,7 +80,7 @@
 
 struct fpm_payload_entry {
 	uint32_t kind;
-	uint64_t offset;			/* of the data, from the start of the file */
+	uint64_t offset; /* of the data, from the start of the file */
 	uint64_t size;
 	unsigned char digest[FPM_PAYLOAD_DIGEST_SIZE];
 };
@@ -92,7 +92,7 @@ struct fpm_payload_entry {
  * file, a chain that loops, an unreadable file. Only -1 is an error worth
  * reporting; `why` then points at a static description. */
 int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *entry,
-	const char **why);
+		const char **why);
 
 /* Reads an entry found by fpm_payload_find() into a malloc()ed buffer and
  * verifies its SHA-256 before returning it. Returns 0 and sets `*data`/`*size`
@@ -100,7 +100,7 @@ int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *
  * C string when the entry holds text), or -1 with `*why` set. The caller
  * free()s. */
 int fpm_payload_read(const char *path, const struct fpm_payload_entry *entry,
-	char **data, size_t *size, const char **why);
+		char **data, size_t *size, const char **why);
 
 /* The path of the running binary: /proc/self/exe where it exists, else the
  * argv[0] fpm-ng was started with (docs/NOTES.md:157-201 asks for both -- /proc

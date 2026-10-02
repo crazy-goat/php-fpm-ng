@@ -119,7 +119,7 @@ static void fpm_pool_script_register_acme_builtins(const char *pool_name)
 	}
 	if (0 > fpm_acme_challenge_register_functions()) {
 		zlog(ZLOG_ERROR, "[pool %s] cannot register the fpmng_acme_challenge_* functions",
-			pool_name);
+				pool_name);
 	}
 }
 
@@ -206,7 +206,8 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 
 	EG(exit_status) = 0;
 
-	zend_first_try {
+	zend_first_try
+	{
 		/* Inside the try, not next to the SG() assignments above: this is the
 		 * first code in the function that runs PHP (a stream wrapper, a
 		 * constant registration), so it is the first that can bail out. */
@@ -224,7 +225,7 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 
 			if (0 > fpm_payload_dist_register(&why)) {
 				zlog(ZLOG_ERROR, "[pool %s] cannot use embedded script '%s': %s",
-					pool_name, script_path, why);
+						pool_name, script_path, why);
 				EG(exit_status) = 255;
 			}
 		}
@@ -245,7 +246,7 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 			file_handle.primary_script = 1;
 			if (zend_stream_open(&file_handle) == FAILURE) {
 				zlog(ZLOG_ERROR, "[pool %s] cannot open embedded script '%s'",
-					pool_name, script_path);
+						pool_name, script_path);
 				/* zend_stream_init_filename() emalloc'd the name; nothing else
 				 * frees it on this branch. */
 				zend_destroy_file_handle(&file_handle);
@@ -265,9 +266,12 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 				zend_destroy_file_handle(&file_handle);
 			}
 		}
-	} zend_catch {
+	}
+	zend_catch
+	{
 		EG(exit_status) = 255;
-	} zend_end_try();
+	}
+	zend_end_try();
 
 	exit_code = EG(exit_status);
 

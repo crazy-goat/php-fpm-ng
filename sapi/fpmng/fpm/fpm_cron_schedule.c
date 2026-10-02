@@ -18,11 +18,11 @@ struct fpm_cron_shorthand_s {
 };
 
 static const struct fpm_cron_shorthand_s fpm_cron_shorthands[] = {
-	{ "@hourly",  "0 * * * *" },
-	{ "@daily",   "0 0 * * *" },
-	{ "@weekly",  "0 0 * * 0" },
+	{ "@hourly", "0 * * * *" },
+	{ "@daily", "0 0 * * *" },
+	{ "@weekly", "0 0 * * 0" },
 	{ "@monthly", "0 0 1 * *" },
-	{ "@yearly",  "0 0 1 1 *" },
+	{ "@yearly", "0 0 1 1 *" },
 };
 
 static int fpm_cron_parse_uint(const char **p, int *out) /* {{{ */
@@ -179,7 +179,7 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out, /
 			}
 		}
 		snprintf(err, err_len,
-			"unknown schedule shorthand '%s' (known: @hourly, @daily, @weekly, @monthly, @yearly)", expr);
+				"unknown schedule shorthand '%s' (known: @hourly, @daily, @weekly, @monthly, @yearly)", expr);
 		return -1;
 	}
 
@@ -201,7 +201,7 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out, /
 
 	if (n != 5) {
 		snprintf(err, err_len,
-			"expected 5 fields (minute hour day-of-month month day-of-week), got %d: '%s'", n, expr);
+				"expected 5 fields (minute hour day-of-month month day-of-week), got %d: '%s'", n, expr);
 		return -1;
 	}
 
@@ -212,7 +212,7 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out, /
 		return -1;
 	}
 	if (0 > fpm_cron_parse_field(fields[2], 1, 31, out->mday, sizeof(out->mday), "day-of-month",
-			&out->mday_is_star, err, err_len)) {
+					&out->mday_is_star, err, err_len)) {
 		return -1;
 	}
 	if (0 > fpm_cron_parse_field(fields[3], 1, 12, out->month, sizeof(out->month), "month", NULL, err, err_len)) {
@@ -222,7 +222,7 @@ int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out, /
 	/* Day of week: 0-7, where both 0 and 7 mean Sunday — parse into a
 	 * temporary 0..7 bitmap, then fold 7 into 0. */
 	if (0 > fpm_cron_parse_field(fields[4], 0, 7, wday_tmp, sizeof(wday_tmp), "day-of-week",
-			&out->wday_is_star, err, err_len)) {
+					&out->wday_is_star, err, err_len)) {
 		return -1;
 	}
 	for (i = 0; i < 7; i++) {

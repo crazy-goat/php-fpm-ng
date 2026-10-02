@@ -48,19 +48,19 @@ struct fpm_worker_pool_s;
  * refusal -- can be logged by filling in only what it actually knows. */
 struct fpm_http_direct_access_entry {
 	const char *method;
-	const char *uri;		/* path only, without the query string */
-	const char *query_string;	/* without the '?' */
+	const char *uri; /* path only, without the query string */
+	const char *query_string; /* without the '?' */
 	const char *script_filename;
 	const char *remote_addr;
 	const char *remote_user;
-	size_t content_length;		/* request body bytes */
-	size_t bytes_sent;		/* response body bytes */
+	size_t content_length; /* request body bytes */
+	size_t bytes_sent; /* response body bytes */
 	int status;
-	struct timeval started;		/* for %d, when duration is left at zero */
-	time_t started_epoch;		/* for %t */
-	struct timeval duration;	/* for %d; zero means "measure from started" */
-	double cpu_percent;		/* for %C; a response that ran no PHP passes 0 */
-	size_t memory;			/* PHP peak for this request, 0 when no PHP ran */
+	struct timeval started; /* for %d, when duration is left at zero */
+	time_t started_epoch; /* for %t */
+	struct timeval duration; /* for %d; zero means "measure from started" */
+	double cpu_percent; /* for %C; a response that ran no PHP passes 0 */
+	size_t memory; /* PHP peak for this request, 0 when no PHP ran */
 	/* CGI variables for %e{...}; NULL when no PHP request was built. */
 	const struct evkeyvalq *env;
 	/* Response headers for %o{...}. The caller must either pass NULL or hold a
@@ -83,6 +83,6 @@ void fpm_http_direct_access_log_free(struct fpm_http_direct_access_log_s *log);
 
 /* No-op when log is NULL or the URI matches an access.suppress_path entry. */
 void fpm_http_direct_access_log_write(struct fpm_http_direct_access_log_s *log,
-	const struct fpm_http_direct_access_entry *entry);
+		const struct fpm_http_direct_access_entry *entry);
 
 #endif

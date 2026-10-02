@@ -76,7 +76,7 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp);
  * that a certificate reload, which reinstalls the pair, does not silently drop
  * them. May be NULL. */
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg);
+		struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg);
 
 /* Issue #195. The streaming writer's write step for a TLS pool: puts the front
  * of the connection's output buffer on the wire with SSL_write() instead of

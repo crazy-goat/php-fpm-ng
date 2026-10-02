@@ -16,13 +16,13 @@ void fpm_tier_announce(enum fpm_tier tier, const char *pool, const char *subject
 			level = ZLOG_NOTICE;
 			label = "BETA";
 			withholds = "its directives may change in a minor release, "
-				"and fixes carry no response-time commitment";
+						"and fixes carry no response-time commitment";
 			break;
 		case FPM_TIER_EXPERIMENTAL:
 			level = ZLOG_WARNING;
 			label = "EXPERIMENTAL";
 			withholds = "its directives may change in any release, "
-				"support is best effort, and it may be removed";
+						"support is best effort, and it may be removed";
 			break;
 		default:
 			/* Supported says nothing. The absence IS the announcement: an
@@ -33,9 +33,9 @@ void fpm_tier_announce(enum fpm_tier tier, const char *pool, const char *subject
 
 	if (pool) {
 		zlog(level, "[pool %s] %s is %s: %s -- see \"Support tiers\" in README.md",
-			pool, subject, label, withholds);
+				pool, subject, label, withholds);
 	} else {
 		zlog(level, "%s is %s: %s -- see \"Support tiers\" in README.md",
-			subject, label, withholds);
+				subject, label, withholds);
 	}
 }

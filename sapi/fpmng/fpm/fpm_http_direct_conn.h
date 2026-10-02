@@ -70,10 +70,10 @@ struct bufferevent;
 struct fpm_http_direct_conns;
 
 struct fpm_http_direct_conns_limits {
-	const char *pool;	/* for log messages */
-	int read_timeout_ms;	/* first-request deadline; 0 disables it */
-	int max_connections;	/* per worker; 0 = unlimited */
-	int max_per_client;	/* per peer address, per worker; 0 = unlimited */
+	const char *pool; /* for log messages */
+	int read_timeout_ms; /* first-request deadline; 0 disables it */
+	int max_connections; /* per worker; 0 = unlimited */
+	int max_per_client; /* per peer address, per worker; 0 = unlimited */
 	/* Keep a node for the whole life of a connection rather than dropping it
 	 * when its first request arrives, so that live() is a true gauge of what
 	 * this worker holds (issue #64). Only a caller that sweeps may ask for
@@ -88,7 +88,7 @@ struct fpm_http_direct_conns_limits {
 /* NULL only on OOM. A worker whose limits are all off still gets an object:
  * the deadline alone is worth tracking, and the caller has one less branch. */
 struct fpm_http_direct_conns *fpm_http_direct_conns_new(struct event_base *base,
-	const struct fpm_http_direct_conns_limits *limits);
+		const struct fpm_http_direct_conns_limits *limits);
 void fpm_http_direct_conns_free(struct fpm_http_direct_conns *conns);
 
 /* From the bevcb, with the bufferevent it is about to return. The fd and the
@@ -122,7 +122,7 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
  * fired the deadline before this request arrived -- the accept-time node was
  * never created). */
 int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev,
-	struct timeval *accepted_out, unsigned *requests_out);
+		struct timeval *accepted_out, unsigned *requests_out);
 
 /* False while this worker is at http.max_connections. The caller keeps its
  * listener disabled for as long as this says so. Not const: it sweeps first,

@@ -85,6 +85,6 @@ void fpm_operator_endpoint_child_main(struct fpm_worker_pool_s *wp);
  * not free them. Call after fpm_operator_endpoint_configure() has run for every
  * pool (the master's init_main pass is such a point). */
 int fpm_operator_endpoint_route(struct fpm_worker_pool_s *wp, int metrics,
-	const char **address, const char **path);
+		const char **address, const char **path);
 
 #endif

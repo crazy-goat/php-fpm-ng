@@ -61,18 +61,19 @@ void fpm_debug_clock_init(void) /* {{{ */
 	/* Both anchors, or neither: a rate applied to only one of the two clocks
 	 * is exactly the skew this file exists to avoid. */
 	if (clock_gettime(CLOCK_REALTIME, &fpm_debug_clock_anchor_real) != 0 ||
-	    clock_gettime(CLOCK_MONOTONIC, &fpm_debug_clock_anchor_mono) != 0) {
+			clock_gettime(CLOCK_MONOTONIC, &fpm_debug_clock_anchor_mono) != 0) {
 		zlog(ZLOG_WARNING, FPM_DEBUG_CLOCK_ENV " is set but clock_gettime() failed; "
-			"the clock runs at real speed");
+											   "the clock runs at real speed");
 		return;
 	}
 
 	errno = 0;
 	parsed = strtoul(raw, &end, 10);
 	if (errno != 0 || end == raw || *end != '\0' ||
-	    parsed < 1 || parsed > FPM_DEBUG_CLOCK_MAX_RATE) {
+			parsed < 1 || parsed > FPM_DEBUG_CLOCK_MAX_RATE) {
 		zlog(ZLOG_WARNING, FPM_DEBUG_CLOCK_ENV " = '%s' is not an integer in 1..%d; "
-			"the clock runs at real speed", raw, FPM_DEBUG_CLOCK_MAX_RATE);
+											   "the clock runs at real speed",
+				raw, FPM_DEBUG_CLOCK_MAX_RATE);
 		return;
 	}
 
@@ -92,8 +93,7 @@ time_t fpm_debug_clock_now(void) /* {{{ */
 		return time(NULL);
 	}
 
-	return (time_t) (fpm_debug_clock_anchor_real.tv_sec
-		+ fpm_debug_clock_elapsed(&fpm_debug_clock_anchor_real, &now) / FPM_DEBUG_CLOCK_NS_PER_S);
+	return (time_t) (fpm_debug_clock_anchor_real.tv_sec + fpm_debug_clock_elapsed(&fpm_debug_clock_anchor_real, &now) / FPM_DEBUG_CLOCK_NS_PER_S);
 }
 /* }}} */
 
@@ -110,8 +110,7 @@ int fpm_debug_clock_monotonic(struct timespec *ts) /* {{{ */
 		return -1;
 	}
 
-	total = fpm_debug_clock_ns(&fpm_debug_clock_anchor_mono)
-		+ fpm_debug_clock_elapsed(&fpm_debug_clock_anchor_mono, &now);
+	total = fpm_debug_clock_ns(&fpm_debug_clock_anchor_mono) + fpm_debug_clock_elapsed(&fpm_debug_clock_anchor_mono, &now);
 
 	ts->tv_sec = (time_t) (total / FPM_DEBUG_CLOCK_NS_PER_S);
 	ts->tv_nsec = (long) (total % FPM_DEBUG_CLOCK_NS_PER_S);

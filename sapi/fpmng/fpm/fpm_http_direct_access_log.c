@@ -147,7 +147,7 @@ static const char *fpm_http_direct_access_env(const struct evkeyvalq *env, const
 }
 
 static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *log,
-	const struct fpm_http_direct_access_entry *e, struct fpm_http_direct_access_buf *b)
+		const struct fpm_http_direct_access_entry *e, struct fpm_http_direct_access_buf *b)
 {
 	const char *s = log->format;
 	char modifier[129];
@@ -198,8 +198,7 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 					struct timeval now;
 
 					gettimeofday(&now, NULL);
-					elapsed = (double) (now.tv_sec - e->started.tv_sec)
-						+ (double) (now.tv_usec - e->started.tv_usec) / 1000000.;
+					elapsed = (double) (now.tv_sec - e->started.tv_sec) + (double) (now.tv_usec - e->started.tv_usec) / 1000000.;
 				}
 				if (elapsed < 0) {
 					elapsed = 0;
@@ -216,7 +215,7 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 			}
 			case 'e':
 				fpm_http_direct_access_puts(b,
-					fpm_http_direct_access_or_dash(fpm_http_direct_access_env(e->env, modifier)));
+						fpm_http_direct_access_or_dash(fpm_http_direct_access_env(e->env, modifier)));
 				break;
 			case 'f':
 				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(e->script_filename));
@@ -241,7 +240,7 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 				break;
 			case 'o':
 				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(
-					fpm_http_direct_access_out_header(e->http, modifier)));
+													   fpm_http_direct_access_out_header(e->http, modifier)));
 				break;
 			case 'p':
 				fpm_http_direct_access_printf(b, "%ld", (long) getpid());
@@ -300,7 +299,7 @@ struct fpm_http_direct_access_log_s *fpm_http_direct_access_log_init_child(struc
 		 * reaching here means the descriptor was closed under us. Say so once
 		 * rather than writing to whatever fd 0 happens to be. */
 		zlog(ZLOG_ERROR, "[pool %s] access.log: no descriptor from the master, logging disabled",
-			wp->config->name);
+				wp->config->name);
 		return NULL;
 	}
 	log = calloc(1, sizeof(*log));
@@ -353,7 +352,7 @@ void fpm_http_direct_access_log_free(struct fpm_http_direct_access_log_s *log)
 }
 
 void fpm_http_direct_access_log_write(struct fpm_http_direct_access_log_s *log,
-	const struct fpm_http_direct_access_entry *entry)
+		const struct fpm_http_direct_access_entry *entry)
 {
 	struct fpm_http_direct_access_buf b;
 	unsigned i;

@@ -39,13 +39,14 @@ int fpm_metrics_init_main(void) /* {{{ */
 	mem = fpm_shm_alloc(size);
 	if (!mem) {
 		zlog(ZLOG_ERROR, "metrics: failed to allocate %zu B of shared memory "
-			"(%u slots x %u series) — application metrics disabled", size, slots, limit);
+						 "(%u slots x %u series) — application metrics disabled",
+				size, slots, limit);
 		return -1;
 	}
 
 	fpmng_metrics_shm_init(mem, size, slots, limit);
 	zlog(ZLOG_DEBUG, "metrics: shm %zu B, %u slotow workera, limit %u serii/slot",
-		size, slots, limit);
+			size, slots, limit);
 	return 0;
 }
 /* }}} */

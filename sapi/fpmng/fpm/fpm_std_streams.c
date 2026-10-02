@@ -49,7 +49,7 @@ void fpm_std_streams_register(const char *pool_name)
 		const char *path;
 		const char *mode;
 	} handles[] = {
-		{ "STDIN",  "php://stdin",  "rb" },
+		{ "STDIN", "php://stdin", "rb" },
 		{ "STDOUT", "php://stdout", "wb" },
 		{ "STDERR", "php://stderr", "wb" },
 	};
@@ -63,10 +63,11 @@ void fpm_std_streams_register(const char *pool_name)
 		 * not the script's, so it is reported once through the pool's own log
 		 * channel rather than as a PHP warning attributed to the script. */
 		stream = php_stream_open_wrapper_ex((char *) handles[i].path,
-			(char *) handles[i].mode, 0, NULL, NULL);
+				(char *) handles[i].mode, 0, NULL, NULL);
 		if (!stream) {
 			zlog(ZLOG_WARNING, "[pool %s] cannot open %s; the %s constant will "
-				"not exist for this run", pool_name, handles[i].path, handles[i].constant);
+							   "not exist for this run",
+					pool_name, handles[i].path, handles[i].constant);
 			continue;
 		}
 
@@ -75,7 +76,7 @@ void fpm_std_streams_register(const char *pool_name)
 		php_stream_to_zval(stream, &c.value);
 		ZEND_CONSTANT_SET_FLAGS(&c, 0, 0);
 		c.name = zend_string_init_interned(handles[i].constant,
-			strlen(handles[i].constant), 0);
+				strlen(handles[i].constant), 0);
 		zend_register_constant(&c);
 	}
 }

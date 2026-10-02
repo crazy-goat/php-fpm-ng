@@ -52,7 +52,7 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log);
  * rotation: SIGUSR1 reaches the master only. The wakeup arrives over the
  * follow channel of that same header. */
 struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_log_s *log,
-	const char *pool, const char *path);
+		const char *pool, const char *path);
 
 /* log == NULL -> no-op. remote_user may be NULL/empty (becomes "-").
  * status < 0 -> "-" instead of a code (for example, the connection failed
@@ -74,7 +74,7 @@ struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_
  * NULL for both; only fpm_http_log_response() in fpm_http.c decides which
  * case it is, from whether the gateway's own http.route[] is set. */
 void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *remote_addr,
-	const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
-	int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target);
+		const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
+		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target);
 
 #endif

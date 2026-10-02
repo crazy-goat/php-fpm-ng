@@ -37,7 +37,7 @@ int fpm_http_direct_tls_validate_pairing(struct fpm_worker_pool_s *wp)
 	}
 	if (c->http_tls_key && *c->http_tls_key) {
 		zlog(ZLOG_ALERT, "[pool %s] http.tls_key without http.tls_cert has nothing to attach the key to",
-			c->name);
+				c->name);
 		return -1;
 	}
 	/* The two knobs that only mean anything once a certificate is served.
@@ -46,7 +46,7 @@ int fpm_http_direct_tls_validate_pairing(struct fpm_worker_pool_s *wp)
 	 * TLS-tuned. */
 	if ((c->http_tls_sni_cert && *c->http_tls_sni_cert) || c->http_tls_min_version) {
 		zlog(ZLOG_ALERT, "[pool %s] http.tls_min_version and http.tls_sni_cert require http.tls_cert",
-			c->name);
+				c->name);
 		return -1;
 	}
 	if (c->http_tls_verify_client && *c->http_tls_verify_client && strcmp(c->http_tls_verify_client, "none") != 0) {
@@ -75,8 +75,8 @@ int fpm_http_direct_tls_validate(struct fpm_worker_pool_s *wp)
 		 * asked for HTTPS on that port; serving plain HTTP there instead is
 		 * the one outcome that must not happen quietly. */
 		zlog(ZLOG_ALERT, "[pool %s] http.tls_cert requires php-fpm-ng to be built with TLS support: "
-			"rebuild with ./configure --enable-fpmng-tls (needs libevent_openssl and OpenSSL)",
-			wp->config->name);
+						 "rebuild with ./configure --enable-fpmng-tls (needs libevent_openssl and OpenSSL)",
+				wp->config->name);
 		return -1;
 	}
 	return 0;
@@ -108,9 +108,13 @@ int fpm_http_direct_tls_init_main(struct fpm_worker_pool_s *wp)
 }
 
 int fpm_http_direct_tls_child_attach(struct fpm_worker_pool_s *wp, struct event_base *base,
-	struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg)
+		struct evhttp *http, void (*on_accept)(void *, struct bufferevent *), void *on_accept_arg)
 {
-	(void) wp; (void) base; (void) http; (void) on_accept; (void) on_accept_arg;
+	(void) wp;
+	(void) base;
+	(void) http;
+	(void) on_accept;
+	(void) on_accept_arg;
 	return 0;
 }
 

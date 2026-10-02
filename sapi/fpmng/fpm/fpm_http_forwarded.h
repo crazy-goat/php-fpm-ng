@@ -22,12 +22,12 @@ struct fpm_http_acl_s;
 struct evkeyvalq;
 
 #define FPM_HTTP_FORWARDED_ADDR_LEN 46 /* INET6_ADDRSTRLEN */
-#define FPM_HTTP_FORWARDED_PORT_LEN 6  /* "65535" + NUL */
+#define FPM_HTTP_FORWARDED_PORT_LEN 6 /* "65535" + NUL */
 
 struct fpm_http_forwarded_result_s {
 	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN]; /* [0] == '\0' -> do not override REMOTE_ADDR */
-	const char *scheme;                            /* "http" or "https", never NULL */
-	int https;                                     /* 1 -> HTTPS should be set to "on" */
+	const char *scheme; /* "http" or "https", never NULL */
+	int https; /* 1 -> HTTPS should be set to "on" */
 	char server_port[FPM_HTTP_FORWARDED_PORT_LEN]; /* [0] == '\0' -> do not override SERVER_PORT */
 };
 
@@ -36,6 +36,6 @@ struct fpm_http_forwarded_result_s {
  * direct TCP address) against `trusted` (fpm_http_acl_check()) before reading
  * headers from `headers`. */
 void fpm_http_forwarded_resolve(struct fpm_http_acl_s *trusted, const char *peer_addr,
-	struct evkeyvalq *headers, struct fpm_http_forwarded_result_s *out);
+		struct evkeyvalq *headers, struct fpm_http_forwarded_result_s *out);
 
 #endif

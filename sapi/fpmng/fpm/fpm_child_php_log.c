@@ -48,7 +48,8 @@ static int fpm_child_php_log_level(int syslog_type_int) /* {{{ */
 static void fpm_child_php_log_message(const char *message, int syslog_type_int) /* {{{ */
 {
 	const char *pool = fpm_child_php_log_wp && fpm_child_php_log_wp->config
-		? fpm_child_php_log_wp->config->name : "-";
+							   ? fpm_child_php_log_wp->config->name
+							   : "-";
 	int level = fpm_child_php_log_level(syslog_type_int);
 
 	if (!message) {
@@ -89,7 +90,7 @@ static void fpm_child_php_log_message(const char *message, int syslog_type_int) 
  * would stop the script itself from calling ini_set('display_errors', ...) —
  * which is not what a default is for. */
 static void fpm_child_php_log_ini_default(struct fpm_worker_pool_s *wp,
-	const char *name, const char *value) /* {{{ */
+		const char *name, const char *value) /* {{{ */
 {
 	struct key_value_s kv;
 
@@ -99,8 +100,8 @@ static void fpm_child_php_log_ini_default(struct fpm_worker_pool_s *wp,
 
 	if (0 > fpm_php_apply_defines_ex(&kv, ZEND_INI_USER)) {
 		zlog(ZLOG_ERROR, "[pool %s] unable to set the default '%s = %s' for this "
-			"pool type; PHP errors may not reach error_log",
-			wp->config->name, name, value);
+						 "pool type; PHP errors may not reach error_log",
+				wp->config->name, name, value);
 	}
 }
 /* }}} */

@@ -25,7 +25,7 @@ struct fpm_http_acl_entry_s {
 
 struct fpm_http_acl_s {
 	unsigned count;
-	struct fpm_http_acl_entry_s entries[1];	/* flexible-ish, count entries follow */
+	struct fpm_http_acl_entry_s entries[1]; /* flexible-ish, count entries follow */
 };
 
 int fpm_http_acl_parse(const char *pool, const char *directive, const char *csv, struct fpm_http_acl_s **out) /* {{{ */
@@ -122,18 +122,14 @@ int fpm_http_acl_check(struct fpm_http_acl_s *acl, const char *peer_addr) /* {{{
 	}
 
 	for (i = 0; i < acl->count; i++) {
-		if (is_v4 && acl->entries[i].family == FPM_HTTP_ACL_INET
-				&& !memcmp(&v4, &acl->entries[i].addr.v4, sizeof(v4))) {
+		if (is_v4 && acl->entries[i].family == FPM_HTTP_ACL_INET && !memcmp(&v4, &acl->entries[i].addr.v4, sizeof(v4))) {
 			return 1;
 		}
-		if (is_v6 && acl->entries[i].family == FPM_HTTP_ACL_INET6
-				&& !memcmp(&v6, &acl->entries[i].addr.v6, sizeof(v6))) {
+		if (is_v6 && acl->entries[i].family == FPM_HTTP_ACL_INET6 && !memcmp(&v6, &acl->entries[i].addr.v6, sizeof(v6))) {
 			return 1;
 		}
 #ifdef IN6_IS_ADDR_V4MAPPED
-		if (is_v6 && acl->entries[i].family == FPM_HTTP_ACL_INET
-				&& IN6_IS_ADDR_V4MAPPED(&v6)
-				&& !memcmp(((char *)&v6) + 12, &acl->entries[i].addr.v4, 4)) {
+		if (is_v6 && acl->entries[i].family == FPM_HTTP_ACL_INET && IN6_IS_ADDR_V4MAPPED(&v6) && !memcmp(((char *) &v6) + 12, &acl->entries[i].addr.v4, 4)) {
 			return 1;
 		}
 #endif

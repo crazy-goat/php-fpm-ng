@@ -71,7 +71,7 @@
 #include "zlog.h"
 
 #ifdef ZTS
-# error "the libphp build substitutes zend_signal_init() with zend_signal_startup(), which is not idempotent under ZTS; build against an NTS libphp or build from source"
+#error "the libphp build substitutes zend_signal_init() with zend_signal_startup(), which is not idempotent under ZTS; build against an NTS libphp or build from source"
 #endif
 
 void zend_signal_init(void)
@@ -139,7 +139,7 @@ int fpmng_libphp_register_bundled_modules(void)
 
 	if (startup == FAILURE) {
 		zlog(ZLOG_ERROR, "could not register the fpmng_metrics extension against this libphp; "
-				"see the E_CORE_WARNING above for what the engine rejected");
+						 "see the E_CORE_WARNING above for what the engine rejected");
 		return -1;
 	}
 

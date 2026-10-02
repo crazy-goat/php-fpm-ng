@@ -15,9 +15,9 @@
 struct fpm_cron_schedule_s {
 	unsigned char minute[60];
 	unsigned char hour[24];
-	unsigned char mday[32];		/* index 0 unused, 1..31 valid */
-	unsigned char month[13];	/* index 0 unused, 1..12 valid */
-	unsigned char wday[7];		/* 0..6, 0 = Sunday */
+	unsigned char mday[32]; /* index 0 unused, 1..31 valid */
+	unsigned char month[13]; /* index 0 unused, 1..12 valid */
+	unsigned char wday[7]; /* 0..6, 0 = Sunday */
 
 	/* Whether the day-of-month / day-of-week field was the LITERAL
 	 * character "*" (not e.g. "*\/1", which is a restriction that merely
@@ -33,7 +33,7 @@ struct fpm_cron_schedule_s {
  * by the caller) — the caller is expected to reject the configuration and
  * show this message, not to guess at "close enough". Returns 0 on success. */
 int fpm_cron_schedule_parse(const char *expr, struct fpm_cron_schedule_s *out,
-	char *err, size_t err_len);
+		char *err, size_t err_len);
 
 /* Computes the next time (epoch seconds, always exactly at the start of
  * a minute) that matches *sched and is strictly greater than `after`. Never

@@ -12,7 +12,7 @@
 #include "php.h"
 /* After php.h, not before: the header uses PHP_HASH_API and ZEND_ATTRIBUTE_UNUSED,
  * which php.h defines. */
-#include "ext/hash/php_hash.h"	/* PHP_HASH_API, which php_hash_sha.h uses and does not include */
+#include "ext/hash/php_hash.h" /* PHP_HASH_API, which php_hash_sha.h uses and does not include */
 #include "ext/hash/php_hash_sha.h"
 
 #include "fpm.h"
@@ -26,7 +26,7 @@
 static uint32_t fpm_payload_u32(const unsigned char *p)
 {
 	return (uint32_t) p[0] | ((uint32_t) p[1] << 8) |
-		((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
+		   ((uint32_t) p[2] << 16) | ((uint32_t) p[3] << 24);
 }
 
 static uint64_t fpm_payload_u64(const unsigned char *p)
@@ -62,7 +62,7 @@ const char *fpm_payload_self_path(void)
 		 * would load the new version's PHP into old machine code. There is no
 		 * path to the running inode left to return, so say so. */
 		if (len >= sizeof(deleted) - 1 &&
-			0 == strcmp(resolved + len - (sizeof(deleted) - 1), deleted)) {
+				0 == strcmp(resolved + len - (sizeof(deleted) - 1), deleted)) {
 			resolved[0] = '\0';
 			return NULL;
 		}
@@ -85,7 +85,7 @@ const char *fpm_payload_self_path(void)
 }
 
 int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *entry,
-	const char **why)
+		const char **why)
 {
 	unsigned char record[FPM_PAYLOAD_RECORD_SIZE];
 	uint64_t at;
@@ -185,7 +185,7 @@ int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *
 }
 
 int fpm_payload_read(const char *path, const struct fpm_payload_entry *entry,
-	char **data, size_t *size, const char **why)
+		char **data, size_t *size, const char **why)
 {
 	unsigned char digest[FPM_PAYLOAD_DIGEST_SIZE];
 	PHP_SHA256_CTX ctx;

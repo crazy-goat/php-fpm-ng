@@ -46,8 +46,9 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	if (!fpm_reload_selective_name_ok(name)) {
 		zlog(ZLOG_WARNING, "[pool %s] issue #330: pool name contains ':', ',' or ';', "
-			"cannot carry this pool's children across a selective reload -- "
-			"reloading it normally instead", name);
+						   "cannot carry this pool's children across a selective reload -- "
+						   "reloading it normally instead",
+				name);
 		return;
 	}
 
@@ -129,8 +130,9 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	free(pids);
 
 	zlog(ZLOG_NOTICE, "[pool %s] issue #330: config unchanged -- sparing all %d running "
-		"child(ren) from this reload; the next generation will adopt them instead of "
-		"restarting the pool", name, n);
+					  "child(ren) from this reload; the next generation will adopt them instead of "
+					  "restarting the pool",
+			name, n);
 }
 /* }}} */
 
@@ -193,7 +195,7 @@ static int fpm_reload_selective_env_take(const char *name, pid_t **out_pids) /* 
 		}
 
 		/* Count pids first so the array can be sized exactly. */
-		for (rest = found_pids; *rest; ) {
+		for (rest = found_pids; *rest;) {
 			char *comma = strchr(rest, ',');
 
 			n++;
@@ -269,7 +271,8 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	if (adopted > 0) {
 		zlog(ZLOG_NOTICE, "[pool %s] issue #330: adopted %d child(ren) carried over by "
-			"a selective reload; not restarted", wp->config->name, adopted);
+						  "a selective reload; not restarted",
+				wp->config->name, adopted);
 	}
 }
 /* }}} */

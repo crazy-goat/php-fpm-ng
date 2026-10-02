@@ -38,6 +38,6 @@ unsigned long fpm_http_gateway_baseline_requests(struct fpm_worker_pool_s *wp);
  * {"pools":[...]} shape the generic page uses. Runs in the operator endpoint's
  * own child and reads only the shared segment. */
 void fpm_http_gateway_operator_status(struct fpm_worker_pool_s *wp, const char *query,
-	struct fpm_operator_reply_s *reply);
+		struct fpm_operator_reply_s *reply);
 
 #endif

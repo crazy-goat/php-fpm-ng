@@ -41,11 +41,11 @@ struct fpm_worker_pool_s;
  * .phpt suite matches on these strings (fpmng-http-direct-config.phpt,
  * fpmng-config-rejected-directives.phpt). */
 struct fpm_http_direct_labels {
-	const char *subject;		/* "http-direct" | "pool.executor = worker" */
-	const char *chdir_note;		/* "" | " (here: the worker script)" */
-	const char *type_label;		/* what an unsupported http.* is not supported by */
-	const char *script_context;	/* log prefix of the script-resolution error */
-	const char *script_noun;	/* "front controller" | "the worker script" */
+	const char *subject; /* "http-direct" | "pool.executor = worker" */
+	const char *chdir_note; /* "" | " (here: the worker script)" */
+	const char *type_label; /* what an unsupported http.* is not supported by */
+	const char *script_context; /* log prefix of the script-resolution error */
+	const char *script_noun; /* "front controller" | "the worker script" */
 	/* NULL-terminated list of http.* directives this executor accepts on top
 	 * of the shared allow-list below, or NULL for none. Kept as data rather
 	 * than a branch on the executor so the allow-list stays one loop. */
@@ -83,9 +83,9 @@ struct fpm_http_direct_labels {
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {
-	const char *script;		/* resolved SCRIPT_FILENAME */
-	const char *root;		/* DOCUMENT_ROOT */
-	const char *front_controller;	/* SCRIPT_NAME / PHP_SELF */
+	const char *script; /* resolved SCRIPT_FILENAME */
+	const char *root; /* DOCUMENT_ROOT */
+	const char *front_controller; /* SCRIPT_NAME / PHP_SELF */
 	const char *server_addr;
 	const char *server_port;
 	const char *server_software;
@@ -101,11 +101,11 @@ typedef int (*fpm_http_direct_env_cb)(void *ctx, const char *key, const char *va
 
 int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct fpm_http_direct_labels *labels);
 int fpm_http_direct_resolve_script(const char *base, const char *front_controller,
-	char root[PATH_MAX], char script[PATH_MAX]);
+		char root[PATH_MAX], char script[PATH_MAX]);
 const char *fpm_http_direct_method(enum evhttp_cmd_type command);
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http);
 int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http_direct_env_source *source,
-	fpm_http_direct_env_cb emit, void *ctx);
+		fpm_http_direct_env_cb emit, void *ctx);
 bool fpm_http_direct_header_dropped(const char *name);
 bool fpm_http_direct_header_name_ok(const char *name);
 /* Writes `name` into `out` (size bytes, always NUL-terminated) with every byte

@@ -45,7 +45,7 @@
 #include "fpm_config.h"
 
 #include <stddef.h>
-#include <sys/types.h>	/* ssize_t */
+#include <sys/types.h> /* ssize_t */
 
 /* ACME is opt-in and off by default (--enable-fpmng-acme, issue #281, part of
  * #279), and fpm_acme_challenge.c is compiled only when it was given --
@@ -66,7 +66,7 @@
  * SHA-256 of the account key thumbprint. Both are comfortably inside these
  * bounds, which are checked -- a value that does not fit is refused with an
  * error rather than silently truncated into an answer no CA would accept. */
-#define FPM_ACME_CHALLENGE_TOKEN_MAX   128
+#define FPM_ACME_CHALLENGE_TOKEN_MAX 128
 #define FPM_ACME_CHALLENGE_KEYAUTH_MAX 512
 
 /* More than one name may be validated in one order, and an order may be
@@ -74,13 +74,21 @@
 #define FPM_ACME_CHALLENGE_MAX 8
 
 #ifndef HAVE_FPMNG_ACME
-static inline int fpm_acme_challenge_init_main(void) { return 0; }
+static inline int fpm_acme_challenge_init_main(void)
+{
+	return 0;
+}
 static inline ssize_t fpm_acme_challenge_lookup(const char *token, char *out, size_t out_len)
 {
-	(void) token; (void) out; (void) out_len;
+	(void) token;
+	(void) out;
+	(void) out_len;
 	return -1;
 }
-static inline int fpm_acme_challenge_register_functions(void) { return 0; }
+static inline int fpm_acme_challenge_register_functions(void)
+{
+	return 0;
+}
 #else
 
 /* Master, before the first fork. Idempotent. 0 or -1. */
@@ -111,6 +119,6 @@ size_t fpm_acme_challenge_tokens(char (*out)[FPM_ACME_CHALLENGE_TOKEN_MAX], size
  * process. 0 or -1. */
 int fpm_acme_challenge_register_functions(void);
 
-#endif	/* HAVE_FPMNG_ACME */
+#endif /* HAVE_FPMNG_ACME */
 
 #endif

@@ -61,13 +61,13 @@ struct fpm_tls_http_s {
 	size_t cert_len;
 	char *key_pem;
 	size_t key_len;
-	int min_version;			/* e.g. TLS1_2_VERSION, see fpm_tls_http.c */
+	int min_version; /* e.g. TLS1_2_VERSION, see fpm_tls_http.c */
 	/* 80 = 16 (key name) + 32 (AES-256 key) + 32 (HMAC-SHA256 key), the
 	 * layout OpenSSL's classic SSL_CTX_set_tlsext_ticket_keys() expects
 	 * since it moved off AES-128/HMAC-SHA1 -- the old 48-byte layout from
 	 * early OpenSSL 1.x docs is refused with "invalid ticket keys length". */
 	unsigned char ticket_key[80];
-	struct fpm_tls_http_sni_s *sni;		/* http.tls_sni_cert, parsed; NULL when unset */
+	struct fpm_tls_http_sni_s *sni; /* http.tls_sni_cert, parsed; NULL when unset */
 	size_t sni_count;
 	/* mTLS (issue #62). verify_client: 0 = off (default, no CertificateRequest
 	 * sent, matches every pool's behavior before this), 1 = "optional" (a
@@ -91,8 +91,8 @@ struct fpm_tls_http_s {
  * "servername:cert_path:key_path" entry is validated exactly like the
  * primary cert_path/key_path pair above, using the same checks. */
 int fpm_tls_http_validate(const char *pool, const char *cert_path, const char *key_path,
-	const char *min_version, const char *sni_spec,
-	const char *verify_client, const char *client_ca_path);
+		const char *min_version, const char *sni_spec,
+		const char *verify_client, const char *client_ca_path);
 
 /* Called once per pool, in the master, BEFORE the first gateway child forks
  * (fpm_http_init_pool_ex()): reads cert+key into memory (fork() copies them
@@ -101,8 +101,8 @@ int fpm_tls_http_validate(const char *pool, const char *cert_path, const char *k
  * Returns NULL on error (logged), never a partially filled structure.
  * sni_spec: see fpm_tls_http_validate() above; fills tls->sni/tls->sni_count. */
 struct fpm_tls_http_s *fpm_tls_http_load(const char *pool, const char *cert_path,
-	const char *key_path, const char *min_version, const char *sni_spec,
-	const char *verify_client, const char *client_ca_path);
+		const char *key_path, const char *min_version, const char *sni_spec,
+		const char *verify_client, const char *client_ca_path);
 
 void fpm_tls_http_free(struct fpm_tls_http_s *tls);
 

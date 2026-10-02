@@ -45,7 +45,7 @@
  * serving (see fpm_tls_reload_master_init() and the master tick in
  * fpm_tls_reload.c). */
 #define FPM_TLS_RELOAD_MAX_CERT (64 * 1024)
-#define FPM_TLS_RELOAD_MAX_KEY  (16 * 1024)
+#define FPM_TLS_RELOAD_MAX_KEY (16 * 1024)
 
 struct fpm_tls_reload_s;
 
@@ -73,8 +73,8 @@ struct fpm_tls_reload_s;
  * and the first tick get published rather than silently adopted as the
  * baseline and never announced. */
 struct fpm_tls_reload_s *fpm_tls_reload_master_init(const char *pool,
-	const char *cert_path, const char *key_path, const char *min_version,
-	struct fpm_tls_http_s *initial, int check_interval_sec);
+		const char *cert_path, const char *key_path, const char *min_version,
+		struct fpm_tls_http_s *initial, int check_interval_sec);
 
 /* Is there a usable certificate in the currently published generation?
  * False only in the NO_CERT state (issue #172): a reload state created with
@@ -121,8 +121,8 @@ SSL_CTX *fpm_tls_reload_child_ctx_new(struct fpm_tls_reload_s *reload);
  * A no-op when `reload` is NULL or its check interval is 0
  * (http.tls_reload_check off, or master-side setup failed). */
 void fpm_tls_reload_child_init(struct fpm_tls_reload_s *reload,
-	struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
-	struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg);
+		struct event_base *base, struct evhttp *http, SSL_CTX **ctx_slot,
+		struct bufferevent *(*bevcb)(struct event_base *, void *), void *bevcb_arg);
 
 /* Called by a gateway child that started in NO_CERT (issue #172), before
  * fpm_tls_reload_child_init(): registers a callback the generation-watch
@@ -140,7 +140,7 @@ void fpm_tls_reload_child_init(struct fpm_tls_reload_s *reload,
  * go through the normal adoption path and do not call it again: `cb` runs at
  * most once per process. */
 void fpm_tls_reload_child_on_first_cert(struct fpm_tls_reload_s *reload,
-	void (*cb)(void *), void *arg);
+		void (*cb)(void *), void *arg);
 
 /* Master-only: releases the shared-memory double buffer and the struct
  * itself. Never called by a gateway child -- children exit() rather than

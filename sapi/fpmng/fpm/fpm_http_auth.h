@@ -21,6 +21,6 @@
  * empty. Both buffers are always NUL-terminated; empty [0] == '\0' means
  * "do not set this CGI parameter". */
 void fpm_http_auth_parse(const char *authorization_header,
-	char auth_type[FPM_HTTP_AUTH_TYPE_LEN], char remote_user[FPM_HTTP_AUTH_USER_LEN]);
+		char auth_type[FPM_HTTP_AUTH_TYPE_LEN], char remote_user[FPM_HTTP_AUTH_USER_LEN]);
 
 #endif

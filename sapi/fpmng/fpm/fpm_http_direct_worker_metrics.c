@@ -41,7 +41,7 @@ struct fpm_worker_metrics_entry {
 static struct fpm_worker_metrics_entry *fpm_worker_metrics_registry;
 
 struct fpm_worker_metrics {
-	struct fpm_worker_metrics_slot *slot;	/* NULL if the pool has no shared segment */
+	struct fpm_worker_metrics_slot *slot; /* NULL if the pool has no shared segment */
 };
 
 static struct fpm_worker_metrics_shared *fpm_worker_metrics_shared_get(struct fpm_worker_pool_s *wp)
@@ -71,14 +71,14 @@ int fpm_http_direct_worker_metrics_init_main(struct fpm_worker_pool_s *wp)
 	shared = fpm_shm_alloc(sizeof(*shared) + nslots * sizeof(shared->slots[0]));
 	if (!shared) {
 		zlog(ZLOG_ERROR, "[pool %s] http-direct worker: cannot allocate the pending/watcher gauges",
-			wp->config->name);
+				wp->config->name);
 		return -1;
 	}
 	shared->nslots = nslots;
 	entry = calloc(1, sizeof(*entry));
 	if (!entry) {
 		zlog(ZLOG_ERROR, "[pool %s] http-direct worker: cannot register the pending/watcher gauges",
-			wp->config->name);
+				wp->config->name);
 		return -1;
 	}
 	entry->wp = wp;

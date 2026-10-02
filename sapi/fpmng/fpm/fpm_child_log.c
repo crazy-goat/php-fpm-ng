@@ -66,7 +66,7 @@ struct fpm_child_log_channel_s {
 	struct fpm_worker_pool_s *wp;
 	int fd_read;
 	int fd_write;
-	unsigned registered:1;		/* read end is in the event loop */
+	unsigned registered : 1; /* read end is in the event loop */
 	struct fpm_event_s ev;
 	struct fpm_child_log_channel_s *next;
 };
@@ -129,7 +129,7 @@ static void fpm_child_log_said(struct fpm_event_s *ev, short which, void *arg) /
 			 * level and a child to. */
 			if (got < 0 && !PHP_IS_TRANSIENT_ERROR(errno) && errno != EINTR) {
 				zlog(ZLOG_SYSERROR, "[pool %s] unable to read the child log channel",
-					ch->wp->config->name);
+						ch->wp->config->name);
 			}
 			return;
 		}
@@ -179,8 +179,8 @@ int fpm_child_log_prepare(struct fpm_child_s *child) /* {{{ */
 
 	if (0 > socketpair(AF_UNIX, SOCK_DGRAM, 0, fds)) {
 		zlog(ZLOG_SYSERROR, "[pool %s] failed to create the child log channel; "
-			"this pool's own messages will not reach error_log",
-			child->wp->config->name);
+							"this pool's own messages will not reach error_log",
+				child->wp->config->name);
 		return 0;
 	}
 
@@ -190,7 +190,7 @@ int fpm_child_log_prepare(struct fpm_child_s *child) /* {{{ */
 	 * throwing away the message that explains why it is restarting. */
 	if (0 > fd_set_blocked(fds[0], 0)) {
 		zlog(ZLOG_SYSERROR, "[pool %s] failed to unblock the child log channel",
-			child->wp->config->name);
+				child->wp->config->name);
 		close(fds[0]);
 		close(fds[1]);
 		return 0;
@@ -214,7 +214,7 @@ int fpm_child_log_prepare(struct fpm_child_s *child) /* {{{ */
 	ch = malloc(sizeof(*ch));
 	if (!ch) {
 		zlog(ZLOG_ERROR, "[pool %s] unable to malloc the child log channel",
-			child->wp->config->name);
+				child->wp->config->name);
 		close(fds[0]);
 		close(fds[1]);
 		return 0;
@@ -273,7 +273,7 @@ static void fpm_child_log_truncate(char *buf, size_t len) /* {{{ */
 {
 	if (len >= sizeof("...") - 1) {
 		memcpy(buf + FPM_CHILD_LOG_HDR + len - (sizeof("...") - 1), "...",
-			sizeof("...") - 1);
+				sizeof("...") - 1);
 	}
 }
 /* }}} */
@@ -358,7 +358,8 @@ void fpm_child_log_init_child(struct fpm_worker_pool_s *wp) /* {{{ */
 		/* strerror(errno) spelled out rather than ZLOG_SYSERROR: see the warning
 		 * in fpm_child_log.h — the relay never sees that suffix. */
 		zlog(ZLOG_ERROR, "[pool %s] failed to open /dev/null: %s (%d); this pool's "
-			"own messages may be logged twice", wp->config->name, strerror(errno), errno);
+						 "own messages may be logged twice",
+				wp->config->name, strerror(errno), errno);
 		return;
 	}
 	fcntl(devnull, F_SETFD, fcntl(devnull, F_GETFD) | FD_CLOEXEC);

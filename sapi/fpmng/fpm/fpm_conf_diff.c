@@ -13,7 +13,7 @@
 #include "zlog.h"
 
 struct fpm_conf_diff_section_s {
-	char *name;			/* NULL for the preamble before the first [section] -- kept
+	char *name; /* NULL for the preamble before the first [section] -- kept
 					 * out of the list entirely, see append_line() below */
 	char *body;
 	size_t body_len, body_cap;
@@ -82,7 +82,7 @@ static int fpm_conf_diff_body_append(struct fpm_conf_diff_section_s *section, co
 
 struct fpm_conf_diff_scan_state {
 	struct fpm_conf_diff_section_s **head;
-	struct fpm_conf_diff_section_s *cur;	/* NULL while still in the preamble */
+	struct fpm_conf_diff_section_s *cur; /* NULL while still in the preamble */
 };
 
 static int fpm_conf_diff_scan_file(const char *path, struct fpm_conf_diff_scan_state *st, int depth); /* forward */
@@ -162,7 +162,7 @@ static int fpm_conf_diff_scan_line(char *line, struct fpm_conf_diff_scan_state *
 
 			if (depth >= FPM_CONF_DIFF_MAX_INCLUDE_DEPTH) {
 				zlog(ZLOG_WARNING, "issue #330: include= nesting too deep while diffing "
-					"config for selective reload, treating every pool as changed this time");
+								   "config for selective reload, treating every pool as changed this time");
 				return -1;
 			}
 
@@ -252,8 +252,8 @@ void fpm_conf_diff_snapshot_current(const char *config_file) /* {{{ */
 
 	if (!snap) {
 		zlog(ZLOG_DEBUG, "issue #330: could not snapshot '%s' for selective reload; "
-			"the next reload will restart every pool regardless of reload.selective",
-			config_file ? config_file : "(null)");
+						 "the next reload will restart every pool regardless of reload.selective",
+				config_file ? config_file : "(null)");
 	}
 }
 /* }}} */
@@ -266,8 +266,8 @@ int fpm_conf_diff_begin_reload_pass(const char *config_file) /* {{{ */
 
 	if (!pass_valid) {
 		zlog(ZLOG_NOTICE, "issue #330: reload.selective could not diff '%s'; "
-			"reloading every pool this time (same as reload.selective = no)",
-			config_file ? config_file : "(null)");
+						  "reloading every pool this time (same as reload.selective = no)",
+				config_file ? config_file : "(null)");
 	}
 	return pass_valid;
 }

@@ -24,13 +24,13 @@ int fpm_pool_output_log_redirect(const char *pool_name, const char *path) /* {{{
 	fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
 	if (fd < 0) {
 		zlog(ZLOG_WARNING, "[pool %s] output_log: cannot open '%s' (%s), stdout/stderr left unchanged",
-			pool_name, path, strerror(errno));
+				pool_name, path, strerror(errno));
 		return -1;
 	}
 
 	if (0 > dup2(fd, STDOUT_FILENO) || 0 > dup2(fd, STDERR_FILENO)) {
 		zlog(ZLOG_WARNING, "[pool %s] output_log: cannot redirect stdout/stderr to '%s' (%s)",
-			pool_name, path, strerror(errno));
+				pool_name, path, strerror(errno));
 		close(fd);
 		return -1;
 	}

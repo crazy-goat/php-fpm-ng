@@ -20,7 +20,7 @@
 #include <event2/http.h>
 
 struct fpm_http_static {
-	const char *pool;	/* for zlog() only */
+	const char *pool; /* for zlog() only */
 	/* Already resolved with realpath(), by whoever owns it: the gateway does
 	 * it once per process, a direct pool gets it from
 	 * fpm_http_direct_resolve_script(). NULL disables serving entirely. */
@@ -45,7 +45,7 @@ struct fpm_http_static {
  * otherwise stat() the same path again does not have to.
  */
 int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_request *req,
-	const char *path, size_t path_len, int *script_missing);
+		const char *path, size_t path_len, int *script_missing);
 
 /* The request path, percent-decoded, with the traversal and embedded-NUL
  * checks every caller has to make before a path from the wire may touch the

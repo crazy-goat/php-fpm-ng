@@ -71,18 +71,18 @@ time_t fpm_debug_clock_now(void);
 int fpm_debug_clock_monotonic(struct timespec *ts);
 void fpm_debug_clock_sleep(time_t seconds);
 
-#define FPM_NOW()             fpm_debug_clock_now()
-#define FPM_MONOTONIC(tsp)    fpm_debug_clock_monotonic(tsp)
-#define FPM_SLEEP(seconds)    fpm_debug_clock_sleep(seconds)
+#define FPM_NOW() fpm_debug_clock_now()
+#define FPM_MONOTONIC(tsp) fpm_debug_clock_monotonic(tsp)
+#define FPM_SLEEP(seconds) fpm_debug_clock_sleep(seconds)
 
 #else
 
 /* Macros rather than wrapper functions so that a default build carries no new
  * symbol, no call and no branch: the preprocessor leaves the original libc
  * call behind, byte for byte. */
-#define FPM_NOW()             time(NULL)
-#define FPM_MONOTONIC(tsp)    clock_gettime(CLOCK_MONOTONIC, (tsp))
-#define FPM_SLEEP(seconds)    ((void) sleep((unsigned) (seconds)))
+#define FPM_NOW() time(NULL)
+#define FPM_MONOTONIC(tsp) clock_gettime(CLOCK_MONOTONIC, (tsp))
+#define FPM_SLEEP(seconds) ((void) sleep((unsigned) (seconds)))
 
 #define fpm_debug_clock_init() ((void) 0)
 

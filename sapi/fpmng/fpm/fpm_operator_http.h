@@ -39,7 +39,7 @@ void fpm_operator_buf_appendf(struct fpm_operator_buf_s *b, const char *fmt, ...
  * at 0 and the server answers 404 with the caller's list of known paths. */
 struct fpm_operator_reply_s {
 	struct fpm_operator_buf_s body;
-	const char *content_type;	/* default "text/plain; charset=utf-8" */
+	const char *content_type; /* default "text/plain; charset=utf-8" */
 	int handled;
 };
 
@@ -56,7 +56,7 @@ struct fpm_operator_reply_s {
  *
  * ctx is whatever was handed to fpm_operator_http_serve(). */
 typedef void (*fpm_operator_http_dispatch_cb)(void *ctx, const char *path, const char *query,
-	struct fpm_operator_reply_s *reply);
+		struct fpm_operator_reply_s *reply);
 
 /* Whether a query string carries this bare flag among its '&'-separated
  * parameters -- the spelling upstream's status page uses, so "json&full" is two
@@ -68,6 +68,6 @@ int fpm_operator_http_has_flag(const char *query, const char *flag);
  * known_paths is used only in the 404 body, so that a mistyped scrape URL says
  * what the right ones would have been. It may be NULL. */
 void fpm_operator_http_serve(int listen_fd, fpm_operator_http_dispatch_cb cb, void *ctx,
-	const char *known_paths);
+		const char *known_paths);
 
 #endif

@@ -504,7 +504,17 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
 EXPECT_FAIL_NAMES=
-EXPECT_TOTAL=178
+EXPECT_XFAIL=1
+EXPECT_TOTAL=179
+
+# Issue #384: fpmng-reload-selective-metrics.phpt carries an --XFAIL-- section
+# for bug #537 and so scores XFAIL on every cell, a bucket of its own in
+# build/run-fpmng-phpt.sh: not a pass, not a failure. When #537 is fixed the
+# test passes, the runner reports it as a failure named XPASS (every run, not
+# only this gate), and the section is to be deleted together with
+# EXPECT_XFAIL. It is the 179th owned test; PASS/FAIL/SKIP in the tables
+# below are unchanged by it. Measured 2026-10-02 on the 177-test tree (deb and
+# apk, TLS and not): XFAIL 1 on all four cells.
 
 # Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
 # alpine:edge with php85 8.5.10/8.5.11), 177 owned tests, from this script run
@@ -860,6 +870,7 @@ grep -q '^measurement_status=MEASURED$' "$SUMMARY" \
 get() { sed -n "s/^$1=\([0-9]*\)\$/\1/p" "$SUMMARY"; }
 GOT_PASS=$(get PASS); GOT_FAIL=$(get 'FAIL\/ERROR'); GOT_SKIP=$(get SKIP); GOT_TOTAL=$(get TOTAL)
 GOT_WARN=$(get WARN)
+GOT_XFAIL=$(get XFAIL)
 
 # Issue #301. run-tests.php has a third outcome between PASS and FAIL: a test
 # that failed once and passed when it was retried is reported as WARNED, and it
@@ -884,9 +895,10 @@ fi
 GOT_OK=$(( ${GOT_PASS:-0} + ${GOT_WARN:-0} ))
 
 if [ "$GOT_OK" != "$EXPECT_PASS" ] || [ "$GOT_FAIL" != "$EXPECT_FAIL" ] \
-   || [ "$GOT_SKIP" != "$EXPECT_SKIP" ] || [ "$GOT_TOTAL" != "$EXPECT_TOTAL" ]; then
-    fail "the packaged binary scored PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL,
-  expected PASS+WARN=$EXPECT_PASS FAIL=$EXPECT_FAIL SKIP=$EXPECT_SKIP of $EXPECT_TOTAL.
+   || [ "$GOT_SKIP" != "$EXPECT_SKIP" ] || [ "${GOT_XFAIL:-0}" != "$EXPECT_XFAIL" ] \
+   || [ "$GOT_TOTAL" != "$EXPECT_TOTAL" ]; then
+    fail "the packaged binary scored PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP XFAIL=${GOT_XFAIL:-0} of $GOT_TOTAL,
+  expected PASS+WARN=$EXPECT_PASS FAIL=$EXPECT_FAIL SKIP=$EXPECT_SKIP XFAIL=$EXPECT_XFAIL of $EXPECT_TOTAL.
   PASS and WARN are added together on purpose (issue #301): a test retried into a
   pass still ran. A number that moved in either direction is a finding: more skips
   usually means the pool stopped starting, more passes means these expectations
@@ -905,4 +917,4 @@ if [ "$GOT_FAIL_NAMES" != "$EXPECT_FAIL_NAMES" ]; then
   got:      $(echo "$GOT_FAIL_NAMES" | tr '\n' ' ')"
 fi
 
-echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP of $GOT_TOTAL)"
+echo "ci-package-gate.sh: PASS ($FLAVOUR package installed on a machine with no compiler, suite PASS=$GOT_PASS WARN=$GOT_WARN FAIL=$GOT_FAIL SKIP=$GOT_SKIP XFAIL=${GOT_XFAIL:-0} of $GOT_TOTAL)"

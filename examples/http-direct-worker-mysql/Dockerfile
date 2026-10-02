@@ -10,10 +10,9 @@
 # there, and shell form would put a shell between FPM and SIGQUIT.
 ARG APP_DIR=http-direct-worker-mysql
 
-# Composer runs in its own image on purpose. Our own binary is built with
-# --disable-all and therefore has no phar, which is what made task 073 build
-# vendor/ on a second machine and copy it in ("PHP's phar extension is
-# missing", measured on the test box).
+# Composer runs in its own image on purpose: the runtime image carries the
+# distribution's libphp (no phar, no composer), and the build stays reproducible
+# without a PHP on the host.
 FROM composer:2 AS deps
 ARG APP_DIR
 WORKDIR /build

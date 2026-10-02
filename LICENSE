@@ -22,7 +22,22 @@ SOFTWARE.
 
 ---
 
-This license covers the code written for this project. Code taken from, or
-modifying, php-src stays under the PHP License 3.01 (and the BSD-style
-license of the original FPM authors); see the "License" section of README.md
-for the list.
+This license covers the code written for this project, except the files below,
+which are taken from or modify php-src.
+
+Files that are not MIT (and are not covered by the copyright line above):
+
+- PHP License 3.01, code taken from or derived from php-src:
+  - `third_party/php-src/` (vendored php-src subset; see its README.md)
+  - `patches/` and `build/phpt-fixture-patches/` (patches against php-src files)
+  - `sapi/fpmng/config.m4` and `sapi/fpmng/Makefile.frag` (derived from php-src
+    `sapi/fpm/config.m4` and `sapi/fpm/Makefile.frag`)
+  - the modified copies of php-src `sapi/fpm/` files: `sapi/fpmng/fpm/fpm.c`,
+    `fpm_children.c`, `fpm_conf.c`, `fpm_conf.h`, `fpm_process_ctl.c`,
+    `fpm_request.c`, `fpm_request.h`, `fpm_stdio.c` and `zlog.h`
+- BSD-2-Clause, Copyright (c) 2007-2009 Andrei Nigmatulin (text in
+  `third_party/php-src/sapi/fpm/LICENSE`): the original FPM code, so the `sapi/fpm/`
+  copies listed above.
+
+These files carry no license header of their own (most have only the original
+"(c) 2007,2008 Andrei Nigmatulin" line); this list is what states their license.

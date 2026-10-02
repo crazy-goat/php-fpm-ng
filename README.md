@@ -313,8 +313,17 @@ its issue or the git command that prints the original file.
 
 ## License
 
-MIT, Copyright (c) 2026 Crazy Goat Software, see [LICENSE](LICENSE).
+MIT, Copyright (c) 2026 Crazy Goat Software, see [LICENSE](LICENSE), except for the code taken from
+or derived from php-src:
 
-Code taken from or patching php-src (`patches/`, the files copied from php-src under
-`third_party/php-src/` and the modified copies of `sapi/fpm/` files) stays under the
-PHP License 3.01, and keeps its license headers.
+- **PHP License 3.01**:
+  - `third_party/php-src/` (vendored subset)
+  - `patches/` and `build/phpt-fixture-patches/`
+  - `sapi/fpmng/config.m4` and `sapi/fpmng/Makefile.frag`
+  - `sapi/fpmng/fpm/fpm.c`, `fpm_children.c`, `fpm_conf.c`, `fpm_conf.h`, `fpm_process_ctl.c`,
+    `fpm_request.c`, `fpm_request.h`, `fpm_stdio.c` and `zlog.h` (modified copies of `sapi/fpm/` files)
+- **BSD-2-Clause**, Copyright (c) 2007-2009 Andrei Nigmatulin (original FPM code, text in
+  `third_party/php-src/sapi/fpm/LICENSE`): the `sapi/fpmng/fpm/` copies listed above.
+
+Those files carry no license header of their own, mostly only the original "(c) 2007,2008 Andrei
+Nigmatulin" line; this list is what states their license. The same list is in [LICENSE](LICENSE).

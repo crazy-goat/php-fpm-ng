@@ -2,7 +2,7 @@
     "name": "php-fpm-ng/laravel-probe",
     "description": "Laravel probe application for php-fpm-ng fiber executor measurements",
     "type": "project",
-    "license": "BSD-3-Clause",
+    "license": "MIT",
     "require": {
         "php": ">=8.3",
         "laravel/framework": "13.30.1",

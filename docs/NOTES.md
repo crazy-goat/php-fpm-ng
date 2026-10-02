@@ -2979,7 +2979,7 @@ upstream changed something.
 
 ## 9. Formal matters
 
-- **License**: the code comes from FPM → PHP License 3.01. There is no choice.
+- **License**: the code that comes from FPM stays under the PHP License 3.01. Our own code is MIT (see `LICENSE`).
 - **Name**: "PHP" is a trademark of the PHP Group, which has a usage policy.
   `php-fpm-ng` as a product name invites a letter asking us to change it. It can
   remain provisional; choose something of our own before publication.

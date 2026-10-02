@@ -1,0 +1,2 @@
+# Whitespace-only clang-format reformat (#571). Use: git config blame.ignoreRevsFile .git-blame-ignore-revs
+1238851041ca32aedfd8305adf43712ab3a214fc

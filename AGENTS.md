@@ -132,7 +132,7 @@ SKIP counts instead of PASS counts did not test anything. CI is the authoritativ
 `bin/lint.sh` details:
 
 - clang-format 23 (CI pins `clang-format==23.1.2`) on our own C sources, style in
-  `.clang-format`. Files listed in `build/clang-format-legacy.txt` are not checked yet (they
+  `.clang-format`. Files listed in `build/clang-format-exclude.txt` are not checked yet (they
   would need a large whitespace-only reformat); shrink that list, never grow it. The nine
   files that are modified copies of upstream `sapi/fpm/` files are excluded for good, so they
   stay diffable against upstream. `third_party/` is vendored and excluded.

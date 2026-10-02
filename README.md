@@ -313,4 +313,8 @@ its issue or the git command that prints the original file.
 
 ## License
 
-PHP License 3.01 — code comes from PHP-FPM.
+MIT, Copyright (c) 2026 Crazy Goat Software, see [LICENSE](LICENSE).
+
+Code taken from or patching php-src (`patches/`, the files copied from php-src under
+`third_party/php-src/` and the modified copies of `sapi/fpm/` files) stays under the
+PHP License 3.01, and keeps its license headers.

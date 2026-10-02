@@ -8,22 +8,23 @@ Task 013. How this tree stays comparable to upstream `sapi/fpm/`.
 `tab_width = 4`). Editors that honour EditorConfig need no project-specific
 setup beyond that file.
 
-## clang-format: not adopted
+## clang-format
 
-php-src ships **no** `.clang-format`. `build/prepare.sh` copies `sapi/fpm/`
-and overlays our files so both live in one directory and get diffed against
-each other. A format style that diverges from upstream would make that
-comparison harder for no gain.
+Config: `.clang-format`, run by `bin/lint.sh` (check only; `--fix` rewrites).
+CI pins clang-format 23.1.2. The style follows the existing hand-written code
+(tabs, `BreakStringLiterals: false`, `SortIncludes: Never`, trailing comments
+left unaligned) so a reformat is whitespace only.
 
-If a `.clang-format` is ever added, it must run only on paths that exist in
-**this** repository (`sapi/fpmng/`, `ext/fpmng_metrics/`), never on a prepared
-php-src tree (that tree mixes untouched upstream copies with our overlays).
-`build/lint-c.sh` already enforces that file-list boundary for clang-tidy;
-the same rule would apply to format.
+Scope is a file list, never a prepared php-src tree: tracked `*.c`/`*.h` under
+`sapi/fpmng/` and `ext/fpmng_metrics/`, minus `build/clang-format-exclude.txt`.
+That file has two parts:
 
-Bulk reformat of the existing tree is out of scope here (destroys `git blame`
-on comments that are the primary documentation). If it happens, it is its own
-commit plus an entry in `.git-blame-ignore-revs`.
+- the nine modified copies of upstream `sapi/fpm/` files, excluded for good so
+  they stay diffable against upstream (`build/prepare.sh` diffs them against
+  the originals);
+- legacy files that would be reflowed in a large way. Shrink that part, never
+  grow it; a new file must pass the check. A reformat of a legacy file is its
+  own commit, listed in `.git-blame-ignore-revs`.
 
 ## clang-tidy: chosen subset
 

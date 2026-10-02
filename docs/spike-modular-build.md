@@ -161,7 +161,7 @@ line by line:
 - `fpm_process_ctl.c:172,176` -- comments citing `fpm_pool_status.c:435-446`.
 - `fpm_error_log_follow.c:54,116`, `fpm_pool_coop_statics.c:210` -- comments.
 
-These are exactly the comments `workflow.md` forbids deleting without
+These are exactly the comments `AGENTS.md` forbids deleting without
 re-establishing the fact. They cost nothing at build time but they mean a
 `grep -l` over the tree over-reports coupling by a factor of about three.
 
@@ -967,7 +967,7 @@ weaknesses**
   `!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http")` to enable
   `fcgi_set_optimized_transport()` and `zend_signal_use_persistent_handlers()`.
   This is the one remaining violation of the architecture contract
-  (`workflow.md`, "never `strcmp(type->name, …)`") and it is in core startup
+  (`AGENTS.md`, "never `strcmp(type->name, …)`") and it is in core startup
   code. Already filed as issue #153; this spike adds the reason it matters now.
 - **Acceptance criteria:**
   - The two behaviours are selected by a field on `fpm_pool_type_s`, set on the

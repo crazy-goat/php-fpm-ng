@@ -296,13 +296,15 @@ what is open; labels carry type (`bug`, `enhancement`, `spike`, `refactor`,
 priority. Everything under `track:nice-to-have` applies only to
 `pool.executor = fiber`, which is behind a build flag that is off by default.
 
-Before touching anything, read [`workflow.md`](workflow.md): the English-only
+Before touching anything, read [`AGENTS.md`](AGENTS.md): the English-only
 rule, the architecture contract (new behaviour in new files under
 `sapi/fpmng/fpm/`, never `strcmp(type->name, ...)`), the evidence rule, the
-shared test box, and the step-by-step process from issue to merged PR. What a
+shared test box, and the build, lint and test commands. The step-by-step
+process from issue to merged PR is [`docs/workflow.md`](docs/workflow.md), and
+releases follow [`docs/release-workflow.md`](docs/release-workflow.md). What a
 comment in this codebase is for — and which comments must never be deleted
 without re-establishing the fact first — is
-[`workflow.md`](workflow.md#comments-what-earns-one).
+[`AGENTS.md`](AGENTS.md#comments-what-earns-one).
 
 Until 2026-09-08 work was tracked as one Markdown file per task under `tasks/`.
 That directory is gone; [`docs/task-archive.md`](docs/task-archive.md) maps

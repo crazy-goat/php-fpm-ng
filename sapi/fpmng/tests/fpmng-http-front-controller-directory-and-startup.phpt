@@ -157,7 +157,7 @@ $tester2->terminate();
 $tester2->expectLogTerminatingNotices();
 $tester2->close();
 
-// Cleanup -- own scratch directories only (workflow.md: clean up temporary dirs).
+// Cleanup -- own scratch directories only (AGENTS.md: clean up temporary dirs).
 function rrmdir(string $dir): void
 {
     if (!is_dir($dir)) {

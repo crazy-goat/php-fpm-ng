@@ -1,10 +1,10 @@
 #!/bin/sh
 # Regression test for task 014: the comment-content contract lives in
-# workflow.md and is linked from the contributor entry points.
+# AGENTS.md and is linked from the contributor entry points.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
-WORKFLOW="$REPO/workflow.md"
+WORKFLOW="$REPO/AGENTS.md"
 ROOT_README="$REPO/README.md"
 FPMNG_README="$REPO/sapi/fpmng/README.md"
 
@@ -19,5 +19,5 @@ grep -q '\*\*Never\*\*' "$WORKFLOW"
 grep -q 'no scheduled comment-cleanup pass' "$WORKFLOW"
 grep -q 'opportunistically' "$WORKFLOW"
 
-grep -q 'workflow.md#comments-what-earns-one' "$ROOT_README"
-grep -q 'workflow.md#comments-what-earns-one' "$FPMNG_README"
+grep -q 'AGENTS.md#comments-what-earns-one' "$ROOT_README"
+grep -q 'AGENTS.md#comments-what-earns-one' "$FPMNG_README"

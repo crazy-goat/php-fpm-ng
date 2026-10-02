@@ -24,7 +24,7 @@ is small and self-contained (NOTES 3x), not ongoing churn.
 Comments here are the primary record of **why**. What earns one — a decision,
 a measurement, a rejected alternative, a trap the code cannot express — and
 what does not (restating the next line) is in
-[`workflow.md`](../../workflow.md#comments-what-earns-one). There is no scheduled
+[`AGENTS.md`](../../AGENTS.md#comments-what-earns-one). There is no scheduled
 comment-cleanup pass; remove redundant comments only when you are already
 changing that code.
 

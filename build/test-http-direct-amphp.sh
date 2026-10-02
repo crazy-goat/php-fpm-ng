@@ -63,7 +63,7 @@ skip() {
 FPMNG_BIN=$1
 [ -x "$FPMNG_BIN" ] || fail "not executable: $FPMNG_BIN"
 
-# workflow.md: confirm the binary under test before measuring anything. This
+# AGENTS.md: confirm the binary under test before measuring anything. This
 # literal is the worker transport's SERVER_SOFTWARE; a build without
 # fpm_http_direct_worker.c linked in does not contain it, and the pool would
 # fail with "unknown pool.executor" much later and less clearly.

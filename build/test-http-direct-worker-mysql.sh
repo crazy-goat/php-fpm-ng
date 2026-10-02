@@ -26,7 +26,7 @@ set -eu
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 EXAMPLE="$REPO/examples/http-direct-worker-mysql"
 # Deliberately not compose.yaml's own default of 28078, and not the fixed
-# `name:` in compose.yaml either. The box is shared (workflow.md), and a fixed
+# `name:` in compose.yaml either. The box is shared (AGENTS.md), and a fixed
 # project name means `down --volumes` in this script's exit trap would delete
 # the stack and volume of a hand-started example, or of a second concurrent run
 # of this harness, rather than its own.

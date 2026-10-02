@@ -109,7 +109,7 @@ EOF
 }
 
 # Confirm the binary under test is the one this script names, before measuring
-# anything with it (workflow.md, "Evidence").
+# anything with it (AGENTS.md, "Evidence").
 strings "$FPMNG_BIN" | grep -q http.fault_upstream_write \
     || fail "$FPMNG_BIN has no http.fault_upstream_write directive: not an fpmng binary, or older than issue #129"
 

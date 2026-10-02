@@ -532,7 +532,8 @@ EXPECT_TOTAL=177
 # A first measurement also failed fpmng-config-input-descriptor.phpt, while
 # Alpine edge carried php85-dev 8.5.10 next to libphp 8.5.11 and every start
 # printed the patch-level notice (issue #557). By the release rehearsal of
-# 2026-10-02 both were 8.5.11 and the test passed.
+# 2026-10-02 both were 8.5.11 and the test passed. Stage 2 now refuses such a
+# skew up front (build/check-libphp-skew.sh).
 
 # Issue #388 retired pool.type = http and split its proxy half into pool.type =
 # gateway. That changes the classification this whole block exists to pin,
@@ -608,7 +609,13 @@ apk)
     # supposed to mean. libphp-build.sh asserts the produced binary's dynamic
     # section either way, which is the evidence; this is the belt.
     [ "$TLS_PACKAGE" = 1 ] && TLS_DEV=openssl-dev || TLS_DEV=
-    BUILD_SETUP="apk add --no-cache alpine-sdk php85-dev php85-embed \
+    # --upgrade: `apk add` leaves an already-installed package alone, so a warm
+    # image (issue #240) from before the distribution's last PHP bump keeps its
+    # old php85-dev while php85-embed arrives new in stage 2, and the binary
+    # prints the patch-level notice on every start (issue #557, measured on the
+    # poligon box against a 2026-09-14 image: SDK 8.5.10, libphp 8.5.11).
+    # apt-get install already upgrades, so the deb branch needs nothing.
+    BUILD_SETUP="apk add --no-cache --upgrade alpine-sdk php85-dev php85-embed \
             libevent-dev acl-dev $TLS_DEV >/dev/null"
     # Same negative control on the Alpine side: abuild is re-run over the
     # APKBUILD package-apk.sh generated, with the dependency moved to a minor
@@ -771,7 +778,7 @@ apk)
     cat >> "$OUT/stage2.sh" <<'EOF'
 # See the Debian branch: binutils, patch and the CLI are the test rig, not package
 # dependencies.
-apk add --no-cache binutils patch php85 php85-openssl openssl >/dev/null
+apk add --no-cache --upgrade binutils patch php85 php85-openssl openssl >/dev/null
 apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
 apk info -d "$PKGNAME"
 ldd /usr/sbin/php-fpm-ng | grep libphp
@@ -805,6 +812,12 @@ EOF
 esac
 
 cat >> "$OUT/stage2.sh" <<'EOF'
+
+# The build stage and this stage install PHP from the distribution on their
+# own. If the SDK it built against and the libphp installed here are different
+# patch releases, every start prints the guard's notice and a dozen tests fail
+# on it; say that now, with both versions, rather than as a test diff (issue #557).
+/repo/build/check-libphp-skew.sh /usr/sbin/php-fpm-ng
 
 # php-fpm refuses to run as root, and a suite that cannot start a pool reports
 # every test as SKIP and still exits 0. So the suite runs as an unprivileged

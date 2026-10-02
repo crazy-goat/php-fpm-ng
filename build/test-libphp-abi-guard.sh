@@ -93,9 +93,18 @@ run patch
 echo "$ERR" | grep -q "built against PHP $MAJOR.$MINOR.$OTHER_PATCH, running on libphp $VER (patch-level difference, supported)" ||
   fail "built for another patch level: the notice does not name both versions (stderr: $ERR)"
 echo "ok: another patch level runs, with one notice naming $MAJOR.$MINOR.$OTHER_PATCH and $VER"
+# The gate's own check (issue #557) must refuse exactly this binary, and name both versions.
+if "$REPO/build/check-libphp-skew.sh" "$WORK/patch" > "$WORK/skew.out" 2>&1; then
+  fail "check-libphp-skew.sh accepted a binary built against another patch level"
+fi
+grep -q "built against PHP $MAJOR.$MINOR.$OTHER_PATCH and runs on libphp $VER" "$WORK/skew.out" ||
+  fail "check-libphp-skew.sh did not name both versions: $(cat "$WORK/skew.out")"
+echo "ok: check-libphp-skew.sh refuses it, naming $MAJOR.$MINOR.$OTHER_PATCH and $VER"
 
 build same
 run same
 [ "$RC" = 42 ] || fail "built for the same version: exit $RC, expected main()'s 42 (stderr: $ERR)"
 [ -z "$ERR" ] || fail "built for the same version: expected silence, got: $ERR"
 echo "ok: the same version ($REAL_ID) runs silently"
+"$REPO/build/check-libphp-skew.sh" "$WORK/same" > /dev/null || fail "check-libphp-skew.sh refused a binary with no skew"
+echo "ok: check-libphp-skew.sh accepts it"

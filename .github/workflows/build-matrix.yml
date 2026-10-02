@@ -36,39 +36,37 @@ name: build
 # flavour, and ran the same suite five times per pull request (issue #393). It
 # runs in release.yml, on a tag, and can be dispatched there to rehearse.
 #
-# Runs on pull_request. NOT on push to main (removed 2026-09-17): merging a pull
-# request whose run was already green re-ran the identical tree, and a merge is
-# not allowed to be the first time anything here is tried. There is no longer a
-# schedule either: it existed to refresh a compiler cache for php-src, and there
-# is no php-src build left to cache.
+# Runs on pull_request and on push to main (the standard's trigger set; the
+# earlier "pull_request only" rule of 2026-09-17 is dropped with it). There is no
+# schedule: it existed to refresh a compiler cache for php-src, and there is no
+# php-src build left to cache.
 #
-# PATH FILTERS. A change that touches only documentation cannot break a build.
-# Deliberately NOT ignored: .github/**, build/**, packaging/** and anything under
-# sapi/ -- a change to CI itself must run CI. A skipped workflow reports nothing,
-# so a branch protection rule naming a job here would block a docs-only pull
-# request forever; if such a rule is ever added it has to be satisfied by a
-# separate always-green job.
+# DOCS-ONLY CHANGES. The `changes` job classifies the diff; the heavy jobs run
+# only when `code` is 'true'. A skipped job reports as skipped, not as missing,
+# and `ci-ok` is the one required check: it passes on a docs-only change and
+# demands every job to be green on a code change. This replaces the old
+# `paths-ignore`, under which a skipped workflow reported nothing at all.
+# Deliberately NOT docs: .github/**, build/**, packaging/**, anything under
+# sapi/ -- a change to CI itself must run CI -- and README.md, AGENTS.md and
+# sapi/fpmng/README.md, which build/test-comment-content-rule.sh reads.
 on:
+  push:
+    branches: [main]
   pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - 'LICENSE'
+    branches: [main]
   workflow_dispatch:
 
-# actions: write is only for build/ci-cancel-run.sh (issue #209), the
-# if: failure() step every job ends with: cancelling a run is an Actions API
-# write. Naming any permission drops every unnamed one to none, and every job
-# checks the repository out.
+# The workflow default is read-only. The heavy jobs add actions: write for
+# build/ci-cancel-run.sh (issue #209), the if: failure() step they end with:
+# cancelling a run is an Actions API write.
 permissions:
   contents: read
-  actions: write
 
 # Every push to a PR branch restarts the whole run; without this the superseded
-# run keeps burning minutes to completion.
+# run keeps burning minutes to completion. A push to main is never cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # The toggles the CI binary is built with, in one place because the lint pass
@@ -98,18 +96,98 @@ defaults:
 
 jobs:
 
-  # Everything that needs no build product of ours: the comment-content rule
-  # (task 014), the fpmng .phpt coverage glob (issue #95), the vendored subset
-  # (#421), the hermetic refusal tests (#422, #423), the version guard (#422)
-  # and clang-tidy (build/lint-c.sh).
+  changes:
+    name: Changes
+    uses: crazy-goat/.github/.github/workflows/changes.yml@main
+    with:
+      # README.md, AGENTS.md and sapi/fpmng/README.md are read by
+      # build/test-comment-content-rule.sh, so they count as code.
+      docs-regex: '^(docs/.*|CHANGELOG\.md|LICENSE.*|examples/.*\.md|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.github/dependabot\.yml|\.gitignore)$'
+
+  docs:
+    name: Docs
+    uses: crazy-goat/.github/.github/workflows/docs-check.yml@main
+
+  # Setup only; every check lives in bin/lint.sh: clang-tidy (build/lint-c.sh),
+  # clang-format, shellcheck and hadolint (issue #571). The tools are pinned: what
+  # the runner image ships would change under us without a commit here.
   #
-  # Order is deliberate: the hermetic scripts first, so a failure in one costs
-  # nothing; clang-tidy last. A failing step stops the ones after it, which is
-  # what the fail-fast of issue #209 already did to the whole run.
-  checks:
+  # clang-tidy needs the compile flags of a real libphp-build.sh run
+  # (commands.log), with the same toggles as the `build` job, so the files behind
+  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK are linted with their macros defined.
+  # This build is only for its flags; `build` is the one whose binary is tested.
+  # The caveat of the former `checks` step stays: clang-tidy is whatever version
+  # Ubuntu 26.04 ships, so a new check can turn this job red without a change to
+  # our C sources. The fix is then a decision about that check (silence it in
+  # .clang-tidy with a reason, or fix the code), not a continue-on-error.
+  lint:
+    name: lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: curl xz-utils pipx
+        run: ./build/ci-install-deps.sh lint
+
+      - name: Install clang-format, shellcheck and hadolint
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          PIPX_BIN_DIR="$HOME/.local/bin" pipx install clang-format==23.1.2
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar -xJ --strip-components=1 -C "$HOME/.local/bin" shellcheck-v0.11.0/shellcheck
+          curl -fsSL -o "$HOME/.local/bin/hadolint" https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x "$HOME/.local/bin/hadolint"
+          "$HOME/.local/bin/clang-format" --version
+          "$HOME/.local/bin/shellcheck" --version
+          "$HOME/.local/bin/hadolint" --version
+
+      - name: build against the SDK, for the compile flags
+        run: ./build/libphp-build.sh "$PWD/out-libphp-lint"
+
+      - name: Lint
+        env:
+          FPMNG_LIBPHP_OUT: ${{ github.workspace }}/out-libphp-lint
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          bin/lint.sh
+
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # Everything that needs no build product of ours: the comment-content rule
+  # (task 014), the fpmng .phpt coverage glob (issue #95), the vendored subset
+  # (#421), the hermetic refusal tests (#422, #423) and the version guard (#422).
+  # clang-tidy moved to the `lint` job (issue #571).
+  #
+  # Order is deliberate: the hermetic scripts first, so a failure in one costs
+  # nothing. A failing step stops the ones after it, which is
+  # what the fail-fast of issue #209 already did to the whole run.
+  checks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       # actions/checkout needs git to leave a .git (check-owned-warnings.sh and
       # the vendor check read it); the bare image has none.
@@ -119,9 +197,9 @@ jobs:
       - uses: actions/checkout@v7
       - name: install the PHP 8.5 SDK and the toolchain (issue #424)
         shell: bash
-        run: ./build/ci-install-deps.sh lint
+        run: ./build/ci-install-deps.sh build
 
-      # Task 014: the comment-content contract in workflow.md stays linked
+      # Task 014: the comment-content contract in AGENTS.md stays linked
       # from the contributor entry points. Checkout only.
       - name: verify comment-content rule links (task 014)
         run: ./build/test-comment-content-rule.sh
@@ -164,45 +242,8 @@ jobs:
       - name: libphp version guard, all three outcomes (issue #220)
         run: ./build/test-libphp-abi-guard.sh
 
-      # Task 013: clang-tidy over our C sources only (never the vendored
-      # upstream copies). It landed non-blocking on purpose -- a red build on
-      # day one for pre-existing findings teaches people to ignore the job. That
-      # backlog is now empty (issues #107, #111), `continue-on-error` was
-      # dropped on 2026-09-09 and this is a required check. See docs/c-style.md
-      # for the enabled/disabled check contract.
-      #
-      # Caveat, accepted knowingly: clang-tidy is whatever version Ubuntu 26.04
-      # ships, so a new check can turn this job red without any change to our C
-      # sources. The fix then is a decision about that check -- silence it in
-      # .clang-tidy with a reason, or fix the code -- not restoring
-      # continue-on-error.
-      #
-      # The compile flags come from a real libphp-build.sh run (its
-      # commands.log), with the same toggles as the `build` job, so the files
-      # behind FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK are linted with their
-      # macros defined. This build is only for its flags; `build` is the one
-      # whose binary is tested.
-      - name: build against the SDK, for the compile flags
-        run: ./build/libphp-build.sh "$PWD/out-libphp-lint"
-
-      - name: clang-tidy report (our files only)
-        run: |
-          # Redirect to the report file and exit on clang-tidy's own status, so
-          # a finding in sapi/fpmng/ turns this step red instead of printing
-          # into the artifact while the job stays green (WarningsAsErrors in
-          # .clang-tidy, issue #414).
-          set +e
-          ./build/lint-c.sh "$PWD/out-libphp-lint" > lint-c-report.txt 2>&1
-          rc=$?
-          cat lint-c-report.txt
-          exit $rc
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: lint-c-report
-          path: lint-c-report.txt
-          retention-days: 14
+      # Task 013: clang-tidy over our C sources runs in the `lint` job, through
+      # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
 
       # Issue #209: separate jobs, so GitHub's matrix `fail-fast` does not
       # apply. One red job otherwise leaves the others running for a result
@@ -220,9 +261,14 @@ jobs:
   # the packages are built with, with the three CI toggles on. Deliberately a
   # single cell (PHP 8.5, NTS, glibc), see the header.
   build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: git for actions/checkout
         shell: bash
@@ -316,10 +362,14 @@ jobs:
   # pool types. cron may take up to one minute. The fixtures come from
   # third_party/php-src through build/phpt-tree.sh (tree "-"), issue #423.
   fpmng-phpt:
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: git for actions/checkout
         shell: bash
@@ -388,10 +438,14 @@ jobs:
   # gateway-privileges is NOT here: it is the one scenario that must start as
   # root, and this job must not.
   integration:
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
     steps:
       - name: git for actions/checkout
         shell: bash
@@ -487,10 +541,14 @@ jobs:
   # key) for its whole life. Needs to run as root, which the other jobs' steps
   # are not -- kept as its own job for that reason.
   gateway-privileges:
-    needs: build
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     container:
       image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
     # No `ci` shell here, unlike every other job: this one asserts the gateway
     # drops root before accepting a connection, so it has to start with it.
     defaults:
@@ -515,3 +573,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
+
+  # The one required check. Docs-only changes skip the heavy jobs, which report
+  # "skipped"; a code change needs every job green.
+  ci-ok:
+    name: ci-ok
+    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges]
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check results
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Code changes: $CODE"
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in failure|cancelled) exit 1 ;; esac
+          done
+          # Documentation-only changes skip the heavy jobs; code changes need all of them.
+          if [ "$CODE" = "true" ]; then
+            for r in $RESULTS; do
+              [ "$r" = "success" ] || exit 1
+            done
+          fi

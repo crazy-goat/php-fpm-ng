@@ -37,7 +37,7 @@ fail() { echo "phpt-parallel.sh: FAIL: $*" >&2; exit 1; }
 # own "previously applied" prompt with yes.
 if ! grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc"; then
     for p in "$REPO"/build/phpt-fixture-patches/*.patch; do
-        patch -d "$TREE" -p1 --forward --silent --no-backup-if-mismatch < "$p" >/dev/null 2>&1 ||
+        patch -d "$TREE" -p1 --forward --silent --no-backup-if-mismatch < "$p" >&2 ||
             fail "$(basename "$p") does not apply to $TREE"
     done
 fi

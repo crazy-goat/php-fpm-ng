@@ -356,3 +356,6 @@ The `fpmng-phpt` job in `.github/workflows/build-matrix.yml` downloads the
 canonical build artifact and runs this runner. It is the only job that runs
 these tests: before issue #95 the `phpt` job ran them a second time, because
 that runner swept the whole copied test directory.
+
+An explicit `FPMNG_*_PORT` environment variable replaces the per-worker offset
+of that test's fixed port, so do not set one for a run with more than one job.

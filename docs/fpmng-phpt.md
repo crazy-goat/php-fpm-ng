@@ -239,10 +239,10 @@ Three rules this facility lives by:
 
   | test | s | converted | why |
   |---|---|---|---|
-  | `fpmng-cron-jitter` | 67.1 | no | the job script records `gmdate('s')` and the test checks it against `cron.jitter`: a real reading against a virtual bound |
+  | `fpmng-cron-jitter` | 67.1 | **yes** (#398) | was: the job script recorded `gmdate('s')` and the test checked it against `cron.jitter`, a real reading against a virtual bound. Now reads `last_start` (stamped by the cron child on the scaled clock) and `next_run` from the status page |
   | `fpmng-cron-schedule` | 40.0 | **yes** | asserts only that the marker exists; the `gmdate('c')` it writes is never compared |
   | `fpmng-baseline-counters-cron` | 2.0 / 40.1 | **yes** | asserts only on master-produced figures (the `fpmng_pool_runs_total` series and the status page) |
-  | `fpmng-supervisor-jitter` | 25.1 | no | same as cron-jitter, on `microtime(true)` deltas written by the iteration script |
+  | `fpmng-supervisor-jitter` | 25.1 | **yes** (#398) | was: the same, on `microtime(true)` deltas written by the iteration script. Now reads `last_start` from the status page; a jitter-free `ref` pool supplies the zero of the cold-start offsets |
   | `fpmng-supervisor-max-memory` | 14.7 | no, shortened by #399 | almost all of it was a 15 s negative-proof budget in the *test* process; the recycle itself is instant |
   | `fpmng-supervisor-reload-rolling` | 12.5 | no, shortened by #399 | 10 of it was `supervisor.stop_timeout`, spent in the watchdog, which counts real seconds by design |
   | `fpmng-cron-expect-within` | 12.3 | **yes** | asserts on master log patterns only |
@@ -315,11 +315,22 @@ Three rules this facility lives by:
 
   What #399 could not touch is the three rows whose cost is not a budget but a
   bound the assertion itself depends on: the two jitter tests and
-  `fpmng-supervisor-heartbeat`. Accelerating any of those by *clock* needs the
-  assertion rewritten to read a master-measured figure first -- the way
-  `fpmng-cron-jitter` already cross-checks the operator status page against the
-  child's recorded offset. That is a separate piece of work (issue #398), not a
-  rate in an `--ENV--` section.
+  `fpmng-supervisor-heartbeat`. Issue #398 converted the two jitter tests by
+  rewriting their assertions to read a master-measured figure, and the way it
+  did so is the technique to reuse. A pool's `last_start` on the status page is
+  stamped by the pool's own child with `FPM_NOW()`, so it is a reading the
+  master's clock took, and the jitter offset is `last_start` minus a reference
+  on the same clock: `% 60` for cron, whose tick is a minute boundary, and a
+  jitter-free `ref` pool started with the others for supervisor, whose test
+  process cannot read the scaled clock. The tests poll the page every 25-50 ms
+  of real time and record each new stamp the moment it appears, because the
+  stamp is overwritten by the next run. The price is one second of quantisation
+  in every figure, which the bounds allow for.
+
+  Those rewrites still fail on the bug the tests exist for -- a libc `rand()`
+  state that survives `fork()` and gives every child the same "random" delay --
+  because `last_start` is what each *child* stamped, not an estimate the master
+  computed on its behalf. `fpmng-supervisor-heartbeat` is the one row left.
 
 At rate 1, or with the variable unset, every reading is the plain libc call and
 nothing is logged -- so a debug-clock build behaves identically to one without

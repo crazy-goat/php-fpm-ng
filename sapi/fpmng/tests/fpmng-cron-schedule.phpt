@@ -19,7 +19,8 @@ FPMNG_DEBUG_CLOCK_RATE=10
  * nothing ever compares that timestamp to anything. A test that did compare it
  * against a configured interval could not be accelerated this way; see the
  * virtual clock section of docs/fpmng-phpt.md, and fpmng-cron-jitter.phpt,
- * which is exactly that case and is deliberately left at real speed.
+ * which was exactly that case until issue #398 rewrote it to read the
+ * master-measured last_start from the status page instead.
  *
  * The 75-second deadline below stays in REAL seconds and stays untouched, so a
  * binary built without --enable-fpmng-debug-clock ignores the variable and this

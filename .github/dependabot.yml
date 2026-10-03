@@ -9,8 +9,8 @@ updates:
     commit-message:
       prefix: "ci(deps)"
   # The scratch image and the package-gate images. Not covered, on purpose:
-  # examples/ (runnable demos) and tests/frameworks/ (probe harnesses whose
-  # framework versions are pinned by the tests that use them).
+  # examples/ (runnable demos) and tests/frameworks/ (the Slim 4 smoke test, whose
+  # versions are pinned by the test; its lock only gets security-alert bumps).
   - package-ecosystem: docker
     directories:
       - "/docker"

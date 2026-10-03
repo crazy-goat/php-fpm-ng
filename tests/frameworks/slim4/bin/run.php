@@ -115,8 +115,12 @@ function checkContainerIdentity(array $rows): void
         return;
     }
 
-    checkUnique($rows, 'container_oid');
-    checkUnique($rows, 'container_service_oid');
+    // Object ids are reused once an earlier request freed its objects, so only
+    // their presence is checked here, never their uniqueness.
+    foreach ($rows as $row) {
+        checkCondition(is_int($row['container_oid'] ?? null), 'container_oid is missing');
+        checkCondition(is_int($row['container_service_oid'] ?? null), 'container service is missing');
+    }
 }
 
 function cacheFingerprint(string $file): array
@@ -201,30 +205,13 @@ recordResult('entry-script-shared-includes', static function () use ($baseUrl): 
     return 'stock public/index.php survived repeated requests';
 });
 
-recordResult('mix-mysql-and-redis', static function () use ($parallelSpecs): string {
-    $responses = requestBatch($parallelSpecs(
-        static fn (int $id): string => "/mix?id=$id&sleep=1",
-    ));
-    $rows = [];
-    foreach ($responses as $id => $response) {
-        $row = getJson($response);
-        checkCondition(($row['ok'] ?? false) === true, "request $id returned ok=false");
-        checkCondition((int) ($row['id'] ?? 0) === $id, "request $id returned the wrong id");
-        $rows[] = $row;
-    }
-    checkUnique($rows, 'request_oid');
-    checkUnique($rows, 'app_oid');
-
-    return '8/8 own MySQL row and Redis value';
-});
-
 recordResult('session-rounds', static function () use ($baseUrl, $parallel): string {
     $cookies = [];
     $firstSpecs = [];
     for ($i = 1; $i <= $parallel; $i++) {
         $cookies[$i] = cookieFile();
         $firstSpecs[$i] = [
-            'url' => "$baseUrl/session?user=user-$i&sleep=1",
+            'url' => "$baseUrl/session?user=user-$i",
             'cookie' => $cookies[$i],
         ];
     }
@@ -243,7 +230,7 @@ recordResult('session-rounds', static function () use ($baseUrl, $parallel): str
         $secondSpecs = [];
         for ($i = 1; $i <= $parallel; $i++) {
             $secondSpecs[$i] = [
-                'url' => "$baseUrl/session?user=user-$i&sleep=1",
+                'url' => "$baseUrl/session?user=user-$i",
                 'cookie' => $cookies[$i],
             ];
         }
@@ -285,7 +272,7 @@ recordResult('authenticated-route', static function () use ($baseUrl, $parallel)
         $meSpecs = [];
         for ($i = 1; $i <= $parallel; $i++) {
             $meSpecs[$i] = [
-                'url' => "$baseUrl/me?sleep=1",
+                'url' => "$baseUrl/me",
                 'cookie' => $cookies[$i],
             ];
         }
@@ -299,26 +286,37 @@ recordResult('authenticated-route', static function () use ($baseUrl, $parallel)
         cleanupCookies($cookies);
     }
 
-    return '8/8 own authenticated identity';
+    // A request without the cookie must not inherit a login of an earlier one.
+    $anonymous = getJson(requestBatch([['url' => "$baseUrl/me"]])[0]);
+    checkCondition(array_key_exists('user', $anonymous) && $anonymous['user'] === null, 'a request without a cookie saw an authenticated user');
+
+    return '8/8 own authenticated identity; no leak to a cookie-less request';
 });
 
-recordResult('object-identity', static function () use ($parallelSpecs): string {
-    $responses = requestBatch($parallelSpecs(
-        static fn (int $id): string => "/identity?sleep=1&id=$id",
-    ));
-    $rows = array_map(static fn (array $response): array => getJson($response), $responses);
-    checkUnique($rows, 'app_oid');
-    checkUnique($rows, 'request_oid');
-    checkUnique($rows, 'route_collector_oid');
+recordResult('request-state-reset', static function () use ($baseUrl): string {
+    // One after another, on purpose: state that leaks from one request to the next shows up.
+    // On http-direct all 24 hit the one worker; through the gateway they may reuse one upstream
+    // (not measured), so spreading over several workers is not guaranteed.
+    $rows = [];
+    for ($i = 0; $i < 24; $i++) {
+        $row = getJson(requestBatch([['url' => "$baseUrl/identity?id=$i"]])[0]);
+        checkCondition(($row['global_hits'] ?? null) === 1, "request $i saw PHP state of an earlier request");
+        checkCondition(($row['middleware_hits'] ?? null) === 1, "middleware hit count of request $i was not one");
+        checkCondition(($row['session_user'] ?? null) === null, "request $i saw a session user without a cookie");
+        $rows[] = $row;
+    }
+    checkUnique($rows, 'middleware_id');
     checkContainerIdentity($rows);
+    $obLevels = array_unique(array_map(static fn (array $row): mixed => $row['ob_level'] ?? null, $rows));
+    checkCondition(count($obLevels) === 1, 'output buffering level drifted between requests: ' . json_encode($obLevels));
 
-    return 'app, request, route collector and container identity are isolated per concurrent request';
+    return '24/24 sequential requests started from a clean request state';
 });
 
 recordResult('psr7-request-body', static function () use ($parallelSpecs): string {
     $payloads = [];
     $responses = requestBatch($parallelSpecs(
-        static fn (int $id): string => "/body?sleep=1&id=$id",
+        static fn (int $id): string => "/body?id=$id",
         'POST',
         static function (int $id) use (&$payloads): string {
             $payloads[$id] = json_encode([
@@ -342,7 +340,7 @@ recordResult('psr7-request-body', static function () use ($parallelSpecs): strin
 recordResult('psr7-response-body', static function () use ($baseUrl, $parallel): string {
     $specs = [];
     for ($i = 1; $i <= $parallel; $i++) {
-        $specs[$i] = ['url' => "$baseUrl/response-stream?id=$i&sleep=1"];
+        $specs[$i] = ['url' => "$baseUrl/response-stream?id=$i"];
     }
     $responses = requestBatch($specs);
     foreach ($responses as $id => $response) {
@@ -356,28 +354,12 @@ recordResult('psr7-response-body', static function () use ($baseUrl, $parallel):
     return '8/8 response streams stayed separate';
 });
 
-recordResult('middleware-state', static function () use ($parallelSpecs): string {
-    $responses = requestBatch($parallelSpecs(
-        static fn (int $id): string => "/middleware?sleep=1&id=$id",
-    ));
-    $rows = [];
-    foreach ($responses as $id => $response) {
-        $row = getJson($response);
-        checkCondition(($row['middleware_hits'] ?? 0) === 1, "middleware hit count for $id was not one");
-        checkCondition(is_string($row['middleware_id'] ?? null), "middleware id missing for $id");
-        $rows[] = $row;
-    }
-    checkUnique($rows, 'middleware_id');
-
-    return 'middleware state did not carry between requests';
-});
-
 recordResult('error-middleware', static function () use ($baseUrl, $parallel): string {
     $tags = [];
     $specs = [];
     for ($i = 1; $i <= $parallel; $i++) {
         $tags[$i] = "error-$i";
-        $specs[$i] = ['url' => "$baseUrl/error?tag={$tags[$i]}&sleep=1"];
+        $specs[$i] = ['url' => "$baseUrl/error?tag={$tags[$i]}"];
     }
     $responses = requestBatch($specs);
     foreach ($responses as $id => $response) {
@@ -399,7 +381,7 @@ recordResult('error-middleware', static function () use ($baseUrl, $parallel): s
 if ($containerMode === 'php-di') {
     recordResult('container-php-di', static function () use ($parallelSpecs): string {
         $responses = requestBatch($parallelSpecs(
-            static fn (int $id): string => "/identity?sleep=1&id=$id",
+            static fn (int $id): string => "/identity?id=$id",
         ));
         $rows = array_map(static fn (array $response): array => getJson($response), $responses);
         foreach ($rows as $row) {
@@ -408,7 +390,7 @@ if ($containerMode === 'php-di') {
         }
         checkContainerIdentity($rows);
 
-        return '8/8 concurrent requests used distinct PHP-DI containers and services';
+        return '8/8 requests ran with their own PHP-DI container and service';
     });
 } else {
     $results['container-php-di'] = 'NOT MEASURED';
@@ -416,36 +398,22 @@ if ($containerMode === 'php-di') {
 }
 
 if ($routeCacheEnabled) {
-    recordResult('route-cache', static function () use ($baseUrl, $parallel, $parallelSpecs, $routeCacheFile): string {
+    recordResult('route-cache', static function () use ($parallelSpecs, $routeCacheFile): string {
         checkCondition($routeCacheFile !== '', 'route cache file path is missing');
         $before = cacheFingerprint($routeCacheFile);
 
         $identityResponses = requestBatch($parallelSpecs(
-            static fn (int $id): string => "/identity?sleep=1&id=$id",
+            static fn (int $id): string => "/identity?id=$id",
         ));
-        $identityRows = [];
         foreach ($identityResponses as $id => $response) {
             $row = getJson($response);
-            checkCondition(($row['uri'] ?? null) === "/identity?sleep=1&id=$id", "identity route $id was not selected");
-            $identityRows[] = $row;
-        }
-        checkUnique($identityRows, 'request_oid');
-        checkUnique($identityRows, 'route_collector_oid');
-
-        $mixSpecs = [];
-        for ($id = 1; $id <= $parallel; $id++) {
-            $mixSpecs[$id] = ['url' => "$baseUrl/mix?id=$id&sleep=1"];
-        }
-        foreach (requestBatch($mixSpecs) as $id => $response) {
-            $row = getJson($response);
-            checkCondition(($row['ok'] ?? false) === true, "cached route $id returned incorrect data");
-            checkCondition((int) ($row['id'] ?? 0) === $id, "cached route $id returned the wrong id");
+            checkCondition(($row['uri'] ?? null) === "/identity?id=$id", "identity route $id was not selected");
         }
 
         $after = cacheFingerprint($routeCacheFile);
-        checkCondition($before === $after, 'route cache changed during concurrent requests');
+        checkCondition($before === $after, 'route cache changed while requests were served');
 
-        return 'route data stayed correct and the cache fingerprint was unchanged';
+        return 'routes were selected correctly and the cache fingerprint was unchanged';
     });
 } else {
     $results['route-cache'] = 'NOT MEASURED';

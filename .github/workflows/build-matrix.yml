@@ -621,11 +621,54 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
+  # Issue #602: a real framework (Slim 4, the stock public/index.php) answers through the
+  # executors main ships: pool.type = gateway in front of fastcgi, and http-direct classic.
+  # The fiber-only Symfony/Laravel/Slim probes live on branch async. Needs Composer (the
+  # runner downloads a checksum-pinned phar) and php-curl for the probe client; no MySQL,
+  # Redis or Docker.
+  frameworks:
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: php8.5-curl php8.5-mbstring php8.5-zip unzip
+        run: ./build/ci-install-deps.sh test
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: make the canonical build executable (and the ci user's)
+        shell: bash
+        run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng
+      - name: Slim 4 smoke test on gateway+fastcgi and http-direct classic (issue #602)
+        run: |
+          FPMNG="$PWD/build-out/bin/php-fpm-ng" \
+          PHP="$(php-config8.5 --php-binary)" \
+          ./tests/frameworks/slim4/bin/run.sh
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
   # The one required check. Docs-only changes skip the heavy jobs, which report
   # "skipped"; a code change needs every job green.
   ci-ok:
     name: ci-ok
-    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples]
+    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples, frameworks]
     if: always()
     runs-on: ubuntu-latest
     defaults:

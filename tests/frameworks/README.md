@@ -1,7 +1,7 @@
 # Framework integration test harness
 
 Automated harness for the framework-integration measurements recorded in
-`docs/frameworks.md` (Symfony, Laravel, Slim 4), built for task 027. It
+`async/docs/frameworks-fiber.md` on branch `async` (Symfony, Laravel, Slim 4), built for task 027. It
 replaces the one-off hand measurements that produced those numbers with a
 reproducible, repository-owned run.
 

@@ -70,7 +70,8 @@ search space the audit discriminates against is on record.
 ## Configuration snippet (Laravel 13.30.1)
 
 The configured pool uses this versioned list for Laravel 13.30.1 (the same
-list `bin/run.sh` passes to the pool; see `docs/frameworks.md`, section
+list `bin/run.sh` passes to the pool; see `async/docs/frameworks-fiber.md` (branch
+`async`), section
 "Laravel: the versioned configuration snippet and how it is verified", for
 where each entry came from and the warning about incomplete lists):
 
@@ -100,7 +101,7 @@ HTTP 200 with another request's data, so
 this configuration must be re-verified after every Laravel minor-version
 upgrade.
 
-**Read the warning in `docs/frameworks.md` before deploying this.** The short
+**Read the warning in `async/docs/frameworks-fiber.md` (branch `async`) before deploying this.** The short
 version: when this list is incomplete for a code path your application uses,
 Laravel does not crash — it returns a correct-looking HTTP 200 with another
 request's data and logs nothing. The audit narrows that risk to measured

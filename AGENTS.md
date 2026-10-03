@@ -194,8 +194,7 @@ Labels are the organization's standard ones (`type:*`, `priority:*`, `status:*`)
   `area:fiber`, `area:ci`, `area:pool-types`, `area:test-harness`
 - kind: `spike`, `decision`, `measurement`, `epic`
 
-Work that only applies to `pool.executor = fiber` (behind a build flag that is **off by
-default**) ranks against other such work, not against the main line.
+Work that only applies to `pool.executor = fiber` (not on `main`; branch `async`) ranks against other such work, not against the main line.
 
 ## Worktree notes
 

@@ -1,5 +1,7 @@
 # amphp/Revolt on the HTTP-direct scheduler
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Status: design note updated by issue #190 (worker event API shipped; classic
 event-loop re-entry is impossible; the spike verdict is recorded below)
 

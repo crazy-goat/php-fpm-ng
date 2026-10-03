@@ -24,7 +24,7 @@ The lock file is committed. The relevant direct versions are:
 Predis is included so the probe can run with a php-fpm-ng build that does not
 load phpredis. If `FPMNG_REDIS_EXTENSION` is supplied and the binary loads it,
 the report records `phpredis` instead. The reference measurement in
-`docs/frameworks.md` used phpredis; a Predis result is identified as such and
+`async/docs/frameworks-fiber.md` (branch `async`) used phpredis; a Predis result is identified as such and
 is not silently presented as that measurement.
 
 ## Run

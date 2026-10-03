@@ -19,11 +19,10 @@
 # never reads them (README.md has the list and the reason for each).
 #
 # THE MANIFEST IS THE INVENTORY. third_party/php-src/MANIFEST lists every
-# vendored file with its upstream path, the SHA-256 of the pristine upstream
-# file at the pinned tag, and the SHA-256 of the copy in this tree. Main carries
-# no php-src patch (issue #592), so the two hashes are equal for every file;
-# zlog_upstream.h is renamed, not changed. A file whose hashes differ is
-# refused.
+# vendored file with its upstream path and the SHA-256 of the file. Main
+# carries no php-src patch (issue #592), so the copy in this tree is the
+# pristine upstream file at the pinned tag and one hash says both;
+# zlog_upstream.h is renamed, not changed.
 # Why each file is in, and why the rest of upstream's sapi/fpm/ is out, is in
 # third_party/php-src/README.md.
 #
@@ -32,8 +31,7 @@
 #         longer has the hash the manifest records (someone edited it in
 #         place, which the next import would silently undo), when a file
 #         appears under third_party/php-src/ that the manifest does not list,
-#         when a vendored copy differs from the pristine upstream file the
-#         manifest names, or when a vendored FPM
+#         or when a vendored FPM
 #         file has the same name as one sapi/fpmng/fpm/ owns (ours would shadow
 #         it in every build, so the vendored copy would be dead weight that
 #         looks alive).
@@ -47,7 +45,7 @@
 #         what import cannot judge.
 #
 # The file list itself is edited by hand in the manifest: add a line with "-"
-# in both hash columns and run import.
+# in the hash column and run import.
 set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -79,10 +77,10 @@ manifest_value() {
   awk -F '\t' -v k="$1" '$1 == k && NF == 2 { print $2 }' "$MANIFEST"
 }
 
-# Vendored file lines: four tab-separated columns, comments and the two-column
+# Vendored file lines: three tab-separated columns, comments and the two-column
 # key/value lines excluded.
 manifest_files() {
-  awk -F '\t' '!/^#/ && NF == 4 { print }' "$MANIFEST"
+  awk -F '\t' '!/^#/ && NF == 3 { print }' "$MANIFEST"
 }
 
 # do_check [preimport]
@@ -102,7 +100,7 @@ do_check() {
   listed=$(mktemp)
   manifest_files > "$listed.lines"
   [ -s "$listed.lines" ] || fail "the manifest lists no files"
-  while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
+  while IFS="$(printf '\t')" read -r path upstream local_sha; do
     echo "$path" >> "$listed"
     f=$TP/$path
     if [ "$mode" = preimport ] && [ "$local_sha" = - ]; then
@@ -114,11 +112,6 @@ do_check() {
       continue
     fi
     [ "$local_sha" != - ] || { echo "  never imported: $path (run import)" >&2; errors=$((errors + 1)); continue; }
-    # Main carries no php-src patch: the copy is the pristine file.
-    if [ "$up_sha" != "$local_sha" ]; then
-      echo "  not pristine: third_party/php-src/$path (upstream sha256 $up_sha, manifest $local_sha)" >&2
-      errors=$((errors + 1))
-    fi
     got=$(sha256 "$f")
     if [ "$got" != "$local_sha" ]; then
       echo "  edited in place: third_party/php-src/$path" >&2
@@ -212,31 +205,26 @@ $dirty"
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
-    : "$up_sha" "$local_sha"
+  manifest_files | while IFS="$(printf '\t')" read -r path upstream local_sha; do
+    : "$local_sha"
     mkdir -p "$work/$(dirname "$upstream")"
     [ -f "$SRC/$upstream" ] || fail "upstream $tag has no $upstream (listed for $path)"
     cp "$SRC/$upstream" "$work/$upstream"
   done
-  manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
-    : "$up_sha" "$local_sha"
-    printf '%s\t%s\n' "$path" "$(sha256 "$work/$upstream")"
-  done > "$work/.pristine"
   new=$work/.manifest
   {
     echo "# third_party/php-src/MANIFEST -- written by build/vendor-php-src.sh import."
-    echo "# Hand-edit only the file list (path and upstream path, '-' for both hashes),"
+    echo "# Hand-edit only the file list (path and upstream path, '-' for the hash),"
     echo "# then run import. check compares the files against the last column."
     printf 'tag\t%s\n' "$tag"
     printf 'commit\t%s\n' "$commit"
-    echo "# vendored path	upstream path	upstream sha256 (pristine $tag)	vendored sha256"
+    echo "# vendored path	upstream path	sha256 (the file is the pristine $tag one)"
   } > "$new"
-  manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
-    : "$up_sha" "$local_sha"
+  manifest_files | while IFS="$(printf '\t')" read -r path upstream local_sha; do
+    : "$local_sha"
     mkdir -p "$TP/$(dirname "$path")"
     cp "$work/$upstream" "$TP/$path"
-    pristine=$(awk -F '\t' -v p="$path" '$1 == p { print $2 }' "$work/.pristine")
-    printf '%s\t%s\t%s\t%s\n' "$path" "$upstream" "$pristine" "$(sha256 "$TP/$path")" >> "$new"
+    printf '%s\t%s\t%s\n' "$path" "$upstream" "$(sha256 "$TP/$path")" >> "$new"
   done
   mv "$new" "$MANIFEST"
   # Files dropped from the list go with the import, so the directory and the

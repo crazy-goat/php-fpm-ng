@@ -12,8 +12,13 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [Unreleased]
 
 ### Changed
+
+- `third_party/php-src/MANIFEST` has three columns (path, upstream path, SHA-256) instead of four: the two hashes were always equal. `build/vendor-php-src.sh` and `build/audit-compile-deps.sh` read the new layout; the "not pristine" refusal is gone because one hash now says both (#676).
+- `LICENSE` and `README.md` no longer list `patches/` under the PHP License 3.01: it holds only project-written history notes (MIT). `build/phpt-fixture-patches/` stays listed (#676).
+- `patches/0002-upstream-report.md` is English throughout; `docs/NOTES.md` marks the patch 0002/0003 passages as historic and a `build/libphp-build.sh` comment no longer names the removed patches/0006 (#676).
 - Owned `.phpt` suite: every test port (the Tester's blocks from 9008 and the http-direct tests from 28054) now also moves by a per-run `FPMNG_PHPT_PORT_SHIFT` that `build/run-fpmng-phpt.sh` picks as the first shift whose blocks nothing listens on, so another php-fpm holding 9201 or 9208 on a shared host no longer fails dozens of tests. Set the variable to pin a shift. The Tester also gives each gateway pool a run-own `operator.*_listen`, so a master holding `127.0.0.1:9253` no longer fails the gateway tests (#674).
 - `bin/lint.sh` runs shellcheck at its default (style) severity instead of `warning`. The 22 info/style findings in `build/` and `tests/frameworks/symfony/run.sh` are fixed or silenced with a reasoned `# shellcheck disable` (#584).
+- `tests/frameworks/laravel/composer.lock` pins `league/commonmark` 2.10.3 (was 2.10.0), closing Dependabot alerts 2 and 3. Test fixture only, not shipped in the packages (#695).
 
 ### Fixed
 
@@ -21,6 +26,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 - `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
   `${{ }}` inside the `run:` script, matching `release.yml` (#583).
+- Gateway: the upstream response (FastCGI or an `http.route[]` HTTP target) was appended to the client's output buffer as fast as the worker produced it, so a client that stopped reading kept the whole response in the memory of the gateway process that serves every connection of the pool. Now, once more than `http.response_buffer` bytes (new, default 1 MiB, `0` = unlimited as before) of a client's output are unwritten, the gateway stops reading that request's upstream and the worker blocks in its own write; it reads again when the client has drained the buffer, when the request ends or when the client is gone. A client that never reads is still closed by `http.write_timeout`. `http.response_buffer` is refused on `http-direct`. Behaviour change to know about: the worker's blocked time now counts against `http.stream_write_timeout` (streaming `http-direct` targets, total budget, default 10 s) and `request_terminate_timeout` (FastCGI), so a client slower than that gets a cut response unless those limits are raised or `http.response_buffer = 0` is set; and a client that trickles bytes (never cut by `http.write_timeout`, a stall timer) now holds a worker for as long as it trickles (#596).
 
 ## [0.13.0] - 2026-10-03
 

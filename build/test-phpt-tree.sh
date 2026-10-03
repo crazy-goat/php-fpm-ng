@@ -52,18 +52,18 @@ fi
 grep -q 'edited in place: third_party/php-src/run-tests.php' "$WORK/out2.txt" || fail "no 'edited in place' diagnosis: $(cat "$WORK/out2.txt")"
 echo "ok: an edited fixture is refused"
 
-# --- 2b. a manifest whose upstream and vendored hashes differ is refused ----
-# Main carries no php-src patch, so a vendored copy that is not the upstream
-# bytes (a patch smuggled in with a re-import) must fail the check.
-cp "$REPO/third_party/php-src/MANIFEST" "$FAKE/third_party/php-src/MANIFEST"
+# --- 2b. a manifest hash that does not match the vendored file is refused ----
+# Main carries no php-src patch, so the manifest hash is the upstream hash: a
+# vendored copy that is not the upstream bytes (a patch smuggled in) must fail
+# the check, whichever side was changed.
 cp "$REPO/third_party/php-src/run-tests.php" "$FAKE/third_party/php-src/run-tests.php"
 awk -F '\t' -v OFS='\t' '$1 == "main/fastcgi.h" { $3 = "0000000000000000000000000000000000000000000000000000000000000000" } { print }' \
   "$REPO/third_party/php-src/MANIFEST" > "$FAKE/third_party/php-src/MANIFEST"
 if "$FAKE/build/vendor-php-src.sh" check >"$WORK/out2b.txt" 2>&1; then
   fail "vendor-php-src.sh check accepted a non-pristine manifest entry"
 fi
-grep -q 'not pristine: third_party/php-src/main/fastcgi.h' "$WORK/out2b.txt" || fail "no 'not pristine' diagnosis: $(cat "$WORK/out2b.txt")"
-echo "ok: a non-pristine vendored file is refused"
+grep -q 'edited in place: third_party/php-src/main/fastcgi.h' "$WORK/out2b.txt" || fail "no 'edited in place' diagnosis: $(cat "$WORK/out2b.txt")"
+echo "ok: a manifest hash that disagrees with the vendored file is refused"
 
 # --- 3. the harness must launch the binary it was given ---------------------
 FPM=$WORK/given/php-fpm-ng

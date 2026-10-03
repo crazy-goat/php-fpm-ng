@@ -501,7 +501,7 @@ fi
 # --- assert what is accepted, and that the retired name is refused -------------
 # Issue #214, re-aimed by #388 and #420. No type keys on a build capability any
 # more: #388 retired pool.type = http, the last type whose children needed
-# patches/0006, and pool.type = gateway runs no PHP child at all; #420 then
+# a php-src patch, and pool.type = gateway runs no PHP child at all; #420 then
 # removed the patch and the build-support refusal outright. So this is a
 # positive check -- every type this build exists to ship (fastcgi, gateway,
 # http-direct) passes -t on this binary -- plus the one negative that still

@@ -99,7 +99,7 @@ fi
 unused=
 # MANIFEST paths are repository paths without whitespace; word splitting is the intent.
 # shellcheck disable=SC2013
-for f in $(awk -F '\t' '!/^#/ && NF == 4 && $1 ~ /\.[ch]$/ { print $1 }' "$REPO/third_party/php-src/MANIFEST"); do
+for f in $(awk -F '\t' '!/^#/ && NF == 3 && $1 ~ /\.[ch]$/ { print $1 }' "$REPO/third_party/php-src/MANIFEST"); do
   rel=$f
   case "$f" in sapi/fpm/fpm/*) rel=sapi/fpmng/fpm/${f#sapi/fpm/fpm/} ;; esac
   grep -q "/$rel\$" "$all" || unused="$unused $f"

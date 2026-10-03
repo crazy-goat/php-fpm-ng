@@ -2096,8 +2096,9 @@ latency fixed at 40.8 ms. Classic Nagle + delayed ACK, because the response uses
 problem disappears (2,686 req/s), confirming the mechanism.
 Remedy: `$server->expose($addr, (new BindContext())->withTcpNoDelay())`.
 
-This is EXACTLY the same class of bug as our 0002 patch to `main/fastcgi.c`
-(there, `req->tcp` is set only under `#ifdef _WIN32`). Worth reporting to amphp.
+This is EXACTLY the same class of bug as our former 0002 patch to `main/fastcgi.c`
+(there, `req->tcp` is set only under `#ifdef _WIN32`; `main` no longer carries the
+patch, the SAPI sets `TCP_NODELAY` on the listener, issue #590). Worth reporting to amphp.
 
 Diagnostic trap worth remembering: with `NullLogger`, amphp SWALLOWS exceptions
 from client handling. The symptom was `wrk` showing 80,000 "read errors" and no
@@ -2348,6 +2349,10 @@ opt-in.
 
 ### What landed
 
+(Historic, issues #590-#592: the `patches/0002` and `patches/0003` rows are no longer
+carried on `main`; `patches/` holds only history notes. `TCP_NODELAY` is now set by
+the SAPI itself.)
+
 | what | where | default | behavior change |
 |---|---|---|---|
 | fix `TCP_NODELAY` (upstream bug) | `patches/0002` (`main/fastcgi.c`) | yes | fix only — Nagle disappears from TCP keep-alive |
@@ -2387,8 +2392,9 @@ afterwards (the same trap as in 3o). The directive is per pool.
 
 ### Traps found along the way
 
-(Historic, issue #592: traps 1-4 concern the patch stack, which `main` no longer
-has; `prepare.sh` lost its stack logic with it.)
+(Historic, issue #592: traps 1-4, and the 0001+0002+0003 stack and the `patches/php-8.3/`
+variants they mention, concern the patch stack, which `main` no longer has;
+`prepare.sh` lost its stack logic with it.)
 
 1. **`0001` broke `--enable-fpm` in the same tree — FIXED (path 1).** It changed
    the hook signatures in `main/fastcgi.h` (`void(*)(bool)`), while upstream

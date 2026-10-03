@@ -318,7 +318,7 @@ or derived from php-src:
 
 - **PHP License 3.01**:
   - `third_party/php-src/` (vendored subset)
-  - `patches/` and `build/phpt-fixture-patches/`
+  - `build/phpt-fixture-patches/`
   - `sapi/fpmng/config.m4` and `sapi/fpmng/Makefile.frag`
   - `sapi/fpmng/fpm/fpm.c`, `fpm_children.c`, `fpm_conf.c`, `fpm_conf.h`, `fpm_process_ctl.c`,
     `fpm_request.c`, `fpm_request.h`, `fpm_stdio.c` and `zlog.h` (modified copies of `sapi/fpm/` files)

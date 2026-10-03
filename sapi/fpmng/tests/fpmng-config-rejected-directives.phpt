@@ -341,6 +341,12 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.write_timeout = 1000",
     ["'http.write_timeout' is not supported by pool.type = http-direct"]
 );
+/* Issue #596: the gateway's response flow-control knob. */
+expectConfigFailure(
+    'direct-response-buffer',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_buffer = 1M",
+    ["'http.response_buffer' is not supported by pool.type = http-direct"]
+);
 
 ?>
 Done
@@ -379,6 +385,7 @@ gateway-max-connections: rejected
 gateway-max-connections-per-client: rejected
 direct-keepalive-timeout: rejected
 direct-write-timeout: rejected
+direct-response-buffer: rejected
 Done
 --CLEAN--
 <?php

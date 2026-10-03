@@ -30,16 +30,15 @@ other php-src `main/` header can reach the compiler this way, so every
 | Commit | `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36` |
 | Files | 207 (see `MANIFEST`): 57 for the build, 150 test fixtures |
 
-`MANIFEST` lists every file, one per line, with four tab-separated columns:
+`MANIFEST` lists every file, one per line, with three tab-separated columns:
 
 - the path in this directory;
 - the upstream path;
-- the SHA-256 of the pristine upstream file at the tag;
-- the SHA-256 of the copy here.
+- the SHA-256 of the file.
 
-The two hashes are equal for every file: `main` carries no php-src patch
-(issues #591, #592), and `vendor-php-src.sh check` refuses a file where they
-differ.
+The file is the pristine upstream file at the tag: `main` carries no php-src
+patch (issues #591, #592), so one hash is enough, and `vendor-php-src.sh check`
+refuses a file that no longer has it.
 
 One file is stored under a different name, with its content unchanged:
 
@@ -186,7 +185,7 @@ header that changed or a source that upstream added is exactly what the
 import cannot judge.
 
 **Adding or dropping a file.** Edit the file list in `MANIFEST`: add a line
-with `-` in both hash columns, or delete a line. Then run the import.
+with `-` in the hash column, or delete a line. Then run the import.
 `build/libphp-build.sh` shows whether the change was needed: it
 fails on a vendored file that no translation unit reads, and on a missing one
 the compile or the link fails.

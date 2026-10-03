@@ -28,11 +28,14 @@ ARG APP_DIR
 ENV DEBIAN_FRONTEND=noninteractive
 # libphp8.5-embed brings the PHP it runs on (openssl, filter and ctype
 # included, which amphp needs); libevent is the one library build/libphp-build.sh
-# links besides libphp (objdump -p: NEEDED libevent-2.1.so.7).
+# links besides libphp (objdump -p: NEEDED libevent-2.1.so.7). The TLS build
+# (FPMNG_TLS=1, which CI uses) also links libevent_openssl-2.1.so.7, so the
+# image carries that too: without it php-fpm-ng does not even start (found
+# by build/test-shipped-configs.sh, #639).
 # An example image; it follows the Ubuntu package repository, so versions are not pinned.
 # hadolint ignore=DL3008
 RUN apt-get update \
-	&& apt-get install -y --no-install-recommends libphp8.5-embed libevent-2.1-7t64 ca-certificates \
+	&& apt-get install -y --no-install-recommends libphp8.5-embed libevent-2.1-7t64 libevent-openssl-2.1-7t64 ca-certificates \
 	&& rm -rf /var/lib/apt/lists/*
 COPY ${APP_DIR}/php-fpm-ng /usr/local/bin/php-fpm-ng
 # *.php rather than app.php: task 075's application ships its own classes

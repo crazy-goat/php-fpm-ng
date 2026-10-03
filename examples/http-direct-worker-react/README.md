@@ -66,7 +66,7 @@ nothing accepted is still unanswered — see
 
 One worker (`pm.max_children = 1`), so every request below is served by the same
 pid. Raw output of `build/test-http-direct-worker-react.sh` against a
-`php-fpm-ng-full` static-pie build of php-8.5.9 on arm64:
+static-pie build of php-8.5.9 on arm64:
 
 ```
 hello-world: ok (hello world from pid 7)

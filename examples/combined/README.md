@@ -8,8 +8,7 @@ their own ports.
 ## Run it
 
 ```sh
-# from examples/README.md "Build the binary once", then:
-cp <build>/sapi/fpmng/php-fpm-ng examples/combined/php-fpm-ng
+# no binary to build: the image installs the released package
 cd examples/combined
 docker build -t fpmng-combined-example .
 docker run --rm --name fpmng-combined-example -p 8080:8080 -p 8081:8081 -p 8082:8082 fpmng-combined-example
@@ -51,9 +50,9 @@ curl -s http://localhost:8082/metrics
 ```
 
 The JSON body includes, together: `app`'s scoreboard (idle/active workers,
-requests, from `fpm_scoreboard_copy()`, `fpm_pool_status.c:196-205`),
+requests, from `fpm_scoreboard_copy()`),
 `tick`'s `state`/`last_start`/`next_run` (`fpm_pool_cron_status()`,
 `fpm_pool_cron.c:444-472`), and `worker`'s `state`/`last_start`
 (`fpm_pool_supervisor_status()`, `fpm_pool_supervisor.c:438-467`, `state`
 should read `running`) -- one process, one config, one running instance,
-all four pool types answering simultaneously.
+all pool types answering simultaneously.

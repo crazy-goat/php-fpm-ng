@@ -5,8 +5,7 @@ One long-lived worker, restarted if it exits.
 ## Run it
 
 ```sh
-# from examples/README.md "Build the binary once", then:
-cp <build>/sapi/fpmng/php-fpm-ng examples/supervisor/php-fpm-ng
+# no binary to build: the image installs the released package
 cd examples/supervisor
 docker build -t fpmng-supervisor-example .
 docker run --rm --name fpmng-supervisor-example fpmng-supervisor-example

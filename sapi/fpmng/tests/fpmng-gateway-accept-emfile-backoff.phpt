@@ -17,9 +17,13 @@ require_once "tester.inc";
  * descriptors (pool.type = gateway has no rlimit_files of its own; a few
  * descriptors go to the listener, the event base, the log and the FastCGI side).
  * Idle clients are opened until accept() starts failing with EMFILE; the
- * kernel queue keeps the rest, so the listening socket stays readable. With
- * no evconnlistener error callback the gateway then burns one core: the CPU
- * time it uses over a two-second window is the measurement. Afterwards the
+ * kernel queue keeps the rest, so the listening socket stays readable. Without
+ * an evconnlistener error callback libevent only logs each failed accept()
+ * to stderr. In production that is a busy loop on one core. In this harness
+ * stderr is a pipe nobody drains, so the unfixed gateway blocks in write()
+ * and uses no CPU: the CPU check below therefore only catches a callback that
+ * does not pause, and a missing callback is caught by the log assertion (the
+ * "pausing accept" WARNING comes from the callback). Afterwards the
  * clients are closed and a request must be answered. */
 
 $docroot = sys_get_temp_dir() . '/fpmng-gw-emfile-' . getmypid();
@@ -114,6 +118,10 @@ try {
     }
     echo "idle-while-exhausted: ok\n";
 
+    // Fails with a clear message when the error callback is missing.
+    $tester->expectLogPattern('/WARNING: \[pool gw\] http: accept\(\) on the main listener failed: .*; pausing accept for 100 ms/', true, 5);
+    echo "backoff-logged: ok\n";
+
     foreach ($clients as $fp) {
         fclose($fp);
     }
@@ -151,6 +159,7 @@ try {
 --EXPECT--
 exhausted: yes
 idle-while-exhausted: ok
+backoff-logged: ok
 recovered: ok
 Done
 --CLEAN--

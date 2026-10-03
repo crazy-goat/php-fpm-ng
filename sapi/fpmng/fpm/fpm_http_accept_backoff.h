@@ -25,9 +25,10 @@
 #define FPM_HTTP_ACCEPT_BACKOFF_MS 100
 
 /* Installs the error callback on the listener behind `bound`. `pool` and
- * `what` (for example "tls" or "plain") are are kept by reference for log lines and must outlive the event loop. Returns 0 on success,
- * -1 on allocation failure (the listener then works as before, without the
- * backoff). */
+ * `what` (for example "main" or "http.plain_listen") are kept by reference
+ * for log lines and must outlive the event loop. Returns 0 on success, -1 on
+ * allocation failure or when the resume timer cannot be created (the
+ * listener then works as before, without the backoff). */
 int fpm_http_accept_backoff_install(struct event_base *base, struct evhttp_bound_socket *bound,
 		const char *pool, const char *what);
 

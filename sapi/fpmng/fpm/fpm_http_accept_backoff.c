@@ -123,6 +123,10 @@ int fpm_http_accept_backoff_install(struct event_base *base, struct evhttp_bound
 	b->what = what;
 	/* Lives as long as the process: the listener does. */
 	b->timer = evtimer_new(base, fpm_http_accept_backoff_resume, b);
+	if (!b->timer) {
+		free(b);
+		return -1;
+	}
 	fpm_http_accept_backoff_table[slot] = b;
 	evconnlistener_set_error_cb(listener, fpm_http_accept_backoff_error);
 	return 0;

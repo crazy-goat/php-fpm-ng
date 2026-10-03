@@ -28,7 +28,7 @@ if (isset($_GET['sleep'])) {
 }
 echo getmypid();
 PHP);
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $port = $base + 31;
 $solo = $base + 32;
 /* The status pages of both pools, on one operator listener (issue #275): the

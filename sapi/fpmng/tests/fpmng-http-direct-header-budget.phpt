@@ -157,8 +157,8 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$classicPort = (int) (getenv('FPMNG_DIRECT_BUDGET_CLASSIC_PORT') ?: 28104 + 200 * (int) getenv('TEST_PHP_WORKER'));
-$workerPort = (int) (getenv('FPMNG_DIRECT_BUDGET_WORKER_PORT') ?: 28105 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$classicPort = (int) (getenv('FPMNG_DIRECT_BUDGET_CLASSIC_PORT') ?: 28104 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
+$workerPort = (int) (getenv('FPMNG_DIRECT_BUDGET_WORKER_PORT') ?: 28105 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

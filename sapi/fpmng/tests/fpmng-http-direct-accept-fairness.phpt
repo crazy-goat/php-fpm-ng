@@ -46,7 +46,7 @@ if (isset($_GET['slow'])) {
 echo getmypid();
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 12;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT')) + 12;
 $addr = "127.0.0.1:$port";
 $cfg = <<<CFG
 [global]

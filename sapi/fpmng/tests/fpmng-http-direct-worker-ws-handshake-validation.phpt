@@ -48,7 +48,7 @@ if (!is_file($source) || !copy($source, "$work/app.php")) {
     throw new RuntimeException("cannot copy shipped WebSocket example from $source");
 }
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_HANDSHAKE_PORT') ?: 28158 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_WS_HANDSHAKE_PORT') ?: 28158 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

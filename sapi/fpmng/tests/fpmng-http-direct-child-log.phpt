@@ -38,7 +38,7 @@ file_put_contents($root . '/front.php', <<<'PHP'
 echo getmypid();
 PHP);
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $port = $base + 35;
 $cfg = <<<CFG
 [global]

@@ -72,7 +72,7 @@ function httpGetRetry(string $url, int $attempts = 50): string
 $root = sys_get_temp_dir() . '/fpmng-worker-saturation-new-' . getmypid();
 @mkdir($root, 0700, true);
 
-file_put_contents("$root/worker.php", <<<'PHP'
+file_put_contents("$root/worker.php", str_replace('__ROOT__', $root, <<<'PHP'
 <?php
 $notify = fpmng_worker_notify_stream();
 
@@ -82,6 +82,8 @@ function handle(int $id): void
     $uri = $env['REQUEST_URI'] ?? '/';
 
     if (str_starts_with($uri, '/hold')) {
+        /* Tell the test this hold has really reached the script. */
+        file_put_contents('__ROOT__/hold-seen', '1');
         return; /* deliberately never call fpmng_worker_respond() */
     }
     fpmng_worker_respond($id, 200, ['Content-Type' => 'text/plain'], 'hello from pid ' . getmypid());
@@ -98,7 +100,17 @@ fpmng_worker_event_enable($watcher);
 while (!fpmng_worker_may_exit() && !fpmng_worker_stopping()) {
     fpmng_worker_loop(true);
 }
-PHP);
+/* Keep driving the event loop after the stop request until the test has read
+ * the answer on the idle keep-alive connection (marker file), bounded by 10 s,
+ * so that however late the test process is scheduled, the request it writes
+ * is read while fpm_worker_stopping is already set (issue #527). Returning at
+ * once would leave a window of a single event-loop iteration. */
+$until = microtime(true) + 10.0;
+while (microtime(true) < $until && !file_exists('__ROOT__/release')) {
+    fpmng_worker_loop(false);
+    usleep(5000);
+}
+PHP));
 
 $port = (int) (getenv('FPMNG_DIRECT_WORKER_SATURATION_NEW_PORT') ?: 28101 + 200 * (int) getenv('TEST_PHP_WORKER'));
 
@@ -118,12 +130,10 @@ http.read_timeout = 10000
 http.max_body = 1M
 catch_workers_output = yes
 worker.max_pending = 1
-; issue #338: this test needs both /hold connections accepted in the same
-; event-loop wakeup, so that the saturation window is already open when the
-; request queued on the idle connection below is dispatched. The default
-; worker.accept_threshold = 1 rate-limits accepts and would let that request be
-; answered 200 before the second hold is even accepted -- a different, and
-; correct, ordering, but not the one this test is about.
+; issue #338: the default worker.accept_threshold = 1 rate-limits accepts and
+; could delay the second hold; 0 accepts at once. The saturation window itself
+; is opened explicitly by the test (marker file, then holdB's 503), not by this
+; setting.
 worker.accept_threshold = 0
 php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
@@ -148,26 +158,19 @@ try {
      * disjunct (already covered by fpmng-http-direct-worker-max-pending.phpt)
      * and also sets fpm_worker_stopping. */
     $holdA = openHeld('127.0.0.1', $port, '/hold');
+    /* Wait until holdA has really reached the worker script, so the second
+     * hold below cannot be seen before it, however the scheduler orders the
+     * test and the worker (issue #527). */
+    for ($i = 0; $i < 1000 && !file_exists("$root/hold-seen"); $i++) {
+        usleep(10000);
+    }
+    check(file_exists("$root/hold-seen"), 'hold A never reached the worker script');
     $holdB = openHeld('127.0.0.1', $port, '/hold');
 
-    /* The load-bearing write: a SECOND request on the connection that was
-     * already open and idle before saturation -- not one of the held sockets,
-     * not a new TCP connection -- must also be refused 503 rather than being
-     * handed to a worker that has already decided to stop. This is the
-     * fpm_worker_stopping disjunct of fpm_worker_accept()'s saturation check,
-     * not the ready_count >= ready_max one.
-     *
-     * This write is queued here, BEFORE reading holdB's response, and not
-     * after: fpm_worker_finish_output()'s "an already-open keep-alive
-     * connection still gets answered 503" window opens the instant
-     * fpm_worker_stopping is set and can close again within a single
-     * event-loop iteration once its bounded flush of already-pending replies
-     * drains back to empty. Waiting for a full round trip on holdB first
-     * risks queuing this write only after that window has already closed,
-     * which starves it of any event-loop iteration ever picking it up before
-     * the worker process exits -- a race, not a synchronization point. */
-    fwrite($idle, "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
-
+    /* holdB's 503 proves fpm_worker_stopping is set. Only then is the
+     * idle-connection request written, so it is always dispatched while the
+     * worker is stopping (the script keeps the event loop running until
+     * "release" exists). */
     $statusB = readStatus($holdB);
     check($statusB === '503', "the 2nd concurrent hold did not get 503: $statusB");
     fclose($holdB);
@@ -175,9 +178,18 @@ try {
     $tester->expectLogPattern('/WARNING: .*\[pool cap\] http-direct worker: 1 requests accepted but unanswered; '
         . 'answering 503 and asking the worker script to stop so the master can respawn it/', true);
 
+    /* The load-bearing write: a SECOND request on the connection that was
+     * already open and idle before saturation -- not one of the held sockets,
+     * not a new TCP connection -- must also be refused 503 rather than being
+     * handed to a worker that has already decided to stop. This is the
+     * fpm_worker_stopping disjunct of fpm_worker_accept()'s saturation check,
+     * not the ready_count >= ready_max one. */
+    fwrite($idle, "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+
     $statusIdle = readStatus($idle);
     check($statusIdle === '503', "a request on an idle keep-alive connection during stopping got $statusIdle, not 503");
     fclose($idle);
+    touch("$root/release");
     echo "idle-connection-refused-once-stopping: ok\n";
 
     /* The held request is still drained with 503 once the worker exits. */
@@ -191,9 +203,12 @@ try {
     check(str_starts_with($again, 'hello from pid '), 'no respawn after saturation: ' . var_export($again, true));
     echo "respawn-after-saturation: ok\n";
 } finally {
+    @touch("$root/release");
     $tester->terminate();
     $tester->close();
     @unlink("$root/worker.php");
+    @unlink("$root/hold-seen");
+    @unlink("$root/release");
     @rmdir($root);
 }
 echo "Done\n";

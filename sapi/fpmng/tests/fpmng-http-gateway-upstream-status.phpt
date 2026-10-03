@@ -22,7 +22,8 @@ function check(bool $condition, string $message): void
 }
 
 /* Raw request on a keep-alive connection. Returns the status line, or
- * 'TIMEOUT' when nothing arrived: that is the 1xx hang. */
+ * 'TIMEOUT' when nothing arrived. With the old code a 1xx status
+ * arrived here as the final answer. */
 function status_line(string $addr, string $path): string
 {
     $fp = stream_socket_client("tcp://$addr", $errno, $error, 5);

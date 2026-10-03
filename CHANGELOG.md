@@ -18,6 +18,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 - `patches/0002-upstream-report.md` is English throughout; `docs/NOTES.md` marks the patch 0002/0003 passages as historic and a `build/libphp-build.sh` comment no longer names the removed patches/0006 (#676).
 - Owned `.phpt` suite: every test port (the Tester's blocks from 9008 and the http-direct tests from 28054) now also moves by a per-run `FPMNG_PHPT_PORT_SHIFT` that `build/run-fpmng-phpt.sh` picks as the first shift whose blocks nothing listens on, so another php-fpm holding 9201 or 9208 on a shared host no longer fails dozens of tests. Set the variable to pin a shift. The Tester also gives each gateway pool a run-own `operator.*_listen`, so a master holding `127.0.0.1:9253` no longer fails the gateway tests (#674).
 - `bin/lint.sh` runs shellcheck at its default (style) severity instead of `warning`. The 22 info/style findings in `build/` and `tests/frameworks/symfony/run.sh` are fixed or silenced with a reasoned `# shellcheck disable` (#584).
+- `tests/frameworks/laravel/composer.lock` pins `league/commonmark` 2.10.3 (was 2.10.0), closing Dependabot alerts 2 and 3. Test fixture only, not shipped in the packages (#695).
 
 ### Fixed
 

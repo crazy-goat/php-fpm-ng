@@ -385,9 +385,14 @@ reach those files. This is the first real limitation of the model.
 
 **And it is not a theoretical problem; it is our own problem.** The gateway
 keeps persistent connections to the pool (`FCGI_KEEP_CONN`), so fpm-ng is exactly
-the case broken by this bug: the idle-versus-active counter lies, and
-`pm = dynamic` and `ondemand` scale the pool incorrectly. Without the patch,
-only `pm = static` is trustworthy.
+the case broken by this bug: the idle-versus-active counter lies. (Corrected
+2026-10-03, issue #591: pm scaling is not affected, because the maintenance loop
+recounts idle and active from `request_stage` every heartbeat. What stays wrong is
+`max active processes` and, for up to one heartbeat, `idle`/`active`.
+Patch 0001 was dropped from `main` by issue #591; `patches/README.md` has the audit.)
+
+(Historic, 2026-10-03, issue #592: the last patch is gone and `prepare.sh` no
+longer has a patch step; the decision below describes the state until then.)
 
 Decision: **carry the patch**, but make the deviation visible and measurable.
 `patches/` + `prepare.sh` applies it and reports it loudly; without patches it
@@ -2381,6 +2386,9 @@ afterwards (the same trap as in 3o). The directive is per pool.
 - **`SO_REUSEPORT`** — untouched (3m: thundering herd does not exist).
 
 ### Traps found along the way
+
+(Historic, issue #592: traps 1-4 concern the patch stack, which `main` no longer
+has; `prepare.sh` lost its stack logic with it.)
 
 1. **`0001` broke `--enable-fpm` in the same tree — FIXED (path 1).** It changed
    the hook signatures in `main/fastcgi.h` (`void(*)(bool)`), while upstream

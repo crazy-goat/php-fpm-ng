@@ -44,7 +44,7 @@ fail() { echo "phpt-tree.sh: FAIL: $*" >&2; exit 1; }
 
 [ -f "$TP/MANIFEST" ] || fail "no third_party/php-src/MANIFEST"
 # The fixtures are only as good as the copy they come from; refuse one that was
-# edited in place or is out of step with patches/. Same check CI runs.
+# edited in place or is out of step with its manifest. Same check CI runs.
 "$REPO/build/vendor-php-src.sh" check >/dev/null || fail "third_party/php-src does not match its manifest; run build/vendor-php-src.sh check"
 
 for f in run-tests.php sapi/fpm/tests/tester.inc; do

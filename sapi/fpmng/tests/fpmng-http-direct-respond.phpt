@@ -120,6 +120,23 @@ function fetch(string $addr, string $case): array
     return [$status, $body, $ms];
 }
 
+// The script writes its marker after fpmng_respond() has already sent the
+// response, so the client can see the response before the marker exists. Poll
+// for the expected content instead of reading once. Returns the last content
+// read ('' when the file never appeared) so a mismatch still reports a value.
+function awaitMarker(string $marker, string $expected, float $timeout = 5.0): string
+{
+    $deadline = microtime(true) + $timeout;
+    do {
+        $got = @file_get_contents($marker);
+        if ($got === $expected) {
+            return $got;
+        }
+        usleep(10000);
+    } while (microtime(true) < $deadline);
+    return (string) $got;
+}
+
 $port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 13;
 $streamPort = $port + 1;
 $cfg = <<<CFG
@@ -154,7 +171,7 @@ try {
 
     [$status, $body] = fetch($addr, 'after');
     verify($status === 200 && $body === 'after-body', "after: got $status '$body'");
-    verify(@file_get_contents($marker) === 'ran-after-respond', 'the script did not run past fpmng_respond()');
+    verify(awaitMarker($marker, 'ran-after-respond') === 'ran-after-respond', 'the script did not run past fpmng_respond()');
     @unlink($marker);
     echo "keeps-running: ok\n";
 
@@ -166,7 +183,7 @@ try {
 
     [$status, $body] = fetch($addr, 'twice');
     verify($status === 200 && $body === 'twice-body', "twice: got $status '$body'");
-    verify(@file_get_contents($marker) === 'true|false', 'second call did not report that it did nothing');
+    verify(awaitMarker($marker, 'true|false') === 'true|false', 'second call did not report that it did nothing');
     @unlink($marker);
     echo "second-call: ok\n";
 
@@ -174,7 +191,7 @@ try {
     // not take the worker with it for the next request.
     [$status, $body] = fetch($addr, 'fatal');
     verify($status === 200 && $body === 'fatal-body', "fatal: got $status '$body'");
-    verify(@file_get_contents($marker) === 'before-fatal', 'the script did not reach the code before the fatal');
+    verify(awaitMarker($marker, 'before-fatal') === 'before-fatal', 'the script did not reach the code before the fatal');
     @unlink($marker);
     [$status, $body] = fetch($addr, 'plain');
     verify($status === 200 && $body === 'plain-body', "after fatal: got $status '$body'");
@@ -220,7 +237,7 @@ try {
     [$status, $body, $ms] = fetch($streamAddr, 'early');
     verify($status === 200 && $body === 'early-body', "early: got $status '$body'");
     verify($ms < 700, sprintf('the streamed response waited %.0f ms for the script', $ms));
-    verify(@file_get_contents($marker) === 'sleeping', 'the streaming script did not run past fpmng_respond()');
+    verify(awaitMarker($marker, 'sleeping') === 'sleeping', 'the streaming script did not run past fpmng_respond()');
     echo "streamed-early: ok\n";
 
     $tester->terminate();

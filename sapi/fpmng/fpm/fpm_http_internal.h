@@ -773,15 +773,18 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len);
 void fpm_http_finish(fpm_http_conn *c, int explained);
 fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t);
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
-void fpm_http_origin_form(smart_str *out, const char *uri);
+/* Origin-form target (path and ?query) of `req`, from libevent's one parse (#534). */
+void fpm_http_origin_form(smart_str *out, struct evhttp_request *req);
 /* Start of the origin-form part of a request-target: `uri` itself when it is not
  * absolute-form, else the byte after the authority (possibly "" or "?q"). With a
  * non-NULL `authority`, also the authority without userinfo (#534). */
 const char *fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len);
-/* Buffer size for fpm_http_absolute_authority(): a 253-byte DNS name, ":65535" and the NUL. */
+/* Buffer size for fpm_http_absolute_authority(): a 253-byte DNS name, ":65535" (6 bytes)
+ * and the NUL, rounded up (a longer authority is answered 400). */
 #define FPM_HTTP_AUTHORITY_MAX 262
-/* Copies the absolute-form authority of `uri` into `buf`; 0 when `uri` is not
- * absolute-form, the authority is empty or does not fit (the Host header stays). */
+/* Copies the absolute-form authority of `uri` into `buf`: 1 = copied, 0 = `uri` is not
+ * absolute-form or the authority is empty (the Host header stays), -1 = it does not fit
+ * (the callers answer 400). */
 int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len);
 /* Issue #344: the HTTP/1.1 client transport's vtable, defined in
  * fpm_http_client.c. A function, not an extern const, so the definition can

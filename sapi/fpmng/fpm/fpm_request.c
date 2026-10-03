@@ -44,7 +44,7 @@ void fpm_request_set_cpu_tracking(bool on)
 	fpm_request_cpu_tracking = on;
 }
 
-void fpm_request_accepting(bool fromActive)
+void fpm_request_accepting_ex(bool fromActive)
 {
 	struct fpm_scoreboard_proc_s *proc;
 	struct timeval now;
@@ -70,7 +70,7 @@ void fpm_request_accepting(bool fromActive)
 			FPM_SCOREBOARD_ACTION_INC, NULL);
 }
 
-void fpm_request_reading_headers(bool keptAlive)
+void fpm_request_reading_headers_ex(bool keptAlive)
 {
 	struct fpm_scoreboard_proc_s *proc;
 
@@ -117,6 +117,16 @@ void fpm_request_reading_headers(bool keptAlive)
 	/* idle--, active++, request++ */
 	fpm_scoreboard_update_commit(keptAlive ? 0 : -1, keptAlive ? 0 : 1, 0, 0, 1, 0, 0, 0,
 			FPM_SCOREBOARD_ACTION_INC, NULL);
+}
+
+void fpm_request_accepting(void)
+{
+	fpm_request_accepting_ex(true);
+}
+
+void fpm_request_reading_headers(void)
+{
+	fpm_request_reading_headers_ex(false);
 }
 
 void fpm_request_info(void)

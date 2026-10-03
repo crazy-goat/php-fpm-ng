@@ -102,6 +102,8 @@ try {
     echo "origin: " . location($plain, '/x?a=1') . "\n";
     echo "absolute: " . location($plain, 'http://other.example:81/x?a=1') . "\n";
     echo "no path: " . location($plain, 'http://other.example:81') . "\n";
+    echo "scheme only: " . location($plain, 'http:/x?a=1') . "\n";
+    echo "network path: " . location($plain, '//h/x') . "\n";
     echo "ipv6: " . location($plain, 'http://[::1]:81/x') . "\n";
 } finally {
     $tester->terminate();
@@ -116,6 +118,8 @@ try {
 origin: 308 https://t/x?a=1
 absolute: 308 https://other.example/x?a=1
 no path: 308 https://other.example/
+scheme only: 308 https://t/x?a=1
+network path: 308 https://t/x
 ipv6: 308 https://[::1]/x
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

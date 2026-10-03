@@ -125,81 +125,8 @@ if [ -n "$OLD_SOURCES" ] && [ "$OLD_SOURCES" != "$NEW_SORTED" ]; then
   rm -f "$_old" "$_new"
 fi
 
-# Patches for files outside sapi/ — a departure from "upstream untouched", so
-# loudly. Rules and validity windows: patches/README.md
-PHPVER=$(awk -F'"' '/PHP_VERSION /{print $2}' "$PHPSRC/main/php_version.h" 2>/dev/null)
-PHPMINOR=$(echo "$PHPVER" | cut -d. -f1,2)
-# Patches form a stack and can touch the same region (0002 and the former
-# 0003 both sat at accept()). Then the "is it already applied" test per patch
-# lies: the reverse dry-run of 0002 fails, because 0003 sat on top of it. The decision
-# is therefore made once, for the whole stack: either the tree is untouched
-# and we apply everything in order, or the whole stack comes off in reverse
-# from the copy of touched files (= already applied), or ERROR.
-PATCHES=""
-for p in "$REPO"/patches/*.patch; do
-  [ -f "$p" ] || continue
-  name=$(basename "$p")
-  # versioned variant overrides the generic one
-  [ -f "$REPO/patches/php-$PHPMINOR/$name" ] && p="$REPO/patches/php-$PHPMINOR/$name"
-  PATCHES="$PATCHES $p"
-done
-PATCHED=0
-if [ -n "$PATCHES" ]; then
-  FIRST=${PATCHES%% *}; FIRST=${PATCHES# }; FIRST=${FIRST%% *}
-  # Order matters: FIRST try forward. Applying in reverse to an untouched tree
-  # can also return success (BSD patch), so testing "-R" first would silently
-  # produce a binary without the patch and a message claiming it is there.
-  if patch -d "$PHPSRC" -p1 --dry-run --forward --silent < "$FIRST" >/dev/null 2>&1; then
-    for p in $PATCHES; do
-      name=$(basename "$p")
-      # Apply each patch immediately. Later patches may deliberately use
-      # context introduced by earlier ones, so probing every patch against the
-      # untouched tree reports false failures.
-      if ! patch -d "$PHPSRC" -p1 --forward --silent < "$p" >/dev/null 2>&1; then
-        echo "ERROR: patch does not apply to PHP $PHPVER: $name" >&2
-        echo "      see patches/README.md — either upstream merged it (remove it)," >&2
-        echo "      or a patches/php-$PHPMINOR/$name variant is needed" >&2
-        exit 1
-      fi
-      echo "  ! patch applied onto upstream: $name"
-      PATCHED=$((PATCHED + 1))
-    done
-  else
-    TMP=$(mktemp -d)
-    # the file name ends at the first whitespace (diff -u appends the date there)
-    for f in $(cat $PATCHES | sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' | sort -u); do
-      mkdir -p "$TMP/$(dirname "$f")"
-      cp "$PHPSRC/$f" "$TMP/$f"
-    done
-    REVERSED=""
-    for p in $PATCHES; do REVERSED="$p $REVERSED"; done
-    OK=1
-    for p in $REVERSED; do
-      patch -d "$TMP" -p1 -R --forward --silent < "$p" >/dev/null 2>&1 || { OK=0; break; }
-    done
-    rm -rf "$TMP"
-    if [ "$OK" = 1 ]; then
-      for p in $PATCHES; do
-        echo "  ! patch was already applied: $(basename "$p")"
-        PATCHED=$((PATCHED + 1))
-      done
-    else
-      echo "ERROR: patches do not apply to PHP $PHPVER and the tree does not look untouched" >&2
-      echo "      ($(echo $PATCHES | wc -w | tr -d ' ') patches, first: $(basename "$FIRST"))" >&2
-      echo "      see patches/README.md — either upstream merged one of them (remove it)," >&2
-      echo "      or a patches/php-$PHPMINOR/<name> variant is needed, or the tree" >&2
-      echo "      has foreign changes in these files (git status in $PHPSRC)" >&2
-      exit 1
-    fi
-  fi
-fi
-
 echo "sapi/fpmng ready."
-if [ "$PATCHED" -gt 0 ]; then
-  echo "  WARNING: upstream was modified by $PATCHED patch(es) (see above)"
-else
-  echo "  upstream untouched — only sapi/fpmng/ was created"
-fi
+echo "  upstream untouched — only sapi/fpmng/ was created"
 echo "  sources from upstream + ours: $(echo "$SOURCES" | wc -l | tr -d ' ')"
 echo "  our files:"
 (cd "$REPO/sapi/fpmng" && find . -type f | sed 's|^\./|    |' | sort)

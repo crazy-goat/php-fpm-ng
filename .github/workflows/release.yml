@@ -40,17 +40,10 @@ permissions:
 # resolved, and leaves libphp-build's commands.log next to each package.
 
 jobs:
-  packages:
-    # Not containerised: the script drives `docker run` with host bind mounts, and -v paths are
-    # resolved by the host daemon, so a containerised copy would mount empty
-    # directories.
+  # Issue #575: the release notes are checked first and on their own, so a missing
+  # CHANGELOG section still fails in seconds and not after the package gate.
+  notes:
     runs-on: ubuntu-latest
-    env:
-      # Refuse the bare-base-image fallback. Without it a login failure would
-      # cut a release built in images that are not the ones the pull request
-      # was gated with, and say nothing -- which is the whole point of the
-      # packages: read line above.
-      FPMNG_REQUIRE_WARM_IMAGES: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -104,6 +97,54 @@ jobs:
           open('release-notes.md', 'w', encoding='utf-8').write(text + install)
           PY
 
+      - name: keep the release notes for the release job
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
+  # Issue #575: the four package-gate cells do not depend on each other, so they
+  # run in parallel and a rehearsal takes the time of the slowest cell, not the
+  # sum (expected about 12 min instead of about 49, not measured). fail-fast is off so that all four
+  # results are visible; one red cell still fails the run, and the release job
+  # below needs all of them, so nothing is published.
+  packages:
+    needs: notes
+    # Not containerised: the script drives `docker run` with host bind mounts, and -v paths are
+    # resolved by the host daemon, so a containerised copy would mount empty
+    # directories.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { cell: deb, kind: deb, tls: "0" }
+          - { cell: apk, kind: apk, tls: "0" }
+          # The second package (issue #294): the same release built
+          # --enable-fpmng-tls --enable-fpmng-acme, so that the remedy for the TLS
+          # regression of issues #280 and #281 is "install php-fpm-ng-tls" rather
+          # than "get a compiler". Beta and unaudited, and its package description
+          # says so.
+          #
+          # Gated here and only here since issue #393 (the pull-request matrix does
+          # not run the package gate). A TLS-only regression is exactly what shipped
+          # in the v0.5.0 tag (PR #320) and what a flake, apk-flavoured this time,
+          # repeated for v0.5.1; the workflow_dispatch rehearsal is the cheap way to
+          # see the gate before a tag.
+          - { cell: deb-tls, kind: deb, tls: "1" }
+          - { cell: apk-tls, kind: apk, tls: "1" }
+    env:
+      # Refuse the bare-base-image fallback. Without it a login failure would
+      # cut a release built in images that are not the ones the pull request
+      # was gated with, and say nothing -- which is the whole point of the
+      # packages: read line above.
+      FPMNG_REQUIRE_WARM_IMAGES: "1"
+      FPMNG_PACKAGE_TLS: ${{ matrix.tls }}
+    steps:
+      - uses: actions/checkout@v7
+
       - name: log in to ghcr.io for the package-gate images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -118,33 +159,50 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = tag ]; then
             echo "FPMNG_RELEASE=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
           else
-            echo "FPMNG_RELEASE=$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
+            echo "FPMNG_RELEASE=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
           fi
 
-      - name: build, install and test the .deb
-        run: ./build/ci-package-gate.sh deb "$PWD/out-package-deb"
-      - name: build, install and test the .apk
-        run: ./build/ci-package-gate.sh apk "$PWD/out-package-apk"
+      - name: build, install and test the ${{ matrix.cell }} package
+        env:
+          CELL_KIND: ${{ matrix.kind }}
+          CELL_NAME: ${{ matrix.cell }}
+        run: ./build/ci-package-gate.sh "$CELL_KIND" "$PWD/out-package-$CELL_NAME"
 
-      # The second package (issue #294): the same release built
-      # --enable-fpmng-tls --enable-fpmng-acme, so that the remedy for the TLS
-      # regression of issues #280 and #281 is "install php-fpm-ng-tls" rather
-      # than "get a compiler". Beta and unaudited, and its package description
-      # says so.
-      #
-      # Gated here and only here since issue #393 (the pull-request matrix does
-      # not run the package gate). A TLS-only regression is exactly what shipped
-      # in the v0.5.0 tag (PR #320) and what a flake, apk-flavoured this time,
-      # repeated for v0.5.1; the workflow_dispatch rehearsal is the cheap way to
-      # see the gate before a tag.
-      - name: build, install and test the TLS .deb
-        env:
-          FPMNG_PACKAGE_TLS: "1"
-        run: ./build/ci-package-gate.sh deb "$PWD/out-package-deb-tls"
-      - name: build, install and test the TLS .apk
-        env:
-          FPMNG_PACKAGE_TLS: "1"
-        run: ./build/ci-package-gate.sh apk "$PWD/out-package-apk-tls"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.cell }}
+          path: out-package-${{ matrix.cell }}
+          retention-days: 1
+
+  release:
+    needs: [notes, packages]
+    runs-on: ubuntu-latest
+    steps:
+      - name: name this build
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            echo "FPMNG_RELEASE=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          else
+            echo "FPMNG_RELEASE=${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+          fi
+
+      # Each cell's output directory comes back under its own name, which is the
+      # layout the collect step below reads (out-package-<cell>/).
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: package-*
+          path: .
+      - name: lay the cell outputs out as out-package-<cell>
+        run: |
+          for d in package-*; do mv "$d" "out-package-${d#package-}"; done
+          ls -d out-package-*
+
+      - name: fetch the release notes
+        if: github.ref_type == 'tag'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: .
 
       # The asset names carry both halves: our release and the PHP minor the
       # binary is a SAPI for. A user with 8.4 and 8.5 installed has to be able
@@ -185,6 +243,8 @@ jobs:
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job, so gh has no repository to infer.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft --jq .isDraft 2>/dev/null); then

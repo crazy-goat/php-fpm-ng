@@ -117,6 +117,14 @@ try {
     }
     $r = rawGet($http, 'http:/ping');
     echo "http:/ping: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    /* The forwarded target comes from the same parse: REQUEST_URI on the
+     * FastCGI transport and the request line to an http.route[] target. */
+    $r = rawGet($http, 'http:/x?a=1');
+    echo "http:/x fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    $r = rawGet($http, 'http:/d/x?a=1');
+    echo "http:/d/x http: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    $r = rawGet($http, '//h/x?a=1');
+    echo "//h/x fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
     $r = rawGet($http, 'http:');
     echo "no authority: " . (str_starts_with(bodyOf($r), 'app:') ? 'served' : 'refused') . "\n";
     $r = rawGet($http, 'http://' . str_repeat('a', 300) . '/x', 't');
@@ -158,6 +166,9 @@ http:/metrics/app operator: 403
 x+y:/metrics/app operator: 403
 //h/metrics/app operator: 403
 http:/ping: 200 pong
+http:/x fastcgi: 200 app:/x?a=1:t
+http:/d/x http: 200 app:/d/x?a=1:t
+//h/x fastcgi: 200 app:/x?a=1:t
 no authority: refused
 long authority: 400
 max authority: 200

@@ -37,10 +37,9 @@ other php-src `main/` header can reach the compiler this way, so every
 - the SHA-256 of the pristine upstream file at the tag;
 - the SHA-256 of the copy here.
 
-The two hashes are equal for every file except two:
-
-- `main/fastcgi.c` and `main/fastcgi.h` carry `patches/0001` and `0002`. The
-  manifest's `patches` line fingerprints that stack.
+The two hashes are equal for every file: `main` carries no php-src patch
+(issues #591, #592), and `vendor-php-src.sh check` refuses a file where they
+differ.
 
 One file is stored under a different name, with its content unchanged:
 
@@ -90,12 +89,10 @@ read by any translation unit.
   - `fpm_main_arginfo.h` is generated upstream by `gen_stub.php` from
     `fpm_main.stub.php`, and upstream commits it. It is vendored as
     generated; this repository never regenerates it.
-- **`main/fastcgi.c` and `main/fastcgi.h`**: the FastCGI protocol layer with
-  this repository's transport patches applied (`patches/README.md`).
-  - The SDK ships its own `main/fastcgi.h`, but that copy is unpatched. A
-    build that read it would compile against a different
-    `fcgi_init_request()` signature than the one it links. In practice that
-    is a compile error, and the audit refuses it as well.
+- **`main/fastcgi.c` and `main/fastcgi.h`**: the FastCGI protocol layer,
+  pristine at the pinned tag.
+  - The build reads these copies, not a header from the SDK, so the header
+    and `fastcgi.c` always match.
 
 There is one generated input that is not here: `config.h`. php-src's
 configure writes it, and ext/fpmng_metrics includes it. On this path the build
@@ -164,9 +161,10 @@ shadowing described above.
 
 ## Updating
 
-**Patches.** A change to a vendored file belongs in `patches/`, never in the
-file itself. After changing `patches/`, re-import (see the next step). Until
-then, `vendor-php-src.sh check` fails, and so does the CI checks job.
+**No patches.** `main` carries no php-src patch, so a vendored file is never
+edited: `vendor-php-src.sh check` fails (and so does the CI checks job) when a
+file differs from the hash in the manifest. A fix to upstream behaviour goes
+into `sapi/fpmng/fpm/` as an owned file, or upstream.
 
 **Refreshing or moving the pin.** Check out a release tag of php-src, with no
 local changes, and run:
@@ -181,9 +179,7 @@ The import does the following:
    Re-importing would overwrite a local edit without a trace.
 2. Refuses a dirty checkout or an untagged commit.
 3. Copies the listed files.
-4. Applies `patches/` in the order and with the `php-<minor>/` overrides of
-   `build/prepare.sh`.
-5. Rewrites `MANIFEST` with the new hashes, then checks the result.
+4. Rewrites `MANIFEST` with the new hashes, then checks the result.
 
 Review the diff as an upstream change. Then rebuild and run the suites. A
 header that changed or a source that upstream added is exactly what the
@@ -199,6 +195,6 @@ the compile or the link fails.
 
 | Command | What it shows |
 |---|---|
-| `build/vendor-php-src.sh check` | The directory matches its manifest and the patch stack (CI checks job; needs no php-src and no network). |
+| `build/vendor-php-src.sh check` | The directory matches its manifest and is pristine (CI checks job; needs no php-src and no network). |
 | `build/test-phpt-tree.sh` | The test tree assembles from this directory alone and an edited fixture is refused. It also covers the runners' refusal to test a binary other than the one they were given (CI checks job; hermetic). |
 | `build/libphp-build.sh <outdir>` | The set is sufficient: everything compiles and links against the SDK, with every command line in `<outdir>/commands.log`, and the dependency audit passes. |

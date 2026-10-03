@@ -27,8 +27,6 @@
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
-#include "fastcgi.h"
-#include "zend_signal.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {

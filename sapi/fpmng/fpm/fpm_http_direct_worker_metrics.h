@@ -1,6 +1,6 @@
 /* fpm-ng: pool.executor = worker's honest metrics (issue #333).
  *
- * The worker executor calls fpm_request_accepting(false) once for the whole
+ * The worker executor calls fpm_request_accepting_ex(false) once for the whole
  * life of the child (fpm_http_direct_worker.c), so it has no per-request
  * scoreboard stage to report -- exactly why fpm_http_direct_worker_rejects
  * refuses operator.status_path, ping.* and access.*. What it DOES know honestly,

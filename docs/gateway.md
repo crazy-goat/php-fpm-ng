@@ -186,7 +186,10 @@ and uses that for `ping.path`, the operator namespace and its ACL,
 `access.suppress_path[]`, the plain-HTTP redirect and both transports; the
 authority (without userinfo) replaces the `Host` header, so `HTTP_HOST`,
 `SERVER_NAME` and the `Host` sent to an `http.route[]` target agree (#534).
-Routing and static lookups already used the parsed path.
+Routing and static lookups already used the parsed path. `http:/path` and
+`//host/path` are read the same way, and the forwarded target (`REQUEST_URI`,
+the request line to an `http.route[]` target, the redirect `Location`) is built
+from that same parse. An authority longer than 261 bytes is answered 400.
 
 ## The upstream's `Status:` header
 
@@ -210,6 +213,13 @@ one, and a cache in front does not store the truncated body. A body that is
 delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
+
+## Upstream status counters on keep-alive
+
+The gateway always sends `FCGI_KEEP_CONN`, so a `fastcgi` upstream hits the
+upstream FPM keep-alive counting bug (php/php-src#18956): `max active processes`
+reads too high and `idle`/`active` can lag by up to one heartbeat. See
+[operator-endpoint.md](operator-endpoint.md#known-upstream-bug-keep-alive-counters-phpphp-src18956).
 
 ## The gateway's own numbers
 

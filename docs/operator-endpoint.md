@@ -244,6 +244,34 @@ gauge (per gateway process, summed by the renderer) and the pool-wide
 per pool the gateway forwards for. `/status` on the gateway is the same numbers
 as JSON, one row per target plus the pool row.
 
+### Known upstream bug: keep-alive counters (php/php-src#18956)
+
+This applies to `pool.type = fastcgi` pools, including the ones behind a gateway
+(the gateway always sends `FCGI_KEEP_CONN`). It does not apply to `http-direct`
+pools. Pristine `fastcgi.c` calls its `on_read()` hook *before* the blocking
+read on a kept connection, so a worker that only starts waiting for the next
+request on a kept connection is already counted as reading headers. Effects on
+a gateway pool (the gateway keeps connections open, and drops idle ones after
+`http.idle_timeout`, 500 ms by default):
+
+- `accepted conn` (the pool's `requests`) and the per-process `requests` count
+  one extra request for every kept connection the client closes without sending
+  another request. This is a lasting counter error.
+- A worker that waits on a kept connection is shown as `Reading headers` in the
+  per-process rows, and its `request duration` includes the idle wait.
+- `max active processes` stays too high, and `idle processes` / `active
+  processes` can be wrong for up to one maintenance heartbeat (about 1 s).
+- `request_terminate_timeout` can hit an idle kept-alive worker, but only with
+  `http.idle_timeout = 0`, a large value, or an external proxy using
+  `fastcgi_keep_conn on`; with the default 500 ms and a whole-second timeout it
+  cannot happen. `request_slowlog_timeout` is not affected (it fires only in
+  the executing stage).
+- pm scaling is not affected: the maintenance loop recounts from each child's
+  request stage every heartbeat.
+
+This repository carries no php-src patch for it; the numbers are right once
+GH-18956 lands upstream. (Static reading, not measured.)
+
 ### The baseline counter
 
 Every pool reports one counter of its own invocations whether or not its PHP

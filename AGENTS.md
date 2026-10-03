@@ -59,8 +59,10 @@ that this section and the links to it stay in place.
   `sapi/fpmng/config.m4` belongs only to the retained from-source flow (`build/prepare.sh`,
   macOS development): its source list is substituted from `find fpm -name '*.c'`, and an
   existing build directory has a frozen object list (`buildconf --force` plus `config.nice`).
-- `patches/` (applied by `prepare.sh`) is retained for development, but the patch stack that
-  changes `libphp` (fibers, async) is shipped only on branch `async`. `main` needs nothing
+- `main` carries no php-src patch (#592): `patches/` holds only history notes,
+  `build/prepare.sh` touches nothing outside `sapi/fpmng/` and `ext/fpmng_metrics/`, and
+  `third_party/php-src/` holds pristine, hash-checked copies of the pinned tag. The patch stack
+  that changes `libphp` (fibers, async) lives only on branch `async`. `main` needs nothing
   from the engine that a distribution `libphp` does not export.
 
 ## Evidence
@@ -80,7 +82,7 @@ that this section and the links to it stay in place.
 | `sapi/fpmng/` | The SAPI: `fpm/` (C sources), `acme/` (PHP ACME client), `tests/` (`fpmng-*.phpt`) |
 | `ext/fpmng_metrics/` | Metrics extension (`fpm_metric_register/inc/set/observe`) |
 | `third_party/php-src/` | Vendored php-src subset (FastCGI layer, upstream FPM files, test fixtures), see its README |
-| `patches/` | Patches for php-src files outside `sapi/`, kept for the from-source flow |
+| `patches/` | Notes on the php-src patches `main` dropped; `main` carries none, patches live on branch `async` |
 | `build/` | Build, package, lint and test scripts |
 | `docker/`, `.github/docker/` | Dockerfiles (scratch image, package-gate images) |
 | `packaging/` | `.deb` and `.apk` configuration and service files |

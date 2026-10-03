@@ -64,8 +64,9 @@ Pushing the tag starts `.github/workflows/release.yml`. This repository builds p
 release workflow is its own and not the shared one from `crazy-goat/.github`. It:
 
 1. builds, installs into a clean container and tests the `.deb` and the `.apk`, with and
-   without TLS and ACME, through `build/ci-package-gate.sh`;
-2. collects the assets: `php-fpm-ng_<tag>_php<minor>_<arch>.deb`,
+   without TLS and ACME, through `build/ci-package-gate.sh`. The four cells run in parallel
+   (matrix job `packages`, `fail-fast: false`) and each uploads its output as an artifact;
+2. in the `release` job, which needs all four cells, collects the assets: `php-fpm-ng_<tag>_php<minor>_<arch>.deb`,
    `php-fpm-ng-<tag>-php<minor>-<arch>.apk`, the same two for `php-fpm-ng-tls`, and
    `SHA256SUMS`. The packages are unsigned on purpose (issue #223);
 3. only for a tag, creates the GitHub Release with `gh release create --verify-tag`. The

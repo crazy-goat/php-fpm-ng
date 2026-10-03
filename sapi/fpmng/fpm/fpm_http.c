@@ -657,16 +657,6 @@ const char *fpm_http_origin_start(const char *uri, const char **authority, size_
 	return uri;
 }
 
-void fpm_http_origin_form(smart_str *out, const char *uri)
-{
-	const char *p = fpm_http_origin_start(uri, NULL, NULL);
-
-	if (p != uri && *p != '/') {
-		smart_str_appendc(out, '/');
-	}
-	smart_str_appends(out, p);
-}
-
 /* 1 = copied, 0 = no authority, -1 = authority longer than buf_len-1. */
 int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
 {
@@ -726,6 +716,30 @@ static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t p
 	memcpy(path, p, len);
 	path[len] = '\0';
 	return len;
+}
+
+/* The origin-form target (path and "?query") the gateway forwards: REQUEST_URI
+ * on the FastCGI transport, the request line of an http.route[] target and
+ * the 308 Location of the plain listener. Built from the same libevent parse
+ * as fpm_http_request_path(), so the path a request is matched and routed on is
+ * the path the application sees, for every form ("http://h/x", "http:/x",
+ * "//h/x", "/x"); the fragment is dropped (#534, #462). "*" and a target
+ * libevent did not parse are copied verbatim. */
+void fpm_http_origin_form(smart_str *out, struct evhttp_request *req)
+{
+	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
+	const char *path = fpm_http_request_path(req);
+	const char *query = u ? evhttp_uri_get_query(u) : NULL;
+
+	if (!path) {
+		smart_str_appends(out, evhttp_request_get_uri(req));
+		return;
+	}
+	smart_str_appends(out, path);
+	if (query) {
+		smart_str_appendc(out, '?');
+		smart_str_appends(out, query);
+	}
 }
 
 const char *fpm_http_method_name(enum evhttp_cmd_type type)
@@ -885,7 +899,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	{
 		smart_str request_uri = {0};
 
-		fpm_http_origin_form(&request_uri, evhttp_request_get_uri(req));
+		fpm_http_origin_form(&request_uri, req);
 		smart_str_0(&request_uri);
 		fpm_http_param(c, "REQUEST_URI", ZSTR_VAL(request_uri.s));
 		smart_str_free(&request_uri);
@@ -2550,7 +2564,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 		}
 	}
 	if (uri) {
-		fpm_http_origin_form(&target, uri);
+		fpm_http_origin_form(&target, req);
 		smart_str_0(&target);
 		uri = ZSTR_VAL(target.s);
 	}
@@ -2851,8 +2865,12 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	if (!uri) {
 		return 0;
 	}
-	/* Origin-form, like every other matcher (#534). */
-	query = strchr(fpm_http_origin_start(uri, NULL, NULL), '?');
+	/* Same libevent parse as the path and as the forwarded target (#534). */
+	{
+		const struct evhttp_uri *pu = evhttp_request_get_evhttp_uri(req);
+
+		query = pu ? evhttp_uri_get_query(pu) : NULL;
+	}
 	path_len = fpm_http_raw_path(req, path, sizeof(path));
 	if (!path_len) {
 		return 0;	/* empty, or too long to be one of this gateway's bases; route it */
@@ -2908,11 +2926,11 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	 * asked for a variant. Everything else about the request (method, body --
 	 * monitored pages are GETs) is serialized by the #344 HTTP transport. */
 	local_len = strlen(hit->local_uri);
-	/* `query` is strchr(fpm_http_origin_start(uri), '?') and therefore INCLUDES the leading '?', so
-	 * it is copied whole exactly once -- writing a separate '?' and then
-	 * copying query produced "/_m??json", and the operator listener's
-	 * fpm_operator_http_has_flag() then never matched the variant. */
-	query_len = query ? strlen(query) : 0;
+	/* `query` is evhttp_uri_get_query(): WITHOUT the leading '?'. The '?' is
+	 * written exactly once below -- writing it twice produced "/_m??json", and
+	 * the operator listener's fpm_operator_http_has_flag() then never matched
+	 * the variant. */
+	query_len = query ? strlen(query) + 1 : 0;
 	target_uri = malloc(local_len + query_len + 1);
 	if (!target_uri) {
 		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
@@ -2923,7 +2941,8 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	}
 	memcpy(target_uri, hit->local_uri, local_len);
 	if (query_len) {
-		memcpy(target_uri + local_len, query, query_len);
+		target_uri[local_len] = '?';
+		memcpy(target_uri + local_len + 1, query, query_len - 1);
 	}
 	target_uri[local_len + query_len] = '\0';
 	c->upstream_uri_owned = target_uri;

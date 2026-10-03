@@ -28,7 +28,7 @@ other php-src `main/` header can reach the compiler this way, so every
 | Upstream | https://github.com/php/php-src |
 | Tag | `php-8.5.9` |
 | Commit | `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36` |
-| Files | 208 (see `MANIFEST`): 57 for the build, 151 test fixtures |
+| Files | 207 (see `MANIFEST`): 57 for the build, 150 test fixtures |
 
 `MANIFEST` lists every file, one per line, with four tab-separated columns:
 

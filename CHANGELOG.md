@@ -17,6 +17,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ### Fixed
 
+- `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
   `${{ }}` inside the `run:` script, matching `release.yml` (#583).
 

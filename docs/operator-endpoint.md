@@ -124,8 +124,9 @@ The sharing above happens **inside one master**. The default address
 (issue #561): a TCP port can be bound once, so a second master whose pools use
 the default fails at startup with `unable to bind listening socket ... 9253`.
 Gateways are affected by default, because their `/status` and `/metrics` are on
-unless turned off; any other type is affected as soon as it sets
-`operator.status_path` or `operator.metrics_path` without a `*_listen`. The
+unless turned off; any other type is affected as soon as it exposes a page
+(`operator.status = on`, `operator.metrics = on`, or an `operator.status_path` /
+`operator.metrics_path`) without a `*_listen`. The
 default is deliberately fixed so one scraper target covers the box (#386); the
 cost is that every additional master needs its own address. In each master after
 the first, either:

@@ -98,6 +98,16 @@ fpmng_worker_event_enable($watcher);
 while (!fpmng_worker_may_exit() && !fpmng_worker_stopping()) {
     fpmng_worker_loop(true);
 }
+/* Keep driving the event loop for a moment after the stop request, so the
+ * request the test writes on the idle keep-alive connection is read while
+ * fpm_worker_stopping is already set, however late the test process gets
+ * scheduled. Returning at once would leave a window of a single event-loop
+ * iteration (issue #527). */
+$until = microtime(true) + 1.0;
+while (microtime(true) < $until) {
+    fpmng_worker_loop(false);
+    usleep(5000);
+}
 PHP);
 
 $port = (int) (getenv('FPMNG_DIRECT_WORKER_SATURATION_NEW_PORT') ?: 28101 + 200 * (int) getenv('TEST_PHP_WORKER'));
@@ -157,15 +167,14 @@ try {
      * fpm_worker_stopping disjunct of fpm_worker_accept()'s saturation check,
      * not the ready_count >= ready_max one.
      *
-     * This write is queued here, BEFORE reading holdB's response, and not
-     * after: fpm_worker_finish_output()'s "an already-open keep-alive
-     * connection still gets answered 503" window opens the instant
-     * fpm_worker_stopping is set and can close again within a single
-     * event-loop iteration once its bounded flush of already-pending replies
-     * drains back to empty. Waiting for a full round trip on holdB first
-     * risks queuing this write only after that window has already closed,
-     * which starves it of any event-loop iteration ever picking it up before
-     * the worker process exits -- a race, not a synchronization point. */
+     * This write is queued here, BEFORE reading holdB's response. The worker
+     * script above keeps the event loop running for a second after the stop
+     * request, so the write is read while fpm_worker_stopping is set even if
+     * this process is descheduled between the two writes on a loaded host.
+     * Without that, the window in which an already-open connection is still
+     * answered closes within one event-loop iteration once the script returns
+     * and the bounded flush in fpm_worker_finish_output() drains -- a race
+     * against the scheduler, not a synchronization point (issue #527). */
     fwrite($idle, "GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
 
     $statusB = readStatus($holdB);

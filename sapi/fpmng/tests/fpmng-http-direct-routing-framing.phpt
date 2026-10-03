@@ -20,7 +20,7 @@ if (isset($_GET['status'])) {
     header('X-Large: ' . str_repeat('x', 65536));
 } else { echo 'controller'; }
 PHP);
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 4;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT')) + 4;
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

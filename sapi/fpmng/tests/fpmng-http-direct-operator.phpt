@@ -15,7 +15,7 @@ file_put_contents($root . '/front.php', <<<'PHP'
 header('X-Marker: mark');
 echo 'php:' . $_SERVER['REQUEST_URI'];
 PHP);
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $port = $base + 16;
 $denied = $base + 17;
 /* Where operator.status_path is answered since issue #275: an operator listener of

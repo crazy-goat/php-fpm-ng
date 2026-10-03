@@ -137,7 +137,7 @@ function awaitMarker(string $marker, string $expected, float $timeout = 5.0): st
     return (string) $got;
 }
 
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 13;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT')) + 13;
 $streamPort = $port + 1;
 $cfg = <<<CFG
 [global]

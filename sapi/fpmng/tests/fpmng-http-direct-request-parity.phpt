@@ -88,8 +88,8 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$classicPort = (int) (getenv('FPMNG_DIRECT_PARITY_CLASSIC_PORT') ?: 28074 + 200 * (int) getenv('TEST_PHP_WORKER'));
-$workerPort = (int) (getenv('FPMNG_DIRECT_PARITY_WORKER_PORT') ?: 28075 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$classicPort = (int) (getenv('FPMNG_DIRECT_PARITY_CLASSIC_PORT') ?: 28074 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
+$workerPort = (int) (getenv('FPMNG_DIRECT_PARITY_WORKER_PORT') ?: 28075 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

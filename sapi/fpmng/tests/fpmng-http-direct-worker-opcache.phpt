@@ -131,7 +131,7 @@ require __DIR__ . '/shared.php';
 echo json_encode(fpmng_worker_probe());
 PHP);
 
-$workerPort = (int) (getenv('FPMNG_DIRECT_WORKER_OPCACHE_TEST_PORT') ?: 28076 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$workerPort = (int) (getenv('FPMNG_DIRECT_WORKER_OPCACHE_TEST_PORT') ?: 28076 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $classicPort = $workerPort + 1;
 $cfg = <<<CFG
 [global]

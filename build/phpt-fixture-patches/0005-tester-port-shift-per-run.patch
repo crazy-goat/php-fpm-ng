@@ -1,0 +1,68 @@
+--- a/sapi/fpmng/tests/tester.inc
++++ b/sapi/fpmng/tests/tester.inc
+@@ -1264,7 +1264,7 @@
+             $vars[$aliasName] = $vars[$aliasValue];
+         }
+ 
+-        return preg_replace_callback(
++        return $this->moveOperatorDefault(preg_replace_callback(
+             '/{{([a-zA-Z0-9:]+)(\[\w+\])?}}/',
+             function ($matches) use ($vars) {
+                 $varName = $matches[1];
+@@ -1284,7 +1284,41 @@
+                 return call_user_func_array([$this, $functionName], $varValue);
+             },
+             $template
+-        );
++        ));
++    }
++
++    /**
++     * Issue #674 (php-fpm-ng): a gateway pool opens the operator endpoint on
++     * 127.0.0.1:9253 unless it names another address, and that address is global
++     * to the host, so a master of another run (or another person) that holds it
++     * fails every gateway test. Give each gateway pool without an explicit
++     * operator.status_listen / operator.metrics_listen one of the run's own: the
++     * last port of this worker's block, which getPort() never reaches, moved by
++     * FPMNG_PHPT_PORT_SHIFT like every other port. Pools that name an address
++     * keep it, and so does every pool of another type.
++     */
++    private function moveOperatorDefault(string $config): string
++    {
++        $port   = 9000 + PHP_INT_SIZE - 1 + 199 + 200 * (int) getenv('TEST_PHP_WORKER')
++            + (int) getenv('FPMNG_PHPT_PORT_SHIFT');
++        $chunks = preg_split('/^(?=\[)/m', $config);
++        foreach ($chunks as $i => $chunk) {
++            if (
++                ! preg_match('/^\[(?!global\])[^\]\n]+\][^\n]*\n/', $chunk, $header)
++                || ! preg_match('/^\s*pool\.type\s*=\s*gateway\s*$/m', $chunk)
++            ) {
++                continue;
++            }
++            $add = '';
++            foreach (['status', 'metrics'] as $kind) {
++                if ( ! preg_match('/^\s*operator\.' . $kind . '_listen\s*=/m', $chunk)) {
++                    $add .= "operator.{$kind}_listen = 127.0.0.1:$port\n";
++                }
++            }
++            $chunks[$i] = $header[0] . $add . substr($chunk, strlen($header[0]));
++        }
++
++        return implode('', $chunks);
+     }
+ 
+     /**
+@@ -1346,7 +1380,12 @@
+          * unset serially); give each worker its own block of 200 ports. Unset or
+          * 0 keeps 9008, 9009, ... exactly as before. */
+         $worker                       = (int) getenv('TEST_PHP_WORKER');
+-        $base                         = 9000 + PHP_INT_SIZE - 1 + $worker * 200;
++        /* Issue #674 (php-fpm-ng): on a shared host another php-fpm may already
++         * hold one of these ports, so a run also moves the whole range by
++         * FPMNG_PHPT_PORT_SHIFT, which build/run-fpmng-phpt.sh picks per run
++         * from a range nothing listens on. Unset or 0 moves nothing. */
++        $shift                        = (int) getenv('FPMNG_PHPT_PORT_SHIFT');
++        $base                         = 9000 + PHP_INT_SIZE - 1 + $worker * 200 + $shift;
+         $port                         = ($this->ports['last'] ?? $base) + 1;
+         $this->ports['values'][$pool] = $this->ports['last'] = $port;
+ 

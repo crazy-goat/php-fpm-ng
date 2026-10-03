@@ -123,6 +123,7 @@ cp "$P/run-tests.php" "$WORK/run-tests.once"
 cmp -s "$WORK/tester.once" "$P/sapi/fpmng/tests/tester.inc" && cmp -s "$WORK/run-tests.once" "$P/run-tests.php" \
   || fail "a second phpt-parallel.sh run changed the tree"
 grep -q 'TEST_PHP_WORKER' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores TEST_PHP_WORKER"
+grep -q 'FPMNG_PHPT_PORT_SHIFT' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_SHIFT"
 grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pass TEST_PHP_WORKER to the tests"
 [ ! -e "$P/sapi/fpmng/tests/CONFLICTS" ] || fail "the dir-wide CONFLICTS file is still there"
 grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"

@@ -91,7 +91,7 @@ while (!fpmng_worker_may_exit()) {
 file_put_contents(__DIR__ . '/drained-twice.marker', implode(',', fpmng_worker_closed_requests()));
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_CLOSED_PORT') ?: 28143 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_CLOSED_PORT') ?: 28143 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $config = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

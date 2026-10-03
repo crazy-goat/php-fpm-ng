@@ -126,6 +126,22 @@ run (the pinned copy under `third_party/php-src/` stays untouched, see
   9009, .... Our tests that pick a fixed port of their own (`28054` and its
   neighbours, from `FPMNG_DIRECT_*_PORT`) add `200 * TEST_PHP_WORKER` the same
   way.
+- **A per-run shift.** The blocks above are fixed numbers, so another php-fpm on
+  a shared host that already holds 9208 or 28254 made dozens of tests fail with
+  "Address already in use" (issue #674). Every port a test takes now also moves
+  by `FPMNG_PHPT_PORT_SHIFT` (the Tester through `0005-tester-port-shift-per-run.patch`,
+  the http-direct tests in their own port expression). `build/run-fpmng-phpt.sh`
+  picks it per run: the first shift of 0, 100, ... 2400 for which nothing listens
+  on the Tester's block or on the http-direct block (`ss`, else `netstat`; with
+  neither it stays 0), and prints `Port shift: N`. Set `FPMNG_PHPT_PORT_SHIFT`
+  yourself to pin it. The check is a snapshot: a pool started after it can still
+  collide. A gateway pool also opens the operator endpoint on the host-global
+  `127.0.0.1:9253`, which a master of someone else's run can hold; the Tester
+  therefore adds `operator.status_listen` / `operator.metrics_listen` on a port of
+  the run's own (the last port of the worker's block, which `getPort()` never
+  reaches) to every gateway pool that sets none, so no test depends on 9253. A
+  master a test starts without the Tester still binds it, which is what the
+  conflict key of the next item is for.
 - **No directory-wide CONFLICTS.** Upstream ships `sapi/fpm/tests/CONFLICTS`
   with the word `all`, which makes `run-tests.php` run every test of the
   directory one after another at the end. It is removed from the tree.
@@ -359,4 +375,4 @@ these tests: before issue #95 the `phpt` job ran them a second time, because
 that runner swept the whole copied test directory.
 
 An explicit `FPMNG_*_PORT` environment variable replaces the per-worker offset
-of that test's fixed port, so do not set one for a run with more than one job.
+and the per-run shift of that test's fixed port, so do not set one for a run with more than one job.

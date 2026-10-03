@@ -51,7 +51,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_LIFETIME_PORT') ?: 28095 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_LIFETIME_PORT') ?: 28095 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 
 /* worker.max_lifetime = 1 (one second) is the shortest useful value: every
  * generation of this worker lives for about a second before the health sweep

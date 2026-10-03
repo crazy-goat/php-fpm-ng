@@ -38,7 +38,7 @@ if (isset($bad[$which])) {
 }
 echo 'controller';
 PHP);
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER')) + 11;
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT')) + 11;
 /* catch_workers_output is required to see the warning: it is emitted by the
  * CHILD, whose zlog fd is closed at fpm_stdio_init_child() and falls back to
  * stderr, and without this the child's stderr is discarded and the log stays

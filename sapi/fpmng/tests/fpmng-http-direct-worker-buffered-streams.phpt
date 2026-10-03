@@ -265,7 +265,7 @@ if (!preg_match('/^127\.0\.0\.1:\d+$/', $addr)) {
 }
 file_put_contents("$root/tls.addr", $addr);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_BUFFERED_PORT') ?: 28079 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_BUFFERED_PORT') ?: 28079 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

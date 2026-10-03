@@ -49,6 +49,10 @@ TEST_FPM_RUN_AS_ROOT are passed through when set. TEST_FPM_TIMEOUT defaults to
 The tests run in parallel (run-tests.php -j, issue #394). TEST_FPM_JOBS sets the
 worker count; the default is the number of CPUs, at most 8. TEST_FPM_JOBS=1 runs
 the suite serially.
+
+Every test port moves by FPMNG_PHPT_PORT_SHIFT (issue #674). Unset, the runner
+picks the first shift (0, 100, ... 2400) whose port blocks nothing listens on,
+so a pool already running on the host does not break the run; set it to pin one.
 EOF
     exit 2
 }
@@ -468,6 +472,47 @@ case "$JOBS" in
 esac
 JOBS_ARGS=
 [ "$JOBS" -gt 1 ] && JOBS_ARGS="-j$JOBS"
+
+# Per-run port shift (issue #674). The ports of the tests are fixed numbers: the
+# Tester's blocks start at 9008 and move by 200 per worker, and the http-direct
+# tests start at 28054 and move the same way. On a shared host another php-fpm
+# (or a leftover of a killed run) can hold one of them, and then dozens of tests
+# fail with "unable to bind listening socket". Every port a test takes moves by
+# FPMNG_PHPT_PORT_SHIFT, so the shift is picked here, per run, as the first one
+# whose two blocks (the Tester's and the http-direct one) nothing listens on.
+# The cap keeps the highest port below the ephemeral range (32768). An explicit
+# FPMNG_PHPT_PORT_SHIFT wins and is not probed; without a way to list the
+# listening sockets (no ss, no netstat) the shift stays 0, the old ports.
+# A gateway pool's operator listener defaults to the host-global 127.0.0.1:9253;
+# tester.inc gives each gateway pool of a test a listen address of the run's own
+# (the last port of the worker's block, so it moves with the shift too).
+PORT_SHIFT=${FPMNG_PHPT_PORT_SHIFT-}
+case "$PORT_SHIFT" in
+    *[!0-9]*) preflight_fail "FPMNG_PHPT_PORT_SHIFT must be a non-negative integer: $PORT_SHIFT" ;;
+esac
+if [ -z "$PORT_SHIFT" ]; then
+    LISTENING=$( { ss -Hltn 2>/dev/null || netstat -an 2>/dev/null; } |
+        awk '/LISTEN/ { n = split($0, f, " "); for (i = 1; i <= n; i++) if (f[i] ~ /[.:][0-9]+$/ && f[i] !~ /^[0-9]+$/) { sub(/.*[.:]/, "", f[i]); print f[i]; break } }' |
+        sort -un )
+    PORT_SHIFT=0
+    if [ -n "$LISTENING" ]; then
+        BLOCK=$((200 * (JOBS + 1) + 120))
+        CAND=0
+        while [ "$CAND" -le 2400 ]; do
+            if ! printf '%s\n' "$LISTENING" | awk -v a=$((9008 + CAND)) -v b=$((28054 + CAND)) -v w="$BLOCK" \
+                '($1 >= a && $1 < a + w) || ($1 >= b && $1 < b + w) { found = 1 } END { exit !found }'; then
+                PORT_SHIFT=$CAND
+                break
+            fi
+            CAND=$((CAND + 100))
+        done
+        if [ "$CAND" -gt 2400 ]; then
+            printf '%s\n' "warning: every port block up to a shift of 2400 has a listener; using the default ports" >&2
+        fi
+    fi
+fi
+export FPMNG_PHPT_PORT_SHIFT="$PORT_SHIFT"
+printf '%s\n' "Port shift: $PORT_SHIFT" >&2
 
 # The floor on PASS, and why this runner needs one at all.
 #

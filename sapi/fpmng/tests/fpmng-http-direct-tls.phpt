@@ -92,7 +92,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$portA = (int) (getenv('FPMNG_DIRECT_TLS_PORT') ?: 28086 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$portA = (int) (getenv('FPMNG_DIRECT_TLS_PORT') ?: 28086 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $portB = $portA + 1;
 
 /* verify_peer off: these are self-signed and the point is what the server

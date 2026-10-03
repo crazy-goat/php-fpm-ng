@@ -8,7 +8,7 @@
 # development headers (issue #418, contract in #419). What the SAPI still needs
 # from php-src is not the engine but a few dozen FPM/FastCGI source files that
 # no php*-dev package ships: upstream's sapi/fpm/fpm/ files this repo does not
-# override, and main/fastcgi.c/.h, which carry this repo's transport patches.
+# override, and main/fastcgi.c/.h.
 # They are kept in third_party/php-src/, at their upstream paths, so that a
 # build needs this repository and the SDK and nothing else.
 #
@@ -20,9 +20,10 @@
 #
 # THE MANIFEST IS THE INVENTORY. third_party/php-src/MANIFEST lists every
 # vendored file with its upstream path, the SHA-256 of the pristine upstream
-# file at the pinned tag, and the SHA-256 of the copy in this tree. The two
-# hashes differ only where patches/ changes the file (main/fastcgi.c and .h);
-# zlog_upstream.h is renamed, not changed, so its two hashes are equal.
+# file at the pinned tag, and the SHA-256 of the copy in this tree. Main carries
+# no php-src patch (issue #592), so the two hashes are equal for every file;
+# zlog_upstream.h is renamed, not changed. A file whose hashes differ is
+# refused.
 # Why each file is in, and why the rest of upstream's sapi/fpm/ is out, is in
 # third_party/php-src/README.md.
 #
@@ -30,18 +31,16 @@
 #         longer has the hash the manifest records (someone edited it in
 #         place, which the next import would silently undo), when a file
 #         appears under third_party/php-src/ that the manifest does not list,
-#         when patches/ changed since the last import (the vendored fastcgi.c
-#         would then no longer be "pristine + patches"), or when a vendored FPM
+#         when a vendored copy differs from the pristine upstream file the
+#         manifest names, or when a vendored FPM
 #         file has the same name as one sapi/fpmng/fpm/ owns (ours would shadow
 #         it in every build, so the vendored copy would be dead weight that
 #         looks alive).
 #
 # import  refreshes the vendored files from a php-src checkout: copy the
-#         pristine files, apply patches/ exactly as build/prepare.sh does,
-#         rename, hash, rewrite the manifest. It runs `check` first and refuses
-#         to overwrite local edits: a change to a vendored file belongs in
-#         patches/, where it is visible and has an expiry path
-#         (patches/README.md), never in the vendored copy itself. To bump the
+#         pristine files, hash, rewrite the manifest. It runs `check` first and
+#         refuses to overwrite local edits: main carries no php-src patch, so
+#         a vendored copy is never edited. To bump the
 #         pin, check out the new tag and run import; then rebuild and run the
 #         suites, because a new upstream file or a changed header is exactly
 #         what import cannot judge.
@@ -75,33 +74,6 @@ sha256() {
   fi
 }
 
-# The patches the import applies, in the order build/prepare.sh applies them,
-# with the same php-<major.minor>/ override. One definition, used both to apply
-# them and to fingerprint them, so `check` and `import` cannot disagree about
-# which patch files count.
-patch_stack() {
-  minor=$1
-  for p in "$REPO"/patches/*.patch; do
-    [ -f "$p" ] || continue
-    name=$(basename "$p")
-    if [ -n "$minor" ] && [ -f "$REPO/patches/php-$minor/$name" ]; then
-      p=$REPO/patches/php-$minor/$name
-    fi
-    echo "$p"
-  done
-}
-
-stack_fingerprint() {
-  # Hash of the hashes, so the fingerprint names content and order but not
-  # the checkout's absolute path.
-  for p in $(patch_stack "$1"); do
-    echo "$(sha256 "$p")  ${p#"$REPO"/}"
-  done > "${TMPDIR:-/tmp}/fpmng-stack.$$"
-  fp=$(sha256 "${TMPDIR:-/tmp}/fpmng-stack.$$")
-  rm -f "${TMPDIR:-/tmp}/fpmng-stack.$$"
-  echo "$fp"
-}
-
 manifest_value() {
   awk -F '\t' -v k="$1" '$1 == k && NF == 2 { print $2 }' "$MANIFEST"
 }
@@ -116,16 +88,15 @@ manifest_files() {
 #
 # preimport is the guard import runs before it overwrites anything. It looks
 # only for what an import would destroy -- an in-place edit, an unlisted file,
-# a shadowed one -- and skips the three things an import exists to fix: lines
-# not imported yet ("-" hashes, a file just added to the list), files no
-# longer listed (import deletes them), and a patch stack that moved on. It returns instead of exiting, so the caller can say
-# why it refuses.
+# a shadowed one -- and skips the two things an import exists to fix: lines
+# not imported yet ("-" hashes, a file just added to the list) and files no
+# longer listed (import deletes them). It returns instead of exiting, so the
+# caller can say why it refuses.
 do_check() {
   mode=${1:-}
   [ -f "$MANIFEST" ] || fail "no manifest at ${MANIFEST#"$REPO"/}"
   tag=$(manifest_value tag)
   [ -n "$tag" ] || fail "the manifest has no 'tag' line"
-  minor=$(echo "$tag" | sed -n 's/^php-\([0-9]*\.[0-9]*\)\..*/\1/p')
   errors=0
   listed=$(mktemp)
   manifest_files > "$listed.lines"
@@ -142,6 +113,11 @@ do_check() {
       continue
     fi
     [ "$local_sha" != - ] || { echo "  never imported: $path (run import)" >&2; errors=$((errors + 1)); continue; }
+    # Main carries no php-src patch: the copy is the pristine file.
+    if [ "$up_sha" != "$local_sha" ]; then
+      echo "  not pristine: third_party/php-src/$path (upstream sha256 $up_sha, manifest $local_sha)" >&2
+      errors=$((errors + 1))
+    fi
     got=$(sha256 "$f")
     if [ "$got" != "$local_sha" ]; then
       echo "  edited in place: third_party/php-src/$path" >&2
@@ -170,7 +146,7 @@ do_check() {
         fi
         ;;
     esac
-    : "$upstream" "$up_sha"
+    : "$upstream"
   done < "$listed.lines"
   # Anything on disk the manifest does not account for. The manifest and the
   # README are the two files that describe the directory rather than belong to
@@ -185,20 +161,12 @@ do_check() {
     errors=$((errors + 1))
   fi
   rm -f "$listed" "$listed.lines" "$listed.disk"
-  want=$(manifest_value patches)
-  have=$(stack_fingerprint "$minor")
-  if [ "$mode" != preimport ] && [ "$want" != "$have" ]; then
-    echo "  patches/ changed since the last import (manifest $want, now $have):" >&2
-    echo "    the vendored main/fastcgi.c and .h are no longer pristine $tag + patches/." >&2
-    echo "    Re-run: build/vendor-php-src.sh import <php-src checkout at $tag>" >&2
-    errors=$((errors + 1))
-  fi
   if [ "$errors" != 0 ]; then
     [ "$mode" = preimport ] && return 1
     fail "$errors problem(s) in third_party/php-src (see above)"
   fi
   [ "$mode" = preimport ] && return 0
-  echo "vendor-php-src.sh: third_party/php-src matches its manifest ($tag, $(manifest_files | wc -l | tr -d ' ') files, patch stack $have)"
+  echo "vendor-php-src.sh: third_party/php-src matches its manifest ($tag, $(manifest_files | wc -l | tr -d ' ') files, pristine)"
 }
 
 do_import() {
@@ -211,12 +179,11 @@ do_import() {
   # hashes and passes this part; a missing manifest is an error either way.
   if [ -n "$(manifest_value tag)" ]; then
     do_check preimport ||
-      fail "refusing to import over the problems above: move each change into patches/ (or drop it), restore the vendored file, and import again"
+      fail "refusing to import over the problems above: restore the vendored file (git checkout) and import again"
   fi
 
-  # Pristine input only. A prepared tree has our patches applied already and
-  # sapi/fpmng/ in it; hashing that as "upstream" would record our own changes
-  # as upstream's and make the next diff meaningless.
+  # Pristine input only. A modified checkout would record local changes as
+  # upstream's and make the next diff meaningless.
   if [ -d "$SRC/.git" ] || git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1; then
     dirty=$(git -C "$SRC" status --porcelain --untracked-files=no 2>/dev/null || true)
     [ -z "$dirty" ] || fail "$SRC has local modifications (git status); import needs a pristine checkout:
@@ -228,37 +195,19 @@ $dirty"
   fi
   ver=$(awk -F'"' '/PHP_VERSION /{print $2}' "$SRC/main/php_version.h")
   [ -n "$tag" ] || fail "$SRC HEAD ($commit) is not a tagged release; the pin must be a tag (PHP $ver)"
-  minor=$(echo "$ver" | cut -d. -f1,2)
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  # Every file a patch touches is copied, not only the vendored ones: a patch
-  # may also edit a file this repo owns rather than vendors, and a patch with
-  # a missing target fails as a whole.
   manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
     : "$up_sha" "$local_sha"
     mkdir -p "$work/$(dirname "$upstream")"
     [ -f "$SRC/$upstream" ] || fail "upstream $tag has no $upstream (listed for $path)"
     cp "$SRC/$upstream" "$work/$upstream"
   done
-  for p in $(patch_stack "$minor"); do
-    sed -n 's|^+++ b/\([^[:space:]]*\).*|\1|p' "$p"
-  done | sort -u | while read -r f; do
-    [ -f "$work/$f" ] && continue
-    mkdir -p "$work/$(dirname "$f")"
-    cp "$SRC/$f" "$work/$f"
-  done
-  # Pristine hashes before any patch lands.
   manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
     : "$up_sha" "$local_sha"
     printf '%s\t%s\n' "$path" "$(sha256 "$work/$upstream")"
   done > "$work/.pristine"
-  for p in $(patch_stack "$minor"); do
-    patch -d "$work" -p1 --forward --silent < "$p" >/dev/null 2>&1 ||
-      fail "$(basename "$p") does not apply to $tag; see patches/README.md"
-    echo "  applied ${p#"$REPO"/}"
-  done
-
   new=$work/.manifest
   {
     echo "# third_party/php-src/MANIFEST -- written by build/vendor-php-src.sh import."
@@ -266,7 +215,6 @@ $dirty"
     echo "# then run import. check compares the files against the last column."
     printf 'tag\t%s\n' "$tag"
     printf 'commit\t%s\n' "$commit"
-    printf 'patches\t%s\n' "$(stack_fingerprint "$minor")"
     echo "# vendored path	upstream path	upstream sha256 (pristine $tag)	vendored sha256"
   } > "$new"
   manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do

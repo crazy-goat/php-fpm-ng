@@ -6,7 +6,7 @@
 # Writes:
 #   <outdir>/sapi/fpmng/fpm/   third_party/php-src/sapi/fpm/fpm/ with
 #                              sapi/fpmng/fpm/ on top
-#   <outdir>/main/             fastcgi.c and fastcgi.h, already patched
+#   <outdir>/main/             fastcgi.c and fastcgi.h, pristine
 #
 # WHY A MERGED DIRECTORY rather than two -I paths: upstream's events/*.c
 # include "../zlog.h", "../fpm.h" and friends. A quoted include with ".." is
@@ -23,7 +23,7 @@
 # php_network.h and streams headers instead of the SDK's -- the header
 # shadowing the libphp build had before this script (the fastcgi.c object was
 # the one translation unit that read the prepared tree's main/*.h). The SDK's
-# own main/fastcgi.h must not be found either: it lacks this repo's patches.
+# own main/fastcgi.h must not be found either: it is not the copy this build pins.
 # Callers put <outdir>/main first on the include path, ahead of the SDK.
 set -eu
 

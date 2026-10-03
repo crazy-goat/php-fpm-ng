@@ -391,6 +391,9 @@ recounts idle and active from `request_stage` every heartbeat. What stays wrong 
 `max active processes` and, for up to one heartbeat, `idle`/`active`.
 Patch 0001 was dropped from `main` by issue #591; `patches/README.md` has the audit.)
 
+(Historic, 2026-10-03, issue #592: the last patch is gone and `prepare.sh` no
+longer has a patch step; the decision below describes the state until then.)
+
 Decision: **carry the patch**, but make the deviation visible and measurable.
 `patches/` + `prepare.sh` applies it and reports it loudly; without patches it
 says explicitly "upstream untouched". After applying, `git status` in the
@@ -2383,6 +2386,9 @@ afterwards (the same trap as in 3o). The directive is per pool.
 - **`SO_REUSEPORT`** — untouched (3m: thundering herd does not exist).
 
 ### Traps found along the way
+
+(Historic, issue #592: traps 1-4 concern the patch stack, which `main` no longer
+has; `prepare.sh` lost its stack logic with it.)
 
 1. **`0001` broke `--enable-fpm` in the same tree — FIXED (path 1).** It changed
    the hook signatures in `main/fastcgi.h` (`void(*)(bool)`), while upstream

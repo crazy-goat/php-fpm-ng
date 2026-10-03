@@ -11,7 +11,7 @@
 #
 #   - this repository's sapi/fpmng/fpm/, ext/fpmng_metrics/, build/libphp/;
 #   - third_party/php-src/, the bounded upstream subset (issue #421): the FPM
-#     files we do not override and the patched main/fastcgi.c/.h;
+#     files we do not override and main/fastcgi.c/.h;
 #   - the SDK: `php-config --includes` and libphp, plus the PHP CLI of the
 #     same installation for the payload packer;
 #   - libevent, and OpenSSL for TLS builds.
@@ -297,8 +297,8 @@ if grep -q '^#define HAVE_FPM_ACL' "$PHP_CONFIG_H"; then
 fi
 
 # --- include path --------------------------------------------------------------
-# $TREE/main first, and it holds only fastcgi.c/.h: our patched fastcgi.h
-# has to shadow the unpatched one php8.5-dev ships, and nothing else in main/
+# $TREE/main first, and it holds only fastcgi.c/.h: our fastcgi.h
+# has to shadow the one php8.5-dev ships, and nothing else in main/
 # may shadow the SDK's (build/standalone-tree.sh).
 #
 # ext/fpmng_metrics includes "config.h" under HAVE_CONFIG_H -- the autoconf
@@ -325,7 +325,7 @@ DEFS=$(echo "$SUPPLIED" | tr '\n' ' ')
 # Every .c the assembly holds, by the name-prefix rule build/prepare.sh uses
 # for the optional groups: fpm_tls_*.c only with TLS, fpm_acme_*.c only with
 # ACME. Found, not listed, so a new source file needs no edit here. The ones
-# from outside sapi/: the patched fastcgi.c, the fpmng_metrics extension, and
+# from outside sapi/: fastcgi.c, the fpmng_metrics extension, and
 # the ABI guard, which is a property of this build rather than of the SAPI.
 #
 # ext/fpmng_metrics is compiled here but NOT registered here: on this path there
@@ -372,7 +372,7 @@ for s in $(sources); do
 done
 
 # What the compiler actually read: nothing outside the assembled tree, the
-# repository, the SDK and the system; not the SDK's unpatched fastcgi.h; no
+# repository, the SDK and the system; not the SDK's fastcgi.h; no
 # main/ header from anywhere but the SDK; every vendored file used.
 "$REPO/build/audit-compile-deps.sh" "$OUT/dep" "$INC_DIR" "$TREE" "$REPO/ext/fpmng_metrics" "$REPO/build/libphp" "$OUT/compat" ||
   fail "the compile consumed something it should not have (see above)"

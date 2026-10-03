@@ -38,8 +38,8 @@ other php-src `main/` header can reach the compiler this way, so every
 - the SHA-256 of the copy here.
 
 The two hashes are equal for every file: `main` carries no php-src patch
-(issue #591). The manifest's `patches` line fingerprints the patch stack and is
-the fingerprint of an empty one.
+(issues #591, #592), and `vendor-php-src.sh check` refuses a file where they
+differ.
 
 One file is stored under a different name, with its content unchanged:
 
@@ -90,7 +90,7 @@ read by any translation unit.
     `fpm_main.stub.php`, and upstream commits it. It is vendored as
     generated; this repository never regenerates it.
 - **`main/fastcgi.c` and `main/fastcgi.h`**: the FastCGI protocol layer,
-  pristine at the pinned tag (`patches/README.md`).
+  pristine at the pinned tag.
   - The build reads these copies, not a header from the SDK, so the header
     and `fastcgi.c` always match.
 
@@ -161,9 +161,10 @@ shadowing described above.
 
 ## Updating
 
-**Patches.** A change to a vendored file belongs in `patches/`, never in the
-file itself. After changing `patches/`, re-import (see the next step). Until
-then, `vendor-php-src.sh check` fails, and so does the CI checks job.
+**No patches.** `main` carries no php-src patch, so a vendored file is never
+edited: `vendor-php-src.sh check` fails (and so does the CI checks job) when a
+file differs from the hash in the manifest. A fix to upstream behaviour goes
+into `sapi/fpmng/fpm/` as an owned file, or upstream.
 
 **Refreshing or moving the pin.** Check out a release tag of php-src, with no
 local changes, and run:
@@ -178,9 +179,7 @@ The import does the following:
    Re-importing would overwrite a local edit without a trace.
 2. Refuses a dirty checkout or an untagged commit.
 3. Copies the listed files.
-4. Applies `patches/` in the order and with the `php-<minor>/` overrides of
-   `build/prepare.sh`.
-5. Rewrites `MANIFEST` with the new hashes, then checks the result.
+4. Rewrites `MANIFEST` with the new hashes, then checks the result.
 
 Review the diff as an upstream change. Then rebuild and run the suites. A
 header that changed or a source that upstream added is exactly what the
@@ -196,6 +195,6 @@ the compile or the link fails.
 
 | Command | What it shows |
 |---|---|
-| `build/vendor-php-src.sh check` | The directory matches its manifest and the patch stack (CI checks job; needs no php-src and no network). |
+| `build/vendor-php-src.sh check` | The directory matches its manifest and is pristine (CI checks job; needs no php-src and no network). |
 | `build/test-phpt-tree.sh` | The test tree assembles from this directory alone and an edited fixture is refused. It also covers the runners' refusal to test a binary other than the one they were given (CI checks job; hermetic). |
 | `build/libphp-build.sh <outdir>` | The set is sufficient: everything compiles and links against the SDK, with every command line in `<outdir>/commands.log`, and the dependency audit passes. |

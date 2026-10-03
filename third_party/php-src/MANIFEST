@@ -3,7 +3,6 @@
 # then run import. check compares the files against the last column.
 tag	php-8.5.9
 commit	dd6e76cce27aaa0ed9f7520648ed1081dfb6af36
-patches	e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
 # vendored path	upstream path	upstream sha256 (pristine php-8.5.9)	vendored sha256
 LICENSE	LICENSE	b42e4df5e50e6ecda1047d503d6d91d71032d09ed1027ba1ef29eed26f890c5a	b42e4df5e50e6ecda1047d503d6d91d71032d09ed1027ba1ef29eed26f890c5a
 sapi/fpm/LICENSE	sapi/fpm/LICENSE	28b9b14401f49784efd2246b32f745c2cd998f4f425be677f29e02a33e68bfed	28b9b14401f49784efd2246b32f745c2cd998f4f425be677f29e02a33e68bfed

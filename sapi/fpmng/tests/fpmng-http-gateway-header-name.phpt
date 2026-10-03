@@ -121,6 +121,19 @@ echo "header-name-at-limit: ok\n";
 check(str_contains($status, ' 400 '), "over-long header name status: $status");
 echo "header-name-over-limit: ok\n";
 
+/* Issue #595: "X_Real_IP" maps to the same CGI key as "X-Real-IP", and the
+ * last pair wins in $_SERVER. A header name with "_" is dropped, so the one a
+ * proxy set is the one the application sees. The underscore spelling comes
+ * last on purpose: that is the order in which it would win. */
+[$status, $body] = request($http, "GET /env.php HTTP/1.1\r\nHost: h.test\r\n"
+    . "X-Real-IP: 10.0.0.1\r\nX_Real_IP: 6.6.6.6\r\nX_Custom: v\r\nConnection: close\r\n\r\n");
+check(str_contains($status, ' 200 '), "underscore request status: $status");
+$headers = json_decode($body, true);
+check(is_array($headers), "underscore request body: $body");
+check(($headers['x-real-ip'] ?? '') === '10.0.0.1', 'X_Real_IP overrode X-Real-IP: ' . $body);
+check(!isset($headers['x_real_ip']) && !isset($headers['x_custom']), 'a header name with "_" reached the worker: ' . $body);
+echo "underscore-dropped: ok\n";
+
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
@@ -134,6 +147,7 @@ Done
 proxy-excluded: ok
 header-name-at-limit: ok
 header-name-over-limit: ok
+underscore-dropped: ok
 Done
 --CLEAN--
 <?php

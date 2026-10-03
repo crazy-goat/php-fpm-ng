@@ -750,6 +750,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	struct evbuffer *body = evhttp_request_get_input_buffer(req);
 	char *decoded, buf[64], authority[256];
 	int have_authority;
+	int saw_host;
 	smart_str filename = {0};
 	const char *path_info;
 	int trailing_slash;
@@ -963,12 +964,20 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	 * 3.2.2), so HTTP_HOST agrees with SERVER_NAME and with what the http
 	 * transport sends (#534). */
 	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority));
+	saw_host = 0;
 
 	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
 	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next) {
 		smart_str name = {0};
 		const char *k = header->key;
-		const char *value = (have_authority && strcasecmp(k, "Host") == 0) ? authority : header->value;
+		const char *value = header->value;
+
+		if (strcasecmp(k, "Host") == 0) {
+			saw_host = 1;
+			if (have_authority) {
+				value = authority;
+			}
+		}
 
 		/* Content-Length is already above under its CGI name; "Proxy" has no
 		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
@@ -1030,6 +1039,12 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		smart_str_0(&name);
 		fpm_http_param(c, ZSTR_VAL(name.s), value);
 		smart_str_free(&name);
+	}
+
+	/* No Host header at all: the authority still defines the host (RFC 9112
+	 * 3.2.2), same as the Host line the http transport sends. */
+	if (have_authority && !saw_host) {
+		fpm_http_param(c, "HTTP_HOST", authority);
 	}
 
 	if (c->params_oversize) {
@@ -2346,7 +2361,8 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
  * pm.max_requests or queue counter is ever touched by a locally answered
  * ping. It is not a request of the pool.
  *
- * Matched against the RAW request URI (evhttp_request_get_uri(), not the
+ * Matched against the origin-form path of the request-target
+ * (fpm_http_raw_path(): an absolute-form target is reduced to its path; not the
  * percent-decoded path fpm_http_static_decode_path() produces for ACME/static
  * below), with any query string cut off and the whole path compared so that
  * "/pings" is not "/ping" -- verbatim the matcher http-direct already uses,
@@ -2882,7 +2898,7 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	 * asked for a variant. Everything else about the request (method, body --
 	 * monitored pages are GETs) is serialized by the #344 HTTP transport. */
 	local_len = strlen(hit->local_uri);
-	/* `query` is strchr(uri, '?') and therefore INCLUDES the leading '?', so
+	/* `query` is strchr(fpm_http_origin_start(uri), '?') and therefore INCLUDES the leading '?', so
 	 * it is copied whole exactly once -- writing a separate '?' and then
 	 * copying query produced "/_m??json", and the operator listener's
 	 * fpm_operator_http_has_flag() then never matched the variant. */

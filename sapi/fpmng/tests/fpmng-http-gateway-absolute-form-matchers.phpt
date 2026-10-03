@@ -30,6 +30,7 @@ pool.type = gateway
 listen = {{ADDR[http]}}
 chdir = $root
 http.gateways = 1
+http.route[direct] = /d
 http.route[app] = /
 http.front_controller = /index.php
 http.operator = yes
@@ -39,6 +40,14 @@ ping.path = /ping
 ping.response = pong
 access.suppress_path[] = /quiet
 operator.metrics_listen = {{ADDR[operator]}}
+
+[direct]
+pool.type = http-direct
+listen = {{ADDR[direct]}}
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = /index.php
 
 [app]
 pool.type = fastcgi
@@ -50,14 +59,14 @@ operator.metrics_listen = {{ADDR[operator]}}
 operator.metrics = on
 EOT;
 
-function rawGet(string $addr, string $target, string $host = 't'): string
+function rawGet(string $addr, string $target, ?string $host = 't'): string
 {
     $s = stream_socket_client("tcp://$addr", $errno, $errstr, 5);
     if (!$s) {
         throw new RuntimeException("connect: $errstr");
     }
     stream_set_timeout($s, 10);
-    fwrite($s, "GET $target HTTP/1.0\r\nHost: $host\r\n\r\n");
+    fwrite($s, "GET $target HTTP/1.0\r\n" . ($host === null ? '' : "Host: $host\r\n") . "\r\n");
     $r = stream_get_contents($s);
     fclose($s);
     return (string) $r;
@@ -92,6 +101,15 @@ try {
     $r = rawGet($http, 'http://other.example', 't');
     echo "no path: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
 
+    /* No Host header at all: the authority still defines HTTP_HOST, on the
+     * FastCGI transport and on the http one (which sends it as Host:). */
+    $r = rawGet($http, 'http://other.example:81/x', null);
+    echo "no host fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    $r = rawGet($http, 'http://other.example:81/d/x', null);
+    echo "no host http: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    $r = rawGet($http, 'http://other.example:81/d/x', 't');
+    echo "host http: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+
     rawGet($http, 'http://t/quiet');
     rawGet($http, 'http://t/loud');
     $accessLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
@@ -119,6 +137,9 @@ absolute-form ping: 200 pong
 absolute-form operator: 403
 host: 200 app:/x?a=1:other.example:8080
 no path: 200 app:/:other.example
+no host fastcgi: 200 app:/x:other.example:81
+no host http: 200 app:/d/x:other.example:81
+host http: 200 app:/d/x:other.example:81
 suppressed: yes
 logged: yes
 --CLEAN--

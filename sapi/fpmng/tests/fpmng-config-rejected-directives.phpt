@@ -15,7 +15,7 @@ require_once "tester.inc";
  * decided by the type's own reject list and nothing else; there is no
  * "type unsupported by this binary" refusal left to short-circuit on. */
 
-function expectConfigFailure(string $label, string $cfg, array $needles): void
+function expectConfigFailure(string $label, string $cfg, array $needles, array $forbidden = []): void
 {
     $tester = new FPM\Tester($cfg, '<?php echo "ok";');
     $messages = $tester->testConfig(true);
@@ -27,6 +27,13 @@ function expectConfigFailure(string $label, string $cfg, array $needles): void
     foreach ($needles as $needle) {
         if (!str_contains($text, $needle)) {
             echo "FAIL: $label missing needle: $needle\n";
+            echo "got:\n$text\n";
+            exit(1);
+        }
+    }
+    foreach ($forbidden as $bad) {
+        if (str_contains($text, $bad)) {
+            echo "FAIL: $label contains forbidden text: $bad\n";
             echo "got:\n$text\n";
             exit(1);
         }
@@ -84,7 +91,8 @@ expectConfigFailure(
         "pool.type 'fastcgi-ng' no longer exists",
         'removed in 0.9.0 (issue #376)',
         'use pool.type = fastcgi, or pool.type = http-direct for a pool with no web server in front',
-    ]
+    ],
+    ['lives on']
 );
 
 /* pool.type = http-direct + pool.executor = worker (task 073). The worker

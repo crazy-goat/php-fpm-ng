@@ -31,8 +31,9 @@ the rest of this file.
   framework's request-scoped class statics (`Container::instance`,
   `Facade::app`, `Facade::resolvedInstance`, `Model::resolver`,
   `Model::dispatcher`, `Model::globalScopes`) — the exact versioned snippet
-  and where each entry came from are in `docs/frameworks.md`, section
-  "Laravel: the versioned configuration snippet and how it is verified".
+  and where each entry came from are in the section
+  "Laravel: the versioned configuration snippet and how it is verified"
+  further down in this file.
   **Warning: an incomplete list does not crash — Laravel returns HTTP 200
   while silently serving one request's session, identity or query results to
   another, and logs nothing.** The list is verified by an automated audit
@@ -47,6 +48,7 @@ the rest of this file.
   `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.
 
 None of this applies to the default `classic` executor, which runs one request
+at a time per worker like upstream FPM.
 
 ---
 

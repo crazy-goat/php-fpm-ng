@@ -16,7 +16,6 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ### Fixed
 - `pool.type = gateway`: an upstream FastCGI `Status:` that is not three digits in 200..599 (`abc`, `-5`, `99999`, a 1xx) is no longer sent to the client as the status line. The gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply. The same applies to an `http.route[]` HTTP target whose status line is outside 200..599 (#594).
-
 - The operator `?full` page no longer prints a `live` row with `pid` 0 for a slot whose child is not forked yet; a test (or an operator script) that took that 0 as an address ran `kill -USR1 0`, which signals the whole process group and killed the `fpmng-phpt` runner with exit 138 (#567).
 - The test harness refuses to signal a pid below 2 (`build/phpt-fixture-patches/0004`), so such a mistake fails one test instead of the run (#567).
 

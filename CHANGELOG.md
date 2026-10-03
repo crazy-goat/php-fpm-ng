@@ -11,6 +11,11 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Fixed
+
+- `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
+  `${{ }}` inside the `run:` script, matching `release.yml` (#583).
+
 ## [0.13.0] - 2026-10-03
 
 ### Changed

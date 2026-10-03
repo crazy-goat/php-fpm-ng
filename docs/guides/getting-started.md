@@ -98,6 +98,8 @@ pm.max_spare_servers = 3
 ; A scheduled script, in place of a crontab line.
 [tick]
 pool.type = cron
+user = www-data
+group = www-data
 cron.schedule = * * * * *
 cron.script = /srv/app/bin/tick.php
 cron.log = /var/log/php-fpm-ng/tick.log
@@ -105,6 +107,8 @@ cron.log = /var/log/php-fpm-ng/tick.log
 ; A long-running script, in place of a supervisord program.
 [worker]
 pool.type = supervisor
+user = www-data
+group = www-data
 supervisor.script = /srv/app/bin/worker.php
 supervisor.processes = 1
 supervisor.restart = always
@@ -116,7 +120,7 @@ What each section is:
   document root, `http.route[app] = /` sends every path that is not a static
   file to the pool named `app`. A gateway with no route is refused; a request that
   matches none gets a local 404. See [`gateway.md`](../gateway.md) and
-  [`http-route.md`](http-route.md).
+  [`http-route.md`](../http-route.md).
 - **`app`** runs PHP. Everything in it is upstream FPM vocabulary (`pm.*`,
   `listen.*`).
 - **`tick`** and **`worker`** are the two pool types that replace cron and
@@ -149,7 +153,7 @@ JSON status page of the gateway, `{"pools":[...]}`; per-pool pages and the
 Prometheus `/metrics` are on the same listener, see
 [`operator-endpoint.md`](../operator-endpoint.md). The cron pool writes one line per
 run to `/var/log/php-fpm-ng/tick.log` after the first full minute, and
-`pgrep -af worker.php` shows the supervised process.
+`pgrep -af 'pool worker'` shows the supervised process (its process title is `php-fpm: pool worker`).
 
 ## Where next
 

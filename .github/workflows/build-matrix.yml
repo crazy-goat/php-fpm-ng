@@ -697,6 +697,13 @@ jobs:
         run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng
       - name: php-fpm-ng -t on every configuration the guides print (issue #645)
         run: ./build/test-doc-configs.sh "$PWD/build-out/bin/php-fpm-ng"
+      # The pages tell a reader to run `sudo php-fpm-ng -t`: as root a pool
+      # without user/group is refused, which a non-root run does not notice.
+      - name: the same -t checks as root, as the pages tell a reader to run them (issue #645)
+        shell: bash
+        run: |
+          [ "$(id -u)" -eq 0 ] || { echo "the step must run as root" >&2; exit 1; }
+          ./build/test-doc-configs.sh "$PWD/build-out/bin/php-fpm-ng"
       - name: fail fast -- cancel the rest of the run (issue #209)
         if: failure()
         shell: bash

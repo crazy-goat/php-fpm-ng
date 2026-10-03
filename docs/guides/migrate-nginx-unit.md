@@ -95,7 +95,7 @@ and everything else to `[web]`; the pool names are the keys of `http.route`.
 | Unit | php-fpm-ng | notes |
 |---|---|---|
 | `listeners["*:8080"]` | `listen = 0.0.0.0:8080` on a gateway | one gateway per public address |
-| `routes[].match.uri` (prefix with `*`) | `http.route[<pool>] = <prefix>` | prefixes only; longest prefix wins ([`http-route.md`](http-route.md)) |
+| `routes[].match.uri` (prefix with `*`) | `http.route[<pool>] = <prefix>` | prefixes only; longest prefix wins ([`http-route.md`](../http-route.md)) |
 | `action.share` | `http.static = yes` + `chdir` | `GET`/`HEAD` of files under the document root |
 | `fallback` / `pass` to a PHP app | falls through to `http.front_controller` and the matching route | |
 | `applications.<n>.root` | `chdir` | **every route of a gateway uses the gateway's `chdir`**: two applications with different roots need two gateways on two ports |

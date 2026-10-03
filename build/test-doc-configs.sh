@@ -24,7 +24,10 @@
 # A referenced script that no block creates is created empty: `-t` checks that
 # it exists, not what it does.
 #
-# Run it as an unprivileged user: php-fpm refuses root.
+# Run it as an unprivileged user to also start the master: php-fpm refuses to
+# start as root without --allow-to-run-as-root. As root only the `-t` checks
+# run (no master is started), which is how the pages tell a reader to run it:
+# a pool without `user`/`group` is refused there and not for a non-root user.
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
@@ -37,7 +40,8 @@ binary="${1:-}"
 [ -n "$binary" ] || fail "usage: $0 /path/to/php-fpm-ng"
 [ -x "$binary" ] || fail "$binary is not an executable file"
 binary=$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")
-[ "$(id -u)" -ne 0 ] || fail "run as an unprivileged user: php-fpm refuses root"
+as_root=0
+[ "$(id -u)" -ne 0 ] || as_root=1
 
 tmp=$(mktemp -d)
 pid=""
@@ -117,7 +121,7 @@ while IFS=$'\t' read -r kind doc block path; do
     case "$out" in *"test is successful"*) ;; *) echo "$out" >&2; fail "$doc: -t did not report success" ;; esac
     checked=$((checked + 1))
 
-    if [ "$kind" = run ]; then
+    if [ "$kind" = run ] && [ "$as_root" -eq 0 ]; then
         # A non-root master cannot chown the socket to the documented owner.
         grep -vE '^[[:space:]]*listen\.(owner|group)[[:space:]]*=' "$conf" >"$conf.run"
         expect="$tmp/app/public/index.php"
@@ -141,5 +145,6 @@ while IFS=$'\t' read -r kind doc block path; do
 done <"$tmp/index.tsv"
 
 [ "$checked" -gt 0 ] || fail "no verified block found in any page: the test would check nothing"
-[ "$ran" -gt 0 ] || fail "no verify-run block found: the getting-started page is not exercised"
+[ "$as_root" -eq 1 ] || [ "$ran" -gt 0 ] || fail "no verify-run block found: the getting-started page is not exercised"
+[ "$as_root" -eq 0 ] || echo "(run as root: -t only, no master started)"
 echo "doc configs: -t accepted $checked blocks, $ran started and answered"

@@ -88,7 +88,7 @@ same requests against the new port. Keep the old configuration until you have.
 | redirect 80 to 443 | `http.plain_listen` | the plain-HTTP companion port of a TLS gateway, redirect-only ([`acme-challenge.md`](../acme-challenge.md)) |
 | `root` | `chdir` | one document root per gateway, shared by every route |
 | `try_files $uri /index.php...` | `http.static = yes` + `http.front_controller` | static files are served by the gateway for `GET`/`HEAD`, the rest goes to the front controller |
-| `fastcgi_pass` | `http.route[<pool>] = <prefix>[,...]` | longest prefix wins; a request matching no route is a local 404 ([`http-route.md`](http-route.md)) |
+| `fastcgi_pass` | `http.route[<pool>] = <prefix>[,...]` | longest prefix wins; a request matching no route is a local 404 ([`http-route.md`](../http-route.md)) |
 | `client_max_body_size` | `http.max_body` | default `32M` |
 | `access_log` | `http.access_log` | |
 | `client_header_timeout`, `client_body_timeout`, `keepalive_timeout`, `send_timeout` | `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout` | milliseconds, not seconds ([`gateway.md`](../gateway.md)) |

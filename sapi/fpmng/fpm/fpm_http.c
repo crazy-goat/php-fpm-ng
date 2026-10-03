@@ -494,6 +494,7 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
 static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
+static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
 
 /* access.suppress_path[]: matched the same way ping.path is (see
  * fpm_http_serve_ping()) -- whole path, query string cut off, no
@@ -504,21 +505,12 @@ static void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
  * here before. */
 static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const char *query = uri ? strchr(uri, '?') : NULL;
-	size_t path_len;
 	char path[512];
 	unsigned i;
 
-	if (!gw->suppress_paths_count || !uri) {
+	if (!gw->suppress_paths_count || !fpm_http_raw_path(req, path, sizeof(path))) {
 		return 0;
 	}
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;
-	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 	for (i = 0; i < gw->suppress_paths_count; i++) {
 		if (!strcmp(path, gw->suppress_paths[i])) {
 			return 1;
@@ -629,10 +621,14 @@ static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value
  * before, a fastcgi route handed the app the whole URL while an http-direct
  * target answered the verbatim absolute-form with its own 400).
  * Origin-form and "*" are copied verbatim. */
-void fpm_http_origin_form(smart_str *out, const char *uri)
+const char *fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len)
 {
 	const char *p = uri;
 
+	if (authority) {
+		*authority = NULL;
+		*authority_len = 0;
+	}
 	if (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z')) {
 		p++;
 		while (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z') || (*p >= '0' && *p <= '9')
@@ -640,18 +636,84 @@ void fpm_http_origin_form(smart_str *out, const char *uri)
 			p++;
 		}
 		if (p[0] == ':' && p[1] == '/' && p[2] == '/') {
-			p += 3;
+			const char *auth = p + 3;
+
+			p = auth;
 			while (*p && *p != '/' && *p != '?' && *p != '#') {
 				p++;
 			}
-			if (*p != '/') {
-				smart_str_appendc(out, '/');
+			if (authority) {
+				const char *at;
+
+				/* userinfo is not part of a Host value (RFC 9110 7.2) */
+				for (at = p; at > auth && at[-1] != '@'; at--) {
+				}
+				*authority = at;
+				*authority_len = (size_t) (p - at);
 			}
-			smart_str_appends(out, p);
-			return;
+			return p;
 		}
 	}
-	smart_str_appends(out, uri);
+	return uri;
+}
+
+void fpm_http_origin_form(smart_str *out, const char *uri)
+{
+	const char *p = fpm_http_origin_start(uri, NULL, NULL);
+
+	if (p != uri && *p != '/') {
+		smart_str_appendc(out, '/');
+	}
+	smart_str_appends(out, p);
+}
+
+int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
+{
+	const char *authority;
+	size_t len;
+
+	if (!uri) {
+		return 0;
+	}
+	fpm_http_origin_start(uri, &authority, &len);
+	if (!authority || !len || len >= buf_len) {
+		return 0;
+	}
+	memcpy(buf, authority, len);
+	buf[len] = '\0';
+	return 1;
+}
+
+/* The path of the request as every gateway matcher (ping.path, the operator
+ * namespace, access.suppress_path[]) compares it: raw (no percent-decoding),
+ * query cut off, and in origin-form, so "GET http://h/ping" matches exactly
+ * what "GET /ping" does (#534; the matchers used to compare the raw
+ * request-target, which for an absolute-form request starts with the scheme
+ * and let the request walk past the access-control decision). An absolute-form
+ * target with no path is "/" (RFC 9112 3.2.2). Returns the length, or 0 when
+ * there is no target or it does not fit `path_size`-1 bytes. */
+static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size)
+{
+	const char *uri = evhttp_request_get_uri(req);
+	const char *start, *end;
+	size_t len;
+
+	if (!uri) {
+		return 0;
+	}
+	start = fpm_http_origin_start(uri, NULL, NULL);
+	end = start + strcspn(start, "?#");
+	if (end == start && start != uri) {
+		start = "/";
+		end = start + 1;
+	}
+	len = (size_t) (end - start);
+	if (len == 0 || len >= path_size) {
+		return 0;
+	}
+	memcpy(path, start, len);
+	path[len] = '\0';
+	return len;
 }
 
 const char *fpm_http_method_name(enum evhttp_cmd_type type)
@@ -686,12 +748,18 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	const char *host = evhttp_request_get_host(req);
 	struct evkeyval *header;
 	struct evbuffer *body = evhttp_request_get_input_buffer(req);
-	char *decoded, buf[64];
+	char *decoded, buf[64], authority[256];
+	int have_authority;
 	smart_str filename = {0};
 	const char *path_info;
 	int trailing_slash;
 	size_t decoded_len, body_len = evbuffer_get_length(body);
 
+	/* "GET http://h HTTP/1.1": an absolute-form target without a path is "/"
+	 * (RFC 9112 3.2.2, #534). */
+	if (uri && path && !*path) {
+		path = "/";
+	}
 	if (!method || !path || !*path) {
 		return HTTP_BADREQUEST;
 	}
@@ -891,10 +959,16 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	snprintf(buf, sizeof(buf), "%zu", body_len);
 	fpm_http_param(c, "CONTENT_LENGTH", buf);
 
+	/* An absolute-form target's authority replaces the Host header (RFC 9112
+	 * 3.2.2), so HTTP_HOST agrees with SERVER_NAME and with what the http
+	 * transport sends (#534). */
+	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority));
+
 	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
 	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next) {
 		smart_str name = {0};
 		const char *k = header->key;
+		const char *value = (have_authority && strcasecmp(k, "Host") == 0) ? authority : header->value;
 
 		/* Content-Length is already above under its CGI name; "Proxy" has no
 		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
@@ -954,7 +1028,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 			}
 		}
 		smart_str_0(&name);
-		fpm_http_param(c, ZSTR_VAL(name.s), header->value);
+		fpm_http_param(c, ZSTR_VAL(name.s), value);
 		smart_str_free(&name);
 	}
 
@@ -2282,23 +2356,14 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
  * written against the documented spelling. */
 static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const char *query = uri ? strchr(uri, '?') : NULL;
-	size_t path_len;
 	char path[512];
 	struct evkeyvalq *out;
 	struct evbuffer *body;
 	size_t bytes;
 
-	if (!gw->ping_path || !uri) {
+	if (!gw->ping_path || !fpm_http_raw_path(req, path, sizeof(path))) {
 		return 0;
 	}
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;
-	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 	if (strcmp(path, gw->ping_path) != 0) {
 		return 0;
 	}
@@ -2404,6 +2469,8 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	struct evkeyvalq *headers = evhttp_request_get_output_headers(req);
 	char *location;
 	char *redirect_host = NULL;
+	char authority[256];
+	smart_str target = {0};
 	size_t len;
 
 	/* Issue #390 review: this listener bypassed all of the gateway's own
@@ -2445,8 +2512,20 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 			return;
 		}
 	}
+	/* An absolute-form target names its own authority, which replaces Host
+	 * (RFC 9112 3.2.2), and is redirected as origin-form -- otherwise the
+	 * Location would be "https://h" + "http://h/x" (#534). */
+	if (uri && fpm_http_absolute_authority(uri, authority, sizeof(authority))) {
+		host = authority;
+	}
+	if (uri) {
+		fpm_http_origin_form(&target, uri);
+		smart_str_0(&target);
+		uri = ZSTR_VAL(target.s);
+	}
 	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
 		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		smart_str_free(&target);
 		return;
 	}
 	if (host[0] == '[') {
@@ -2454,6 +2533,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 
 		if (!end || (end[1] && end[1] != ':')) {
 			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			smart_str_free(&target);
 			return;
 		}
 		redirect_host = strndup(host, (size_t)(end - host + 1));
@@ -2465,6 +2545,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (!redirect_host || !*redirect_host) {
 		free(redirect_host);
 		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		smart_str_free(&target);
 		return;
 	}
 
@@ -2473,6 +2554,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (!location) {
 		free(redirect_host);
 		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		smart_str_free(&target);
 		return;
 	}
 	snprintf(location, len, "https://%s%s", redirect_host, uri);
@@ -2480,6 +2562,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	evhttp_send_reply(req, 308, "Permanent Redirect", NULL);
 	free(location);
 	free(redirect_host);
+	smart_str_free(&target);
 }
 
 /* ------------------------------------------------------------------- routing */
@@ -2540,6 +2623,9 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 
 	uri = evhttp_request_get_evhttp_uri(req);
 	path = uri ? evhttp_uri_get_path(uri) : NULL;
+	if (uri && path && !*path) {
+		path = "/";	/* absolute-form without a path (#534) */
+	}
 	if (!path || !*path) {
 		/* No path to route on: the gateway has no implicit target, so this
 		 * is a local 404 (fpm_http_request() answers it). */
@@ -2739,13 +2825,12 @@ static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhtt
 	if (!uri) {
 		return 0;
 	}
-	query = strchr(uri, '?');
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;	/* too long to be one of this gateway's bases; route it */
+	/* Origin-form, like every other matcher (#534). */
+	query = strchr(fpm_http_origin_start(uri, NULL, NULL), '?');
+	path_len = fpm_http_raw_path(req, path, sizeof(path));
+	if (!path_len) {
+		return 0;	/* empty, or too long to be one of this gateway's bases; route it */
 	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 
 	if (!fpm_http_operator_under_base(gw, path)) {
 		return 0;

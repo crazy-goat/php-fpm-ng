@@ -2016,10 +2016,10 @@ static void fpm_conf_ini_parser_include(char *inc, void *arg) /* {{{ */
 			if (g.gl_pathv[i][len - 1] == '/') continue; /* don't parse directories */
 			int loaded = fpm_conf_load_ini_file(g.gl_pathv[i]);
 			ini_lineno = outer_lineno;
-			ini_filename = filename;
 			if (0 > loaded) {
 				zlog(ZLOG_ERROR, "Unable to include %s from %s at line %d", g.gl_pathv[i], filename, ini_lineno);
 				*error = 1;
+				php_globfree(&g);
 				return;
 			}
 		}

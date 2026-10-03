@@ -12,6 +12,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [Unreleased]
 
 ### Fixed
+- Selective reload (`reload.selective = yes`): a pool spared across the reload kept serving, but its application metrics series vanished and its status page showed 0 processes, because the new master allocated fresh anonymous shared memory the spared workers never wrote to. The scoreboards and the metrics region are now `memfd`-backed and inherited across the master's `execvp()` for spared pools (Linux); a spared pool's counters continue and the status page keeps counting its workers. `fpmng-reload-selective-metrics.phpt` no longer carries `--XFAIL--` (#537).
 - Gateway: a client connection was time-limited only until its first request was read. Now `http.read_timeout` also bounds every later request on a keep-alive connection (from its first byte), the new `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) closes an idle keep-alive connection, and the new `http.write_timeout` (default 30000 ms, 0 = unlimited) closes a client that stalls a pending response write. `http.plain_listen` now has a first-request read deadline and the same keep-alive limit. `http.max_connections` and `http.max_connections_per_client` are refused on a gateway (they were silently ignored); both new directives are refused on `http-direct`. Docs corrected: `http.read_timeout` is not libevent's `evhttp_set_timeout_tv()` and `http.idle_timeout` is not a client timeout (#593).
 
 ### Documentation

@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "fpm_reload_selective.h"
+#include "fpm_reload_shm.h"
 #include "fpm_worker_pool.h"
 #include "fpm_children.h"
 #include "fpm_children_extra.h"
@@ -111,6 +112,10 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		free(pids);
 		return;
 	}
+
+	/* Issue #537: the spared workers keep writing to this generation's
+	 * scoreboard and metrics region; hand both to the next generation. */
+	fpm_reload_shm_spare_pool(wp);
 
 	existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
 	{
@@ -258,10 +263,16 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 		 * this function returns think this slot is already covered. Signal 0
 		 * is the standard existence probe and disturbs nothing if it is. */
 		if (kill(pids[i], 0) != 0) {
+			/* Its scoreboard slot is still marked used in the inherited
+			 * scoreboard (issue #537) and nothing else would free it. */
+			fpm_reload_shm_drop_slot(wp, pids[i]);
 			continue;
 		}
 
 		fpm_clock_get(&started);
+		/* Issue #537: the worker writes to the scoreboard slot its previous
+		 * master gave it; make adoption take that one. */
+		fpm_reload_shm_prepare_adopt(wp, pids[i]);
 		if (fpm_children_adopt(wp, pids[i], started)) {
 			adopted++;
 		}

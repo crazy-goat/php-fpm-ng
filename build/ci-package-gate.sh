@@ -504,17 +504,16 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 # the shipped binary does not have; they now run at real speed.
 EXPECT_FAIL=0
 EXPECT_FAIL_NAMES=
-EXPECT_XFAIL=1
-EXPECT_TOTAL=179
+EXPECT_XFAIL=0
+EXPECT_TOTAL=180
 
-# Issue #384: fpmng-reload-selective-metrics.phpt carries an --XFAIL-- section
-# for bug #537 and so scores XFAIL on every cell, a bucket of its own in
-# build/run-fpmng-phpt.sh: not a pass, not a failure. When #537 is fixed the
-# test passes, the runner reports it as a failure named XPASS (every run, not
-# only this gate), and the section is to be deleted together with
-# EXPECT_XFAIL. It is the 179th owned test; PASS/FAIL/SKIP in the tables
-# below are unchanged by it. Measured 2026-10-02 on the 177-test tree (deb and
-# apk, TLS and not): XFAIL 1 on all four cells.
+# Issue #537: fpmng-reload-selective-metrics.phpt used to carry an --XFAIL--
+# section (issue #384) and scored XFAIL on every cell. The bug is fixed, the
+# section is gone, and the test counts as a PASS. The same change adds
+# fpmng-reload-selective-metrics-shift.phpt (the 180th owned test). Against the
+# pins of the 179-test tree: PASS +2 on all four cells, XFAIL 0, TOTAL +1. Derived from
+# the old pins, not re-measured on a package-gate run; a real gate run must
+# confirm it.
 
 # Measured for issue #424 (2026-10-02, ubuntu:26.04 with php8.5-dev 8.5.4 and
 # alpine:edge with php85 8.5.10/8.5.11), 177 owned tests, from this script run
@@ -579,8 +578,8 @@ EXPECT_TOTAL=179
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=177; EXPECT_SKIP=1
-    else EXPECT_PASS=163; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=179; EXPECT_SKIP=1
+    else EXPECT_PASS=165; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -613,8 +612,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=172; EXPECT_SKIP=6
-    else EXPECT_PASS=161; EXPECT_SKIP=17; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=174; EXPECT_SKIP=6
+    else EXPECT_PASS=163; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

@@ -1,7 +1,5 @@
 --TEST--
 fpm-ng: a pool spared by a selective reload keeps reporting application metrics (issue #384)
---XFAIL--
-Issue #537: a pool spared by a selective reload loses its application metrics and its scoreboard. Delete this section when #537 is fixed.
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";

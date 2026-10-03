@@ -24,6 +24,7 @@
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fpm_metrics.h"
+#include "fpm_reload_shm.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
@@ -79,6 +80,7 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	    0 > fpm_conf_init_main(test_conf, force_daemon) ||
 	    0 > fpm_unix_init_main()          ||
 	    0 > fpm_scoreboard_init_main()    ||
+	    0 > fpm_reload_shm_scoreboards()  ||
 	    0 > fpm_pctl_init_main()          ||
 	    0 > fpm_env_init_main()           ||
 	    0 > fpm_signals_init_main()       ||

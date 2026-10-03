@@ -9,8 +9,10 @@
  * name and pass them to fpmng_metrics_child_attach. From then on, PHP
  * fpm_metric_* functions write to the worker's own series table.
  *
- * Worker slot = sum of pm.max_children for earlier pools in configuration order
- * + the index from this pool's scoreboard. Index, not pid — recycling after
+ * Worker slot = the pool's slot base + the index from this pool's scoreboard.
+ * The base is the sum of pm.max_children for earlier pools in configuration
+ * order on an ordinary start; after a selective reload a spared pool keeps the
+ * base its workers are already bound to (issue #537, fpm_reload_shm.h). Index, not pid — recycling after
  * pm.max_requests then does not zero the counters (NOTES 3k).
  */
 

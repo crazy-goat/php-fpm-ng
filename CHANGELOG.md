@@ -12,7 +12,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [Unreleased]
 
 ### Fixed
-- `pool.type = gateway` and `pool.type = http-direct`: a request header whose name contains `_` is no longer passed to the worker. `X_Real_IP` and `X-Real-IP` both became `HTTP_X_REAL_IP` and the last one won, so a client could override a header set by the reverse proxy in front (nginx and Apache 2.4 drop such headers too). The header is now dropped; there is no opt-in option (#595).
+- `pool.type = gateway` and `pool.type = http-direct`: a request header whose name contains `_` is no longer passed to the worker. `X_Real_IP` and `X-Real-IP` both became `HTTP_X_REAL_IP` and the last one won, so a client could override a header set by the reverse proxy in front (nginx drops such headers by default, `underscores_in_headers off`, and Apache 2.4 drops them too). The header is now dropped; there is no opt-in option (#595).
 - `pool.type = gateway`: an upstream FastCGI `Status:` that is not three digits in 200..599 (`abc`, `-5`, `99999`, a 1xx) is no longer sent to the client as the status line. The gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply. The same applies to an `http.route[]` HTTP target whose status line is outside 200..599 (#594).
 
 ## [0.12.0] - 2026-10-02

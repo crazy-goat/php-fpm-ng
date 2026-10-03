@@ -511,7 +511,7 @@ if [ -z "$PORT_SHIFT" ]; then
         fi
     fi
 fi
-export FPMNG_PHPT_PORT_SHIFT=$PORT_SHIFT
+export FPMNG_PHPT_PORT_SHIFT="$PORT_SHIFT"
 printf '%s\n' "Port shift: $PORT_SHIFT" >&2
 
 # The floor on PASS, and why this runner needs one at all.

@@ -1359,7 +1359,7 @@ scoreboard index and is only ever re-zeroed by the next child to take that
 index, so a child that was scaled down, recycled or killed outright would
 otherwise leave `live connections: 20` standing for as long as the pool stayed
 small. The page checks the scoreboard's `used` flag for each slot instead
-(`fpm_http_direct_ops.c`, `fpm_http_direct_ops_slot_alive()`), which needs
+(`fpm_http_direct_ops.c`, `fpm_http_direct_ops_slot_pid()`), which needs
 nothing to run in the dying child and therefore also covers `SIGKILL`,
 `request_terminate_timeout` and a crash. On `?full` the same fact is a row:
 `live: 1` or `live: 0` says whether a child holds the slot at all, which is

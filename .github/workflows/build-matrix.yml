@@ -212,10 +212,10 @@ jobs:
 
       # Issue #421: third_party/php-src/ is exactly what its MANIFEST says --
       # no file edited in place, none unlisted, none shadowed by an overlay
-      # file of the same name, and main/fastcgi.c/.h still "pinned tag +
-      # patches/", so a patch change without a re-import fails here instead of
-      # building a FastCGI layer the patch stack does not describe. This
-      # replaces the former `patches` job, which applied the stack to a freshly
+      # file of the same name, and main/fastcgi.c/.h still byte-identical to the
+      # pinned tag (main carries no php-src patch), so a locally modified copy
+      # fails here instead of building a FastCGI layer that is not upstream's.
+      # This replaces the former `patches` job, which applied the stack to a freshly
       # cloned php-src: main has no php-src to apply it to any more.
       - name: verify the vendored php-src subset (issue #421)
         run: ./build/vendor-php-src.sh check

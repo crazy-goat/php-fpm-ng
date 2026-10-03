@@ -11,9 +11,9 @@
 # checkout on the include path, a header from another PHP build on the
 # machine. Three further failures are specific:
 #
-#   - the SDK's main/fastcgi.h was read. It is the unpatched upstream header;
-#     reading it means the build compiled against a FastCGI that is not the
-#     one it links.
+#   - the SDK's main/fastcgi.h was read. It is the SDK-installed upstream header;
+#     reading it means the build compiled against a FastCGI header that is not
+#     the vendored one it links.
 #   - any main/ header other than the vendored fastcgi.h came from outside the
 #     SDK: header shadowing, the defect the old libphp build had.
 #   - a file listed in third_party/php-src/MANIFEST (C or header) was read by
@@ -81,7 +81,7 @@ if [ "$n_bad" != 0 ]; then
   problems=$((problems + 1))
 fi
 if grep -qx "$SDK_C/main/fastcgi.h" "$all"; then
-  echo "  the SDK's unpatched main/fastcgi.h was read; the vendored one must come first" >&2
+  echo "  the SDK's main/fastcgi.h was read; the vendored one must come first" >&2
   problems=$((problems + 1))
 fi
 # main/*.h from anywhere but the SDK, except the vendored fastcgi.h.

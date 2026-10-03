@@ -55,9 +55,8 @@ the refusal.
 
 - Either `-` as above, or a PHP source checkout with `sapi/fpm/` and
   `run-tests.php`, prepared with `build/prepare.sh`.
-- With a checkout: a source revision compatible with the patch stack in
-  `patches/`. `prepare.sh` stops instead of silently applying an incompatible
-  or already-applied patch.
+- With a checkout: a php-src revision of the supported PHP minor. `prepare.sh`
+  only overlays this repository's files onto it; main carries no php-src patch.
 - A completed `php-fpm-ng` build and a CLI PHP executable. With a checkout, the
   CLI is the one from that same PHP build. Supply both as absolute paths.
 - `strings` and either `shasum -a 256` or `sha256sum`.

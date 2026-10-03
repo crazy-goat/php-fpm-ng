@@ -129,9 +129,9 @@ fi
 # loudly. Rules and validity windows: patches/README.md
 PHPVER=$(awk -F'"' '/PHP_VERSION /{print $2}' "$PHPSRC/main/php_version.h" 2>/dev/null)
 PHPMINOR=$(echo "$PHPVER" | cut -d. -f1,2)
-# Patches form a stack and can touch the same region (0002 and 0003 both sit
-# at accept()). Then the "is it already applied" test per patch lies: the
-# reverse dry-run of 0002 fails, because 0003 sits on top of it. The decision
+# Patches form a stack and can touch the same region (0002 and the former
+# 0003 both sat at accept()). Then the "is it already applied" test per patch
+# lies: the reverse dry-run of 0002 fails, because 0003 sat on top of it. The decision
 # is therefore made once, for the whole stack: either the tree is untouched
 # and we apply everything in order, or the whole stack comes off in reverse
 # from the copy of touched files (= already applied), or ERROR.
@@ -154,7 +154,7 @@ if [ -n "$PATCHES" ]; then
       name=$(basename "$p")
       # Apply each patch immediately. Later patches may deliberately use
       # context introduced by earlier ones, so probing every patch against the
-      # untouched tree reports false failures (0004/0005 on PHP 8.6).
+      # untouched tree reports false failures.
       if ! patch -d "$PHPSRC" -p1 --forward --silent < "$p" >/dev/null 2>&1; then
         echo "ERROR: patch does not apply to PHP $PHPVER: $name" >&2
         echo "      see patches/README.md — either upstream merged it (remove it)," >&2

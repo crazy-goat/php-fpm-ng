@@ -39,7 +39,7 @@ other php-src `main/` header can reach the compiler this way, so every
 
 The two hashes are equal for every file except two:
 
-- `main/fastcgi.c` and `main/fastcgi.h` carry `patches/0001` to `0005`. The
+- `main/fastcgi.c` and `main/fastcgi.h` carry `patches/0001` and `0002`. The
   manifest's `patches` line fingerprints that stack.
 
 One file is stored under a different name, with its content unchanged:

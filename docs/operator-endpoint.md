@@ -261,8 +261,11 @@ a gateway pool (the gateway keeps connections open, and drops idle ones after
   per-process rows, and its `request duration` includes the idle wait.
 - `max active processes` stays too high, and `idle processes` / `active
   processes` can be wrong for up to one maintenance heartbeat (about 1 s).
-- `request_terminate_timeout` and `request_slowlog_timeout` can hit an idle
-  kept-alive worker, because both look at the same request stage.
+- `request_terminate_timeout` can hit an idle kept-alive worker, but only with
+  `http.idle_timeout = 0`, a large value, or an external proxy using
+  `fastcgi_keep_conn on`; with the default 500 ms and a whole-second timeout it
+  cannot happen. `request_slowlog_timeout` is not affected (it fires only in
+  the executing stage).
 - pm scaling is not affected: the maintenance loop recounts from each child's
   request stage every heartbeat.
 

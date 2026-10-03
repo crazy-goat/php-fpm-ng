@@ -211,8 +211,10 @@ POC, not a production frontend; configuration, limits, and benchmark methodology
 
 ## Framework support
 
-`main` ships the `classic` executor (and `worker` on `http-direct`), which run one
-request at a time per worker like upstream FPM; see [`docs/frameworks.md`](docs/frameworks.md).
+`main` ships the `classic` executor, which runs one request at a time per worker
+like upstream FPM, and the beta `worker` executor on `pool.type = http-direct`,
+for long-lived connections: one worker holds several requests at once. See
+[`docs/frameworks.md`](docs/frameworks.md).
 The framework measurements for `pool.executor = fiber` (Symfony, Laravel, Slim 4)
 belong to the `fiber` executor and live on branch `async`
 (`async/docs/frameworks-fiber.md`).

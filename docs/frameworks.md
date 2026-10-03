@@ -1,8 +1,8 @@
 # Frameworks on `main`
 
 `main` ships the `classic` executor (one request at a time per worker, like
-upstream FPM) and the beta `worker` executor on `pool.type = http-direct`. Under
-`classic` a framework runs as it does under upstream PHP-FPM: every request
+upstream FPM) and the beta `worker` executor on `pool.type = http-direct`, which
+holds several requests per worker. Under `classic` a framework runs as it does under upstream PHP-FPM: every request
 starts from a clean request state, so nothing in this repository needs framework
 specific configuration.
 

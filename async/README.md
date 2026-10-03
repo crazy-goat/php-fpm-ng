@@ -23,6 +23,12 @@ never conflicts with it:
 | `build-tree.sh <tree> <repo> <ref> <flags...>` | fresh php-src checkout, `prepare.sh`, `buildconf`, `configure`; keeps the configure log in the tree |
 | `check-no-fiber-symbols.sh <binary>` | fails if the binary carries fiber/coop/async symbols; run by `build/libphp-build.sh` |
 
+Docs that moved here from main (#601), kept for the fiber executor:
+
+- `async/docs/frameworks-fiber.md`: Symfony, Laravel and Slim 4 on `pool.executor = fiber`
+  (the former README section and `docs/frameworks.md` of main; the harness is `tests/frameworks/`)
+- `async/docs/FASTCGI_NG_OPTIMIZATION.md`: the retired `fastcgi-ng` plan and measurements (historical)
+
 0001-0005 were dropped on async together with main (#589-#592): nothing on
 this branch calls what they added, and 0007/0008 touch only `ext/openssl/*`
 and `ext/standard/streamsfuncs.c`.

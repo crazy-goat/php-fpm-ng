@@ -7,8 +7,7 @@ verifiable in under two minutes.
 ## Run it
 
 ```sh
-# from examples/README.md "Build the binary once", then:
-cp <build>/sapi/fpmng/php-fpm-ng examples/cron/php-fpm-ng
+# no binary to build: the image installs the released package
 cd examples/cron
 docker build -t fpmng-cron-example .
 docker run --rm --name fpmng-cron-example fpmng-cron-example

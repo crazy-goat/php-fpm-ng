@@ -1,47 +1,55 @@
 # Examples
 
-Two tiers (task 035):
+Everything here runs on `ubuntu:26.04` and the distribution's PHP 8.5
+(`libphp8.5-embed`): `php-fpm-ng` links the distribution's `libphp`, so an
+image on an older base has no library to run it against. The released packages
+contain no PHP and are amd64 only; on another architecture build the binary
+yourself (`build/libphp-build.sh`, see [AGENTS.md](../AGENTS.md)).
+
+Two tiers:
 
 - [`combined/`](combined/) -- **Tier 1**: one config, one container, one
-  `docker run`, all four pool types (`http`, `cron`, `supervisor`, `status`)
-  running at the same time. Start here if you're deciding whether this
-  project is worth adopting.
+  `docker run`, a gateway, a FastCGI pool, cron and a supervisor running at the
+  same time, with the operator endpoints on their own ports. Start here if
+  you're deciding whether this project is worth adopting.
 - [`http/`](http/), [`cron/`](cron/), [`supervisor/`](supervisor/),
-  [`status/`](status/) -- **Tier 2**: one pool type each, minimal, each
-  small enough to read in full. Start here once you know which pool type
-  you want and want the smallest config to copy from.
+  [`status/`](status/) -- **Tier 2**: one thing each, minimal, each small
+  enough to read in full. Start here once you know which pool type you want
+  and want the smallest config to copy from.
+- [`http-direct-worker-mysql/`](http-direct-worker-mysql/) and
+  [`http-direct-worker-react/`](http-direct-worker-react/) -- `pool.type =
+  http-direct` with a long-lived worker script (the other
+  `http-direct-worker*` directories are application code for them).
 
 Every example's own README says exactly what was run and observed to verify
 it -- not just that the config parses.
 
-## Build the binary once
+## How the images get the binary
 
-All five examples run the same `php-fpm-ng` binary; build it once and copy
-it next to whichever example's `Dockerfile` you're using. This is the same
-recipe `.github/workflows/build-matrix.yml` runs in CI:
+The Tier 1 and Tier 2 images install the **released package**
+(`php-fpm-ng_v<version>_php8.5_amd64.deb`, or `php-fpm-ng-tls_...` for
+`http/`, which terminates TLS) from the GitHub release, checked against that
+release's `SHA256SUMS`. `docker build` in the example directory is the whole
+setup. The version and its checksum are two `ARG`s at the top of each
+`Dockerfile`.
 
-```sh
-git init php-src && git -C php-src fetch --depth 1 \
-  https://github.com/php/php-src.git php-8.5.9 && git -C php-src checkout FETCH_HEAD
+The `http-direct-worker-*` images take a `php-fpm-ng` next to the example
+instead, because their test scripts measure the binary under test; each README
+says how to build or fetch it.
 
-./build/prepare.sh "$PWD/php-src"
-cd php-src && ./buildconf --force
-./configure --disable-all --enable-fpmng --enable-session --with-openssl
-make -j"$(nproc)" fpmng
+## Checked in CI
 
-cp sapi/fpmng/php-fpm-ng ../examples/<example>/php-fpm-ng
-```
+`build/test-shipped-configs.sh` runs in CI: `static` greps `examples/` and
+`docker/` for retired pool types, retired artefacts and pre-26.04 base images;
+`images` builds the image of every shipped `*.conf` and runs `php-fpm-ng -t` on
+it inside the image. The package-based images carry the released `.deb`, so
+`-t` runs there twice: with the released binary, and with the binary the CI
+run built mounted over it, so a PR that retires a directive fails here. A new example needs a `Dockerfile` (or the shared
+`http-direct-worker-mysql/Dockerfile`) and a `*.conf`, and is picked up by the
+second step on its own.
 
-`--with-openssl` builds `ext/openssl` into the CLI (used by our TLS tests,
-not by `php-fpm-ng` itself); the gateway's own TLS support only needs
-`libssl-dev` at configure time (`fpm_tls_http.c`). Kept here to match CI
-exactly rather than re-deriving a minimal flag set.
+## `docker/`
 
-## Why not `docker/`
-
-`docker/fpm.conf` + `docker/Dockerfile.scratch` predate `pool.type` entirely
-(no directive at all -- plain upstream-compatible FastCGI) and don't
-demonstrate anything specific to this project; see task 035's Context
-section. They still work as a minimal FastCGI-only container (now with the
-port mismatch fixed) but are not where you should start looking for how to
-configure `http`/`cron`/`supervisor`/`status`.
+`docker/fpm.conf` + `docker/Dockerfile` are the smallest container: a gateway
+on 9001 in front of one FastCGI pool, serving a mounted `/www`. It is not
+`FROM scratch`; a static image is #424 and the single-file path is #425.

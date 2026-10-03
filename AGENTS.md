@@ -84,7 +84,7 @@ that this section and the links to it stay in place.
 | `third_party/php-src/` | Vendored php-src subset (FastCGI layer, upstream FPM files, test fixtures), see its README |
 | `patches/` | Notes on the php-src patches `main` dropped; `main` carries none, patches live on branch `async` |
 | `build/` | Build, package, lint and test scripts |
-| `docker/`, `.github/docker/` | Dockerfiles (scratch image, package-gate images) |
+| `docker/`, `.github/docker/` | Dockerfiles (minimal package image, package-gate images) |
 | `packaging/` | `.deb` and `.apk` configuration and service files |
 | `examples/` | Runnable examples (each has its own Dockerfile or compose file) |
 | `tests/frameworks/` | Symfony, Laravel and Slim 4 probe harness |
@@ -121,6 +121,7 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-libphp-build-refusals.sh
 ./build/test-phpt-tree.sh
 ./build/test-package-gate-expected.sh
+./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
 
 # Shell scenarios against the built binary (see .github/workflows/build-matrix.yml)

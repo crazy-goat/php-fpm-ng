@@ -247,6 +247,12 @@ jobs:
       - name: libphp version guard, all three outcomes (issue #220)
         run: ./build/test-libphp-abi-guard.sh
 
+      # Issue #639: no retired pool type, artefact or pre-26.04 base image in
+      # examples/ or docker/. Hermetic, a grep. The other half (php-fpm-ng -t on
+      # every shipped configuration) is the `examples` job.
+      - name: no retired names in the shipped examples (issue #639)
+        run: ./build/test-shipped-configs.sh static
+
       # Task 013: clang-tidy over our C sources runs in the `lint` job, through
       # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
 
@@ -579,11 +585,47 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
+  # Issue #639: every shipped configuration (examples/*/*.conf, docker/fpm.conf)
+  # passes `php-fpm-ng -t` inside the image its Dockerfile builds, so an example
+  # that rots against the build contract fails here and not on an evaluator's
+  # first try. The package-based images download the released .deb, so each
+  # is checked twice: with the released binary and with the binary this run
+  # built mounted over it (a retired directive fails the second); the
+  # http-direct-worker-* ones are built with the binary this run built. Runs on the
+  # runner itself (not the ubuntu:26.04 container the other jobs use): it needs
+  # docker.
+  examples:
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    # The workflow default shell is `runuser -u ci`; the bare runner has no ci account.
+    defaults:
+      run:
+        shell: bash
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: php-fpm-ng -t on every shipped configuration, in its image (issue #639)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-shipped-configs.sh images "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
   # The one required check. Docs-only changes skip the heavy jobs, which report
   # "skipped"; a code change needs every job green.
   ci-ok:
     name: ci-ok
-    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges]
+    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples]
     if: always()
     runs-on: ubuntu-latest
     defaults:

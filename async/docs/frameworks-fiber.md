@@ -10,7 +10,7 @@ branch async only. -->
 The `fiber` executor runs several requests concurrently in one worker process,
 which only helps a framework that keeps no state outside what is isolated per
 request. Full measurements, root causes and required configuration:
-this file.
+the rest of this file.
 
 - **Symfony — supported, with required configuration.** Verified only on
   **Symfony 8.1.6** (skeleton + orm-pack + security-bundle, Doctrine ORM,

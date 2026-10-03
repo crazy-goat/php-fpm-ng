@@ -41,6 +41,8 @@ ls "$DEPS"/*.d >/dev/null 2>&1 || fail "no .d files in $DEPS"
 # counts as zlog.h.
 all=$(mktemp)
 for d in "$DEPS"/*.d; do
+  # the two-character set splits a .d file on spaces and tabs into lines; it is not a word swap.
+  # shellcheck disable=SC2020
   sed -e 's/^[^:]*://' -e 's/\\$//' "$d" | tr ' \t' '\n\n' | grep -v '^$'
 done | sort -u | while read -r p; do
   ( cd "$(dirname "$p")" 2>/dev/null && echo "$(pwd -P)/$(basename "$p")" ) || echo "$p"
@@ -95,6 +97,8 @@ fi
 # under any allowed directory, because the build reads the assembled copy, not
 # third_party/ itself.
 unused=
+# MANIFEST paths are repository paths without whitespace; word splitting is the intent.
+# shellcheck disable=SC2013
 for f in $(awk -F '\t' '!/^#/ && NF == 4 && $1 ~ /\.[ch]$/ { print $1 }' "$REPO/third_party/php-src/MANIFEST"); do
   rel=$f
   case "$f" in sapi/fpm/fpm/*) rel=sapi/fpmng/fpm/${f#sapi/fpm/fpm/} ;; esac
@@ -108,6 +112,8 @@ fi
 total=$(wc -l < "$all" | tr -d ' ')
 n_allowed=$(for a in $allowed; do grep "^$a/" "$all"; done | sort -u | wc -l | tr -d ' ')
 n_sys=$((total - n_sdk - n_allowed - n_bad))
+# the *.d files are the audit's own, generated names without special characters; only the count is used.
+# shellcheck disable=SC2012
 echo "audit-compile-deps.sh: $(ls "$DEPS"/*.d | wc -l | tr -d ' ') translation units read $total files: $n_allowed from the repository's assembled tree, $n_sdk from the SDK ($SDK_C), $n_sys from the system, $n_bad from elsewhere"
 for a in $allowed; do
   echo "  $(grep -c "^$a/" "$all" || true) under $a"

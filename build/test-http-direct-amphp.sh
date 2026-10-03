@@ -53,6 +53,8 @@ skip() {
         {
             printf '## amphp harness: SKIPPED\n\n'
             printf '%s\n\n' "$*"
+            # the backticks are literal Markdown in the step summary, not a command substitution.
+            # shellcheck disable=SC2016
             printf 'This is expected on the canonical CI image, which has no PHP CLI/phar/Composer (issue #75). See `build/test-http-direct-amphp.sh` and `examples/http-direct-worker/README.md` for how to run this harness manually.\n'
         } >> "$GITHUB_STEP_SUMMARY"
     fi

@@ -79,8 +79,8 @@ record() {
     detail=${detail//|/\/}
     for index in "${!SCENARIO_NAMES[@]}"; do
         if [[ ${SCENARIO_NAMES[$index]} == "$name" ]]; then
-            SCENARIO_STATUS[$index]=$status
-            SCENARIO_DETAIL[$index]=$detail
+            SCENARIO_STATUS[index]=$status
+            SCENARIO_DETAIL[index]=$detail
             return
         fi
     done
@@ -1116,6 +1116,8 @@ write_report() {
         echo '|---|---|---|'
         for index in "${!SCENARIO_NAMES[@]}"; do
             status=${SCENARIO_STATUS[$index]:-NOT MEASURED}
+            # the backticks are literal Markdown in the report table, not a command substitution.
+            # shellcheck disable=SC2016
             printf '| `%s` | **%s** | %s |\n' "${SCENARIO_NAMES[$index]}" "$status" "${SCENARIO_DETAIL[$index]:-not run}"
             case $status in
                 PASS) pass=$((pass + 1)) ;;

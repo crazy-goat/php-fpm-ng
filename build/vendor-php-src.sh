@@ -27,7 +27,8 @@
 # Why each file is in, and why the rest of upstream's sapi/fpm/ is out, is in
 # third_party/php-src/README.md.
 #
-# check   needs no php-src and no network. It fails when a vendored file no
+# check   needs no php-src and no network. It also fails when the README file
+#         counts disagree with the manifest. It fails when a vendored file no
 #         longer has the hash the manifest records (someone edited it in
 #         place, which the next import would silently undo), when a file
 #         appears under third_party/php-src/ that the manifest does not list,
@@ -159,6 +160,19 @@ do_check() {
   if [ -n "$extra" ] && [ "$mode" != preimport ]; then
     echo "$extra" | sed 's|^|  not in the manifest: third_party/php-src/|' >&2
     errors=$((errors + 1))
+  fi
+  # The README states the file counts by hand; a stale number is a doc bug
+  # nothing else would catch. Test fixtures are run-tests.php and everything
+  # under sapi/fpm/tests/; the rest is the build.
+  if [ "$mode" != preimport ]; then
+    total=$(wc -l < "$listed.lines" | tr -d ' ')
+    fixtures=$(cut -f 1 "$listed.lines" | grep -c -e '^run-tests\.php$' -e '^sapi/fpm/tests/' || true)
+    want="| Files | $total (see \`MANIFEST\`): $((total - fixtures)) for the build, $fixtures test fixtures |"
+    if ! grep -qxF -- "$want" "$TP/README.md"; then
+      echo "  stale file count in third_party/php-src/README.md: the Provenance table must read" >&2
+      echo "    $want" >&2
+      errors=$((errors + 1))
+    fi
   fi
   rm -f "$listed" "$listed.lines" "$listed.disk"
   if [ "$errors" != 0 ]; then

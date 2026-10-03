@@ -13,6 +13,13 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ### Changed
 - Owned `.phpt` suite: every test port (the Tester's blocks from 9008 and the http-direct tests from 28054) now also moves by a per-run `FPMNG_PHPT_PORT_SHIFT` that `build/run-fpmng-phpt.sh` picks as the first shift whose blocks nothing listens on, so another php-fpm holding 9201 or 9208 on a shared host no longer fails dozens of tests. Set the variable to pin a shift. The Tester also gives each gateway pool a run-own `operator.*_listen`, so a master holding `127.0.0.1:9253` no longer fails the gateway tests (#674).
+- `bin/lint.sh` runs shellcheck at its default (style) severity instead of `warning`. The 22 info/style findings in `build/` and `tests/frameworks/symfony/run.sh` are fixed or silenced with a reasoned `# shellcheck disable` (#584).
+
+### Fixed
+
+- `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
+- `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
+  `${{ }}` inside the `run:` script, matching `release.yml` (#583).
 
 ## [0.13.0] - 2026-10-03
 

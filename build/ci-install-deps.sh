@@ -58,7 +58,11 @@ esac
 PKGS="$PKGS ${FPMNG_CI_EXTRA_PACKAGES:-}"
 
 export DEBIAN_FRONTEND=noninteractive
+# /etc/os-release is a system file that shellcheck cannot follow.
+# shellcheck disable=SC1091
 echo "ci-install-deps.sh: role=$ROLE on $(. /etc/os-release && echo "$PRETTY_NAME") $(uname -m)"
+# PKGS is a space-separated list; the unquoted echo joins it onto one line for the log.
+# shellcheck disable=SC2116,SC2086
 echo "ci-install-deps.sh: apt packages: $(echo $PKGS)"
 set -x
 apt-get update -qq

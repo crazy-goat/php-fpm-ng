@@ -15,7 +15,11 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Changed
 
+<<<<<<< HEAD
 - `fpmng-cron-jitter` and `fpmng-supervisor-jitter` take `FPMNG_DEBUG_CLOCK_RATE=10`: their assertions read the pool's master-measured `last_start` (and `next_run`) from the operator status page instead of a `gmdate()`/`microtime()` value the job script wrote, so a scaled clock can speed them up. They still fail on a libc `rand()` state shared across `fork()`. Test and `docs/fpmng-phpt.md` only; no operator surface added (#398).
+=======
+- Docs: `README.md` and `docs/frameworks.md` no longer describe framework support on `pool.executor = fiber`, and `docs/FASTCGI_NG_OPTIMIZATION.md` is gone. The fiber framework measurements and the `fastcgi-ng` plan live on branch `async` (`async/docs/frameworks-fiber.md`, `async/docs/FASTCGI_NG_OPTIMIZATION.md`); `main` describes only the executors it ships. History documents carry a one-line note (#601).
+>>>>>>> origin/main
 - `CHANGELOG.md`: the entries v0.1.0 to v0.11.1 are filled in from `git log <previous tag>..<tag>` instead of placeholders; the v0.11.1 entry was checked against its commits; the tags v0.5.0, v0.5.1 and v0.11.0 are folded into the next entry, and the compare links match (#586).
 - `examples/` and `docker/` follow the v0.12 build contract: the Tier 1 and Tier 2 example images (`combined`, `cron`, `http`, `status`, `supervisor`) and the new `docker/Dockerfile` are `ubuntu:26.04` and install the released `.deb` (checksum-verified), instead of `ubuntu:24.04` plus a binary built from php-src. `examples/status` is an `operator.*` example on a real pool (it still used the removed `pool.type = status`), `docker/Dockerfile.scratch` (it copied the retired `php-fpm-ng-full`) is replaced, `examples/README.md` no longer describes a php-src build, and `examples/http-direct-worker-mysql/Dockerfile` installs `libevent-openssl-2.1-7t64`, without which the TLS-enabled binary does not start in it. New `build/test-shipped-configs.sh`: `static` (in the `checks` job) greps `examples/` and `docker/` for retired names, `images` (new `examples` job) builds every shipped configuration's image and runs `php-fpm-ng -t` inside it (#639).
 - `third_party/php-src/MANIFEST` has three columns (path, upstream path, SHA-256) instead of four: the two hashes were always equal. `build/vendor-php-src.sh` and `build/audit-compile-deps.sh` read the new layout; the "not pristine" refusal is gone because one hash now says both (#676).
@@ -27,6 +31,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- `fpm.conf` diagnostics after an `include=` name the real line of the including file: the line counter is put back when the included file has been read, so an error on a later line, and the "Unable to include" message, no longer carry a number from the end of the included file (#545).
+- The gateway listeners (the main one and `http.plain_listen`) pause accepting for 100 ms when `accept()` fails with `EMFILE`/`ENFILE` (or another non-retriable error) instead of spinning on one core until a descriptor is freed; the failure is logged at most once every 10 s (#687).
 - `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
   `${{ }}` inside the `run:` script, matching `release.yml` (#583).

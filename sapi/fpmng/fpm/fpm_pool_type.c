@@ -294,7 +294,7 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
  * "fastcgi" here and was removed in 0.9.0 (issue #376): once fiber/async had
  * left, its only content was the capability bit that selected the optimized
  * transport, measured at 9.5 us per request
- * (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to "http", which set the
+ * (async/docs/FASTCGI_NG_OPTIMIZATION.md on branch async) -- a footnote to "http", which set the
  * same bit. The transport patches were dropped in issue #589, so no pool
  * type reaches an optimized path. Issue #388 retired "http" itself: it was two
  * things in one section (a pool of PHP workers and the proxy in front of them)

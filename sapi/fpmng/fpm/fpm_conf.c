@@ -1991,6 +1991,10 @@ static void fpm_conf_ini_parser_include(char *inc, void *arg) /* {{{ */
 	if (*error) return; /* We got already an error. Switch to the end. */
 
 	const char *filename = ini_filename;
+	/* fpm_conf_load_ini_file() restarts the file-level ini_lineno for the
+	 * included file, so the including file's position is put back after each
+	 * include: the lines that follow, and the failure message below, use it. */
+	const int outer_lineno = ini_lineno;
 
 	{
 		g.gl_offs = 0;
@@ -2010,9 +2014,12 @@ static void fpm_conf_ini_parser_include(char *inc, void *arg) /* {{{ */
 			size_t len = strlen(g.gl_pathv[i]);
 			if (len < 1) continue;
 			if (g.gl_pathv[i][len - 1] == '/') continue; /* don't parse directories */
-			if (0 > fpm_conf_load_ini_file(g.gl_pathv[i])) {
+			int loaded = fpm_conf_load_ini_file(g.gl_pathv[i]);
+			ini_lineno = outer_lineno;
+			if (0 > loaded) {
 				zlog(ZLOG_ERROR, "Unable to include %s from %s at line %d", g.gl_pathv[i], filename, ini_lineno);
 				*error = 1;
+				php_globfree(&g);
 				return;
 			}
 		}

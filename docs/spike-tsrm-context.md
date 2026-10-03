@@ -195,7 +195,7 @@ Not digging further into the cause (out of scope for the spike) — but this
 closes the matter of (b): if even a trivial file segfaults in context B,
 `require vendor/autoload.php` with Symfony in the same context has no chance
 of working, and trying it further would be wasting time on something already
-known not to work. The reference point from `docs/frameworks.md` (8 parallel
+known not to work. The reference point from `async/docs/frameworks-fiber.md` on branch `async` (8 parallel
 Symfony requests = 42 MB RSS in one process, the current model) remains the
 only measured data point on this side.
 

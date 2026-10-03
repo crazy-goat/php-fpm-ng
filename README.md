@@ -209,49 +209,15 @@ The FPM master still manages the workers. This is a buffered, front-controller-o
 POC, not a production frontend; configuration, limits, and benchmark methodology:
 [`docs/http-direct.md`](docs/http-direct.md).
 
-## Framework support on `pool.executor = fiber`
+## Framework support
 
-The `fiber` executor runs several requests concurrently in one worker process,
-which only helps a framework that keeps no state outside what is isolated per
-request. Full measurements, root causes and required configuration:
+`main` ships the `classic` executor, which runs one request at a time per worker
+like upstream FPM, and the beta `worker` executor on `pool.type = http-direct`,
+for long-lived connections: one worker holds several requests at once. See
 [`docs/frameworks.md`](docs/frameworks.md).
-
-- **Symfony — supported, with required configuration.** Verified only on
-  **Symfony 8.1.6** (skeleton + orm-pack + security-bundle, Doctrine ORM,
-  sessions and cache on Redis). Requires `env[FPMNG_SHARED_INCLUDES] = 1` and a
-  hand-written `public/index.php` without `symfony/runtime`
-  ([#78](https://github.com/crazy-goat/php-fpm-ng/issues/78)); needs
-  **no** `fiber.isolate_statics` entries. Covered by an automated probe
-  (`tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
-  Doctrine identity, Twig, form validation, synchronous Messenger dispatch,
-  `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq` deploys, and a
-  200-request RSS run all pass. Other Symfony major versions (6.4 LTS, 7.x,
-  other 8.x releases) are **not verified**: the `symfony/runtime` interaction
-  that forces the hand-written `index.php` is version-sensitive and must be
-  re-checked before extending this claim to another version.
-- **Laravel — supported for the measured surface, with a required statics
-  list.** Verified on **Laravel 13.30.1**. Needs
-  `env[FPMNG_SHARED_INCLUDES] = 1` and `fiber.isolate_statics` naming the
-  framework's request-scoped class statics (`Container::instance`,
-  `Facade::app`, `Facade::resolvedInstance`, `Model::resolver`,
-  `Model::dispatcher`, `Model::globalScopes`) — the exact versioned snippet
-  and where each entry came from are in `docs/frameworks.md`, section
-  "Laravel: the versioned configuration snippet and how it is verified".
-  **Warning: an incomplete list does not crash — Laravel returns HTTP 200
-  while silently serving one request's session, identity or query results to
-  another, and logs nothing.** The list is verified by an automated audit
-  (`/statics-audit` in `tests/frameworks/laravel/`) that snapshots every
-  static property across a suspension, plus data-asserting scenarios
-  covering sessions, auth, Eloquent, rate limiting, mail, Blade composers,
-  route model binding and per-request observers/global scopes. The list
-  must be re-verified for every Laravel minor version. Covered by
-  `tests/frameworks/laravel/`.
-- **Slim 4 — supported for the measured surface.** Verified on **Slim
-  4.15.3** with `slim/psr7`; needs `env[FPMNG_SHARED_INCLUDES] = 1` and no
-  `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.
-
-None of this applies to the default `classic` executor, which runs one request
-at a time per worker like upstream FPM.
+The framework measurements for `pool.executor = fiber` (Symfony, Laravel, Slim 4)
+belong to the `fiber` executor and live on branch `async`
+(`async/docs/frameworks-fiber.md`).
 
 ## Recommended pool configuration for lightweight endpoints
 
@@ -294,7 +260,7 @@ Work is tracked in **GitHub Issues**, not in the tree. `gh issue list` shows
 what is open; labels carry type (`bug`, `enhancement`, `spike`, `refactor`,
 `decision`, ...), area (`area:http-direct`, `area:tls`, `area:fiber`, ...) and
 priority. Everything under `track:nice-to-have` applies only to
-`pool.executor = fiber`, which is behind a build flag that is off by default.
+`pool.executor = fiber`, which is not on `main` (branch `async`).
 
 Before touching anything, read [`AGENTS.md`](AGENTS.md): the English-only
 rule, the architecture contract (new behaviour in new files under

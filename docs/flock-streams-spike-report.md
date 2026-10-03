@@ -1,5 +1,7 @@
 # flock() via the streams layer, with an in-process registry: spike
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Date: 2026-09-06. Branch `spike/flock-streams`, worktree
 `/Users/piotr.halas/work/php-fpm-ng-worktrees/flock-streams`. Test box
 `192.168.8.50`, working directory `~/rd/b1`, ports 18931-18933/18940-18941

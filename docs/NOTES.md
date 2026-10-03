@@ -1,5 +1,7 @@
 # php-fpm-ng — project notes
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Status as of 2026-09-05. This file is the project's memory: decisions, measured
 numbers, open questions, and the list of known problems. Update it whenever the
 direction changes, so the same conclusions do not have to be worked out again.
@@ -3386,6 +3388,8 @@ The former combined types become:
 - `http-fiber` -> `pool.type = http`, `pool.executor = fiber`.
 
 ## 3w. Splitting transport and `writev()` for large responses (2026-09-05)
+
+**Historical (#601).** The optimized transport switch and patches 0003-0005 were dropped by issue #589, and `fastcgi-ng` was retired by #376. The text and numbers below are the measurement of that removed path, not a current feature.
 
 The process-wide `fcgi_set_optimized_transport()` switch is disabled by default
 and set after the worker forks. `fastcgi` retains the upstream `accept()` and

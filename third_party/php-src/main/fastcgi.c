@@ -63,7 +63,6 @@ static int is_impersonate = 0;
 # include <unistd.h>
 # include <fcntl.h>
 # include <sys/socket.h>
-# include <sys/uio.h>
 # include <sys/un.h>
 # include <netinet/in.h>
 # include <netinet/tcp.h>
@@ -218,15 +217,6 @@ struct _fcgi_request {
 	int            in_len;
 	int            in_pad;
 
-	/* Read-side buffer: safe_read() pulls as much as the peer has already sent
-	 * in one read() and hands it out piecemeal, so a request head
-	 * (BEGIN_REQUEST + PARAMS + empty PARAMS + empty STDIN) costs one syscall
-	 * instead of one per record header and one per record body. Data left in
-	 * the buffer belongs to the same connection and survives until it closes. */
-	unsigned char *in_pos;
-	unsigned char *in_end;
-	unsigned char  in_buf[1024*16];
-
 	fcgi_header   *out_hdr;
 
 	unsigned char *out_pos;
@@ -256,7 +246,6 @@ static HashTable fcgi_mgmt_vars;
 static int is_initialized = 0;
 static int is_fastcgi = 0;
 static int in_shutdown = 0;
-static bool optimized_transport = false;
 static sa_t *allowed_clients = NULL;
 static sa_t client_sa;
 
@@ -458,11 +447,6 @@ static void fcgi_setup_signals(void)
 void fcgi_set_in_shutdown(int new_value)
 {
 	in_shutdown = new_value;
-}
-
-void fcgi_set_optimized_transport(bool enabled)
-{
-	optimized_transport = enabled;
 }
 
 int fcgi_in_shutdown(void)
@@ -910,7 +894,6 @@ fcgi_request *fcgi_init_request(int listen_socket, void(*on_accept)(bool), void(
 
 	*/
 	req->out_pos = req->out_buf;
-	req->in_pos = req->in_end = req->in_buf;
 	req->hook.on_accept = on_accept ? on_accept : fcgi_hook_dummy_bool;
 	req->hook.on_read = on_read ? on_read : fcgi_hook_dummy_bool;
 	req->hook.on_close = on_close ? on_close : fcgi_hook_dummy;
@@ -966,117 +949,42 @@ static inline ssize_t safe_write(fcgi_request *req, const void *buf, size_t coun
 	return n;
 }
 
-#ifndef _WIN32
-static inline ssize_t safe_writev(fcgi_request *req, const void *head, size_t head_len, const void *body, size_t body_len)
+static inline ssize_t safe_read(fcgi_request *req, void *buf, size_t count)
 {
-	struct iovec iov[2] = {
-		{ .iov_base = (void *) head, .iov_len = head_len },
-		{ .iov_base = (void *) body, .iov_len = body_len }
-	};
-	struct iovec *current = iov;
-	int iovcnt = 2;
-	size_t written = 0;
-	const size_t total = head_len + body_len;
-
-	while (written < total) {
-		ssize_t ret;
-
-		do {
-			ret = writev(req->fd, current, iovcnt);
-		} while (ret < 0 && errno == EINTR);
-		if (ret <= 0) {
-			return ret;
-		}
-		written += (size_t) ret;
-		while (iovcnt > 0 && (size_t) ret >= current->iov_len) {
-			ret -= (ssize_t) current->iov_len;
-			current++;
-			iovcnt--;
-		}
-		if (iovcnt > 0 && ret > 0) {
-			current->iov_base = (char *) current->iov_base + ret;
-			current->iov_len -= (size_t) ret;
-		}
-	}
-	return (ssize_t) written;
-}
-#endif
-
-/* One read(2) on the connection, EINTR retried. Returns >0 bytes, 0 on EOF, <0 on error. */
-static inline ssize_t fcgi_read_raw(fcgi_request *req, void *buf, size_t count)
-{
-	int ret;
+	int    ret;
+	size_t n = 0;
 
 	do {
+#ifdef _WIN32
+		size_t tmp;
+#endif
 		errno = 0;
 #ifdef _WIN32
+		tmp = count - n;
+
 		if (!req->tcp) {
-			unsigned int in_len = count > INT_MAX ? INT_MAX : (unsigned int)count;
+			unsigned int in_len = tmp > INT_MAX ? INT_MAX : (unsigned int)tmp;
 
-			ret = _read(req->fd, buf, in_len);
+			ret = _read(req->fd, ((char*)buf)+n, in_len);
 		} else {
-			int in_len = count > INT_MAX ? INT_MAX : (int)count;
+			int in_len = tmp > INT_MAX ? INT_MAX : (int)tmp;
 
-			ret = recv(req->fd, buf, in_len, 0);
+			ret = recv(req->fd, ((char*)buf)+n, in_len, 0);
 			if (ret <= 0) {
 				errno = WSAGetLastError();
 			}
 		}
 #else
-		ret = read(req->fd, buf, count);
+		ret = read(req->fd, ((char*)buf)+n, count-n);
 #endif
-	} while (ret < 0 && errno == EINTR);
-	return ret;
-}
-
-static inline ssize_t safe_read(fcgi_request *req, void *buf, size_t count)
-{
-	size_t n = 0;
-
-	if (!optimized_transport) {
-		while (n < count) {
-			ssize_t ret = fcgi_read_raw(req, ((char *) buf) + n, count - n);
-
-			if (ret <= 0) {
-				return ret < 0 ? ret : (ssize_t) n;
-			}
+		if (ret > 0) {
 			n += ret;
+		} else if (ret == 0 && errno == 0) {
+			return n;
+		} else if (ret <= 0 && errno != 0 && errno != EINTR) {
+			return ret;
 		}
-		return n;
-	}
-
-	while (n < count) {
-		size_t avail = (size_t)(req->in_end - req->in_pos);
-
-		if (avail == 0) {
-			ssize_t ret;
-			size_t want = count - n;
-
-			if (want >= sizeof(req->in_buf)) {
-				/* Large body chunk and nothing buffered: read straight into
-				 * the caller's buffer, no extra copy. */
-				ret = fcgi_read_raw(req, ((char*)buf) + n, want);
-				if (ret <= 0) {
-					return ret < 0 ? ret : (ssize_t)n;
-				}
-				n += ret;
-				continue;
-			}
-			ret = fcgi_read_raw(req, req->in_buf, sizeof(req->in_buf));
-			if (ret <= 0) {
-				return ret < 0 ? ret : (ssize_t)n;
-			}
-			req->in_pos = req->in_buf;
-			req->in_end = req->in_buf + ret;
-			avail = (size_t)ret;
-		}
-		if (avail > count - n) {
-			avail = count - n;
-		}
-		memcpy(((char*)buf) + n, req->in_pos, avail);
-		req->in_pos += avail;
-		n += avail;
-	}
+	} while (n != count);
 	return n;
 }
 
@@ -1400,7 +1308,6 @@ void fcgi_close(fcgi_request *req, int force, int destroy)
 		req->nodelay = 0;
 #endif
 		req->fd = -1;
-		req->in_pos = req->in_end = req->in_buf;
 
 		req->hook.on_close();
 	}
@@ -1496,15 +1403,7 @@ int fcgi_accept_request(fcgi_request *req)
 					socklen_t len = sizeof(sa);
 
 					FCGI_LOCK(req->listen_socket);
-#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
-					if (optimized_transport) {
-						req->fd = accept4(listen_socket, (struct sockaddr *)&sa, &len, SOCK_CLOEXEC);
-					} else {
-						req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
-					}
-#else
 					req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
-#endif
 					FCGI_UNLOCK(req->listen_socket);
 
 #ifndef _WIN32
@@ -1532,9 +1431,6 @@ int fcgi_accept_request(fcgi_request *req)
 				}
 
 #if defined(F_SETFD) && defined(FD_CLOEXEC)
-#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
-				if (!optimized_transport) {
-#endif
 				int fd_attrs = fcntl(req->fd, F_GETFD);
 				if (0 > fd_attrs) {
 					fcgi_log(FCGI_WARNING, "failed to get attributes of the connection socket");
@@ -1542,9 +1438,6 @@ int fcgi_accept_request(fcgi_request *req)
 				if (0 > fcntl(req->fd, F_SETFD, fd_attrs | FD_CLOEXEC)) {
 					fcgi_log(FCGI_WARNING, "failed to change attribute of the connection socket");
 				}
-#if defined(HAVE_ACCEPT4) && defined(SOCK_CLOEXEC)
-				}
-#endif
 #endif
 
 #ifdef _WIN32
@@ -1735,25 +1628,12 @@ int fcgi_write(fcgi_request *req, fcgi_request_type type, const char *str, int l
 			open_packet(req, type);
 			fcgi_make_header(req->out_hdr, type, req->id, 0xfff8);
 			req->out_hdr = NULL;
-#ifndef _WIN32
-			if (optimized_transport) {
-				size_t header_len = (size_t) (req->out_pos - req->out_buf);
-				if (safe_writev(req, req->out_buf, header_len, str + pos, 0xfff8) != (ssize_t) (header_len + 0xfff8)) {
-					req->keep = 0;
-					req->out_pos = req->out_buf;
-					return -1;
-				}
-				req->out_pos = req->out_buf;
-			} else
-#endif
-			{
-				if (!fcgi_flush(req, 0)) {
-					return -1;
-				}
-				if (safe_write(req, str + pos, 0xfff8) != 0xfff8) {
-					req->keep = 0;
-					return -1;
-				}
+			if (!fcgi_flush(req, 0)) {
+				return -1;
+			}
+			if (safe_write(req, str + pos, 0xfff8) != 0xfff8) {
+				req->keep = 0;
+				return -1;
 			}
 			pos += 0xfff8;
 		}
@@ -1764,26 +1644,12 @@ int fcgi_write(fcgi_request *req, fcgi_request_type type, const char *str, int l
 		open_packet(req, type);
 		fcgi_make_header(req->out_hdr, type, req->id, (len - pos) - rest);
 		req->out_hdr = NULL;
-#ifndef _WIN32
-		if (optimized_transport) {
-			size_t body_len = (size_t) ((len - pos) - rest);
-			size_t header_len = (size_t) (req->out_pos - req->out_buf);
-			if (safe_writev(req, req->out_buf, header_len, str + pos, body_len) != (ssize_t) (header_len + body_len)) {
-				req->keep = 0;
-				req->out_pos = req->out_buf;
-				return -1;
-			}
-			req->out_pos = req->out_buf;
-		} else
-#endif
-		{
-			if (!fcgi_flush(req, 0)) {
-				return -1;
-			}
-			if (safe_write(req, str + pos, (len - pos) - rest) != (len - pos) - rest) {
-				req->keep = 0;
-				return -1;
-			}
+		if (!fcgi_flush(req, 0)) {
+			return -1;
+		}
+		if (safe_write(req, str + pos, (len - pos) - rest) != (len - pos) - rest) {
+			req->keep = 0;
+			return -1;
 		}
 		if (pad) {
 			open_packet(req, type);

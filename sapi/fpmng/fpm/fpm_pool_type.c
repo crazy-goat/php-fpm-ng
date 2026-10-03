@@ -290,7 +290,8 @@ static const struct fpm_pool_executor_s fpm_http_direct_executors[] = {
  * left, its only content was the capability bit that selected the optimized
  * transport, measured at 9.5 us per request
  * (docs/FASTCGI_NG_OPTIMIZATION.md) -- a footnote to "http", which set the
- * same bit. Issue #388 retired "http" itself: it was two
+ * same bit. The transport patches were dropped in issue #589, so no pool
+ * type reaches an optimized path. Issue #388 retired "http" itself: it was two
  * things in one section (a pool of PHP workers and the proxy in front of them)
  * and the proxy is now the type it always should have been. Both names are
  * kept as retired names below. */
@@ -606,8 +607,7 @@ static const struct {
 	  "set 'operator.status_path' and 'operator.metrics_path' on the pool you want to watch "
 	  "(issue #278); one endpoint per pool replaced the pool that aggregated all of them" },
 	{ "fastcgi-ng",
-	  "it was removed in 0.9.0 (issue #376): the optimized transport it selected lives on under "
-	  "pool.type = fastcgi; use pool.type = fastcgi, or pool.type = http-direct for a pool with "
+	  "it was removed in 0.9.0 (issue #376); use pool.type = fastcgi, or pool.type = http-direct for a pool with "
 	  "no web server in front" },
 	{ "http",
 	  "it was split in two (issue #388): a pool of PHP workers is 'pool.type = fastcgi' and the "

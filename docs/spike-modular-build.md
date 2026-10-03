@@ -267,6 +267,8 @@ to php-src's `main/fastcgi.c`; the behaviour it switches on comes from patches
 0001, 0002, 0003, 0005 and 0006. `build/prepare.sh` applies all of them
 unconditionally.
 
+Note: `fcgi_set_optimized_transport()` and patch 0004 were dropped by issue #589 (dead code).
+
 Consequences, all of them findings rather than tasks:
 
 - A `--enable-fpmng-fastcgi-ng` flag would remove a registry entry and
@@ -966,6 +968,7 @@ weaknesses**
 - **Why:** `fpm.c:184` does
   `!strcmp(type->name, "fastcgi-ng") || !strcmp(type->name, "http")` to enable
   `fcgi_set_optimized_transport()` and `zend_signal_use_persistent_handlers()`.
+  (Update: the optimized-transport switch and patch 0004 were dropped by issue #589.)
   This is the one remaining violation of the architecture contract
   (`AGENTS.md`, "never `strcmp(type->name, …)`") and it is in core startup
   code. Already filed as issue #153; this spike adds the reason it matters now.

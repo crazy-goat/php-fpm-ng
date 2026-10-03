@@ -178,6 +178,15 @@ transport #344 adds for `http-direct` targets. One transport, two uses: a
 target pool's request listener, and the operator listener. Nothing new is
 invented for it.
 
+## The upstream's `Status:` header
+
+The gateway turns the upstream's CGI `Status:` header into the HTTP status line.
+Only `NNN` or `NNN reason` with a final status (200..599) is accepted, the same
+range `http-direct` uses. Anything else (`abc`, `-5`, `99999`, a 1xx, an empty
+value) makes the gateway answer `502 Bad Gateway`, log a WARNING
+(`upstream sent invalid Status`), record 502 in the access log and drop the rest
+of the upstream reply (#594).
+
 ## The gateway's own numbers
 
 Gateway processes are not workers and have no scoreboard slot. Their numbers

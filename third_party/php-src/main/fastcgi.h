@@ -98,7 +98,6 @@ int fcgi_accept_request(fcgi_request *req);
 int fcgi_finish_request(fcgi_request *req, int force_close);
 const char *fcgi_get_last_client_ip(void);
 void fcgi_set_in_shutdown(int new_value);
-void fcgi_set_optimized_transport(bool enabled);
 void fcgi_request_set_keep(fcgi_request *req, int new_value);
 
 #ifndef HAVE_ATTRIBUTE_WEAK

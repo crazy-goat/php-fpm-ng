@@ -401,6 +401,13 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 		if (len > FPM_HTTP_HEADER_NAME_MAX) {
 			return -1;
 		}
+		/* "_" would collide with the "-" spelling below ("X_Real_IP" and
+		 * "X-Real-IP" are both HTTP_X_REAL_IP), letting a client override a
+		 * header the proxy in front set. Dropped, as nginx and Apache 2.4 do;
+		 * same rule as the gateway, fpm_http.c. Issue #595. */
+		if (memchr(kv->key, '_', len) != NULL) {
+			continue;
+		}
 		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in
 		 * this child, and the locale changes this mapping for plain US-ASCII
 		 * input. In tr_TR.UTF-8 and az_AZ.UTF-8 toupper('i') returns 'i' -- the

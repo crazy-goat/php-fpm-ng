@@ -121,6 +121,31 @@ echo "header-name-at-limit: ok\n";
 check(str_contains($status, ' 400 '), "over-long header name status: $status");
 echo "header-name-over-limit: ok\n";
 
+/* Issue #595: "X_Real_IP" maps to the same CGI key as "X-Real-IP", and the
+ * last pair wins in $_SERVER. A header name with "_" is dropped, so the one a
+ * proxy set is the one the application sees. The underscore spelling comes
+ * last on purpose: that is the order in which it would win. */
+[$status, $body] = request($http, "GET /env.php HTTP/1.1\r\nHost: h.test\r\n"
+    . "X-Real-IP: 10.0.0.1\r\nX_Real_IP: 6.6.6.6\r\nConnection: close\r\n\r\n");
+check(str_contains($status, ' 200 '), "underscore request status: $status");
+$headers = json_decode($body, true);
+check(is_array($headers), "underscore request body: $body");
+check(($headers['x-real-ip'] ?? '') === '10.0.0.1', 'X_Real_IP overrode X-Real-IP: ' . $body);
+echo "underscore-no-override: ok\n";
+
+/* No collision here: "X_Custom" is the only spelling. getallheaders() turns
+ * HTTP_X_CUSTOM back into "X-Custom", so the key to look for is "x-custom"
+ * (a key "x_custom" can never exist). It must be absent: the name is dropped,
+ * not merely de-duplicated. X-Proxy-Control rides along as the control. */
+[$status, $body] = request($http, "GET /env.php HTTP/1.1\r\nHost: h.test\r\n"
+    . "X_Custom: v\r\nX-Proxy-Control: kept\r\nConnection: close\r\n\r\n");
+check(str_contains($status, ' 200 '), "lone underscore request status: $status");
+$headers = json_decode($body, true);
+check(is_array($headers), "lone underscore request body: $body");
+check(!isset($headers['x-custom']), 'a header name with "_" reached the worker: ' . $body);
+check(($headers['x-proxy-control'] ?? '') === 'kept', 'gateway dropped an ordinary header: ' . $body);
+echo "underscore-dropped: ok\n";
+
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
@@ -134,6 +159,8 @@ Done
 proxy-excluded: ok
 header-name-at-limit: ok
 header-name-over-limit: ok
+underscore-no-override: ok
+underscore-dropped: ok
 Done
 --CLEAN--
 <?php

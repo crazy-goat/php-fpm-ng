@@ -54,7 +54,7 @@ The script is resolved inside `chdir`; client paths never select a script.
 `SCRIPT_NAME` and `PHP_SELF` identify the configured front controller;
 `REQUEST_URI` retains the raw URI, `QUERY_STRING` carries the query, and
 `PATH_INFO` carries the parsed URL path. Headers map to `HTTP_*` (except Proxy,
-which is not imported as `HTTP_PROXY`); content type/length have CGI-compatible
+which is not imported as `HTTP_PROXY`, and any header whose name contains `_`, which would collide with its `-` spelling: `X_Real_IP` must not override `X-Real-IP`); content type/length have CGI-compatible
 names. `getallheaders()` and `apache_request_headers()` read HTTP headers directly.
 A header name longer than 1024 bytes cannot become an `HTTP_*` key and the
 request is refused with 400 rather than served with the header missing.

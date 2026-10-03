@@ -1285,13 +1285,10 @@ page keeps working. The split is what the sum could never answer: "the pool is
 refusing" and "the pool is refusing *the people you told it to refuse*" are
 different incidents.
 
-**Known upstream bug (php/php-src#18956).** On a FastCGI pool (and on the
-FastCGI side behind a gateway), where the gateway always sends `FCGI_KEEP_CONN`,
-`max active processes` is unreliable: it stays too high on keep-alive
-connections, and `idle processes` / `active processes` can be wrong for up to one
-maintenance heartbeat (about 1 s). pm scaling is not affected, because the
-maintenance loop recounts from each child's request stage. This repository
-carries no php-src patch for it; the numbers are right once GH-18956 lands upstream.
+The upstream keep-alive counting bug (php/php-src#18956) does not apply to
+`http-direct` pools: they count idle/active themselves and stay balanced. It
+affects `fastcgi` pools and the gateway's upstreams; see
+[operator-endpoint.md](operator-endpoint.md#known-upstream-bug-keep-alive-counters-phpphp-src18956).
 
 `direct schema` exists so that a tool meeting a page it does not understand can
 say so instead of guessing from which fields happen to be present. It is

@@ -201,6 +201,13 @@ delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
 
+## Upstream status counters on keep-alive
+
+The gateway always sends `FCGI_KEEP_CONN`, so a `fastcgi` upstream hits the
+upstream FPM keep-alive counting bug (php/php-src#18956): `max active processes`
+reads too high and `idle`/`active` can lag by up to one heartbeat. See
+[operator-endpoint.md](operator-endpoint.md#known-upstream-bug-keep-alive-counters-phpphp-src18956).
+
 ## The gateway's own numbers
 
 Gateway processes are not workers and have no scoreboard slot. Their numbers

@@ -244,6 +244,16 @@ gauge (per gateway process, summed by the renderer) and the pool-wide
 per pool the gateway forwards for. `/status` on the gateway is the same numbers
 as JSON, one row per target plus the pool row.
 
+### Known upstream bug: keep-alive counters (php/php-src#18956)
+
+This applies to `pool.type = fastcgi` pools, including the ones behind a gateway
+(the gateway always sends `FCGI_KEEP_CONN`). It does not apply to `http-direct`
+pools. On keep-alive connections `max active processes` stays too high, and
+`idle processes` / `active processes` can be wrong for up to one maintenance
+heartbeat (about 1 s). pm scaling is not affected, because the maintenance loop
+recounts from each child's request stage. This repository carries no php-src patch
+for it; the numbers are right once GH-18956 lands upstream.
+
 ### The baseline counter
 
 Every pool reports one counter of its own invocations whether or not its PHP

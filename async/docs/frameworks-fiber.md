@@ -18,7 +18,7 @@ the rest of this file.
   hand-written `public/index.php` without `symfony/runtime`
   ([#78](https://github.com/crazy-goat/php-fpm-ng/issues/78)); needs
   **no** `fiber.isolate_statics` entries. Covered by an automated probe
-  (`tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
+  (`async/tests/frameworks/symfony/`): sessions, the stateful `http_basic` firewall,
   Doctrine identity, Twig, form validation, synchronous Messenger dispatch,
   `APP_ENV=prod`, `pm.max_children > 1`, `fiber.revalidate_freq` deploys, and a
   200-request RSS run all pass. Other Symfony major versions (6.4 LTS, 7.x,
@@ -37,15 +37,15 @@ the rest of this file.
   **Warning: an incomplete list does not crash — Laravel returns HTTP 200
   while silently serving one request's session, identity or query results to
   another, and logs nothing.** The list is verified by an automated audit
-  (`/statics-audit` in `tests/frameworks/laravel/`) that snapshots every
+  (`/statics-audit` in `async/tests/frameworks/laravel/`) that snapshots every
   static property across a suspension, plus data-asserting scenarios
   covering sessions, auth, Eloquent, rate limiting, mail, Blade composers,
   route model binding and per-request observers/global scopes. The list
   must be re-verified for every Laravel minor version. Covered by
-  `tests/frameworks/laravel/`.
+  `async/tests/frameworks/laravel/`.
 - **Slim 4 — supported for the measured surface.** Verified on **Slim
   4.15.3** with `slim/psr7`; needs `env[FPMNG_SHARED_INCLUDES] = 1` and no
-  `fiber.isolate_statics` entries. Covered by `tests/frameworks/slim4/`.
+  `fiber.isolate_statics` entries. Covered by `async/tests/frameworks/slim4/`.
 
 None of this applies to the default `classic` executor, which runs one request
 at a time per worker like upstream FPM.
@@ -354,7 +354,7 @@ last. With the four-item list below: 8/8 correct.
 
 ### Laravel 13.30.1 repository-owned runner result
 
-The Task 025 runner lives in `tests/frameworks/laravel/` and uses Laravel
+The Task 025 runner lives in `async/tests/frameworks/laravel/` and uses Laravel
 13.30.1, Predis 3.6.0 locked in Composer, phpredis 6.3.0RC1, MySQL 8.4.11 and
 Redis 8.0.5. On 2026-09-06 it used PHP-FPM-NG 8.5.11-dev, source worktree
 HEAD `67d1476d4d8015c7a7ddf3221eb062c423869818` with the uncommitted fpm-ng
@@ -460,7 +460,7 @@ general one.
 
 # UPDATE 2026-09-06: automated Symfony probe — remaining task-024 scenarios measured
 
-`tests/frameworks/symfony/run.sh` now covers the whole task-024 matrix
+`async/tests/frameworks/symfony/run.sh` now covers the whole task-024 matrix
 end-to-end (it provisions its own Symfony copy, private MySQL database and
 Redis namespace per run, and asserts on response data, never on HTTP status).
 Measured on macOS (arm64, kqueue) against a locally built php-fpm-ng
@@ -670,7 +670,7 @@ Illuminate\Database\Eloquent\Model::globalScopes
 ```
 
 (The line is comma-separated with no whitespace in the real directive; broken
-here only for readability. Copy it from `tests/frameworks/laravel/bin/run.sh`,
+here only for readability. Copy it from `async/tests/frameworks/laravel/bin/run.sh`,
 which is the file the runner itself uses.)
 
 Where each entry came from:
@@ -694,7 +694,7 @@ version — a framework upgrade can add or move a static.
 
 ## The audit: how the list is verified instead of hand-picked
 
-`tests/frameworks/laravel/bin/run.sh` ends with a statics audit. The
+`async/tests/frameworks/laravel/bin/run.sh` ends with a statics audit. The
 `/statics-audit` route touches every state-keeping subsystem first (DB, cache,
 Redis, log, mail, view, events, rate limiter, auth, Eloquent model events and
 global scopes — so each one initializes whatever statics it owns in *this*

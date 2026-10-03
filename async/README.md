@@ -26,7 +26,9 @@ never conflicts with it:
 Docs that moved here from main (#601), kept for the fiber executor:
 
 - `async/docs/frameworks-fiber.md`: Symfony, Laravel and Slim 4 on `pool.executor = fiber`
-  (the former README section and `docs/frameworks.md` of main; the harness is `tests/frameworks/`)
+  (the former README section and `docs/frameworks.md` of main; the harness is `async/tests/frameworks/`)
+- `async/tests/frameworks/`: the fiber probe harness itself (Symfony, Laravel, Slim 4), moved here
+  from main by #602; main keeps only a Slim 4 smoke test for `classic` and `worker`
 - `async/docs/FASTCGI_NG_OPTIMIZATION.md`: the retired `fastcgi-ng` plan and measurements (historical)
 
 0001-0005 were dropped on async together with main (#589-#592): nothing on

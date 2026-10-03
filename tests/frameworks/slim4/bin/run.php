@@ -294,8 +294,9 @@ recordResult('authenticated-route', static function () use ($baseUrl, $parallel)
 });
 
 recordResult('request-state-reset', static function () use ($baseUrl): string {
-    // One after another, on purpose: a pool has at most 8 workers, so 24 requests make
-    // every worker serve several, and state that leaks from request to request shows up.
+    // One after another, on purpose: state that leaks from one request to the next shows up.
+    // On http-direct all 24 hit the one worker; through the gateway they may reuse one upstream
+    // (not measured), so spreading over several workers is not guaranteed.
     $rows = [];
     for ($i = 0; $i < 24; $i++) {
         $row = getJson(requestBatch([['url' => "$baseUrl/identity?id=$i"]])[0]);

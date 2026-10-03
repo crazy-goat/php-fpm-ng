@@ -11,8 +11,8 @@ Slim `4.15.3`, `slim/psr7` `1.8.0`, PHP-DI `7.1.1`, pinned in `composer.json` an
 
 For each setup it starts a static pool, waits for `/health`, runs `bin/run.php` and stops the pool.
 `http-direct` has one worker, so every request lands in the same process. The `fastcgi` pool behind the
-gateway has 8 (one per parallel probe request), and the gateway waits (`http.pool_full_policy =
-wait`) instead of answering 503 when its share of them is used up:
+gateway has 8 (one per parallel probe request) and the gateway runs as one process (`http.gateways = 1`):
+with 2 gateway processes some of a parallel burst stayed queued until the wait timeout and got 503.
 
 - `gateway-fastcgi`: `pool.type = gateway` in front of `pool.type = fastcgi`;
 - `http-direct`: `pool.type = http-direct`, `pool.executor = classic`.

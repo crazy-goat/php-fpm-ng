@@ -74,9 +74,8 @@ trap 'stop_pool "$CURRENT_PID_FILE"' EXIT INT TERM
 
 # http-direct runs one worker, so every request is served by the same process and state that
 # leaks from one request to the next is visible to the probe. The gateway rejects a request
-# with 503 when its pool has no free worker (fpm_http_reject_queued()), so that pool gets one
-# worker per parallel probe request and waits when a gateway's share is used up; bin/run.php then sends enough sequential requests for
-# each worker to serve several.
+# with 503 when its pool has no free worker (fpm_http_reject_queued()), so the fastcgi pool gets
+# one worker per parallel probe request. bin/run.php then sends sequential requests as well.
 write_pools() {
     local mode=$1 dir=$2 http_port=$3 fcgi_port=$4 container=$5 route_cache=$6
     local app_env workers=1
@@ -108,8 +107,11 @@ listen = 127.0.0.1:$http_port
 ; the same public/ directory as the application pool.
 chdir = $ROOT/public
 http.front_controller = /index.php
-; Two gateway processes share the pool's 8 workers, so a burst of 8 requests can exceed one
-; process's share; wait for a free worker instead of the default immediate 503.
+; One gateway process, on purpose: with 2 processes a queued request is re-pumped only when an
+; upstream is freed in the same process, so part of a burst of 8 parallel requests waited for
+; http.pool_full_wait_ms and then got 503 although the 8 fastcgi workers were idle (3 of 10
+; runs failed). A single process is deterministic.
+http.gateways = 1
 http.pool_full_policy = wait
 http.pool_full_queue_max = 32
 http.pool_full_wait_ms = 5000

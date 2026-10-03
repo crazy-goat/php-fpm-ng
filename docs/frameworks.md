@@ -15,7 +15,7 @@ configuration) through
 - `pool.type = gateway` in front of `pool.type = fastcgi` (classic executor), and
 - `pool.type = http-direct` with `pool.executor = classic`,
 
-each plain and with PHP-DI plus Slim's route cache, one worker per pool. CI runs it in the
+each plain and with PHP-DI plus Slim's route cache (http-direct has one worker, the fastcgi pool 8). CI runs it in the
 `frameworks` job of `.github/workflows/build-matrix.yml` (issue #602). It checks that:
 
 - requests started from a clean request state (no PHP global, middleware state or session user

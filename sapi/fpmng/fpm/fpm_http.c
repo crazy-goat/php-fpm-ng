@@ -146,6 +146,7 @@ struct {								\
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
 #include "fpm_http_acl.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_forwarded.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
@@ -3634,14 +3635,20 @@ static void fpm_http_log_follow_init(struct fpm_http_gateway_s *gw)
  * stays dark with nothing in the log to say why. */
 static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* {{{ */
 {
+	struct evhttp_bound_socket *bound;
+
 	if (listen(gw->listen_fd, gw->backlog) != 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http: cannot open the TLS listener: listen() failed: %s -- the certificate is installed but this gateway is not serving it",
 			gw->pool, strerror(errno));
 		return -1;
 	}
-	if (evhttp_accept_socket(gw->http, gw->listen_fd) != 0) {
+	bound = evhttp_accept_socket_with_handle(gw->http, gw->listen_fd);
+	if (!bound) {
 		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
 		return -1;
+	}
+	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main") != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the main listener; running out of file descriptors will make it spin", gw->pool);
 	}
 	gw->tls_ready = 1;
 	return 0;
@@ -3906,6 +3913,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	}
 	if (gw->plain_listen_fd >= 0) {
 		struct evhttp *plain = evhttp_new(gw->base);
+		struct evhttp_bound_socket *plain_bound;
 
 		if (!plain) {
 			exit(FPM_EXIT_SOFTWARE);
@@ -3919,9 +3927,13 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		evhttp_set_bevcb(plain, fpm_http_plain_bevcb, gw);
 		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
 		evutil_make_socket_nonblocking(gw->plain_listen_fd);
-		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {
+		plain_bound = evhttp_accept_socket_with_handle(plain, gw->plain_listen_fd);
+		if (!plain_bound) {
 			zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed for http.plain_listen", gw->pool);
 			exit(FPM_EXIT_SOFTWARE);
+		}
+		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen") != 0) {
+			zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on http.plain_listen; running out of file descriptors will make it spin", gw->pool);
 		}
 	}
 

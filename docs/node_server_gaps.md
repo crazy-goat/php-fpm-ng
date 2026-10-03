@@ -183,7 +183,7 @@ SSE, reliable client-disconnect detection, and request-body streaming have the b
 ### Already in the plan
 
 - routing / a `try_files` equivalent — done (`http.front_controller`), remaining gaps tracked in task 018;
-- client timeouts — done (task 031, issue #593: `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout`; `http.idle_timeout` is the upstream-side timer, not a client one). Still open: a connection cap on the gateway (`http.max_connections*` are refused on a gateway for now) and an `EMFILE`/`ENFILE` backoff on the listener (issue #593 point 6);
+- client timeouts — done (task 031, issue #593: `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout`; `http.idle_timeout` is the upstream-side timer, not a client one). Still open: a connection cap on the gateway (`http.max_connections*` are refused on a gateway for now) (the `EMFILE`/`ENFILE` accept backoff on the listener is done, issue #687);
 - request-body backpressure — decision made (task 031): whole-body buffering stays, bound is `http.max_body`;
 - `503 Retry-After` for a full pool — done (task 031);
 - TLS + ACME — TLS done, ACME tracked in task 020;

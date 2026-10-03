@@ -324,9 +324,8 @@ ln -s "$CLI_BIN" "$HARNESS_CLI"
 # <php>/sbin/php-fpm and to a php-fpm next to the tests, so a harness that did
 # not take the link would quietly exercise some other FPM -- an installed
 # php-fpm8.5 above all -- and report its results as this binary's.
-# the PHP code is single-quoted on purpose: the shell must not expand $p; FPMNG_TESTER_INC is
-# read by that php process through getenv(), which shellcheck cannot see.
-# shellcheck disable=SC2016,SC2034
+# the PHP code is single-quoted on purpose: the shell must not expand $p
+# shellcheck disable=SC2016
 if ! TESTER_FPM=$(TEST_PHP_EXECUTABLE="$HARNESS_CLI" FPMNG_TESTER_INC="$PHPSRC/$TEST_DIR/tester.inc" \
     "$CLI_BIN" -n -r 'require getenv("FPMNG_TESTER_INC"); $p = FPM\Tester::findExecutable(); echo $p === false ? "" : realpath($p);' 2>/dev/null); then
     TESTER_FPM=unknown

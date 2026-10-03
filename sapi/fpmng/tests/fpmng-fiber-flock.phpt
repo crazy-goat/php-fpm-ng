@@ -15,18 +15,22 @@ if ($status !== 0 || !str_contains(implode("\n", $output), '--enable-fpmng-fiber
 
 require_once "tester.inc";
 
-/* Each request gets its own php process. `delay` staggers the ARRIVAL of the
- * requests, which this test needs: the waiter must reach flock() while the
- * holder still holds the lock, and the unrelated request must arrive after
- * the waiter is already queued. */
+/* Each request gets its own php process. A request is [url, delay, marker].
+ * `marker` is a file the holder's probe creates right AFTER it acquired the
+ * lock: the client polls for it (bounded) before sending, so a waiter can only
+ * arrive once the holder really holds the lock, whatever the process start-up
+ * jitter. `delay` then staggers the arrival relative to that point: the
+ * unrelated request must arrive after the waiter is already queued. */
 function concurrentHttpGet(array $requests): array
 {
     $descriptors = [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
     $processes = [];
     $pipes = [];
     foreach ($requests as $i => $request) {
-        [$url, $delay] = [$request[0], $request[1] ?? 0];
-        $code = 'usleep(' . (int) $delay . ');'
+        [$url, $delay, $marker] = [$request[0], $request[1] ?? 0, $request[2] ?? null];
+        $code = ($marker === null ? '' : '$t=microtime(true);'
+                . 'while(!file_exists(' . var_export($marker, true) . ')&&microtime(true)-$t<20)usleep(2000);')
+            . 'usleep(' . (int) $delay . ');'
             . '$b=@file_get_contents(' . var_export($url, true) . '); echo $b === false ? "@@FALSE@@" : $b;';
         $processes[$i] = proc_open(PHP_BINARY . ' -n -r ' . escapeshellarg($code), $descriptors, $pipes[$i]);
         fclose($pipes[$i][0]);
@@ -89,12 +93,15 @@ $id = $_GET['id'] ?? 'missing';
 $case = $_GET['case'] ?? 'ex';
 $file = __DIR__ . '/lock.dat';
 $out = ['id' => $id, 'case' => $case, 'start' => microtime(true)];
+// Observable "I hold the lock" signal for the client (see concurrentHttpGet()).
+$held = static fn() => file_put_contents(__DIR__ . '/held-' . $_GET['id'], '1');
 
 switch ($case) {
     case 'ex':
         $fp = fopen($file, 'c');
         flock($fp, LOCK_EX);
         $out['acquired'] = microtime(true);
+        $held();
         // 1 s hold, not 400 ms: gives hundreds of ms of margin against
         // relative jitter between independently proc_open()'d `php -n`
         // interpreters (startup + TCP connect + usleep overshoot) for the
@@ -109,7 +116,8 @@ switch ($case) {
         $fp = fopen($file, 'c');
         flock($fp, LOCK_SH);
         $out['acquired'] = microtime(true);
-        usleep(300000);
+        $held();
+        usleep(500000);
         $out['released'] = microtime(true);
         flock($fp, LOCK_UN);
         fclose($fp);
@@ -164,13 +172,13 @@ $tester->start();
 $tester->expectLogStartNotices();
 $http = $tester->getAddr('ipv4', '[http]');
 
-/* H holds LOCK_EX for 1 s (arrives at 0). W asks for the same lock 150 ms in,
- * so it must wait. F arrives 350 ms in and takes no lock at all - well
- * inside H's 1 s hold, leaving a wide margin for client-side stagger. */
+/* H holds LOCK_EX for 1 s. W is sent once H has signalled that it holds the
+ * lock (+150 ms), so it must wait. F is sent 350 ms after that signal and
+ * takes no lock at all - well inside H's 1 s hold. */
 $rows = decodeAll(concurrentHttpGet([
     ["http://$http/probe.php?id=H&case=ex", 0],
-    ["http://$http/probe.php?id=W&case=ex", 150000],
-    ["http://$http/probe.php?id=F&case=free", 350000],
+    ["http://$http/probe.php?id=W&case=ex", 150000, "$docRoot/held-H"],
+    ["http://$http/probe.php?id=F&case=free", 350000, "$docRoot/held-H"],
 ]));
 if (count($rows) !== 3) {
     bail('FAIL: expected H, W, F, got ' . json_encode(array_keys($rows)) . "\n");
@@ -181,10 +189,10 @@ if (count($rows) !== 3) {
  * reached flock() while H still held the lock. If it did not, the run is
  * inconclusive rather than a pass or a detected bug, but a .phpt needs
  * deterministic output, so bail() rather than silently continuing. */
-if (!($w['start'] < $h['released'])) {
+if (!($w['start'] > $h['acquired'] && $w['start'] < $h['released'])) {
     bail(
-        "FAIL: inconclusive run, W did not arrive before H released: "
-        . "w.start={$w['start']} h.released={$h['released']}\n"
+        "FAIL: inconclusive run, W did not arrive while H held the lock: "
+        . "h.acquired={$h['acquired']} w.start={$w['start']} h.released={$h['released']}\n"
     );
 }
 
@@ -215,7 +223,7 @@ echo "flock-does-not-park-process: ok\n";
 /* Two LOCK_SH holders are compatible and must overlap (fpm_flock_sh_add). */
 $rows = decodeAll(concurrentHttpGet([
     ["http://$http/probe.php?id=S1&case=sh", 0],
-    ["http://$http/probe.php?id=S2&case=sh", 50000],
+    ["http://$http/probe.php?id=S2&case=sh", 0, "$docRoot/held-S1"],
 ]));
 if (count($rows) !== 2) {
     bail('FAIL: expected S1, S2, got ' . json_encode(array_keys($rows)) . "\n");
@@ -231,15 +239,16 @@ echo "flock-sh-shared: ok\n";
  * come back false rather than suspend. */
 $rows = decodeAll(concurrentHttpGet([
     ["http://$http/probe.php?id=H2&case=ex", 0],
-    ["http://$http/probe.php?id=NB&case=nb", 120000],
+    ["http://$http/probe.php?id=NB&case=nb", 0, "$docRoot/held-H2"],
 ]));
 /* Same precondition idea as the mutual-exclusion batch above: NB only tells
  * us anything about non-blocking behaviour if it actually reached flock()
  * while H2 still held the lock. */
-if (!($rows['NB']['start'] < $rows['H2']['released'])) {
+if (!($rows['NB']['start'] > $rows['H2']['acquired'] && $rows['NB']['start'] < $rows['H2']['released'])) {
     bail(
-        'FAIL: inconclusive run, NB did not arrive before H2 released: '
-        . "nb.start={$rows['NB']['start']} h2.released={$rows['H2']['released']}\n"
+        'FAIL: inconclusive run, NB did not arrive while H2 held the lock: '
+        . "h2.acquired={$rows['H2']['acquired']} nb.start={$rows['NB']['start']} "
+        . "h2.released={$rows['H2']['released']}\n"
     );
 }
 if (($rows['NB']['got'] ?? null) !== 'no') {

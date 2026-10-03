@@ -668,6 +668,7 @@ struct _fpm_http_conn {
 
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
+	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
 
 	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
 	ev_uint16_t peer_port;

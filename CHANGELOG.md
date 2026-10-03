@@ -11,6 +11,9 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Fixed
+- `pool.type = gateway`: an upstream FastCGI `Status:` that is not three digits in 200..599 (`abc`, `-5`, `99999`, a 1xx) is no longer sent to the client as the status line. The gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply (#594).
+
 ## [0.12.0] - 2026-10-02
 
 ### Added

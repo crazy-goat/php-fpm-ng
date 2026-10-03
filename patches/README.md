@@ -78,13 +78,18 @@ What the unpatched counters cost (static reading, not measured):
 - pm scaling is not affected: the maintenance loop recounts idle and active
   processes from `request_stage` on every heartbeat
   (`sapi/fpmng/fpm/fpm_process_ctl.c`).
+- Pristine `fastcgi.c` calls `on_read()` before the blocking read on a kept
+  connection (`third_party/php-src/main/fastcgi.c`), so a worker that starts
+  waiting on a kept connection counts as reading headers. Hence `accepted conn`
+  and the per-process `requests` get one extra request for every kept connection
+  the client closes (the gateway does this after `http.idle_timeout`, 500 ms by
+  default), a waiting worker is shown as `Reading headers` with the idle wait in
+  `request duration`, and `max active processes` stays too high.
 - `idle processes` and `active processes` in the status page can be wrong for
   up to one heartbeat (about 1 s).
-- `max active processes` stays too high on keep-alive connections. The gateway
-  always sends `FCGI_KEEP_CONN`, so this is the lasting visible effect.
-- `request_terminate_timeout` can hit an idle kept-alive worker only with
-  `http.idle_timeout = 0`, a large value, or an external proxy using
-  `fastcgi_keep_conn on`.
+- `request_terminate_timeout` and `request_slowlog_timeout` can hit an idle
+  kept-alive worker only with `http.idle_timeout = 0`, a large value, or an
+  external proxy using `fastcgi_keep_conn on`.
 
 `sapi/fpmng/fpm/fpm_request.c` offers the `void` entry points
 `fpm_request_accepting()` and `fpm_request_reading_headers()` that the pristine

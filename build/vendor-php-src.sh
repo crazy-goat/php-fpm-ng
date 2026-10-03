@@ -232,9 +232,9 @@ $dirty"
 
   work=$(mktemp -d)
   trap 'rm -rf "$work"' EXIT
-  # Every file a patch touches is copied, not only the vendored ones: patch
-  # 0001 also edits sapi/fpm/fpm/fpm_request.c/.h, which this repo owns rather
-  # than vendors, and a patch with a missing target fails as a whole.
+  # Every file a patch touches is copied, not only the vendored ones: a patch
+  # may also edit a file this repo owns rather than vendors, and a patch with
+  # a missing target fails as a whole.
   manifest_files | while IFS="$(printf '\t')" read -r path upstream up_sha local_sha; do
     : "$up_sha" "$local_sha"
     mkdir -p "$work/$(dirname "$upstream")"

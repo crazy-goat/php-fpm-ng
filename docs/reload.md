@@ -135,7 +135,10 @@ Details worth knowing:
   `pm.max_children` changed; pools that were not spared, or are new, are
   placed in the remaining gaps and start from zero. The slot ranges are kept
   in a per-generation table in `fpm_metrics.c`, not recomputed from pool
-  order.
+  order. The slots a replaced pool used in the previous generation are kept
+  free of new ranges, because a #329 survivor of that pool may still write to
+  its old slot; the new pool's slots are cleared by punching a hole in the
+  memfd, which frees the memory instead of faulting it in.
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.

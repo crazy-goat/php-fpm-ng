@@ -23,7 +23,11 @@
  * are never spared, see fpm_reload_selective_name_ok()):
  *   S:<pool>:<fd>:<size>                    scoreboard of a spared pool
  *   M:<fd>:<size>:<slots>:<limit>           the metrics region
- *   B:<pool>:<base>:<count>                 a spared pool's metrics slot range */
+ *   B:<pool>:<base>:<count>                 a spared pool's metrics slot range
+ *   X:<pool>:<base>:<count>                 any pool's metrics slot range in the
+ *                                           old generation (spared or not): the
+ *                                           ones without a B record are reserved,
+ *                                           a #329 survivor may still write there */
 #define FPM_RELOAD_SHM_ENV "FPMNG_SELECTIVE_RELOAD_SHM"
 
 struct fpm_reload_shm_inh_s {
@@ -150,6 +154,8 @@ static void fpm_reload_shm_load(void) /* {{{ */
 			fpm_reload_shm_add_inherited('M', NULL, fd, (size_t) size, a, b);
 		} else if (sscanf(rec, "B:%255[^:]:%u:%u", name, &a, &b) == 3) {
 			fpm_reload_shm_add_inherited('B', name, -1, 0, a, b);
+		} else if (sscanf(rec, "X:%255[^:]:%u:%u", name, &a, &b) == 3) {
+			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b);
 		}
 	}
 	free(copy);
@@ -290,6 +296,19 @@ int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *c
 }
 /* }}} */
 
+void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count)) /* {{{ */
+{
+	struct fpm_reload_shm_inh_s *r;
+
+	fpm_reload_shm_load();
+	for (r = inherited; r; r = r->next) {
+		if (r->kind == 'X' && r->name && !fpm_reload_shm_find('B', r->name)) {
+			cb(r->a, r->b);
+		}
+	}
+}
+/* }}} */
+
 void fpm_reload_shm_metrics_done(int kept) /* {{{ */
 {
 	struct fpm_reload_shm_inh_s *r = fpm_reload_shm_find('M', NULL);
@@ -341,6 +360,7 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	const char *name = wp->config->name;
 	struct fpm_reload_shm_sb_s *s;
+	struct fpm_worker_pool_s *o;
 	uint32_t base, count;
 	char rec[512];
 
@@ -359,6 +379,16 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			fpm_reload_shm_set_cloexec(own_mx_fd, 0);
 			snprintf(rec, sizeof(rec), "M:%d:%zu:%u:%u", own_mx_fd, own_mx_size, own_mx_slots, own_mx_limit);
 			fpm_reload_shm_append_env(rec);
+			/* Every pool's old range, so the next master can keep new ranges
+			 * off the slots of pools that are about to be replaced. */
+			for (o = fpm_worker_all_pools; o; o = o->next) {
+				uint32_t ob, oc;
+
+				if (!strpbrk(o->config->name, ":;") && fpm_metrics_pool_range(o, &ob, &oc)) {
+					snprintf(rec, sizeof(rec), "X:%s:%u:%u", o->config->name, ob, oc);
+					fpm_reload_shm_append_env(rec);
+				}
+			}
 		}
 		snprintf(rec, sizeof(rec), "B:%s:%u:%u", name, base, count);
 		fpm_reload_shm_append_env(rec);

@@ -505,13 +505,14 @@ command -v docker >/dev/null || fail "docker is not available; this script drive
 EXPECT_FAIL=0
 EXPECT_FAIL_NAMES=
 EXPECT_XFAIL=0
-EXPECT_TOTAL=180
+EXPECT_TOTAL=181
 
 # Issue #537: fpmng-reload-selective-metrics.phpt used to carry an --XFAIL--
 # section (issue #384) and scored XFAIL on every cell. The bug is fixed, the
 # section is gone, and the test counts as a PASS. The same change adds
-# fpmng-reload-selective-metrics-shift.phpt (the 180th owned test). Against the
-# pins of the 179-test tree: PASS +2 on all four cells, XFAIL 0, TOTAL +1. Derived from
+# fpmng-reload-selective-metrics-shift.phpt and -fresh.phpt (the 180th and 181st
+# owned tests). Against the pins of the 179-test tree: PASS +3 on all four
+# cells, XFAIL 0, TOTAL +2. Derived from
 # the old pins, not re-measured on a package-gate run; a real gate run must
 # confirm it.
 
@@ -578,8 +579,8 @@ EXPECT_TOTAL=180
 case "$FLAVOUR" in
 deb)
     IMAGE=ubuntu:26.04
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=179; EXPECT_SKIP=1
-    else EXPECT_PASS=165; EXPECT_SKIP=15; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=180; EXPECT_SKIP=1
+    else EXPECT_PASS=166; EXPECT_SKIP=15; fi
     # binutils for objdump and nm (package-deb.sh resolves NEEDED sonames and
     # reads the binary's symbols with them),
     # php8.5-dev for the headers libphp-build.sh compiles against, the embed
@@ -612,8 +613,8 @@ deb)
     ;;
 apk)
     IMAGE=alpine:edge
-    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=174; EXPECT_SKIP=6
-    else EXPECT_PASS=163; EXPECT_SKIP=17; fi
+    if [ "$TLS_PACKAGE" = 1 ]; then EXPECT_PASS=175; EXPECT_SKIP=6
+    else EXPECT_PASS=164; EXPECT_SKIP=17; fi
     # openssl-dev only for the TLS package (issue #294). Without it the build
     # stage does not get the headers that would let it link OpenSSL even by
     # accident, which is what a default build being TLS-free (issue #280) is

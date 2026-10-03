@@ -51,6 +51,12 @@ int fpm_reload_shm_inherited_metrics(int *fd, size_t *size, uint32_t *slots, uin
  * `name`. Returns 1 if a range was carried over, 0 if not. */
 int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *count);
 
+/* Calls `cb` for the slot range of every pool of the previous generation that
+ * was NOT spared. A #329 survivor of such a pool may still write to its old
+ * slot for a while, so the new generation must not hand those slots to
+ * another writer. */
+void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count));
+
 /* Called by fpm_metrics_init_main() when it has finished with the inherited
  * descriptor, whether it kept it (`kept` != 0, the fd is then registered for
  * the next reload by fpm_reload_shm_register_metrics()) or not (closed). */

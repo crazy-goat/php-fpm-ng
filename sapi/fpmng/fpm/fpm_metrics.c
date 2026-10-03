@@ -3,6 +3,7 @@
 #include "fpm_config.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
@@ -26,7 +27,7 @@
  * ordinary start the two give the same numbers. */
 struct fpm_metrics_range_s {
 	struct fpm_metrics_range_s *next;
-	const char *name; /* wp->config->name: lives as long as the generation */
+	const char *name; /* wp->config->name: lives as long as the generation; NULL = reserved */
 	uint32_t base, count;
 };
 
@@ -37,7 +38,7 @@ static int fpm_metrics_range_of(const struct fpm_worker_pool_s *wp, uint32_t *ba
 	struct fpm_metrics_range_s *r;
 
 	for (r = ranges; r; r = r->next) {
-		if (strcmp(r->name, wp->config->name) == 0) {
+		if (r->name && strcmp(r->name, wp->config->name) == 0) {
 			*base = r->base;
 			return 1;
 		}
@@ -51,7 +52,7 @@ int fpm_metrics_pool_range(const struct fpm_worker_pool_s *wp, uint32_t *base, u
 	struct fpm_metrics_range_s *r;
 
 	for (r = ranges; r; r = r->next) {
-		if (strcmp(r->name, wp->config->name) == 0) {
+		if (r->name && strcmp(r->name, wp->config->name) == 0) {
 			*base = r->base;
 			*count = r->count;
 			return 1;
@@ -111,6 +112,34 @@ static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t coun
 }
 /* }}} */
 
+/* Slots of a replaced pool in the old generation: kept free of new ranges
+ * because its #329 survivor can still be writing to its old slot, and two
+ * writers on one slot race (issue #537). */
+static void fpm_metrics_reserve(uint32_t base, uint32_t count) /* {{{ */
+{
+	fpm_metrics_add_range(NULL, base, count);
+}
+/* }}} */
+
+/* Zero `n` slots from `first` in the region. A hole punched in the memfd gives
+ * zeros back and frees the pages (the region is sparse by design: memset would
+ * fault in every page, GiBs with a large pm.max_children); memset only if the
+ * filesystem cannot punch. */
+static void fpm_metrics_clear_slots(int fd, void *mem, size_t header, size_t slot_size, uint32_t first, uint32_t n) /* {{{ */
+{
+	size_t off = header + (size_t) first * slot_size, len = (size_t) n * slot_size;
+
+#if defined(__linux__) && defined(FALLOC_FL_PUNCH_HOLE) && defined(FALLOC_FL_KEEP_SIZE)
+	if (fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, (off_t) off, (off_t) len) == 0) {
+		return;
+	}
+#else
+	(void) fd;
+#endif
+	memset((char *) mem + off, 0, len);
+}
+/* }}} */
+
 int fpm_metrics_init_main(void) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -166,6 +195,9 @@ int fpm_metrics_init_main(void) /* {{{ */
 			}
 		}
 	}
+	if (have_inh) {
+		fpm_reload_shm_foreach_unspared_range(fpm_metrics_reserve);
+	}
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		uint32_t base;
 
@@ -179,7 +211,7 @@ int fpm_metrics_init_main(void) /* {{{ */
 		struct fpm_metrics_range_s *r;
 
 		for (r = ranges; r; r = r->next) {
-			if (r->base + r->count > total) {
+			if (r->base + r->count > total) { /* reserved ranges count too: a survivor must not hit a truncated page */
 				total = r->base + r->count;
 			}
 		}
@@ -207,6 +239,9 @@ int fpm_metrics_init_main(void) /* {{{ */
 			for (r = ranges; r; r = r->next) {
 				uint32_t b, c;
 
+				if (!r->name) {
+					continue;
+				}
 				if (fpm_reload_shm_inherited_range(r->name, &b, &c) && b == r->base && c == r->count) {
 					continue;
 				}
@@ -216,7 +251,7 @@ int fpm_metrics_init_main(void) /* {{{ */
 					if (r->base + n > old_slots_size) {
 						n = (uint32_t) old_slots_size - r->base;
 					}
-					memset((char *) mem + header + (size_t) r->base * slot_size, 0, (size_t) n * slot_size);
+					fpm_metrics_clear_slots(fd, mem, header, slot_size, r->base, n);
 				}
 			}
 			fpm_reload_shm_metrics_done(1);

@@ -385,9 +385,11 @@ reach those files. This is the first real limitation of the model.
 
 **And it is not a theoretical problem; it is our own problem.** The gateway
 keeps persistent connections to the pool (`FCGI_KEEP_CONN`), so fpm-ng is exactly
-the case broken by this bug: the idle-versus-active counter lies, and
-`pm = dynamic` and `ondemand` scale the pool incorrectly. Without the patch,
-only `pm = static` is trustworthy.
+the case broken by this bug: the idle-versus-active counter lies. (Corrected
+2026-10-03, issue #591: pm scaling is not affected, because the maintenance loop
+recounts idle and active from `request_stage` every heartbeat. What stays wrong is
+`max active processes` and, for up to one heartbeat, `idle`/`active`.
+Patch 0001 was dropped from `main` by issue #591; `patches/README.md` has the audit.)
 
 Decision: **carry the patch**, but make the deviation visible and measurable.
 `patches/` + `prepare.sh` applies it and reports it loudly; without patches it

@@ -37,10 +37,9 @@ other php-src `main/` header can reach the compiler this way, so every
 - the SHA-256 of the pristine upstream file at the tag;
 - the SHA-256 of the copy here.
 
-The two hashes are equal for every file except two:
-
-- `main/fastcgi.c` and `main/fastcgi.h` carry `patches/0001`. The
-  manifest's `patches` line fingerprints that stack.
+The two hashes are equal for every file: `main` carries no php-src patch
+(issue #591). The manifest's `patches` line fingerprints the patch stack and is
+the fingerprint of an empty one.
 
 One file is stored under a different name, with its content unchanged:
 
@@ -90,12 +89,10 @@ read by any translation unit.
   - `fpm_main_arginfo.h` is generated upstream by `gen_stub.php` from
     `fpm_main.stub.php`, and upstream commits it. It is vendored as
     generated; this repository never regenerates it.
-- **`main/fastcgi.c` and `main/fastcgi.h`**: the FastCGI protocol layer with
-  this repository's transport patches applied (`patches/README.md`).
-  - The SDK ships its own `main/fastcgi.h`, but that copy is unpatched. A
-    build that read it would compile against a different
-    `fcgi_init_request()` signature than the one it links. In practice that
-    is a compile error, and the audit refuses it as well.
+- **`main/fastcgi.c` and `main/fastcgi.h`**: the FastCGI protocol layer,
+  pristine at the pinned tag (`patches/README.md`).
+  - The build reads these copies, not a header from the SDK, so the header
+    and `fastcgi.c` always match.
 
 There is one generated input that is not here: `config.h`. php-src's
 configure writes it, and ext/fpmng_metrics includes it. On this path the build

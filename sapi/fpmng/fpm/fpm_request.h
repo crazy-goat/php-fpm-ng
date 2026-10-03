@@ -3,10 +3,16 @@
 #ifndef FPM_REQUEST_H
 #define FPM_REQUEST_H 1
 
-/* hanging in accept() */
-void fpm_request_accepting(bool fromActive);
+/* hanging in accept(). The void entry points are the ones the pristine upstream
+ * fpm_main.c passes to fcgi_init_request(); they count every call as a state change. */
+void fpm_request_accepting(void);
 /* start reading fastcgi request from very first byte */
-void fpm_request_reading_headers(bool keptAlive);
+void fpm_request_reading_headers(void);
+/* The same with an explicit counter policy, for the http-direct executors, which keep one
+ * long-lived state: fromActive / keptAlive = false leaves the idle/active counters alone
+ * where the worker was not counted active (see fpm_request.c). */
+void fpm_request_accepting_ex(bool fromActive);
+void fpm_request_reading_headers_ex(bool keptAlive);
 /* not a stage really but a point in the php code, where all request params have become known to sapi */
 void fpm_request_info(void);
 /* the script is executing */

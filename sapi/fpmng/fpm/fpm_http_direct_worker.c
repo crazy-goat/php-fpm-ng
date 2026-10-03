@@ -34,7 +34,7 @@
  * Current limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
- * per-request scoreboard accounting (fpm_request_accepting(false) once at
+ * per-request scoreboard accounting (fpm_request_accepting_ex(false) once at
  * :2580). TLS is NOT a limit here: this executor terminates it like the
  * classic one since issue #55, see the fpm_http_direct_tls_child_attach()
  * call at :2474. Streaming is no longer one either: fpmng_worker_respond()
@@ -396,7 +396,7 @@ const char *const fpm_http_direct_worker_rejects[] = {
 	 * unenforced. */
 	"request_terminate_timeout", "request_slowlog_timeout", "slowlog",
 	/* Same reason, one step further (issue #59). This executor calls
-	 * fpm_request_accepting(false) once for the life of the child, so the
+	 * fpm_request_accepting_ex(false) once for the life of the child, so the
 	 * scoreboard has no per-request stage, duration, CPU or peak memory to
 	 * report and no request to count. A status page would show one process
 	 * stuck in one state and an access log would have nothing to time, so
@@ -2951,9 +2951,9 @@ static bool fpm_worker_add_header(struct evkeyvalq *out, const char *name, zval 
  * fpm_scoreboard_update()'s idle/active/lq/lq_len/max_children_reached/slow_rq
  * arguments all carry their FPM_SCOREBOARD_ACTION_INC "no change" value (0 --
  * see fpm_scoreboard_update_commit()), so this touches requests and nothing
- * else: not request_stage, which fpm_request_reading_headers() would also
+ * else: not request_stage, which fpm_request_reading_headers_ex() would also
  * set and which this executor has no per-request concept of (one
- * fpm_request_accepting(false) call for the child's whole life, see
+ * fpm_request_accepting_ex(false) call for the child's whole life, see
  * fpm_http_direct_worker_child_main()). */
 static void fpm_worker_count_scoreboard_request(void)
 {
@@ -4142,7 +4142,7 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	 * would have nothing to measure — which is why this type rejects them
 	 * (fpm_http_direct_worker_rejects). Per-request accounting for a worker
 	 * serving many connections at once is task 066 territory. */
-	fpm_request_accepting(false);
+	fpm_request_accepting_ex(false);
 
 	memset(&SG(request_info), 0, sizeof(SG(request_info)));
 	SG(server_context) = &fw;

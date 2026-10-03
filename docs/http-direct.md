@@ -306,7 +306,7 @@ property and are **not** bugs in the above, but they are easy to trip over:
   per-request, `worker.request_timeout`) are the only things that eventually
   free it.
 - The child reports `ACCEPTING` for its whole life
-  (`fpm_request_accepting(false)` is called once), so `fpm_request_is_idle()`
+  (`fpm_request_accepting_ex(false)` is called once), so `fpm_request_is_idle()`
   (`sapi/fpmng/fpm/fpm_request.c`) — and therefore `pm = ondemand` bookkeeping
   and the scoreboard — see a worker holding long-polls as idle. Per-request
   accounting for this executor is #64.
@@ -1285,6 +1285,14 @@ page keeps working. The split is what the sum could never answer: "the pool is
 refusing" and "the pool is refusing *the people you told it to refuse*" are
 different incidents.
 
+**Known upstream bug (php/php-src#18956).** On a FastCGI pool (and on the
+FastCGI side behind a gateway), where the gateway always sends `FCGI_KEEP_CONN`,
+`max active processes` is unreliable: it stays too high on keep-alive
+connections, and `idle processes` / `active processes` can be wrong for up to one
+maintenance heartbeat (about 1 s). pm scaling is not affected, because the
+maintenance loop recounts from each child's request stage. This repository
+carries no php-src patch for it; the numbers are right once GH-18956 lands upstream.
+
 `direct schema` exists so that a tool meeting a page it does not understand can
 say so instead of guessing from which fields happen to be present. It is
 bumped when a field changes meaning or leaves; adding a field does not bump it.
@@ -1515,7 +1523,7 @@ What differs from a fastcgi pool:
 
 Under `pool.executor = worker`, `operator.status_path`/`operator.status` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
-that executor calls `fpm_request_accepting(false)` once for the life of the
+that executor calls `fpm_request_accepting_ex(false)` once for the life of the
 child, so there is no per-request stage, duration, CPU or peak memory to
 report. Refusing the directive is better than answering it with placeholders.
 Issue #387 decided the status page **stays refused** here rather than being
@@ -1550,7 +1558,7 @@ still cannot say for this executor is the same thing `operator.status_path` cann
 idle vs. active per request, a request's duration, or its CPU/peak memory —
 the scoreboard's `idle`/`active` pair for a worker pool therefore keeps reading
 `idle=N, active=0` regardless of how many requests are actually in flight,
-because that pair is written from `fpm_request_accepting()`, called once per
+because that pair is written from `fpm_request_accepting_ex()`, called once per
 child rather than once per request.
 
 ### `listen.allowed_clients`
@@ -1943,7 +1951,7 @@ that could simply be relaxed.
 Reaching a truly arbitrary method would mean either patching libevent itself
 or bypassing its HTTP request-line parser entirely for a raw
 `bufferevent`-level implementation. This project patches php-src for its own
-worker/fiber transport needs (`patches/0001`; 0002 was replaced by a listener option in issue #590,
+worker/fiber transport needs (patch 0001 was dropped by issue #591; 0002 was replaced by a listener option in issue #590,
 0003-0005 were dropped by issue #589, 0006 by issue #420, and 0007/0008 live on branch async) but has never carried a
 libevent patch, and vendoring or patching a system HTTP parsing library is a
 materially larger commitment (a new patch surface to track across

@@ -12,6 +12,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 ## [Unreleased]
 
 ### Removed
+- php-src patch `0001` (GH-18956, idle/active counting on FastCGI keep-alive connections) and its `php-8.3/` variant; `main` now carries no php-src patch, and `third_party/php-src/` is re-imported unpatched. Known effect, documented in `docs/http-direct.md` and `patches/README.md`: `max active processes` stays too high on keep-alive connections, and `idle`/`active` can be wrong for up to one heartbeat; pm scaling is not affected. The owned `fpm_request.c` again offers the `void` `fpm_request_accepting()` / `fpm_request_reading_headers()` that upstream's `fpm_main.c` passes to `fcgi_init_request()`, plus `_ex(bool)` variants for http-direct (#591).
 - The dead optimized-transport patches `0003` (buffered read, `accept4`), `0004` (`fcgi_set_optimized_transport()`) and `0005` (`writev`), the `HAVE_ACCEPT4` probe and its binary assert; `third_party/php-src/` is re-imported at php-8.5.9. `main` carries only patches 0001 and 0002 (#589; 0002 was removed in #590).
 
 ### Changed

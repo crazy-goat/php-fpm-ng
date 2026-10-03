@@ -42,7 +42,7 @@ rather than overwrite the edit.
 
 | patch | touches | waiting for | checked on |
 |---|---|---|---|
-| `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (full PR, not an excerpt) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (7 arguments to `fpm_scoreboard_update_commit`) |
+| (none) | | | |
 
 `prepare.sh` applies everything in order to an untouched tree, and checks
 "already applied" for the whole stack at once (in reverse, from copies of the
@@ -65,75 +65,34 @@ nothing has selected the optimized transport since #420 (#376 retired
 does not need for correctness. Branch `async` may keep its own copies. The
 numbers they earned are in `docs/NOTES.md` (3t and the `writev` section).
 
-### Why 0001 is necessary
+### Patch 0001 (GH-18956) was dropped from `main` by issue #591
 
-The gateway keeps persistent connections to the pool (`FCGI_KEEP_CONN`), so
-fpm-ng is exactly the case broken by GH-18956: the idle-versus-active counter
-lies, and `pm = dynamic` and `ondemand` scale the pool incorrectly. Without this
-patch, only `pm = static` is trustworthy.
+`main` carries no php-src patch. `patches/0001-gh18956-fastcgi-keepalive-counting.patch`
+(and its `php-8.3/` variant) fixed the idle/active counters on FastCGI keep-alive
+connections. The upstream bug is still real and is reported as php/php-src#18956
+(fix: bukka/php-src#2); the patch is in git history
+(`git log --diff-filter=D -- patches/0001-gh18956-fastcgi-keepalive-counting.patch`).
 
-Information about whether `accept` came from a persistent connection lives in
-`main/fastcgi.c` — it cannot be produced from `sapi/` alone. The companion
-changes in `fpm_request.c` and `fpm_request.h` are carried as our own files in
-`sapi/fpmng/fpm/`, because they live under `sapi/`.
+What the unpatched counters cost (static reading, not measured):
 
-### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
+- pm scaling is not affected: the maintenance loop recounts idle and active
+  processes from `request_stage` on every heartbeat
+  (`sapi/fpmng/fpm/fpm_process_ctl.c`).
+- `idle processes` and `active processes` in the status page can be wrong for
+  up to one heartbeat (about 1 s).
+- `max active processes` stays too high on keep-alive connections. The gateway
+  always sends `FCGI_KEEP_CONN`, so this is the lasting visible effect.
+- `request_terminate_timeout` can hit an idle kept-alive worker only with
+  `http.idle_timeout = 0`, a large value, or an external proxy using
+  `fastcgi_keep_conn on`.
 
-Coordinator decision: path 1. `0001` now also carries the PR hunks for
-`sapi/fpm/fpm/fpm_request.c/.h`, so it is the FULL equivalent of bukka#2's PR
-(without `.phpt` tests) and disappears entirely when that PR is merged. Both
-SAPIs build together and the old FPM receives the same fix. Verification:
-`--enable-fpm --enable-fpmng` build + the full `sapi/fpm/tests` suite — result in
-`docs/NOTES.md` 3t. The original analysis below is retained for context.
-
-`0001` changes the `fcgi_init_request()` hook signatures in `main/fastcgi.h` from
-`void(*)(void)` to `void(*)(bool)`. Upstream `sapi/fpm/fpm/fpm_main.c` passes
-`fpm_request_accepting`/`fpm_request_reading_headers` with the old signatures
-from upstream `fpm_request.h`, so GCC 14+ stops the build
-(`-Wincompatible-pointer-types` is an error). The promise that "old FPM keeps
-working alongside it" is broken here: today only `--enable-fpmng` works without
-`--enable-fpm`. Our `sapi/fpmng` compiles because it carries its own
-`fpm_request.c/.h` with `bool` signatures.
-
-Size: **small**, because it does exactly what the upstream PR does. PR bukka#2
-(GH-18956) changes `main/fastcgi.c` **and** `sapi/fpm/fpm/fpm_request.c`,
-`sapi/fpm/fpm/fpm_request.h` (plus tests). Our `0001` was the `main/` portion;
-we carried the missing part as our own files in `sapi/fpmng/` — which is why
-upstream `sapi/fpm` fell behind.
-
-Two paths:
-
-1. **Add the PR hunks for `sapi/fpm/fpm/fpm_request.c` and `fpm_request.h` to
-   `0001`** (~33 lines, identical to what we have in `sapi/fpmng/`). Both SAPIs
-   then build together, and upstream FPM in the same tree gets the GH-18956
-   counting fix — behavior upstream will merge anyway. Cost: the patch touches
-   `sapi/fpm/` for the first time, but it remains one problem = one patch, with
-   the same expiry path. The old FPM behavior changes only through correct
-   idle/active counters on keep-alive.
-2. **Redesign `0001` without changing signatures**: keep the old hooks and add a
-   separate setter in `fastcgi.c` (for example,
-   `fcgi_request_set_hooks_ex(req, on_accept(bool), on_read(bool))`). Upstream
-   `sapi/fpm` stays untouched, but our copied `fpm_main.c` calls
-   `fcgi_init_request()` with old prototypes and our `bool` functions — so we
-   would have to own `fpm_main.c` (20 commits/year) or add a hook to it. More
-   code, further from upstream's shape.
-
-Recommendation: path 1. Zero new code, convergent with upstream, and
-`prepare.sh` could stop deleting `sapi/fpmng/tests` merely because the tests
-refer to the php-fpm binary — with `--enable-fpm` alongside it, upstream tests
-run in the same tree. Do this after the coordinator's decision, not in this task.
+`sapi/fpmng/fpm/fpm_request.c` offers the `void` entry points
+`fpm_request_accepting()` and `fpm_request_reading_headers()` that the pristine
+`fpm_main.c` passes to `fcgi_init_request()`, plus the `_ex(bool)` variants the
+http-direct executors use.
 
 ### Version variants
 
-PHP-8.3 currently has ONE variant (`0001` — 7 arguments to
-`fpm_scoreboard_update_commit`); a second one (`0003`, `const void *buf` in
-`safe_read()`) went with that patch in issue #589. It will disappear with the
-patch when upstream merges it; if 8.3 diverges further, dropping 8.3 from
-supported versions will be cheaper than a third variant.
-
-**DECISION (2026-09-05): KEEP 8.3.** It still receives security support, and the
-two variants cost us practically nothing — they apply cleanly and are covered
-by CI. The rule-3 threshold remains a warning, not an automatic cutoff: merely
-being at the threshold is NOT a reason to drop a version. The reason would be a
-third variant or a variant requiring different logic rather than a different
-signature. Until then, do not reopen this discussion.
+None. The `php-8.3/` directory is gone with 0001. The 2026-09-05 decision to keep
+PHP 8.3 supported stands; the rule-3 warning threshold applies again when a
+patch needs variants.

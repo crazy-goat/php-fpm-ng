@@ -13,7 +13,7 @@
 #
 #   - the SDK's main/fastcgi.h was read. It is the unpatched upstream header;
 #     reading it means the build compiled against a FastCGI that is not the
-#     one it links (patches/0001-0002).
+#     one it links (patches/0001).
 #   - any main/ header other than the vendored fastcgi.h came from outside the
 #     SDK: header shadowing, the defect the old libphp build had.
 #   - a file listed in third_party/php-src/MANIFEST (C or header) was read by

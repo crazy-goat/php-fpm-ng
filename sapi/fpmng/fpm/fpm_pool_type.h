@@ -253,12 +253,14 @@ struct fpm_pool_type_s {
 	unsigned listening_socket_nonblocking:1;
 
 	/* TCP_NODELAY on the same master-side socket, for a type whose children
-	 * speak to the client directly (issue #244). FPM's own listener code never
-	 * set it: it was written for FastCGI, where the peer is a web server on the
-	 * same host and Nagle costs nothing. For a type that answers the client, it
-	 * costs the trailing partial segment of every response over a few kilobytes
-	 * a wait for the peer's delayed ACK -- 43 ms on the poligon, against 0.3 ms
-	 * without.
+	 * speak to the client directly (issue #244), and for the fastcgi type, whose
+	 * FastCGI layer intends to set it per connection but never does off Windows
+	 * (issue #590). FPM's own listener code never set it: it was written for
+	 * FastCGI with a web server on the same host. Over a keep-alive connection
+	 * Nagle is not free even there (the gateway is such a peer); for a type that
+	 * answers the client, it costs the trailing partial segment of every
+	 * response over a few kilobytes a wait for the peer's delayed ACK -- 43 ms
+	 * on the poligon, against 0.3 ms without.
 	 *
 	 * In the master and before the fork, not in the child, because Linux copies
 	 * the listening socket's options onto a connection when the handshake

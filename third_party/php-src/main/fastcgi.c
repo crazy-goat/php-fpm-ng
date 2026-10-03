@@ -1406,13 +1406,6 @@ int fcgi_accept_request(fcgi_request *req)
 					req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
 					FCGI_UNLOCK(req->listen_socket);
 
-#ifndef _WIN32
-					/* On Windows req->tcp is set once in fcgi_init_request() (pipe vs socket).
-					 * Elsewhere it was never set at all, so TCP_NODELAY was never enabled. */
-					if (req->fd >= 0) {
-						req->tcp = (sa.sa.sa_family != AF_UNIX);
-					}
-#endif
 					client_sa = sa;
 					if (req->fd >= 0 && !fcgi_is_allowed()) {
 						fcgi_log(FCGI_ERROR, "Connection disallowed: IP address '%s' has been dropped.", fcgi_get_last_client_ip());

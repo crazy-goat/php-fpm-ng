@@ -1170,6 +1170,33 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 	}
 }
 
+/* Issue #533: the upstream failed after the status line and headers went to
+ * the client. evhttp_send_reply_end() would put the terminating 0-chunk on the
+ * wire, and the client (or a cache between us and it) would store a truncated
+ * body as a complete one. The only truthful thing left to send is a message
+ * that does not end: access-log the request, then shutdown() the client socket
+ * -- the same shape as fpm_direct_stream_abort() in fpm_http_direct.c -- so
+ * libevent finds the connection dead on its next pass, frees the request there
+ * and runs fpm_http_client_closed() for the gauge and the index. The close
+ * callback stays registered on purpose; fpm_http_conn_free() has detached this
+ * request from it. A reply framed by Content-Length is cut short of its
+ * length, a chunked one of its terminator; an HTTP/1.0 client gets a
+ * close-delimited reply, which no close can mark as incomplete. */
+static void fpm_http_finish_truncated(fpm_http_conn *c)
+{
+	struct evhttp_connection *evcon = evhttp_request_get_connection(c->req);
+	struct bufferevent *bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
+	evutil_socket_t fd = bev ? bufferevent_getfd(bev) : -1;
+
+	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+		c->remote_user, c->status, c->bytes_out,
+		c->log_target ? c->log_target : c->target->pool);
+	fpm_http_conn_free(c);
+	if (fd >= 0) {
+		shutdown(fd, SHUT_RDWR);
+	}
+}
+
 /* The pool is done with the request (END_REQUEST seen or the connection failed).
  * `explained` says the reason is already in the log -- a clean EOF needs no
  * line at all, and fpm_http_upstream_fail() writes its own for the case it can
@@ -1299,7 +1326,19 @@ void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 	}
 	/* EOF is normal after pm.max_requests or a worker restart; a request in flight is lost though */
 	if (up->current) {
-		fpm_http_finish(up->current, clean_eof || mute);
+		fpm_http_conn *c = up->current;
+
+		if (c->headers_sent && !c->discard_upstream) {
+			/* A close-delimited HTTP reply ends by this very EOF, but its
+			 * transport completes it before it gets here, so reaching this
+			 * point with headers out is always a lost reply (issue #533). */
+			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' failed after the response head was sent; "
+				"the client connection is closed without completing the reply",
+				gw->pool, upstream_address);
+			fpm_http_finish_truncated(c);
+		} else {
+			fpm_http_finish(c, clean_eof || mute);
+		}
 		up->current = NULL;
 	}
 	up->t->ops->drop(up);

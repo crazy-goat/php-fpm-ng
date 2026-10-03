@@ -287,6 +287,32 @@ EOT;
         return $out;
     }
 
+    /**
+     * Reads what the gateway sends this client until it closes the connection or
+     * $seconds pass: [bytes, closed]. Unlike readResponse() it does not stop at a
+     * framing boundary, so a reply that ends WITHOUT its terminator is told apart
+     * from one that ends with it (issue #533).
+     */
+    public function readUntilClose(float $seconds = 6.0): array
+    {
+        $deadline = microtime(true) + $seconds;
+        $out = $this->clientBuf;
+        $this->clientBuf = '';
+        while (microtime(true) < $deadline) {
+            $chunk = fread($this->client, 65536);
+            if ($chunk !== '' && $chunk !== false) {
+                $out .= $chunk;
+                continue;
+            }
+            if (feof($this->client)) {
+                return [$out, true];
+            }
+            usleep(20000);
+        }
+
+        return [$out, false];
+    }
+
     public static function status(string $response): string
     {
         return strtok($response, "\r\n") ?: '(nothing)';

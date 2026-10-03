@@ -313,6 +313,16 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.requires_listen = 1,
 		.requires_pm     = 1,
 		.serves_requests = 1,
+		/* Issue #590. Upstream main/fastcgi.c assigns req->tcp only under
+		 * _WIN32, so its own "TCP_NODELAY on a FCGI_KEEP_CONN connection"
+		 * branch never runs and a response over the 8 KiB output buffer waits
+		 * for the peer's delayed ACK (41 ms median per request measured with a
+		 * keep-alive client; fpmng-fastcgi-tcp-nodelay.phpt). The gateway holds
+		 * persistent TCP connections to a pool, so this is the common case, not
+		 * an edge. Set on the listener, where accepted sockets inherit it on
+		 * Linux; it replaces the php-src patch that used to do this in
+		 * main/fastcgi.c. A unix listener is left alone. */
+		.listening_socket_nodelay = 1,
 		.baseline_counter = "requests",
 		.operator_endpoint = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,

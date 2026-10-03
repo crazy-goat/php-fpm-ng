@@ -107,7 +107,7 @@ jobs:
 
   # Issue #575: the four package-gate cells do not depend on each other, so they
   # run in parallel and a rehearsal takes the time of the slowest cell, not the
-  # sum (about 12 min instead of about 49). fail-fast is off so that all four
+  # sum (expected about 12 min instead of about 49, not measured). fail-fast is off so that all four
   # results are visible; one red cell still fails the run, and the release job
   # below needs all of them, so nothing is published.
   packages:

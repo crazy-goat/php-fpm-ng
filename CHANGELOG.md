@@ -17,7 +17,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 - The dead optimized-transport patches `0003` (buffered read, `accept4`), `0004` (`fcgi_set_optimized_transport()`) and `0005` (`writev`), the `HAVE_ACCEPT4` probe and its binary assert; `third_party/php-src/` is re-imported at php-8.5.9. `main` carries only patches 0001 and 0002 (#589; 0002 was removed in #590, 0001 in #591).
 
 ### Changed
-- `release.yml`: the four package-gate cells (`deb`, `apk`, `deb-tls`, `apk-tls`) run as a parallel matrix (`fail-fast: false`) and each uploads its output as an artifact; a `release` job that needs all of them collects the assets and publishes on a tag only. The release notes are checked in a separate first job. A rehearsal takes about 12 min instead of about 49; asset names and publish-on-tag-only behaviour are unchanged (#575).
+- `release.yml`: the four package-gate cells (`deb`, `apk`, `deb-tls`, `apk-tls`) run as a parallel matrix (`fail-fast: false`) and each uploads its output as an artifact; a `release` job that needs all of them collects the assets and publishes on a tag only. The release notes are checked in a separate first job. A rehearsal should take about the slowest cell instead of the sum of the four (expected about 12 min instead of about 49, not measured yet); asset names and publish-on-tag-only behaviour are unchanged (#575).
 - `pool.type = fastcgi`: TCP_NODELAY is now set on the listening socket by the SAPI (`.listening_socket_nodelay`) and so applies to every accepted TCP connection, not only FCGI_KEEP_CONN ones. It replaces php-src patch `0002` (`main/fastcgi.c`), which is removed; `main` now carries only patch `0001`. No latency change against 0.12.0, which already carried the patch (#590).
 
 ### Fixed

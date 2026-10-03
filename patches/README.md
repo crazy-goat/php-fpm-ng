@@ -87,8 +87,9 @@ What the unpatched counters cost (static reading, not measured):
   `request duration`, and `max active processes` stays too high.
 - `idle processes` and `active processes` in the status page can be wrong for
   up to one heartbeat (about 1 s).
-- `request_terminate_timeout` can hit an idle kept-alive worker only with `http.idle_timeout = 0`, a large value, or an
-  external proxy using `fastcgi_keep_conn on`.
+- `request_terminate_timeout` can hit an idle kept-alive worker only with
+  `http.idle_timeout = 0`, a large value, or an external proxy using
+  `fastcgi_keep_conn on`.
 
 `sapi/fpmng/fpm/fpm_request.c` offers the `void` entry points
 `fpm_request_accepting()` and `fpm_request_reading_headers()` that the pristine

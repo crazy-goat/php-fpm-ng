@@ -174,6 +174,7 @@ struct {								\
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
 #define FPM_HTTP_KEEPALIVE_TIMEOUT_MS 60000	/* http.keepalive_timeout default (ms); how long an idle keep-alive client connection may wait for its next request */
+#define FPM_HTTP_RESPONSE_BUFFER (1024 * 1024)	/* http.response_buffer default (bytes), issue #596 */
 #define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
 /* A crash loop (bad bind, OOM, ...) must not turn into an unbounded fork()
@@ -1250,13 +1251,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 	c->status = code; /* for the access log, see fpm_http_finish() */
 
 	if (c->cgi_headers.s && body_off < ZSTR_LEN(c->cgi_headers.s)) {
-		struct evbuffer *chunk = evbuffer_new();
-		size_t chunk_len = ZSTR_LEN(c->cgi_headers.s) - body_off;
-
-		evbuffer_add(chunk, ZSTR_VAL(c->cgi_headers.s) + body_off, chunk_len);
-		evhttp_send_reply_chunk(c->req, chunk);
-		evbuffer_free(chunk);
-		c->bytes_out += chunk_len;
+		fpm_http_response_chunk(c, ZSTR_VAL(c->cgi_headers.s) + body_off, ZSTR_LEN(c->cgi_headers.s) - body_off);
 	}
 	smart_str_free(&c->cgi_headers);
 }
@@ -1270,12 +1265,7 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 		return; /* issue #594: the 502 is already on the wire */
 	}
 	if (c->headers_sent) {
-		struct evbuffer *chunk = evbuffer_new();
-
-		evbuffer_add(chunk, data, len);
-		evhttp_send_reply_chunk(c->req, chunk);
-		evbuffer_free(chunk);
-		c->bytes_out += len;
+		fpm_http_response_chunk(c, data, len);
 		return;
 	}
 
@@ -1332,6 +1322,10 @@ static void fpm_http_finish_truncated(fpm_http_conn *c)
  * name (issue #118) -- so only the unexplained loss is reported from here. */
 void fpm_http_finish(fpm_http_conn *c, int explained)
 {
+	/* Issue #596: the last piece of a read can pause the upstream and the
+	 * END_REQUEST behind it finish the request in the same read; nothing would
+	 * re-arm the read event of an upstream that has no idle timeout. */
+	fpm_http_response_resume(c);
 	if (c->headers_sent) {
 		evhttp_send_reply_end(c->req);
 	} else if (c->cgi_headers.s) {
@@ -2188,6 +2182,11 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 		cl->ka_watch = NULL;
 	}
 	if (c) {
+		/* Issue #596: the upstream was paused for this client's sake. The
+		 * client is gone, so the worker's remaining output is read and dropped
+		 * and the pinned connection comes back, the same as when a client
+		 * leaves a response that is not paused. */
+		fpm_http_response_resume(c);
 		c->evcon = NULL;
 		c->client = NULL;
 		cl->c = NULL;
@@ -4936,6 +4935,7 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->write_timeout_ms = wp->config->http_write_timeout;
 	gw->write_timeout.tv_sec = wp->config->http_write_timeout / 1000;
 	gw->write_timeout.tv_usec = (wp->config->http_write_timeout % 1000) * 1000;
+	gw->response_buffer = wp->config->http_response_buffer;
 	gw->max_body = wp->config->http_max_body;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;

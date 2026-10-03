@@ -89,6 +89,49 @@ them:
 | `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
 | `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
 
+Response flow control (issue #596). The gateway reads the upstream response
+only while the client keeps up:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
+
+A larger value frees a PHP worker earlier for a slow client and costs gateway
+memory per slow client; a smaller one bounds the memory and holds the worker
+longer. The limit is checked after each piece of the response, so one read
+(16 KiB) can overshoot it, and the kernel socket buffers on the client and
+upstream side come on top. The write timeout above still closes a client that
+reads nothing; with `http.write_timeout = 0` such a client keeps its connection
+and one worker, but no longer grows the gateway's memory. Not measured: the
+gateway's RSS under many slow clients. `http.response_buffer` is refused on
+`http-direct`.
+
+Two consequences of holding the worker back, both new with flow control:
+
+- **Blocked time counts against the target's own limits.** While the gateway
+  has stopped reading, the target worker is blocked in its write, and that wall
+  time is charged to it. A streaming `http-direct` target (`http.stream = yes`)
+  spends it from `http.stream_write_timeout`, a *total* budget per response
+  (default 10000 ms): a client that lags behind the target for longer than that
+  in total gets a response cut without its terminating chunk. A FastCGI target
+  spends it from `request_terminate_timeout`. Before this change the gateway
+  took the whole response and the target never blocked. Measured: a 128 MiB
+  streamed response to a client that waits 15 s before reading arrived
+  truncated (5.4 MB) with the defaults and complete with
+  `http.response_buffer = 0`. Behind a gateway, give streaming targets a
+  `http.stream_write_timeout` (and FastCGI targets a `request_terminate_timeout`)
+  at least as long as the slowest download you want to serve, or set
+  `http.response_buffer = 0` to keep the old behaviour (the gateway buffers
+  everything, bounded only by memory). `fpmng-http-gateway-stream-budget.phpt`
+  pins both outcomes.
+- **A trickling reader holds a worker.** `http.write_timeout` is a stall timer:
+  it restarts whenever the client takes any bytes, so a client that reads one
+  byte per second is never cut by it. With flow control that client now keeps a
+  PHP worker (or target worker) blocked for as long as it trickles, so a few of
+  them can occupy all of `pm.max_children`. Before this change such a client
+  cost gateway memory only. There is no minimum-progress or total-time limit
+  for a response yet; it is tracked as a follow-up to #596.
+
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
 `http.max_connections` and `http.max_connections_per_client` are not supported

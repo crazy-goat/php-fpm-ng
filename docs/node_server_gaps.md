@@ -31,6 +31,7 @@ A typical Node server can control header, request, idle-socket, and keep-alive t
 - `http.read_timeout` (default 5000 ms, 0 = disabled) — one budget for the whole client-side read of a request (headers + body). It is a gateway deadline timer, not libevent's `evhttp_set_timeout_tv()` (that is an inactivity timer and would cut a slow upstream). A slow-loris client that trickles bytes without ever going idle is cut off once the budget is spent. It covers the first request from accept, and every later request on the connection from its first byte.
 - `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) — how long an idle keep-alive client connection may wait for its next request after a response completed. The first byte of the next request replaces it with `http.read_timeout`.
 - `http.write_timeout` (default 30000 ms, 0 = unlimited) — how long a client may make no progress on a pending response write; a client that never reads its response is closed.
+- `http.response_buffer` (default 1M, 0 = unlimited, issue #596) — response backpressure: past this many unwritten bytes for a client the gateway stops reading that request's upstream until the client drains the buffer.
 - `http.plain_listen` gets the same first-request read deadline and keep-alive limits.
 - `http.idle_timeout` (default 500 ms, 0 = never) — releases a pinned upstream connection after this much idle time on a keep-alive request; this protects a *worker slot*, not the client socket.
 
@@ -59,7 +60,7 @@ To investigate:
 - whether the response is streamed without unbounded buffering;
 - whether flush reaches the client;
 - behavior after the client disconnects;
-- write timeouts and backpressure;
+- write timeouts (`http.write_timeout`, #593) and backpressure (`http.response_buffer`, #596) exist for the gateway direction; what is not known is how they behave for SSE (#179);
 - the effect of a long request on worker occupancy.
 
 SSE is not currently an approved roadmap item.

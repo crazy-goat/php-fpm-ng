@@ -572,10 +572,17 @@ static void fpm_http_http_complete(fpm_http_upstream *up)
 		fpm_http_http_state_reset(st);
 	}
 	if (expect_eof) {
+		/* `gw` is read before the drop: with no caller up the stack (the EOF
+		 * of a close-delimited body, issue #533) the drop frees `up`
+		 * outright, and the pump below used to read up->gw from freed memory.
+		 * The transport's drop, not the generic one, so the parser state goes
+		 * with the connection instead of leaking. */
+		struct fpm_http_gateway_s *gw = up->gw;
+
 		fpm_http_finish(up->current, 1);
 		up->current = NULL;
-		fpm_http_upstream_drop(up);
-		fpm_http_pump(up->gw);
+		up->t->ops->drop(up);
+		fpm_http_pump(gw);
 		return;
 	}
 	fpm_http_request_done(up);
@@ -959,6 +966,14 @@ static void fpm_http_http_readcb(evutil_socket_t fd, short what, void *arg)
 		 * closing before the response was complete is a lost reply mid-body
 		 * -- worth its own line, since the clean-EOF path below would
 		 * otherwise end the client's truncated stream in silence. */
+		if (up->busy && up->current && st && st->head_done
+			&& st->body == FPM_HTTP_HTTP_BODY_EOF) {
+			/* Issue #533: the close IS the end of a close-delimited body.
+			 * fpm_http_upstream_fail() below treats a close with the head
+			 * already sent as a lost reply, so this one completes here. */
+			fpm_http_http_complete(up);
+			return;
+		}
 		if (up->busy && up->current && st && st->head_done
 			&& !st->expect_eof && st->body != FPM_HTTP_HTTP_BODY_EOF) {
 			zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' closed before the response was complete",

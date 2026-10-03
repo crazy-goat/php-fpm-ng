@@ -187,6 +187,20 @@ value) makes the gateway answer `502 Bad Gateway`, log a WARNING
 (`upstream sent invalid Status`), record 502 in the access log and drop the rest
 of the upstream reply (#594).
 
+## An upstream that fails after the response head
+
+Once the status line and headers are on the wire the gateway can no longer
+answer 502. If the upstream then dies or breaks its framing (a FastCGI
+connection closed without `END_REQUEST`, an HTTP target closed before the
+chunked terminator or the full `Content-Length`), the gateway logs a WARNING
+(`failed after the response head was sent`), writes the access-log line with the
+status already sent, and closes the client connection **without** the
+terminating chunk. The client sees an incomplete message instead of a complete
+one, and a cache in front does not store the truncated body. A body that is
+delimited by the upstream closing its connection ends normally. An HTTP/1.0
+client gets a close-delimited reply, which no close can mark as incomplete
+(#533).
+
 ## The gateway's own numbers
 
 Gateway processes are not workers and have no scoreboard slot. Their numbers

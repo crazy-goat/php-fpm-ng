@@ -3389,6 +3389,8 @@ The former combined types become:
 
 ## 3w. Splitting transport and `writev()` for large responses (2026-09-05)
 
+**Historical (#601).** The optimized transport switch and patches 0003-0005 were dropped by issue #589, and `fastcgi-ng` was retired by #376. The text and numbers below are the measurement of that removed path, not a current feature.
+
 The process-wide `fcgi_set_optimized_transport()` switch is disabled by default
 and set after the worker forks. `fastcgi` retains the upstream `accept()` and
 read path, while `fastcgi-ng` and the internal `http` frontend transport enable

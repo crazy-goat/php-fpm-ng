@@ -120,6 +120,7 @@ TEST_FPM_TIMEOUT=120 \
 ./build/vendor-php-src.sh check
 ./build/test-libphp-build-refusals.sh
 ./build/test-phpt-tree.sh
+./build/test-package-gate-expected.sh
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
 
 # Shell scenarios against the built binary (see .github/workflows/build-matrix.yml)

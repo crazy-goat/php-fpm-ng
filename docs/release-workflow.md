@@ -42,9 +42,10 @@ In `CHANGELOG.md`:
 - Group entries under Added, Changed, Deprecated, Removed, Fixed, Security.
 - Update the compare links at the bottom, if the file has them.
 - No file carries the version. The packages take it from the tag (`FPMNG_RELEASE` in
-  `.github/workflows/release.yml`). If the PR adds or removes `.phpt` tests, check the
-  expected counts in `build/ci-package-gate.sh` (`EXPECT_TOTAL`), because the release
-  workflow runs that gate.
+  `.github/workflows/release.yml`). The release gate
+  (`build/ci-package-gate.sh`) derives its total from the owned tests and needs no edit for a
+  test that passes everywhere; a test that skips on a package is a named line in
+  `build/package-gate-expected.txt` (issue #678).
 
 Open a PR titled `chore: release vX.Y.Z`, wait for `ci-ok`, squash merge.
 

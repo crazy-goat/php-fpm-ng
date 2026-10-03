@@ -233,6 +233,12 @@ jobs:
       - name: phpt fixtures and binary-under-test guard (issue #423)
         run: ./build/test-phpt-tree.sh
 
+      # Issue #678: the package gate scores by test name against
+      # build/package-gate-expected.txt, not by pinned counts. Hermetic: a fake
+      # results.tsv and a fake tests directory.
+      - name: package gate scoring (issue #678)
+        run: ./build/test-package-gate-expected.sh
+
       # Issue #220 / #422: the packaged binary's libphp version guard, in all
       # three outcomes (another minor FATAL, another patch level a notice, the
       # same version silent), compiled against this job's real SDK. It used to

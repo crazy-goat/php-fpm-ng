@@ -1,0 +1,28 @@
+# Expected non-PASS results of the package gate (build/ci-package-gate.sh).
+# Everything not listed here must PASS in every cell; build/package-gate-compare.sh
+# scores by name (issue #678). One line per exception:
+#
+#   <cell-globs> <SKIP|XFAIL> <test-name> <reason / issue>
+#
+# Cells: deb, deb-tls, apk, apk-tls. Globs are comma separated (deb*, *).
+# A listed SKIP that passes, or a listed XFAIL that passes, fails the gate as stale.
+# Only the deb and deb-tls results are recorded so far; the apk cells are added when
+# the release.yml rehearsal measures them (do not guess them).
+deb       SKIP  fpmng-acme-challenge                                 the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-acme-challenge-plain                           the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-acme-handover                                  the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-acme-issue                                     the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-acme-renew-failure                             the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-http-gateway-absolute-form-plain-redirect      the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-http-gateway-plain-limits                      the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-payload-distribution                           the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+deb       SKIP  fpmng-http-direct-connection-info                    the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-direct-tls                                the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-direct-tls-streaming                      the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-direct-worker-tls-and-client-tls          the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-direct-worker-ws-tls                      the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-tls-alpn-sni                              the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-http-tls-chain                                 the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb       SKIP  fpmng-tier-build-flags                               the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+deb,deb-tls SKIP  fpmng-ini-bootstrap-extension                        the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)
+deb,deb-tls XFAIL fpmng-reload-selective-metrics                       known defect, tracked in #537

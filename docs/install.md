@@ -220,8 +220,9 @@ default because that is the more common arrangement, not because the TLS build
 is unfinished.
 
 Both packages go through the same gate before they are published: built,
-installed into a container with no compiler in it, and measured against an
-exact PASS/SKIP count (`build/ci-package-gate.sh`, issue #224). The TLS one
+installed into a container with no compiler in it, and measured against the
+expected result of every owned test: all pass except the named exceptions in
+`build/package-gate-expected.txt` (`build/ci-package-gate.sh`, issues #224, #678). The TLS one
 scores more passes, which is the point -- the tests that skip on the default
 package for want of TLS run there.
 

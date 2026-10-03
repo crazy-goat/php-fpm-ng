@@ -45,6 +45,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -1000,6 +1001,25 @@ static void fpm_http_conn_free(fpm_http_conn *c)
 	free(c);
 }
 
+/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
+ * digits, and only a final status (200..599, fpm_http_direct_status_final())
+ * may become the status line. atoi() turned "abc" into 0, "99999" into itself
+ * and overflowed on a longer number; a 1xx went out as the *final* answer, its
+ * body dropped by libevent, and the client waited for a response that never
+ * came (the shape of #451). *reason points into `value`, "" when absent. */
+static bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason)
+{
+	if (!isdigit((unsigned char)value[0]) || !isdigit((unsigned char)value[1]) || !isdigit((unsigned char)value[2])) {
+		return false;
+	}
+	if (value[3] != '\0' && value[3] != ' ') {
+		return false;
+	}
+	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
+	*reason = value[3] == ' ' ? value + 4 : "";
+	return fpm_http_direct_status_final(*code);
+}
+
 /* The CGI header block is complete: "Status:" becomes the status line, the rest is copied. */
 void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 {
@@ -1007,6 +1027,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 	const char *line = c->cgi_headers.s ? ZSTR_VAL(c->cgi_headers.s) : "", *end = line + head_len;
 	char *reason = NULL;
 	int code = HTTP_OK;
+	bool invalid_status = false;
 
 	while (line < end) {
 		const char *nl = memchr(line, '\n', end - line), *next = nl ? nl + 1 : end, *colon;
@@ -1028,9 +1049,18 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			key = strndup(line, klen);
 			value = strndup(v, vlen);
 			if (strcasecmp(key, "Status") == 0) {
-				code = atoi(value);
+				const char *parsed_reason;
+
 				free(reason);
-				reason = strdup(strchr(value, ' ') ? strchr(value, ' ') + 1 : "");
+				reason = NULL;
+				if (fpm_http_parse_cgi_status(value, &code, &parsed_reason)) {
+					reason = strdup(parsed_reason);
+					invalid_status = false;
+				} else {
+					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%.64s', answering 502",
+						c->gw->pool, value);
+					invalid_status = true;
+				}
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -1038,6 +1068,30 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			free(value);
 		}
 		line = next;
+	}
+
+	if (invalid_status) {
+		/* Nothing the upstream said can be trusted any more: drop its headers
+		 * and, via discard_upstream, the rest of its reply. The 502 is a
+		 * chunked reply that fpm_http_finish() ends like any other, so the
+		 * request stays alive until then (an evhttp_send_error() here would
+		 * complete it while the upstream is still talking). Mapping to 500
+		 * instead is a maintainer decision (issue #594). */
+		struct evbuffer *msg = evbuffer_new();
+
+		evhttp_clear_headers(out);
+		evhttp_add_header(out, "Content-Type", "text/plain");
+		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		evbuffer_add_printf(msg, "Bad Gateway\n");
+		c->bytes_out += evbuffer_get_length(msg);
+		evhttp_send_reply_chunk(c->req, msg);
+		evbuffer_free(msg);
+		free(reason);
+		c->headers_sent = 1;
+		c->discard_upstream = 1;
+		c->status = FPM_HTTP_BAD_GATEWAY;
+		smart_str_free(&c->cgi_headers);
+		return;
 	}
 
 	/* http.pool_full_policy = wait (issue #309): observable from outside the
@@ -1071,6 +1125,9 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
 	size_t scan_from, i;
 	const char *h;
 
+	if (c->discard_upstream) {
+		return; /* issue #594: the 502 is already on the wire */
+	}
 	if (c->headers_sent) {
 		struct evbuffer *chunk = evbuffer_new();
 

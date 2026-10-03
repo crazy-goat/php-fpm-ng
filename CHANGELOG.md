@@ -11,6 +11,9 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Documentation
+- Document that the default operator listener `127.0.0.1:9253` is global to the host: a second master with gateway (or any operator-page) pools on the default fails to bind, and how to avoid it with `operator.*_listen` or `operator.status|metrics = off` (#561).
+
 ### Removed
 - The php-src patch machinery, now that `main` carries no patch (#592): the patch-stack step of `build/prepare.sh` and of `build/vendor-php-src.sh` (and the `php-<minor>/` variant selection), the `patches` line of `third_party/php-src/MANIFEST`, and `build/test-prepare-patch-stack.sh`. `build/vendor-php-src.sh check` now also refuses a vendored file that differs from its pristine upstream hash. `patches/` keeps only history notes; patches live on branch `async`. A PHP upgrade on `main` is a plain re-import.
 - php-src patch `0001` (GH-18956, idle/active counting on FastCGI keep-alive connections) and its `php-8.3/` variant; `main` now carries no php-src patch, and `third_party/php-src/` is re-imported unpatched. Known effect, documented in `docs/operator-endpoint.md`, `docs/gateway.md` and `patches/README.md`; it does not affect http-direct pools: on keep-alive connections `accepted conn` and the per-process `requests` count one extra request per kept connection the client closes, a worker waiting on a kept connection shows as `Reading headers` with the idle wait in `request duration`, `max active processes` stays too high, `idle`/`active` can be wrong for up to one heartbeat, and `request_terminate_timeout` can hit an idle worker only with `http.idle_timeout = 0`, a large value or `fastcgi_keep_conn on` behind a proxy; pm scaling is not affected. The owned `fpm_request.c` again offers the `void` `fpm_request_accepting()` / `fpm_request_reading_headers()` that upstream's `fpm_main.c` passes to `fcgi_init_request()`, plus `_ex(bool)` variants for http-direct (#591).

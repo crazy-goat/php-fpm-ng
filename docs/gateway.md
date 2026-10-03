@@ -160,6 +160,11 @@ explicit collision is still a startup error, as for any pool. An explicit
 `operator.status = off` / `operator.metrics = off` is honoured too and
 suppresses only the default.
 
+Sharing the default is limited to one master. A second **master** on the same
+host cannot bind `127.0.0.1:9253` again and fails to start; give it its own
+`operator.*_listen` or turn its pages off (see "Two masters on one host" in
+`operator-endpoint.md`, issue #561).
+
 Two gateways with `http.operator = yes` expose the same set of pools, each
 under its own base. To keep one gateway out of it, turn its `http.operator` off
 or empty its base paths. To keep one *pool* out of it, do not expose the pool.

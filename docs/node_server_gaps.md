@@ -26,9 +26,12 @@ This item is already in the FPM-NG plan and matters to PHP frameworks.
 
 ### Client timeouts
 
-A typical Node server can control header, request, idle-socket, and keep-alive timeouts separately. The FPM-NG HTTP gateway now has two complementary ones (task 031):
+A typical Node server can control header, request, idle-socket, and keep-alive timeouts separately. The FPM-NG HTTP gateway has these client-side limits (task 031, issue #593):
 
-- `http.read_timeout` (default 5000 ms, 0 = disabled) — one budget for the whole client-side read (headers + body), enforced by libevent (`evhttp_set_timeout_tv()`). A slow-loris client that trickles bytes without ever going idle is cut off once the budget is spent; libevent drops the connection.
+- `http.read_timeout` (default 5000 ms, 0 = disabled) — one budget for the whole client-side read of a request (headers + body). It is a gateway deadline timer, not libevent's `evhttp_set_timeout_tv()` (that is an inactivity timer and would cut a slow upstream). A slow-loris client that trickles bytes without ever going idle is cut off once the budget is spent. It covers the first request from accept, and every later request on the connection from its first byte.
+- `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) — how long an idle keep-alive client connection may wait for its next request after a response completed. The first byte of the next request replaces it with `http.read_timeout`.
+- `http.write_timeout` (default 30000 ms, 0 = unlimited) — how long a client may make no progress on a pending response write; a client that never reads its response is closed.
+- `http.plain_listen` gets the same first-request read deadline and keep-alive limits.
 - `http.idle_timeout` (default 500 ms, 0 = never) — releases a pinned upstream connection after this much idle time on a keep-alive request; this protects a *worker slot*, not the client socket.
 
 There is deliberately no separate header-read vs body-read budget: a single budget covers both, which is simpler to reason about and still bounds the total time a slow client can hold a gateway connection.
@@ -179,7 +182,7 @@ SSE, reliable client-disconnect detection, and request-body streaming have the b
 ### Already in the plan
 
 - routing / a `try_files` equivalent — done (`http.front_controller`), remaining gaps tracked in task 018;
-- client timeouts — done (task 031, `http.read_timeout` + `http.idle_timeout`);
+- client timeouts — done (task 031, issue #593: `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout`; `http.idle_timeout` is the upstream-side timer, not a client one). Still open: a connection cap on the gateway (`http.max_connections*` are refused on a gateway for now);
 - request-body backpressure — decision made (task 031): whole-body buffering stays, bound is `http.max_body`;
 - `503 Retry-After` for a full pool — done (task 031);
 - TLS + ACME — TLS done, ACME tracked in task 020;

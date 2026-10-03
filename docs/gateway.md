@@ -79,6 +79,22 @@ is honest for a type called `gateway`. Two are new:
 | `http.operator` | Serve every exposed pool's operator pages through this public port. | `no` |
 | `http.operator_allowed_clients` | Who may reach them. Separate from `http.allowed_clients`. | -- (required when `http.operator = yes`) |
 
+Client-side limits (issue #593). A gateway process serves every connection of
+its pool, so a client that holds a socket open holds a file descriptor for all of
+them:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.read_timeout` | Budget in ms for reading one whole request (headers and body). The first request from accept; every later request on the connection from its first byte. `0` = off. | `5000` |
+| `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
+| `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
+
+`http.plain_listen` has the first-request deadline and the keep-alive limit too.
+`http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
+`http.max_connections` and `http.max_connections_per_client` are not supported
+on a gateway yet and are refused by `php-fpm-ng -t`.
+`http.keepalive_timeout` and `http.write_timeout` are refused on `http-direct`.
+
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.
 

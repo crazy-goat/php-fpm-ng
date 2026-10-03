@@ -317,6 +317,26 @@ expectConfigFailure(
     ['pool.type = gateway with no http.route[] serves nothing']
 );
 
+/* Issue #593: the gateway has no connection cap, and http.max_connections* are
+ * read only by http-direct, so a gateway config naming them must fail instead
+ * of leaving the public port believed to be limited. */
+expectConfigFailure(
+    'gateway-max-connections',
+    gatewayConfig("http.max_connections = 10\n"),
+    ["'http.max_connections' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'gateway-max-connections-per-client',
+    gatewayConfig("http.max_connections_per_client = 2\n"),
+    ["'http.max_connections_per_client' is not supported by pool.type = gateway"]
+);
+/* ... and the gateway-only client limits are refused on http-direct. */
+expectConfigFailure(
+    'direct-keepalive-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.keepalive_timeout = 1000",
+    ["'http.keepalive_timeout' is not supported by pool.type = http-direct"]
+);
+
 ?>
 Done
 --EXPECT--
@@ -350,6 +370,9 @@ gateway-clear-env: rejected
 gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
+gateway-max-connections: rejected
+gateway-max-connections-per-client: rejected
+direct-keepalive-timeout: rejected
 Done
 --CLEAN--
 <?php

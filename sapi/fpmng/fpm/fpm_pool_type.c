@@ -87,6 +87,11 @@ static const char *const fpm_pool_gateway_rejects[] = {
 	"process.dumpable",
 	/* AppArmor confines a PHP child; the gateway process is not confined. */
 	"apparmor_hat",
+	/* Issue #593: the gateway has no connection cap. Both are read only by the
+	 * http-direct code (fpm_http_direct.c), so accepting them here would leave
+	 * an operator believing the public port is limited while it is not. */
+	"http.max_connections",
+	"http.max_connections_per_client",
 	"fiber.",
 	"worker.",
 	NULL

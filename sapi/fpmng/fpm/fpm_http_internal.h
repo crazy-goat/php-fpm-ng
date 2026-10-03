@@ -352,6 +352,15 @@ struct fpm_http_client_s {
 	struct fpm_http_client_s *hash_prev;
 	struct fpm_http_client_s *hash_next;
 	size_t hash_bucket;
+	/* Issue #593: the deadline for the NEXT request on a keep-alive connection.
+	 * ka_timer is armed when a response completes (http.keepalive_timeout) and
+	 * stopped when the next request is dispatched; ka_watch is a one-shot
+	 * EV_READ on the fd that sees the first byte of that next request and
+	 * swaps the timer for http.read_timeout. Both belong to the node, not to
+	 * a bufferevent reference: fpm_http_client_closed() frees them before the
+	 * connection (and its fd) goes. */
+	struct event *ka_timer;
+	struct event *ka_watch;
 };
 
 /* Process-local open-connection index, copied empty into each gateway child by
@@ -391,6 +400,10 @@ struct fpm_http_gateway_s {
 	struct timeval idle_timeout;			/* idle_ms split into {sec, usec} for event_add() */
 	int read_timeout_ms;				/* http.read_timeout, milliseconds; 0 = no client-side read deadline */
 	struct timeval read_timeout;			/* read_timeout_ms split into {sec, usec} for evhttp_set_timeout_tv() */
+	int keepalive_timeout_ms;			/* http.keepalive_timeout, milliseconds; 0 = idle keep-alive connections are never cut */
+	struct timeval keepalive_timeout;		/* keepalive_timeout_ms split into {sec, usec} */
+	int write_timeout_ms;				/* http.write_timeout, milliseconds; 0 = a stalled client write is never cut */
+	struct timeval write_timeout;			/* write_timeout_ms split into {sec, usec} for bufferevent_set_timeouts() */
 	/* http.pool_full_policy, issue #309. wait_policy is FPM_HTTP_POOL_FULL_REJECT
 	 * (the default, unchanged behavior: fpm_http_pump_once() drains gw->waiting
 	 * to a 503 the instant the budget is exhausted) or FPM_HTTP_POOL_FULL_WAIT,
@@ -591,9 +604,11 @@ struct fpm_http_gateway_s {
  * there is no complete request to answer to.
  *
  * Keep-alive: the deadline covers the first request on a connection. Later
- * requests on the same connection are a deliberate gap (arming a new one
- * would need a request-start hook libevent does not offer); the per-read
- * idle timeout still applies to them.
+ * requests are bounded by http.keepalive_timeout and, from their first byte,
+ * http.read_timeout again -- the timers on struct fpm_http_client_s (issue
+ * #593). They are not built on this node: a node holds a bufferevent
+ * reference, and a reference kept past the close of a keep-alive connection
+ * would delay its EOF for the whole timeout.
  *
  * The gw->deadlines list exists only so fpm_http_request() can find and
  * disarm its own deadline by bufferevent pointer: one linear scan per

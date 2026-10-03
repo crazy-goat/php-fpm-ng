@@ -77,9 +77,13 @@ struct fpm_http_direct_labels {
  * from this same macro and carves the two directives back out via
  * .reject_exceptions on fpm_http_direct_worker's fpm_pool_type_s entry
  * (fpm_pool_type.c) -- the established mechanism for "reject a whole prefix,
- * name the exceptions", see fpm_pool_type.h. */
+ * name the exceptions", see fpm_pool_type.h.
+ *
+ * http.keepalive_timeout and http.write_timeout are gateway-only client
+ * limits (issue #593); a direct pool reads neither, so they are refused. */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON \
-	"fiber.", "supervisor.", "cron.", "worker."
+	"fiber.", "supervisor.", "cron.", "worker.", \
+	"http.keepalive_timeout", "http.write_timeout"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

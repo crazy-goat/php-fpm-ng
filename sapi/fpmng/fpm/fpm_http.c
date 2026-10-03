@@ -173,6 +173,8 @@ struct {								\
 
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
+#define FPM_HTTP_KEEPALIVE_TIMEOUT_MS 60000	/* http.keepalive_timeout default (ms); how long an idle keep-alive client connection may wait for its next request */
+#define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
 /* A crash loop (bad bind, OOM, ...) must not turn into an unbounded fork()
  * storm: after this many respawns within RESPAWN_WINDOW seconds, a gateway
@@ -2175,6 +2177,16 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	/* One close notification owns this node. Clearing the slot first also keeps
 	 * a nested libevent close path from seeing the same callback as current. */
 	evhttp_connection_set_closecb(evcon, NULL, NULL);
+	/* Issue #593: before the connection's fd goes, so the one-shot watcher is
+	 * never registered on a closed descriptor. */
+	if (cl->ka_timer) {
+		event_free(cl->ka_timer);
+		cl->ka_timer = NULL;
+	}
+	if (cl->ka_watch) {
+		event_free(cl->ka_watch);
+		cl->ka_watch = NULL;
+	}
 	if (c) {
 		c->evcon = NULL;
 		c->client = NULL;
@@ -2194,6 +2206,106 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 		fpm_http_conn_free(c);
 	}
 	free(cl);
+}
+
+/* ---------------------------------------------------------------- client limits after the first request (issue #593) */
+
+/* The deadline for the next request expired, or the client stalled. Shrinks the
+ * connection's own timeouts to (almost) zero so evhttp closes it through its
+ * error path -- the same, and only safe, way fpm_http_read_deadline_fire()
+ * ends a connection (a bufferevent_free() underneath evhttp is a
+ * use-after-free, issue #90). `cl->evcon` is valid here: the close callback
+ * frees this timer before evhttp lets go of the connection. */
+static void fpm_http_client_idle_fire(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+	static const struct timeval now = {0, 1};
+
+	(void) fd; (void) what;
+	if (cl->ka_watch) {
+		event_del(cl->ka_watch);
+	}
+	bufferevent_set_timeouts(evhttp_connection_get_bufferevent(cl->evcon), &now, &now);
+}
+
+/* The first byte of the next request arrived. From here the client is
+ * delivering a request, and that is http.read_timeout's job: the same
+ * absolute budget a first request gets, whatever the spacing of its bytes. The
+ * keep-alive timer is replaced, not stacked. With http.read_timeout = 0 the
+ * keep-alive timer simply keeps running, so the connection is still bounded. */
+static void fpm_http_client_idle_byte(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+
+	(void) fd; (void) what;
+	if (cl->ka_timer && cl->gw->read_timeout_ms > 0) {
+		event_add(cl->ka_timer, &cl->gw->read_timeout);
+	}
+}
+
+/* The response is complete and the connection stays open for another request:
+ * start the keep-alive clock. If evhttp is about to close the connection
+ * instead (Connection: close, an error reply), the close callback frees both
+ * events a moment later -- nothing here holds a reference to the connection,
+ * which is the reason this lives on the client node and not on the
+ * struct fpm_http_read_deadline_s bufferevent reference. A reference held
+ * past a close would keep the fd, and a "Connection: close" client would wait
+ * for the whole keep-alive timeout to see EOF. */
+static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
+{
+	struct fpm_http_client_s *cl = arg;
+	struct fpm_http_gateway_s *gw = cl->gw;
+	evutil_socket_t fd;
+
+	(void) req;
+	if (gw->keepalive_timeout_ms <= 0 || !cl->evcon) {
+		return;
+	}
+	if (!cl->ka_timer) {
+		cl->ka_timer = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+	}
+	if (!cl->ka_timer) {
+		return;	/* OOM: this connection is not bounded, the gateway still works */
+	}
+	event_add(cl->ka_timer, &gw->keepalive_timeout);
+	fd = bufferevent_getfd(evhttp_connection_get_bufferevent(cl->evcon));
+	if (fd < 0) {
+		return;
+	}
+	if (!cl->ka_watch) {
+		cl->ka_watch = event_new(gw->base, fd, EV_READ, fpm_http_client_idle_byte, cl);
+	}
+	if (cl->ka_watch) {
+		event_add(cl->ka_watch, NULL);
+	}
+}
+
+/* Called first thing for every request dispatched on a connection, from both
+ * listeners. A request reaching a gencb has been read completely, so the
+ * keep-alive clock (and the first-byte watcher) are spent; the completion hook
+ * restarts them when this request's response is done. Also puts the client
+ * write stall limit on the connection (http.write_timeout): a bufferevent write
+ * timeout runs only while output is pending and restarts on every byte the
+ * client takes, so it is a stall timer -- unlike a read timeout it does not
+ * cut a slow upstream, because nothing is pending to the client then. The read
+ * side is passed as NULL on purpose: evhttp's read timeout is an idle timer
+ * and would cut exactly that slow upstream (see the bevcb comment). */
+static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
+	struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	if (!gw || !cl) {
+		return;
+	}
+	if (cl->ka_timer) {
+		event_del(cl->ka_timer);
+	}
+	if (cl->ka_watch) {
+		event_del(cl->ka_watch);
+	}
+	evhttp_request_set_on_complete_cb(req, fpm_http_client_request_done, cl);
+	if (gw->write_timeout_ms > 0 && cl->evcon) {
+		bufferevent_set_timeouts(evhttp_connection_get_bufferevent(cl->evcon), NULL, &gw->write_timeout);
+	}
 }
 
 /* ------------------------------------------------------------------------ *
@@ -2540,7 +2652,10 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (gw && gw->counters) {
 		fpm_http_counter_incr(&gw->counters->requests_total);
 	}
-	(void) fpm_http_client_track(gw, evcon);
+	fpm_http_client_request_begin(gw, fpm_http_client_track(gw, evcon), req);
+	if (gw && gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
+	}
 	fpm_http_count_local(gw);
 
 	/* HTTP-01 before anything else, including the redirect: the CA speaks
@@ -3001,10 +3116,12 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		fpm_http_counter_incr(&gw->counters->requests_total);
 	}
 	client = fpm_http_client_track(gw, evcon);
+	fpm_http_client_request_begin(gw, client, req);
 
 	/* Reaching this callback means the client delivered the whole request
 	 * (evhttp buffers headers AND body before dispatching), so its read
-	 * deadline (task 031, armed at accept) is spent. */
+	 * deadline (task 031, armed at accept) is spent. Later requests on the
+	 * connection are bounded by fpm_http_client_request_done() (issue #593). */
 	if (gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
@@ -3323,7 +3440,7 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	struct fpm_http_read_deadline_s *dl = calloc(1, sizeof(*dl));
 
 	if (!dl) {
-		return; /* OOM: degrade to libevent's idle timeout only, the listener still works */
+		return; /* OOM: this connection gets no read deadline (libevent has no implicit one, issue #593); the listener still works */
 	}
 	dl->gw = gw;
 	dl->bev = bev;
@@ -3412,6 +3529,21 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	{
 		bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
 	}
+	if (bev && gw->read_timeout_ms > 0) {
+		fpm_http_read_deadline_arm(gw, bev);
+	}
+	return bev;
+}
+
+/* The bevcb of the http.plain_listen listener: always a plain bufferevent,
+ * never the TLS wrapper fpm_http_bevcb() applies when gw->tls_ctx is set --
+ * this is the cleartext port. It arms the same first-request read deadline;
+ * without one a client could connect and send nothing, forever (issue #593). */
+static struct bufferevent *fpm_http_plain_bevcb(struct event_base *base, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	struct bufferevent *bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
+
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
@@ -3767,6 +3899,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		 * unauthenticated listener, and it answers before TLS, so leaving it
 		 * at EV_SIZE_MAX would leave the hole open on the easier port. */
 		evhttp_set_max_headers_size(plain, FPM_HTTP_HEADERS_MAX);
+		evhttp_set_bevcb(plain, fpm_http_plain_bevcb, gw);
 		evhttp_set_gencb(plain, fpm_http_plain_request, gw);
 		evutil_make_socket_nonblocking(gw->plain_listen_fd);
 		if (evhttp_accept_socket(plain, gw->plain_listen_fd) != 0) {
@@ -4779,6 +4912,12 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->read_timeout_ms = wp->config->http_read_timeout;
 	gw->read_timeout.tv_sec = wp->config->http_read_timeout / 1000;
 	gw->read_timeout.tv_usec = (wp->config->http_read_timeout % 1000) * 1000;
+	gw->keepalive_timeout_ms = wp->config->http_keepalive_timeout;
+	gw->keepalive_timeout.tv_sec = wp->config->http_keepalive_timeout / 1000;
+	gw->keepalive_timeout.tv_usec = (wp->config->http_keepalive_timeout % 1000) * 1000;
+	gw->write_timeout_ms = wp->config->http_write_timeout;
+	gw->write_timeout.tv_sec = wp->config->http_write_timeout / 1000;
+	gw->write_timeout.tv_usec = (wp->config->http_write_timeout % 1000) * 1000;
 	gw->max_body = wp->config->http_max_body;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
@@ -5365,6 +5504,14 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_read_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.read_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_keepalive_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.keepalive_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_write_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.write_timeout must not be negative", wp->config->name);
 		return -1;
 	}
 	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the

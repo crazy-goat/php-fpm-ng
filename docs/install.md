@@ -350,6 +350,9 @@ available on `main`.
 
 ## See also
 
+* [`docs/guides/getting-started.md`](guides/getting-started.md) -- from the
+  package to a combined gateway, cron and supervisor configuration, and the
+  migration guides linked from it.
 * [`docs/http-direct.md`](http-direct.md) -- what `http-direct` is, and how to
   configure the worker executor.
 * [`docs/tls.md`](tls.md) and [`docs/acme-client.md`](acme-client.md) --

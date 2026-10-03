@@ -89,6 +89,7 @@ that this section and the links to it stay in place.
 | `examples/` | Runnable examples (each has its own Dockerfile or compose file) |
 | `tests/frameworks/` | Slim 4 smoke test on `gateway`+`fastcgi` and `http-direct` classic (fiber probes: `async/tests/frameworks/` on branch `async`) |
 | `docs/` | Design notes, spike reports, process docs |
+| `docs/guides/` | User-facing guides (getting started, migrations, framework recipes); their `ini verify` blocks are checked by `build/test-doc-configs.sh` |
 
 ## Commands
 
@@ -122,6 +123,7 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-phpt-tree.sh
 ./build/test-package-gate-expected.sh
 ./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
+./build/test-doc-configs.sh "$PWD/out/php-fpm-ng"   # `php-fpm-ng -t` on every `ini verify` block of docs/guides/ (CI job `doc-configs`); run as non-root
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
 
 # Slim 4 framework smoke test (needs Composer or network for the pinned phar, and php-curl)

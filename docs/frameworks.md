@@ -29,6 +29,11 @@ cache backend is involved. Run it by hand with
 `FPMNG=/path/to/php-fpm-ng tests/frameworks/slim4/bin/run.sh`
 ([`tests/frameworks/README.md`](../tests/frameworks/README.md)).
 
+## Recipes
+
+Symfony and Laravel configurations for the classic executors, and what was and was
+not tried with them: [`guides/framework-recipes.md`](guides/framework-recipes.md).
+
 ## Fiber and async executors
 
 The `fiber` and `async` executors run several requests concurrently in one

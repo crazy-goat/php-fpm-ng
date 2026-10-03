@@ -1,8 +1,16 @@
 # php-fpm-ng
 
-POC. PHP-FPM with additional operating modes: HTTP, supervisor, cron and
-metrics — so that the container image holds one binary and the application
-code, without nginx, without supervisord and without a system cron.
+PHP-FPM with additional operating modes: HTTP, supervisor, cron and metrics —
+so that the container image holds one binary and the application code, without
+nginx, without supervisord and without a system cron. Which parts are supported
+and which are beta is the table under [Support tiers](#support-tiers).
+
+**New here?** [`docs/guides/getting-started.md`](docs/guides/getting-started.md) goes from the
+`.deb` to a working combined configuration. Coming from something else:
+[php-fpm + nginx](docs/guides/migrate-php-fpm-nginx.md),
+[NGINX Unit](docs/guides/migrate-nginx-unit.md),
+[supervisord + cron](docs/guides/migrate-supervisord-cron.md). Symfony and Laravel:
+[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md).
 
 **Target audience: small projects.** One VPS, one instance, typically an
 application plus one or two consumers plus a few cron jobs. Not k8s.
@@ -13,14 +21,12 @@ whole thing and one binary to scan.
 
 ## State as of today
 
-The HTTP gateway POC on libevent works, as a branch in php-src:
-https://github.com/s2x/php-src/tree/fpm-http-poc
-
-Historical measurement (2026-09-07, php-src tree build; the static musl
-artefact it describes was retired from `main` in #424): a full static
-`-static-pie` build on musl ran in a bare `FROM scratch` as PID 1 and answered
-HTTP 200. Current builds are dynamic only (Debian/Ubuntu glibc and Alpine musl,
-PHP 8.5 NTS) against the distribution's PHP SDK; see `docs/install.md`.
+`sapi/fpmng` is a separate SAPI, built against the distribution's PHP 8.5 SDK
+(NTS, dynamic, Debian/Ubuntu glibc and Alpine musl; see `docs/install.md`). The
+HTTP gateway on libevent started as a branch in php-src
+(https://github.com/s2x/php-src/tree/fpm-http-poc); `main` carries no php-src
+patch. The static musl artefact of the early measurements was retired from
+`main` in #424.
 
 Current state of `sapi/fpmng`:
 
@@ -147,12 +153,12 @@ is the one name that stays, and only on `pool.type = fastcgi`, where it keeps
 its upstream meaning. See
 [`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
-## Plan
+## Documentation map
 
-Eventually a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src —
-`configure.ac` finds directories under `sapi/` by glob, so no existing file
-needs to be touched. Details, decisions, measured numbers and the list of
-known issues: [`docs/NOTES.md`](docs/NOTES.md).
+php-fpm-ng is a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src:
+`configure.ac` finds directories under `sapi/` by glob, so no existing file needs
+to be touched. Details, decisions, measured numbers and the list of known
+issues: [`docs/NOTES.md`](docs/NOTES.md).
 
 `pool.type = cron` directives (`cron.schedule`, `cron.timezone`, `cron.log`,
 ...) are documented for operators in [`docs/cron.md`](docs/cron.md).
@@ -201,12 +207,15 @@ in the `php-fpm-ng-tls` package (issue #281);
 a build without it carries neither the challenge state nor the client, and
 refuses an ACME `cron.script` at startup.
 
-## Experimental direct HTTP
+## Direct HTTP
 
 `pool.type = http-direct` runs HTTP and PHP in the same FPM child, without the
-FastCGI gateway hop. It supports **classic execution and `pm = static` only**.
-The FPM master still manages the workers. This is a buffered, front-controller-only
-POC, not a production frontend; configuration, limits, and benchmark methodology:
+FastCGI gateway hop. It is **supported with the default `classic` executor** and
+beta with `pool.executor = worker` (see the tier table). It supports **`pm =
+static` only**, and responses are buffered by default (`http.stream = yes`
+streams them). The FPM master still manages the workers. A pool that
+needs routing to several targets, or TLS, uses the gateway in front instead.
+Configuration, limits, and benchmark methodology:
 [`docs/http-direct.md`](docs/http-direct.md).
 
 ## Framework support

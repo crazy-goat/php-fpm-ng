@@ -1,12 +1,13 @@
-# Experimental direct HTTP: classic PHP, static FPM pool
+# Direct HTTP: classic PHP, static FPM pool
 
 `pool.type = http-direct` runs libevent's HTTP parser and PHP in each FPM child.
 It does **not** start gateway children, create an internal FastCGI listener, or
 serialize requests/responses as FastCGI records. The master still creates,
 monitors, replaces, and signals normal FPM children.
 
-This is a **POC, not a production frontend**. Existing `http` and `fastcgi`
-pools are unchanged.
+With the `classic` executor this is a **supported** pool type; the `worker`
+executor is beta (tiers: [`README.md`](../README.md#support-tiers)). Existing
+`gateway` and `fastcgi` pools are unchanged.
 
 ```ini
 [direct]

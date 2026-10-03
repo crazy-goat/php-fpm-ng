@@ -94,7 +94,7 @@ $case = $_GET['case'] ?? 'ex';
 $file = __DIR__ . '/lock.dat';
 $out = ['id' => $id, 'case' => $case, 'start' => microtime(true)];
 // Observable "I hold the lock" signal for the client (see concurrentHttpGet()).
-$held = static fn() => file_put_contents(__DIR__ . '/held-' . $_GET['id'], '1');
+$held = static fn() => file_put_contents(__DIR__ . '/held-' . $id, '1');
 
 switch ($case) {
     case 'ex':
@@ -117,6 +117,7 @@ switch ($case) {
         flock($fp, LOCK_SH);
         $out['acquired'] = microtime(true);
         $held();
+        // 500 ms: room for S2 to start and reach flock() while S1 still holds it.
         usleep(500000);
         $out['released'] = microtime(true);
         flock($fp, LOCK_UN);
@@ -227,6 +228,15 @@ $rows = decodeAll(concurrentHttpGet([
 ]));
 if (count($rows) !== 2) {
     bail('FAIL: expected S1, S2, got ' . json_encode(array_keys($rows)) . "\n");
+}
+/* Same precondition as the batches above: S2 only proves LOCK_SH compatibility
+ * if it reached flock() while S1 held its shared lock. */
+if (!($rows['S2']['start'] > $rows['S1']['acquired'] && $rows['S2']['start'] < $rows['S1']['released'])) {
+    bail(
+        'FAIL: inconclusive run, S2 did not arrive while S1 held the lock: '
+        . "s1.acquired={$rows['S1']['acquired']} s2.start={$rows['S2']['start']} "
+        . "s1.released={$rows['S1']['released']}\n"
+    );
 }
 $lastAcquired = max($rows['S1']['acquired'], $rows['S2']['acquired']);
 $firstReleased = min($rows['S1']['released'], $rows['S2']['released']);

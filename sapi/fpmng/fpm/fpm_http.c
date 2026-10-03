@@ -667,6 +667,7 @@ void fpm_http_origin_form(smart_str *out, const char *uri)
 	smart_str_appends(out, p);
 }
 
+/* 1 = copied, 0 = no authority, -1 = authority longer than buf_len-1. */
 int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
 {
 	const char *authority;
@@ -676,12 +677,250 @@ int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
 		return 0;
 	}
 	fpm_http_origin_start(uri, &authority, &len);
-	if (!authority || !len || len >= buf_len) {
+	if (!authority || !len) {
 		return 0;
+	}
+	if (len >= buf_len) {
+		return -1;	/* over-long: the caller answers 400 rather than fall back to Host */
 	}
 	memcpy(buf, authority, len);
 	buf[len] = '\0';
 	return 1;
+}
+
+/* The path every consumer of the request-target uses -- the matchers below,
+ * the router and the FastCGI builder -- taken from the ONE parse libevent
+ * did (evhttp_uri_get_path), so no form can be matched on one path and routed
+ * on another: "http:/metrics/app" (absolute-URI without authority) and the
+ * network-path "//h/metrics/app" both yield "/metrics/app", like the
+ * origin-form (#534). An empty path is "/" only when an authority was present
+ * ("GET http://h", RFC 9112 3.2.2); "GET http:" has none and stays empty. */
+static const char *fpm_http_request_path(struct evhttp_request *req)
+{
+	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
+	const char *p = u ? evhttp_uri_get_path(u) : NULL;
+
+	if (u && p && !*p && evhttp_uri_get_host(u)) {
+		return "/";
+	}
+	return p;
+}
+
+/* The path of the request as every gateway matcher (ping.path, the operator
+ * namespace, access.suppress_path[]) compares it: fpm_http_request_path(), raw
+ * (no percent-decoding), the query already cut off by libevent's parse. Returns
+ * the length, or 0 when there is no path or it does not fit `path_size`-1
+ * bytes (#534). */
+static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
+
+/* access.suppress_path[]: matched the same way ping.path is (see
+ * fpm_http_serve_ping()) -- whole path, query string cut off, no
+ * percent-decoding, so the entry an operator writes in the pool file is what
+ * is compared against. This is the http gateway's first consumer of the
+ * directive (issue #382); it was parsed in fpm_conf.c and copied onto
+ * gw->suppress_paths in fpm_http_gateway_settings() but never referenced
+ * here before. */
+static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+{
+	char path[512];
+	unsigned i;
+
+	if (!gw->suppress_paths_count || !fpm_http_raw_path(req, path, sizeof(path))) {
+		return 0;
+	}
+	for (i = 0; i < gw->suppress_paths_count; i++) {
+		if (!strcmp(path, gw->suppress_paths[i])) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
+ * straight from the evhttp_request, callers only supply what they already know
+ * (effective remote_addr, remote_user if any, final status, body bytes sent).
+ *
+ * A locally answered ping.path (issue #382) IS logged here, like every other
+ * locally answered response (an ACME challenge, a static file) already was --
+ * it is real HTTP traffic that reached this process, and an operator who
+ * wants it out of the log has the same lever as for any other noisy path:
+ * access.suppress_path[], applied by fpm_http_log_suppressed() above.
+ *
+ * target (issue #341): the backend pool this request was dispatched to, NULL
+ * for a request this gateway answered on its own (ping, static, ACME, an ACL
+ * rejection before routing ran) -- see fpm_http_access_log.h for the exact
+ * field this produces. Gated on gw->has_routes here, not left to the caller:
+ * a gateway with no http.route[] configured logs "-" on every line whether or
+ * not the caller happens to know its one implicit target's name, which is
+ * what keeps that gateway's log byte-for-byte what it was before this issue. */
+static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target)
+{
+	if (!gw->access_log) {
+		return;
+	}
+	if (fpm_http_log_suppressed(gw, req)) {
+		return;
+	}
+	fpm_http_access_log_write(gw->access_log, remote_addr, remote_user,
+		fpm_http_method_name(evhttp_request_get_command(req)), evhttp_request_get_uri(req),
+		req->major, req->minor, status, bytes,
+		evhttp_find_header(evhttp_request_get_input_headers(req), "Referer"),
+		evhttp_find_header(evhttp_request_get_input_headers(req), "User-Agent"),
+		/* Issue #389: an operator-forwarded request passes the literal
+		 * "operator" here even though it was dispatched to a target, so the
+		 * target field is non-NULL and the field prints. The has_routes gate
+		 * keeps a gateway that never opted into routing (and therefore has no
+		 * target field to print) byte-for-byte what it was before #341. */
+		(gw->has_routes || target) ? target : NULL);
+}
+
+/* ---------------------------------------------------------------- FastCGI encoding */
+
+static void fpm_http_fcgi_record(smart_str *out, int type, const char *data, size_t len)
+{
+	unsigned char hdr[8] = {FCGI_VERSION_1, (unsigned char)type, 0, 1, (unsigned char)(len >> 8), (unsigned char)len, (unsigned char)((8 - len % 8) % 8), 0};
+	static const char zeros[8] = {0};
+
+	smart_str_appendl(out, (char*)hdr, sizeof(hdr));
+	smart_str_appendl(out, data, len);
+	smart_str_appendl(out, zeros, hdr[6]);
+}
+
+static void fpm_http_fcgi_len(smart_str *out, size_t len)
+{
+	if (len < 0x80) {
+		smart_str_appendc(out, (char)len);
+	} else {
+		unsigned char b[4] = {(unsigned char)((len >> 24) | 0x80), (unsigned char)(len >> 16), (unsigned char)(len >> 8), (unsigned char)len};
+		smart_str_appendl(out, (char*)b, 4);
+	}
+}
+
+/* name/value pairs never straddle records, the receiver decodes each record on its own */
+static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value)
+{
+	size_t name_len = strlen(name), value_len = strlen(value);
+	size_t pair_len = (name_len < 0x80 ? 1 : 4) + (value_len < 0x80 ? 1 : 4) + name_len + value_len;
+
+	/* A pair may not straddle records (see above), so one that cannot fit an
+	 * empty record cannot be sent at all: the request is refused rather than
+	 * mangled. Without this the length silently wrapped in the record header
+	 * -- fpm_http_fcgi_record() writes contentLength as two bytes, so 65539
+	 * became 3 -- and the worker parsed request bytes as record headers.
+	 * Reachable inside the 64 KiB block bound this commit sets, measured on
+	 * 192.168.8.50, 2026-09-09: `GET / HTTP/1.0` plus one 65520-byte header
+	 * line gives a 65533-byte pair, and a 65523-byte `.php` URI gives a
+	 * 65539-byte REQUEST_URI; both answered 502 before this check. The caller
+	 * turns the flag into a 400 and throws the connection away. */
+	if (pair_len > FCGI_MAX_RECORD_LEN) {
+		c->params_oversize = 1;
+		return;
+	}
+	if (c->params.s && ZSTR_LEN(c->params.s) + pair_len > FCGI_MAX_RECORD_LEN) {
+		fpm_http_fcgi_record(&c->out, FCGI_PARAMS, ZSTR_VAL(c->params.s), ZSTR_LEN(c->params.s));
+		smart_str_free(&c->params);
+	}
+	fpm_http_fcgi_len(&c->params, name_len);
+	fpm_http_fcgi_len(&c->params, value_len);
+	smart_str_appendl(&c->params, name, name_len);
+	smart_str_appendl(&c->params, value, value_len);
+}
+
+/* ---------------------------------------------------------------- request -> FastCGI */
+
+/* The request-target as an origin server wants to see it. RFC 9112 3.2.2: a
+ * server MUST accept the absolute-form ("GET http://host/path?q HTTP/1.1")
+ * even though only proxies are sent it, and a client talking to an origin
+ * server MUST send only path and query -- so the gateway, which is the client
+ * of its targets, forwards the origin-form, and a FastCGI application sees
+ * the same REQUEST_URI whichever transport the route uses (#462 bullet e:
+ * before, a fastcgi route handed the app the whole URL while an http-direct
+ * target answered the verbatim absolute-form with its own 400).
+ * Origin-form and "*" are copied verbatim. */
+const char *fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len)
+{
+	const char *p = uri;
+
+	if (authority) {
+		*authority = NULL;
+		*authority_len = 0;
+	}
+	if (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z')) {
+		p++;
+		while (((*p | 0x20) >= 'a' && (*p | 0x20) <= 'z') || (*p >= '0' && *p <= '9')
+			|| *p == '+' || *p == '-' || *p == '.') {
+			p++;
+		}
+		if (p[0] == ':' && p[1] == '/' && p[2] == '/') {
+			const char *auth = p + 3;
+
+			p = auth;
+			while (*p && *p != '/' && *p != '?' && *p != '#') {
+				p++;
+			}
+			if (authority) {
+				const char *at;
+
+				/* userinfo is not part of a Host value (RFC 9110 7.2) */
+				for (at = p; at > auth && at[-1] != '@'; at--) {
+				}
+				*authority = at;
+				*authority_len = (size_t) (p - at);
+			}
+			return p;
+		}
+	}
+	return uri;
+}
+
+void fpm_http_origin_form(smart_str *out, const char *uri)
+{
+	const char *p = fpm_http_origin_start(uri, NULL, NULL);
+
+	if (p != uri && *p != '/') {
+		smart_str_appendc(out, '/');
+	}
+	smart_str_appends(out, p);
+}
+
+/* 1 = copied, 0 = no authority, -1 = authority longer than buf_len-1. */
+int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
+{
+	const char *authority;
+	size_t len;
+
+	if (!uri) {
+		return 0;
+	}
+	fpm_http_origin_start(uri, &authority, &len);
+	if (!authority || !len) {
+		return 0;
+	}
+	if (len >= buf_len) {
+		return -1;	/* over-long: the caller answers 400 rather than fall back to Host */
+	}
+	memcpy(buf, authority, len);
+	buf[len] = '\0';
+	return 1;
+}
+
+/* The path every consumer of the request-target uses -- the matchers below,
+ * the router and the FastCGI builder -- taken from the ONE parse libevent
+ * did (evhttp_uri_get_path), so no form can be matched on one path and routed
+ * on another: "http:/metrics/app" (absolute-URI without authority) and the
+ * network-path "//h/metrics/app" both yield "/metrics/app", like the
+ * origin-form (#534). An empty path is "/" only when an authority was present
+ * ("GET http://h", RFC 9112 3.2.2); "GET http:" has none and stays empty. */
+static const char *fpm_http_request_path(struct evhttp_request *req)
+{
+	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
+	const char *p = u ? evhttp_uri_get_path(u) : NULL;
+
+	if (u && p && !*p && evhttp_uri_get_host(u)) {
+		return "/";
+	}
+	return p;
 }
 
 /* The path of the request as every gateway matcher (ping.path, the operator
@@ -694,24 +933,17 @@ int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
  * there is no target or it does not fit `path_size`-1 bytes. */
 static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size)
 {
-	const char *uri = evhttp_request_get_uri(req);
-	const char *start, *end;
+	const char *p = fpm_http_request_path(req);
 	size_t len;
 
-	if (!uri) {
+	if (!p) {
 		return 0;
 	}
-	start = fpm_http_origin_start(uri, NULL, NULL);
-	end = start + strcspn(start, "?#");
-	if (end == start && start != uri) {
-		start = "/";
-		end = start + 1;
-	}
-	len = (size_t) (end - start);
+	len = strlen(p);
 	if (len == 0 || len >= path_size) {
 		return 0;
 	}
-	memcpy(path, start, len);
+	memcpy(path, p, len);
 	path[len] = '\0';
 	return len;
 }
@@ -743,7 +975,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	struct evhttp_request *req = c->req;
 	const struct evhttp_uri *uri = evhttp_request_get_evhttp_uri(req);
 	const char *method = fpm_http_method_name(evhttp_request_get_command(req));
-	const char *path = uri ? evhttp_uri_get_path(uri) : NULL;
+	const char *path = fpm_http_request_path(req);
 	const char *query = uri ? evhttp_uri_get_query(uri) : NULL;
 	const char *host = evhttp_request_get_host(req);
 	struct evkeyval *header;
@@ -756,11 +988,6 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	int trailing_slash;
 	size_t decoded_len, body_len = evbuffer_get_length(body);
 
-	/* "GET http://h HTTP/1.1": an absolute-form target without a path is "/"
-	 * (RFC 9112 3.2.2, #534). */
-	if (uri && path && !*path) {
-		path = "/";
-	}
 	if (!method || !path || !*path) {
 		return HTTP_BADREQUEST;
 	}
@@ -963,7 +1190,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	/* An absolute-form target's authority replaces the Host header (RFC 9112
 	 * 3.2.2), so HTTP_HOST agrees with SERVER_NAME and with what the http
 	 * transport sends (#534). */
-	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority));
+	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0;
 	saw_host = 0;
 
 	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
@@ -2531,7 +2758,11 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	/* An absolute-form target names its own authority, which replaces Host
 	 * (RFC 9112 3.2.2), and is redirected as origin-form -- otherwise the
 	 * Location would be "https://h" + "http://h/x" (#534). */
-	if (uri && fpm_http_absolute_authority(uri, authority, sizeof(authority))) {
+	if (uri && fpm_http_absolute_authority(uri, authority, sizeof(authority)) < 0) {
+		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		return;
+	}
+	if (uri && fpm_http_absolute_authority(uri, authority, sizeof(authority)) > 0) {
 		host = authority;
 	}
 	if (uri) {
@@ -2621,7 +2852,6 @@ static int fpm_http_prefix_covers(const char *prefix, size_t prefix_len, const c
  * gateway is alive, not any target's workers). */
 static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
 {
-	const struct evhttp_uri *uri;
 	const char *path;
 	char *decoded;
 	size_t decoded_len;
@@ -2637,11 +2867,7 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 		return gw->routes[0].target;
 	}
 
-	uri = evhttp_request_get_evhttp_uri(req);
-	path = uri ? evhttp_uri_get_path(uri) : NULL;
-	if (uri && path && !*path) {
-		path = "/";	/* absolute-form without a path (#534) */
-	}
+	path = fpm_http_request_path(req);
 	if (!path || !*path) {
 		/* No path to route on: the gateway has no implicit target, so this
 		 * is a local 404 (fpm_http_request() answers it). */
@@ -2969,6 +3195,20 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 		evhttp_send_error(req, 403, "Forbidden");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
+	}
+
+	/* An absolute-form authority too long for the 256-byte buffer would be
+	 * silently replaced by the Host header in some places and not in others
+	 * (#534): refuse it up front. */
+	{
+		char authority[256];
+
+		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) < 0) {
+			fpm_http_log_response(gw, req, peer_addr, NULL, 400, 0, NULL);
+			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			fpm_http_count_local(gw);
+			return;
+		}
 	}
 
 	/* Resolved once per request: whether the direct peer is a trusted proxy

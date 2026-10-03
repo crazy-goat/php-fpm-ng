@@ -206,7 +206,7 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 		char authority[256];
 
 		/* RFC 9112 3.2.2: the absolute-form authority replaces Host (#534). */
-		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority))) {
+		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0) {
 			host = authority;
 		}
 		smart_str_appends(&c->out, "Host: ");

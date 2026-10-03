@@ -110,6 +110,18 @@ try {
     $r = rawGet($http, 'http://other.example:81/d/x', 't');
     echo "host http: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
 
+    /* Other absolute-URI / network-path shapes libevent parses: the matchers
+     * must see the path routing sees. */
+    foreach (['http:/metrics/app', 'x+y:/metrics/app', '//h/metrics/app'] as $t) {
+        echo "$t operator: " . statusOf(rawGet($http, $t)) . "\n";
+    }
+    $r = rawGet($http, 'http:/ping');
+    echo "http:/ping: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    $r = rawGet($http, 'http:');
+    echo "no authority: " . (str_starts_with(bodyOf($r), 'app:') ? 'served' : 'refused') . "\n";
+    $r = rawGet($http, 'http://' . str_repeat('a', 260) . '/x', 't');
+    echo "long authority: " . statusOf($r) . "\n";
+
     rawGet($http, 'http://t/quiet');
     rawGet($http, 'http://t/loud');
     $accessLog = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
@@ -140,6 +152,12 @@ no path: 200 app:/:other.example
 no host fastcgi: 200 app:/x:other.example:81
 no host http: 200 app:/d/x:other.example:81
 host http: 200 app:/d/x:other.example:81
+http:/metrics/app operator: 403
+x+y:/metrics/app operator: 403
+//h/metrics/app operator: 403
+http:/ping: 200 pong
+no authority: refused
+long authority: 400
 suppressed: yes
 logged: yes
 --CLEAN--

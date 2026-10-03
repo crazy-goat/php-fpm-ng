@@ -37,9 +37,15 @@ pm = static
 pm.max_children = 1
 CFG;
 
-$script = __DIR__ . '/fpmng-fastcgi-tcp-nodelay-' . getmypid() . '.php';
+// Under the temp dir, not __DIR__: the path is a FastCGI parameter value and a
+// long results directory would make it exceed 127 bytes. The encoder below
+// handles that too, but a short path keeps the request small. It is removed in
+// the finally block below, also when the test throws.
+$script = sys_get_temp_dir() . '/fpmng-fastcgi-tcp-nodelay-' . getmypid() . '.php';
 file_put_contents($script, "<?php echo str_repeat('x', $bodyBytes);");
+chmod($script, 0644);
 
+try {
 $tester = new FPM\Tester($cfg, '<?php');
 $tester->start();
 $tester->expectLogStartNotices();
@@ -53,9 +59,9 @@ $record = function (int $type, string $content): string {
     $pad = (8 - strlen($content) % 8) % 8;
     return pack('CCnnCx', 1, $type, 1, strlen($content), $pad) . $content . str_repeat("\0", $pad);
 };
-$pair = function (string $k, string $v): string {
-    return chr(strlen($k)) . chr(strlen($v)) . $k . $v;
-};
+// FastCGI name-value lengths: one byte below 128, else four bytes with the high bit set.
+$len = fn (string $s): string => strlen($s) < 128 ? chr(strlen($s)) : pack('N', strlen($s) | 0x80000000);
+$pair = fn (string $k, string $v): string => $len($k) . $len($v) . $k . $v;
 $params = $pair('SCRIPT_FILENAME', $script)
     . $pair('REQUEST_METHOD', 'GET') . $pair('REQUEST_URI', '/')
     . $pair('SCRIPT_NAME', '/x.php') . $pair('SERVER_PROTOCOL', 'HTTP/1.1')
@@ -121,10 +127,12 @@ if (count($stalled) > $stallsAllowed) {
     echo "no stall: ok\n";
 }
 
-@unlink($script);
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
 $tester->close();
+} finally {
+    @unlink($script);
+}
 ?>
 Done
 --EXPECT--

@@ -1,0 +1,24 @@
+--- a/run-tests.php
++++ b/run-tests.php
+@@ -2849,6 +2849,21 @@
+ 
+ function error_may_be_retried(TestFile $test, string $output): bool
+ {
++    /* Issue #562 (php-fpm-ng): a port collision is not a flake, it is two
++     * tests holding one port. Under -j (issue #394) the ports are partitioned
++     * per worker, so a collision means that partition is broken, and the retry
++     * used to turn it into "WARN passed on retry", which build/ci-package-
++     * gate.sh counts as a pass (issue #301). The pattern takes both spellings
++     * of the errno: glibc says "Address already in use", musl "Address in use"
++     * (measured: Alpine's php-fpm logs the second one, so the original phrase
++     * alone never fired there). The timing retry below stays: the gate has
++     * recorded fpmng-http-direct-worker-saturation-refuses-new.phpt passing
++     * only on retry on a loaded runner, and removing it would turn known load
++     * flakes red. */
++    if (preg_match('/address (already )?in use/i', $output) === 1) {
++        return false;
++    }
++
+     return is_flaky_output($output)
+         || is_flaky($test);
+ }

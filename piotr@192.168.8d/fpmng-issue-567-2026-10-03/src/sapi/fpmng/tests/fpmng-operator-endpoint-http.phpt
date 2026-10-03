@@ -1,0 +1,170 @@
+--TEST--
+fpm-ng: pool.type = gateway answers operator.status_path on the operator listener and not on the public one (issues #274, #388)
+--SKIPIF--
+<?php
+include "fpmng-skipif.inc";
+fpmng_skip_if_pool_type_unsupported('gateway');
+?>
+--FILE--
+<?php
+
+require_once "tester.inc";
+
+/* The rule from #273: one directive, one page, one socket. On the gateway
+ * (issue #388; pool.type = http before it) the status path names the gateway's
+ * OWN page on the operator listener and nothing on the public port.
+ *
+ * The public half is shown with the front controller turned OFF and the path
+ * routed to an ordinary fastcgi target: the same URL on the public port is an
+ * ordinary request the application answers, not a second copy of the operator
+ * page. With the front controller on, an unmatched path would fall back to it
+ * and the application would answer there too; the point is the same.
+ *
+ * ping.path is checked in the same run for the opposite reason: #273, point 9,
+ * leaves it on the public listener, answered by the gateway process itself
+ * (#382). If moving the status page silently took ping with it, this is where
+ * that shows up. */
+
+$root = sys_get_temp_dir() . '/fpmng-operator-http-' . getmypid();
+@mkdir($root, 0700, true);
+file_put_contents($root . '/index.php', '<?php echo "app:", $_SERVER["REQUEST_URI"], "\n";');
+/* A real script at the status path, so that "the public listener hands it to
+ * the application" is shown by the application running, not by a 404 that a
+ * missing file would produce either way. */
+file_put_contents($root . '/gw-status.php', '<?php echo "app:", $_SERVER["REQUEST_URI"], "\n";');
+
+$cfg = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+
+[gw]
+pool.type = gateway
+listen = {{ADDR[public]}}
+chdir = $root
+http.route[app] = /
+http.front_controller =
+operator.status_path = /gw-status.php
+operator.status_listen = {{ADDR[operator]}}
+ping.path = /gw-ping
+ping.response = pong
+
+[app]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 2
+chdir = $root
+EOT;
+
+$tester = new FPM\Tester($cfg, '<?php');
+$tester->start();
+$tester->expectLogStartNotices();
+
+function httpGet(string $addr, string $path): string
+{
+    $parts = explode(':', $addr);
+    $port = (int) array_pop($parts);
+    $host = implode(':', $parts);
+    $sock = @stream_socket_client("tcp://$host:$port", $errno, $errstr, 5);
+    if (!$sock) {
+        return "CONNECT FAILED: $errstr";
+    }
+    fwrite($sock, "GET $path HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    $raw = stream_get_contents($sock);
+    fclose($sock);
+    return $raw;
+}
+
+$public = $tester->getListen('{{ADDR[public]}}');
+$operator = $tester->getListen('{{ADDR[operator]}}');
+
+/* The status path on the public listener is now an ordinary request: the front
+ * controller answers it, and the reply is the application's. */
+$body = httpGet($public, '/gw-status.php');
+echo 'public status path -> ', str_contains($body, 'app:/gw-status.php') ? "the application\n" : "UNEXPECTED: $body\n";
+
+/* ...and on the operator listener it is the per-pool JSON, reporting this pool
+ * and no other. Since issue #390 a gateway's page is its own pool row plus one
+ * row per target label (the routed pool, "operator", "-"), all naming the pool
+ * it reports on -- the shape is still {"pools":[...]}, still only this pool. */
+$body = httpGet($operator, '/gw-status.php');
+$json = json_decode(substr($body, strpos($body, "\r\n\r\n") + 4), true);
+$pools = $json['pools'] ?? [];
+$onlyGw = $pools !== [];
+foreach ($pools as $row) {
+    if (($row['name'] ?? null) !== 'gw') {
+        $onlyGw = false;
+    }
+}
+echo 'operator status path -> ', $onlyGw && $pools[0]['type'] === 'gateway'
+    ? "json for pool gw, type gateway\n" : "UNEXPECTED: $body\n";
+
+/* ping did not move. */
+$body = httpGet($public, '/gw-ping');
+echo 'public ping path -> ', str_contains($body, 'pong') ? "pong\n" : "UNEXPECTED: $body\n";
+
+$tester->terminate();
+$tester->close();
+
+/* Issue #388 finding 2: on the gateway the operator paths DEFAULT to /status
+ * and /metrics, and an explicit `operator.status = off` must stay off. The
+ * flag parses to 0, which by value alone is indistinguishable from "unset", so
+ * the code has to ask whether the directive was SET. Here the listener exists
+ * (operator.metrics_path is explicit) and /status must be a 404: if `off` were
+ * treated as unset, the default would register /status and answer JSON. */
+$cfgOff = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+
+[gw2]
+pool.type = gateway
+listen = {{ADDR[public2]}}
+chdir = $root
+http.route[app2] = /
+http.front_controller =
+operator.status = off
+operator.metrics_path = /m2
+operator.status_listen = {{ADDR[operator2]}}
+operator.metrics_listen = {{ADDR[operator2]}}
+
+[app2]
+pool.type = fastcgi
+listen = {{ADDR[app2]}}
+pm = static
+pm.max_children = 1
+chdir = $root
+EOT;
+
+$tester2 = new FPM\Tester($cfgOff, '<?php');
+$tester2->start();
+$tester2->expectLogStartNotices();
+$operator2 = $tester2->getListen('{{ADDR[operator2]}}');
+
+$body = httpGet($operator2, '/status');
+echo 'operator.status = off -> ', str_starts_with($body, 'HTTP/1.1 404') ? "404, no default\n" : "UNEXPECTED: $body\n";
+$body = httpGet($operator2, '/m2');
+echo 'operator.metrics_path = /m2 -> ', str_starts_with($body, 'HTTP/1.1 200') ? "200\n" : "UNEXPECTED: $body\n";
+
+$tester2->terminate();
+$tester2->close();
+
+@unlink($root . '/gw-status.php');
+@unlink($root . '/index.php');
+@rmdir($root);
+
+echo "Done\n";
+?>
+--EXPECT--
+public status path -> the application
+operator status path -> json for pool gw, type gateway
+public ping path -> pong
+operator.status = off -> 404, no default
+operator.metrics_path = /m2 -> 200
+Done
+--CLEAN--
+<?php
+require_once "tester.inc";
+FPM\Tester::clean();
+?>

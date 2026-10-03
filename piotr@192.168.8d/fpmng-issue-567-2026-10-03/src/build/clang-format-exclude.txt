@@ -1,0 +1,47 @@
+# Our own C sources that bin/lint.sh does not run clang-format on. One path per line.
+#
+# Modified copies of upstream php-src sapi/fpm files. They stay diffable against
+# upstream (docs/c-style.md), so they keep upstream's formatting. Permanent.
+sapi/fpmng/fpm/fpm.c
+sapi/fpmng/fpm/fpm_children.c
+sapi/fpmng/fpm/fpm_conf.c
+sapi/fpmng/fpm/fpm_conf.h
+sapi/fpmng/fpm/fpm_process_ctl.c
+sapi/fpmng/fpm/fpm_request.c
+sapi/fpmng/fpm/fpm_request.h
+sapi/fpmng/fpm/fpm_stdio.c
+sapi/fpmng/fpm/zlog.h
+
+# Legacy: hand-formatted files that .clang-format would reflow in more than 20
+# lines each (about 3600 lines in total). A whitespace-only reformat of them
+# would bury `git blame` on comments that are the primary documentation, so it is
+# a separate change. Remove a file from this list when it is reformatted. Never
+# add one: a new file must pass the check.
+ext/fpmng_metrics/fpmng_metrics.c
+ext/fpmng_metrics/php_fpmng_metrics.h
+sapi/fpmng/fpm/fpm_acme_challenge.c
+sapi/fpmng/fpm/fpm_error_log_follow.c
+sapi/fpmng/fpm/fpm_http_access_log.c
+sapi/fpmng/fpm/fpm_http_auth.c
+sapi/fpmng/fpm/fpm_http_client.c
+sapi/fpmng/fpm/fpm_http_direct_conn.c
+sapi/fpmng/fpm/fpm_http_direct_ops.c
+sapi/fpmng/fpm/fpm_http_direct_ops.h
+sapi/fpmng/fpm/fpm_http_direct_request.c
+sapi/fpmng/fpm/fpm_http_direct_user_ini.c
+sapi/fpmng/fpm/fpm_http_direct_worker.c
+sapi/fpmng/fpm/fpm_http_direct.c
+sapi/fpmng/fpm/fpm_http_internal.h
+sapi/fpmng/fpm/fpm_http_static.c
+sapi/fpmng/fpm/fpm_http.c
+sapi/fpmng/fpm/fpm_operator_endpoint.c
+sapi/fpmng/fpm/fpm_operator_http.c
+sapi/fpmng/fpm/fpm_operator_pages.c
+sapi/fpmng/fpm/fpm_payload_dist.c
+sapi/fpmng/fpm/fpm_pool_cron.c
+sapi/fpmng/fpm/fpm_pool_supervisor.c
+sapi/fpmng/fpm/fpm_pool_type.c
+sapi/fpmng/fpm/fpm_pool_type.h
+sapi/fpmng/fpm/fpm_tls_http_direct.c
+sapi/fpmng/fpm/fpm_tls_http.c
+sapi/fpmng/fpm/fpm_tls_reload.c

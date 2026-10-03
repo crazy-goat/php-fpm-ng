@@ -1,0 +1,1 @@
+served by http.static (fpm_http.c) over the sendfile/mmap path, no PHP involved.

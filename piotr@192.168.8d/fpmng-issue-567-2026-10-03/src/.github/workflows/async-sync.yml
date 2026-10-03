@@ -1,0 +1,31 @@
+name: async-sync
+
+# !!! WHEN YOU MERGE main INTO async: KEEP async's VERSION OF THIS FILE !!!
+# This file exists on both branches (add/add conflict on the first merge). Main's
+# copy is only an echo stub; taking it would silently replace the real sync
+# workflow on async. Resolve with: git checkout --ours .github/workflows/async-sync.yml
+# (while on async). Why the stub exists: issue #528, see below.
+#
+# Registration stub (issue #528). The real workflow lives only on branch
+# `async`. `gh workflow run async-sync.yml --ref async`, which
+# async-sync-trigger.yml runs, resolves the workflow by file name among the
+# workflows registered on the DEFAULT branch, and answers 404 when there is none
+# there. With this file on main the name resolves, and GitHub then runs the
+# async-branch version of the file at --ref async. Running this stub from main
+# does nothing on purpose. It has no schedule: the clock is async-sync-trigger.yml.
+on:
+  workflow_dispatch:
+    inputs:
+      allow_deletions:
+        description: "Forwarded to the async-branch workflow; unused here."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "This is the registration stub on main; dispatch with --ref async (see async-sync-trigger.yml)."

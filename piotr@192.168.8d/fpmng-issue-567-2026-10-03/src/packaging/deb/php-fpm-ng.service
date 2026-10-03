@@ -1,0 +1,25 @@
+[Unit]
+Description=php-fpm-ng, the FPM SAPI with HTTP-direct pools
+Documentation=https://github.com/crazy-goat/php-fpm-ng
+After=network.target
+
+[Service]
+; Type=exec, not Type=notify. Upstream FPM's sd_notify() support is behind
+; HAVE_SYSTEMD, and build/libphp-build.sh leaves it unset on purpose -- it
+; would add a libsystemd link to a package whose whole selling point is that it
+; needs nothing but the distribution's libphp. Type=notify against a binary
+; that never notifies hangs the unit until its timeout.
+Type=exec
+ExecStart=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
+; SIGUSR2 is FPM's reload: the master re-reads the configuration and replaces
+; its children. SIGUSR1 reopens the log files, which is what logrotate wants.
+ExecReload=/bin/kill -USR2 $MAINPID
+; SIGQUIT is FPM's graceful stop -- children finish the request they are on.
+; The default SIGTERM cuts them off mid-request.
+KillSignal=SIGQUIT
+RuntimeDirectory=php-fpm-ng
+RuntimeDirectoryMode=0755
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

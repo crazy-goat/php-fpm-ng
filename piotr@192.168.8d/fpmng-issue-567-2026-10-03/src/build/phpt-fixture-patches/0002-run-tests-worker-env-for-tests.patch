@@ -1,0 +1,17 @@
+--- a/run-tests.php
++++ b/run-tests.php
+@@ -1741,7 +1741,13 @@
+ 
+         switch ($command["type"]) {
+             case "run_tests":
+-                run_all_tests($command["test_files"], $command["env"], $command["redir_tested"]);
++                /* Issue #394 (php-fpm-ng): $command["env"] is the main process's
++                 * environment, which is what every test is started with, so a
++                 * test could not tell which worker runs it. Hand it the worker
++                 * number; tester.inc derives its port block from it. */
++                $testEnv = $command["env"];
++                $testEnv["TEST_PHP_WORKER"] = (string) $workerID;
++                run_all_tests($command["test_files"], $testEnv, $command["redir_tested"]);
+                 send_message($workerSock, [
+                     "type" => "tests_finished",
+                     "junit" => $junit->isEnabled() ? $junit : null,

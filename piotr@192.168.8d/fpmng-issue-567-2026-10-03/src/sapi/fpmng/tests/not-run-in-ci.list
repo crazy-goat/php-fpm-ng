@@ -1,0 +1,14 @@
+# Tests this repo owns that build/run-fpmng-phpt.sh must not run, one per line:
+#
+#   fpmng-<file>.phpt   <reason it cannot run in CI>
+#
+# The reason is mandatory, and the file keeps its fpmng- prefix: without it
+# build/run-fpm-phpt.sh would take the test for one of upstream's and run it
+# anyway. The runner fails on a bare name, on a name it cannot find, and on a
+# name without the prefix (issue #95).
+#
+# This is not the place for a test that merely fails: fix it or open an issue
+# for it. It is for a test that cannot run at all where the runner runs, e.g.
+# one needing hardware or a privilege the CI job does not have.
+#
+# Empty on purpose: every fpmng test currently runs.

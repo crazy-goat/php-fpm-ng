@@ -1,0 +1,35 @@
+Fix: TCP_NODELAY never enabled on keep-alive FastCGI connections (non-Windows)
+
+Upstream bug in main/fastcgi.c. `req->tcp` is assigned only under `#ifdef _WIN32`
+in fcgi_init_request(), but fcgi_read_request() uses it unconditionally to decide
+whether to set TCP_NODELAY on a FCGI_KEEP_CONN connection. On every other platform
+the field stays 0 from calloc(), so TCP_NODELAY is never set and a response larger
+than the 8 KB output buffer (several write() calls, last one small) hits
+Nagle + delayed ACK: ~40 ms instead of ~80 us per request against a client that
+does not ACK promptly. Reproduction and proposed upstream report:
+patches/0002-upstream-report.md
+
+Fix: derive `req->tcp` from the peer address family right after accept().
+
+Czeka na: zgloszenie do php/php-src (jeszcze nie wyslane, tekst w
+0002-upstream-report.md). Znika w dniu, w ktorym upstream to zmerguje.
+Sprawdzone na: PHP-8.3, PHP-8.4, PHP-8.5, master (patrz patches/README.md).
+
+diff --git a/main/fastcgi.c b/main/fastcgi.c
+index 6cdf023334a..d5eb6289530 100644
+--- a/main/fastcgi.c
++++ b/main/fastcgi.c
+@@ -1395,6 +1395,13 @@ int fcgi_accept_request(fcgi_request *req)
+ 					req->fd = accept(listen_socket, (struct sockaddr *)&sa, &len);
+ 					FCGI_UNLOCK(req->listen_socket);
+ 
++#ifndef _WIN32
++					/* On Windows req->tcp is set once in fcgi_init_request() (pipe vs socket).
++					 * Elsewhere it was never set at all, so TCP_NODELAY was never enabled. */
++					if (req->fd >= 0) {
++						req->tcp = (sa.sa.sa_family != AF_UNIX);
++					}
++#endif
+ 					client_sa = sa;
+ 					if (req->fd >= 0 && !fcgi_is_allowed()) {
+ 						fcgi_log(FCGI_ERROR, "Connection disallowed: IP address '%s' has been dropped.", fcgi_get_last_client_ip());

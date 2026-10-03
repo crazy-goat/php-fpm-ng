@@ -1,0 +1,602 @@
+name: build
+
+# Every job here builds and tests against a prebuilt PHP 8.5 SDK -- the
+# distribution's php8.5-dev, libphp8.5-embed and php8.5-cli -- and nothing else
+# (issue #424, the cutover of epic #418; the contract is decision #419). No job
+# fetches php-src, configures it or compiles the engine, and no step falls back
+# to doing so. The binary under test is the one build/libphp-build.sh produces,
+# which is the binary the packages ship.
+#
+# THE MATRIX IS ONE CELL: PHP 8.5, NTS, Ubuntu 26.04 (glibc). That is the
+# contract's Debian/Ubuntu cell. The Alpine (musl) cell is covered by the
+# package gate, which runs only in release.yml (see below).
+#
+# WHERE THE SDK COMES FROM. Each job runs in a stock ubuntu:26.04 container (a
+# public Docker Hub image, so no registry credentials) and installs its
+# dependencies with build/ci-install-deps.sh, which prints the packages it asked
+# for and the versions it got. Not a prebuilt CI image: ci-image.yml cannot push
+# one from a pull request, so a change to the package list could only be tried
+# after merging it, and every job would carry a registry pull. The price is
+# about a minute of apt per job. libphp-build.sh then writes commands.log with
+# every compile and link command, and ends with build/audit-compile-deps.sh --
+# the compiler's own dependency output is checked for anything outside this
+# repository, the SDK and the system -- so "no php-src, no engine build" is
+# audited in the build job rather than claimed here. The `build` job uploads
+# that log.
+#
+# NOT ROOT. php-fpm refuses to start as root, so a job that runs the suites as
+# root reports every test SKIP and still goes green. The container starts as
+# root (apt needs it); ci-install-deps.sh creates the uid-1001 `ci` account and
+# `defaults.run.shell` runs every ordinary step as it. The few steps that need
+# root say `shell: bash` explicitly. A green job is not a pass until its log
+# shows PASS counts, not SKIPs.
+#
+# PACKAGE GATE. build/ci-package-gate.sh (issue #224) is not here: it installs
+# the built package into a clean container, takes about eight minutes per
+# flavour, and ran the same suite five times per pull request (issue #393). It
+# runs in release.yml, on a tag, and can be dispatched there to rehearse.
+#
+# Runs on pull_request and on push to main (the standard's trigger set; the
+# earlier "pull_request only" rule of 2026-09-17 is dropped with it). There is no
+# schedule: it existed to refresh a compiler cache for php-src, and there is no
+# php-src build left to cache.
+#
+# DOCS-ONLY CHANGES. The `changes` job classifies the diff; the heavy jobs run
+# only when `code` is 'true'. A skipped job reports as skipped, not as missing,
+# and `ci-ok` is the one required check: it passes on a docs-only change and
+# demands every job to be green on a code change. This replaces the old
+# `paths-ignore`, under which a skipped workflow reported nothing at all.
+# Deliberately NOT docs: .github/**, build/**, packaging/**, anything under
+# sapi/ -- a change to CI itself must run CI -- and README.md, AGENTS.md and
+# sapi/fpmng/README.md, which build/test-comment-content-rule.sh reads.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The workflow default is read-only. The heavy jobs add actions: write for
+# build/ci-cancel-run.sh (issue #209), the if: failure() step they end with:
+# cancelling a run is an Actions API write.
+permissions:
+  contents: read
+
+# Every push to a PR branch restarts the whole run; without this the superseded
+# run keeps burning minutes to completion. A push to main is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # The toggles the CI binary is built with, in one place because the lint pass
+  # has to describe the same configuration the tests run:
+  #
+  # FPMNG_TLS: since issue #280 TLS termination is opt-in and OFF by default, so
+  # without it every TLS test would SKIP and the run would be testing a binary
+  # that cannot terminate TLS. The shipped default package is built WITHOUT it
+  # (build/ci-package-gate.sh); that difference is deliberate and asserted on
+  # both sides rather than assumed.
+  #
+  # FPMNG_ACME: the same, one level up (issue #281). It needs FPMNG_TLS.
+  #
+  # FPMNG_DEBUG_CLOCK: the test-suite virtual clock (issue #396). Three tests
+  # wait on a five-field cron schedule or a supervisor timeout, which they
+  # cannot shorten themselves; without it they run at real speed, roughly 175
+  # extra seconds of a serial suite. Deliberately NOT in the packages: the
+  # shipped binary must not carry a clock an environment variable can speed up.
+  FPMNG_TLS: "1"
+  FPMNG_ACME: "1"
+  FPMNG_DEBUG_CLOCK: "1"
+
+defaults:
+  run:
+    # See "NOT ROOT" above. HOME is set here because runuser -u does not.
+    shell: runuser -u ci -- env HOME=/home/ci bash --noprofile --norc -eo pipefail {0}
+
+jobs:
+
+  changes:
+    name: Changes
+    uses: crazy-goat/.github/.github/workflows/changes.yml@main
+    with:
+      # README.md, AGENTS.md and sapi/fpmng/README.md are read by
+      # build/test-comment-content-rule.sh, so they count as code.
+      docs-regex: '^(docs/.*|CHANGELOG\.md|LICENSE.*|examples/.*\.md|\.github/ISSUE_TEMPLATE/.*|\.github/pull_request_template\.md|\.github/dependabot\.yml|\.gitignore)$'
+
+  docs:
+    name: Docs
+    uses: crazy-goat/.github/.github/workflows/docs-check.yml@main
+
+  # Setup only; every check lives in bin/lint.sh: clang-tidy (build/lint-c.sh),
+  # clang-format, shellcheck and hadolint (issue #571). The tools are pinned: what
+  # the runner image ships would change under us without a commit here.
+  #
+  # clang-tidy needs the compile flags of a real libphp-build.sh run
+  # (commands.log), with the same toggles as the `build` job, so the files behind
+  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK are linted with their macros defined.
+  # This build is only for its flags; `build` is the one whose binary is tested.
+  # The caveat of the former `checks` step stays: clang-tidy is whatever version
+  # Ubuntu 26.04 ships, so a new check can turn this job red without a change to
+  # our C sources. The fix is then a decision about that check (silence it in
+  # .clang-tidy with a reason, or fix the code), not a continue-on-error.
+  lint:
+    name: lint
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: curl xz-utils pipx
+        run: ./build/ci-install-deps.sh lint
+
+      - name: Install clang-format, shellcheck and hadolint
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          PIPX_BIN_DIR="$HOME/.local/bin" pipx install clang-format==23.1.2
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.xz \
+            | tar -xJ --strip-components=1 -C "$HOME/.local/bin" shellcheck-v0.11.0/shellcheck
+          curl -fsSL -o "$HOME/.local/bin/hadolint" https://github.com/hadolint/hadolint/releases/download/v2.12.0/hadolint-Linux-x86_64
+          chmod +x "$HOME/.local/bin/hadolint"
+          "$HOME/.local/bin/clang-format" --version
+          "$HOME/.local/bin/shellcheck" --version
+          "$HOME/.local/bin/hadolint" --version
+
+      - name: build against the SDK, for the compile flags
+        run: ./build/libphp-build.sh "$PWD/out-libphp-lint"
+
+      # $PWD, not github.workspace: in a container job the expression is the
+      # host path, which does not exist inside the container.
+      - name: Lint
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          FPMNG_LIBPHP_OUT="$PWD/out-libphp-lint" bin/lint.sh
+
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # Everything that needs no build product of ours: the comment-content rule
+  # (task 014), the fpmng .phpt coverage glob (issue #95), the vendored subset
+  # (#421), the hermetic refusal tests (#422, #423) and the version guard (#422).
+  # clang-tidy moved to the `lint` job (issue #571).
+  #
+  # Order is deliberate: the hermetic scripts first, so a failure in one costs
+  # nothing. A failing step stops the ones after it, which is
+  # what the fail-fast of issue #209 already did to the whole run.
+  checks:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      # actions/checkout needs git to leave a .git (check-owned-warnings.sh and
+      # the vendor check read it); the bare image has none.
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        run: ./build/ci-install-deps.sh build
+
+      # Task 014: the comment-content contract in AGENTS.md stays linked
+      # from the contributor entry points. Checkout only.
+      - name: verify comment-content rule links (task 014)
+        run: ./build/test-comment-content-rule.sh
+
+      # Issue #95: the fpmng runner's fpmng-*.phpt glob is checked against the
+      # tests this repo owns, so a new test file cannot be silently
+      # unreachable. Hermetic -- no build, no binary; the runner stops at its
+      # own preflight.
+      - name: verify fpmng .phpt coverage check (issue #95)
+        run: ./build/test-fpmng-phpt-coverage.sh
+
+      # Issue #421: third_party/php-src/ is exactly what its MANIFEST says --
+      # no file edited in place, none unlisted, none shadowed by an overlay
+      # file of the same name, and main/fastcgi.c/.h still "pinned tag +
+      # patches/", so a patch change without a re-import fails here instead of
+      # building a FastCGI layer the patch stack does not describe. This
+      # replaces the former `patches` job, which applied the stack to a freshly
+      # cloned php-src: main has no php-src to apply it to any more.
+      - name: verify the vendored php-src subset (issue #421)
+        run: ./build/vendor-php-src.sh check
+
+      # Issue #422: every refusal of the SDK build (wrong minor, ZTS, not
+      # Linux, bad toggles, the retired two-argument call) triggered on
+      # purpose against a fake php-config. Hermetic: no SDK, no compiler.
+      - name: libphp-build.sh refuses builds outside the contract (issue #422)
+        run: ./build/test-libphp-build-refusals.sh
+
+      # Issue #423: the .phpt tree assembles from third_party/php-src/ and this
+      # repository alone, an edited fixture is refused, and the runners stop
+      # when tester.inc would launch another FPM than the one they were given.
+      # Hermetic: shell-script stand-ins for the CLI and the binary.
+      - name: phpt fixtures and binary-under-test guard (issue #423)
+        run: ./build/test-phpt-tree.sh
+
+      # Issue #220 / #422: the packaged binary's libphp version guard, in all
+      # three outcomes (another minor FATAL, another patch level a notice, the
+      # same version silent), compiled against this job's real SDK. It used to
+      # run only inside the release package gate; it needs nothing but the SDK
+      # and a compiler, so it runs on every pull request.
+      - name: libphp version guard, all three outcomes (issue #220)
+        run: ./build/test-libphp-abi-guard.sh
+
+      # Task 013: clang-tidy over our C sources runs in the `lint` job, through
+      # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
+
+      # Issue #209: separate jobs, so GitHub's matrix `fail-fast` does not
+      # apply. One red job otherwise leaves the others running for a result
+      # nobody will read. The run ends as "cancelled" rather than "failed";
+      # build/ci-cancel-run.sh says why that is the price and what it costs.
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # The one build. Nothing here configures or compiles PHP: it is
+  # build/libphp-build.sh against the SDK installed above, i.e. the same script
+  # the packages are built with, with the three CI toggles on. Deliberately a
+  # single cell (PHP 8.5, NTS, glibc), see the header.
+  build:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        run: ./build/ci-install-deps.sh build
+
+      # The build, with its output kept: the step's own log names the SDK it
+      # resolved and the libphp it linked, and commands.log (uploaded below)
+      # holds every compile and link command verbatim.
+      - name: build against the SDK (build/libphp-build.sh)
+        run: ./build/libphp-build.sh "$PWD/out-libphp" 2>&1 | tee libphp-build.log
+
+      # Issue #111: the build is warning-free in the files we ship, and stays
+      # that way. -Werror is not available (the assembled tree also holds the
+      # vendored upstream files, whose warnings are not ours), so the gate
+      # filters the compile log by `git ls-files` on this repo rather than by
+      # path. commands.log is prepended because compile.log is empty on a clean
+      # build, and the script refuses (exit 2) a log that mentions no owned
+      # file, which is what keeps this from being a no-op. See
+      # build/check-owned-warnings.sh.
+      - name: no compiler warnings in our own sources (issue #111)
+        run: |
+          cat out-libphp/commands.log out-libphp/compile.log > out-libphp/owned-check.log
+          ./build/check-owned-warnings.sh "$PWD/out-libphp/owned-check.log"
+
+      - name: verify the binary that got built
+        run: |
+          BIN="$PWD/out-libphp/php-fpm-ng"
+          test -x "$BIN"
+          file "$BIN" 2>/dev/null || true
+          sha256sum "$BIN"
+          ldd "$BIN" | grep -E 'libphp|libevent'
+          "$BIN" -v
+
+      # Issue #280. A toggle that did not take would not fail the build, it
+      # would make every TLS test quietly SKIP. So it is asserted where it
+      # lands, in the linked binary, and not on the command that asked for it.
+      - name: assert TLS termination is really in this build (issue #280)
+        run: ldd "$PWD/out-libphp/php-fpm-ng" | grep libevent_openssl >/dev/null
+
+      # Issue #281, for the same reason: a symbol from the ACME code.
+      - name: assert ACME issuance is really in this build (issue #281)
+        run: nm --defined-only "$PWD/out-libphp/php-fpm-ng" | grep -w fpm_acme_challenge_init_main >/dev/null
+
+      # Issue #171: fpmng-payload-distribution.phpt reads the payload out of
+      # the binary under test. libphp-build.sh embeds it (FPMNG_ACME=1), so this
+      # checks it is there rather than embedding it again.
+      - name: assert the distribution payload is embedded (issue #171)
+        run: |
+          php8.5 build/payload-pack.php list --binary="$PWD/out-libphp/php-fpm-ng" | grep '^kind=1' >/dev/null
+
+      - name: stage artifact
+        run: |
+          mkdir -p stage/bin
+          cp out-libphp/php-fpm-ng stage/bin/
+
+      - name: upload build (for the test jobs)
+        uses: actions/upload-artifact@v7
+        with:
+          name: fpmng-canonical-build
+          path: stage
+          # One day: every consumer is a job in the same run, so retention only
+          # buys pulling the binary of a failed run by hand (issue #261).
+          retention-days: 1
+
+      # The audit trail for "no php-src was fetched and no engine was
+      # compiled": the dependency installs (in the job log), the exact compile
+      # and link commands, and the compiler's dependency audit result.
+      - name: upload the build commands and logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: libphp-build-logs
+          path: |
+            libphp-build.log
+            out-libphp/commands.log
+            out-libphp/compile.log
+            out-libphp/link.log
+          retention-days: 14
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # Task 003: regression tests for pool.type, pool.executor, and request-less
+  # pool types. cron may take up to one minute. The fixtures come from
+  # third_party/php-src through build/phpt-tree.sh (tree "-"), issue #423.
+  fpmng-phpt:
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      # Issue #105: the locale leg of fpmng-http-direct-request-parity.phpt is
+      # only discriminating under a Turkish locale -- toupper('i') returns 'i'
+      # there, which is what used to corrupt the HTTP_* CGI keys. The stock image
+      # carries C, C.utf8 and POSIX only, where even the pre-fix mapping is
+      # correct, so without this the check would pass on a reverted fix. The test
+      # names the locale it actually got on its own output line, so a run where
+      # this step stopped working does not look the same as a real one.
+      - name: install the PHP 8.5 SDK, the toolchain and the Turkish locale (issue #424)
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: locales
+        run: |
+          ./build/ci-install-deps.sh test
+          locale-gen tr_TR.UTF-8
+      - name: assert tr_TR.UTF-8 is present (issue #105)
+        run: locale -a | grep -i tr_TR
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      # download-artifact runs as root in the container, so the binary it wrote
+      # is root-owned and the unprivileged `ci` user cannot chmod it.
+      - name: hand the downloaded build to the ci user
+        shell: bash
+        run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng build/run-fpmng-phpt.sh
+      - name: run fpmng-owned .phpt tests (task 003)
+        run: |
+          # TEST_FPM_EXTENSION_DIR: the distribution's shared ctype.so, which
+          # fpmng-ini-bootstrap-extension.phpt loads (issue #428); it skips
+          # without it.
+          TEST_PHP_EXECUTABLE="$(php-config8.5 --php-binary)" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          TEST_FPM_EXTENSION_DIR="$(php-config8.5 --extension-dir)" \
+          TEST_FPM_TIMEOUT=120 \
+          ./build/run-fpmng-phpt.sh - "$PWD/fpmng-phpt-results"
+      - name: PASS and SKIP counts
+        if: always()
+        run: cat fpmng-phpt-results/summary.txt
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fpmng-phpt-results
+          path: fpmng-phpt-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # Every shell-driven scenario that runs the canonical build as a normal
+  # (non-root) user, plus the upstream FPM .phpt suite, in one job.
+  #
+  # These were seven jobs until the CI restructure, each 20 to 70 seconds of
+  # work behind a runner allocation, a container start and an artifact download
+  # of the same build. What the split did buy was a named verdict per scenario;
+  # that is now the step name, and a failing step stops the steps after it. Each
+  # step keeps the comment explaining why the scenario cannot be a .phpt,
+  # because that is the part that is expensive to rediscover.
+  #
+  # gateway-privileges is NOT here: it is the one scenario that must start as
+  # root, and this job must not.
+  integration:
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      # valgrind for issue #129's step below.
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: valgrind
+        run: ./build/ci-install-deps.sh test
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: make the canonical build executable (and the ci user's)
+        shell: bash
+        run: chown -R 1001:1001 build-out && chmod +x build-out/bin/php-fpm-ng
+
+      # Task 003's sibling: the suite php-src itself ships for FPM, run
+      # against our SAPI (upstream's tests, vendored in third_party/php-src).
+      # Cheap, and first here because a failure in it means the build is wrong
+      # rather than one scenario being wrong.
+      - name: run the upstream FPM .phpt suite against php-fpm-ng
+        run: |
+          TEST_PHP_EXECUTABLE="$(php-config8.5 --php-binary)" \
+          TEST_PHP_FPM_EXECUTABLE="$PWD/build-out/bin/php-fpm-ng" \
+          ./build/run-fpm-phpt.sh - "$PWD/phpt-results"
+      - name: PASS and SKIP counts
+        if: always()
+        run: cat phpt-results/summary.txt
+
+      # Task 040: a renewed TLS certificate must take effect in every gateway
+      # process without a restart. Needs multiple real gateway processes under
+      # SO_REUSEPORT, a load generator running across the file swap, and a
+      # deliberately broken candidate -- no .phpt can drive that.
+      - name: verify TLS certificate reload without restart (task 040)
+        run: ./build/test-http-tls-reload.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #172: a pool with http.tls_wait_for_cert must start without its
+      # certificate, refuse TLS connections rather than answer them badly, and
+      # have every gateway process pick up the certificate once it appears.
+      # The load-bearing part is a socket that is bound but not listening,
+      # which no phpt can observe -- it shows up only as the difference
+      # between curl exit 7 (refused) and 35 (handshake failed).
+      - name: verify the NO_CERT -> READY transition (issue #172)
+        run: ./build/test-http-tls-wait-for-cert.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #90: the per-connection read deadline (task 031) used to fire
+      # into a bufferevent evhttp had already freed, killing the whole gateway
+      # process with SIGSEGV. Real gateway processes, real TLS.
+      - name: verify a gateway survives its own read deadline (issue #90)
+        run: ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Task 042: the redirect-only plain HTTP companion listener.
+      - name: verify the redirect-only plain HTTP companion (task 042)
+        run: ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      # Issue #75: the amphp/Revolt worker-mode harness is DECLARED OPTIONAL
+      # rather than gated. The job has a PHP CLI but no Composer, so this SKIPs
+      # (exit 0) on every run today. That is expected, not a bug: what the step
+      # buys is that the skip is visible in the job summary
+      # (build/test-http-direct-amphp.sh's skip()) instead of being a harness
+      # nobody invoked. Its dependency-free half
+      # (sapi/fpmng/tests/fpmng-http-direct-worker.phpt) is gated in fpmng-phpt.
+      - name: run the amphp/Revolt worker-mode harness (issue #75)
+        run: ./build/test-http-direct-amphp.sh "$PWD/build-out/bin/php-fpm-ng" "$(php-config8.5 --php-binary)"
+
+      # Issue #129: a synchronous hard write error while handing a request to
+      # an upstream freed the connection and the upstream underneath their
+      # caller. Nothing observable from outside the process changes -- the
+      # gateway answers 502 and keeps serving on a corrupted heap -- so this
+      # runs the gateway under valgrind and fails on any invalid access inside
+      # fpm_http.c. Last in the job because valgrind makes it the step most
+      # likely to be slow on a contended runner.
+      - name: verify a synchronous upstream write failure corrupts nothing (issue #129)
+        run: ./build/test-http-gateway-write-failure.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: phpt-results
+          path: phpt-results
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # Task 010: the HTTP gateway must drop root before it ever accepts a
+  # connection, instead of holding the master's identity (and the TLS private
+  # key) for its whole life. Needs to run as root, which the other jobs' steps
+  # are not -- kept as its own job for that reason.
+  gateway-privileges:
+    needs: [changes, build]
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    # No `ci` shell here, unlike every other job: this one asserts the gateway
+    # drops root before accepting a connection, so it has to start with it.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: git for actions/checkout
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: install the PHP 8.5 SDK and the toolchain (issue #424)
+        run: ./build/ci-install-deps.sh test
+      - uses: actions/download-artifact@v8
+        with:
+          name: fpmng-canonical-build
+          path: build-out
+      - name: verify the gateway drops privileges (task 010)
+        run: |
+          chmod +x build-out/bin/php-fpm-ng
+          ./build/test-http-gateway-privileges.sh "$PWD/build-out/bin/php-fpm-ng"
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
+  # The one required check. Docs-only changes skip the heavy jobs, which report
+  # "skipped"; a code change needs every job green.
+  ci-ok:
+    name: ci-ok
+    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges]
+    if: always()
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check results
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Code changes: $CODE"
+          echo "Results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in failure|cancelled) exit 1 ;; esac
+          done
+          # Documentation-only changes skip the heavy jobs; code changes need all of them.
+          if [ "$CODE" = "true" ]; then
+            for r in $RESULTS; do
+              [ "$r" = "success" ] || exit 1
+            done
+          fi

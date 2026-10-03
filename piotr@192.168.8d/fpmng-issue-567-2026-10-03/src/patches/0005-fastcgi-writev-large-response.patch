@@ -1,0 +1,132 @@
+FastCGI transport: coalesce record headers and large response bodies with writev()
+
+Large response chunks bypass the output buffer to avoid copying, but the record
+header and body were written with separate write() calls. In optimized transport
+mode on Unix, send both with writev() while retaining the existing path for the
+classic transport and Windows.
+
+The helper handles EINTR and partial writes across both vectors. This preserves
+the FastCGI byte stream while reducing write syscalls for a 256 KB response from
+11 to 6.
+
+Czeka na: nie zgloszone jeszcze do upstreamu — kandydat na PR do php/php-src.
+Sprawdzone na: master (PHP 8.6.0-dev); testy pozostalych wersji przed commitem.
+
+--- a/main/fastcgi.c
++++ b/main/fastcgi.c
+@@ -61,6 +61,7 @@
+ # include <unistd.h>
+ # include <fcntl.h>
+ # include <sys/socket.h>
++# include <sys/uio.h>
+ # include <sys/un.h>
+ # include <netinet/in.h>
+ # include <netinet/tcp.h>
+@@ -954,6 +955,42 @@
+ 	return n;
+ }
+ 
++#ifndef _WIN32
++static inline ssize_t safe_writev(fcgi_request *req, const void *head, size_t head_len, const void *body, size_t body_len)
++{
++	struct iovec iov[2] = {
++		{ .iov_base = (void *) head, .iov_len = head_len },
++		{ .iov_base = (void *) body, .iov_len = body_len }
++	};
++	struct iovec *current = iov;
++	int iovcnt = 2;
++	size_t written = 0;
++	const size_t total = head_len + body_len;
++
++	while (written < total) {
++		ssize_t ret;
++
++		do {
++			ret = writev(req->fd, current, iovcnt);
++		} while (ret < 0 && errno == EINTR);
++		if (ret <= 0) {
++			return ret;
++		}
++		written += (size_t) ret;
++		while (iovcnt > 0 && (size_t) ret >= current->iov_len) {
++			ret -= (ssize_t) current->iov_len;
++			current++;
++			iovcnt--;
++		}
++		if (iovcnt > 0 && ret > 0) {
++			current->iov_base = (char *) current->iov_base + ret;
++			current->iov_len -= (size_t) ret;
++		}
++	}
++	return (ssize_t) written;
++}
++#endif
++
+ /* One read(2) on the connection, EINTR retried. Returns >0 bytes, 0 on EOF, <0 on error. */
+ static inline ssize_t fcgi_read_raw(fcgi_request *req, void *buf, size_t count)
+ {
+@@ -1661,12 +1698,25 @@
+ 			open_packet(req, type);
+ 			fcgi_make_header(req->out_hdr, type, req->id, 0xfff8);
+ 			req->out_hdr = NULL;
+-			if (!fcgi_flush(req, 0)) {
+-				return -1;
+-			}
+-			if (safe_write(req, str + pos, 0xfff8) != 0xfff8) {
+-				req->keep = 0;
+-				return -1;
++#ifndef _WIN32
++			if (optimized_transport) {
++				size_t header_len = (size_t) (req->out_pos - req->out_buf);
++				if (safe_writev(req, req->out_buf, header_len, str + pos, 0xfff8) != (ssize_t) (header_len + 0xfff8)) {
++					req->keep = 0;
++					req->out_pos = req->out_buf;
++					return -1;
++				}
++				req->out_pos = req->out_buf;
++			} else
++#endif
++			{
++				if (!fcgi_flush(req, 0)) {
++					return -1;
++				}
++				if (safe_write(req, str + pos, 0xfff8) != 0xfff8) {
++					req->keep = 0;
++					return -1;
++				}
+ 			}
+ 			pos += 0xfff8;
+ 		}
+@@ -1677,12 +1727,26 @@
+ 		open_packet(req, type);
+ 		fcgi_make_header(req->out_hdr, type, req->id, (len - pos) - rest);
+ 		req->out_hdr = NULL;
+-		if (!fcgi_flush(req, 0)) {
+-			return -1;
+-		}
+-		if (safe_write(req, str + pos, (len - pos) - rest) != (len - pos) - rest) {
+-			req->keep = 0;
+-			return -1;
++#ifndef _WIN32
++		if (optimized_transport) {
++			size_t body_len = (size_t) ((len - pos) - rest);
++			size_t header_len = (size_t) (req->out_pos - req->out_buf);
++			if (safe_writev(req, req->out_buf, header_len, str + pos, body_len) != (ssize_t) (header_len + body_len)) {
++				req->keep = 0;
++				req->out_pos = req->out_buf;
++				return -1;
++			}
++			req->out_pos = req->out_buf;
++		} else
++#endif
++		{
++			if (!fcgi_flush(req, 0)) {
++				return -1;
++			}
++			if (safe_write(req, str + pos, (len - pos) - rest) != (len - pos) - rest) {
++				req->keep = 0;
++				return -1;
++			}
+ 		}
+ 		if (pad) {
+ 			open_packet(req, type);

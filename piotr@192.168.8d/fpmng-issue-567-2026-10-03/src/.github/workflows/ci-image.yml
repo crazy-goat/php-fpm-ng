@@ -1,0 +1,109 @@
+name: ci-image
+
+# Builds the four package-gate images that build/ci-package-gate.sh (release.yml)
+# runs its stages in. build-matrix.yml no longer uses an image of ours: its jobs
+# run in a stock ubuntu:26.04 and install the PHP SDK in the job (issue #424), and
+# the php-fpm-ng-ci image was retired with that change.
+#
+# Runs on ubuntu-latest, like the rest of CI since this repository went public.
+# No container: -- this job needs the host's docker daemon, and it must not run
+# inside the image it is building.
+#
+# Only fires when a Dockerfile changes, so a normal PR does not rebuild it --
+# plus a nightly schedule, which exists solely for the package-gate images
+# (issue #240). Those carry the distribution's PHP, and the package gate is
+# what notices when a distribution moves under us. Baking that PHP into an
+# image and never rebuilding it would silently turn the gate into a test of a
+# frozen 8.5.4.
+#
+# The schedule matters MORE since issue #393 moved the package gate out of
+# build-matrix.yml: the gate itself now runs only in release.yml, on a tag, so
+# nothing gates distribution drift day to day. What is left daily is this
+# workflow's own `report the PHP each image carries` step below -- it is now
+# the early warning, and a version moving there is the thing to look at before
+# cutting a tag rather than after the tag fails. That is a weaker signal than
+# a gating cell and it is the known cost of #393; the alternative was keeping
+# a 32-minute job on every pull request that, measured, caught neither of the
+# two packaging failures it existed to catch (v0.5.0 and v0.5.1 are tagged
+# with no release).
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/docker/package-gate.Dockerfile
+      - .github/workflows/ci-image.yml
+  pull_request:
+    paths:
+      - .github/docker/package-gate.Dockerfile
+      - .github/workflows/ci-image.yml
+  schedule:
+    # 03:17 UTC. Not on the hour: GitHub queues scheduled runs and the round
+    # numbers are the congested ones.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # The four package-gate stages (issue #240). One Dockerfile, four targets,
+      # because they are two distributions x (build host, install host) and the
+      # asymmetry between the last two is the point: the install images must NOT
+      # carry the package's own dependencies, or the gate stops proving that they
+      # resolve. Built here rather than in package-gate itself so the job that
+      # gates a merge never waits on an image build.
+      #
+      # --pull on every target: these exist to track what the distributions ship,
+      # so a base image cached on the runner from last month is the one failure
+      # mode that would make them useless without saying so.
+      - name: build the package-gate stages
+        run: |
+          for target in deb-build deb-test apk-build apk-test; do
+            docker build --pull \
+              --target "$target" \
+              -t "ghcr.io/crazy-goat/php-fpm-ng-package-gate:$target" \
+              -f .github/docker/package-gate.Dockerfile \
+              .github/docker
+          done
+
+      # What the images ended up carrying, in the log, so that "the gate went red
+      # and no PR could have caused it" has somewhere to be answered. This is the
+      # same version line package-gate itself prints; seeing it move here and in
+      # the gate on the same day is what identifies a distribution bump.
+      - name: report the PHP each image carries
+        run: |
+          docker run --rm ghcr.io/crazy-goat/php-fpm-ng-package-gate:deb-build \
+            php-config8.5 --version
+          docker run --rm ghcr.io/crazy-goat/php-fpm-ng-package-gate:apk-build \
+            php-config85 --version
+
+      # On a pull_request the image is built but not pushed: a PR from a fork
+      # has a read-only GITHUB_TOKEN, and a PR that breaks the Dockerfile
+      # should fail at build rather than after publishing a broken :latest.
+      - name: log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+      - name: push
+        if: github.event_name != 'pull_request'
+        run: |
+          # No :sha tag for these four. They are a cache of what a distribution
+          # ships on the day they were built, not an artefact of this commit, and
+          # package-gate always wants the freshest one -- a pinned tag would be a
+          # tag nobody could ever pull deliberately.
+          for target in deb-build deb-test apk-build apk-test; do
+            docker push "ghcr.io/crazy-goat/php-fpm-ng-package-gate:$target"
+          done
+
+      - name: log out
+        if: always() && github.event_name != 'pull_request'
+        run: docker logout ghcr.io

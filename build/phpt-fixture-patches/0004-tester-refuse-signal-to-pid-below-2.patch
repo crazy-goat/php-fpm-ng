@@ -1,0 +1,19 @@
+--- a/sapi/fpmng/tests/tester.inc
++++ b/sapi/fpmng/tests/tester.inc
+@@ -1125,6 +1125,16 @@
+         if (is_null($pid)) {
+             $pid = $this->getPid();
+         }
++        /* Issue #567 (php-fpm-ng): `kill -USR1 0` is not "no such process", it
++         * signals the caller's whole process group -- the run-tests.php worker
++         * and, under -j, the runner with it ("User defined signal 1", exit
++         * 138). Tests read the pid they signal from a status page or a
++         * response body, and (int) of an empty or half-written one is 0, so
++         * the check lives here, where every test passes through, and fails
++         * that one test instead of the whole run. */
++        if ($pid < 2) {
++            throw new \RuntimeException("refusing to send SIG$signal to pid $pid");
++        }
+         $cmd = "kill -$signal $pid";
+         $this->trace('Sending signal using command', $cmd, true);
+ 

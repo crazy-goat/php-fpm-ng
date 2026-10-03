@@ -1,0 +1,2 @@
+served as a static file by the http gateway's http.static path (fpm_http.c),
+not by PHP -- there is no hello.php behind this request.

@@ -1,0 +1,43 @@
+#ifndef FPM_HTTP_H
+#define FPM_HTTP_H 1
+
+struct fpm_worker_pool_s;
+struct fpm_operator_buf_s;
+struct fpm_operator_reply_s;
+
+/* The HTTP gateway for one pool (see fpm_http.c). Called by the "gateway" pool
+ * type from fpm_pool_type.c, on the master side, before any child forks. */
+int fpm_http_init_pool(struct fpm_worker_pool_s *wp);
+
+/* As above, but for an executor handling multiple requests per worker.
+ * capacity = number of concurrent FastCGI connections for the whole pool. */
+int fpm_http_init_pool_with_capacity(struct fpm_worker_pool_s *wp, unsigned capacity);
+
+/* Validate http.* directives for pool.type = http, called from the pool type's
+ * .validate hook in fpm_pool_type.c while checking configuration, before any fork. */
+int fpm_http_validate_pool(struct fpm_worker_pool_s *wp);
+
+/* Issue #341: fpm_pool_type_s.render_metrics_prometheus for pool.type =
+ * gateway -- fpmng_gateway_{upstreams_used,upstreams_max,requests_total,
+ * rejected_total} per target, on wp's own operator.metrics_path. Called from
+ * the operator endpoint's own child (see fpm_pool_type_s's comment on
+ * render_metrics_prometheus): the counters it reads are shared memory,
+ * allocated once in the master before any child -- including the operator
+ * endpoint's -- forks. A wp with no gateway of its own (not pool.type =
+ * gateway, or the gateway failed to start) renders nothing. */
+void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm_operator_buf_s *b);
+
+/* Issue #390: fpm_pool_type_s.baseline for pool.type = gateway -- the value of
+ * the type's `requests` counter, from the shared segment the master allocated
+ * instead of the scoreboard no gateway child bumps. Runs in the operator
+ * endpoint's own child. */
+unsigned long fpm_http_gateway_baseline_requests(struct fpm_worker_pool_s *wp);
+
+/* Issue #390: fpm_pool_type_s.operator_status for pool.type = gateway -- the
+ * gateway's own /status, one row per target plus a pool row, in the
+ * {"pools":[...]} shape the generic page uses. Runs in the operator endpoint's
+ * own child and reads only the shared segment. */
+void fpm_http_gateway_operator_status(struct fpm_worker_pool_s *wp, const char *query,
+		struct fpm_operator_reply_s *reply);
+
+#endif

@@ -1,0 +1,15 @@
+build-dir/
+*.log
+php-fpm
+php-fpm-*
+# The packaged configuration and service files are sources, not build output;
+# they only match the line above because they carry the binary's name.
+!packaging/**
+examples/http/certs/
+__pycache__/
+.run/
+# Claude Code session state: worktrees, local MCP settings, transcripts.
+.claude/
+/findings.md
+/review.md
+/.env.worktree

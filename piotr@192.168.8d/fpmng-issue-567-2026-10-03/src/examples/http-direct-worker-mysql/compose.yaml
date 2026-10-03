@@ -1,0 +1,55 @@
+# Its own Compose project with its own volume, so it never touches a shared
+# MySQL: `docker compose down --volumes` removes the database with the demo.
+name: fpmng-worker-mysql
+
+services:
+  mysql:
+    # Pinned to the same version as tests/frameworks/*/compose.yaml so a
+    # measurement here is comparable with the framework runners.
+    image: mysql:8.4.6
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-fpmng-worker-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fpmng}
+      MYSQL_USER: ${MYSQL_USER:-fpmng}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fpmng}
+    # SELECT SLEEP(1) holds a server thread for the whole second, so the
+    # concurrency this example demonstrates needs one server thread per
+    # in-flight request. 8.4's default is 151; raised because a large N needs
+    # more than that. It is not the first cap, though: the client pool
+    # (MYSQL_POOL_MAX below) and FPM_WORKER_PENDING_MAX = 256 both bite before
+    # a server limit of 500 does.
+    command: ["--max-connections=500"]
+    healthcheck:
+      # CMD-SHELL, not CMD: under exec form nothing expands ${...}, so
+      # mysqladmin was handed the literal string as a password — and
+      # `mysqladmin ping` exits 0 even on ER_ACCESS_DENIED, so the credential
+      # half of this check was dead and `service_healthy` only meant "the
+      # server completed a handshake".
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+  app:
+    build:
+      # examples/, so the image can reuse the driver from the task 073 example.
+      context: ..
+      dockerfile: http-direct-worker-mysql/Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-fpmng}
+      MYSQL_USER: ${MYSQL_USER:-fpmng}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-fpmng}
+      # Client-side connection cap, raised together with N by the harness.
+      MYSQL_POOL_MAX: "${MYSQL_POOL_MAX:-100}"
+    ports:
+      - "${APP_PORT:-28078}:8080"
+
+volumes:
+  mysql-data:

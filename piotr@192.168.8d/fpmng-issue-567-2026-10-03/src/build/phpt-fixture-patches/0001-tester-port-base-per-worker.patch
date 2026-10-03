@@ -1,0 +1,19 @@
+--- a/sapi/fpmng/tests/tester.inc
++++ b/sapi/fpmng/tests/tester.inc
+@@ -1339,7 +1339,15 @@
+         if (isset($this->ports['values'][$pool])) {
+             return $this->ports['values'][$pool];
+         }
+-        $port                         = ($this->ports['last'] ?? 9000 + PHP_INT_SIZE - 1) + 1;
++        /* Issue #394 (php-fpm-ng): run-tests.php -j runs tests from several
++         * workers at once on one host, and every Tester instance used to
++         * allocate from 9008 upwards, so two tests in two workers bound the
++         * same port. TEST_PHP_WORKER is the worker's number (1..N under -j,
++         * unset serially); give each worker its own block of 200 ports. Unset or
++         * 0 keeps 9008, 9009, ... exactly as before. */
++        $worker                       = (int) getenv('TEST_PHP_WORKER');
++        $base                         = 9000 + PHP_INT_SIZE - 1 + $worker * 200;
++        $port                         = ($this->ports['last'] ?? $base) + 1;
+         $this->ports['values'][$pool] = $this->ports['last'] = $port;
+ 
+         return $port;

@@ -1,0 +1,145 @@
+--TEST--
+fpm-ng: HTTP-direct accepts only classic/static and supported HTTP directives
+--SKIPIF--
+<?php include "skipif.inc"; ?>
+--FILE--
+<?php
+require_once "tester.inc";
+$root = __DIR__;
+$script = '/fpmng-direct-config-front-' . getmypid() . '.php';
+file_put_contents($root . $script, '<?php');
+register_shutdown_function(static function () use ($root, $script) { @unlink($root . $script); });
+$base = <<<CFG
+[global]
+error_log = {{FILE:LOG}}
+[direct]
+listen = {{ADDR}}
+pool.type = http-direct
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = $script
+CFG;
+$cases = [
+    'dynamic' => [str_replace('pm = static', 'pm = dynamic', $base), 'requires pm = static'],
+    'ondemand' => [str_replace('pm = static', 'pm = ondemand', $base), 'requires pm = static'],
+    'fiber' => [$base . "\npool.executor = fiber", 'supports only pool.executor = classic'],
+    'async' => [$base . "\npool.executor = async", 'supports only pool.executor = classic'],
+    'gateway-listen' => [$base . "\nhttp.listen = 127.0.0.1:1", "'http.listen' is not supported"],
+    /* http.tls_cert IS supported since issue #55 -- what stays rejected is a
+     * half-configured pair, and the second listener a direct pool has nowhere
+     * to put. A cert alone must not silently start a pool serving plain HTTP
+     * on a port its configuration says is HTTPS. */
+    'tls-cert-without-key' => [$base . "\nhttp.tls_cert = /missing.pem", 'http.tls_cert requires http.tls_key'],
+    'tls-key-without-cert' => [$base . "\nhttp.tls_key = /missing.pem", 'nothing to attach the key to'],
+    'tls-tuning-without-cert' => [$base . "\nhttp.tls_min_version = TLSv1.2", 'require http.tls_cert'],
+    'gateway-plain-listen' => [$base . "\nhttp.plain_listen = 127.0.0.1:1", "'http.plain_listen' is not supported"],
+    /* issue #58. http.static IS supported on the classic executor, which serves
+     * the file in its request callback before any PHP runs. The worker executor
+     * never passes through there, so the directive is refused rather than
+     * accepted into doing nothing. */
+    'worker-static' => [$base . "\npool.executor = worker\nhttp.static = yes", "'http.static' is not supported"],
+    /* http.allowed_clients is the GATEWAY's directive and stays refused; the
+     * pool-level listen.allowed_clients is supported since issue #59 and is
+     * among the accepted cases below. */
+    'gateway-acl' => [$base . "\nhttp.allowed_clients = 127.0.0.1", "'http.allowed_clients' is not supported"],
+    /* issue #59. The classic executor answers status and access.log from the
+     * per-request scoreboard slot it maintains; the worker executor keeps the
+     * same slot untouched for the whole life of the child, so there those
+     * directives are refused rather than answered with placeholders. ping.path
+     * is NOT refused any more (issue #387): it needs none of that accounting,
+     * it is a literal path match, and it is accepted -- see the accepted case
+     * below. */
+    'worker-status' => [$base . "\npool.executor = worker\noperator.status_path = /status", "'operator.status_path' is not supported"],
+    'worker-access-log' => [$base . "\npool.executor = worker\naccess.log = /dev/null", "'access.log' is not supported"],
+    'traversal' => [$base . "\nhttp.front_controller = /../secret.php", 'requires an absolute chdir'],
+    'unbounded-body' => [$base . "\nhttp.max_body = 0", 'http.max_body between 1 and 32M'],
+    'unbounded-timeout' => [$base . "\nhttp.read_timeout = 0", 'http.read_timeout > 0'],
+    /* issue #56. A streamed response blocks the child on one client, and this
+     * executor has exactly one request in flight, so an unbounded wait would
+     * take the whole pool down with a single stalled reader. */
+    'stream-without-timeout' => [$base . "\nhttp.stream = yes\nhttp.stream_write_timeout = 0", 'http.stream requires http.stream_write_timeout > 0'],
+    /* http.stream + http.tls_cert used to be refused here, because the
+     * streaming writer reached past the bufferevent to the descriptor and on a
+     * TLS connection that sends plaintext. Since issue #195 the writer hands
+     * the same buffer to SSL_write() instead and the combination is supported;
+     * what proves it is fpmng-http-direct-tls-streaming.phpt, which streams
+     * 16 MiB over TLS, rather than a line here -- a config case would need a
+     * readable certificate to get past the check that reads it. */
+    /* Parsed in the master so a typo stops -t. Left to the child it would be
+     * a fork loop: the child can only exit, and the master replaces it. */
+    'bad-acl' => [$base . "\nlisten.allowed_clients = 127.0.0.1, not-an-ip", "listen.allowed_clients: 'not-an-ip' is not a valid IP address"],
+    /* issue #61. The bounds exist so that a typo is a startup error rather
+     * than a pool that silently never accepts, or one whose per-client cap
+     * can never be reached because it sits above the total. */
+    'negative-max-connections' => [$base . "\nhttp.max_connections = -1", 'http.max_connections_per_client between 0 (unlimited) and 1000000'],
+    'per-client-above-total' => [$base . "\nhttp.max_connections = 4\nhttp.max_connections_per_client = 8", 'http.max_connections_per_client (8) is above http.max_connections (4)'],
+    'per-client-without-total' => [$base . "\nhttp.max_connections_per_client = 4", 'http.max_connections_per_client requires http.max_connections'],
+    'missing-script' => [$base . "\nhttp.front_controller = /missing-direct-script.php", 'front controller must be a regular file inside chdir'],
+];
+foreach ($cases as $label => [$config, $needle]) {
+    $tester = new FPM\Tester($config, '<?php');
+    $messages = $tester->testConfig(true);
+    if ($messages === null || !str_contains(implode("\n", $messages), $needle)) {
+        throw new RuntimeException("$label: " . var_export($messages, true));
+    }
+    echo "$label: rejected\n";
+}
+/* issue #59: the operator directives a fastcgi pool has always had. chroot is
+ * validated here (the front controller is resolved inside it, as the child
+ * will see it) even though chroot(2) itself needs root at run time, which is
+ * why there is no chroot .phpt that actually starts such a pool. */
+foreach (['', "\npool.executor = classic", "\nhttp.static = yes", "\nhttp.static = no",
+          "\nlisten.allowed_clients = 127.0.0.1",
+          "\nping.path = /ping\nping.response = alive",
+          "\noperator.status_path = /status",
+          /* Accepted since issue #275: the status page moved onto the operator
+           * endpoint, so the directive that names where that endpoint binds has
+           * something to name. It was refused before, when it could only have
+           * asked for a second FastCGI socket a direct child has nowhere to
+           * put. */
+          "\noperator.status_path = /status\noperator.status_listen = 127.0.0.1:9001",
+          "\naccess.log = /dev/null",
+          "\naccess.log = /dev/null\naccess.format = %R %m %r %s\naccess.suppress_path[] = /ping",
+          "\nchroot = /"] as $extra) {
+    $tester = new FPM\Tester($base . $extra, '<?php');
+    if ($tester->testConfig() !== null) throw new RuntimeException('classic config failed');
+}
+echo "classic: accepted\n";
+/* issue #387: ping.path/ping.response are accepted on the worker executor --
+ * answered after the saturation 503, ahead of the userland queue, and needing
+ * none of the per-request accounting the other #59 directives are refused for. */
+foreach (["\npool.executor = worker\nphp_admin_value[max_execution_time] = 0\nping.path = /ping",
+          "\npool.executor = worker\nphp_admin_value[max_execution_time] = 0\nping.path = /ping\nping.response = alive"] as $extra) {
+    $tester = new FPM\Tester($base . $extra, '<?php');
+    if ($tester->testConfig() !== null) throw new RuntimeException('worker ping config failed');
+}
+echo "worker-ping: accepted\n";
+?>
+--EXPECT--
+dynamic: rejected
+ondemand: rejected
+fiber: rejected
+async: rejected
+gateway-listen: rejected
+tls-cert-without-key: rejected
+tls-key-without-cert: rejected
+tls-tuning-without-cert: rejected
+gateway-plain-listen: rejected
+worker-static: rejected
+gateway-acl: rejected
+worker-status: rejected
+worker-access-log: rejected
+traversal: rejected
+unbounded-body: rejected
+unbounded-timeout: rejected
+stream-without-timeout: rejected
+bad-acl: rejected
+negative-max-connections: rejected
+per-client-above-total: rejected
+per-client-without-total: rejected
+missing-script: rejected
+classic: accepted
+worker-ping: accepted
+--CLEAN--
+<?php require_once "tester.inc"; FPM\Tester::clean(); ?>

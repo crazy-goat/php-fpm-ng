@@ -64,8 +64,9 @@ clang_format_check() {
 
 check_shellcheck() {
     need shellcheck || return 1
-    # Warnings and errors; the style and info notes in build/ and tests/ are a follow-up.
-    shell_files | xargs -0 -r shellcheck -S warning
+    # Default (style) severity: an unquoted expansion (SC2086) is only an info note.
+    # Silence a finding with "# shellcheck disable=SCxxxx" and the reason on the line above.
+    shell_files | xargs -0 -r shellcheck -S style
 }
 
 check_hadolint() {

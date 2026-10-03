@@ -94,6 +94,8 @@ sha256_file() {
     fi
 }
 
+# cleanup is only invoked through "trap cleanup EXIT".
+# shellcheck disable=SC2329
 cleanup() {
     status=$?
     if [ -n "$HARNESS_DIR" ]; then
@@ -322,6 +324,8 @@ ln -s "$CLI_BIN" "$HARNESS_CLI"
 # <php>/sbin/php-fpm and to a php-fpm next to the tests, so a harness that did
 # not take the link would quietly exercise some other FPM -- an installed
 # php-fpm8.5 above all -- and report its results as this binary's.
+# the PHP code is single-quoted on purpose: the shell must not expand $p
+# shellcheck disable=SC2016
 if ! TESTER_FPM=$(TEST_PHP_EXECUTABLE="$HARNESS_CLI" FPMNG_TESTER_INC="$PHPSRC/$TEST_DIR/tester.inc" \
     "$CLI_BIN" -n -r 'require getenv("FPMNG_TESTER_INC"); $p = FPM\Tester::findExecutable(); echo $p === false ? "" : realpath($p);' 2>/dev/null); then
     TESTER_FPM=unknown
@@ -347,6 +351,8 @@ TEST_FILES=$(tr '\n' ' ' < "$DISCOVERED")
 set +e
 (
     cd "$PHPSRC" || exit 1
+    # TEST_FILES is a space-separated list of test paths without whitespace; splitting is the intent.
+    # shellcheck disable=SC2086
     TEST_PHP_EXECUTABLE="$HARNESS_CLI" \
     TEST_PHP_FPM_EXECUTABLE="$HARNESS_FPM" \
     "$CLI_BIN" -n run-tests.php \

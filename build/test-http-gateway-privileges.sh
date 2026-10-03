@@ -135,6 +135,8 @@ list_children() {
     parent=$1
     kids=$(cat /proc/"$parent"/task/*/children 2>/dev/null || true)
     if [ -n "$kids" ]; then
+        # kids is a space-separated pid list; the split gives one pid per line.
+        # shellcheck disable=SC2086
         printf '%s\n' $kids
         return 0
     fi
@@ -330,6 +332,8 @@ EOF
 
     kill -TERM "$master_pid"
     wait "$master_pid" 2>/dev/null || true
+    # MASTER_PIDS is a newline- or space-separated pid list; the split gives one pid per line.
+    # shellcheck disable=SC2086
     MASTER_PIDS=$(printf '%s\n' $MASTER_PIDS | grep -v "^$master_pid\$" || true)
 
     info "[$name] PASS"

@@ -139,8 +139,9 @@ SKIP counts instead of PASS counts did not test anything. CI is the authoritativ
   would need a large whitespace-only reformat); shrink that list, never grow it. The nine
   files that are modified copies of upstream `sapi/fpm/` files are excluded for good, so they
   stay diffable against upstream. `third_party/` is vendored and excluded.
-- shellcheck v0.11.0 at warning severity on every tracked shell script (also extensionless
-  ones with a shell shebang).
+- shellcheck v0.11.0 at its default (style) severity on every tracked shell script (also
+  extensionless ones with a shell shebang). Put the reason on the line above
+  `# shellcheck disable=SCxxxx`; no blanket disable in a `.shellcheckrc`.
 - hadolint v2.12.0 on every tracked Dockerfile. Put the reason on the line above
   `# hadolint ignore=DLxxxx`.
 

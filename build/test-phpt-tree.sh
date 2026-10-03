@@ -104,6 +104,8 @@ for runner in run-fpmng-phpt.sh run-fpm-phpt.sh; do
   set -e
   grep -q "^tester_resolves_fpm_to=$(realpath "$FPM")\$" "$WORK/res/metadata.txt" \
     || fail "$runner: metadata.txt does not record what the harness resolved: $(cat "$WORK/res/metadata.txt")"
+  # the || branch is a failure report; fail does not run on the success path of grep.
+  # shellcheck disable=SC2015
   grep -q '^fixtures_begin$' "$WORK/res/metadata.txt" && grep -q '^upstream_tag=php-8.5.9$' "$WORK/res/metadata.txt" \
     || fail "$runner: metadata.txt does not record the fixture provenance"
   echo "ok: $runner refuses a harness that would start another FPM and records the resolved binary"
@@ -116,6 +118,8 @@ P=$WORK/ptree
 cp "$P/sapi/fpmng/tests/tester.inc" "$WORK/tester.once"
 cp "$P/run-tests.php" "$WORK/run-tests.once"
 "$REPO/build/phpt-parallel.sh" "$P" || fail "phpt-parallel.sh is not idempotent"
+# the || branch is a failure report; fail does not run on the success path of cmp.
+# shellcheck disable=SC2015
 cmp -s "$WORK/tester.once" "$P/sapi/fpmng/tests/tester.inc" && cmp -s "$WORK/run-tests.once" "$P/run-tests.php" \
   || fail "a second phpt-parallel.sh run changed the tree"
 grep -q 'TEST_PHP_WORKER' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores TEST_PHP_WORKER"
@@ -124,6 +128,8 @@ grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pas
 grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"
 if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then fail "a non-gateway test got a conflict key"; fi
 # The serial run must stay what it was: worker 0 / unset allocates 9008 first.
+# the pattern is single-quoted on purpose: the $ is a literal in the PHP source being grepped.
+# shellcheck disable=SC2016
 grep -q '9000 + PHP_INT_SIZE - 1 + \$worker \* 200' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc port base is not 9000 + PHP_INT_SIZE - 1 + 200 * worker"
 # Issue #567: signalling pid 0 would take the whole process group, runner included.
 grep -q 'refusing to send SIG' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc still signals a pid below 2"

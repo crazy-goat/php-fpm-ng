@@ -2231,14 +2231,25 @@ static void fpm_http_client_idle_fire(evutil_socket_t fd, short what, void *arg)
 /* The first byte of the next request arrived. From here the client is
  * delivering a request, and that is http.read_timeout's job: the same
  * absolute budget a first request gets, whatever the spacing of its bytes. The
- * keep-alive timer is replaced, not stacked. With http.read_timeout = 0 the
- * keep-alive timer simply keeps running, so the connection is still bounded. */
+ * keep-alive timer is replaced, not stacked; it is created here when
+ * http.keepalive_timeout = 0 left it unarmed. With http.read_timeout = 0 the
+ * keep-alive timer simply keeps running, so the connection is still bounded.
+ * Limit: bytes of the next request that arrive together with the previous one
+ * are already in the bufferevent input, so this watcher never fires for them;
+ * such a connection is bounded by http.keepalive_timeout, not by
+ * http.read_timeout. */
 static void fpm_http_client_idle_byte(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_client_s *cl = arg;
 
 	(void) fd; (void) what;
-	if (cl->ka_timer && cl->gw->read_timeout_ms > 0) {
+	if (cl->gw->read_timeout_ms <= 0) {
+		return;
+	}
+	if (!cl->ka_timer) {
+		cl->ka_timer = event_new(cl->gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+	}
+	if (cl->ka_timer) {
 		event_add(cl->ka_timer, &cl->gw->read_timeout);
 	}
 }
@@ -2258,16 +2269,23 @@ static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
 	evutil_socket_t fd;
 
 	(void) req;
-	if (gw->keepalive_timeout_ms <= 0 || !cl->evcon) {
+	if ((gw->keepalive_timeout_ms <= 0 && gw->read_timeout_ms <= 0) || !cl->evcon) {
 		return;
 	}
-	if (!cl->ka_timer) {
-		cl->ka_timer = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+	/* Keep-alive 0 means unlimited idle, but a later request is still bounded by
+	 * http.read_timeout: only the first-byte watcher is armed then. */
+	if (gw->keepalive_timeout_ms > 0) {
+		if (!cl->ka_timer) {
+			cl->ka_timer = event_new(gw->base, -1, EV_TIMEOUT, fpm_http_client_idle_fire, cl);
+		}
+		if (!cl->ka_timer) {
+			return;	/* OOM: this connection is not bounded, the gateway still works */
+		}
+		event_add(cl->ka_timer, &gw->keepalive_timeout);
 	}
-	if (!cl->ka_timer) {
-		return;	/* OOM: this connection is not bounded, the gateway still works */
+	if (gw->read_timeout_ms <= 0) {
+		return;
 	}
-	event_add(cl->ka_timer, &gw->keepalive_timeout);
 	fd = bufferevent_getfd(evhttp_connection_get_bufferevent(cl->evcon));
 	if (fd < 0) {
 		return;

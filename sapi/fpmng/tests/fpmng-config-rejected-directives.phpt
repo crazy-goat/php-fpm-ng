@@ -336,6 +336,11 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.keepalive_timeout = 1000",
     ["'http.keepalive_timeout' is not supported by pool.type = http-direct"]
 );
+expectConfigFailure(
+    'direct-write-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.write_timeout = 1000",
+    ["'http.write_timeout' is not supported by pool.type = http-direct"]
+);
 
 ?>
 Done
@@ -373,6 +378,7 @@ gateway-no-routes: rejected
 gateway-max-connections: rejected
 gateway-max-connections-per-client: rejected
 direct-keepalive-timeout: rejected
+direct-write-timeout: rejected
 Done
 --CLEAN--
 <?php

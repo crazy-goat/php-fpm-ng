@@ -83,6 +83,8 @@ mkdir -p "$WORK/src"
 cp "$BIN" "$WORK/src/php-fpm-ng"
 cp "$REPO/packaging/apk/php-fpm-ng.conf" "$REPO/packaging/apk/www.conf" \
    "$REPO/packaging/apk/php-fpm-ng.initd" "$WORK/src/"
+# The license texts the license= field below names (issue #581).
+"$REPO/build/package-licenses.sh" > "$WORK/src/LICENSE" || fail "could not assemble the license texts"
 
 # The two packages own the same files, so each one replaces the other and both
 # provide the virtual php-fpm-ng-any (issue #294). replaces= is what lets apk
@@ -113,6 +115,7 @@ package() {
 	install -Dm0644 "\$srcdir"/php-fpm-ng.conf "\$pkgdir"/etc/php-fpm-ng/php-fpm-ng.conf
 	install -Dm0644 "\$srcdir"/www.conf "\$pkgdir"/etc/php-fpm-ng/conf.d/www.conf
 	install -Dm0755 "\$srcdir"/php-fpm-ng.initd "\$pkgdir"/etc/init.d/php-fpm-ng
+	install -Dm0644 "\$srcdir"/LICENSE "\$pkgdir"/usr/share/licenses/$PKGNAME/LICENSE
 	install -dm0750 "\$pkgdir"/var/log/php-fpm-ng
 }
 EOT

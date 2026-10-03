@@ -327,3 +327,6 @@ or derived from php-src:
 
 Those files carry no license header of their own, mostly only the original "(c) 2007,2008 Andrei
 Nigmatulin" line; this list is what states their license. The same list is in [LICENSE](LICENSE).
+
+The `.deb` and `.apk` packages ship all three texts in one file: `/usr/share/doc/<pkg>/copyright` on
+Debian and `/usr/share/licenses/<pkg>/LICENSE` on Alpine (assembled by `build/package-licenses.sh`).

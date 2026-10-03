@@ -36,7 +36,7 @@ if (isset($_GET['sleep'])) {
 }
 echo 'php';
 PHP);
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $port = $base + 21;
 $recycle = $base + 22;
 $ops = '127.0.0.1:' . ($base + 23);

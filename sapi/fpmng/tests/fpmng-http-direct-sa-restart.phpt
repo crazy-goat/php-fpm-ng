@@ -54,7 +54,7 @@ $h = fopen($dir . '/fifo', 'r');
 echo 'read=', var_export(fread($h, 5), true);
 PHP);
 
-$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$base = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $port = $base + 34;
 $cfg = <<<CFG
 [global]

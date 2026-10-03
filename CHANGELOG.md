@@ -11,6 +11,9 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Changed
+- Owned `.phpt` suite: every test port (the Tester's blocks from 9008 and the http-direct tests from 28054) now also moves by a per-run `FPMNG_PHPT_PORT_SHIFT` that `build/run-fpmng-phpt.sh` picks as the first shift whose blocks nothing listens on, so another php-fpm holding 9201 or 9208 on a shared host no longer fails dozens of tests. Set the variable to pin a shift. The Tester also gives each gateway pool a run-own `operator.*_listen`, so a master holding `127.0.0.1:9253` no longer fails the gateway tests (#674).
+
 ## [0.13.0] - 2026-10-03
 
 ### Changed

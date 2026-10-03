@@ -63,7 +63,7 @@ echo json_encode([
     'conn' => fpm_connection_info(),
 ]);
 PHP);
-$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_TEST_PORT') ?: 28054 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
 error_log = {{FILE:LOG}}

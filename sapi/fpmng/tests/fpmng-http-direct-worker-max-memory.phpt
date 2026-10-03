@@ -51,7 +51,7 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_MEMORY_PORT') ?: 28094 + 200 * (int) getenv('TEST_PHP_WORKER'));
+$port = (int) (getenv('FPMNG_DIRECT_WORKER_MAX_MEMORY_PORT') ?: 28094 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 
 /* worker.max_memory = 1 (one byte) always compares true against any real
  * getrusage() peak RSS, the same deterministic-and-frequent trigger

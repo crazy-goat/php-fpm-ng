@@ -113,6 +113,8 @@ for cell in deb deb-tls apk apk-tls; do
     END { exit !hit }' "$REAL" || fail "build/package-gate-expected.txt has no line for cell $cell"
 done
 awk '/^#/ || NF == 0 { next } NF < 4 { print "no reason: " $0 }' "$REAL" | grep . && fail "an expected line has no reason"
+# test names in the expected file contain no whitespace; word splitting is the intent.
+# shellcheck disable=SC2013
 for n in $(awk '/^#/ || NF == 0 { next } { print $3 }' "$REAL" | sort -u); do
   [ -f "$REPO/sapi/fpmng/tests/$n.phpt" ] || fail "build/package-gate-expected.txt names $n, which is not a test"
 done

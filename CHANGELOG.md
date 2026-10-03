@@ -11,6 +11,10 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [Unreleased]
 
+### Changed
+
+- `bin/lint.sh` runs shellcheck at its default (style) severity instead of `warning`. The 22 info/style findings in `build/` and `tests/frameworks/symfony/run.sh` are fixed or silenced with a reasoned `# shellcheck disable` (#584).
+
 ### Fixed
 
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding

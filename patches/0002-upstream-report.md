@@ -5,8 +5,8 @@ listener instead (fpm_pool_type.c). The patch and the reproducer below are in gi
 history: `git show bd3f332:patches/0002-fastcgi-tcp-nodelay-never-set.patch` and
 `git show bd3f332:patches/0002-fcgi-nodelay-repro.py`. Keep this file until the report is sent.
 
-Status: tekst gotowy, nic nie wyslane. Zglosic jako issue na github.com/php/php-src
-(komponent FastCGI / FPM), a lacze potem wpisac do `patches/README.md` przy 0002.
+Status: text ready, nothing sent. File it as an issue on github.com/php/php-src
+(component FastCGI / FPM), then put the link into `patches/README.md` next to 0002.
 
 ---
 

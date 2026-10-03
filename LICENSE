@@ -29,7 +29,7 @@ Files that are not MIT (and are not covered by the copyright line above):
 
 - PHP License 3.01, code taken from or derived from php-src:
   - `third_party/php-src/` (vendored php-src subset; see its README.md)
-  - `patches/` and `build/phpt-fixture-patches/` (patches against php-src files)
+  - `build/phpt-fixture-patches/` (patches against php-src files)
   - `sapi/fpmng/config.m4` and `sapi/fpmng/Makefile.frag` (derived from php-src
     `sapi/fpm/config.m4` and `sapi/fpm/Makefile.frag`)
   - the modified copies of php-src `sapi/fpm/` files: `sapi/fpmng/fpm/fpm.c`,

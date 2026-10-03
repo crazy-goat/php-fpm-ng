@@ -6,8 +6,10 @@
 #
 # Cells: deb, deb-tls, apk, apk-tls. Globs are comma separated (deb*, *).
 # A listed SKIP that passes, or a listed XFAIL that passes, fails the gate as stale.
-# Only the deb and deb-tls results are recorded so far; the apk cells are added when
-# the release.yml rehearsal measures them (do not guess them).
+# The deb and deb-tls lines come from a real package-gate run (issue #678). The apk
+# lines are derived from the counts and names the old count-based gate measured
+# (apk 17 skips, apk-tls 6; #424, #500) and were not run by this change: the first
+# release.yml rehearsal confirms them, and its error output names any correction.
 deb       SKIP  fpmng-acme-challenge                                 the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
 deb       SKIP  fpmng-acme-challenge-plain                           the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
 deb       SKIP  fpmng-acme-handover                                  the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
@@ -25,3 +27,24 @@ deb       SKIP  fpmng-http-tls-alpn-sni                              the default
 deb       SKIP  fpmng-http-tls-chain                                 the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 deb       SKIP  fpmng-tier-build-flags                               the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 deb,deb-tls SKIP  fpmng-ini-bootstrap-extension                        the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)
+apk       SKIP  fpmng-acme-challenge                                    the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-acme-challenge-plain                              the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-acme-handover                                     the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-acme-issue                                        the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-acme-renew-failure                                the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-http-gateway-absolute-form-plain-redirect         the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-http-gateway-plain-limits                         the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-payload-distribution                              the default apk is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
+apk       SKIP  fpmng-http-direct-connection-info                       the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-http-direct-tls                                   the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-http-direct-tls-streaming                         the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-http-direct-worker-ws-tls                         the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-http-tls-alpn-sni                                 the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-http-tls-chain                                    the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk       SKIP  fpmng-tier-build-flags                                  the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
+apk,apk-tls SKIP  fpmng-http-direct-session-status                        the Alpine -n CLI/pool has no session extension loaded (measured by the old gate, #424)
+apk,apk-tls SKIP  fpmng-http-direct-worker-buffered-streams               the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
+apk-tls   SKIP  fpmng-acme-issue                                        the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
+apk-tls   SKIP  fpmng-acme-renew-failure                                the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
+apk,apk-tls SKIP  fpmng-http-direct-worker-tls-and-client-tls             the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
+apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)

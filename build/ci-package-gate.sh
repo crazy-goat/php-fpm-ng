@@ -341,7 +341,7 @@ echo "ok: $LICENSE_FILE carries the MIT, PHP-3.01 and BSD-2-Clause texts"
 
 # php-fpm refuses to run as root, and a suite that cannot start a pool reports
 # every test as SKIP and still exits 0. So the suite runs as an unprivileged
-# user, and the count assertion on the host is what notices if that ever stops
+# user, and the name comparison on the host (build/package-gate-compare.sh) is what notices if that ever stops
 # being true.
 mkdir -p /out/results /out/work
 rm -rf /out/work/prepared

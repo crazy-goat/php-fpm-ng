@@ -103,4 +103,18 @@ tsv "$WORK/allskip" fpmng-alpha:SKIP fpmng-beta:SKIP fpmng-gamma:SKIP fpmng-epsi
 out=$(run deb "$WORK/allskip") && fail "an all-skipped run passed"
 echo "$out" | grep -q 'unexpected SKIP: fpmng-epsilon' || fail "the all-skip run was not named: $out"
 
+# 6. the real expected file: every cell has at least one exception line, every
+# named test exists, and every line has a reason (the apk cells were once missing).
+REAL=$REPO/build/package-gate-expected.txt
+for cell in deb deb-tls apk apk-tls; do
+  awk -v c="$cell" '
+    /^#/ || NF == 0 { next }
+    { n = split($1, g, ","); for (i = 1; i <= n; i++) { p = g[i]; gsub(/\*/, ".*", p); if (c ~ "^" p "$") { hit = 1 } } }
+    END { exit !hit }' "$REAL" || fail "build/package-gate-expected.txt has no line for cell $cell"
+done
+awk '/^#/ || NF == 0 { next } NF < 4 { print "no reason: " $0 }' "$REAL" | grep . && fail "an expected line has no reason"
+for n in $(awk '/^#/ || NF == 0 { next } { print $3 }' "$REAL" | sort -u); do
+  [ -f "$REPO/sapi/fpmng/tests/$n.phpt" ] || fail "build/package-gate-expected.txt names $n, which is not a test"
+done
+
 echo "ok: package-gate-compare.sh scores by name (new pass, new skip, stale skip, FAIL, missing row, no reason, all skipped)"

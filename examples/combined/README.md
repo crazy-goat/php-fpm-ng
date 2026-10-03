@@ -8,8 +8,7 @@ their own ports.
 ## Run it
 
 ```sh
-# from examples/README.md "Build the binary once", then:
-cp <build>/sapi/fpmng/php-fpm-ng examples/combined/php-fpm-ng
+# no binary to build: the image installs the released package
 cd examples/combined
 docker build -t fpmng-combined-example .
 docker run --rm --name fpmng-combined-example -p 8080:8080 -p 8081:8081 -p 8082:8082 fpmng-combined-example

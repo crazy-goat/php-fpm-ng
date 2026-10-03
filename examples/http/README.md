@@ -7,8 +7,7 @@ static file, one PHP request; still fits on one screen.
 ## Run it
 
 ```sh
-# from examples/README.md "Build the binary once", then:
-cp <build>/sapi/fpmng/php-fpm-ng examples/http/php-fpm-ng
+# no binary to build: the image installs the released package
 cd examples/http
 ./generate-cert.sh
 docker build -t fpmng-http-example .

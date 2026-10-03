@@ -119,7 +119,7 @@ origin: 308 https://t/x?a=1
 absolute: 308 https://other.example/x?a=1
 no path: 308 https://other.example/
 scheme only: 308 https://t/x?a=1
-network path: 308 https://t/x
+network path: 308 https://t//h/x
 ipv6: 308 https://[::1]/x
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

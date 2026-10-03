@@ -612,16 +612,9 @@ static void fpm_http_param(fpm_http_conn *c, const char *name, const char *value
 
 /* ---------------------------------------------------------------- request -> FastCGI */
 
-/* The request-target as an origin server wants to see it. RFC 9112 3.2.2: a
- * server MUST accept the absolute-form ("GET http://host/path?q HTTP/1.1")
- * even though only proxies are sent it, and a client talking to an origin
- * server MUST send only path and query -- so the gateway, which is the client
- * of its targets, forwards the origin-form, and a FastCGI application sees
- * the same REQUEST_URI whichever transport the route uses (#462 bullet e:
- * before, a fastcgi route handed the app the whole URL while an http-direct
- * target answered the verbatim absolute-form with its own 400).
- * Origin-form and "*" are copied verbatim. */
-const char *fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len)
+/* Skips an absolute-form scheme://authority and reports the authority (without
+ * userinfo); a target without one is returned unchanged. Copies nothing. */
+static void fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len)
 {
 	const char *p = uri;
 
@@ -651,10 +644,9 @@ const char *fpm_http_origin_start(const char *uri, const char **authority, size_
 				*authority = at;
 				*authority_len = (size_t) (p - at);
 			}
-			return p;
+			return;
 		}
 	}
-	return uri;
 }
 
 /* 1 = copied, 0 = no authority, -1 = authority longer than buf_len-1. */
@@ -678,13 +670,38 @@ int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len)
 	return 1;
 }
 
-/* The path every consumer of the request-target uses -- the matchers below,
- * the router and the FastCGI builder -- taken from the ONE parse libevent
- * did (evhttp_uri_get_path), so no form can be matched on one path and routed
- * on another: "http:/metrics/app" (absolute-URI without authority) and the
- * network-path "//h/metrics/app" both yield "/metrics/app", like the
- * origin-form (#534). An empty path is "/" only when an authority was present
- * ("GET http://h", RFC 9112 3.2.2); "GET http:" has none and stays empty. */
+/* Ingress step (#534), first thing in both listeners' request callbacks: a
+ * target that starts with "/" is an origin-form absolute-path (RFC 9112 3.2.1),
+ * so "//api/users" is the path "//api/users". libevent reads it as a
+ * network-path reference (host "api", path "/users"); rewrite its parse so the
+ * host is dropped and the path is the raw one up to "?" or "#". Only a target
+ * with a scheme keeps libevent's reading of an authority. From here on every
+ * consumer -- matchers, router, static lookup, ACME, REQUEST_URI -- sees one
+ * path, so nothing is matched on one path and served on another. */
+static void fpm_http_normalize_target(struct evhttp_request *req)
+{
+	struct evhttp_uri *u = (struct evhttp_uri *) evhttp_request_get_evhttp_uri(req);
+	const char *uri = evhttp_request_get_uri(req);
+	size_t len;
+	char *path;
+
+	if (!u || !uri || uri[0] != '/' || uri[1] != '/') {
+		return;
+	}
+	len = strcspn(uri, "?#");
+	path = estrndup(uri, len);
+	if (evhttp_uri_set_path(u, path) == 0) {
+		evhttp_uri_set_host(u, NULL);
+		evhttp_uri_set_port(u, -1);
+		evhttp_uri_set_userinfo(u, NULL);
+	}
+	efree(path);
+}
+
+/* The path every consumer of the request-target uses (see
+ * fpm_http_normalize_target()). "http:/metrics/app" yields "/metrics/app"; an
+ * empty path is "/" only when an authority was present ("GET http://h",
+ * RFC 9112 3.2.2). */
 static const char *fpm_http_request_path(struct evhttp_request *req)
 {
 	const struct evhttp_uri *u = evhttp_request_get_evhttp_uri(req);
@@ -2510,6 +2527,7 @@ static void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	smart_str target = {0};
 	size_t len;
 
+	fpm_http_normalize_target(req);
 	/* Issue #390 review: this listener bypassed all of the gateway's own
 	 * accounting. Every plain request is answered locally -- the ACME
 	 * challenge, the 308 redirect, the NO_CERT 503, a 400 -- and it is the
@@ -2968,6 +2986,7 @@ static void fpm_http_request(struct evhttp_request *req, void *arg)
 	struct fpm_http_client_s *client;
 	fpm_http_conn *c;
 
+	fpm_http_normalize_target(req);
 	if (evcon) {
 		evhttp_connection_get_peer(evcon, &peer_addr, &peer_port);
 	}

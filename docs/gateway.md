@@ -186,10 +186,10 @@ and uses that for `ping.path`, the operator namespace and its ACL,
 `access.suppress_path[]`, the plain-HTTP redirect and both transports; the
 authority (without userinfo) replaces the `Host` header, so `HTTP_HOST`,
 `SERVER_NAME` and the `Host` sent to an `http.route[]` target agree (#534).
-Routing and static lookups already used the parsed path. `http:/path` and
-`//host/path` are read the same way, and the forwarded target (`REQUEST_URI`,
+Routing and static lookups already used the parsed path. `http:/path` is read the same way, and the forwarded target (`REQUEST_URI`,
 the request line to an `http.route[]` target, the redirect `Location`) is built
-from that same parse. An authority longer than 261 bytes is answered 400.
+from that same parse. A target that starts with `/` is always origin-form: `//api/users` is the path
+`//api/users`, not host `api` plus `/users`. An authority longer than 261 bytes is answered 400.
 
 ## The upstream's `Status:` header
 

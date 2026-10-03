@@ -123,8 +123,13 @@ try {
     echo "http:/x fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
     $r = rawGet($http, 'http:/d/x?a=1');
     echo "http:/d/x http: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
-    $r = rawGet($http, '//h/x?a=1');
-    echo "//h/x fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    /* A target starting with "/" is origin-form, whatever follows: "//h/x" is
+     * the path "//h/x", not host "h" plus "/x" (RFC 9112 3.2.1). The app sees
+     * it unchanged and it is not under /metrics. */
+    foreach (['//h/x?a=1', '//api/users?x=1', '///etc/x', '//wp-admin'] as $t) {
+        $r = rawGet($http, $t);
+        echo "$t fastcgi: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
+    }
     $r = rawGet($http, 'http:');
     echo "no authority: " . (str_starts_with(bodyOf($r), 'app:') ? 'served' : 'refused') . "\n";
     $r = rawGet($http, 'http://' . str_repeat('a', 300) . '/x', 't');
@@ -164,11 +169,14 @@ no host http: 200 app:/d/x:other.example:81
 host http: 200 app:/d/x:other.example:81
 http:/metrics/app operator: 403
 x+y:/metrics/app operator: 403
-//h/metrics/app operator: 403
+//h/metrics/app operator: 200
 http:/ping: 200 pong
 http:/x fastcgi: 200 app:/x?a=1:t
 http:/d/x http: 200 app:/d/x?a=1:t
-//h/x fastcgi: 200 app:/x?a=1:t
+//h/x?a=1 fastcgi: 200 app://h/x?a=1:t
+//api/users?x=1 fastcgi: 200 app://api/users?x=1:t
+///etc/x fastcgi: 200 app:///etc/x:t
+//wp-admin fastcgi: 200 app://wp-admin:t
 no authority: refused
 long authority: 400
 max authority: 200

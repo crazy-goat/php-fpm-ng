@@ -10,7 +10,7 @@ assert behaviour that upstream's 150-test suite does not cover: `pool.type`,
 endpoint.
 
 Each test's `--TEST--` title and inline comments name the documented claim they
-protect (`docs/NOTES.md`, `docs/cron.md`, `docs/frameworks.md`, or a finished
+protect (`docs/NOTES.md`, `docs/cron.md`, or a finished
 task file).
 
 ## Prerequisites

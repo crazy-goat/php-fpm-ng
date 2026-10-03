@@ -1,5 +1,7 @@
 # php-fpm-ng — project notes
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Status as of 2026-09-05. This file is the project's memory: decisions, measured
 numbers, open questions, and the list of known problems. Update it whenever the
 direction changes, so the same conclusions do not have to be worked out again.

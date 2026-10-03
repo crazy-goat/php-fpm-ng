@@ -1,5 +1,7 @@
 # Spike: modular build -- core modes vs. experimental modules
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Measured 2026-09-12 on the test box against a canonical build
 (`--disable-all --enable-fpmng --enable-session --with-openssl`, php-8.5.9).
 Investigation only: no production code was changed. The task breakdown in §8 is

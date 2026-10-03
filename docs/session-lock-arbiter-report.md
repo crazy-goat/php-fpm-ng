@@ -1,5 +1,7 @@
 # In-process session-lock arbiter for `session.save_handler = files` under `pool.executor = fiber`: spike
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Date: 2026-09-06. Branch `spike/session-lock-arb`, worktree
 `/Users/piotr.halas/work/php-fpm-ng-worktrees/session-lock`. Base: `main`
 (`65ec755`, "async: reject executor until hardened"). Prior work: the

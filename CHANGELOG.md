@@ -13,6 +13,7 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ### Changed
 
+- Docs: `README.md` and `docs/frameworks.md` no longer describe framework support on `pool.executor = fiber`, and `docs/FASTCGI_NG_OPTIMIZATION.md` is gone. The fiber framework measurements and the `fastcgi-ng` plan live on branch `async` (`async/docs/frameworks-fiber.md`, `async/docs/FASTCGI_NG_OPTIMIZATION.md`); `main` describes only the executors it ships. History documents carry a one-line note (#601).
 - `third_party/php-src/MANIFEST` has three columns (path, upstream path, SHA-256) instead of four: the two hashes were always equal. `build/vendor-php-src.sh` and `build/audit-compile-deps.sh` read the new layout; the "not pristine" refusal is gone because one hash now says both (#676).
 - `LICENSE` and `README.md` no longer list `patches/` under the PHP License 3.01: it holds only project-written history notes (MIT). `build/phpt-fixture-patches/` stays listed (#676).
 - `patches/0002-upstream-report.md` is English throughout; `docs/NOTES.md` marks the patch 0002/0003 passages as historic and a `build/libphp-build.sh` comment no longer names the removed patches/0006 (#676).

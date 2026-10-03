@@ -325,7 +325,7 @@ and its follow-ups, not to this limit.
   (`fpm_http_direct_worker_validate()`).
 - **Only valid under `pool.executor = worker`.** Every other pool type and
   every other executor of `pool.type = http-direct` rejects it at startup,
-  the same way `fiber.*` is rejected outside `pool.executor = fiber`.
+  like any directive that does not apply to the pool type.
 - **Example:**
 
   ```ini

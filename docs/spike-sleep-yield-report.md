@@ -1,5 +1,7 @@
 # Spike: yield sleep()/usleep()/time_nanosleep() in fiber pools
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Status: DONE. All measurements below were run on `piotr@192.168.8.50` in
 `~/rd/b3/`, ports 18971 (AFTER, this spike's build) and 18972 (BEFORE,
 same tree with the one `fpm_pool_fiber_sleep_install()` call commented

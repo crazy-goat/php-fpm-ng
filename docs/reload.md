@@ -66,7 +66,7 @@ The natural-sounding design is "parse both configs, compare the resulting
    Giving it one would be a large, risky change to an existing, heavily
    loaded file for this issue's time budget.
 2. `fpm_worker_pool_config_s` is large (100+ fields across the base config
-   plus the cron/supervisor/http/http-direct/tls/acme/fiber extensions) and
+   plus the cron/supervisor/http/http-direct/tls/acme extensions) and
    several fields are pointers (`zend_string *`, `char *`) where a naive
    `memcmp()` of the struct compares addresses, not content — silently
    wrong in exactly the cases that matter.

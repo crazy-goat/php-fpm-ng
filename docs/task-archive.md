@@ -1,5 +1,7 @@
 # Task archive
 
+> Note (#601): the `fiber` and `async` executors no longer exist on `main`; they live on branch `async`. Mentions of them below are history, written when they were part of `main`.
+
 Until 2026-09-08 this project tracked work as one Markdown file per task under
 `tasks/`. That tracker was replaced by GitHub Issues; the directory was deleted in
 the commit that added this file. Nothing was rewritten in history, so every task

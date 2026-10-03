@@ -75,7 +75,7 @@ expectConfigFailure(
 
 /* issue #376: pool.type = fastcgi-ng was removed. It is a retired name, not an
  * unknown one -- a config file outlives the release that broke it, so the
- * message has to say what happened and where the transport went. It reads the
+ * message has to say what happened and what to use instead. It reads the
  * same on every build: issue #420 removed the libphp guard entirely. */
 expectConfigFailure(
     'retired-fastcgi-ng',

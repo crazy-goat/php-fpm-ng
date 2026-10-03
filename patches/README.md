@@ -44,21 +44,19 @@ rather than overwrite the edit.
 |---|---|---|---|
 | `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (full PR, not an excerpt) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (7 arguments to `fpm_scoreboard_update_commit`) |
 | `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | report to php/php-src — text ready in `0002-upstream-report.md`, not sent yet | 8.3, 8.4, 8.5, master |
-| `0003-fastcgi-buffered-read-accept4.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (different `safe_read` signature) |
-| `0004-fastcgi-ng-transport-switch.patch` | `main/fastcgi.c`, `main/fastcgi.h` | move the switch behind an API owned by `sapi/fpmng` | 8.5.9, 8.6.0-dev |
-| `0005-fastcgi-writev-large-response.patch` | `main/fastcgi.c` | candidate PR to php/php-src, not submitted | 8.5.9, 8.6.0-dev |
 
-The stack is ordered: 0002 and 0003 assume 0001 has already been applied (the
+The stack is ordered: 0002 assumes 0001 has already been applied (the
 context around `accept()`), although they are independent in substance.
 `prepare.sh` applies everything in order to an untouched tree, and checks
 "already applied" for the whole stack at once (in reverse, from copies of the
 touched files) — a per-patch test lies when two patches occupy the same location.
 
-`fcgi_set_optimized_transport()` (0004) has no caller in the tree after issue
-#420: #376 retired `fastcgi-ng`, #388 retired `pool.type = http`, and #420
-removed the last capability bit together with 0006. The function and 0004 stay
-— the transport it switches on is still shipped, and the switch keeps the
-protocol changes behind one API — but nothing selects the optimized path today.
+Patches 0003 (buffered read, `accept4`), 0004 (`fcgi_set_optimized_transport()`)
+and 0005 (`writev` for large responses) were dropped from `main` by issue #589:
+nothing has selected the optimized transport since #420 (#376 retired
+`fastcgi-ng`, #388 retired `pool.type = http`), and `main` carries no patch it
+does not need for correctness. Branch `async` may keep its own copies. The
+numbers they earned are in `docs/NOTES.md` (3t and the `writev` section).
 
 ### Why 0001 is necessary
 
@@ -80,16 +78,6 @@ A response larger than 8 KB over TCP uses several `write()` calls; the final
 small segment waits for ACK: Nagle + delayed ACK, tens of milliseconds instead
 of microseconds. The gateway keeps TCP connections to the pool, so this affects
 us directly. Report and reproducer: `0002-upstream-report.md`.
-
-### Why 0003 (input buffer + `accept4`)
-
-A purely transport-level syscall saving in the worker (one `read()` for the
-request header instead of six, `accept4(SOCK_CLOEXEC)` instead of `accept` +
-2x `fcntl`), with no wire changes. Before/after numbers: `docs/NOTES.md`,
-section 3t. Our `sapi/fpmng/config.m4` detects `accept4`
-(`AC_CHECK_FUNCS([accept4])`) because upstream checks it only in `ext/sockets`;
-without `HAVE_ACCEPT4`, the old path is compiled. An upstream version would
-need to add this check to `configure.ac`.
 
 ### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
 
@@ -139,10 +127,10 @@ run in the same tree. Do this after the coordinator's decision, not in this task
 
 ### Version variants
 
-PHP-8.3 currently has TWO variants (`0001` — 7 arguments to
-`fpm_scoreboard_update_commit`; `0003` — `const void *buf` in `safe_read()`).
-That is exactly the warning threshold from rule 3. Both will disappear with the
-patches when upstream merges them; if 8.3 diverges further, dropping 8.3 from
+PHP-8.3 currently has ONE variant (`0001` — 7 arguments to
+`fpm_scoreboard_update_commit`); a second one (`0003`, `const void *buf` in
+`safe_read()`) went with that patch in issue #589. It will disappear with the
+patch when upstream merges it; if 8.3 diverges further, dropping 8.3 from
 supported versions will be cheaper than a third variant.
 
 **DECISION (2026-09-05): KEEP 8.3.** It still receives security support, and the

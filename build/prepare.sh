@@ -154,7 +154,7 @@ if [ -n "$PATCHES" ]; then
       name=$(basename "$p")
       # Apply each patch immediately. Later patches may deliberately use
       # context introduced by earlier ones, so probing every patch against the
-      # untouched tree reports false failures (0004/0005 on PHP 8.6).
+      # untouched tree reports false failures.
       if ! patch -d "$PHPSRC" -p1 --forward --silent < "$p" >/dev/null 2>&1; then
         echo "ERROR: patch does not apply to PHP $PHPVER: $name" >&2
         echo "      see patches/README.md — either upstream merged it (remove it)," >&2

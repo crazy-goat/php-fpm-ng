@@ -135,10 +135,9 @@ mkdir -p "$OUT/obj" "$OUT/dep" "$OUT/compat" "$OUT/probe"
 # --- host capabilities, probed ---------------------------------------------------
 # There is no configure on this path, and the distribution's php_config.h
 # describes the distribution's build of PHP, not ours: Ubuntu's leaves
-# HAVE_EPOLL and HAVE_ACCEPT4 undefined because its embed build had no FPM and
-# no ext/sockets. So each capability the FPM sources test is compiled and
-# linked here, with the same test program upstream's configure uses, and a
-# missing one stops the build by name.
+# HAVE_EPOLL undefined because its embed build had no FPM. So each capability
+# the FPM sources test is compiled and linked here, with the same test program
+# upstream's configure uses, and a missing one stops the build by name.
 PROBE_CFLAGS="-D_GNU_SOURCE ${EXTRA_CFLAGS:-}"
 probe() {
   name=$1
@@ -155,10 +154,6 @@ probe HAVE_LQ_TCP_INFO '#include <netinet/tcp.h>' 'int main(void) { struct tcp_i
 probe HAVE_TIMES '#include <sys/times.h>' 'int main(void) { struct tms t; return times(&t) == (clock_t) -1; }'
 probe HAVE_CLEARENV '#include <stdlib.h>' 'int main(void) { return clearenv(); }'
 probe HAVE_CLOCK_GETTIME '#include <time.h>' 'int main(void) { struct timespec ts; return clock_gettime(CLOCK_MONOTONIC, &ts); }'
-# patches/0003: accept4(SOCK_CLOEXEC) saves two fcntl() calls per accepted
-# connection. Ubuntu's php_config.h does not define it, so before #422 the
-# Ubuntu packages silently compiled the accept()+fcntl() fallback.
-probe HAVE_ACCEPT4 '#include <sys/socket.h>' 'int main(void) { return accept4(-1, 0, 0, SOCK_CLOEXEC) == 0; }'
 # PROC_MEM_FILE: the slowlog reads a stuck child's stack through
 # /proc/<pid>/mem with pread() (fpm_trace_pread.c). Upstream's configure runs
 # this program; so does this build, because the answer is a property of the
@@ -170,14 +165,13 @@ probe PROC_MEM_FILE '#define _FILE_OFFSET_BITS 64' '#include <stdint.h>' '#inclu
   '  close(fd); return v1 != v2; }'
 "$OUT/probe/PROC_MEM_FILE" ||
   fail "pread() on /proc/<pid>/mem does not work here, which the slowlog backend (fpm_trace_pread.c) relies on"
-echo "libphp-build.sh: probed epoll, select, __sync atomics, TCP_INFO, times, clearenv, clock_gettime, accept4, /proc/<pid>/mem"
+echo "libphp-build.sh: probed epoll, select, __sync atomics, TCP_INFO, times, clearenv, clock_gettime, /proc/<pid>/mem"
 
 # --- the defines, classified -----------------------------------------------------
 # A missing define is not a build error, it is a silently smaller binary. The
 # spike's first attempt scored 26 PASS / 22 FAIL / 11 SKIP purely because
-# HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS were absent, and HAVE_ACCEPT4 was
-# missing from this build for months. So every feature macro the compiled
-# sources test in a preprocessor conditional must be accounted for: supplied
+# HAVE_FPM_HTTP and HAVE_FPM_HTTP_TLS were absent. So every feature macro the
+# compiled sources test in a preprocessor conditional must be accounted for: supplied
 # here, defined by the SDK or by the sources themselves, or deliberately off
 # with a reason. An unclassified name stops the build.
 SUPPLIED='-DHAVE_CONFIG_H
@@ -188,7 +182,6 @@ SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_TIMES=1
 -DHAVE_CLEARENV=1
 -DHAVE_CLOCK_GETTIME=1
--DHAVE_ACCEPT4=1
 -DHAVE_FPM_HTTP=1
 -DFPMNG_LIBPHP_BUILD=1
 -DPROC_MEM_FILE="mem"'
@@ -454,10 +447,6 @@ refute_symbol() {
 assert_symbol fpm_http_init_pool "HAVE_FPM_HTTP was not set, so the http gateway is compiled out"
 assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
 assert_symbol zif_fpm_metric_inc "the fpmng_metrics extension's userland functions are missing"
-# The accept4() path of patches/0003 is inlined into fcgi_accept_request(), so
-# its evidence is the call in the binary's dynamic symbol table.
-nm -D --undefined-only "$BIN" 2>/dev/null | grep -qw accept4 ||
-  fail "the binary does not call accept4(): HAVE_ACCEPT4 did not reach main/fastcgi.c (patches/0003)"
 
 # TLS, in whichever direction was asked for. Both halves are asserted on the
 # binary: the symbol says the sources were compiled, and the dynamic section

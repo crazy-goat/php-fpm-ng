@@ -5,12 +5,14 @@ measured gain was 114.53 us upstream against 105.01 us per request ("Worker
 CPU without saturating the machine" below) -- 9.5 us, 8.3% of a hello-world
 request and 0.02-0.2% of a 5-50 ms framework request; throughput at
 saturation moved +0.41%, within noise ("Throughput at saturation" below).
-The transport optimizations themselves (patches 0004/0005) survive and are
-still in the tree; `patches/0006` (persistent Zend signal handlers) and the
-capability bit that selected it were removed by issue #420, after #388 retired
-`pool.type = http`, the last type that set it. The numbers below are the
-measurement that justified the removal and stay as written -- they describe
-the tree the experiment ran against, not a current requirement.
+The transport optimizations themselves (patches 0003, 0004 and 0005) were
+dropped from `main` by issue #589: nothing selected them any more, so `pool.type
+= fastcgi` always runs the upstream read path and `accept()` + `fcntl()`.
+`patches/0006` (persistent Zend signal handlers) and the capability bit that
+selected it were removed by issue #420, after #388 retired `pool.type = http`,
+the last type that set it. Branch `async` may keep its own copies. Everything
+below is historical: it describes the tree the experiment ran against, and
+the numbers are the measurement that justified the removal, kept as written.
 
 ## Goal
 

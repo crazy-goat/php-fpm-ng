@@ -18,7 +18,10 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 - `pool.type = fastcgi`: TCP_NODELAY is now set on the listening socket by the SAPI (`.listening_socket_nodelay`) and so applies to every accepted TCP connection, not only FCGI_KEEP_CONN ones. It replaces php-src patch `0002` (`main/fastcgi.c`), which is removed; `main` now carries only patch `0001`. No latency change against 0.12.0, which already carried the patch (#590).
 
 ### Fixed
+- `pool.type = gateway` and `pool.type = http-direct`: a request header whose name contains `_` is no longer passed to the worker. `X_Real_IP` and `X-Real-IP` both became `HTTP_X_REAL_IP` and the last one won, so a client could override a header set by the reverse proxy in front (nginx drops such headers by default, `underscores_in_headers off`, and Apache 2.4 drops them too). The header is now dropped; there is no opt-in option (#595).
 - `pool.type = gateway`: an upstream FastCGI `Status:` that is not three digits in 200..599 (`abc`, `-5`, `99999`, a 1xx) is no longer sent to the client as the status line. The gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply. The same applies to an `http.route[]` HTTP target whose status line is outside 200..599 (#594).
+- The operator `?full` page no longer prints a `live` row with `pid` 0 for a slot whose child is not forked yet; a test (or an operator script) that took that 0 as an address ran `kill -USR1 0`, which signals the whole process group and killed the `fpmng-phpt` runner with exit 138 (#567).
+- The test harness refuses to signal a pid below 2 (`build/phpt-fixture-patches/0004`), so such a mistake fails one test instead of the run (#567).
 
 ## [0.12.0] - 2026-10-02
 

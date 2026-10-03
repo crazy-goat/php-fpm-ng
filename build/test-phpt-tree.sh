@@ -112,6 +112,8 @@ grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.php
 if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then fail "a non-gateway test got a conflict key"; fi
 # The serial run must stay what it was: worker 0 / unset allocates 9008 first.
 grep -q '9000 + PHP_INT_SIZE - 1 + \$worker \* 200' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc port base is not 9000 + PHP_INT_SIZE - 1 + 200 * worker"
+# Issue #567: signalling pid 0 would take the whole process group, runner included.
+grep -q 'refusing to send SIG' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc still signals a pid below 2"
 # The bundle itself is untouched.
 (cd "$REPO" && ./build/vendor-php-src.sh check >/dev/null) || fail "the pinned bundle was modified"
 echo "ok: phpt-parallel.sh is idempotent, adds worker port blocks and conflict keys, leaves the bundle alone"

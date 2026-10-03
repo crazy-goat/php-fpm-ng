@@ -11,7 +11,9 @@
 #   1. build/phpt-fixture-patches/*.patch: run-tests.php tells each test which
 #      worker runs it, and tester.inc allocates ports from that worker's block;
 #      run-tests.php no longer retries a test whose output says "address already
-#      in use", so a port collision fails instead of passing as WARN (#562).
+#      in use", so a port collision fails instead of passing as WARN (#562);
+#      Tester::signal() refuses a pid below 2, because `kill -USR1 0` signals
+#      the whole process group, the runner included (#567).
 #   2. sapi/fpmng/tests/CONFLICTS is removed. Upstream ships it with the single
 #      word "all" (spurious failures on Azure), and run-tests.php then pulls
 #      every test of that directory out of the parallel pool and runs them one
@@ -47,8 +49,10 @@ apply_patch() { # <patch file> <file it changes, relative to the tree> <marker>
 apply_patch 0001-tester-port-base-per-worker.patch sapi/fpmng/tests/tester.inc 'Issue #394 (php-fpm-ng)'
 apply_patch 0002-run-tests-worker-env-for-tests.patch run-tests.php 'Issue #394 (php-fpm-ng)'
 apply_patch 0003-run-tests-no-retry-on-port-collision.patch run-tests.php 'Issue #562 (php-fpm-ng)'
+apply_patch 0004-tester-refuse-signal-to-pid-below-2.patch sapi/fpmng/tests/tester.inc 'Issue #567 (php-fpm-ng)'
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"
+grep -q 'Issue #567 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc still signals pid 0 (the whole process group) after patching"
 grep -q 'Issue #562 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php still retries a test on 'address already in use' after patching"
 
 rm -f "$TESTS/CONFLICTS"

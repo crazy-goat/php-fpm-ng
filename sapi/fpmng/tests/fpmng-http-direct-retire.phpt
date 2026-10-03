@@ -262,6 +262,7 @@ try {
     $reader = connect($solo);
     [$status, $pid] = fetch($reader, '/');
     verify($status === 200, "solo pool: $status");
+    verify((int) $pid > 1, "solo pool: no usable pid in '$pid'");
     $tester->signal('USR1', (int) $pid);
     $tester->signal('USR1', (int) $pid);
     /* A request the retiring child does answer, on the connection it is

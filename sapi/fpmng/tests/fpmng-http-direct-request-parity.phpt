@@ -223,6 +223,18 @@ try {
         check(str_contains($status, ' 400 '), "$name accepted an over-long header name: $status");
     }
     echo "header-name-limit: ok\n";
+
+    /* Issue #595: a header name with "_" collides with its "-" spelling
+     * (X_Real_IP and X-Real-IP are both HTTP_X_REAL_IP) and is dropped, in
+     * both executors. The underscore spelling is sent last, where it would win. */
+    $underscore = "GET /probe HTTP/1.1\r\nHost: parity.test\r\n"
+        . "X-Real-IP: 10.0.0.1\r\nX_Real_IP: 6.6.6.6\r\nX_Custom: v\r\nConnection: close\r\n\r\n";
+    foreach (['classic' => $classicPort, 'worker' => $workerPort] as $name => $port) {
+        $env = json_decode(request($port, $underscore)[2], true, flags: JSON_THROW_ON_ERROR);
+        check(($env['HTTP_X_REAL_IP'] ?? null) === '10.0.0.1', "$name: X_Real_IP overrode X-Real-IP: " . json_encode($env['HTTP_X_REAL_IP'] ?? null));
+        check(!isset($env['HTTP_X_CUSTOM']), "$name imported a header name with an underscore");
+    }
+    echo "underscore-dropped: ok\n";
 } finally {
     $tester->terminate();
     $tester->close();
@@ -237,6 +249,7 @@ env-parity: ok
 locale-independent-cgi-keys: ok (worker locale: %s)
 framing-parity: ok
 header-name-limit: ok
+underscore-dropped: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

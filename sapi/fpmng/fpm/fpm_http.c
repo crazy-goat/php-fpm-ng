@@ -917,6 +917,18 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		if (strcasecmp(k, "Content-Length") == 0 || strcasecmp(k, "Proxy") == 0) {
 			continue;
 		}
+		/* A name with "_" would collide with its "-" spelling: the mapping below
+		 * turns "-" into "_", so "X_Real_IP" and "X-Real-IP" both become
+		 * HTTP_X_REAL_IP, and the last pair on the wire wins in $_SERVER
+		 * (fcgi_hash_set replaces an existing key). A client could then
+		 * override a header the reverse proxy in front set. nginx (default
+		 * underscores_in_headers off) and Apache 2.4 drop such headers when
+		 * they build the CGI environment; the gateway is the front server for
+		 * this hop, so it does the same. Same rule in
+		 * fpm_http_direct_build_env(). Issue #595. */
+		if (strchr(k, '_') != NULL) {
+			continue;
+		}
 		if (strcasecmp(k, "Content-Type") != 0) {
 			smart_str_appendl(&name, "HTTP_", sizeof("HTTP_") - 1);
 		}

@@ -386,14 +386,33 @@ static const char *fpm_http_direct_ops_pm_name(int pm)
  * Reading `used` rather than clearing the slot at exit is what also covers the
  * child nothing runs in: SIGKILL, request_terminate_timeout, a crash.
  *
+ * `used` is set when the master prepares the slot, before fork(), and the pid
+ * is stamped only when fork() returns. A slot in that window has no child to
+ * address yet, and printing it as live with pid 0 hands a reader "0" as the
+ * target of a signal, which kill(2) takes as the caller's whole process group
+ * (issue #567). So a slot counts as live only once it has a pid.
+ *
+ * Returns that pid, or 0 for a slot that is not live. The master rewrites the
+ * slot concurrently (a reap clears it, the next prepare sets `used` with pid
+ * 0), so the pid is loaded exactly once and the caller prints this very value:
+ * a second load could see the cleared slot and print live:1 with pid 0.
+ *
  * The shared scoreboard, not the copy the page took: fpm_scoreboard_copy() is
  * called with copy_procs = 0 here, so the copy has no procs array at all. An
  * unlocked int read is the right price for a gauge that is already up to one
  * tick stale -- taking the scoreboard's lock per slot to decide whether to add
  * a number would cost more than the number is worth. */
-static int fpm_http_direct_ops_slot_alive(const struct fpm_scoreboard_s *live, unsigned i)
+static int fpm_http_direct_ops_slot_pid(const struct fpm_scoreboard_s *live, unsigned i)
 {
-	return live && i < live->nprocs && live->procs[i].used;
+	const volatile struct fpm_scoreboard_proc_s *p;
+	int pid;
+
+	if (!live || i >= live->nprocs) {
+		return 0;
+	}
+	p = &live->procs[i];
+	pid = (int) p->pid;
+	return (p->used && pid > 0) ? pid : 0;
 }
 
 /* The pool's totals, summed over the slots. Children that have never run leave
@@ -421,7 +440,7 @@ static void fpm_http_direct_ops_totals(const struct fpm_http_direct_ops_shared *
 		}
 		out->requests_local += in->requests_local;
 		out->responses_rejected += in->responses_rejected;
-		if (fpm_http_direct_ops_slot_alive(copy, i)) {
+		if (fpm_http_direct_ops_slot_pid(copy, i) > 0) {
 			out->conn_live += in->conn_live;
 			out->requests_active += in->requests_active;
 			out->responses_pending += in->responses_pending;
@@ -466,7 +485,8 @@ static void fpm_http_direct_ops_status_workers(const struct fpm_http_direct_ops_
 	}
 	for (i = 0; i < shared->nslots; i++) {
 		const struct fpm_http_direct_ops_slot *in = &shared->slots[i];
-		int alive = fpm_http_direct_ops_slot_alive(live, i);
+		int pid = fpm_http_direct_ops_slot_pid(live, i);
+		int alive = pid > 0;
 		/* The same rule the pool totals use, said out loud per row: the totals
 		 * of a child that has gone are still this pool's, its gauges are not.
 		 * `live` is on the row so that a reader can tell "this child holds
@@ -481,7 +501,6 @@ static void fpm_http_direct_ops_status_workers(const struct fpm_http_direct_ops_
 		 * which of the pool's children is the slot they just read. Taken from
 		 * the scoreboard rather than kept in the slot -- the scoreboard
 		 * already has it, and one copy cannot disagree with itself. */
-		int pid = alive ? (int) live->procs[i].pid : 0;
 
 		if (json) {
 			fpm_operator_buf_appendf(out,
@@ -689,7 +708,7 @@ void fpm_http_direct_ops_render_worker_metrics_prometheus(struct fpm_worker_pool
 
 	for (i = 0; i < shared->nslots; i++) {
 		const struct fpm_http_direct_ops_slot *in = &shared->slots[i];
-		int alive = fpm_http_direct_ops_slot_alive(wp->scoreboard, i);
+		int alive = fpm_http_direct_ops_slot_pid(wp->scoreboard, i) > 0;
 		unsigned long queued = alive ? in->worker_queued : 0;
 		unsigned long pending_oldest_us = alive ? in->worker_pending_oldest_us : 0;
 		unsigned long loop_stall_max_us = alive ? in->worker_loop_stall_max_us : 0;

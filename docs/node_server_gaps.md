@@ -60,7 +60,7 @@ To investigate:
 - whether the response is streamed without unbounded buffering;
 - whether flush reaches the client;
 - behavior after the client disconnects;
-- write timeouts and backpressure;
+- write timeouts (`http.write_timeout`, #593) and backpressure (`http.response_buffer`, #596) exist for the gateway direction; what is not known is how they behave for SSE (#179);
 - the effect of a long request on worker occupancy.
 
 SSE is not currently an approved roadmap item.

@@ -962,6 +962,12 @@ never sees a silently short 200. The worker's memory does not grow after the
 abort: output from the still-running script is discarded, and the script runs to
 its normal shutdown.
 
+Behind a gateway pool the budget is also spent while the gateway holds the
+response back from a slow end client (`http.response_buffer`, issue #596): the
+worker is blocked in its write for that time. Size it for the slowest download
+you want to serve, or set `http.response_buffer = 0` on the gateway. See
+[gateway.md](gateway.md).
+
 **Over TLS too, since issue #195.** The combination used to be refused at
 startup: writing from inside a running request means not re-entering the event
 loop — libevent refuses a reentrant `event_base_loop()` on the base it is already

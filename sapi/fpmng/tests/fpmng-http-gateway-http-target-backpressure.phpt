@@ -22,6 +22,9 @@ require_once "tester.inc";
 
 const MIB = 1048576;
 const TOTAL = 128;
+/* The limit is 1 MiB; the kernel buffers on three hops add a few MiB (6-7
+ * observed). 16 MiB still fails a gateway that keeps tens of MiB per client. */
+const STALL_MAX = 16;
 
 $docroot = __DIR__ . '/fpmng-backpressure-http-docroot';
 @mkdir($docroot, 0700, true);
@@ -58,6 +61,9 @@ http.front_controller = /index.php
 ; Without streaming the direct pool holds the whole response until the script
 ; ends, and the script would finish whatever the gateway does.
 http.stream = yes
+; The gateway pausing makes the target block in its write, and that blocked
+; time counts against this total budget (default 10000 ms); the test holds the
+; client back for longer than that. See fpmng-http-gateway-stream-budget.phpt.
 http.stream_write_timeout = 120000
 EOT;
 
@@ -105,7 +111,7 @@ $tmp = sys_get_temp_dir() . '/fpmng-backpressure-http-p-' . getmypid();
 @unlink("$tmp-a");
 $fp = open($host, $port, "$tmp-a");
 $stalled = settle("$tmp-a");
-if ($stalled < 1 || $stalled > TOTAL / 2) {
+if ($stalled < 1 || $stalled > STALL_MAX) {
     echo "FAIL: [paused] target is at $stalled of " . TOTAL . " MiB with the client not reading\n";
     exit(1);
 }
@@ -149,7 +155,7 @@ echo "resume: byte-exact\n";
 @unlink("$tmp-b");
 $fp = open($host, $port, "$tmp-b");
 $stalled = settle("$tmp-b");
-if ($stalled < 1 || $stalled > TOTAL / 2) {
+if ($stalled < 1 || $stalled > STALL_MAX) {
     echo "FAIL: [closed] target is at $stalled MiB before the disconnect\n";
     exit(1);
 }

@@ -32,6 +32,9 @@ require_once "fpmng-operator.inc";
 
 const MIB = 1048576;
 const TOTAL = 128;
+/* The limit is 1 MiB; the kernel buffers on three hops add a few MiB (6-7
+ * observed). 16 MiB still fails a gateway that keeps tens of MiB per client. */
+const STALL_MAX = 16;
 
 $cfg = <<<EOT
 [global]
@@ -145,9 +148,7 @@ $pf = "$tmp-a";
 $fp = connect($host, $port);
 request($fp, $host, $script, $pf);
 $stalled = settle($pf);
-/* Kernel buffers on the three hops absorb a few MiB (not measured exactly);
- * a worker that was never held back would be at 128. */
-if ($stalled < 1 || $stalled > TOTAL / 2) {
+if ($stalled < 1 || $stalled > STALL_MAX) {
     echo "FAIL: [paused] worker is at $stalled of " . TOTAL . " MiB with the client not reading\n";
     exit(1);
 }
@@ -200,7 +201,7 @@ $pf = "$tmp-b";
 $fp = connect($host, $port);
 request($fp, $host, $script, $pf);
 $stalled = settle($pf);
-if ($stalled < 1 || $stalled > TOTAL / 2) {
+if ($stalled < 1 || $stalled > STALL_MAX) {
     echo "FAIL: [closed] worker is at $stalled MiB before the disconnect\n";
     exit(1);
 }
@@ -221,7 +222,7 @@ $pf = "$tmp-c";
 $fp = connect($host, $port);
 request($fp, $host, $script, $pf);
 $stalled = settle($pf);
-if ($stalled < 1 || $stalled > TOTAL / 2) {
+if ($stalled < 1 || $stalled > STALL_MAX) {
     echo "FAIL: [timeout] worker is at $stalled MiB with the client not reading\n";
     exit(1);
 }

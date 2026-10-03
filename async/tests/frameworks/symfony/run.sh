@@ -265,7 +265,7 @@ chdir = $APP_DIR/public
 listen = 127.0.0.1:$fcgi_port
 pm = static
 pm.max_children = 1
-pool.type = fastcgi-ng
+pool.type = fastcgi
 pool.executor = classic
 fiber.isolate_statics = App\\Controller\\ProbeController::hits
 php_admin_value[max_execution_time] = 0
@@ -287,7 +287,7 @@ chdir = $APP_DIR/public
 listen = 127.0.0.1:$fcgi_port
 pm = static
 pm.max_children = 1
-pool.type = fastcgi-ng
+pool.type = fastcgi
 pool.executor = async
 php_admin_value[max_execution_time] = 0
 EOF
@@ -616,9 +616,9 @@ run_unsupported_configuration() {
     fi
 
     if [[ $unsupported_status -ne 0 ]] \
-        && grep -Eiq 'fiber\.isolate_statics|not supported|unsupported' <<<"$output" \
+        && grep -Fq "'fiber.isolate_statics' is not supported by pool.type = fastcgi" <<<"$output" \
         && [[ $async_status -ne 0 ]] \
-        && grep -Eiq 'pool\.executor|async|disabled|not supported' <<<"$async_output"; then
+        && grep -Fq 'pool.executor = async' <<<"$async_output"; then
         record unsupported-configuration PASS "classic rejected fiber.isolate_statics and async executor was rejected"
     else
         detail="classic status=$unsupported_status, async status=$async_status; classic output: $output; async output: $async_output"

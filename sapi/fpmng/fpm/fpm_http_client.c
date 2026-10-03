@@ -203,7 +203,7 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	 * gateway pool's name rather than leave the request headerless. */
 	{
 		const char *host = evhttp_find_header(in, "Host");
-		char authority[256];
+		char authority[FPM_HTTP_AUTHORITY_MAX];
 
 		/* RFC 9112 3.2.2: the absolute-form authority replaces Host (#534). */
 		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0) {

@@ -119,8 +119,10 @@ try {
     echo "http:/ping: " . statusOf($r) . ' ' . bodyOf($r) . "\n";
     $r = rawGet($http, 'http:');
     echo "no authority: " . (str_starts_with(bodyOf($r), 'app:') ? 'served' : 'refused') . "\n";
-    $r = rawGet($http, 'http://' . str_repeat('a', 260) . '/x', 't');
+    $r = rawGet($http, 'http://' . str_repeat('a', 300) . '/x', 't');
     echo "long authority: " . statusOf($r) . "\n";
+    $r = rawGet($http, 'http://' . str_repeat('a', 253) . ':65535/x', 't');
+    echo "max authority: " . statusOf($r) . "\n";
 
     rawGet($http, 'http://t/quiet');
     rawGet($http, 'http://t/loud');
@@ -158,6 +160,7 @@ x+y:/metrics/app operator: 403
 http:/ping: 200 pong
 no authority: refused
 long authority: 400
+max authority: 200
 suppressed: yes
 logged: yes
 --CLEAN--

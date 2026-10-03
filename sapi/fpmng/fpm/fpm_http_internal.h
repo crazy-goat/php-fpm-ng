@@ -778,6 +778,8 @@ void fpm_http_origin_form(smart_str *out, const char *uri);
  * absolute-form, else the byte after the authority (possibly "" or "?q"). With a
  * non-NULL `authority`, also the authority without userinfo (#534). */
 const char *fpm_http_origin_start(const char *uri, const char **authority, size_t *authority_len);
+/* Buffer size for fpm_http_absolute_authority(): a 253-byte DNS name, ":65535" and the NUL. */
+#define FPM_HTTP_AUTHORITY_MAX 262
 /* Copies the absolute-form authority of `uri` into `buf`; 0 when `uri` is not
  * absolute-form, the authority is empty or does not fit (the Host header stays). */
 int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len);

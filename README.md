@@ -214,7 +214,8 @@ POC, not a production frontend; configuration, limits, and benchmark methodology
 `main` ships the `classic` executor, which runs one request at a time per worker
 like upstream FPM, and the beta `worker` executor on `pool.type = http-direct`,
 for long-lived connections: one worker holds several requests at once. See
-[`docs/frameworks.md`](docs/frameworks.md).
+[`docs/frameworks.md`](docs/frameworks.md). CI runs a Slim 4 smoke test on `gateway`+`fastcgi` and on
+`http-direct` classic (`tests/frameworks/`).
 The framework measurements for `pool.executor = fiber` (Symfony, Laravel, Slim 4)
 belong to the `fiber` executor and live on branch `async`
 (`async/docs/frameworks-fiber.md`).

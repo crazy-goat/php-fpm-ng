@@ -87,7 +87,7 @@ that this section and the links to it stay in place.
 | `docker/`, `.github/docker/` | Dockerfiles (minimal package image, package-gate images) |
 | `packaging/` | `.deb` and `.apk` configuration and service files |
 | `examples/` | Runnable examples (each has its own Dockerfile or compose file) |
-| `tests/frameworks/` | Symfony, Laravel and Slim 4 probe harness |
+| `tests/frameworks/` | Slim 4 smoke test on `gateway`+`fastcgi` and `http-direct` classic (fiber probes: `async/tests/frameworks/` on branch `async`) |
 | `docs/` | Design notes, spike reports, process docs |
 
 ## Commands
@@ -123,6 +123,9 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-package-gate-expected.sh
 ./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
+
+# Slim 4 framework smoke test (needs Composer or network for the pinned phar, and php-curl)
+FPMNG="$PWD/out/php-fpm-ng" PHP="$(php-config8.5 --php-binary)" tests/frameworks/slim4/bin/run.sh
 
 # Shell scenarios against the built binary (see .github/workflows/build-matrix.yml)
 ./build/test-http-tls-reload.sh "$PWD/out/php-fpm-ng"
@@ -161,10 +164,6 @@ can be made to execute code on. Re-registering one is a decision, not a convenie
   the pid file of your own pool.
 - MySQL (3306) and Redis (6379) are shared: use your own database and Redis index, never
   `FLUSHALL`.
-- The Laravel framework runner's negative controls are *designed* to corrupt their database
-  (empty static lists). Under `SERVICE_MODE=external` they are skipped (issue #51); run them
-  with `SERVICE_MODE=docker`, or set `LARAVEL_NEGATIVE_ALLOW_EXTERNAL=1` only for a private
-  MySQL/Redis.
 - `pgrep -f "<pattern>"` matches its own command line. Do not use it to wait for a job to
   finish.
 - Typical build path on the box (Ubuntu 26.04 with the SDK packages above; no php-src
@@ -204,7 +203,7 @@ Work that only applies to `pool.executor = fiber` (not on `main`; branch `async`
   `<type>/issue-<N>-<slug>`.
 - `bin/worktree-setup.sh` only reports missing tools; the project has no package
   dependencies to install.
-- The compose files (`examples/*/compose.yaml`, `tests/frameworks/*/compose.yaml`) publish
+- The compose files (`examples/*/compose.yaml`) publish
   ports as `${..._PORT:-N}` and set no `container_name`, so worktrees do not collide. The
   harnesses read the ports from the environment (`.env.worktree`).
 - After adding a `.c` file nothing is needed for `build/libphp-build.sh`; only a from-source

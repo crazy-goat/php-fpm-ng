@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Same provisioning pattern as tests/frameworks/laravel/bin/provision.sh:
-# use an already-installed Composer if there is one, else download and
+# Use an already-installed Composer if there is one, else download and
 # checksum-verify a pinned Composer phar, so a clean checkout with no
 # manual step still gets vendor/autoload.php.
 
@@ -21,7 +20,7 @@ fi
 mkdir -p "$RUN_DIR"
 
 if command -v composer >/dev/null 2>&1; then
-    composer install --no-interaction --prefer-dist --no-progress
+    composer install --working-dir="$ROOT" --no-interaction --prefer-dist --no-progress
     exit 0
 fi
 
@@ -37,5 +36,5 @@ if [ "$actual_sha256" != "$COMPOSER_SHA256" ]; then
     exit 2
 fi
 
-COMPOSER_ALLOW_SUPERUSER=1 "$PHP" "$COMPOSER_PHAR" install \
+COMPOSER_ALLOW_SUPERUSER=1 "$PHP" "$COMPOSER_PHAR" install --working-dir="$ROOT" \
     --no-interaction --prefer-dist --no-progress

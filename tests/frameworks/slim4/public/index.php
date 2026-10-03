@@ -3,7 +3,6 @@
 declare(strict_types=1);
 
 use DI\ContainerBuilder;
-use Predis\Client as RedisClient;
 use Psr\Container\ContainerInterface;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
@@ -96,51 +95,11 @@ $queryValue = static function (ServerRequestInterface $request, string $name, mi
     return $query[$name] ?? $default;
 };
 
-$newRedis = static function (): RedisClient {
-    $database = getenv('SLIM_REDIS_DB');
-
-    return new RedisClient([
-        'scheme' => 'tcp',
-        'host' => getenv('SLIM_REDIS_HOST') ?: '127.0.0.1',
-        'port' => (int) (getenv('SLIM_REDIS_PORT') ?: 6379),
-        'database' => $database === false ? 2 : (int) $database,
-        'timeout' => 5,
-        'read_write_timeout' => 5,
-    ]);
-};
-
-$suspend = static function (float $seconds) use ($newRedis): void {
-    if ($seconds <= 0) {
-        return;
-    }
-
-    $redis = $newRedis();
-    $key = 'slim4:wait:' . bin2hex(random_bytes(8));
-    $redis->executeRaw(['BRPOP', $key, (string) max(1, (int) ceil($seconds))]);
-    $redis->disconnect();
-};
-
-$newPdo = static function (): PDO {
-    $host = getenv('SLIM_DB_HOST') ?: '127.0.0.1';
-    $port = (int) (getenv('SLIM_DB_PORT') ?: 3306);
-    $database = getenv('SLIM_DB_NAME') ?: 'slim4';
-    $user = getenv('SLIM_DB_USER') ?: 'bench';
-    $password = getenv('SLIM_DB_PASSWORD') ?: 'bench';
-
-    return new PDO(
-        "mysql:host=$host;port=$port;dbname=$database;charset=utf8mb4",
-        $user,
-        $password,
-        [
-            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-            PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES => false,
-        ]
-    );
-};
-
 $common = static function (ServerRequestInterface $request) use ($app, $containerService): array {
     $container = $app->getContainer();
+    // A global survives only if the worker keeps PHP state between requests, which
+    // `classic` must not: every response has to report 1.
+    $GLOBALS['slim4_probe_hits'] = ($GLOBALS['slim4_probe_hits'] ?? 0) + 1;
 
     return [
         'pid' => getmypid(),
@@ -153,6 +112,7 @@ $common = static function (ServerRequestInterface $request) use ($app, $containe
         'container_service_oid' => is_object($containerService) ? spl_object_id($containerService) : null,
         'middleware_id' => $request->getAttribute('slim_probe_middleware_id'),
         'middleware_hits' => $request->getAttribute('slim_probe_middleware_hits'),
+        'global_hits' => $GLOBALS['slim4_probe_hits'],
         'session_user' => $_SESSION['user'] ?? null,
         'included' => count(get_included_files()),
         'ob_level' => ob_get_level(),
@@ -173,58 +133,15 @@ $app->get('/health', function (
 $app->get('/identity', function (
     ServerRequestInterface $request,
     ResponseInterface $response
-) use ($json, $common, $queryValue, $suspend): ResponseInterface {
-    $suspend((float) $queryValue($request, 'sleep', 0));
-
+) use ($json, $common): ResponseInterface {
     return $json($response, $common($request));
-});
-
-$app->get('/mix', function (
-    ServerRequestInterface $request,
-    ResponseInterface $response
-) use ($json, $common, $queryValue, $newPdo, $newRedis): ResponseInterface {
-    $id = max(1, min(8, (int) $queryValue($request, 'id', 1)));
-    $sleep = max(0, min(2, (float) $queryValue($request, 'sleep', 0)));
-    $token = bin2hex(random_bytes(4));
-    $tag = "t-$id-$token";
-    $value = "v-$id-$token";
-    $key = "slim4:probe:$id:$token";
-    $redis = $newRedis();
-    $pdo = $newPdo();
-
-    $redis->executeRaw(['SETEX', $key, '60', $value]);
-
-    $statement = $pdo->prepare(
-        'SELECT SLEEP(:delay) AS waited, CONNECTION_ID() AS connection_id, :tag AS tag'
-    );
-    $statement->execute(['delay' => $sleep, 'tag' => $tag]);
-    $databaseRow = $statement->fetch();
-
-    $statement = $pdo->prepare('SELECT label FROM slim4_probe_items WHERE id = :id');
-    $statement->execute(['id' => $id]);
-    $item = $statement->fetch();
-    $redisValue = $redis->get($key);
-    $redis->disconnect();
-
-    return $json($response, [
-        'id' => $id,
-        'token' => $token,
-        'item' => $item['label'] ?? null,
-        'db_tag' => $databaseRow['tag'] ?? null,
-        'db_connection_id' => (int) ($databaseRow['connection_id'] ?? 0),
-        'redis' => $redisValue,
-        'ok' => ($item['label'] ?? null) === "item-$id"
-            && ($databaseRow['tag'] ?? null) === $tag
-            && $redisValue === $value,
-    ] + $common($request));
 });
 
 $app->get('/session', function (
     ServerRequestInterface $request,
     ResponseInterface $response
-) use ($json, $common, $queryValue, $suspend): ResponseInterface {
+) use ($json, $common, $queryValue): ResponseInterface {
     $user = (string) $queryValue($request, 'user', 'anonymous');
-    $sleep = max(0, min(2, (float) $queryValue($request, 'sleep', 0)));
 
     if (!array_key_exists('user', $_SESSION)) {
         $_SESSION['user'] = $user;
@@ -233,7 +150,6 @@ $app->get('/session', function (
     $sessionUser = $_SESSION['user'];
     $count = $_SESSION['count'];
     $sessionId = session_id();
-    $suspend($sleep);
 
     return $json($response, [
         'user_param' => $user,
@@ -260,9 +176,7 @@ $app->get('/login', function (
 $app->get('/me', function (
     ServerRequestInterface $request,
     ResponseInterface $response
-) use ($json, $common, $queryValue, $suspend): ResponseInterface {
-    $suspend((float) $queryValue($request, 'sleep', 0));
-
+) use ($json, $common): ResponseInterface {
     return $json($response, [
         'user' => $_SESSION['user'] ?? null,
     ] + $common($request));
@@ -271,14 +185,13 @@ $app->get('/me', function (
 $app->post('/body', function (
     ServerRequestInterface $request,
     ResponseInterface $response
-) use ($json, $common, $suspend, $queryValue): ResponseInterface {
+) use ($json, $common): ResponseInterface {
     $body = $request->getBody();
     if ($body->isSeekable()) {
         $body->rewind();
     }
     $contents = $body->getContents();
     $payload = json_decode($contents, true, 512, JSON_THROW_ON_ERROR);
-    $suspend((float) $queryValue($request, 'sleep', 0));
 
     return $json($response, [
         'marker' => $payload['marker'] ?? null,
@@ -291,30 +204,18 @@ $app->post('/body', function (
 $app->get('/response-stream', function (
     ServerRequestInterface $request,
     ResponseInterface $response
-) use ($queryValue, $suspend): ResponseInterface {
+) use ($queryValue): ResponseInterface {
     $id = (int) $queryValue($request, 'id', 0);
-    $sleep = (float) $queryValue($request, 'sleep', 0);
     $response->getBody()->write("start-$id\n");
-    $suspend($sleep);
     $response->getBody()->write("end-$id\n");
 
     return $response->withHeader('Content-Type', 'text/plain');
 });
 
-$app->get('/middleware', function (
-    ServerRequestInterface $request,
-    ResponseInterface $response
-) use ($json, $common, $queryValue, $suspend): ResponseInterface {
-    $suspend((float) $queryValue($request, 'sleep', 0));
-
-    return $json($response, $common($request));
-});
-
 $app->get('/error', function (
     ServerRequestInterface $request
-) use ($queryValue, $suspend): never {
+) use ($queryValue): never {
     $tag = (string) $queryValue($request, 'tag', 'unknown');
-    $suspend((float) $queryValue($request, 'sleep', 0));
 
     throw new RuntimeException("slim4 probe error: $tag");
 });

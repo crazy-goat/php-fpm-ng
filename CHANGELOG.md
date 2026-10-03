@@ -5,14 +5,16 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The history below is rebuilt from the GitHub releases. Most of them carry only the install
-boilerplate; those entries say so, and the few that could be checked against the tagged commits are summarized. The tags
-v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
+The entries for v0.1.0 to v0.11.1 were rebuilt from the tagged history (`git log --no-merges <previous tag>..<tag>`),
+because the GitHub release notes of those releases carry only the install boilerplate. Issue numbers come from the
+commit subjects; an entry without one is a commit that named none. The tags v0.5.0, v0.5.1 and v0.11.0 have no GitHub
+release and no entry of their own: they are folded into the next entry (v0.5.2 and v0.11.1), which says so.
 
 ## [Unreleased]
 
 ### Changed
 
+- `CHANGELOG.md`: the entries v0.1.0 to v0.11.1 are filled in from `git log --no-merges <previous tag>..<tag>` instead of placeholders; the v0.11.1 entry was checked against its commits; the tags v0.5.0, v0.5.1 and v0.11.0 are folded into the next entry, and the compare links match (#586).
 - `examples/` and `docker/` follow the v0.12 build contract: the Tier 1 and Tier 2 example images (`combined`, `cron`, `http`, `status`, `supervisor`) and the new `docker/Dockerfile` are `ubuntu:26.04` and install the released `.deb` (checksum-verified), instead of `ubuntu:24.04` plus a binary built from php-src. `examples/status` is an `operator.*` example on a real pool (it still used the removed `pool.type = status`), `docker/Dockerfile.scratch` (it copied the retired `php-fpm-ng-full`) is replaced, `examples/README.md` no longer describes a php-src build, and `examples/http-direct-worker-mysql/Dockerfile` installs `libevent-openssl-2.1-7t64`, without which the TLS-enabled binary does not start in it. New `build/test-shipped-configs.sh`: `static` (in the `checks` job) greps `examples/` and `docker/` for retired names, `images` (new `examples` job) builds every shipped configuration's image and runs `php-fpm-ng -t` inside it (#639).
 - `third_party/php-src/MANIFEST` has three columns (path, upstream path, SHA-256) instead of four: the two hashes were always equal. `build/vendor-php-src.sh` and `build/audit-compile-deps.sh` read the new layout; the "not pristine" refusal is gone because one hash now says both (#676).
 - `LICENSE` and `README.md` no longer list `patches/` under the PHP License 3.01: it holds only project-written history notes (MIT). `build/phpt-fixture-patches/` stays listed (#676).
@@ -93,78 +95,149 @@ v0.5.0, v0.5.1 and v0.11.0 have no GitHub release.
 
 ## [0.11.1] - 2026-09-30
 
-### Added
-- `pool.type = fastcgi` can join the shared operator listener on an explicit `pm.metrics_listen` / `pm.status_listen` (#383).
-- Decision records: the packed-app contract (#427), the v0.12 build support contract (#419) and an embedded-PHAR feasibility spike (#426).
+Also covers the tag v0.11.0 (2026-09-25, no GitHub release): it is the merge of #525 and v0.11.1 adds one commit on top, so both are listed here.
 
-### Changed
-- Verified the v0.9.0 docs, handshake and hardening findings and decided the open contracts (#440).
+### Added
+- `pool.type = fastcgi` can join the shared operator listener on an explicit `pm.metrics_listen` / `pm.status_listen`, so a FastCGI pool exposes its own per-pool metrics (#383).
+- `pool.type = supervisor`: the operator page reports the heartbeat age per child (#356).
+- Decision records and spike results: the approved PHAR runtime contract (#427), the embedded-PHAR runtime spike (#426) and the verdict on the event API (#190).
+- Documentation: the bound for a worker that never checks `fpmng_worker_stopping()` (`docs/shutdown-timeouts.md`, `docs/http-direct.md`), with a test (#365); the gateway and operator endpoint guides brought up to date (#385); a README mention of the http-direct pool executors (#447).
 
 ### Fixed
 - Worker WebSocket: the RFC 6455 handshake now rejects non-conformant clients (#457), both close paths send a TLS close_notify (#458), the 101 head write is checked (#468), and a userland throw after `fpmng_worker_upgrade()` no longer leaves a zero-byte close (#461).
-- Worker: a backpressured live stream no longer blocks `fpmng_worker_may_exit()` forever (#459); a handler that never checks `fpmng_worker_stopping()` can no longer block graceful shutdown indefinitely (#365).
-- `http.route[]`: a non-loopback http-direct target is no longer accepted in cleartext (#450).
-- Gateway: connection counters no longer scan the client list on every request (#490).
-- `cron.expect_within`: staleness no longer depends on a scrape (#357), and the duplicate stale-episode warning is gone (#358).
-- `supervisor.max_memory` below the baseline RSS is now warned about or rejected (#350); `cron.log` failure lines carry a `[pool %s]` prefix (#355).
-- Documentation and comment fixes: #446, #447, #448, #385.
+- Worker: a backpressured live stream no longer blocks `fpmng_worker_may_exit()` forever, so retiring a worker no longer ends in the master's SIGKILL that lost the terminating chunk (#459).
+- `http.route[]`: a cleartext route to a non-loopback http-direct target is refused (#450).
+- Gateway: connection counters no longer scan the client list on every request and disconnect (#490).
+- `cron.expect_within`: staleness is checked without an operator scrape (#357), and the duplicate stale-episode warning is gone (#358).
+- `supervisor.max_memory` at or below the master's baseline RSS is warned about (#350); `cron.log` failure lines carry a `[pool %s]` prefix (#355).
+- Documentation and comment fixes: #446, #448; example SSE clients retry under backpressure (#454, #455).
+
+### Changed
+- The cron stale and `cron.log` tests run at real speed and the package gate counts were refreshed (#526).
 
 ## [0.10.0] - 2026-09-22
 
+### Added
+- `pool.type = gateway`: the HTTP front of the pool, replacing `pool.type = http`. It has its own counters in one shared-memory segment rendered by the operator child, counts the plain listener, and `http.operator` forwards the operator pages of exposed pools (#388, #389, #390).
+- `pool.executor = worker` answers `ping.path` after the saturation check (#387).
+- Worker WebSocket: the read watcher no longer spins after EOF and `has_buffered()` no longer doubles as an EOF signal (#460, #456).
+
 ### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+- The operator directives moved out of the `pm.` namespace into `operator.*` (#386).
+- `pool.type = http` is retired in favour of `pool.type = gateway` (#388).
+- The reduced pool type/executor surface was audited against the tier bar (#380) and the persistent-signal build capability was dropped (#420).
+- The gateway refuses `listen.allowed_clients` instead of ignoring it (#493); the docs state that gateway metrics `off` is explicit, not unset (#491).
+
+### Fixed
+- Supervisor: the one-shot restart decision is made per copy instead of pool-wide, and one-shot completion is derived from the per-slot bytes (#347, #492).
+- Tests and CI: the in-pool ACME tests skip when the `-n` FPM pool has no openssl (#500); `reload-selective-on` writes the error log and asserts the sparing NOTICE (#405); the Laravel runner never runs its negative controls against shared services (#51); the package gate EXPECT rows are measured (#497).
 
 ## [0.9.0] - 2026-09-19
 
-### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+### Fixed
+- `http.route[]`: a 1xx interim response from the target no longer completes the exchange; `X-Forwarded-For` appends the direct peer, not the resolved client; response header names are forwarded up to the maximum length.
+- Worker WebSocket: a dead client's pending entry is reaped in the close callback, the orphaned flag guards every stream operation, and the hijacked bufferevent is disarmed before the idle-close shutdown.
+- Test-harness helpers (`expectNoLogPattern`, `readHead`) and the package gate counts (136 tests).
 
 ## [0.8.0] - 2026-09-19
 
 ### Added
-- `http.route[]` routes path prefixes to other pools on one gateway, with per-target accounting (#341).
+- `http.route[]` routes path prefixes to other pools on one gateway, with per-target accounting (#341) and an HTTP/1.1 client transport so a route can target `http-direct` pools (#344).
+- Worker: native WebSocket, `fpmng_worker_upgrade()` hijacks the connection into a `php_stream` (#343); SSE semantics, a clean end on retire and closed clients reported by id (#342).
+
+### Changed
+- The fiber and async executors were cut out of `main` onto the branch `async` (#373, #374).
+
+### Removed
+- `pool.type = fastcgi-ng` and its documentation and packaging text (#376, #377, #378).
 
 ### Fixed
 - The gateway answers `ping.path` locally instead of forwarding it upstream.
 - `examples/combined` uses per-pool operator endpoints instead of the removed `pool.type = status`.
+- clang-analyzer findings are fixed and now fail CI (#414); tests stopped waiting out fixed budgets (#399).
 
 ## [0.7.0] - 2026-09-18
 
 ### Added
+- `pool.executor = worker`: configurable `max_pending` and `request_timeout` (#331), streaming responses with backpressure (`fpmng_worker_respond_start/chunk/end`, #332), `worker.max_memory` and `worker.max_lifetime` recycling, `fpm_connection_info()` and `fpm_send_early_hints()` by request id (#335), honest request metrics with pending and watcher gauges, an accept ceiling so one child cannot hoard the backlog (#338), and per-slot metrics for capacity, fairness and stall diagnosis (#339).
 - `--enable-fpmng-debug-clock`, a virtual clock so the test suite stops waiting on the real one (#396). It is not part of the packages.
+
+### Changed
+- CI: the package gate left the pull-request path (17 jobs to 8) and the nightly image rebuild is the daily signal for distribution drift (#393).
+- Design documents for `pool.type = gateway`, the `operator.*` namespace and the default operator port 9253 (#386, #387).
 
 ### Fixed
 - The operator page derives ages on the same clock that wrote the stamps (#396).
+- The test runner fails a full run that passes fewer than half its tests, and reports per-test durations (#393, #396).
+- Missing `.phpt` coverage for `pool.executor = worker` (#336).
 
 ## [0.6.0] - 2026-09-17
 
+### Added
+- `cron.jitter` / `cron.jitter_mode` spread scheduled pools out (#322); `supervisor.restart_jitter` and `supervisor.start_jitter` break restart-storm lockstep (#323).
+- `supervisor.max_memory` recycles a script on memory and `supervisor.stop_signal` is configurable (#324); `cron.stop_signal` for a graceful kill on master shutdown or reload (#325).
+- `supervisor.max_runtime`, a runtime cap per script iteration.
+- Cron and supervisor expose staleness so a stuck or silently dead job is visible (#327); `cron.output_log` / `supervisor.output_log` give a dedicated per-pool output log.
+- Supervisor rolling restart across a reload (#329).
+
 ### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+- A reload restarts only the pools whose configuration changed (#330).
+
+### Fixed
+- Cron jitter PRNG state across fork; a bind race and an idle-timeout risk in the new cron and supervisor tests.
 
 ## [0.5.2] - 2026-09-14
 
-### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.5.1 and v0.5.2 are one commit each on top of v0.5.0, so all three are listed here.
+
+### Added
+- `pool.type = http-direct`: `fpm_connection_info()` and client-certificate verification (#62); early hints, status codes and method passthrough (#63); `.user.ini` is read from the front controller's directory (#60).
+- Gateway: an opt-in `wait` pool-full policy (#309).
+- Documentation: recommendations for the gateway pool-full policy (#160) and for the http-direct dynamic and ondemand process managers (#170).
+
+### Fixed
+- `pm.max_requests` rollover on http-direct drains held connections instead of severing them (#313); a scaled-down child gets its `http.read_timeout` before SIGKILL (#310) and a retiring child's deadline is extended on every completed response (#311).
+- Test and CI: the TLS `.deb` and `.apk` are gated on every PR; the connection-info test's SKIPIF gap and supervisor poll were fixed (#320, #321).
+- Benchmark harnesses for the pool-full and pm studies were extended (#154, #157, #158, #169).
 
 ## [0.4.0] - 2026-09-13
 
-### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+### Added
+- TLS termination is behind `--enable-fpmng-tls`, off by default (#280), and ACME certificate issuance is a build flag that takes its payload with it (#281). A second package, `php-fpm-ng-tls`, is built and gated on a tag (#294).
+- Tiers: `.tier` on the pool type, one line per pool at startup and a table in the README (#295).
+- `--enable-fpmng-http2` and `--enable-fpmng-quic` are reserved and refused (#282).
+
+### Fixed
+- http-direct: `SA_RESTART` is restored after every request startup (#259) and the child's own log lines reach the master's error log (#260).
+- The three ACME log-leak test assertions were passing on an empty string (#297); the package gate counts a test retried into a pass as a pass (#301).
 
 ## [0.3.0] - 2026-09-13
 
+### Added
+- Operator endpoint: one HTTP listener per address serving each pool's own stats and metrics (#274); http-direct serves `pm.status_path` from it (#275); a per-pool metrics path reports its own pool's series (#276) and each pool type has a baseline counter (#277).
+- Supervisor warns once when a script restarts at PHP-startup speed (#122).
+- Pool types: a reject list can carve out individual directives (#283).
+
+### Removed
+- `pool.type = status` and the shared status pool; use the operator endpoint (#278).
+
 ### Changed
-- Release; the GitHub release notes contain only the install boilerplate, no itemized changes.
+- CI moved off the self-hosted box onto `ubuntu-latest`, with caches written only by `main`; the modular-build spike was documented.
 
 ## [0.2.0] - 2026-09-12
 
+### Added
+- http-direct: static files from the pool's own root (#58), operator parity (ping, status, access log, `allowed_clients`, chroot; #59), a bound on the first request and on connections per worker (#61), per-connection metrics and per-child rows on `pm.status` (#64), retiring one child with SIGUSR1 (#65), `fpmng_respond()` to finish a response early (#57), and TLS streaming with the pool's own `SSL_write` (#195).
+- The ACME client is carried inside the binary (#171); the metrics extension is registered on the libphp path and tested from PHP (#216).
+- A pm-sizing benchmark harness for http-direct (#163) and installation docs for the packages (#225).
+
 ### Fixed
-- Repaired a corrupted comment splice in `fpm_cron_schedule_next()`, restored the `http.*` configuration fields lost in a rebase, and routed `TEST_PHP_EXECUTABLE` through the test harness directory.
+- http-direct: one child no longer scoops a whole burst (#53), Nagle is off on the listening socket (#244), and the signal handlers are re-snapshotted after the child installs its own (#256).
 
 ## [0.1.0] - 2026-09-11
 
 ### Added
-- First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223).
+- First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
 [Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...HEAD
 [0.13.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...v0.13.0

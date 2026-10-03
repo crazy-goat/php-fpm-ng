@@ -1,5 +1,10 @@
 # Draft bug report for php/php-src (NOT yet filed)
 
+Note (issue #590): main no longer carries the patch; the SAPI sets TCP_NODELAY on the
+listener instead (fpm_pool_type.c). The patch and the reproducer below are in git
+history: `git show bd3f332:patches/0002-fastcgi-tcp-nodelay-never-set.patch` and
+`git show bd3f332:patches/0002-fcgi-nodelay-repro.py`. Keep this file until the report is sent.
+
 Status: tekst gotowy, nic nie wyslane. Zglosic jako issue na github.com/php/php-src
 (komponent FastCGI / FPM), a lacze potem wpisac do `patches/README.md` przy 0002.
 
@@ -124,7 +129,7 @@ non-Windows platforms (Windows keeps the pipe-vs-socket detection in
 #endif
 ```
 
-Full patch: `0002-fastcgi-tcp-nodelay-never-set.patch`. Applies to PHP-8.3,
+Full patch: `0002-fastcgi-tcp-nodelay-never-set.patch` (git history, see the note at the top). Applies to PHP-8.3,
 PHP-8.4, PHP-8.5 and master.
 
 ---

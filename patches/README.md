@@ -43,13 +43,20 @@ rather than overwrite the edit.
 | patch | touches | waiting for | checked on |
 |---|---|---|---|
 | `0001-gh18956-fastcgi-keepalive-counting.patch` | `main/fastcgi.c`, `main/fastcgi.h`, **`sapi/fpm/fpm/fpm_request.c`, `fpm_request.h`** (full PR, not an excerpt) | https://github.com/bukka/php-src/pull/2 (GH-18956) | 8.4, 8.5, master; **8.3 through the** `php-8.3/` variant (7 arguments to `fpm_scoreboard_update_commit`) |
-| `0002-fastcgi-tcp-nodelay-never-set.patch` | `main/fastcgi.c` | report to php/php-src — text ready in `0002-upstream-report.md`, not sent yet | 8.3, 8.4, 8.5, master |
 
-The stack is ordered: 0002 assumes 0001 has already been applied (the
-context around `accept()`), although they are independent in substance.
 `prepare.sh` applies everything in order to an untouched tree, and checks
 "already applied" for the whole stack at once (in reverse, from copies of the
 touched files) — a per-patch test lies when two patches occupy the same location.
+
+Patch 0002 (`TCP_NODELAY` on FastCGI keep-alive connections) was dropped from
+`main` by issue #590: the same effect now comes from `.listening_socket_nodelay = 1`
+on the `fastcgi` pool type in `sapi/fpmng/fpm/fpm_pool_type.c`, because accepted
+sockets inherit the option from the listener on Linux
+(`sapi/fpmng/tests/fpmng-fastcgi-tcp-nodelay.phpt`; macOS/BSD: not verified).
+The upstream bug is still real: `patches/0002-upstream-report.md` is the report
+to send to php/php-src, and the patch and reproducer it names are in git history
+(`git show bd3f332:patches/0002-fastcgi-tcp-nodelay-never-set.patch`,
+`git show bd3f332:patches/0002-fcgi-nodelay-repro.py`).
 
 Patches 0003 (buffered read, `accept4`), 0004 (`fcgi_set_optimized_transport()`)
 and 0005 (`writev` for large responses) were dropped from `main` by issue #589:
@@ -69,15 +76,6 @@ Information about whether `accept` came from a persistent connection lives in
 `main/fastcgi.c` — it cannot be produced from `sapi/` alone. The companion
 changes in `fpm_request.c` and `fpm_request.h` are carried as our own files in
 `sapi/fpmng/fpm/`, because they live under `sapi/`.
-
-### Why 0002 (`TCP_NODELAY`)
-
-An upstream bug, not our optimization: `req->tcp` is assigned only under
-`_WIN32`, so on Linux `TCP_NODELAY` is never applied to a keep-alive connection.
-A response larger than 8 KB over TCP uses several `write()` calls; the final
-small segment waits for ACK: Nagle + delayed ACK, tens of milliseconds instead
-of microseconds. The gateway keeps TCP connections to the pool, so this affects
-us directly. Report and reproducer: `0002-upstream-report.md`.
 
 ### RESOLVED (path 1): 0001 broke `--enable-fpm --enable-fpmng` in one tree
 

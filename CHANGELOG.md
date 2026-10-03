@@ -13,6 +13,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-03
+
 ### Changed
 
 - Docs: new `docs/guides/getting-started.md` (install the `.deb`, a combined gateway + FastCGI + cron + supervisor configuration, `-t`, start, verify), migration guides `docs/guides/migrate-php-fpm-nginx.md`, `docs/guides/migrate-nginx-unit.md` and `docs/guides/migrate-supervisord-cron.md` (each with a directive map and the list of what has no equivalent), and `docs/guides/framework-recipes.md` (Symfony and Laravel on the classic executors, tried by hand once, not in CI). New `build/test-doc-configs.sh` (new CI job `doc-configs`, which `ci-ok` needs; `docs/guides/` counts as code for the docs-only skip) runs `php-fpm-ng -t` on every `ini verify` block of those pages and starts the getting-started configuration. `README.md` no longer says "POC", drops the php-src branch status and the "Plan" section that said the SAPI would eventually exist, calls `http-direct` with the classic executor supported as the tier table does, and links the new pages; `docs/http-direct.md` loses the same "POC, not a production frontend" claim (#645).
@@ -250,7 +252,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.10.0...v0.11.1

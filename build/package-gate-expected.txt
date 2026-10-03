@@ -25,4 +25,3 @@ deb       SKIP  fpmng-http-tls-alpn-sni                              the default
 deb       SKIP  fpmng-http-tls-chain                                 the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 deb       SKIP  fpmng-tier-build-flags                               the default deb is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 deb,deb-tls SKIP  fpmng-ini-bootstrap-extension                        the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)
-deb,deb-tls XFAIL fpmng-reload-selective-metrics                       known defect, tracked in #537

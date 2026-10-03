@@ -67,7 +67,9 @@ OWNED=0
 for f in "$TESTS"/fpmng-*.phpt; do
     [ -f "$f" ] || continue
     base=$(basename "$f")
-    if [ -f "$TESTS/not-run-in-ci.list" ] && grep -q "^$base[[:space:]]" "$TESTS/not-run-in-ci.list"; then
+    # Exact match on the first field: the name is data, not a regex (its dot).
+    if [ -f "$TESTS/not-run-in-ci.list" ] &&
+        awk -v b="$base" '$1 == b { found = 1 } END { exit !found }' "$TESTS/not-run-in-ci.list"; then
         continue
     fi
     OWNED=$((OWNED + 1))

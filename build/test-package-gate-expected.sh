@@ -75,14 +75,28 @@ tsv "$WORK/short" fpmng-alpha:XFAIL fpmng-beta:SKIP fpmng-gamma:PASS
 out=$(run deb "$WORK/short") && fail "a missing result row passed"
 echo "$out" | grep -q 'scored 3 tests but the tree owns 4' || fail "the missing row was not reported: $out"
 
-# 4c. an XFAIL that started passing.
-tsv "$WORK/xpass" fpmng-alpha:PASS fpmng-beta:SKIP fpmng-gamma:PASS fpmng-epsilon:PASS
+# 4c. an XFAIL that started passing. The real runner (run-fpmng-phpt.sh) reports a
+# passing XFAIL test as FAIL/ERROR, so that is the row the gate sees.
+tsv "$WORK/xpass" fpmng-alpha:FAIL/ERROR fpmng-beta:SKIP fpmng-gamma:PASS fpmng-epsilon:PASS
 out=$(run deb "$WORK/xpass") && fail "a stale XFAIL entry passed"
+echo "$out" | grep -q 'unexpected FAIL: fpmng-alpha' || fail "the passing XFAIL was not named: $out"
+# (and a PASS row for an XFAIL test is still refused as stale)
+tsv "$WORK/xpass2" fpmng-alpha:PASS fpmng-beta:SKIP fpmng-gamma:PASS fpmng-epsilon:PASS
+out=$(run deb "$WORK/xpass2") && fail "a PASS row for an XFAIL entry passed"
 echo "$out" | grep -q 'expected XFAIL but PASS: fpmng-alpha' || fail "the stale XFAIL was not named: $out"
 
 # 4d. an exception without a reason is refused.
 printf 'deb SKIP fpmng-beta\n' > "$WORK/noreason.txt"
 "$CMP" deb "$WORK/noreason.txt" "$WORK/new-pass" "$WORK/tests" >/dev/null 2>&1 && fail "an exception with no reason was accepted"
+
+# 4e. the not-run-in-ci list is matched exactly: a list line that only matches the
+# file name as a regex (X for the dot of .phpt) must not exempt the test.
+: > "$WORK/tests/fpmng-zeta.phpt"
+cp "$WORK/tests/not-run-in-ci.list" "$WORK/nrc.bak"
+printf 'fpmng-zetaXphpt retired\n' >> "$WORK/tests/not-run-in-ci.list"
+tsv "$WORK/dot" fpmng-alpha:XFAIL fpmng-beta:SKIP fpmng-gamma:PASS fpmng-epsilon:PASS fpmng-zeta:PASS
+run deb "$WORK/dot" >/dev/null || fail "a regex-only list line exempted a test from the owned count"
+rm "$WORK/tests/fpmng-zeta.phpt"; mv "$WORK/nrc.bak" "$WORK/tests/not-run-in-ci.list"
 
 # 5. the PASS=0 trap: everything skipped.
 tsv "$WORK/allskip" fpmng-alpha:SKIP fpmng-beta:SKIP fpmng-gamma:SKIP fpmng-epsilon:SKIP

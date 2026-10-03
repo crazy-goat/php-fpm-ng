@@ -112,6 +112,37 @@ the fork loop tops up `running_children` to `pm.max_children`/
 complement forks zero new children — the same worker process keeps running,
 same pid, across the reload.
 
+## Shared memory of a spared pool (issue #537)
+
+The scoreboard (the status page) and the application-metrics region are
+shared memory, and a spared worker keeps the mapping it inherited from the
+old master. Anonymous memory does not survive `execvp()`, so with
+`reload.selective = yes` the master backs both with a close-on-exec `memfd`
+(`sapi/fpmng/fpm/fpm_reload_shm.c`, Linux only; without the directive, or
+without `memfd_create()`, they stay anonymous and nothing changes). Sparing a
+pool clears close-on-exec on its scoreboard fd and on the metrics fd and
+records the fd numbers, the sizes and the pool's metrics slot range in
+`FPMNG_SELECTIVE_RELOAD_SHM`; the new master maps the same pages again. So
+the spared workers and the new master's operator endpoint see one region: a
+counter continues from its pre-reload value and the status page keeps
+counting the worker.
+
+Details worth knowing:
+
+- Adoption gives the worker the scoreboard slot it already writes to (the one
+  whose `pid` matches), not the first free one.
+- A spared pool keeps its metrics slot range even if an earlier pool's
+  `pm.max_children` changed; pools that were not spared, or are new, are
+  placed in the remaining gaps and start from zero. The slot ranges are kept
+  in a per-generation table in `fpm_metrics.c`, not recomputed from pool
+  order. The slots a replaced pool used in the previous generation are kept
+  free of new ranges, because a #329 survivor of that pool may still write to
+  its old slot; the new pool's slots are cleared by punching a hole in the
+  memfd, which frees the memory instead of faulting it in.
+- If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
+  the old region cannot be reused, and the spared pools' application series
+  restart from zero (a warning is logged). The scoreboard is not affected.
+
 ## Relationship to issue #329's rolling restart
 
 Issue #329 (`fpm_pool_supervisor.c`, `FPMNG_RELOAD_SURVIVORS`) is a

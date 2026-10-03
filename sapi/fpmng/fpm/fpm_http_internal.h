@@ -404,6 +404,7 @@ struct fpm_http_gateway_s {
 	struct timeval keepalive_timeout;		/* keepalive_timeout_ms split into {sec, usec} */
 	int write_timeout_ms;				/* http.write_timeout, milliseconds; 0 = a stalled client write is never cut */
 	struct timeval write_timeout;			/* write_timeout_ms split into {sec, usec} for bufferevent_set_timeouts() */
+	size_t response_buffer;				/* http.response_buffer, bytes; 0 = never pause an upstream for a slow client (issue #596) */
 	/* http.pool_full_policy, issue #309. wait_policy is FPM_HTTP_POOL_FULL_REJECT
 	 * (the default, unchanged behavior: fpm_http_pump_once() drains gw->waiting
 	 * to a 503 the instant the budget is exhausted) or FPM_HTTP_POOL_FULL_WAIT,
@@ -684,6 +685,7 @@ struct _fpm_http_conn {
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
 	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
+	int read_paused;				/* issue #596: upstream->ev_read is removed because the client has not drained the response; see fpm_http_backpressure.c */
 
 	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
 	ev_uint16_t peer_port;
@@ -801,6 +803,13 @@ int fpm_http_absolute_authority(const char *uri, char *buf, size_t buf_len);
  * fpm_http_client.c. A function, not an extern const, so the definition can
  * stay static to its file and the header stays linkage-free. */
 const struct fpm_http_transport_s *fpm_http_target_http_ops(void);
+
+/* Issue #596, fpm_http_backpressure.c. Sends one piece of the response body to
+ * the client and stops reading the upstream while the client lags. */
+void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len);
+/* Reads the upstream again if fpm_http_response_chunk() stopped it. Safe to
+ * call at any time, including when nothing is paused. */
+void fpm_http_response_resume(fpm_http_conn *c);
 
 #endif /* HAVE_FPM_HTTP */
 #endif /* FPM_HTTP_INTERNAL_H */

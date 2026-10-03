@@ -80,10 +80,11 @@ struct fpm_http_direct_labels {
  * name the exceptions", see fpm_pool_type.h.
  *
  * http.keepalive_timeout and http.write_timeout are gateway-only client
- * limits (issue #593); a direct pool reads neither, so they are refused. */
+ * limits (issue #593), and http.response_buffer is the gateway's flow-control
+ * knob (issue #596); a direct pool reads none of them, so they are refused. */
 #define FPM_HTTP_DIRECT_REJECTS_COMMON           \
 	"fiber.", "supervisor.", "cron.", "worker.", \
-			"http.keepalive_timeout", "http.write_timeout"
+			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

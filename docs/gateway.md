@@ -89,6 +89,23 @@ them:
 | `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
 | `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
 
+Response flow control (issue #596). The gateway reads the upstream response
+only while the client keeps up:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
+
+A larger value frees a PHP worker earlier for a slow client and costs gateway
+memory per slow client; a smaller one bounds the memory and holds the worker
+longer. The limit is checked after each piece of the response, so one read
+(16 KiB) can overshoot it, and the kernel socket buffers on the client and
+upstream side come on top. The write timeout above still closes a client that
+reads nothing; with `http.write_timeout = 0` such a client keeps its connection
+and one worker, but no longer grows the gateway's memory. Not measured: the
+gateway's RSS under many slow clients. `http.response_buffer` is refused on
+`http-direct`.
+
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
 `http.max_connections` and `http.max_connections_per_client` are not supported

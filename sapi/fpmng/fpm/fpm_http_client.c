@@ -193,7 +193,7 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	} else {
 		/* RFC 9112 3.2.2: an origin server is sent origin-form only; see
 		 * fpm_http_origin_form() for the absolute-form contract (#462). */
-		fpm_http_origin_form(&c->out, evhttp_request_get_uri(req));
+		fpm_http_origin_form(&c->out, req);
 	}
 	smart_str_appends(&c->out, " HTTP/1.1\r\n");
 
@@ -203,7 +203,12 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	 * gateway pool's name rather than leave the request headerless. */
 	{
 		const char *host = evhttp_find_header(in, "Host");
+		char authority[FPM_HTTP_AUTHORITY_MAX];
 
+		/* RFC 9112 3.2.2: the absolute-form authority replaces Host (#534). */
+		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0) {
+			host = authority;
+		}
 		smart_str_appends(&c->out, "Host: ");
 		smart_str_appends(&c->out, host ? host : c->gw->pool);
 		smart_str_appends(&c->out, "\r\n");

@@ -178,6 +178,19 @@ transport #344 adds for `http-direct` targets. One transport, two uses: a
 target pool's request listener, and the operator listener. Nothing new is
 invented for it.
 
+## Absolute-form request targets
+
+RFC 9112 3.2.2 obliges a server to accept `GET http://host/path HTTP/1.1`. The
+gateway reduces such a target to origin-form (`/path`, or `/` when empty) once
+and uses that for `ping.path`, the operator namespace and its ACL,
+`access.suppress_path[]`, the plain-HTTP redirect and both transports; the
+authority (without userinfo) replaces the `Host` header, so `HTTP_HOST`,
+`SERVER_NAME` and the `Host` sent to an `http.route[]` target agree (#534).
+Routing and static lookups already used the parsed path. `http:/path` is read the same way, and the forwarded target (`REQUEST_URI`,
+the request line to an `http.route[]` target, the redirect `Location`) is built
+from that same parse. A target that starts with `/` is always origin-form: `//api/users` is the path
+`//api/users`, not host `api` plus `/users`. An authority longer than 261 bytes is answered 400.
+
 ## The upstream's `Status:` header
 
 The gateway turns the upstream's CGI `Status:` header into the HTTP status line.

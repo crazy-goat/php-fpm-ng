@@ -588,14 +588,20 @@ jobs:
   # Issue #639: every shipped configuration (examples/*/*.conf, docker/fpm.conf)
   # passes `php-fpm-ng -t` inside the image its Dockerfile builds, so an example
   # that rots against the build contract fails here and not on an evaluator's
-  # first try. The package-based images download the released .deb; the
-  # http-direct-worker-* ones are given the binary this run built. Runs on the
+  # first try. The package-based images download the released .deb, so each
+  # is checked twice: with the released binary and with the binary this run
+  # built mounted over it (a retired directive fails the second); the
+  # http-direct-worker-* ones are built with the binary this run built. Runs on the
   # runner itself (not the ubuntu:26.04 container the other jobs use): it needs
   # docker.
   examples:
     needs: [changes, build]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
+    # The workflow default shell is `runuser -u ci`; the bare runner has no ci account.
+    defaults:
+      run:
+        shell: bash
     permissions:
       contents: read
       actions: write

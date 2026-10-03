@@ -42,7 +42,9 @@ says how to build or fetch it.
 `build/test-shipped-configs.sh` runs in CI: `static` greps `examples/` and
 `docker/` for retired pool types, retired artefacts and pre-26.04 base images;
 `images` builds the image of every shipped `*.conf` and runs `php-fpm-ng -t` on
-it inside the image. A new example needs a `Dockerfile` (or the shared
+it inside the image. The package-based images carry the released `.deb`, so
+`-t` runs there twice: with the released binary, and with the binary the CI
+run built mounted over it, so a PR that retires a directive fails here. A new example needs a `Dockerfile` (or the shared
 `http-direct-worker-mysql/Dockerfile`) and a `*.conf`, and is picked up by the
 second step on its own.
 

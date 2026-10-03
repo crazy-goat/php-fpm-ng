@@ -117,6 +117,28 @@ gateway a path or a listen address of its own to expose it, or
 `operator.status = off` / `operator.metrics = off` to say it has none. Note
 that an explicit `off` is honoured: it is not overwritten by the default.
 
+### Two masters on one host
+
+The sharing above happens **inside one master**. The default address
+`127.0.0.1:9253` is global to the host, not derived from the pool's own `listen`
+(issue #561): a TCP port can be bound once, so a second master whose pools use
+the default fails at startup with `unable to bind listening socket ... 9253`.
+Gateways are affected by default, because their `/status` and `/metrics` are on
+unless turned off; any other type is affected as soon as it exposes a page
+(`operator.status = on`, `operator.metrics = on`, or an `operator.status_path` /
+`operator.metrics_path`) without a `*_listen`. The
+default is deliberately fixed so one scraper target covers the box (#386); the
+cost is that every additional master needs its own address. In each master after
+the first, either:
+
+- set `operator.status_listen` / `operator.metrics_listen` to an unused address
+  (for example `127.0.0.1:9254`), or
+- turn the pages off with `operator.status = off` / `operator.metrics = off`
+  (and set no explicit path), so no operator listener is bound at all.
+
+The phpt suite works around it with a shared `--CONFLICTS--` key
+(`build/phpt-parallel.sh`), so no two gateway tests run at the same time.
+
 One socket is one process, so it can have only one identity. The `user`, `group`,
 `listen.owner`, `listen.group` and `listen.mode` of the pools sharing an address
 must agree; if they do not, startup fails naming the directive and both pools.

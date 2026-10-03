@@ -768,6 +768,7 @@ apt-get update -qq
 apt-get install -y -qq binutils patch php8.5-cli openssl >/dev/null
 apt-get install -y -qq "$(find /out -maxdepth 1 -name "${PKGNAME}_*.deb" ! -name 'wrong-minor*' | head -1)"
 dpkg -s "$PKGNAME" | grep -E '^(Package|Version|Depends|Conflicts|Replaces|Provides):'
+LICENSE_FILE=/usr/share/doc/$PKGNAME/copyright
 ldd /usr/sbin/php-fpm-ng | grep libphp
 PHP_CLI=/usr/bin/php8.5
 
@@ -793,6 +794,7 @@ apk)
 apk add --no-cache --upgrade binutils patch php85 php85-openssl openssl >/dev/null
 apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
 apk info -d "$PKGNAME"
+LICENSE_FILE=/usr/share/licenses/$PKGNAME/LICENSE
 ldd /usr/sbin/php-fpm-ng | grep libphp
 PHP_CLI=/usr/bin/php85
 # Alpine ships every PHP extension as a shared module loaded from
@@ -824,6 +826,20 @@ EOF
 esac
 
 cat >> "$OUT/stage2.sh" <<'EOF'
+
+# The license texts (issue #581): MIT, PHP License 3.01 and BSD-2-Clause are all
+# notice-on-redistribution licenses, so the installed package must carry them.
+# Compared with a fresh run of the script that assembled them, and the three
+# texts are also looked for by a line that occurs only in that text's body (not
+# in a section header and not in another license), so an empty or truncated
+# source cannot make the comparison pass.
+/repo/build/package-licenses.sh > /tmp/expected-license
+cmp /tmp/expected-license "$LICENSE_FILE" || { echo "FAIL: $LICENSE_FILE differs from build/package-licenses.sh" >&2; exit 1; }
+for t in 'Permission is hereby granted, free of charge' 'The PHP Group may publish revised' \
+         'Copyright (c) 2007-2009, Andrei Nigmatulin' 'PROVIDED BY AUTHOR AND CONTRIBUTORS'; do
+    grep -qF "$t" "$LICENSE_FILE" || { echo "FAIL: $LICENSE_FILE has no '$t'" >&2; exit 1; }
+done
+echo "ok: $LICENSE_FILE carries the MIT, PHP-3.01 and BSD-2-Clause texts"
 
 # The build stage and this stage install PHP from the distribution on their
 # own. If the SDK it built against and the libphp installed here are different

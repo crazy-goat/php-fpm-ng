@@ -249,6 +249,11 @@ EOT
 chmod 0755 "$ROOT/DEBIAN/postinst" "$ROOT/DEBIAN/prerm" "$ROOT/DEBIAN/postrm"
 
 cp "$REPO/README.md" "$ROOT/usr/share/doc/$PKGNAME/README.md"
+# MIT, PHP License 3.01 and BSD-2-Clause notices (issue #581). Written to a
+# temporary file first so a missing source text fails here, not as an empty file.
+"$REPO/build/package-licenses.sh" > "$OUT/copyright.tmp" || fail "could not assemble the license texts"
+install -m 0644 "$OUT/copyright.tmp" "$ROOT/usr/share/doc/$PKGNAME/copyright"
+rm -f "$OUT/copyright.tmp"
 
 DEB=$OUT/${PKGNAME}_${VERSION}_${ARCH}.deb
 dpkg-deb --build --root-owner-group "$ROOT" "$DEB" >/dev/null

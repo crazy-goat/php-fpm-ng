@@ -830,12 +830,13 @@ cat >> "$OUT/stage2.sh" <<'EOF'
 # The license texts (issue #581): MIT, PHP License 3.01 and BSD-2-Clause are all
 # notice-on-redistribution licenses, so the installed package must carry them.
 # Compared with a fresh run of the script that assembled them, and the three
-# texts are also looked for by their own words, so an empty or truncated source
-# cannot make the comparison pass.
+# texts are also looked for by a line that occurs only in that text's body (not
+# in a section header and not in another license), so an empty or truncated
+# source cannot make the comparison pass.
 /repo/build/package-licenses.sh > /tmp/expected-license
 cmp /tmp/expected-license "$LICENSE_FILE" || { echo "FAIL: $LICENSE_FILE differs from build/package-licenses.sh" >&2; exit 1; }
-for t in 'Permission is hereby granted, free of charge' 'The PHP License, version 3.01' \
-         'Andrei Nigmatulin' 'Redistributions in binary form must reproduce'; do
+for t in 'Permission is hereby granted, free of charge' 'The PHP Group may publish revised' \
+         'Copyright (c) 2007-2009, Andrei Nigmatulin' 'PROVIDED BY AUTHOR AND CONTRIBUTORS'; do
     grep -qF "$t" "$LICENSE_FILE" || { echo "FAIL: $LICENSE_FILE has no '$t'" >&2; exit 1; }
 done
 echo "ok: $LICENSE_FILE carries the MIT, PHP-3.01 and BSD-2-Clause texts"

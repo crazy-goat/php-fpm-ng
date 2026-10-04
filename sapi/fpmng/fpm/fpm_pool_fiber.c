@@ -32,12 +32,6 @@
 #include "fpm_stdio.h"
 #include "zlog.h"
 
-int fpm_pool_fiber_validate(struct fpm_worker_pool_s *wp) /* {{{ */
-{
-	return fpm_coop_validate(wp, "fiber");
-}
-/* }}} */
-
 #ifdef ZTS
 
 void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp) /* {{{ */

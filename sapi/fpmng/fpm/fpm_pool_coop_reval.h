@@ -30,8 +30,6 @@
  * Call in the child, after fpm_coop_container_start(), before the first request. */
 void fpm_coop_reval_start(int freq_seconds);
 
-bool fpm_coop_reval_enabled(void);
-
 /* One sweep: stat() every remembered file. 1 = one changed (path points into
  * our table, why describes the change), 0 = unchanged. A file that cannot be
  * checked (stat() error, including ENOENT) counts as changed — a deploy through

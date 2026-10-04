@@ -384,9 +384,10 @@ from memory — see `PHP_FUNCTION(sleep)`, `PHP_FUNCTION(usleep)`,
 ## Risks of "replace the internal function handler" as a technique
 
 - **Thread safety.** This only works because `pool.executor = fiber`
-  already requires a non-ZTS build — `fpm_pool_fiber_validate()` /
-  `fpm_pool_fiber_child_main()`'s ZTS stub rejects ZTS outright
-  (`fpm_pool_fiber.c:41-49`). `CG(function_table)` is then a single
+  already requires a non-ZTS build — `fpm_coop_validate()` /
+  `fpm_pool_fiber_child_main()`'s ZTS stub reject ZTS outright
+  (`fpm_pool_coop.c:236`, `fpm_pool_fiber.c:35-43`). `CG(function_table)` is
+  then a single
   process-global table and one child process is single-threaded (libevent,
   one fiber on the CPU at a time), so mutating one `zif_handler` pointer at
   startup is a plain, uncontended write. The technique as written here

@@ -1,8 +1,8 @@
 /* fpm-ng: SECOND variant of the in-process session-lock arbiter — patches
  * PS(mod) (ps_globals.mod) in place instead of registering a differently
- * named save-handler module. See fpm_pool_coop_session_lock.[ch] for the
- * first variant ("files_arb") and docs/session-lock-arbiter-report.md for
- * the comparison and trade-offs between the two.
+ * named save-handler module. The first variant ("files_arb") is gone from the
+ * tree; docs/session-lock-arbiter-report.md is the record of both and of the
+ * comparison and trade-offs between them.
  *
  * Point of this variant: protect plain `session.save_handler = files` with
  * ZERO pool reconfiguration and with NO new link-time dependency on
@@ -57,8 +57,15 @@ void fpm_coop_session_patch_req_apply(void);
  * protection with no trace in the logs is worse than not having it). */
 void fpm_coop_session_patch_req_enter(struct fpm_coop_req_s *ctx);
 
-/* Leak safety net, same pattern/reasoning as
- * fpm_coop_session_lock_req_free() in the files_arb variant. */
+/* Leak safety net: if ctx is being torn down (fiber died/destroyed, e.g. a
+ * bailout) while still attributed as the holder of an in-process session
+ * lock, force-release it and wake the next in-process waiter, if any — a
+ * leaked entry here would deadlock the process PERMANENTLY (nobody could
+ * ever pass this session id's in-process gate again). Call from
+ * fpm_coop_req_free(), the same place as the existing
+ * fpm_coop_ini_req_free() / fpm_coop_statics_req_free(). Does NOT touch the
+ * real kernel flock/fd — that is owned by ps_globals.mod_data for this request
+ * and, on an abnormal fiber death, may leak independently of this feature. */
 void fpm_coop_session_patch_req_free(struct fpm_coop_req_s *ctx);
 
 #endif

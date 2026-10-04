@@ -131,12 +131,6 @@ void fpm_coop_reval_start(int freq_seconds) /* {{{ */
 }
 /* }}} */
 
-bool fpm_coop_reval_enabled(void) /* {{{ */
-{
-	return fpm_coop_reval_on;
-}
-/* }}} */
-
 int fpm_coop_reval_sweep(const char **path, char *why, size_t why_len) /* {{{ */
 {
 	zend_string *key;

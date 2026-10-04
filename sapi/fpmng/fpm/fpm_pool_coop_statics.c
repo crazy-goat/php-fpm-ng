@@ -193,11 +193,12 @@
  * touching the zend_reference's refcount either way. $x keeps seeing
  * whatever the (correctly restored, at the next enter) static slot's
  * reference sees, exactly as PHP reference semantics require, across any
- * number of suspend/resume cycles. See tests/statics_reference.php,
- * committed alongside this file: it takes a reference to an isolated
- * static property, suspends the request (Fiber::suspend()) across it, and
- * asserts both directions of the reference still see each other's writes
- * after resuming, with the item correctly isolated from a second,
+ * number of suspend/resume cycles. See
+ * sapi/fpmng/tests/fpmng-fiber-statics-reference.phpt: it takes a reference
+ * to an isolated static property before the request's first suspension
+ * (usleep(), which the sleep interception turns into a real fiber switch),
+ * and asserts both directions of the reference still see each other's
+ * writes after resuming, with the item correctly isolated from a second,
  * concurrently-run "other user" request in between.
  *
  * --- Duplicate slots, syntax errors, misconfiguration -------------------
@@ -514,11 +515,14 @@ void fpm_coop_statics_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		 * it away. Leaving IS_UNDEF instead (the spike's approach) is a
 		 * real bug for any TYPED property with no nullable/default: PHP
 		 * throws "must not be accessed before initialization" on the very
-		 * first read by that other request -- reproduced with
-		 * tests/statics_reference.php before this fix, see its git log
-		 * entry. ZVAL_COPY_OR_DUP, not ZVAL_COPY_VALUE, because the
-		 * default template can itself be a refcounted value (e.g. an
-		 * array-literal default) that must not be aliased between the
+		 * first read by that other request (or "Cannot access uninitialized
+		 * non-nullable property ... by reference", which is the wording
+		 * fpmng-fiber-statics-reference.phpt hit while reproducing this --
+		 * both messages checked against PHP 8.5.10 on the host, not from
+		 * memory). That test guards the fix. ZVAL_COPY_OR_DUP, not
+		 * ZVAL_COPY_VALUE, because the default template can itself be a
+		 * refcounted value (e.g. an array-literal default) that must not
+		 * be aliased between the
 		 * class's permanent default table and the live slot. */
 		ZVAL_COPY_VALUE(&slots[i], slot);
 		ZVAL_COPY_OR_DUP(slot, def);

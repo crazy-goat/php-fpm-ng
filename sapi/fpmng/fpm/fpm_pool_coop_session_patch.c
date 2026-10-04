@@ -1,7 +1,9 @@
 /* fpm-ng: SECOND variant of the in-process session-lock arbiter — patches
  * ps_globals.mod in place. See fpm_pool_coop_session_patch.h for the
  * contract and docs/session-lock-arbiter-report.md for the comparison
- * against the "files_arb" variant (fpm_pool_coop_session_lock.c).
+ * against the "files_arb" variant, whose own sources are no longer in the
+ * tree (that report's "Shipping decision" section is what says which of the
+ * two variants shipped and why).
  *
  * --- Why this avoids the files_arb variant's link dependency ---------------
  *
@@ -57,9 +59,9 @@
  * re-deriving, ourselves, independently, the exact same ini-string-based
  * decision RINIT already made a moment earlier - if the ini string says
  * "files", RINIT's _php_find_ps_module("files") is GUARANTEED (by the
- * ps_modules[] layout established in fpm_pool_coop_session_lock.c's header
- * comment) to have returned the one true built-in module, so there is
- * nothing left to misidentify.
+ * ps_modules[] layout docs/session-lock-arbiter-report.md quotes from
+ * ext/session/session.c:1208-1210 and :1488-1499) to have returned the one
+ * true built-in module, so there is nothing left to misidentify.
  *
  * --- The auto_start gap (real, structural, not fixed by this variant) -----
  *

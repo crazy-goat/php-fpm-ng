@@ -20,9 +20,6 @@
 
 struct fpm_worker_pool_s;
 
-/* fpm_pool_type_s.validate — pm = static, NTS. */
-int fpm_pool_fiber_validate(struct fpm_worker_pool_s *wp);
-
 /* fpm_pool_type_s.child_main — libevent loop instead of a blocking accept loop.
  * Does not return. */
 void fpm_pool_fiber_child_main(struct fpm_worker_pool_s *wp);

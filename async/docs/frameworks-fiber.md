@@ -401,21 +401,25 @@ request owns it. Leaving it `IS_UNDEF` (the spike's approach) is a genuine
 bug for any typed property with no default: a second, unrelated request
 touching the same property for the first time while the first is suspended
 elsewhere hit "Cannot access uninitialized non-nullable property ... by
-reference" — reproduced with `tests/statics_reference.php` and fixed by
-refilling the slot with the class's own compiled-in default
+reference" — reproduced with `sapi/fpmng/tests/fpmng-fiber-statics-reference.phpt`
+and fixed by refilling the slot with the class's own compiled-in default
 (`ZVAL_COPY_OR_DUP` from `default_static_members_table`) instead. References
-(`$x = &Class::$static;`) across a real suspension point (a blocking MySQL
-query, not `usleep()` — see the caveat below) are covered by that same test
-and pass. See the commit and `fpm_pool_coop_statics.c`'s own comments for
-the complete argument, hazard by hazard.
+(`$x = &Class::$static;`) across a real suspension point are covered by that
+same test and pass. See the commit and `fpm_pool_coop_statics.c`'s own
+comments for the complete argument, hazard by hazard.
 
-**Caveat worth stating plainly: `sleep()`/`usleep()` do not suspend the fiber
-in this build** (`docs/fiber_async_io.md`) — they block the whole process.
-The `?sleep=0.3` parameter above does not itself cause interleaving; the
-interleaving that makes the `/session` and `/me` measurements meaningful
-comes from the real Redis/MySQL I/O Laravel's own bootstrap and session
-handling already do. This was checked with a negative control before relying
-on it (see above), not assumed.
+**Caveat worth stating plainly: the `?sleep=` parameter above is not a
+`usleep()`** — it is `DB::selectOne('SELECT SLEEP(?)')`
+(`async/tests/frameworks/laravel/routes/web.php`), i.e. real MySQL I/O
+through mysqlnd. That is what makes the `/session` and `/me` measurements
+interleave. `usleep()` would work too, but not because it blocks: the
+`sleep` interception (`fpm_pool_fiber_sleep.c`, three `zif_handler`s swapped
+in `CG(function_table)`) makes it suspend the fiber rather than the process,
+which `docs/fiber_async_io.md` lists and
+`fpmng-fiber-sleep-concurrency.phpt` measures. Redis/MySQL I/O from
+Laravel's own bootstrap and session handling interleaves for the same
+reason. This was checked with a negative control before relying on it (see
+above), not assumed.
 
 **Cost when unconfigured:** `fpm_coop_statics_req_enter()`/`_req_leave()`
 both start with `if (fpm_coop_statics_count == 0) { return; }` — no

@@ -231,11 +231,12 @@ static void fpm_serve_listen_addr(const char *in, char *out, size_t out_size)
  * the error log and the access logs both go to /dev/stderr. */
 
 /* The values go into the generated file inside double quotes. The ini scanner
- * cannot represent a quote, a backslash, a newline or a ${ there, so those are
+ * cannot represent a quote, a backslash, a newline or a ${ there, and the master
+ * expands $pool in string settings after parsing, so those are
  * refused instead of being written wrongly. */
 static int fpm_serve_check_value(const char *what, const char *v)
 {
-	if (strpbrk(v, "\"\\\n\r") != NULL || strstr(v, "${") != NULL) {
+	if (strpbrk(v, "\"\\\n\r") != NULL || strstr(v, "${") != NULL || strstr(v, "$pool") != NULL) {
 		return fpm_serve_fail(what, v);
 	}
 	return 0;

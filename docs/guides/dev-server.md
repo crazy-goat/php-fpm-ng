@@ -52,7 +52,7 @@ php-fpm-ng -y php-fpm-ng.conf
 ```
 
 The printed file is a complete configuration that passes `-t`. It uses a
-stand-in socket path (`/tmp/php-fpm-ng-serve.sock`); give the `[app]` pool a
+stand-in socket and pid paths (`/tmp/php-fpm-ng-serve.sock`, `/tmp/php-fpm-ng-serve.pid`); give the `[app]` pool a
 `listen` of your own before running it for real, and add `user`/`group` and a
 log file as in [Getting started](getting-started.md).
 
@@ -90,4 +90,4 @@ A reload starts the same generated configuration again.
 - The listen address is tried first: when it is already in use, `serve` exits
   with status 1 and says so, instead of running without a listener.
 - A document root, listen address or front controller that contains `"`, `\`,
-  a line break or `${` is refused, because it cannot be written into the file.
+  a line break, `${` or `$pool` is refused, because it cannot be written into the file.

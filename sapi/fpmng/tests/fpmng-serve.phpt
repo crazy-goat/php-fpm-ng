@@ -234,7 +234,7 @@ foreach ([[], ['--direct'], ['--worker', 'index.php']] as $i => $mode) {
 echo "odd root: ok\n";
 
 /* 7. characters the file cannot carry are refused */
-foreach (['a"b', 'a\\b', 'a${x}b'] as $name) {
+foreach (['a"b', 'a\\b', 'a${x}b', 'a$poolb'] as $name) {
     mkdir("$work/$name", 0777, true);
     [$rc, $out] = run($binary, ['serve', '--root', "$work/$name", '--print-config']);
     check($rc === 64 && strpos($out, 'cannot be written into a configuration file') !== false, "bad root $name: $rc " . var_export($out, true));

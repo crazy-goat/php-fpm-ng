@@ -184,6 +184,7 @@ SUPPLIED='-DHAVE_CONFIG_H
 -DHAVE_CLOCK_GETTIME=1
 -DHAVE_FPM_HTTP=1
 -DFPMNG_LIBPHP_BUILD=1
+-DFPMNG_SERVE_WRAP=1
 -DPROC_MEM_FILE="mem"'
 
 # TLS termination is opt-in here for the same reason it is opt-in in
@@ -362,7 +363,14 @@ for s in $(sources); do
     *) rel=${s#"$REPO"/} ;;
   esac
   base=$(echo "$rel" | tr /. __)
-  cmd="$CC $CFLAGS $DEFS $INC -MD -MF $OUT/dep/$base.d -c $s -o $OUT/obj/$base.o"
+  # `php-fpm-ng serve` (#728): the vendored fpm_main.c keeps its pristine main(),
+  # renamed, and sapi/fpmng/fpm/fpm_serve.c supplies the real one (FPMNG_SERVE_WRAP,
+  # in SUPPLIED; the from-source flow does not set it, so `serve` is not built there).
+  extra=
+  case "$s" in
+    */fpm_main.c) extra="-Dmain=fpmng_fpm_main" ;;
+  esac
+  cmd="$CC $CFLAGS $DEFS $extra $INC -MD -MF $OUT/dep/$base.d -c $s -o $OUT/obj/$base.o"
   echo "$cmd" >> "$OUT/commands.log"
   # shellcheck disable=SC2086
   $cmd >>"$OUT/compile.log" 2>&1 ||
@@ -445,6 +453,7 @@ refute_symbol() {
     fail "the binary has '$1': $2"
 }
 assert_symbol fpm_http_init_pool "HAVE_FPM_HTTP was not set, so the http gateway is compiled out"
+assert_symbol fpmng_fpm_main "fpm_main.c was not compiled with -Dmain=fpmng_fpm_main, so fpm_serve.c's main() (php-fpm-ng serve) is missing or collides"
 assert_symbol zif_fpmng_worker_respond "pool.executor = worker cannot answer a request without the fpmng_worker_* builtins"
 assert_symbol zif_fpm_metric_inc "the fpmng_metrics extension's userland functions are missing"
 

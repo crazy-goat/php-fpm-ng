@@ -155,6 +155,9 @@ its upstream meaning. See
 
 ## Documentation map
 
+First run without a configuration file: `php-fpm-ng serve`
+([`docs/guides/dev-server.md`](docs/guides/dev-server.md)).
+
 php-fpm-ng is a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src:
 `configure.ac` finds directories under `sapi/` by glob, so no existing file needs
 to be touched. Details, decisions, measured numbers and the list of known

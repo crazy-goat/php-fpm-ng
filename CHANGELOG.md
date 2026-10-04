@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- `php-fpm-ng serve`: a zero-config dev server. It builds the configuration in memory (written to a private temporary directory, removed on exit) and runs the master in the foreground on it, logs and access log on standard error. Default: `pool.type = gateway` in front of one `fastcgi` pool on a private unix socket; `--direct` is one `http-direct` pool (classic executor); `--worker <file>` is `http-direct` with `pool.executor = worker` (implies `--direct`). Also `--root` (default `public/` if present, else the current directory), `--listen` (default `127.0.0.1:8080`), `--front-controller`, `--workers` (default the CPU count) and `--print-config`, whose output passes `php-fpm-ng -t`; `serve` refuses `-y`. The vendored `fpm_main.c` is unchanged: `build/libphp-build.sh` compiles it with `-Dmain=fpmng_fpm_main` and the new `sapi/fpmng/fpm/fpm_serve.c` supplies `main()` (not in the from-source flow). New test `fpmng-serve.phpt`, new guide `docs/guides/dev-server.md`, and `docs/guides/getting-started.md` leads with the command (#728).
+
 ## [0.14.0] - 2026-10-03
 
 ### Changed

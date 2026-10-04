@@ -666,10 +666,11 @@ if test "$PHP_FPMNG" != "no"; then
   dnl OFF by default, so a default build carries none of its code. The flag
   dnl pulls in its own source list, substituted by async/prepare.sh from the
   dnl same file the base list comes from (see NOTES: the source split).
-  dnl --enable-fpmng-async is a reserved flag name, as on main: the async
-  dnl executor was deleted (issue #623), nothing implements it.
+  dnl --enable-fpmng-async is a reserved flag name: the async (True Async)
+  dnl executor was deleted (issue #623), nothing implements it, so passing the
+  dnl flag is an error rather than a silent no-op.
   dnl Branch async: build/prepare.sh is main's file and knows no fiber group,
-  dnl so it would list the fiber/coop/async sources in PHP_FPMNG_FILES, the
+  dnl so it would list the fiber/coop sources in PHP_FPMNG_FILES, the
   dnl always-built list. async/prepare.sh moves them out. Refuse the mistake
   dnl here, where it is made, instead of shipping a default binary that
   dnl carries the executors.
@@ -687,12 +688,12 @@ if test "$PHP_FPMNG" != "no"; then
   PHP_ARG_ENABLE([fpmng-async],
     [whether to build the async multi-request executor in fpm-ng],
     [AS_HELP_STRING([--enable-fpmng-async],
-      [Build fpm-ng with pool.executor = async support -- MOVED to branch async])],
+      [Build fpm-ng with pool.executor = async support -- DELETED, reserved flag (issue 623)])],
     [no],
     [no])
 
   AS_VAR_IF([PHP_FPMNG_ASYNC], [no],, [
-    AC_MSG_ERROR([--enable-fpmng-async is a reserved flag name: the async executor is not in this tree. It lives on branch async of the repository, issue 373. Drop the flag, or build branch async.])
+    AC_MSG_ERROR([--enable-fpmng-async is a reserved flag name: the async (True Async) executor was deleted (issue 623) and nothing implements it. Drop the flag.])
   ])
 
   PHP_FPMNG_FIBER_FILES=""

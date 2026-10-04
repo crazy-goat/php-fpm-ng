@@ -13,8 +13,7 @@ name: async-sync
 # a squash, never a rebase), refuse a merge that deletes async-only paths
 # (#520), build and test the merge commit through async-fiber.yml (main's
 # contract: pristine vendor check and the default SDK build without executor
-# symbols; and the fiber executor from the php-src flow), and only
-# then push
+# symbols; and the fiber executor from the php-src flow), and only then push
 # async. On a conflict, a deleting merge, a failed build or a rejected push it
 # opens or updates one issue (build/ci-report-async-sync-failure.sh) that names
 # the conflicted files. The merge commit must reach async as a fast-forward

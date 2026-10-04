@@ -1,13 +1,13 @@
 # async/: what branch async adds to main's build
 
 Branch `async` is `main` plus the multi-request executors (`pool.executor =
-fiber` and `async`). Everything async-only that is not a new `sapi/fpmng/fpm/`
+fiber`). Everything async-only that is not a new `sapi/fpmng/fpm/`
 file lives here, so main's build contract stays intact and a merge from main
 never conflicts with it:
 
 - main carries **no php-src patch** and its vendored `third_party/php-src/` is
   pristine (`build/vendor-php-src.sh check`). Nothing here changes that.
-- main's SDK build (`build/libphp-build.sh`) compiles **no** fiber/coop/async
+- main's SDK build (`build/libphp-build.sh`) compiles **no** fiber/coop
   source and asserts the produced binary has none of their symbols
   (`async/check-no-fiber-symbols.sh`). The fiber executor needs changes
   inside php-src, which a distribution `libphp` cannot carry.
@@ -19,9 +19,9 @@ never conflicts with it:
 | `patches/0007-fiber-tls-nonblocking-transports.patch` | `ext/openssl`: TLS handshake and IO suspend the request fiber; gated on `HAVE_FPMNG_FIBER_TLS`, upstream behavior otherwise |
 | `patches/0008-fiber-stream-select.patch` | `ext/standard/streamsfuncs.c`: `stream_select()` waits through the fiber scheduler; gated on `HAVE_FPMNG_FIBER` |
 | `apply-patches.sh <php-src>` | applies the two patches (idempotent); used only by `prepare.sh` |
-| `prepare.sh <php-src>` | main's `build/prepare.sh`, then the fiber/async source split in `config.m4`, then the patches |
+| `prepare.sh <php-src>` | main's `build/prepare.sh`, then the fiber source split in `config.m4`, then the patches |
 | `build-tree.sh <tree> <repo> <ref> <flags...>` | fresh php-src checkout, `prepare.sh`, `buildconf`, `configure`; keeps the configure log in the tree |
-| `check-no-fiber-symbols.sh <binary>` | fails if the binary carries fiber/coop/async symbols; run by `build/libphp-build.sh` |
+| `check-no-fiber-symbols.sh <binary>` | fails if the binary carries fiber/coop symbols; run by `build/libphp-build.sh` |
 
 Docs that moved here from main (#601), kept for the fiber executor:
 

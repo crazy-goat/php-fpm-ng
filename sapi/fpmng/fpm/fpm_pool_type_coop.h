@@ -5,11 +5,11 @@
  * plus appends to the tail of things main owns. fpm_pool_type.c is the one
  * file every pool-type change touches, so the fiber executor
  * struct cannot live inside it without conflicting on every merge as the
- * base type table grows. They live here instead, reached through the one
+ * base type table grows. It lives here instead, reached through the one
  * lookup below.
  *
- * This file is ALWAYS compiled (see build/prepare.sh: its name matches
- * not the fiber/coop source pattern), regardless of
+ * This file is ALWAYS compiled (see build/prepare.sh: its name does
+ * not match the fiber/coop source pattern), regardless of
  * --enable-fpmng-fiber. What is conditional is only
  * the BODY of fpm_pool_type_coop_variant() -- see fpm_pool_type_coop.c --
  * exactly the way the four struct literals it used to hand back were

@@ -178,8 +178,9 @@ if (trim($bodies[1]) !== '' && trim($bodies[1]) !== '@@FALSE@@') {
 /* "no body" alone is also what a client hitting default_socket_timeout (60s)
  * would see, so also require the fetch to have closed promptly. 5s is a
  * loose bound - it only needs to separate "closed immediately" from a 60s
- * timeout. A regression that drops fcgi_finish_request(fr->ctx->req, 1)
- * (sapi/fpmng/fpm/fpm_pool_fiber.c:164) while keeping the zlog warning would
+ * timeout. A regression that drops the fcgi_finish_request(fr->ctx->req, 1)
+ * in fpm_fiber_after_switch()'s suspended-outside branch
+ * (sapi/fpmng/fpm/fpm_pool_fiber.c:181) while keeping the zlog warning would
  * stall this fetch the full 60s and would otherwise stay green. */
 if ($durations[1] < 0) {
     bail("FAIL: could not measure how long the dropped request took (no @@T:...@@ from the client)\n");

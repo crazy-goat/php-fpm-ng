@@ -34,8 +34,12 @@ fi
 
 # Our translation units only. Headers are covered via HeaderFilterRegex when
 # a .c includes them; we do not pass .h files as TUs on their own.
+# No "unbuilt source" exclusion: it used to be `! -name '*.notbuilt'`, which
+# excluded nothing (the glob is `-name '*.c'`, so a .c.notbuilt file can never
+# match it anyway) and whose only user was fpm_pool_coop_session_lock.c.notbuilt,
+# deleted in #624. Unbuilt code is kept out by not being a .c at all.
 FILES=$(find "$REPO/sapi/fpmng" "$REPO/ext/fpmng_metrics" \
-	-type f -name '*.c' ! -name '*.notbuilt' | sort)
+	-type f -name '*.c' | sort)
 # Guard: zero files means the paths moved and the boundary broke silently.
 [ -n "$FILES" ] || { echo "lint-c: no .c files under sapi/fpmng or ext/fpmng_metrics" >&2; exit 1; }
 

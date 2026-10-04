@@ -418,7 +418,11 @@ in `CG(function_table)`) makes it suspend the fiber rather than the process,
 which `docs/fiber_async_io.md` lists and
 `fpmng-fiber-sleep-concurrency.phpt` measures. Redis/MySQL I/O from
 Laravel's own bootstrap and session handling interleaves for the same
-reason. This was checked with a negative control before relying on it (see
+general reason — intercepted, so it suspends the fiber rather than the
+process — but through the `xport` entry of the registry
+(`sapi/fpmng/fpm/fpm_pool_fiber_intercept.c:57`, the wrapped `tcp`/`unix`
+transport factories that mysqlnd and phpredis go through), not through
+`sleep`. This was checked with a negative control before relying on it (see
 above), not assumed.
 
 **Cost when unconfigured:** `fpm_coop_statics_req_enter()`/`_req_leave()`

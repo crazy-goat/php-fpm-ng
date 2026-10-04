@@ -161,7 +161,7 @@ line by line:
   `fpm_pool_supervisor_validate()` to explain ordering.
 - `fpm_children.c:410` -- comment citing `fpm_pool_status.c`.
 - `fpm_process_ctl.c:172,176` -- comments citing `fpm_pool_status.c:435-446`.
-- `fpm_error_log_follow.c:54,116`, `fpm_pool_coop_statics.c:210` -- comments.
+- `fpm_error_log_follow.c:54,116`, `fpm_pool_coop_statics.c:211` -- comments.
 
 These are exactly the comments `AGENTS.md` forbids deleting without
 re-establishing the fact. They cost nothing at build time but they mean a

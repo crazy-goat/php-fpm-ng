@@ -1041,20 +1041,48 @@ field-patch protects every pool at `session.save_handler = files`
 automatically, with zero config change, which is the property that
 actually matters for a default that is silently fatal.
 
-`files_arb`'s code (`fpm_pool_coop_session_lock.[ch]`) is **kept in the
-tree, not deleted** — the mechanism is real, measured, and may become
+`files_arb`'s code was **kept in the tree unbuilt** at the time of that
+decision, not deleted: the mechanism is real, measured, and may become
 relevant again if the field-patch's one structural gap (`session.auto_start`,
-see below) ever needs a stronger fix than a startup refusal. It is
-**excluded from the build**, not by hand-editing `sapi/fpmng/config.m4`'s
-generated `@FPMNG_SOURCES@` list (forbidden — see this project's own
+see below) ever needs a stronger fix than a startup refusal. It was kept out
+of the build, not by hand-editing `sapi/fpmng/config.m4`'s generated
+`@FPMNG_SOURCES@` list (forbidden — see this project's own
 `build/prepare.sh`/`CLAUDE.md`), but by renaming
 `fpm_pool_coop_session_lock.c` to `fpm_pool_coop_session_lock.c.notbuilt`:
-`find fpm -name '*.c'` no longer matches it, so it is invisible to the
-generated source list with no hand-edit anywhere. `fpm_pool_coop_session_lock.h`
-is left in place (harmless — nothing includes it once `fpm_pool_coop.c`'s
-hooks into the files_arb variant are removed). **NOT SHIPPED. Kept for
-reference only** — do not build this file back in without re-reading the
-link-dependency risk in "## Verdict" above.
+`find fpm -name '*.c'` no longer matched it, so it was invisible to the
+generated source list with no hand-edit anywhere.
+`fpm_pool_coop_session_lock.h` was left in place, harmlessly — nothing
+included it once `fpm_pool_coop.c`'s hooks into the files_arb variant were
+removed.
+
+**Update, 2026-10-04 (issue #624): both files are now deleted.** The `.h`
+included nothing and the `.c.notbuilt` compiled into nothing, so the
+"unbuilt" arrangement only kept them out of the compiler's way while still
+letting a comment in another file point at them; with those comments
+re-pointed here, the files themselves had no remaining reader. Nothing else
+referred to either name — no `config.m4` source list, `build/prepare.sh`,
+`ext/`, `.github/` cell, packaging file or linker script — and
+`build/lint-c.sh`'s `! -name '*.notbuilt'` exclusion, which had matched
+nothing anyway, went with them.
+
+Everything above this paragraph about Variant 1 is unchanged and remains the
+record of why the field-patch was chosen. Sections that mention
+`fpm_pool_coop_session_lock.[ch]` in the present tense describe the tree as
+it stood on `feature/session-lock-field-patch`, and their quoted material —
+the `strings` runs, the gdb backtrace (`:329-341`), the compiler output
+(`:649-651`) and the code excerpts — is program output, left verbatim: the
+line numbers in it are the deleted file's, and stay that way. That includes
+"Fix applied (`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c`, in this worktree,
+committed to the working tree)" in the SIGSEGV section, which describes what
+happened during that measurement pass.
+
+If the `session.auto_start` gap ever needs a stronger fix than a startup
+refusal, rebuild Variant 1 from this report, and re-read the link-dependency
+risk in "## Verdict" above before doing so — `files_arb` needs
+`php_session_register_module()`/`_php_find_ps_module()`, a real ext/session
+link dependency that `fpm_pool_coop_session.c` specifically does not have.
+The shipped variant, `fpm_pool_coop_session_patch.[ch]`, is untouched by this
+deletion.
 
 `fpm_pool_coop.c` on this branch hooks only the field-patch variant
 (`fpm_coop_session_patch_container_start()`/`_req_apply()`/`_req_enter()`/

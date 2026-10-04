@@ -13,9 +13,13 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- New fiber test `fpmng-fiber-statics-reference.phpt`, and the manual script it replaces, `tests/statics_reference.php`, is gone. It is the regression test for the hazard that script reproduced: a request that takes a reference to a `fiber.isolate_statics` typed static before its first suspension, with a second request touching the same slot while the first is away — it checks that the reference and the static still see each other's writes after resuming, and that each request's own sequence is unperturbed by the other. The suspension is `usleep()`, which the sleep interception turns into a real fiber switch, so the test needs no MySQL, unlike the script. Listed in `build/assert-fiber-tests-ran.sh`, so a `--SKIPIF--` guard that starts matching makes the fiber CI cell red instead of leaving this untested (#624).
+
 ### Removed
 
-- Dead code on branch `async`, none of it built or reachable: the unbuilt "files_arb" session-lock variant (`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c.notbuilt` and its orphan `fpm_pool_coop_session_lock.h`, which nothing included — `docs/session-lock-arbiter-report.md` stays as the record of that variant and of why the shipped one is the field-patch), `fpm_pool_fiber_validate()` (the fiber pool type's `validate` slot is `fpm_pool_type_coop_fiber_validate()`, which calls `fpm_coop_validate()` itself) and `fpm_coop_reval_enabled()`. The manual script `tests/statics_reference.php` becomes `fpmng-fiber-statics-reference.phpt`, a real fiber regression test for the hazard it reproduced: a request holding a reference to a `fiber.isolate_statics` typed static across a suspension, with a second request touching the same slot while the first is away (#624).
+- Dead code on branch `async`, none of it built or reachable: the unbuilt "files_arb" session-lock variant (`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c.notbuilt` and its orphan `fpm_pool_coop_session_lock.h`, which nothing included — `docs/session-lock-arbiter-report.md` stays as the record of that variant and of why the shipped one is the field-patch), `fpm_pool_fiber_validate()` (the fiber pool type's `validate` slot is `fpm_pool_type_coop_fiber_validate()`, which calls `fpm_coop_validate()` itself) and `fpm_coop_reval_enabled()` (#624).
 
 ### Changed
 

@@ -172,9 +172,17 @@ EOT;
 $tester = new FPM\Tester($cfg, $probe);
 $tester->start();
 $tester->expectLogStartNotices();
-/* Not cosmetic: without this line the item could have resolved to nothing and
- * every assertion below would pass on a pool with the mechanism switched off
- * (fpm_coop_statics_resolve() skips an unknown class silently). */
+/* What this line is for: it is the only check that the directive reached
+ * fpm_coop_statics_container_start() with the expected item count. The value
+ * assertions do NOT depend on it -- with the mechanism entirely off (an
+ * unknown class, which fpm_coop_statics_resolve() skips silently) A and B
+ * would bind $ref to the SAME zend_reference, because a slot that already
+ * holds IS_REFERENCE is shared rather than re-referenced, so A sets 1, B
+ * shares and sets 1, A wakes (sees 1) and $ref++ makes the shared reference
+ * 2 -- and then B wakes on 2 and the after_woke_static assertion below fails
+ * with "B saw another request's static on waking". So that case is caught,
+ * but by an indirect route whose failure message does not name the cause.
+ * This line names it directly. */
 $tester->expectLogPattern('/coop-statics: per-request isolation of 1 class static property ENABLED/', true, 10);
 $http = $tester->getAddr('ipv4', '[http]');
 

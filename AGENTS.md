@@ -200,9 +200,11 @@ Work that only applies to `pool.executor = fiber` (not on `main`; branch `async`
 ## Worktree notes
 
 - `bin/worktree.sh` picks the worktree location (see [docs/workflow.md](docs/workflow.md),
-  step 2); `--dir <path>` sets it. Branches from
-  before the migration are named `task/<NNN>-<slug>` or `issue/<N>-<slug>`; new work uses
-  `<type>/issue-<N>-<slug>`.
+  step 2); `--dir <path>` sets it, `--base <branch>` the branch the worktree is cut from.
+  Everything that touches `pool.executor = fiber` lives on `async`, so such a worktree needs
+  `bin/worktree.sh --base async <N>`: cut from `main` it would hold no fiber code at all.
+  Branches from before the migration are named `task/<NNN>-<slug>` or `issue/<N>-<slug>`;
+  new work uses `<type>/issue-<N>-<slug>`.
 - `bin/worktree-setup.sh` only reports missing tools; the project has no package
   dependencies to install.
 - The compose files (`examples/*/compose.yaml`) publish

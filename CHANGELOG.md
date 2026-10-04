@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Changed
+
+- `bin/worktree.sh` takes `--base <branch>` (or `--base=<branch>`) and creates the worktree from `origin/<branch>` instead of the repository's default branch, which stays the default when the option is absent. It is for work that belongs to a long-lived line the default branch has no trace of: a fiber or coop issue here needs `--base async`, because `main` carries no fiber or coop source, no fiber/coop test and no `async-fiber.yml`. The base is looked up on the remote before the worktree exists, so a mistyped branch ends in `base branch does not exist on origin: <name>` instead of a `git worktree add` reference error, and the summary block gained a `Base:` line (#709).
+
 ## [0.14.0] - 2026-10-03
 
 ### Changed

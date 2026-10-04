@@ -55,11 +55,15 @@ score breakdown. You still make the final pick. Blocked issues
 
 ```bash
 bin/worktree.sh <issue-number>          # optional 2nd argument: feat|fix|docs|refactor|test|chore
+bin/worktree.sh --base <branch> <issue-number>
 cd <worktree path printed by the script>
 ```
 
-The script fetches the default branch and creates a worktree on branch
-`<type>/issue-<N>-<slug>`. You choose where it goes; the first match wins:
+The script fetches the branch it creates the worktree from — the default branch, or
+`<branch>` with `--base` — and puts the worktree on branch `<type>/issue-<N>-<slug>`.
+`--base` is for work that belongs to another line; the branch is checked on the remote
+before anything is created, so a mistyped branch is refused there instead of failing
+inside `git worktree add`. You choose where the worktree goes; the first match wins:
 
 1. `--dir <path>`: exactly `<path>` (a relative path is relative to where you are),
 2. `WORKTREES_DIR=<dir>` in the environment: `<dir>/<repo>/issue-<N>`,

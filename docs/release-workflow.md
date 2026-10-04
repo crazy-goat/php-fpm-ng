@@ -95,14 +95,20 @@ gh release view vX.Y.Z
 A red `packages` cell says where its evidence is. `run-tests.php` writes a `.diff`, a `.out`,
 an `.exp` and a `.log` next to every failing `.phpt`; the gate leaves the tree it ran in
 behind (staged under `work/prepared`), and the workflow uploads those files as
-`phpt-failure-<cell>` — `if: failure()`, `retention-days: 1`, `if-no-files-found: warn`. Take
+`phpt-failure-<cell>` — `if: failure()`, `retention-days: 3`, `if-no-files-found: warn`. Take
 it from the run's Artifacts list. A cell that passed uploads nothing (issue #669).
+
+Three days is the interval of the failure this is for: #527 was opened on 2026-09-30 and
+fixed on 2026-10-03, with the flake chased in between, so evidence kept for less than that
+expires before the investigation ends.
 
 Look for it in the tree, not in `results/`. The runners' own `failed-artifacts/` directory is
 a different thing and is never created for the gate: `build/run-fpmng-phpt.sh` only copies
 out of a tree it assembled itself, the `-` form, which is what `build-matrix.yml` uses
 (`build/run-fpmng-phpt.sh:126`). Issue #527 could not be reproduced because nobody could find
-any of this, and the failure message named a file that was not downloadable either.
+any of this — that gate uploaded no cell output at all; the `package-<cell>` artifact arrived
+later, with the parallel matrix of #677 — and the failure message named a file that was not
+downloadable either.
 
 Note also that `package-<cell>` is uploaded only when the cell passed — a step with no `if:`
 gets the default `success()` — so a failing cell has no package artifact, and the `release`

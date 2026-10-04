@@ -34,8 +34,12 @@ fail() {
     # Issue #669: a failing .phpt leaves the only record of why it failed --
     # the .diff/.out/.exp/.log run-tests.php writes next to it -- in the tree
     # the suite ran in, and this script leaves that tree behind. Say where, on
-    # every failure: issue #527 was a red cell that said nothing about them,
+    # every fail(): issue #527 was a red cell that said nothing about them,
     # which is why the fix for it could only be by analysis.
+    #
+    # Every fail(), not every failure: set -eu above exits 1 at the docker run
+    # of a stage that aborts, without reaching this function. Nothing is lost
+    # there, because a stage that never ran the suite wrote no .phpt evidence.
     #
     # Not the runner's own <results>/failed-artifacts/, which is what
     # build/run-fpmng-phpt.sh:130 writes: that copy is guarded by a TREE_DIR

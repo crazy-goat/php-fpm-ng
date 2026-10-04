@@ -196,38 +196,47 @@ jobs:
       #
       # run-tests.php writes a .diff, .out, .exp and .log next to every failing
       # test, and the tree the gate ran in is never removed afterwards --
-      # build/ci-package-gate.sh stages it at :348 and nothing after the suite
+      # build/ci-package-gate.sh stages it at :383 and nothing after the suite
       # takes it away. So a red cell has them under
       # out-package-<cell>/work/prepared/sapi/fpmng/tests/. (The runner's own
       # <results>/failed-artifacts/ copy is not the same thing and is empty
       # here: build/run-fpmng-phpt.sh:126 only copies out of a tree it assembled
       # itself, which is the "-" form build-matrix.yml:432 uses, not the
-      # directory build/ci-package-gate.sh:356 hands it.)
+      # directory build/ci-package-gate.sh:391 hands it.)
       #
-      # A step of its own because the upload above is not there when it
-      # matters: a step with no `if:` gets the default `success()` (GitHub,
-      # "Evaluate expressions in workflows and actions", Status check
-      # functions), so package-<cell> is skipped the moment the gate step fails.
-      # Issue #527 is what that cost: a flaky apk-cell failure with no log
-      # anywhere, which is why #666 could only fix it by analysis.
+      # A step of its own, after the gate step. Because the upload above is
+      # skipped the moment the gate fails -- a step with no `if:` gets the
+      # default `success()` (GitHub, "Evaluate expressions in workflows and
+      # actions", Status check functions) -- so a red cell has no
+      # package-<cell> artifact, and the release job below, which needs all
+      # four cells, does not run either. That is the workflow as it stands
+      # today, and it is not why #527 had no log: that gate ran the four cells
+      # in one job and uploaded no cell output at all until #677 added the
+      # matrix with this artifact (212b840, 2026-10-03), the day #527's fix
+      # merged, so there was nothing to skip then. And `if: failure()` is false
+      # until a step has failed, which is why this step comes after the gate
+      # and not above it. build/test-phpt-failure-artifact.sh (CI job `checks`)
+      # keeps both.
       #
-      # The name must not begin with "package-": the release job below
-      # downloads that pattern and renames every directory it gets into
-      # out-package-<cell>, so an artifact called package-<something> would be
-      # dragged into a release.
+      # Three days, from the failure this issue exists for: #527 opened
+      # 2026-09-30, its fix (#666) merged 2026-10-03T09:58, and the flake was
+      # chased in between -- evidence that expires before the investigation
+      # ends is the #527 outcome all over again. #261's storage argument does
+      # not pull the other way: that was 34 MB uploaded on every run of
+      # build-matrix.yml, and this exists only on a red cell of a workflow that
+      # runs on a tag and on rehearsals, with nothing downloading it. What is
+      # in it is not measured; the cell output it is a subset of is (7.6 + 10.0
+      # + 8.0 + 10.7 MB, quoted above).
       #
-      # One day, the window fpmng-canonical-build gets in build-matrix.yml:
-      # nothing downloads this artifact, it is here to be pulled by hand while
-      # the failure is being read. Not the storage issue #261 was about -- that
-      # was 34 MB uploaded on every run of build-matrix.yml, and this exists
-      # only on a red cell of a workflow that runs on a tag and on rehearsals.
-      # What is in it is not measured; the cell output it is a subset of is
-      # (7.6 + 10.0 + 8.0 + 10.7 MB, quoted above).
+      # The name must not begin with "package-", the prefix the release job
+      # below downloads by pattern and renames into out-package-<cell>. Nothing
+      # reaches it today -- this artifact exists only when a cell failed, and
+      # release needs all four -- but a name that says "not a package" is
+      # cheaper to keep right than to unpick later.
       #
-      # `warn` is the action's default and `error` would turn a gate that
-      # failed before any test ran -- a package that did not build -- into a
-      # second failure. build/test-phpt-failure-artifact.sh (CI job `checks`)
-      # keeps the four extensions, the failure() and the decided retention.
+      # `warn` is the action's default; `error` would turn a gate that failed
+      # before any test ran -- a package that did not build -- into a second
+      # failure.
       - name: upload the failing .phpt diffs and output
         if: failure()
         uses: actions/upload-artifact@v7
@@ -239,7 +248,7 @@ jobs:
             out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.exp
             out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.log
           if-no-files-found: warn
-          retention-days: 1
+          retention-days: 3
 
   release:
     needs: [notes, packages]

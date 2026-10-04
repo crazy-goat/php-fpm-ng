@@ -85,32 +85,40 @@ function gatewayGet(string $url): array
  * about the pool, not a property of the page, so two reads taken milliseconds
  * apart may disagree on it.
  *
- * WHY they moved here. A child counts itself idle only immediately before it
- * enters the loop that accepts: fpm_http_direct.c:2548 calls
- * fpm_request_accepting_ex(false) and :2551 then hands the base to
- * event_base_dispatch(). The idle++ that call makes (fpm_request.c:69) happens
- * because it is this child's FIRST one -- the argument is
- * (first || fromActive) ? 1 : 0, with first set at :62 from a proc still in
- * FPM_REQUEST_CREATING -- and that call sits behind the whole per-child startup:
- * script resolution, the event base and the evhttp object, the TLS attach, the
- * signal handlers, zend_signal_init(), the SAPI surgery, the per-child user_ini,
- * ops and access-log init (fpm_http_direct.c:2423-2547). expectLogStartNotices()
- * returns on the MASTER's own "ready to handle connections" NOTICE, which
- * third_party/php-src/sapi/fpm/fpm/fpm_events.c:374 logs on entering the master's
- * event loop, and third_party/php-src/sapi/fpm/tests/logtool.inc:465-474 is what
- * matches it. With pm = static the master has forked pm.max_children = 2
- * children by that line (fpm.c:185-199 creates the initial children, :202 then
- * enters the event loop) but nothing has waited for either of them to get past
- * 2548, so an early read can report fewer idle workers than a later one.
+ * WHY they moved here. A child counts itself idle whenever it stops being
+ * active, and the FIRST time it does so is immediately before it enters the loop
+ * that accepts: fpm_http_direct.c:2548 calls fpm_request_accepting_ex(false) and
+ * :2551 then hands the base to event_base_dispatch(). That idle++
+ * (fpm_request.c:69) fires because the argument is (first || fromActive) ? 1 : 0
+ * with first set at :62 from a proc still in FPM_REQUEST_CREATING, and the call
+ * sits behind the whole per-child startup: script resolution, the event base and
+ * the evhttp object, the TLS attach, the signal handlers, zend_signal_init(), the
+ * SAPI surgery, the per-child user_ini, ops and access-log init
+ * (fpm_http_direct.c:2423-2547). The pair moves again after every request the
+ * child serves: fpm_http_direct.c:2303 takes it active (idle--/active++ at
+ * fpm_request.c:117-118) and the three endings of fpm_direct_handle() give it
+ * back with fpm_request_accepting_ex(true) at :2379, :2394 and :2406, the
+ * fromActive half of the same condition. Only the first move is one this test
+ * can race, because no request reaches app's listening socket anywhere in it
+ * (the bullets below).
+ * expectLogStartNotices() returns on the MASTER's own "ready to handle
+ * connections" NOTICE, which third_party/php-src/sapi/fpm/fpm/fpm_events.c:374
+ * logs on entering the master's event loop, and
+ * third_party/php-src/sapi/fpm/tests/logtool.inc:465-474 is what matches it.
+ * With pm = static the master has forked pm.max_children = 2 children by that
+ * line (fpm.c:185-199 creates the initial children, :202 then enters the event
+ * loop) but nothing has waited for either of them to get past 2548, so an early
+ * read can report fewer idle workers than a later one.
  *
  * Measured over 60 runs of this test before the fix, six-way parallel: 20
- * failures, and in every one the single differing line was this one -- the
- * operator's earlier read held 0 or 1, the gateway's later one 1 or 2. CI run
- * 37151225422 is that same shape with one value missing: its gateway body
- * carried fpmng_pool_workers_idle{pool="app"} 2 and the operator's read was
- * never printed, so what that read held is not measured -- by elimination below
- * 2: no request reaches app's listening socket anywhere in this test, so nothing
- * else on the page can differ between the two reads (the bullets below say which
+ * failures, and in every one the single differing line was
+ * fpmng_pool_workers_idle -- the operator's earlier read held 0 or 1, the
+ * gateway's later one 1 or 2. CI run 37151225422 is that same shape with one
+ * value missing: its gateway body carried
+ * fpmng_pool_workers_idle{pool="app"} 2 and the operator's read was never
+ * printed, so what that read held is not measured -- by elimination below 2: no
+ * request reaches app's listening socket anywhere in this test, so nothing else
+ * on the page can differ between the two reads (the bullets below say which
  * lines and why).
  *
  * The scrape is not what moves them. The page is rendered by the operator
@@ -132,7 +140,10 @@ function gatewayGet(string $url): array
  * row.live_count stays at the zero fpm_operator_pages.c:123 leaves it and
  * fpm_operator_page_row_prometheus_live() (:207-220) prints nothing. Switching
  * app to pool.executor = worker puts fpmng_pool_worker_pending and
- * fpmng_pool_worker_watchers on this page, and both move.
+ * fpmng_pool_worker_watchers on this page
+ * (fpm_http_direct_worker_metrics.c:170-175), and both are live: they aggregate
+ * what the children publish into their slots (same file, :167-169), so they are 0
+ * at rest and move once there is traffic.
  *
  * The sample lines are dropped, not blanked: a line present on one side and
  * absent on the other is still a difference, so a gateway that served a page

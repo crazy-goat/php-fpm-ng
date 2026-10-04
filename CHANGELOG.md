@@ -23,7 +23,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
-- Test `fpmng-http-gateway-operator-two-gateways.phpt`: app's operator page is now compared across the two reads with `fpmng_pool_workers_idle` and `fpmng_pool_workers_active` dropped, because a `pm = static` child only counts itself idle immediately before it enters the loop that accepts, and the master's "ready to handle connections" NOTICE does not wait for that, so an early read of the page could report fewer idle workers than a later one. A mismatch now prints both bodies, and every other line of the page is still compared byte for byte, so a gateway that forwards the wrong page still fails (#743).
+- Test `fpmng-http-gateway-operator-two-gateways.phpt`: app's operator page is now compared across the two reads with `fpmng_pool_workers_idle` and `fpmng_pool_workers_active` dropped, because a `pm = static` child counts itself idle for the first time immediately before it enters the loop that accepts (and again at the end of every request it serves), while the master's "ready to handle connections" NOTICE does not wait for that first report, so an early read of the page could report fewer idle workers than a later one. A mismatch now prints both bodies, and every other line of the page is still compared byte for byte, so a gateway that forwards the wrong page still fails (#743).
 
 ## [0.14.0] - 2026-10-03
 

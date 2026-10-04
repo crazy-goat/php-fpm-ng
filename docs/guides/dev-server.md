@@ -1,7 +1,7 @@
 # `php-fpm-ng serve`: run an application with one command
 
 For the first ten minutes and for local development: no configuration file, no
-pool to write. `serve` builds the configuration in memory, starts the usual master
+pool to write. `serve` writes the configuration to a temporary file, starts the usual master
 on it and stays in the foreground.
 
 ```sh
@@ -64,10 +64,14 @@ request on the classic executors, so editing a file needs no reload. Only the
 watcher:
 
 ```sh
-# the master is the process named "php-fpm: master process"
-watchexec -w src -- 'kill -USR2 $(pgrep -of "php-fpm: master process")'
-ls src/*.php | entr -s 'kill -USR2 $(pgrep -of "php-fpm: master process")'
+# serve prints the master pid and the path of its pid file when it starts:
+#   php-fpm-ng serve: master pid 12345, pid file /tmp/php-fpm-ng-serve-AbC123/serve.pid
+watchexec -w src -- kill -USR2 12345
+ls src/*.php | entr -s 'kill -USR2 12345'
 ```
+
+The pid stays the same across reloads. The pid file is removed when the server
+exits.
 
 A reload starts the same generated configuration again.
 
@@ -82,4 +86,8 @@ A reload starts the same generated configuration again.
 - The environment is cleared for the PHP workers in the default mode, as in a
   production FastCGI pool (`clear_env`).
 - A temporary directory under `$TMPDIR` (default `/tmp`) holds the generated
-  file and the private socket. It is removed when the server exits.
+  file, the pid file and the private socket. It is removed when the server exits.
+- The listen address is tried first: when it is already in use, `serve` exits
+  with status 1 and says so, instead of running without a listener.
+- A document root, listen address or front controller that contains `"`, `\`,
+  a line break or `${` is refused, because it cannot be written into the file.

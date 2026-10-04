@@ -141,6 +141,15 @@ try {
     check($s === 200 && $b === 'index:/no/such/path?x=1', "default front controller fallback: $s " . var_export($b, true));
     $log = file_get_contents("$tmp/default.err");
     check(strpos($log, 'GET /second.php') !== false, 'default: no access log line on stderr: ' . var_export($log, true));
+    /* the reload recipe of docs/guides/dev-server.md: the pid from the start message, SIGUSR2, still serving */
+    check(preg_match('/master pid (\d+), pid file (\S+)/', $log, $m) === 1, 'default: no pid in the start message: ' . var_export($log, true));
+    check(trim((string) @file_get_contents($m[2])) === $m[1], "default: pid file $m[2] does not hold {$m[1]}");
+    $kill = proc_open(['kill', '-USR2', $m[1]], [], $pipes);
+    check(proc_close($kill) === 0, 'default: kill -USR2 failed');
+    usleep(500000);
+    waitUp($port, $proc, 'default after reload');
+    [$s, , $b] = get($port, '/second.php');
+    check($s === 200 && $b === 'second', "default after SIGUSR2: $s " . var_export($b, true));
     echo "default: ok\n";
 } finally {
     stop($proc, $tmp, 'default');
@@ -201,6 +210,45 @@ foreach ([[], ['--direct'], ['--worker', 'worker.php']] as $i => $mode) {
     check($rc === 0 && strpos($out, 'test is successful') !== false, "-t on print-config #$i: $rc " . var_export($out, true));
 }
 echo "print-config: ok\n";
+
+/* 6. a root with spaces, parentheses and & is written quoted: serve it, and print it for -t */
+$odd = "$work/app (old) & new";
+mkdir("$odd/public", 0777, true);
+file_put_contents("$odd/public/index.php", '<?php echo "odd";');
+$port = $base + 3;
+$proc = serve($binary, ['--root', "$odd/public", '--listen', "127.0.0.1:$port", '--workers', '1'], $work, $tmp, 'odd');
+try {
+    waitUp($port, $proc, 'odd');
+    [$s, , $b] = get($port, '/');
+    check($s === 200 && $b === 'odd', "odd root: $s " . var_export($b, true));
+} finally {
+    stop($proc, $tmp, 'odd');
+}
+foreach ([[], ['--direct'], ['--worker', 'index.php']] as $i => $mode) {
+    [$rc, $text] = run($binary, array_merge(['serve', '--root', "$odd/public", '--print-config'], $mode));
+    check($rc === 0 && strpos($text, "chdir = \"$odd/public\"") !== false, "odd print-config #$i: $rc " . var_export($text, true));
+    file_put_contents("$tmp/odd$i.conf", $text);
+    [$rc, $out] = run($binary, ['-t', '-y', "$tmp/odd$i.conf"]);
+    check($rc === 0 && strpos($out, 'test is successful') !== false, "-t on odd print-config #$i: $rc " . var_export($out, true));
+}
+echo "odd root: ok\n";
+
+/* 7. characters the file cannot carry are refused */
+foreach (['a"b', 'a\\b', 'a${x}b'] as $name) {
+    mkdir("$work/$name", 0777, true);
+    [$rc, $out] = run($binary, ['serve', '--root', "$work/$name", '--print-config']);
+    check($rc === 64 && strpos($out, 'cannot be written into a configuration file') !== false, "bad root $name: $rc " . var_export($out, true));
+}
+echo "refused characters: ok\n";
+
+/* 8. a listen address that is taken: exit 1 with a message, no server without a listener */
+$held = stream_socket_server('tcp://127.0.0.1:' . ($base + 4), $errno, $error);
+check($held !== false, "cannot hold the port: $error");
+[$rc, $out] = run($binary, ['serve', '--root', "$app/public", '--listen', (string) ($base + 4)]);
+check($rc === 1 && strpos($out, 'cannot listen on 127.0.0.1:' . ($base + 4)) !== false, "busy port: $rc " . var_export($out, true));
+fclose($held);
+check(glob("$tmp/php-fpm-ng-serve-*") === [], 'busy port left a temporary directory');
+echo "busy port: ok\n";
 ?>
 --CLEAN--
 <?php
@@ -223,3 +271,6 @@ direct: ok
 worker: ok
 refusals: ok
 print-config: ok
+odd root: ok
+refused characters: ok
+busy port: ok

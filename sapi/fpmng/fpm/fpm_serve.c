@@ -39,9 +39,11 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -228,9 +230,77 @@ static void fpm_serve_listen_addr(const char *in, char *out, size_t out_size)
  * their files (fpm_stdio_init_main()), so /dev/stdout would be a black hole:
  * the error log and the access logs both go to /dev/stderr. */
 
+/* The values go into the generated file inside double quotes. The ini scanner
+ * cannot represent a quote, a backslash, a newline or a ${ there, so those are
+ * refused instead of being written wrongly. */
+static int fpm_serve_check_value(const char *what, const char *v)
+{
+	if (strpbrk(v, "\"\\\n\r") != NULL || strstr(v, "${") != NULL) {
+		return fpm_serve_fail(what, v);
+	}
+	return 0;
+}
+
+/* The gateway only logs a warning when its port is taken and keeps running
+ * without a listener, which is useless for a dev server: try the bind first. */
+static int fpm_serve_probe_listen(const char *listen)
+{
+	char host[256], *colon;
+	const char *port, *h;
+	struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM, .ai_flags = AI_PASSIVE }, *res, *ai;
+	int fd, err = 0, one = 1, rc;
+
+	if (strchr(listen, '/') != NULL || strlen(listen) >= sizeof(host)) {
+		return 0;
+	}
+	snprintf(host, sizeof(host), "%s", listen);
+	colon = strrchr(host, ':');
+	if (colon == NULL) {
+		return 0;
+	}
+	*colon = '\0';
+	port = colon + 1;
+	h = host;
+	if (h[0] == '[') {
+		size_t l = strlen(h);
+
+		if (l > 1 && h[l - 1] == ']') {
+			host[l - 1] = '\0';
+			h++;
+		}
+	}
+	if (strcmp(h, "*") == 0 || *h == '\0') {
+		h = NULL;
+	}
+	if ((rc = getaddrinfo(h, port, &hints, &res)) != 0) {
+		fprintf(stderr, "php-fpm-ng serve: cannot resolve the listen address %s: %s\n", listen, gai_strerror(rc));
+		return 1;
+	}
+	for (ai = res; ai != NULL; ai = ai->ai_next) {
+		fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+		if (fd < 0) {
+			continue;
+		}
+		setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+		if (bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
+			close(fd);
+			freeaddrinfo(res);
+			return 0;
+		}
+		err = errno;
+		close(fd);
+	}
+	freeaddrinfo(res);
+	if (err != 0) {
+		fprintf(stderr, "php-fpm-ng serve: cannot listen on %s: %s\n", listen, strerror(err));
+		return 1;
+	}
+	return 0;
+}
+
 /* The text of serve.conf. `socket_path` is the fastcgi pool's unix socket. */
 static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *root, const char *listen, const char *front_controller,
-		long workers, const char *socket_path, size_t *len)
+		long workers, const char *socket_path, const char *pid_path, size_t *len)
 {
 	char *buf = NULL;
 	FILE *f = open_memstream(&buf, len);
@@ -245,8 +315,10 @@ static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *
 			"; `php-fpm-ng -y <file>` to leave the dev server behind.\n"
 			"[global]\n"
 			"daemonize = no\n"
+			"pid = \"%s\"\n"
 			"error_log = /dev/stderr\n"
-			"\n");
+			"\n",
+			pid_path);
 
 	if (o->mode == FPM_SERVE_GATEWAY) {
 		start = workers < 2 ? workers : 2;
@@ -255,10 +327,10 @@ static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *
 				"; The public port: static files from the root, everything else to the pool below.\n"
 				"[gateway]\n"
 				"pool.type = gateway\n"
-				"listen = %s\n"
-				"chdir = %s\n"
+				"listen = \"%s\"\n"
+				"chdir = \"%s\"\n"
 				"http.static = yes\n"
-				"http.front_controller = %s\n"
+				"http.front_controller = \"%s\"\n"
 				"http.route[app] = /\n"
 				"http.access_log = /dev/stderr\n"
 				"operator.status = off\n"
@@ -267,9 +339,9 @@ static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *
 				"; The PHP workers: an ordinary FastCGI pool on a private unix socket.\n"
 				"[app]\n"
 				"pool.type = fastcgi\n"
-				"listen = %s\n"
+				"listen = \"%s\"\n"
 				"listen.mode = 0600\n"
-				"chdir = %s\n"
+				"chdir = \"%s\"\n"
 				"catch_workers_output = yes\n"
 				"pm = dynamic\n"
 				"pm.max_children = %ld\n"
@@ -283,9 +355,9 @@ static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *
 				"[app]\n"
 				"pool.type = http-direct\n"
 				"pool.executor = %s\n"
-				"listen = %s\n"
-				"chdir = %s\n"
-				"http.front_controller = %s\n"
+				"listen = \"%s\"\n"
+				"chdir = \"%s\"\n"
+				"http.front_controller = \"%s\"\n"
 				"catch_workers_output = yes\n"
 				"pm = static\n"
 				"pm.max_children = %ld\n",
@@ -316,6 +388,8 @@ static void fpm_serve_cleanup(void)
 	}
 	snprintf(path, sizeof(path), "%s/serve.conf", fpm_serve_dir);
 	unlink(path);
+	snprintf(path, sizeof(path), "%s/serve.pid", fpm_serve_dir);
+	unlink(path);
 	snprintf(path, sizeof(path), "%s/php.sock", fpm_serve_dir);
 	unlink(path);
 	rmdir(fpm_serve_dir);
@@ -336,7 +410,7 @@ static void fpm_serve_arm_cleanup(const char *dir)
 static int fpm_serve_main(int argc, char **argv)
 {
 	struct fpm_serve_opts o = { .listen = "127.0.0.1:8080", .front_controller = "index.php", .mode = FPM_SERVE_GATEWAY };
-	char root[PATH_MAX], listen[256], fc[PATH_MAX], dir[PATH_MAX], conf_path[PATH_MAX + 16], sock_path[PATH_MAX + 16];
+	char root[PATH_MAX], listen[256], fc[PATH_MAX], dir[PATH_MAX], conf_path[PATH_MAX + 16], sock_path[PATH_MAX + 16], pid_path[PATH_MAX + 16];
 	char *text, *new_argv[24];
 	const char *given_root, *tmp;
 	size_t len;
@@ -369,6 +443,10 @@ static int fpm_serve_main(int argc, char **argv)
 		}
 	}
 
+	if ((rc = fpm_serve_check_value("the document root cannot be written into a configuration file", root)) != 0 || (rc = fpm_serve_check_value("the listen address cannot be written into a configuration file", listen)) != 0 || (rc = fpm_serve_check_value("the front controller cannot be written into a configuration file", fc)) != 0) {
+		return rc;
+	}
+
 	if (o.workers == 0) {
 		long cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
@@ -377,13 +455,17 @@ static int fpm_serve_main(int argc, char **argv)
 
 	if (o.print_config) {
 		/* No directory is created for a print: the socket path is a stand-in. */
-		text = fpm_serve_build_config(&o, root, listen, fc, o.workers, "/tmp/php-fpm-ng-serve.sock", &len);
+		text = fpm_serve_build_config(&o, root, listen, fc, o.workers, "/tmp/php-fpm-ng-serve.sock", "/tmp/php-fpm-ng-serve.pid", &len);
 		if (text == NULL) {
 			return fpm_serve_fail("out of memory", NULL);
 		}
 		fwrite(text, 1, len, stdout);
 		free(text);
 		return 0;
+	}
+
+	if (fpm_serve_probe_listen(listen) != 0) {
+		return 1;
 	}
 
 	tmp = getenv("TMPDIR");
@@ -396,11 +478,15 @@ static int fpm_serve_main(int argc, char **argv)
 		return 1;
 	}
 	fpm_serve_arm_cleanup(dir);
+	if ((rc = fpm_serve_check_value("the temporary directory cannot be written into a configuration file", dir)) != 0) {
+		return rc;
+	}
 	setenv(FPM_SERVE_DIR_ENV, dir, 1);
 
 	snprintf(conf_path, sizeof(conf_path), "%s/serve.conf", dir);
 	snprintf(sock_path, sizeof(sock_path), "%s/php.sock", dir);
-	text = fpm_serve_build_config(&o, root, listen, fc, o.workers, sock_path, &len);
+	snprintf(pid_path, sizeof(pid_path), "%s/serve.pid", dir);
+	text = fpm_serve_build_config(&o, root, listen, fc, o.workers, sock_path, pid_path, &len);
 	f = text ? fopen(conf_path, "w") : NULL;
 	if (f == NULL || fwrite(text, 1, len, f) != len || fclose(f) != 0) {
 		fprintf(stderr, "php-fpm-ng serve: cannot write %s: %s\n", conf_path, strerror(errno));
@@ -409,9 +495,10 @@ static int fpm_serve_main(int argc, char **argv)
 	}
 	free(text);
 
-	fprintf(stderr, "php-fpm-ng serve: %s on http://%s, root %s, %ld worker%s (Ctrl-C to stop)\n",
+	fprintf(stderr, "php-fpm-ng serve: %s on http://%s, root %s, %ld worker%s (Ctrl-C to stop)\n"
+					"php-fpm-ng serve: master pid %ld, pid file %s (kill -USR2 reloads, kill -TERM stops)\n",
 			o.mode == FPM_SERVE_GATEWAY ? "gateway + fastcgi" : (o.mode == FPM_SERVE_WORKER ? "http-direct, worker executor" : "http-direct, classic executor"), listen,
-			root, o.workers, o.workers == 1 ? "" : "s");
+			root, o.workers, o.workers == 1 ? "" : "s", (long) getpid(), pid_path);
 
 	n = 0;
 	new_argv[n++] = argv[0];

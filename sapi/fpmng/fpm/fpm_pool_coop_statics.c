@@ -522,8 +522,8 @@ void fpm_coop_statics_req_leave(struct fpm_coop_req_s *ctx) /* {{{ */
 		 * memory). That test guards the fix. ZVAL_COPY_OR_DUP, not
 		 * ZVAL_COPY_VALUE, because the default template can itself be a
 		 * refcounted value (e.g. an array-literal default) that must not
-		 * be aliased between the
-		 * class's permanent default table and the live slot. */
+		 * be aliased between the class's permanent default table and the
+		 * live slot. */
 		ZVAL_COPY_VALUE(&slots[i], slot);
 		ZVAL_COPY_OR_DUP(slot, def);
 	}

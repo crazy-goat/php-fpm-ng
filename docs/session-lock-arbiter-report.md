@@ -1067,14 +1067,25 @@ nothing anyway, went with them.
 
 Everything above this paragraph about Variant 1 is unchanged and remains the
 record of why the field-patch was chosen. Sections that mention
-`fpm_pool_coop_session_lock.[ch]` in the present tense describe the tree as
-it stood on `feature/session-lock-field-patch`, and their quoted material —
-the `strings` runs, the gdb backtrace (`:329-341`), the compiler output
-(`:649-651`) and the code excerpts — is program output, left verbatim: the
-line numbers in it are the deleted file's, and stay that way. That includes
-"Fix applied (`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c`, in this worktree,
-committed to the working tree)" in the SIGSEGV section, which describes what
-happened during that measurement pass.
+`fpm_pool_coop_session_lock.[ch]` in the present tense describe the tree as it
+stood on `feature/session-lock-field-patch`. Their quoted material — the
+`strings` runs, the gdb backtrace (`:329-341`), the compiler output (`:649-651`)
+and the code excerpts — is recorded program output, which this project does not
+edit: correcting a captured backtrace or a compiler diagnostic would make it a
+reconstruction of what was printed rather than a record of it. Expect the
+line numbers inside those blocks not to resolve against the current tree, and
+that is the point rather than a defect to fix: some name files that no longer
+exist, and some name files that do exist but have moved on since — the
+backtrace's `fpm_coop.c:626` is inside `fpm_coop_base_tables_restore()`
+(`fpm_pool_coop.c:618`), not the `fpm_coop_execute()` (`:692`) the frame names,
+and the compiler output's `fpm_pool_coop_session_patch.c:451` no longer holds
+`zend_ini_string_literal()`, which that file's own comment at `:502-505`
+explains it does not use (it calls `zend_ini_string()`, `:507`).
+
+That treatment also covers the prose around them, "Fix applied
+(`sapi/fpmng/fpm/fpm_pool_coop_session_lock.c`, in this worktree, committed to
+the working tree)" in the SIGSEGV section included: that sentence describes
+what happened during that measurement pass.
 
 If the `session.auto_start` gap ever needs a stronger fix than a startup
 refusal, rebuild Variant 1 from this report, and re-read the link-dependency

@@ -107,6 +107,17 @@ the time went without downloading the artifact. Each test is timed on its own,
 so under `-j` the table still ranks tests by what they cost, but their sum is no
 longer the wall clock.
 
+`failed-artifacts/` is the record of why a test failed: the `.diff`, `.out`, `.exp` and
+`.log` that `run-tests.php` leaves next to it, copied out before the tree is deleted
+(the `trap cleanup EXIT` in `build/run-fpmng-phpt.sh`). It is created only when the runner
+assembled the tree itself, the `-` form, because that is the only case in which there is a
+tree of this run's own to copy out of and then delete (`build/run-fpmng-phpt.sh:126`); with
+no failing test it is there and empty. Given a directory the tree belongs to the caller, is
+not deleted, and no `failed-artifacts/` appears at all — which is the form
+`build/ci-package-gate.sh:356` uses. Its evidence is therefore in the tree the gate staged,
+`work/prepared/sapi/fpmng/tests/`, and that is where `release.yml` reads it from (artifact
+`phpt-failure-<cell>`, issue #669).
+
 ## Parallel runs
 
 The suite runs with `run-tests.php -j<N>` (issue #394). `TEST_FPM_JOBS` sets the
@@ -384,6 +395,11 @@ canonical build artifact (built by `build/libphp-build.sh` against the
 distribution SDK, no php-src) and runs this runner with tree `-`. It is the only job that runs
 these tests: before issue #95 the `phpt` job ran them a second time, because
 that runner swept the whole copied test directory.
+
+That job uploads the whole result directory with `if: always()`, so a failing test's
+`failed-artifacts/` is in the run's Artifacts list under `fpmng-phpt-results` — which is the
+one place where the copy described under [Result files](#result-files) exists, because this is
+the `-` form. The package gate does not use it (issue #669).
 
 An explicit `FPMNG_*_PORT` environment variable replaces the per-worker offset
 and the per-run shift of that test's fixed port, so do not set one for a run with more than one job.

@@ -123,6 +123,7 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-phpt-tree.sh
 ./build/test-package-gate-expected.sh
 ./build/test-release-retention.sh   # CI job `checks`
+./build/test-phpt-failure-artifact.sh  # CI job `checks`
 ./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
 ./build/test-doc-configs.sh "$PWD/out/php-fpm-ng"   # `php-fpm-ng -t` on every `ini verify` block of docs/guides/ (CI job `doc-configs`); run as non-root
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler

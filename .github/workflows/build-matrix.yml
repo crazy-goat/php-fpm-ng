@@ -248,6 +248,15 @@ jobs:
       - name: release artifacts outlive a re-run of the release job (issue #679)
         run: ./build/test-release-retention.sh
 
+      # Issue #669: a red package cell has to leave the failing .phpt tests'
+      # diff and output downloadable under its own name, which means an upload
+      # step gated on failure(), covering the files run-tests.php leaves next to
+      # a test, with a decided and short retention. Hermetic: reads
+      # .github/workflows/release.yml and build/ci-package-gate.sh, no network,
+      # no build, no YAML parser.
+      - name: a red package cell uploads the failing .phpt evidence (issue #669)
+        run: ./build/test-phpt-failure-artifact.sh
+
       # Issue #220 / #422: the packaged binary's libphp version guard, in all
       # three outcomes (another minor FATAL, another patch level a notice, the
       # same version silent), compiled against this job's real SDK. It used to

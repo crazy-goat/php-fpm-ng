@@ -19,6 +19,23 @@ name: async-sync
 # the conflicted files. The merge commit must reach async as a fast-forward
 # push (this workflow does that); a hand merge must never be squash-merged
 # through a PR, or main stops being an ancestor of async.
+#
+# The token the two pushes use (issue #710). GitHub refuses a push that carries
+# changes under .github/workflows/ unless the token pushing it has the
+# `workflow` scope, and GITHUB_TOKEN -- what this workflow uses while the
+# repository secret below is absent -- has not got one. main's af103df (#679,
+# PR #758) already changed build-matrix.yml and release.yml, so the next sync is
+# the first run whose merge commit is refused. The secret is
+# ASYNC_SYNC_PUSH_TOKEN, created by a human in
+# Settings -> Secrets and variables -> Actions -> New repository secret, holding
+# a token that may push workflow files: a classic PAT with the `workflow` scope
+# plus `repo`, or a fine-grained PAT with `workflows: write` and
+# `contents: write`. Both pushes need it -- the scratch one in the merge job and
+# the push of async in push-or-report -- and both take it through the `token:`
+# input of actions/checkout, which is the only place the credential is set: the
+# pushes themselves stay plain `git push`. While the secret is absent every step
+# behaves exactly as before, the push is refused, the run fails, and the issue
+# says which token was tried and what that token needs.
 on:
   workflow_dispatch:
     inputs:
@@ -44,6 +61,19 @@ env:
   # trip over.
   SCRATCH_REF: _async-sync-scratch
 
+  # Issue #710. The two pushes of this workflow need a token with the
+  # `workflow` scope, which GITHUB_TOKEN has not got, so the repository secret
+  # ASYNC_SYNC_PUSH_TOKEN (see the header) is preferred and GITHUB_TOKEN is the
+  # fallback. Both names live here, next to each other, because a step may not
+  # be able to tell which one the push used, and the issue that reports a
+  # refusal has to say it.
+  #
+  # The token itself is not interpolated into any `run:` block: it reaches git
+  # only through the `token:` input of actions/checkout, which persists it in
+  # the checkout's git config exactly as it does for GITHUB_TOKEN today.
+  ASYNC_SYNC_PUSH_TOKEN: ${{ secrets.ASYNC_SYNC_PUSH_TOKEN }}
+  ASYNC_SYNC_PUSH_TOKEN_SOURCE: ${{ secrets.ASYNC_SYNC_PUSH_TOKEN && 'ASYNC_SYNC_PUSH_TOKEN' || 'GITHUB_TOKEN' }}
+
 jobs:
   # Step 1 (issue #374): merge origin/main into async. Runs on the plain
   # ubuntu-latest runner, NOT the CI image container that the build/test job
@@ -57,6 +87,10 @@ jobs:
         with:
           ref: async
           fetch-depth: 0
+          # Issue #710: the token the scratch push below runs with. Empty in
+          # the input when the secret is not set, which falls back to
+          # GITHUB_TOKEN -- the credential this push used before #710.
+          token: ${{ env.ASYNC_SYNC_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: git identity for the merge commit
         run: |
@@ -128,21 +162,32 @@ jobs:
           {
             echo "The merge of \`origin/main\` into \`async\` was clean, but"
             echo "pushing the merge commit to the scratch ref \`$SCRATCH_REF\`"
-            echo "was refused, so nothing was built or pushed. This is the first"
-            echo "push that carries main's changes; a merge that touches"
-            echo "\`.github/workflows/\` needs a token with the \`workflow\` scope."
+            echo "was refused, so nothing was built or pushed."
+            echo
+            echo "A push that carries changes under \`.github/workflows/\` needs a"
+            echo "token with the \`workflow\` scope. This run pushed with"
+            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`, which has no such scope."
+            echo
+            echo "Fix it by adding the repository secret \`ASYNC_SYNC_PUSH_TOKEN\`"
+            echo "(Settings -> Secrets and variables -> Actions -> New repository"
+            echo "secret) holding a token that may push workflow files -- a classic"
+            echo "PAT with the \`workflow\` scope plus \`repo\`, or a fine-grained PAT"
+            echo "with \`workflows: write\` and \`contents: write\` -- and re-running"
+            echo "this workflow. While that secret is absent the workflow falls back"
+            echo "to \`GITHUB_TOKEN\`, so nothing else about this run has to change."
             echo
             echo "Files this merge changes in \`.github/workflows/\`:"
             echo '```'
             git diff --name-only origin/async HEAD -- .github/workflows || true
             echo '```'
             echo
-            echo "Git said:"
+            echo "What the push step reported (build/async-sync-merge.sh, then git):"
             echo '```'
             cat /tmp/deleted-paths.txt
             echo '```'
             echo
-            echo "Merge by hand (no rebase, no squash) or give the workflow a token that may push workflow files."
+            echo "Merge by hand (no rebase, no squash) or add the secret; the merge"
+            echo "commit is otherwise ready."
             echo
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > /tmp/scratch-body.md
@@ -212,6 +257,10 @@ jobs:
         with:
           ref: ${{ env.SCRATCH_REF }}
           fetch-depth: 0
+          # Issue #710, the same token as the merge job's checkout: this job's
+          # push carries the same merge commit, and GitHub's `workflow` scope
+          # rule does not care which ref is pushed.
+          token: ${{ env.ASYNC_SYNC_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       # A plain (non-force) push: if async moved while this run built, or a
       # ruleset or the token's missing `workflow` scope refuses it, the push is
@@ -239,8 +288,19 @@ jobs:
             echo "The merge of \`origin/main\` into \`async\` built and passed"
             echo "(merge commit \`${{ needs.merge.outputs.sha }}\`), but pushing it to"
             echo "\`async\` was rejected. Either \`async\` moved during the run, or a"
-            echo "ruleset or the token refused it (a merge that touches"
-            echo "\`.github/workflows/\` needs a token with the \`workflow\` scope)."
+            echo "ruleset or the token refused it."
+            echo
+            echo "A push that carries changes under \`.github/workflows/\` needs a"
+            echo "token with the \`workflow\` scope. This run pushed with"
+            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`, which has no such scope."
+            echo
+            echo "Fix it by adding the repository secret \`ASYNC_SYNC_PUSH_TOKEN\`"
+            echo "(Settings -> Secrets and variables -> Actions -> New repository"
+            echo "secret) holding a token that may push workflow files -- a classic"
+            echo "PAT with the \`workflow\` scope plus \`repo\`, or a fine-grained PAT"
+            echo "with \`workflows: write\` and \`contents: write\` -- and re-running"
+            echo "this workflow. While that secret is absent the workflow falls back"
+            echo "to \`GITHUB_TOKEN\`, so nothing else about this run has to change."
             echo
             echo "Files changed by this merge in \`.github/workflows/\`:"
             echo '```'
@@ -252,7 +312,7 @@ jobs:
             cat /tmp/push.err
             echo '```'
             echo
-            echo "Merge by hand (no rebase, no squash) or re-run the workflow."
+            echo "Merge by hand (no rebase, no squash) or add the secret and re-run."
             echo
             echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
           } > /tmp/push-body.md

@@ -14,8 +14,9 @@
 #
 # Part 2 builds small synthetic repositories for the other outcomes: a clean
 # merge is published, a conflict is not, a deletion of a shared file (the
-# patches/0006 case from #420) is refused unless allow-listed, and a merge
-# that fast-forwards is still checked.
+# patches/0006 case from #420) is refused unless allow-listed, a merge that
+# fast-forwards is still checked, and a refused scratch push exits 4 with a
+# report naming the token it tried (#710).
 # shellcheck disable=SC2015 # `cond && ok || bad`: ok only echoes, so bad
 # cannot run after a passing check.
 set -eu
@@ -175,14 +176,73 @@ run_script "$W" origin main "$SCRATCH" "$TMP/report"
 [ "$rc" = 3 ] && [ "$(cat "$TMP/report")" = fiber.c ] && [ -e "$W/fiber.c" ] && ok "fast-forward deletion refused" || bad "fast-forward deletion: rc=$rc"
 
 # e. a clean merge whose scratch push the remote refuses (the token-scope case):
-#    its own exit code, with git's message in the report, for the issue.
-new_case scratch-refused
+#    its own exit code, and a report naming the token the run tried next to
+#    git's message. The whole report is what the workflow puts in the issue it
+#    opens, so an operator has to be able to fix it from the issue alone (#710).
+#    Run once per state of the repository secret ASYNC_SYNC_PUSH_TOKEN: set
+#    (the workflow passes its name) and absent (GITHUB_TOKEN), plus a hand run
+#    that passes no name at all, because that is what a person running the
+#    script gets.
+#
+# refuse_push <origin>: the remote refuses every push, the way GitHub refuses a
+# push of workflow files from a token without the `workflow` scope.
+refuse_push() {
+	printf '#!/bin/sh\necho "refusing to update workflow files" >&2\nexit 1\n' > "$1/hooks/pre-receive"
+	chmod +x "$1/hooks/pre-receive"
+}
+
+# refused_push <token-source> <what>: run the script on the current case with
+# ASYNC_SYNC_PUSH_TOKEN_SOURCE set to <token-source> (empty: not set at all),
+# and check the exit code and the report. One `ok` per call, so a `ok` is never
+# printed next to a failure of the same run.
+refused_push() {
+	src=$1
+	what=$2
+	fail_before=$fail
+	if [ -n "$src" ]; then
+		ASYNC_SYNC_PUSH_TOKEN_SOURCE=$src
+		export ASYNC_SYNC_PUSH_TOKEN_SOURCE
+	else
+		unset ASYNC_SYNC_PUSH_TOKEN_SOURCE
+	fi
+	run_script "$W" origin main "$SCRATCH" "$TMP/report"
+	unset ASYNC_SYNC_PUSH_TOKEN_SOURCE
+	if [ "$rc" != 4 ]; then
+		bad "$what: exited $rc, expected 4"
+		cat "$TMP/script.log" >&2
+		return
+	fi
+	if [ -n "$src" ]; then
+		want="pushing the scratch ref $SCRATCH was refused; the token it used is $src"
+	else
+		# The script's own default, not a guess at a token name.
+		want="ASYNC_SYNC_PUSH_TOKEN_SOURCE unset"
+	fi
+	grep -Fq "refusing to update workflow files" "$TMP/report" &&
+		grep -Fq "$want" "$TMP/report" ||
+		bad "$what: report: $(tr '\n' '|' < "$TMP/report")"
+	# An `if` whose condition is false returns 0, a bare `&& ok` does not, and
+	# with `set -eu` a function must not end on a false test.
+	if [ "$fail" = "$fail_before" ]; then
+		ok "$what"
+	fi
+}
+
+new_case scratch-refused-secret
 git -C "$S" checkout -q main; echo more >> "$S/shared.txt"; seed_commit main-edits
 git -C "$S" push -q "$O" main
-printf '#!/bin/sh\necho "refusing to update workflow files" >&2\nexit 1\n' > "$O/hooks/pre-receive"
-chmod +x "$O/hooks/pre-receive"
-run_script "$W" origin main "$SCRATCH" "$TMP/report"
-[ "$rc" = 4 ] && grep -q "refusing to update workflow files" "$TMP/report" && ok "refused scratch push exits 4 with git's message in the report" || bad "refused scratch push: rc=$rc"
+refuse_push "$O"
+refused_push ASYNC_SYNC_PUSH_TOKEN "refused scratch push exits 4 and names the token (secret set)"
+
+new_case scratch-refused-no-secret
+git -C "$S" checkout -q main; echo more >> "$S/shared.txt"; seed_commit main-edits
+git -C "$S" push -q "$O" main
+refuse_push "$O"
+refused_push GITHUB_TOKEN "refused scratch push exits 4 and names the token (secret absent)"
+# A hand run of the script passes no token name, so the report has to say that
+# rather than guess. The push is refused again: HEAD is still the merge commit
+# of the run above, and a second run only re-attempts the push.
+refused_push "" "refused scratch push reports that the workflow passed no token name"
 
 if [ "$fail" = 0 ]; then
 	echo "test-async-sync-guard.sh: all checks passed"

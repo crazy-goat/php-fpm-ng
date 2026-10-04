@@ -27,6 +27,18 @@
 #   listed in <allow-file> (one path per line), force-pushes HEAD to
 #   refs/heads/<scratch-ref> on <remote>. It never pushes async itself.
 #
+# Environment:
+#   ASYNC_SYNC_PUSH_TOKEN_SOURCE
+#     The NAME of the token the push authenticates with, not the token:
+#     ASYNC_SYNC_PUSH_TOKEN when the workflow found that repository secret,
+#     GITHUB_TOKEN when it did not (#710). It is only reported, never used --
+#     the credential itself is whatever actions/checkout persisted into the
+#     repository's git config before this script ran, and the script adds no
+#     second auth mechanism. It exists so that the exit-4 report can name the
+#     token the run tried: the workflow puts that report in the issue it opens,
+#     and an operator has to be able to fix it from the issue alone. A hand run
+#     of the script passes nothing and the report says so.
+#
 # Exit status:
 #   0  clean, published to the scratch ref; HEAD is the merge commit
 #   2  merge conflict; merge aborted, HEAD unchanged, nothing pushed; the
@@ -35,7 +47,8 @@
 #      <report-file>, HEAD reset to its pre-merge commit, nothing pushed
 #   4  the merge is clean but pushing the scratch ref failed (a token without
 #      the `workflow` scope is refused when main changed .github/workflows/);
-#      git's message is in <report-file>, HEAD stays the merge commit
+#      <report-file> holds the token that was tried and what it needs, then
+#      git's message; HEAD stays the merge commit
 #   1  anything else (bad usage, fetch failure)
 set -eu
 
@@ -93,9 +106,17 @@ fi
 
 # Its own exit code: the workflow reports this one in an issue, because it is
 # where the first push carrying main's .github/workflows/ changes is refused.
+# The two lines the script adds keep git's message last, so a reader sees the
+# diagnosis first and a grep for what git said still finds it.
 if ! git push --force "$REMOTE" "HEAD:refs/heads/$SCRATCH" 2> "$REPORT"; then
+	token_source=${ASYNC_SYNC_PUSH_TOKEN_SOURCE:-"unnamed (ASYNC_SYNC_PUSH_TOKEN_SOURCE unset: run this through async-sync.yml)"}
+	{
+		echo "async-sync-merge.sh: pushing the scratch ref $SCRATCH was refused; the token it used is $token_source"
+		echo "async-sync-merge.sh: a push that changes .github/workflows/ needs a token with the 'workflow' scope"
+		cat "$REPORT"
+	} > "$REPORT.diagnosis"
+	mv "$REPORT.diagnosis" "$REPORT"
 	cat "$REPORT" >&2
-	echo "async-sync-merge.sh: pushing the scratch ref $SCRATCH failed" >&2
 	exit 4
 fi
 : > "$REPORT"

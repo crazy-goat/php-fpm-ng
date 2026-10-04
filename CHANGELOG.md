@@ -21,6 +21,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - `release.yml`: the `release-notes` and the four `package-<cell>` artifacts keep a week instead of one day, so re-running only the `release` job (which downloads both) still finishes a release days after a failed attempt instead of failing at `download-artifact`; the one day of `fpmng-canonical-build` in `build-matrix.yml` is right there, where every consumer is a job in the same run, and it is not what issue #261 was about either. The comments at both uploads and above the publish step say so, `docs/release-workflow.md` §5 documents the re-run and what to do once the week is over, and the new hermetic `build/test-release-retention.sh` (CI job `checks`) fails when an artifact the re-runnable `release` job downloads keeps less than that window (#679).
 
+### Fixed
+
+- Test `fpmng-http-gateway-operator-two-gateways.phpt`: app's operator page is now compared across the two reads with `fpmng_pool_workers_idle` and `fpmng_pool_workers_active` dropped, because a `pm = static` child only counts itself idle once it reaches its accept loop and the master's "ready to handle connections" NOTICE does not wait for that, so the first scrape of the page could read fewer idle workers than the next one. A mismatch now prints both bodies, and every other line of the page is still compared byte for byte, so a gateway that forwards the wrong page still fails (#743).
+
 ## [0.14.0] - 2026-10-03
 
 ### Changed

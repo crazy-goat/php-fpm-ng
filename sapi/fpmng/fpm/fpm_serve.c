@@ -411,7 +411,7 @@ static void fpm_serve_arm_cleanup(const char *dir)
 static int fpm_serve_main(int argc, char **argv)
 {
 	struct fpm_serve_opts o = { .listen = "127.0.0.1:8080", .front_controller = "index.php", .mode = FPM_SERVE_GATEWAY };
-	char root[PATH_MAX], listen[256], fc[PATH_MAX], dir[PATH_MAX], conf_path[PATH_MAX + 16], sock_path[PATH_MAX + 16], pid_path[PATH_MAX + 16];
+	char root[PATH_MAX], listen[256], fc[PATH_MAX], dir[PATH_MAX], conf_path[PATH_MAX + 16], sock_path[PATH_MAX + 16], tmpreal[PATH_MAX], pid_path[PATH_MAX + 16];
 	char *text, *new_argv[24];
 	const char *given_root, *tmp;
 	size_t len;
@@ -439,6 +439,9 @@ static int fpm_serve_main(int argc, char **argv)
 		if (!fpm_serve_is_file(file)) {
 			if (o.mode == FPM_SERVE_WORKER) {
 				return fpm_serve_fail("the worker script is not a file under the document root", file);
+			}
+			if (o.mode == FPM_SERVE_DIRECT) {
+				return fpm_serve_fail("the front controller is not a file under the document root", file);
 			}
 			fprintf(stderr, "php-fpm-ng serve: warning: the front controller %s does not exist\n", file);
 		}
@@ -473,6 +476,11 @@ static int fpm_serve_main(int argc, char **argv)
 	if (tmp == NULL || *tmp == '\0' || strlen(tmp) > FPM_SERVE_DIR_MAX - 30) {
 		tmp = "/tmp";
 	}
+	/* The master resolves a relative path against its prefix, so the directory must be absolute. */
+	if (realpath(tmp, tmpreal) == NULL) {
+		snprintf(tmpreal, sizeof(tmpreal), "/tmp");
+	}
+	tmp = tmpreal;
 	snprintf(dir, sizeof(dir), "%s/php-fpm-ng-serve-XXXXXX", tmp);
 	if (mkdtemp(dir) == NULL) {
 		fprintf(stderr, "php-fpm-ng serve: cannot create a directory under %s: %s\n", tmp, strerror(errno));

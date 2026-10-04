@@ -185,9 +185,9 @@ try {
 }
 
 /* 4. refusals */
-function run(string $binary, array $args): array
+function run(string $binary, array $args, ?array $env = null): array
 {
-    $proc = proc_open(array_merge([$binary], $args, ['-n']), [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes);
+    $proc = proc_open(array_merge([$binary], $args, ['-n']), [1 => ['pipe', 'w'], 2 => ['redirect', 1]], $pipes, null, $env);
     $out = stream_get_contents($pipes[1]);
     return [proc_close($proc), $out];
 }
@@ -244,11 +244,25 @@ echo "refused characters: ok\n";
 /* 8. a listen address that is taken: exit 1 with a message, no server without a listener */
 $held = stream_socket_server('tcp://127.0.0.1:' . ($base + 4), $errno, $error);
 check($held !== false, "cannot hold the port: $error");
-[$rc, $out] = run($binary, ['serve', '--root', "$app/public", '--listen', (string) ($base + 4)]);
+[$rc, $out] = run($binary, ['serve', '--root', "$app/public", '--listen', (string) ($base + 4)], ['TMPDIR' => $tmp, 'PATH' => getenv('PATH')]);
 check($rc === 1 && strpos($out, 'cannot listen on 127.0.0.1:' . ($base + 4)) !== false, "busy port: $rc " . var_export($out, true));
 fclose($held);
 check(glob("$tmp/php-fpm-ng-serve-*") === [], 'busy port left a temporary directory');
 echo "busy port: ok\n";
+
+/* 9. a relative TMPDIR is made absolute: the socket and pid paths must not depend on the master's prefix */
+$port = $base + 5;
+$spec = [0 => ['file', '/dev/null', 'r'], 1 => ['file', "$tmp/rel.out", 'w'], 2 => ['file', "$tmp/rel.err", 'w']];
+$proc = proc_open([$binary, 'serve', '-n', '--root', "$app/public", '--listen', (string) $port, '--workers', '1'], $spec, $pipes, $work, ['TMPDIR' => 'tmp', 'PATH' => getenv('PATH')]);
+check(is_resource($proc), 'rel: proc_open failed');
+try {
+    waitUp($port, $proc, 'rel');
+    [$s, , $b] = get($port, '/second.php');
+    check($s === 200 && $b === 'second', "relative TMPDIR: $s " . var_export($b, true));
+} finally {
+    stop($proc, $tmp, 'rel');
+}
+echo "relative TMPDIR: ok\n";
 ?>
 --CLEAN--
 <?php
@@ -274,3 +288,4 @@ print-config: ok
 odd root: ok
 refused characters: ok
 busy port: ok
+relative TMPDIR: ok

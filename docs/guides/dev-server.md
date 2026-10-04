@@ -22,7 +22,7 @@ production setup, so what works here behaves the same there.
 |---|---|---|
 | `php-fpm-ng serve` | `pool.type = gateway` in front of one `pool.type = fastcgi` pool (`pm = dynamic`) on a private unix socket | The default: the same model as nginx + php-fpm. Several `.php` entry points work (`/admin.php` runs `admin.php`), `fastcgi_finish_request()` works. |
 | `php-fpm-ng serve --direct` | one `pool.type = http-direct` pool, classic executor, `pm = static` | Fewer processes. Every path that is not a static file runs the front controller; see [`http-direct.md`](../http-direct.md). |
-| `php-fpm-ng serve --worker index.php` | one `pool.type = http-direct` pool, `pool.executor = worker` (implies `--direct`) | A long-running worker script (beta). It serves no static files. |
+| `php-fpm-ng serve --worker index.php` | one `pool.type = http-direct` pool, `pool.executor = worker` (implies `--direct`) | A long-running worker script (beta). It serves no static files and writes no access log. |
 
 ## Options
 

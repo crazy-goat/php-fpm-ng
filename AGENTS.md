@@ -125,6 +125,7 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
 ./build/test-doc-configs.sh "$PWD/out/php-fpm-ng"   # `php-fpm-ng -t` on every `ini verify` block of docs/guides/ (CI job `doc-configs`); run as non-root
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
+./build/test-worktree-base.sh         # bin/worktree.sh --base (CI job `fiber-hermetic` on `async`; needs git and jq)
 
 # Slim 4 framework smoke test (needs Composer or network for the pinned phar, and php-curl)
 FPMNG="$PWD/out/php-fpm-ng" PHP="$(php-config8.5 --php-binary)" tests/frameworks/slim4/bin/run.sh
@@ -201,9 +202,16 @@ Work that only applies to `pool.executor = fiber` (not on `main`; branch `async`
 
 - `bin/worktree.sh` picks the worktree location (see [docs/workflow.md](docs/workflow.md),
   step 2); `--dir <path>` sets it, `--base <branch>` the branch the worktree is cut from.
-  Everything that touches `pool.executor = fiber` lives on `async`, so such a worktree needs
-  `bin/worktree.sh --base async <N>`: cut from `main` it would hold no fiber code at all.
-  Branches from before the migration are named `task/<NNN>-<slug>` or `issue/<N>-<slug>`;
+  `--base` is not upstream yet (`standard/worktree.sh` in crazy-goat/.github has no such
+  option), so this copy diverges from the shared script and
+  `build/test-worktree-base.sh` is what fails if a sync drops it.
+- Everything that touches `pool.executor = fiber` lives on `async`, so such a worktree needs
+  `bin/worktree.sh --base async <N>`. Cut from `main` it would hold no fiber code at all:
+  `origin/main` has none of `sapi/fpmng/fpm/fpm_pool_fiber*.c`, of the `fpm_pool_coop*.c`
+  files, of the 10 fiber/coop `.phpt` tests (measured with `git ls-tree` against
+  `origin/async` and `origin/main`) and no `.github/workflows/async-fiber.yml`, so every
+  check run in such a worktree would describe another tree than the issue is about.
+- Branches from before the migration are named `task/<NNN>-<slug>` or `issue/<N>-<slug>`;
   new work uses `<type>/issue-<N>-<slug>`.
 - `bin/worktree-setup.sh` only reports missing tools; the project has no package
   dependencies to install.

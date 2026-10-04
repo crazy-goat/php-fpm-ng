@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # Create an isolated worktree for one issue and prepare its environment.
 #
+# Shared script: the source of truth is standard/worktree.sh in crazy-goat/.github. This
+# copy carries --base, which is not upstream yet, and is otherwise identical; a sync from
+# the standard has to keep --base or bring it back with it. build/test-worktree-base.sh
+# fails without the option, so a sync that drops it does not go unnoticed.
+#
 # Usage: bin/worktree.sh [--dir <path>] [--base <branch>] <issue-number> [type]
 #   type:  feat|fix|docs|refactor|test|chore (default: derived from the type:* label)
 #   --dir: exact path of the new worktree (see "Worktree location" below)
@@ -43,12 +48,9 @@ esac
 root="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 repo="$(basename "$root")"
 # The base is the default branch unless --base says otherwise. A repository can carry a
-# long-lived line the default branch has no trace of: php-fpm-ng has the fiber and coop
-# executors (sapi/fpmng/fpm/fpm_pool_fiber*.c, fpm_pool_coop*.c), 10 fiber/coop .phpt tests
-# and .github/workflows/async-fiber.yml on `async` and none of them on `main` (verified with
-# `git ls-tree` against origin/async and origin/main), so a worktree cut from `main` for a
-# fiber issue would hold none of the code the issue is about and every check run in it
-# would describe another tree.
+# long-lived line the default branch has no trace of (work that is not to merge into the
+# default branch, or an experiment that runs beside it), and a worktree cut from the default
+# branch would hold none of the code such an issue is about.
 if [[ -z "$base" ]]; then
   base="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
 fi
@@ -93,14 +95,27 @@ case "$dir" in /*) ;; *) dir="$PWD/$dir" ;; esac
 # problem rather than a mistyped branch. refs/heads/ is spelled out because git matches an
 # unqualified ls-remote pattern against the *tail* of a ref name: "v0.8.0" is answered by
 # refs/heads/release/v0.8.0, so an unqualified pattern would accept a branch that is not
-# there. --exit-code is what turns "no ref matched" into a non-zero status (measured: 2).
-git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$base" >/dev/null \
-  || { echo "base branch does not exist on origin: $base" >&2; exit 1; }
-# A plain branch name is enough for the fetch, no refs/heads/ qualification: git updates the
-# matching remote-tracking ref opportunistically under the default refspec
-# (+refs/heads/*:refs/remotes/origin/*), for every branch, not only the default one. What
-# makes origin/$base resolvable below is that update, not FETCH_HEAD.
-git -C "$root" fetch origin "$base"
+# there.
+rc=0
+git -C "$root" ls-remote --exit-code --heads origin "refs/heads/$base" >/dev/null || rc=$?
+case "$rc" in
+  0) ;;
+  # --exit-code answers "no ref matched" with 2 (measured). It answers an unreachable remote
+  # or refused credentials with 128 (measured), and calling that a mistyped branch sends the
+  # operator looking for a typo that is not there: git's own stderr reached the terminal, but
+  # the message under it said the branch does not exist.
+  2) echo "base branch does not exist on origin: $base" >&2; exit 1 ;;
+  *) echo "cannot reach origin to check base branch $base (git ls-remote exited $rc)" >&2; exit "$rc" ;;
+esac
+# The destination is spelled out because a plain `git fetch origin "$base"` is not enough:
+# git updates refs/remotes/origin/$base opportunistically only while remote.origin.fetch is
+# the wildcard refspec, and a `git clone --single-branch` clone (or `git remote set-branches`)
+# narrows it to one branch. There the plain fetch writes FETCH_HEAD alone, origin/$base stays
+# unresolvable and `git worktree add` dies with "invalid reference" (measured). The leading +
+# keeps the update non-fast-forward-tolerant, as the wildcard refspec
+# (+refs/heads/*:refs/remotes/origin/*) also does; without it a rebased base is rejected and
+# the fetch exits 1 (measured).
+git -C "$root" fetch origin "+refs/heads/$base:refs/remotes/origin/$base"
 git -C "$root" worktree add -b "$branch" "$dir" "origin/$base"
 
 cd "$dir"

@@ -43,7 +43,10 @@ defaults:
     shell: runuser -u ci -- env HOME=/home/ci bash --noprofile --norc -eo pipefail {0}
 
 jobs:
-  # Hermetic, no build: the IO-seam boundary (issue #531).
+  # Hermetic, no build: the IO-seam boundary (issue #531) and the branch
+  # bin/worktree.sh cuts a worktree from (issue #709). Both are scripts only, so
+  # this job stays the cheap one: a sync should not need an SDK to find out that
+  # a tooling script regressed.
   fiber-hermetic:
     runs-on: ubuntu-latest
     steps:
@@ -53,6 +56,9 @@ jobs:
       - name: verify fiber IO seam boundary (#531)
         shell: bash
         run: ./build/test-fiber-io-seam.sh
+      - name: worktree.sh --base, the branch a worktree is cut from (#709)
+        shell: bash
+        run: ./build/test-worktree-base.sh
 
   # Main's build contract on this branch (review of #620): build-matrix.yml
   # runs only for main, so nothing else checks a push to async or the merge

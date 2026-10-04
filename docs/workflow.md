@@ -63,7 +63,9 @@ The script fetches the branch it creates the worktree from — the default branc
 `<branch>` with `--base` — and puts the worktree on branch `<type>/issue-<N>-<slug>`.
 `--base` is for work that belongs to another line; the branch is checked on the remote
 before anything is created, so a mistyped branch is refused there instead of failing
-inside `git worktree add`. You choose where the worktree goes; the first match wins:
+inside `git worktree add`. (This paragraph and `--base` are a local divergence:
+`standard/worktree.sh` has no such option yet, and a sync from the standard has to keep
+them.) You choose where the worktree goes; the first match wins:
 
 1. `--dir <path>`: exactly `<path>` (a relative path is relative to where you are),
 2. `WORKTREES_DIR=<dir>` in the environment: `<dir>/<repo>/issue-<N>`,

@@ -618,7 +618,7 @@ run_unsupported_configuration() {
     if [[ $unsupported_status -ne 0 ]] \
         && grep -Fq "'fiber.isolate_statics' is not supported by pool.type = fastcgi" <<<"$output" \
         && [[ $async_status -ne 0 ]] \
-        && grep -Fq 'pool.executor = async' <<<"$async_output"; then
+        && grep -Fq "unknown pool.executor 'async'" <<<"$async_output"; then
         record unsupported-configuration PASS "classic rejected fiber.isolate_statics and async executor was rejected"
     else
         detail="classic status=$unsupported_status, async status=$async_status; classic output: $output; async output: $async_output"

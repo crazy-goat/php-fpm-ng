@@ -545,9 +545,7 @@ previously appeared every 1-6 rounds), and the full suite result is
 `1d002fbff74530876245e2d055662de7c13acfc5ecd77569ee1c9c4c5ab1729d`, source
 commit `d617976` — all four `pm2-*` scenarios pass their data assertions in
 the same run, including `pm2-stateful-auth` round 2 (cookie replay).
-`pool.executor = async` has the same latent pattern in
-`fpm_pool_async.c` and is currently a rejected configuration; it needs the
-same treatment before it can be enabled.
+The `async` executor had the same latent pattern; it was deleted (issue #623).
 
 ---
 

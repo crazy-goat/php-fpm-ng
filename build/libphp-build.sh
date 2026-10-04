@@ -235,7 +235,7 @@ off_reason() {
   USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
   PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
   FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
-  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS|HAVE_FPMNG_ASYNC|FPMNG_ASYNC_ENGINE)
+  HAVE_FPMNG_FIBER|HAVE_FPMNG_FIBER_TLS)
                                 echo "branch async: the executors need patches 0007/0008 inside libphp, which is the distribution's file; from-source builds only (async/README.md)" ;;
   *) return 1 ;;
   esac
@@ -342,12 +342,12 @@ sources() {
     case "$(basename "$f")" in
       fpm_tls_*) [ "$FPMNG_TLS" = 1 ] || continue ;;
       fpm_acme_*) [ "$FPMNG_ACME" = 1 ] || continue ;;
-      # Branch async: the fiber/coop/async executors are never part of this
+      # Branch async: the fiber/coop executors are never part of this
       # build. They need patches 0007/0008 inside libphp, which is the
       # distribution's file, so they are built only by the from-source flow
       # (async/build-tree.sh). Same prefixes as async/prepare.sh. The tree
       # still carries their headers (fpm_pool_type_coop.c includes them).
-      fpm_pool_fiber*|fpm_pool_coop*|fpm_pool_async*) continue ;;
+      fpm_pool_fiber*|fpm_pool_coop*) continue ;;
     esac
     echo "$TREE/sapi/fpmng/$f"
   done

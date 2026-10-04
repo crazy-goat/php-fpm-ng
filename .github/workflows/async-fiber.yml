@@ -1,6 +1,6 @@
 name: async-fiber
 
-# Branch `async` only (issue #620). The fiber/coop/async executors need two
+# Branch `async` only (issue #620). The fiber/coop executor needs two
 # php-src patches (async/patches/0007, 0008) that a distribution libphp cannot
 # carry, so they are built the old way, from a php-src tree prepared by
 # async/prepare.sh. main's build-matrix.yml knows nothing about this: it builds
@@ -22,10 +22,6 @@ on:
         description: "Commit to build and test"
         type: string
         required: true
-      with_async:
-        description: "Also configure and assert --enable-fpmng-async"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -132,21 +128,13 @@ jobs:
         env:
           CC: ccache gcc
           CXX: ccache g++
-          WITH_ASYNC: ${{ inputs.with_async && '1' || '' }}
         run: |
-          extra="--enable-fpmng-fiber"
-          if [ -n "$WITH_ASYNC" ]; then extra="$extra --enable-fpmng-async"; fi
           # shellcheck disable=SC2086 -- the flag lists are meant to word-split
-          ./async/build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS $extra
+          ./async/build-tree.sh "$PHPSRC" "$PHP_SRC_REPO" "$PHP_SRC_REF" $FPMNG_CONFIGURE_FLAGS --enable-fpmng-fiber
 
-      - name: assert the executors are really in this build
-        env:
-          WITH_ASYNC: ${{ inputs.with_async && '1' || '' }}
+      - name: assert the executor is really in this build
         run: |
           grep -q "fiber-based multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
-          if [ -n "$WITH_ASYNC" ]; then
-            grep -q "async multi-request executor in fpm-ng\.\.\. yes" "$PHPSRC/.fpmng-ci-configure.log"
-          fi
 
       - name: build
         env:

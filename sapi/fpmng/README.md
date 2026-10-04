@@ -9,8 +9,6 @@ Our files. The rest of the SAPI is copied from upstream `sapi/fpm/` by
 | `fpm/fpm.c` | hook `fpm_http_init_main()` in `fpm_run()` — the attachment point for pool types |
 | `fpm/fpm_http.c` | HTTP gateway |
 | `fpm/fpm_http.h` | |
-| `fpm/fpm_pool_async.c` | POC `pool.executor = async` for `http` — the True Async implementation stays in the tree, but validation rejects the executor until it has the required hardening (NOTES 3t, `docs/async_errors.md`) |
-| `fpm/fpm_pool_async.h` | |
 | `fpm/fpm_pool_coop.c` | shared request state for the experimental multi-request executors |
 | `fpm/fpm_pool_coop.h` | |
 | `fpm/fpm_pool_fiber.c` | EXPERIMENT: `pool.executor = fiber` for `http` on upstream PHP, libevent scheduler (NOTES 3u) |

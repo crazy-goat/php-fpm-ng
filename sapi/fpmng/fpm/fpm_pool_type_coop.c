@@ -1,4 +1,4 @@
-/* fpm-ng: the fiber/async executor variants. See fpm_pool_type_coop.h for
+/* fpm-ng: the fiber executor variant. See fpm_pool_type_coop.h for
  * why this is a separate file from fpm_pool_type.c and what stays stable
  * across a build with either flag, both, or neither.
  */
@@ -10,7 +10,6 @@
 #include "fpm.h"
 #include "fpm_pool_type.h"
 #include "fpm_pool_type_coop.h"
-#include "fpm_pool_async.h"
 #include "fpm_pool_coop.h"
 #include "fpm_pool_coop_statics.h"
 #include "fpm_pool_fiber.h"
@@ -35,8 +34,8 @@ static int fpm_pool_type_coop_fiber_validate(struct fpm_worker_pool_s *wp)
 }
 #endif
 
-/* Both groups below exist only in a binary built with the corresponding flag
- * (--enable-fpmng-fiber / --enable-fpmng-async, both default "no"). Without
+/* The group below exists only in a binary built with the flag
+ * (--enable-fpmng-fiber, default "no"). Without
  * the flag the sources are not compiled at all (see build/prepare.sh and
  * sapi/fpmng/config.m4), so these structures are protected by the same
  * #ifdef -- fpm_pool_type_coop_variant() below hands back NULL for them
@@ -69,37 +68,11 @@ static const struct fpm_pool_type_s fpm_pool_fastcgi_fiber = {
 };
 #endif /* HAVE_FPMNG_FIBER */
 
-#ifdef HAVE_FPMNG_ASYNC
-static const struct fpm_pool_type_s fpm_pool_fastcgi_async = {
-	.name = "fastcgi",
-	/* Issue #295. Experimental, one criterion short of beta in a way that is
-	 * cheap to state: no cell in CI builds --enable-fpmng-async at all (see
-	 * build-matrix.yml and issue #87), so criterion 1 of #269's bar -- tests
-	 * on every PR -- has nothing behind it here. */
-	.tier = FPM_TIER_EXPERIMENTAL,
-	.requires_listen = 1,
-	.requires_pm = 1,
-	.serves_requests = 1,
-	.serves_fastcgi = 1,
-	.baseline_counter = "requests",
-	.operator_endpoint = 1,
-	.rejects = fpm_pool_async_rejects,
-	.validate = fpm_pool_async_validate,
-	.child_main = fpm_pool_async_child_main,
-	.requests_per_child = 128,
-};
-#endif /* HAVE_FPMNG_ASYNC */
-
 const struct fpm_pool_type_s *fpm_pool_type_coop_variant(const char *type_name, const char *executor_name)
 {
 #ifdef HAVE_FPMNG_FIBER
 	if (!strcmp(executor_name, "fiber") && !strcmp(type_name, "fastcgi")) {
 		return &fpm_pool_fastcgi_fiber;
-	}
-#endif
-#ifdef HAVE_FPMNG_ASYNC
-	if (!strcmp(executor_name, "async") && !strcmp(type_name, "fastcgi")) {
-		return &fpm_pool_fastcgi_async;
 	}
 #endif
 	(void) type_name;

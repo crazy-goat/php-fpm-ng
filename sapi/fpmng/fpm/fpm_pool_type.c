@@ -266,9 +266,9 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.live_gauges                  = fpm_http_direct_worker_live_gauges,
 };
 
-/* pool.executor on pool.type = fastcgi. The fiber/async children speak
+/* pool.executor on pool.type = fastcgi. The fiber children speak
  * FastCGI on the pool's own listening socket, so since issue #388 split the
- * proxy out into pool.type = gateway they sit on the plain FastCGI type: in
+ * proxy out into pool.type = gateway it sits on the plain FastCGI type: in
  * front of a web server, or as an ordinary http.route[] target of a gateway.
  * The .type pointers are filled in by fpm_pool_type_install_coop_variants()
  * below; an executor built without its configure flag keeps its entry with
@@ -276,7 +276,6 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 static struct fpm_pool_executor_s fpm_fastcgi_executors[] = {
 	{ .name = "classic", .resolves_to_base = 1 },
 	{ .name = "fiber", .build_flag = "--enable-fpmng-fiber" },
-	{ .name = "async", .build_flag = "--enable-fpmng-async" },
 	{ .name = NULL }
 };
 

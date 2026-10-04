@@ -2,11 +2,12 @@
 # Issue #709: bin/worktree.sh --base, the branch a worktree is cut from.
 #
 # The option exists because a repository can carry a long-lived line the default
-# branch has no trace of; here that line is `async` and its work is fiber and coop
-# executors, 10 .phpt tests and async-fiber.yml, none of which `main` has. The
-# scenarios below drive the real bin/worktree.sh, never a reimplementation of it,
-# against a throwaway bare remote: a stub `gh` answers the two calls the script
-# makes (the default branch name and the issue), and jq reads the issue JSON.
+# branch has no trace of; here that line is `async`, and `main` has none of its 28
+# fpm_pool_fiber*/fpm_pool_coop* sources, none of its 9 fiber tests and no
+# async-fiber.yml (git ls-tree against origin/async and origin/main). The scenarios
+# below drive the real bin/worktree.sh, never a reimplementation of it, against a
+# throwaway bare remote: a stub `gh` answers the two calls the script makes (the
+# default branch name and the issue), and jq reads the issue JSON.
 #
 # Hermetic: git, bash, jq and coreutils only. No network, no PHP, no build. The
 # remote is a local bare repository in the temp dir, and nothing is pushed to it
@@ -59,7 +60,7 @@ mkdir -p "$STUB"
 cat >"$STUB/gh" <<'STUBEOF'
 #!/usr/bin/env bash
 case "$1 $2" in
-  "repo view") echo "${STUB_DEFAULT_BRANCH:-main}" ;;
+  "repo view") echo main ;;
   "issue view") echo '{"title":"worktree base scenario","labels":[{"name":"type:chore"}]}' ;;
   *) echo "stub gh: unexpected call: $*" >&2; exit 1 ;;
 esac
@@ -67,8 +68,7 @@ STUBEOF
 chmod +x "$STUB/gh"
 
 # run <clone> <issue> [worktree.sh args...]: runs the real script inside <clone>.
-# Sets $rc and $LOG. STUB_DEFAULT_BRANCH overrides what the stub reports, for the
-# case where the default branch is not called "main".
+# Sets $rc and $LOG.
 run() {
 	_clone=$1
 	_issue=$2
@@ -123,6 +123,23 @@ grep -q 'base branch does not exist on origin: no-such-branch' "$LOG" ||
 [ -z "$(git -C "$WORK/plain" branch --list '*issue-711*')" ] ||
 	fail 'the refused run created a branch'
 ok 'a base that is not on the remote is refused and creates nothing'
+
+# --- 3b. a base git would not accept as a branch name is refused -------------
+# The existence check is an ls-remote pattern, and git matches those as globs: "as*"
+# matches refs/heads/async, so before check-ref-format the run got past the check,
+# wrote refs/remotes/origin/async and only then died in the fetch. Nothing may happen
+# here, not even a mutated ref, so the ref list is compared instead of a directory.
+before=$(git -C "$WORK/plain" for-each-ref --format='%(refname) %(objectname)' | sort)
+run "$WORK/plain" 714 --base 'as*'
+[ "$rc" != 0 ] || fail 'a glob base was accepted'
+grep -q 'not a branch name: as\*' "$LOG" ||
+	{ cat "$LOG" >&2; fail 'no "not a branch name" diagnosis for a glob base'; }
+[ ! -e "$WORK/wt-714" ] || fail 'the refused run created the worktree directory'
+[ "$(git -C "$WORK/plain" for-each-ref --format='%(refname) %(objectname)' | sort)" = "$before" ] ||
+	fail 'the refused run changed a ref in the clone'
+[ -z "$(git -C "$WORK/plain" branch --list '*issue-714*')" ] ||
+	fail 'the refused run created a branch'
+ok 'a glob base is refused before anything is created'
 
 # --- 4. --base in a clone whose refspec is narrowed (issue #709, point 1) -----
 # `git clone --single-branch` narrows remote.origin.fetch to the one branch, and then

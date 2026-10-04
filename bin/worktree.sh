@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Create an isolated worktree for one issue and prepare its environment.
 #
-# Shared script: the source of truth is standard/worktree.sh in crazy-goat/.github. This
-# copy carries --base, which is not upstream yet, and is otherwise identical; a sync from
-# the standard has to keep --base or bring it back with it. build/test-worktree-base.sh
-# fails without the option, so a sync that drops it does not go unnoticed.
+# Shared script: the source of truth is standard/worktree.sh in crazy-goat/.github,
+# compared here at blob 529a8fc7 (no --base). This copy adds --base, and on the
+# default path two effects that come with it: one ls-remote round trip before the
+# fetch, and a "Base:" line in the output. No other divergence from that blob is
+# intended, so a sync from the standard has to carry --base with it. Nothing runs
+# build/test-worktree-base.sh on main, only on async, so on main a sync that drops
+# --base is not caught by anything.
 #
 # Usage: bin/worktree.sh [--dir <path>] [--base <branch>] <issue-number> [type]
 #   type:  feat|fix|docs|refactor|test|chore (default: derived from the type:* label)
@@ -35,6 +38,16 @@ done
 # further down it is read as the issue number, and the operator is told the issue is not a
 # number instead of being told that --base swallowed an option.
 [[ "$base" != -* ]] || { echo "--base needs a branch name: $base" >&2; exit 1; }
+# Git has to accept the name as a branch name before anything else looks at it. The ls-remote
+# below is a glob, so a base like "as*" matches refs/heads/async, passes the existence check
+# and only then dies in the fetch (measured); a name with a space or a `..` in it fails the
+# same way. Every branch name this repository uses is accepted (main, async,
+# release/v0.8.0, <type>/issue-<N>-<slug>), and git would refuse to create the ones this
+# rejects anyway.
+if [[ -n "$base" ]]; then
+  git check-ref-format --branch "$base" >/dev/null 2>&1 \
+    || { echo "not a branch name: $base" >&2; exit 1; }
+fi
 if [[ ${#args[@]} -lt 1 || ${#args[@]} -gt 2 ]]; then echo "$usage" >&2; exit 1; fi
 issue="${args[0]}"
 type="${args[1]:-}"
@@ -112,9 +125,10 @@ esac
 # the wildcard refspec, and a `git clone --single-branch` clone (or `git remote set-branches`)
 # narrows it to one branch. There the plain fetch writes FETCH_HEAD alone, origin/$base stays
 # unresolvable and `git worktree add` dies with "invalid reference" (measured). The leading +
-# keeps the update non-fast-forward-tolerant, as the wildcard refspec
-# (+refs/heads/*:refs/remotes/origin/*) also does; without it a rebased base is rejected and
-# the fetch exits 1 (measured).
+# forces the update, so a base that was rewritten (rebased) on the remote is taken instead of
+# refused; without it git rejects the non-fast-forward and the fetch exits 1, which under
+# `set -e` aborts the run before the worktree exists (measured). The wildcard refspec this
+# replaces carries the same +.
 git -C "$root" fetch origin "+refs/heads/$base:refs/remotes/origin/$base"
 git -C "$root" worktree add -b "$branch" "$dir" "origin/$base"
 

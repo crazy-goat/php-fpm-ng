@@ -89,6 +89,30 @@ gh run watch
 gh release view vX.Y.Z
 ```
 
+### A failed release run
+
+The `release` job can be re-run on its own (the re-run button next to the job, or
+`gh run rerun --job JOB_ID`), and doing that is safe: a draft release left behind by an
+interrupted run is completed and published, and a release that is already published is
+refused rather than overwritten. Fix forward with a new tag.
+
+That re-run downloads the `release-notes` artifact and the four `package-*` cells again, so
+it works while they are still there: a week (`retention-days: 7` in
+`.github/workflows/release.yml`, issue #679). The one day a `build-matrix.yml` artifact
+keeps is not enough here, because its consumer is a job in the same run and this one is a
+job that can be re-run on its own.
+
+Past the week the artifacts have expired and the re-run fails at `download-artifact` without
+publishing anything. Note that GitHub allows a re-run for 30 days after the run (GitHub,
+"Re-running workflows and jobs"), so the button can still be there with the artifacts gone.
+Then re-run everything, which builds and gates the packages again (about 13.5 min, measured
+2026-10-03):
+
+```bash
+gh run rerun RUN_ID
+gh run watch
+```
+
 ## 6. Close the milestone
 
 ```bash

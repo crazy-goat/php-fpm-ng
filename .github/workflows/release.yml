@@ -97,13 +97,18 @@ jobs:
           open('release-notes.md', 'w', encoding='utf-8').write(text + install)
           PY
 
+      # A week, not the one day fpmng-canonical-build gets in build-matrix.yml:
+      # the consumer of this one is a job that can be re-run on its own days
+      # after the run that produced it, and that is the re-run window (issue
+      # #679). Size is no argument against it: 3.7 kB, measured on 2026-10-04
+      # over the Actions API.
       - name: keep the release notes for the release job
         if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: release-notes.md
-          retention-days: 1
+          retention-days: 7
 
   # Issue #575: the four package-gate cells do not depend on each other, so they
   # run in parallel and a rehearsal takes the time of the slowest cell, not the
@@ -168,11 +173,22 @@ jobs:
           CELL_NAME: ${{ matrix.cell }}
         run: ./build/ci-package-gate.sh "$CELL_KIND" "$PWD/out-package-$CELL_NAME"
 
+      # A week, not the one day fpmng-canonical-build gets in build-matrix.yml.
+      # The consumer of these four is the `release` job, which a maintainer can
+      # re-run on its own, so this handoff has to outlive the run it comes from
+      # (issue #679).
+      #
+      # Not the storage issue #261 was about: that was 34 MB uploaded on every
+      # push of build-matrix.yml. Measured on 2026-10-04 over the Actions API,
+      # these four are 7.6 + 10.0 + 8.0 + 10.7 MB, so the six extra days cost
+      # about 220 MB per run, and this workflow runs on a tag and on rehearsals,
+      # not on every push. Artifact storage shares the pooled storage allowance
+      # that GitHub's pricing page marks "Free for public repositories".
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ matrix.cell }}
           path: out-package-${{ matrix.cell }}
-          retention-days: 1
+          retention-days: 7
 
   release:
     needs: [notes, packages]
@@ -236,9 +252,18 @@ jobs:
           retention-days: 14
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
-      # --verify-tag refuses to create a tag from a release. Re-run safe: a
-      # leftover draft (an interrupted run) is completed and published. A
-      # published release is never touched: fix forward with a new tag.
+      # --verify-tag refuses to create a tag from a release.
+      #
+      # Re-run safe, but only for as long as the two downloads above are still
+      # there (a week): a leftover draft (an interrupted run) is completed and
+      # published, and a re-run of this job alone picks the `notes` and
+      # `packages` artifacts up again. Past that window they have expired, the
+      # download fails and nothing is published -- re-run all jobs, which builds
+      # and re-gates the packages again (issue #679). GitHub allows the re-run
+      # for 30 days after the run, so the button can still be there with the
+      # artifacts gone.
+      #
+      # A published release is never touched: fix forward with a new tag.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:

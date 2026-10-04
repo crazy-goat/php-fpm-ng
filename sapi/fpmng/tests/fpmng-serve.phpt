@@ -257,8 +257,11 @@ $proc = proc_open([$binary, 'serve', '-n', '--root', "$app/public", '--listen', 
 check(is_resource($proc), 'rel: proc_open failed');
 try {
     waitUp($port, $proc, 'rel');
-    [$s, , $b] = get($port, '/second.php');
-    check($s === 200 && $b === 'second', "relative TMPDIR: $s " . var_export($b, true));
+    /* back to back on a one-worker pool: a second gateway process would hold a connection the only worker never serves (503) */
+    for ($i = 0; $i < 8; $i++) {
+        [$s, , $b] = get($port, '/second.php');
+        check($s === 200 && $b === 'second', "relative TMPDIR, request $i: $s " . var_export($b, true));
+    }
 } finally {
     stop($proc, $tmp, 'rel');
 }

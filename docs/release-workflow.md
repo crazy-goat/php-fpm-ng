@@ -105,8 +105,9 @@ job that can be re-run on its own.
 Past the week the artifacts have expired and the re-run fails at `download-artifact` without
 publishing anything. Note that GitHub allows a re-run for 30 days after the run (GitHub,
 "Re-running workflows and jobs"), so the button can still be there with the artifacts gone.
-Then re-run everything, which builds and gates the packages again (about 13.5 min, measured
-2026-10-03):
+Then re-run everything, which builds and gates the packages again -- about 13.5 min, from the
+v0.14.0 tag run on 2026-10-03 (run 37151892430, attempt 1); no re-run of this workflow has
+been timed:
 
 ```bash
 gh run rerun RUN_ID

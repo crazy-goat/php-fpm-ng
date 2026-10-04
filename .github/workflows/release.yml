@@ -178,12 +178,14 @@ jobs:
       # re-run on its own, so this handoff has to outlive the run it comes from
       # (issue #679).
       #
-      # Not the storage issue #261 was about: that was 34 MB uploaded on every
-      # push of build-matrix.yml. Measured on 2026-10-04 over the Actions API,
+      # Not the storage issue #261 was about: that was 34 MB uploaded once per
+      # run of build-matrix.yml. Measured on 2026-10-04 over the Actions API,
       # these four are 7.6 + 10.0 + 8.0 + 10.7 MB, so the six extra days cost
       # about 220 MB per run, and this workflow runs on a tag and on rehearsals,
-      # not on every push. Artifact storage shares the pooled storage allowance
-      # that GitHub's pricing page marks "Free for public repositories".
+      # not on every push. Nor is the money: Actions artifacts share one pooled
+      # storage allowance with GitHub Packages (GitHub, "GitHub Actions
+      # billing"), which is free in a public repository, which this repository
+      # is (github.com/pricing; both checked 2026-10-04).
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ matrix.cell }}

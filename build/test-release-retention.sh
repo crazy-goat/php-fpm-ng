@@ -84,8 +84,21 @@ while IFS=$'\t' read -r kind job name days; do
     if ! days=$(retention_of "$name"); then
         fail "the release job downloads '$name', which no job of $workflow uploads"
     fi
-    if [ -z "$days" ] || [ "$days" -lt "$MIN_DAYS" ]; then
-        fail "the release job downloads '$name', whose upload keeps ${days:-no retention-days}; re-running only the release job must work for $MIN_DAYS days (issue #679)"
+    # A plain YAML scalar ends at an unquoted ` #`, so a value that carries a
+    # comment is still that many days (`retention-days: 7 # a week` is 7) and
+    # must not be called a non-literal.
+    days=${days%% #*}
+    # `upload-artifact` takes any expression for retention-days, and
+    # `[ "$days" -lt 7 ]` answers 2 for one, which a `||` would read as "no
+    # problem": a non-literal has to fail here, not sail through. No
+    # retention-days at all is the same kind of undecided window, so it fails
+    # too, loudly, instead of taking the action's own default.
+    case "$days" in
+        '') fail "the release job downloads '$name', whose upload sets no retention-days; decide the re-run window there (issue #679)" ;;
+        *[!0-9]*) fail "the release job downloads '$name', whose upload sets retention-days to '$days'; this check reads a plain number of days (issue #679)" ;;
+    esac
+    if [ "$days" -lt "$MIN_DAYS" ]; then
+        fail "the release job downloads '$name', whose upload keeps $days days; re-running only the release job must work for $MIN_DAYS days (issue #679)"
     fi
     echo "  $name: ${days} days"
     checked=$((checked + 1))

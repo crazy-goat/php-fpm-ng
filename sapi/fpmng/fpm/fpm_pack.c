@@ -297,11 +297,15 @@ static int fpm_pack_write_output(const char *out, const char *self, const unsign
 	PHP_SHA256_CTX ctx;
 	char tmp[PATH_MAX + 32];
 	uint64_t self_size = 0;
+	mode_t mask;
 	int fd, chained = 0, rc;
 
 	if (snprintf(tmp, sizeof(tmp), "%s.tmp.XXXXXX", out) >= (int) sizeof(tmp)) {
 		return fpm_pack_fail("the output path is too long: %s", out, NULL);
 	}
+	/* Like cp and install: executable for whoever the umask lets read it. */
+	mask = umask(0);
+	umask(mask);
 	fd = mkstemp(tmp);
 	if (fd < 0) {
 		return fpm_pack_fail("cannot create a file next to '%s': %s", out, strerror(errno));
@@ -321,7 +325,7 @@ static int fpm_pack_write_output(const char *out, const char *self, const unsign
 	PHP_SHA256Final(record + 32, &ctx);
 	fpm_pack_put64(record + 64, chained ? self_size - FPM_PAYLOAD_RECORD_SIZE : 0);
 
-	if (fpm_pack_write_all(fd, archive, archive_len) != 0 || fpm_pack_write_all(fd, record, sizeof(record)) != 0 || fchmod(fd, 0755) != 0 || fsync(fd) != 0) {
+	if (fpm_pack_write_all(fd, archive, archive_len) != 0 || fpm_pack_write_all(fd, record, sizeof(record)) != 0 || fchmod(fd, 0777 & ~mask) != 0 || fsync(fd) != 0) {
 		rc = fpm_pack_fail("cannot write '%s': %s", tmp, strerror(errno));
 		goto fail;
 	}

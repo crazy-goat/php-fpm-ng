@@ -193,9 +193,40 @@ try {
         check(!file_exists($o) && glob("$o.tmp.*") === [], "$name: left a file at the output");
     }
 
+    $out_hash = hash_file('sha256', $out);
     [$status, $text] = run($binary, ['pack', $phar, $ini, $conf, '-o', $out]);
     check($status !== 0 && str_contains($text, 'already exists'), "existing output: $text");
-    check(hash_file('sha256', $out) === hash_file('sha256', $out2 = $out), 'existing output was modified');
+    check(hash_file('sha256', $out) === $out_hash, 'existing output was modified');
+
+    /* -o naming an input or the packing binary is "exists" too, and neither file may change. */
+    $hash_binary = hash_file('sha256', $binary);
+    $hash_conf = hash_file('sha256', $conf);
+    [$status, $text] = run($binary, ['pack', $phar, $ini, $conf, '-o', $conf]);
+    check($status !== 0 && str_contains($text, 'already exists'), "-o equal to an input: $text");
+    check(hash_file('sha256', $conf) === $hash_conf, '-o equal to an input changed the input');
+    [$status, $text] = run($binary, ['pack', $phar, $ini, $conf, '-o', $binary]);
+    check($status !== 0 && str_contains($text, 'already exists'), "-o equal to the binary: $text");
+    check(hash_file('sha256', $binary) === $hash_binary, '-o equal to the binary changed the binary');
+
+    /* Damaged artefacts. One flipped byte in the application data fails the digest; a truncated
+     * file loses its record, so there is no payload to find; a record that describes data outside
+     * the file is refused by `pack` itself. */
+    $good = file_get_contents($out);
+    $rec = records($out)[0];
+    $flip = $rec['offset'] + 20;
+    $bad = $good;
+    $bad[$flip] = chr(ord($bad[$flip]) ^ 1);
+    file_put_contents("$work/flipped", $bad);
+    $r = records("$work/flipped")[0];
+    check(hash('sha256', file_get_contents("$work/flipped", false, null, $r['offset'], $r['size']), true) !== $r['digest'], 'a flipped byte kept the digest valid');
+    file_put_contents("$work/truncated", substr($good, 0, -5));
+    check(records("$work/truncated") === [] || records("$work/truncated")[0]['kind'] !== 2, 'a truncated file still shows the application payload');
+    $bad = $good;
+    $bad[strlen($bad) - 72 + 31] = "\x7f";
+    file_put_contents("$work/oversize", $bad);
+    chmod("$work/oversize", 0755);
+    [$status, $text] = run("$work/oversize", ['pack', $phar, $ini, $conf, '-o', "$work/from-damaged"]);
+    check($status !== 0 && str_contains($text, 'broken') && !file_exists("$work/from-damaged"), "pack from a damaged record: $text");
 
     [$status, $text] = run($out, ['pack', $phar, $ini, $conf, '-o', "$work/again"]);
     check($status !== 0 && str_contains($text, 'already carries an application'), "repack: $text");

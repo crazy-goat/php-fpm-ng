@@ -1338,488 +1338,530 @@ static int fpm_conf_reject_renamed_operator_directives(struct fpm_worker_pool_s 
 	return 0;
 }
 
-static int fpm_conf_process_all_pools(void)
+/* Resolves pool.type and pool.executor once; from here on the callers use the
+ * requirements of the effective combination. Returns NULL when the pool cannot run. */
+static const struct fpm_pool_type_s *fpm_conf_resolve_pool_type(struct fpm_worker_pool_s *wp)
 {
-	struct fpm_worker_pool_s *wp, *wp2;
+	const struct fpm_pool_type_s *type;
 
-	if (!fpm_worker_all_pools) {
-		zlog(ZLOG_ERROR, "No pool defined. at least one pool section must be specified in config file");
+	type = fpm_pool_type_get(wp->config->type);
+	if (!type) {
+		const char *retired = fpm_pool_type_retired(wp->config->type);
+		char known[256];
+
+		if (retired) {
+			zlog(ZLOG_ALERT, "[pool %s] pool.type '%s' no longer exists: %s",
+				wp->config->name, wp->config->type, retired);
+			return NULL;
+		}
+
+		fpm_pool_type_list(known, sizeof(known));
+		zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
+			wp->config->name, wp->config->type, known);
+		return NULL;
+	}
+	if (0 > fpm_pool_type_check_configurable(wp, type)) {
+		return NULL;
+	}
+	if (0 > fpm_pool_type_validate_executor(wp)) {
+		return NULL;
+	}
+	type = fpm_pool_type_resolve(wp);
+	if (!type) {
+		return NULL;
+	}
+
+	return type;
+}
+
+/* prefix, renamed and unsupported directives, listen, the type's own validate(),
+ * user and process.priority. */
+static int fpm_conf_check_pool_basics(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+	/* prefix */
+	if (wp->config->prefix && *wp->config->prefix) {
+		fpm_evaluate_full_path(&wp->config->prefix, NULL, NULL, 0);
+
+		if (!fpm_conf_is_dir(wp->config->prefix)) {
+			zlog(ZLOG_ERROR, "[pool %s] the prefix '%s' does not exist or is not a directory", wp->config->name, wp->config->prefix);
+			return -1;
+		}
+	}
+
+	/* Issue #386: old operator directive names, refused by name before the
+	 * type's own reject list can report them generically. */
+	if (0 > fpm_conf_reject_renamed_operator_directives(wp, type)) {
 		return -1;
 	}
 
-	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
-		const struct fpm_pool_type_s *type;
+	/* Directives unsupported by this type — reject, do not ignore. */
+	if (0 > fpm_pool_type_check_directives(wp, type)) {
+		return -1;
+	}
 
-		/* pool.type + pool.executor — resolve once; from here on, use the
-		 * requirements of the effective combination. */
-		type = fpm_pool_type_get(wp->config->type);
-		if (!type) {
-			const char *retired = fpm_pool_type_retired(wp->config->type);
-			char known[256];
+	/* listen — resolved before type->validate() (fpmng: task 015) so that
+	 * wp->listen_address_domain is populated by the time a type's validate()
+	 * reads it. fpm_http_validate_pool() needs this to tell a TCP listen
+	 * (where http.listen may default to the FastCGI port + 1) from a unix
+	 * socket (where it can't); with the original upstream ordering
+	 * (validate() before listen) that check always saw the zero, unset
+	 * value — matching neither FPM_AF_UNIX nor FPM_AF_INET — and treated
+	 * every http pool as if it listened on a unix socket. This must still
+	 * run before type->validate(), because fpm_pool_supervisor_validate()
+	 * and its like set wp->config->pm/pm_max_children,
+	 * which the "pm" checks further below depend on — moving listen later
+	 * than those would work too, but moving validate() before listen would
+	 * reintroduce this bug. */
+	if (wp->config->listen_address && *wp->config->listen_address) {
+		wp->listen_address_domain = fpm_sockets_domain_from_address(wp->config->listen_address);
 
-			if (retired) {
-				zlog(ZLOG_ALERT, "[pool %s] pool.type '%s' no longer exists: %s",
-					wp->config->name, wp->config->type, retired);
+		if (wp->listen_address_domain == FPM_AF_UNIX && *wp->config->listen_address != '/') {
+			fpm_evaluate_full_path(&wp->config->listen_address, wp, NULL, 0);
+		}
+	} else if (type->requires_listen) {
+		zlog(ZLOG_ALERT, "[pool %s] no listen address have been defined!", wp->config->name);
+		return -1;
+	}
+
+	/* Type-specific checks. */
+	if (type->validate && 0 > type->validate(wp)) {
+		return -1;
+	}
+
+	/* alert if user is not set; only if we are root and fpm is not running with --allow-to-run-as-root */
+	if (!wp->config->user && !geteuid() && !fpm_globals.run_as_root) {
+		zlog(ZLOG_ALERT, "[pool %s] 'user' directive has not been specified when running as a root without --allow-to-run-as-root", wp->config->name);
+		return -1;
+	}
+
+	if (wp->config->process_priority != 64 && (wp->config->process_priority < -19 || wp->config->process_priority > 20)) {
+		zlog(ZLOG_ERROR, "[pool %s] process.priority must be included into [-19,20]", wp->config->name);
+		return -1;
+	}
+
+	return 0;
+}
+
+/* pm, pm.max_children and the dynamic and ondemand sub-checks. */
+static int fpm_conf_check_pool_pm(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+	/* pm */
+	if (type->requires_pm && wp->config->pm != PM_STYLE_STATIC && wp->config->pm != PM_STYLE_DYNAMIC && wp->config->pm != PM_STYLE_ONDEMAND) {
+		zlog(ZLOG_ALERT, "[pool %s] the process manager is missing (static, dynamic or ondemand)", wp->config->name);
+		return -1;
+	}
+
+	/* pm.max_children */
+	if (type->requires_pm && wp->config->pm_max_children < 1) {
+		zlog(ZLOG_ALERT, "[pool %s] pm.max_children must be a positive value", wp->config->name);
+		return -1;
+	}
+
+	/* pm.start_servers, pm.min_spare_servers, pm.max_spare_servers, pm.max_spawn_rate */
+	if (wp->config->pm == PM_STYLE_DYNAMIC) {
+		struct fpm_worker_pool_config_s *config = wp->config;
+
+		if (config->pm_min_spare_servers <= 0) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.min_spare_servers(%d) must be a positive value", wp->config->name, config->pm_min_spare_servers);
+			return -1;
+		}
+
+		if (config->pm_max_spare_servers <= 0) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.max_spare_servers(%d) must be a positive value", wp->config->name, config->pm_max_spare_servers);
+			return -1;
+		}
+
+		if (config->pm_min_spare_servers > config->pm_max_children ||
+				config->pm_max_spare_servers > config->pm_max_children) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.min_spare_servers(%d) and pm.max_spare_servers(%d) cannot be greater than pm.max_children(%d)", wp->config->name, config->pm_min_spare_servers, config->pm_max_spare_servers, config->pm_max_children);
+			return -1;
+		}
+
+		if (config->pm_max_spare_servers < config->pm_min_spare_servers) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.max_spare_servers(%d) must not be less than pm.min_spare_servers(%d)", wp->config->name, config->pm_max_spare_servers, config->pm_min_spare_servers);
+			return -1;
+		}
+
+		if (config->pm_start_servers <= 0) {
+			config->pm_start_servers = config->pm_min_spare_servers + ((config->pm_max_spare_servers - config->pm_min_spare_servers) / 2);
+			zlog(ZLOG_NOTICE, "[pool %s] pm.start_servers is not set. It's been set to %d.", wp->config->name, config->pm_start_servers);
+
+		} else if (config->pm_start_servers < config->pm_min_spare_servers || config->pm_start_servers > config->pm_max_spare_servers) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.start_servers(%d) must not be less than pm.min_spare_servers(%d) and not greater than pm.max_spare_servers(%d)", wp->config->name, config->pm_start_servers, config->pm_min_spare_servers, config->pm_max_spare_servers);
+			return -1;
+		}
+
+		if (config->pm_max_spawn_rate < 1) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.max_spawn_rate must be a positive value", wp->config->name);
+			return -1;
+		}
+	} else if (wp->config->pm == PM_STYLE_ONDEMAND) {
+		struct fpm_worker_pool_config_s *config = wp->config;
+
+		if (!fpm_event_support_edge_trigger()) {
+			zlog(ZLOG_ALERT, "[pool %s] ondemand process manager can ONLY be used when events.mechanism is either epoll (Linux) or kqueue (*BSD).", wp->config->name);
+			return -1;
+		}
+
+		if (config->pm_process_idle_timeout < 1) {
+			zlog(ZLOG_ALERT, "[pool %s] pm.process_idle_timeout(%ds) must be greater than 0s", wp->config->name, config->pm_process_idle_timeout);
+			return -1;
+		}
+
+		if (config->listen_backlog < FPM_BACKLOG_DEFAULT) {
+			zlog(ZLOG_WARNING, "[pool %s] listen.backlog(%d) was too low for the ondemand process manager. I updated it for you to %d.", wp->config->name, config->listen_backlog, FPM_BACKLOG_DEFAULT);
+			config->listen_backlog = FPM_BACKLOG_DEFAULT;
+		}
+
+		/* certainly useless but proper */
+		config->pm_start_servers = 0;
+		config->pm_min_spare_servers = 0;
+		config->pm_max_spare_servers = 0;
+	}
+
+	return 0;
+}
+
+/* The operator endpoint's directives and pm.status_path. */
+static int fpm_conf_check_pool_operator(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type)
+{
+	/* status and metrics -- the operator endpoint's directives (issue #386:
+	 * they left the "pm." namespace, which never described them).
+	 *
+	 * On a type that carries its own operator endpoint (#273, #274), the
+	 * operator.* directives say where THAT endpoint binds, and the pool
+	 * they bind is created by fpm_operator_endpoint.c. FastCGI opts in via
+	 * fpm_pool_type_s.operator_endpoint (issue #383); its upstream
+	 * pm.status_path remains a separate FastCGI-socket handler, since that
+	 * directive is not in the operator.* namespace after issue #386.
+	 * Whether a type has the listener is data on the type, never a name
+	 * compared here. */
+	if (type->operator_endpoint) {
+		if (0 > fpm_operator_endpoint_configure(wp, type)) {
+			return -1;
+		}
+	} else {
+		/* Refused rather than ignored, and this is a behaviour change:
+		 * until issue #278, pm.status_listen on these types auto-allocated
+		 * a second pool named <pool>_status, pm = ondemand,
+		 * pm.max_children = 2, speaking FastCGI and inheriting this pool's
+		 * user, group, status path, ping path and allowed clients. That
+		 * pool is gone -- #274 puts an operator endpoint on the types that
+		 * need one without a second pool, and keeping both would be two
+		 * answers to one question. A config that relied on it must now
+		 * restrict pm.status_path at the web server that is already in
+		 * front, so the error says so rather than starting a master that
+		 * quietly no longer has the pool the operator is scraping. */
+		static const char *const unsupported[] = {
+			"operator.status_path", "operator.status_listen",
+			"operator.metrics_path", "operator.metrics_listen",
+			"operator.metrics", "operator.status"
+		};
+		size_t i;
+
+		for (i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
+			if (fpm_conf_directive_was_set(wp->config, unsupported[i])) {
+				zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s: that type has no "
+					"operator listener of its own, because it has a web server in front of it -- "
+					"keep 'pm.status_path' on the pool's own socket and restrict it there",
+					wp->config->name, unsupported[i], type->name);
 				return -1;
 			}
+		}
+	}
 
-			fpm_pool_type_list(known, sizeof(known));
-			zlog(ZLOG_ALERT, "[pool %s] unknown pool.type '%s'; known types: %s",
-				wp->config->name, wp->config->type, known);
-			return -1;
-		}
-		if (0 > fpm_pool_type_check_configurable(wp, type)) {
-			return -1;
-		}
-		if (0 > fpm_pool_type_validate_executor(wp)) {
-			return -1;
-		}
-		type = fpm_pool_type_resolve(wp);
-		if (!type) {
+	if (wp->config->pm_status_path && *wp->config->pm_status_path) {
+		size_t i;
+		char *status = wp->config->pm_status_path;
+
+		if (*status != '/') {
+			zlog(ZLOG_ERROR, "[pool %s] the status path '%s' must start with a '/'", wp->config->name, status);
 			return -1;
 		}
 
-		/* prefix */
-		if (wp->config->prefix && *wp->config->prefix) {
-			fpm_evaluate_full_path(&wp->config->prefix, NULL, NULL, 0);
+		if (strlen(status) < 2) {
+			zlog(ZLOG_ERROR, "[pool %s] the status path '%s' is not long enough", wp->config->name, status);
+			return -1;
+		}
 
-			if (!fpm_conf_is_dir(wp->config->prefix)) {
-				zlog(ZLOG_ERROR, "[pool %s] the prefix '%s' does not exist or is not a directory", wp->config->name, wp->config->prefix);
+		for (i = 0; i < strlen(status); i++) {
+			if (!isalnum((unsigned char)status[i]) && status[i] != '/' && status[i] != '-' && status[i] != '_' && status[i] != '.' && status[i] != '~') {
+				zlog(ZLOG_ERROR, "[pool %s] the status path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, status);
+				return -1;
+			}
+		}
+	}
+
+	return 0;
+}
+
+/* ping.path, ping.response, access.log and access.format. */
+static int fpm_conf_check_pool_ping_access_log(struct fpm_worker_pool_s *wp)
+{
+	/* ping */
+	if (wp->config->ping_path && *wp->config->ping_path) {
+		char *ping = wp->config->ping_path;
+		size_t i;
+
+		if (*ping != '/') {
+			zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' must start with a '/'", wp->config->name, ping);
+			return -1;
+		}
+
+		if (strlen(ping) < 2) {
+			zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' is not long enough", wp->config->name, ping);
+			return -1;
+		}
+
+		for (i = 0; i < strlen(ping); i++) {
+			if (!isalnum((unsigned char)ping[i]) && ping[i] != '/' && ping[i] != '-' && ping[i] != '_' && ping[i] != '.' && ping[i] != '~') {
+				zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, ping);
 				return -1;
 			}
 		}
 
-		/* Issue #386: old operator directive names, refused by name before the
-		 * type's own reject list can report them generically. */
-		if (0 > fpm_conf_reject_renamed_operator_directives(wp, type)) {
-			return -1;
-		}
-
-		/* Directives unsupported by this type — reject, do not ignore. */
-		if (0 > fpm_pool_type_check_directives(wp, type)) {
-			return -1;
-		}
-
-		/* listen — resolved before type->validate() (fpmng: task 015) so that
-		 * wp->listen_address_domain is populated by the time a type's validate()
-		 * reads it. fpm_http_validate_pool() needs this to tell a TCP listen
-		 * (where http.listen may default to the FastCGI port + 1) from a unix
-		 * socket (where it can't); with the original upstream ordering
-		 * (validate() before listen) that check always saw the zero, unset
-		 * value — matching neither FPM_AF_UNIX nor FPM_AF_INET — and treated
-		 * every http pool as if it listened on a unix socket. This must still
-		 * run before type->validate(), because fpm_pool_supervisor_validate()
-		 * and its like set wp->config->pm/pm_max_children,
-		 * which the "pm" checks further below depend on — moving listen later
-		 * than those would work too, but moving validate() before listen would
-		 * reintroduce this bug. */
-		if (wp->config->listen_address && *wp->config->listen_address) {
-			wp->listen_address_domain = fpm_sockets_domain_from_address(wp->config->listen_address);
-
-			if (wp->listen_address_domain == FPM_AF_UNIX && *wp->config->listen_address != '/') {
-				fpm_evaluate_full_path(&wp->config->listen_address, wp, NULL, 0);
-			}
-		} else if (type->requires_listen) {
-			zlog(ZLOG_ALERT, "[pool %s] no listen address have been defined!", wp->config->name);
-			return -1;
-		}
-
-		/* Type-specific checks. */
-		if (type->validate && 0 > type->validate(wp)) {
-			return -1;
-		}
-
-		/* alert if user is not set; only if we are root and fpm is not running with --allow-to-run-as-root */
-		if (!wp->config->user && !geteuid() && !fpm_globals.run_as_root) {
-			zlog(ZLOG_ALERT, "[pool %s] 'user' directive has not been specified when running as a root without --allow-to-run-as-root", wp->config->name);
-			return -1;
-		}
-
-		if (wp->config->process_priority != 64 && (wp->config->process_priority < -19 || wp->config->process_priority > 20)) {
-			zlog(ZLOG_ERROR, "[pool %s] process.priority must be included into [-19,20]", wp->config->name);
-			return -1;
-		}
-
-		/* pm */
-		if (type->requires_pm && wp->config->pm != PM_STYLE_STATIC && wp->config->pm != PM_STYLE_DYNAMIC && wp->config->pm != PM_STYLE_ONDEMAND) {
-			zlog(ZLOG_ALERT, "[pool %s] the process manager is missing (static, dynamic or ondemand)", wp->config->name);
-			return -1;
-		}
-
-		/* pm.max_children */
-		if (type->requires_pm && wp->config->pm_max_children < 1) {
-			zlog(ZLOG_ALERT, "[pool %s] pm.max_children must be a positive value", wp->config->name);
-			return -1;
-		}
-
-		/* pm.start_servers, pm.min_spare_servers, pm.max_spare_servers, pm.max_spawn_rate */
-		if (wp->config->pm == PM_STYLE_DYNAMIC) {
-			struct fpm_worker_pool_config_s *config = wp->config;
-
-			if (config->pm_min_spare_servers <= 0) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.min_spare_servers(%d) must be a positive value", wp->config->name, config->pm_min_spare_servers);
-				return -1;
-			}
-
-			if (config->pm_max_spare_servers <= 0) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.max_spare_servers(%d) must be a positive value", wp->config->name, config->pm_max_spare_servers);
-				return -1;
-			}
-
-			if (config->pm_min_spare_servers > config->pm_max_children ||
-					config->pm_max_spare_servers > config->pm_max_children) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.min_spare_servers(%d) and pm.max_spare_servers(%d) cannot be greater than pm.max_children(%d)", wp->config->name, config->pm_min_spare_servers, config->pm_max_spare_servers, config->pm_max_children);
-				return -1;
-			}
-
-			if (config->pm_max_spare_servers < config->pm_min_spare_servers) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.max_spare_servers(%d) must not be less than pm.min_spare_servers(%d)", wp->config->name, config->pm_max_spare_servers, config->pm_min_spare_servers);
-				return -1;
-			}
-
-			if (config->pm_start_servers <= 0) {
-				config->pm_start_servers = config->pm_min_spare_servers + ((config->pm_max_spare_servers - config->pm_min_spare_servers) / 2);
-				zlog(ZLOG_NOTICE, "[pool %s] pm.start_servers is not set. It's been set to %d.", wp->config->name, config->pm_start_servers);
-
-			} else if (config->pm_start_servers < config->pm_min_spare_servers || config->pm_start_servers > config->pm_max_spare_servers) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.start_servers(%d) must not be less than pm.min_spare_servers(%d) and not greater than pm.max_spare_servers(%d)", wp->config->name, config->pm_start_servers, config->pm_min_spare_servers, config->pm_max_spare_servers);
-				return -1;
-			}
-
-			if (config->pm_max_spawn_rate < 1) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.max_spawn_rate must be a positive value", wp->config->name);
-				return -1;
-			}
-		} else if (wp->config->pm == PM_STYLE_ONDEMAND) {
-			struct fpm_worker_pool_config_s *config = wp->config;
-
-			if (!fpm_event_support_edge_trigger()) {
-				zlog(ZLOG_ALERT, "[pool %s] ondemand process manager can ONLY be used when events.mechanism is either epoll (Linux) or kqueue (*BSD).", wp->config->name);
-				return -1;
-			}
-
-			if (config->pm_process_idle_timeout < 1) {
-				zlog(ZLOG_ALERT, "[pool %s] pm.process_idle_timeout(%ds) must be greater than 0s", wp->config->name, config->pm_process_idle_timeout);
-				return -1;
-			}
-
-			if (config->listen_backlog < FPM_BACKLOG_DEFAULT) {
-				zlog(ZLOG_WARNING, "[pool %s] listen.backlog(%d) was too low for the ondemand process manager. I updated it for you to %d.", wp->config->name, config->listen_backlog, FPM_BACKLOG_DEFAULT);
-				config->listen_backlog = FPM_BACKLOG_DEFAULT;
-			}
-
-			/* certainly useless but proper */
-			config->pm_start_servers = 0;
-			config->pm_min_spare_servers = 0;
-			config->pm_max_spare_servers = 0;
-		}
-
-		/* status and metrics -- the operator endpoint's directives (issue #386:
-		 * they left the "pm." namespace, which never described them).
-		 *
-		 * On a type that carries its own operator endpoint (#273, #274), the
-		 * operator.* directives say where THAT endpoint binds, and the pool
-		 * they bind is created by fpm_operator_endpoint.c. FastCGI opts in via
-		 * fpm_pool_type_s.operator_endpoint (issue #383); its upstream
-		 * pm.status_path remains a separate FastCGI-socket handler, since that
-		 * directive is not in the operator.* namespace after issue #386.
-		 * Whether a type has the listener is data on the type, never a name
-		 * compared here. */
-		if (type->operator_endpoint) {
-			if (0 > fpm_operator_endpoint_configure(wp, type)) {
-				return -1;
-			}
+		if (!wp->config->ping_response) {
+			wp->config->ping_response = strdup("pong");
 		} else {
-			/* Refused rather than ignored, and this is a behaviour change:
-			 * until issue #278, pm.status_listen on these types auto-allocated
-			 * a second pool named <pool>_status, pm = ondemand,
-			 * pm.max_children = 2, speaking FastCGI and inheriting this pool's
-			 * user, group, status path, ping path and allowed clients. That
-			 * pool is gone -- #274 puts an operator endpoint on the types that
-			 * need one without a second pool, and keeping both would be two
-			 * answers to one question. A config that relied on it must now
-			 * restrict pm.status_path at the web server that is already in
-			 * front, so the error says so rather than starting a master that
-			 * quietly no longer has the pool the operator is scraping. */
-			static const char *const unsupported[] = {
-				"operator.status_path", "operator.status_listen",
-				"operator.metrics_path", "operator.metrics_listen",
-				"operator.metrics", "operator.status"
-			};
-			size_t i;
-
-			for (i = 0; i < sizeof(unsupported) / sizeof(unsupported[0]); i++) {
-				if (fpm_conf_directive_was_set(wp->config, unsupported[i])) {
-					zlog(ZLOG_ALERT, "[pool %s] '%s' is not supported by pool.type = %s: that type has no "
-						"operator listener of its own, because it has a web server in front of it -- "
-						"keep 'pm.status_path' on the pool's own socket and restrict it there",
-						wp->config->name, unsupported[i], type->name);
-					return -1;
-				}
-			}
-		}
-
-		if (wp->config->pm_status_path && *wp->config->pm_status_path) {
-			size_t i;
-			char *status = wp->config->pm_status_path;
-
-			if (*status != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] the status path '%s' must start with a '/'", wp->config->name, status);
+			if (strlen(wp->config->ping_response) < 1) {
+				zlog(ZLOG_ERROR, "[pool %s] the ping response page '%s' is not long enough", wp->config->name, wp->config->ping_response);
 				return -1;
 			}
+		}
+	} else {
+		if (wp->config->ping_response) {
+			free(wp->config->ping_response);
+			wp->config->ping_response = NULL;
+		}
+	}
 
-			if (strlen(status) < 2) {
-				zlog(ZLOG_ERROR, "[pool %s] the status path '%s' is not long enough", wp->config->name, status);
-				return -1;
-			}
+	/* access.log, access.format */
+	if (wp->config->access_log && *wp->config->access_log) {
+		fpm_evaluate_full_path(&wp->config->access_log, wp, NULL, 0);
+		if (!wp->config->access_format) {
+			wp->config->access_format = strdup("%R - %u %t \"%m %r\" %s");
+		}
+	}
 
-			for (i = 0; i < strlen(status); i++) {
-				if (!isalnum((unsigned char)status[i]) && status[i] != '/' && status[i] != '-' && status[i] != '_' && status[i] != '.' && status[i] != '~') {
-					zlog(ZLOG_ERROR, "[pool %s] the status path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, status);
-					return -1;
-				}
-			}
+	return 0;
+}
+
+/* request_terminate_timeout, slowlog and request_slowlog_*. */
+static int fpm_conf_check_pool_timeouts(struct fpm_worker_pool_s *wp)
+{
+	if (wp->config->request_terminate_timeout) {
+		fpm_globals.heartbeat = fpm_globals.heartbeat ? MIN(fpm_globals.heartbeat, (wp->config->request_terminate_timeout * 1000) / 3) : (wp->config->request_terminate_timeout * 1000) / 3;
+	}
+
+	/* slowlog */
+	if (wp->config->slowlog && *wp->config->slowlog) {
+		fpm_evaluate_full_path(&wp->config->slowlog, wp, NULL, 0);
+	}
+
+	/* request_slowlog_timeout */
+	if (wp->config->request_slowlog_timeout) {
+#if HAVE_FPM_TRACE
+		if (! (wp->config->slowlog && *wp->config->slowlog)) {
+			zlog(ZLOG_ERROR, "[pool %s] 'slowlog' must be specified for use with 'request_slowlog_timeout'", wp->config->name);
+			return -1;
+		}
+#else
+		static int warned = 0;
+
+		if (!warned) {
+			zlog(ZLOG_WARNING, "[pool %s] 'request_slowlog_timeout' is not supported on your system",	wp->config->name);
+			warned = 1;
 		}
 
-		/* ping */
-		if (wp->config->ping_path && *wp->config->ping_path) {
-			char *ping = wp->config->ping_path;
-			size_t i;
+		wp->config->request_slowlog_timeout = 0;
+#endif
 
-			if (*ping != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' must start with a '/'", wp->config->name, ping);
-				return -1;
-			}
-
-			if (strlen(ping) < 2) {
-				zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' is not long enough", wp->config->name, ping);
-				return -1;
-			}
-
-			for (i = 0; i < strlen(ping); i++) {
-				if (!isalnum((unsigned char)ping[i]) && ping[i] != '/' && ping[i] != '-' && ping[i] != '_' && ping[i] != '.' && ping[i] != '~') {
-					zlog(ZLOG_ERROR, "[pool %s] the ping path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, ping);
-					return -1;
-				}
-			}
-
-			if (!wp->config->ping_response) {
-				wp->config->ping_response = strdup("pong");
-			} else {
-				if (strlen(wp->config->ping_response) < 1) {
-					zlog(ZLOG_ERROR, "[pool %s] the ping response page '%s' is not long enough", wp->config->name, wp->config->ping_response);
-					return -1;
-				}
-			}
-		} else {
-			if (wp->config->ping_response) {
-				free(wp->config->ping_response);
-				wp->config->ping_response = NULL;
-			}
-		}
-
-		/* access.log, access.format */
-		if (wp->config->access_log && *wp->config->access_log) {
-			fpm_evaluate_full_path(&wp->config->access_log, wp, NULL, 0);
-			if (!wp->config->access_format) {
-				wp->config->access_format = strdup("%R - %u %t \"%m %r\" %s");
-			}
-		}
-
-		if (wp->config->request_terminate_timeout) {
-			fpm_globals.heartbeat = fpm_globals.heartbeat ? MIN(fpm_globals.heartbeat, (wp->config->request_terminate_timeout * 1000) / 3) : (wp->config->request_terminate_timeout * 1000) / 3;
-		}
-
-		/* slowlog */
 		if (wp->config->slowlog && *wp->config->slowlog) {
-			fpm_evaluate_full_path(&wp->config->slowlog, wp, NULL, 0);
-		}
+			int fd;
 
-		/* request_slowlog_timeout */
-		if (wp->config->request_slowlog_timeout) {
-#if HAVE_FPM_TRACE
-			if (! (wp->config->slowlog && *wp->config->slowlog)) {
-				zlog(ZLOG_ERROR, "[pool %s] 'slowlog' must be specified for use with 'request_slowlog_timeout'", wp->config->name);
+			fd = open(wp->config->slowlog, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
+
+			if (0 > fd) {
+				zlog(ZLOG_SYSERROR, "Unable to create or open slowlog(%s)", wp->config->slowlog);
 				return -1;
 			}
+			close(fd);
+		}
+
+		fpm_globals.heartbeat = fpm_globals.heartbeat ? MIN(fpm_globals.heartbeat, (wp->config->request_slowlog_timeout * 1000) / 3) : (wp->config->request_slowlog_timeout * 1000) / 3;
+
+		if (wp->config->request_terminate_timeout && wp->config->request_slowlog_timeout > wp->config->request_terminate_timeout) {
+			zlog(ZLOG_ERROR, "[pool %s] 'request_slowlog_timeout' (%d) can't be greater than 'request_terminate_timeout' (%d)", wp->config->name, wp->config->request_slowlog_timeout, wp->config->request_terminate_timeout);
+			return -1;
+		}
+	}
+
+	/* request_slowlog_trace_depth */
+	if (wp->config->request_slowlog_trace_depth) {
+#if HAVE_FPM_TRACE
+		if (! (wp->config->slowlog && *wp->config->slowlog)) {
+			zlog(ZLOG_ERROR, "[pool %s] 'slowlog' must be specified for use with 'request_slowlog_trace_depth'", wp->config->name);
+			return -1;
+		}
 #else
-			static int warned = 0;
+		static int warned = 0;
 
-			if (!warned) {
-				zlog(ZLOG_WARNING, "[pool %s] 'request_slowlog_timeout' is not supported on your system",	wp->config->name);
-				warned = 1;
-			}
-
-			wp->config->request_slowlog_timeout = 0;
+		if (!warned) {
+			zlog(ZLOG_WARNING, "[pool %s] 'request_slowlog_trace_depth' is not supported on your system", wp->config->name);
+			warned = 1;
+		}
 #endif
 
-			if (wp->config->slowlog && *wp->config->slowlog) {
-				int fd;
+		if (wp->config->request_slowlog_trace_depth <= 0) {
+			zlog(ZLOG_ERROR, "[pool %s] 'request_slowlog_trace_depth' (%d) must be a positive value", wp->config->name, wp->config->request_slowlog_trace_depth);
+			return -1;
+		}
+	} else {
+		wp->config->request_slowlog_trace_depth = 20;
+	}
 
-				fd = open(wp->config->slowlog, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR);
+	return 0;
+}
 
-				if (0 > fd) {
-					zlog(ZLOG_SYSERROR, "Unable to create or open slowlog(%s)", wp->config->slowlog);
-					return -1;
-				}
-				close(fd);
-			}
+/* chroot and chdir. */
+static int fpm_conf_check_pool_paths(struct fpm_worker_pool_s *wp)
+{
+	/* chroot */
+	if (wp->config->chroot && *wp->config->chroot) {
 
-			fpm_globals.heartbeat = fpm_globals.heartbeat ? MIN(fpm_globals.heartbeat, (wp->config->request_slowlog_timeout * 1000) / 3) : (wp->config->request_slowlog_timeout * 1000) / 3;
+		fpm_evaluate_full_path(&wp->config->chroot, wp, NULL, 1);
 
-			if (wp->config->request_terminate_timeout && wp->config->request_slowlog_timeout > wp->config->request_terminate_timeout) {
-				zlog(ZLOG_ERROR, "[pool %s] 'request_slowlog_timeout' (%d) can't be greater than 'request_terminate_timeout' (%d)", wp->config->name, wp->config->request_slowlog_timeout, wp->config->request_terminate_timeout);
-				return -1;
-			}
+		if (*wp->config->chroot != '/') {
+			zlog(ZLOG_ERROR, "[pool %s] the chroot path '%s' must start with a '/'", wp->config->name, wp->config->chroot);
+			return -1;
 		}
 
-		/* request_slowlog_trace_depth */
-		if (wp->config->request_slowlog_trace_depth) {
-#if HAVE_FPM_TRACE
-			if (! (wp->config->slowlog && *wp->config->slowlog)) {
-				zlog(ZLOG_ERROR, "[pool %s] 'slowlog' must be specified for use with 'request_slowlog_trace_depth'", wp->config->name);
-				return -1;
-			}
-#else
-			static int warned = 0;
+		if (!fpm_conf_is_dir(wp->config->chroot)) {
+			zlog(ZLOG_ERROR, "[pool %s] the chroot path '%s' does not exist or is not a directory", wp->config->name, wp->config->chroot);
+			return -1;
+		}
+	}
 
-			if (!warned) {
-				zlog(ZLOG_WARNING, "[pool %s] 'request_slowlog_trace_depth' is not supported on your system", wp->config->name);
-				warned = 1;
-			}
-#endif
+	/* chdir */
+	if (wp->config->chdir && *wp->config->chdir) {
 
-			if (wp->config->request_slowlog_trace_depth <= 0) {
-				zlog(ZLOG_ERROR, "[pool %s] 'request_slowlog_trace_depth' (%d) must be a positive value", wp->config->name, wp->config->request_slowlog_trace_depth);
-				return -1;
-			}
-		} else {
-			wp->config->request_slowlog_trace_depth = 20;
+		fpm_evaluate_full_path(&wp->config->chdir, wp, NULL, 0);
+
+		if (*wp->config->chdir != '/') {
+			zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' must start with a '/'", wp->config->name, wp->config->chdir);
+			return -1;
 		}
 
-		/* chroot */
-		if (wp->config->chroot && *wp->config->chroot) {
+		if (wp->config->chroot) {
+			char *buf;
 
-			fpm_evaluate_full_path(&wp->config->chroot, wp, NULL, 1);
+			spprintf(&buf, 0, "%s/%s", wp->config->chroot, wp->config->chdir);
 
-			if (*wp->config->chroot != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] the chroot path '%s' must start with a '/'", wp->config->name, wp->config->chroot);
-				return -1;
-			}
-
-			if (!fpm_conf_is_dir(wp->config->chroot)) {
-				zlog(ZLOG_ERROR, "[pool %s] the chroot path '%s' does not exist or is not a directory", wp->config->name, wp->config->chroot);
-				return -1;
-			}
-		}
-
-		/* chdir */
-		if (wp->config->chdir && *wp->config->chdir) {
-
-			fpm_evaluate_full_path(&wp->config->chdir, wp, NULL, 0);
-
-			if (*wp->config->chdir != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' must start with a '/'", wp->config->name, wp->config->chdir);
-				return -1;
-			}
-
-			if (wp->config->chroot) {
-				char *buf;
-
-				spprintf(&buf, 0, "%s/%s", wp->config->chroot, wp->config->chdir);
-
-				if (!fpm_conf_is_dir(buf)) {
-					zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' within the chroot path '%s' ('%s') does not exist or is not a directory", wp->config->name, wp->config->chdir, wp->config->chroot, buf);
-					efree(buf);
-					return -1;
-				}
-
+			if (!fpm_conf_is_dir(buf)) {
+				zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' within the chroot path '%s' ('%s') does not exist or is not a directory", wp->config->name, wp->config->chdir, wp->config->chroot, buf);
 				efree(buf);
-			} else {
-				if (!fpm_conf_is_dir(wp->config->chdir)) {
-					zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' does not exist or is not a directory", wp->config->name, wp->config->chdir);
-					return -1;
-				}
+				return -1;
+			}
+
+			efree(buf);
+		} else {
+			if (!fpm_conf_is_dir(wp->config->chdir)) {
+				zlog(ZLOG_ERROR, "[pool %s] the chdir path '%s' does not exist or is not a directory", wp->config->name, wp->config->chdir);
+				return -1;
 			}
 		}
+	}
 
-		/* security.limit_extensions */
-		if (!wp->config->security_limit_extensions) {
-			wp->config->security_limit_extensions = strdup(".php .phar");
+	return 0;
+}
+
+/* security.limit_extensions and the expansion of env[], php_value[] and
+ * php_admin_value[]. */
+static int fpm_conf_prepare_pool_runtime(struct fpm_worker_pool_s *wp)
+{
+	/* security.limit_extensions */
+	if (!wp->config->security_limit_extensions) {
+		wp->config->security_limit_extensions = strdup(".php .phar");
+	}
+
+	if (*wp->config->security_limit_extensions) {
+		int nb_ext;
+		char *ext;
+		char *security_limit_extensions;
+		char *limit_extensions;
+
+
+		/* strdup because strtok(3) alters the string it parses */
+		security_limit_extensions = strdup(wp->config->security_limit_extensions);
+		limit_extensions = security_limit_extensions;
+		nb_ext = 0;
+
+		/* find the number of extensions */
+		while (strtok(limit_extensions, " \t")) {
+			limit_extensions = NULL;
+			nb_ext++;
 		}
+		free(security_limit_extensions);
 
-		if (*wp->config->security_limit_extensions) {
-			int nb_ext;
-			char *ext;
-			char *security_limit_extensions;
-			char *limit_extensions;
+		/* if something found */
+		if (nb_ext > 0) {
 
+			/* malloc the extension array */
+			wp->limit_extensions = malloc(sizeof(char *) * (nb_ext + 1));
+			if (!wp->limit_extensions) {
+				zlog(ZLOG_ERROR, "[pool %s] unable to malloc extensions array", wp->config->name);
+				return -1;
+			}
 
 			/* strdup because strtok(3) alters the string it parses */
 			security_limit_extensions = strdup(wp->config->security_limit_extensions);
 			limit_extensions = security_limit_extensions;
 			nb_ext = 0;
 
-			/* find the number of extensions */
-			while (strtok(limit_extensions, " \t")) {
+			/* parse the string and save the extension in the array */
+			while ((ext = strtok(limit_extensions, " \t"))) {
 				limit_extensions = NULL;
-				nb_ext++;
+				wp->limit_extensions[nb_ext++] = strdup(ext);
 			}
+
+			/* end the array with NULL in order to parse it */
+			wp->limit_extensions[nb_ext] = NULL;
 			free(security_limit_extensions);
+		}
+	}
 
-			/* if something found */
-			if (nb_ext > 0) {
+	/* env[], php_value[], php_admin_values[] */
+	if (!wp->config->chroot) {
+		struct key_value_s *kv;
+		static const char *const options[] = FPM_PHP_INI_TO_EXPAND;
 
-				/* malloc the extension array */
-				wp->limit_extensions = malloc(sizeof(char *) * (nb_ext + 1));
-				if (!wp->limit_extensions) {
-					zlog(ZLOG_ERROR, "[pool %s] unable to malloc extensions array", wp->config->name);
-					return -1;
+		for (kv = wp->config->php_values; kv; kv = kv->next) {
+			for (const char *const*p = options; *p; p++) {
+				if (!strcasecmp(kv->key, *p)) {
+					fpm_evaluate_full_path(&kv->value, wp, NULL, 0);
 				}
-
-				/* strdup because strtok(3) alters the string it parses */
-				security_limit_extensions = strdup(wp->config->security_limit_extensions);
-				limit_extensions = security_limit_extensions;
-				nb_ext = 0;
-
-				/* parse the string and save the extension in the array */
-				while ((ext = strtok(limit_extensions, " \t"))) {
-					limit_extensions = NULL;
-					wp->limit_extensions[nb_ext++] = strdup(ext);
-				}
-
-				/* end the array with NULL in order to parse it */
-				wp->limit_extensions[nb_ext] = NULL;
-				free(security_limit_extensions);
 			}
 		}
-
-		/* env[], php_value[], php_admin_values[] */
-		if (!wp->config->chroot) {
-			struct key_value_s *kv;
-			static const char *const options[] = FPM_PHP_INI_TO_EXPAND;
-
-			for (kv = wp->config->php_values; kv; kv = kv->next) {
-				for (const char *const*p = options; *p; p++) {
-					if (!strcasecmp(kv->key, *p)) {
-						fpm_evaluate_full_path(&kv->value, wp, NULL, 0);
-					}
-				}
+		for (kv = wp->config->php_admin_values; kv; kv = kv->next) {
+			if (!strcasecmp(kv->key, "error_log") && !strcasecmp(kv->value, "syslog")) {
+				continue;
 			}
-			for (kv = wp->config->php_admin_values; kv; kv = kv->next) {
-				if (!strcasecmp(kv->key, "error_log") && !strcasecmp(kv->value, "syslog")) {
-					continue;
-				}
-				for (const char *const*p = options; *p; p++) {
-					if (!strcasecmp(kv->key, *p)) {
-						fpm_evaluate_full_path(&kv->value, wp, NULL, 0);
-					}
+			for (const char *const*p = options; *p; p++) {
+				if (!strcasecmp(kv->key, *p)) {
+					fpm_evaluate_full_path(&kv->value, wp, NULL, 0);
 				}
 			}
 		}
 	}
 
-	/* ensure 2 pools do not use the same listening address */
+	return 0;
+}
+
+/* Two pools must not share a listening address. */
+static int fpm_conf_check_unique_listen(void)
+{
+	struct fpm_worker_pool_s *wp, *wp2;
+
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		for (wp2 = fpm_worker_all_pools; wp2; wp2 = wp2->next) {
 			if (wp == wp2) {
@@ -1833,6 +1875,29 @@ static int fpm_conf_process_all_pools(void)
 		}
 	}
 	return 0;
+}
+
+static int fpm_conf_process_all_pools(void)
+{
+	struct fpm_worker_pool_s *wp;
+
+	if (!fpm_worker_all_pools) {
+		zlog(ZLOG_ERROR, "No pool defined. at least one pool section must be specified in config file");
+		return -1;
+	}
+
+	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+		const struct fpm_pool_type_s *type = fpm_conf_resolve_pool_type(wp);
+
+		if (!type || 0 > fpm_conf_check_pool_basics(wp, type) || 0 > fpm_conf_check_pool_pm(wp, type)
+				|| 0 > fpm_conf_check_pool_operator(wp, type) || 0 > fpm_conf_check_pool_ping_access_log(wp)
+				|| 0 > fpm_conf_check_pool_timeouts(wp) || 0 > fpm_conf_check_pool_paths(wp)
+				|| 0 > fpm_conf_prepare_pool_runtime(wp)) {
+			return -1;
+		}
+	}
+
+	return fpm_conf_check_unique_listen();
 }
 
 int fpm_conf_unlink_pid(void)

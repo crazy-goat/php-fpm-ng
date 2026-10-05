@@ -209,7 +209,6 @@ void fpm_http_pump(struct fpm_http_gateway_s *gw);
 static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
 /* Issue #390 review: the budget helpers below also maintain this process's own
  * upstreams_held gauge, defined with the other counter helpers further down. */
-static void fpm_http_counter_incr(atomic_t *counter);
 static void fpm_http_counter_decr(atomic_t *counter);
 static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
 
@@ -259,7 +258,7 @@ void fpm_http_budget_give_back(struct fpm_http_target_s *t)
  * refuses to start the gateway if the shm allocation failed, so this is a
  * defensive check, not a reachable path, kept only because every other
  * dereference of one of these fields in this file makes the same check. */
-static void fpm_http_counter_incr(atomic_t *counter)
+void fpm_http_counter_incr(atomic_t *counter)
 {
 	unsigned long value;
 
@@ -352,7 +351,7 @@ size_t fpm_http_counters_size(const struct fpm_http_counters_s *c)
  * the ACL/operator-namespace 403s. Null-safe so a gateway whose segment
  * allocation failed (and which fpm_http_target_init() refuses to start) cannot
  * turn a request into a crash. */
-static void fpm_http_count_local(struct fpm_http_gateway_s *gw)
+void fpm_http_count_local(struct fpm_http_gateway_s *gw)
 {
 	if (gw && gw->counters) {
 		fpm_http_counter_incr(&fpm_http_counters_slot_cells(gw->counters, gw->counters->nslots - 1)[0]);
@@ -480,7 +479,6 @@ static void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf,
 }
 
 const char *fpm_http_method_name(enum evhttp_cmd_type type);
-static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
 
 /* access.suppress_path[]: matched the same way ping.path is (see
  * fpm_http_serve_ping()) -- whole path, query string cut off, no
@@ -522,7 +520,7 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
  * a gateway with no http.route[] configured logs "-" on every line whether or
  * not the caller happens to know its one implicit target's name, which is
  * what keeps that gateway's log byte-for-byte what it was before this issue. */
-static void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target)
 {
 	if (!gw->access_log) {
@@ -704,7 +702,7 @@ static const char *fpm_http_request_path(struct evhttp_request *req)
  * (no percent-decoding), the query already cut off by libevent's parse. Returns
  * the length, or 0 when there is no path or it does not fit `path_size`-1
  * bytes (#534). */
-static size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size)
+size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size)
 {
 	const char *p = fpm_http_request_path(req);
 	size_t len;
@@ -1096,7 +1094,7 @@ static int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 
 /* ---------------------------------------------------------------- FastCGI -> response */
 
-static void fpm_http_conn_free(fpm_http_conn *c)
+void fpm_http_conn_free(fpm_http_conn *c)
 {
 	/* Issue #390: the connection's close callback is the connections_open
 	 * gauge's, not this request's -- it stays registered on fpm_http_client_s.
@@ -2820,103 +2818,13 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 	return hit;
 }
 
-/* ------------------------------------------------------------------ operator forwarding (issue #389) */
-
-/* The gateway's OWN effective operator base for one format -- the root the
- * <base>/<pool name> forwarding hangs under. It is exactly the effective
- * operator.metrics_path / operator.status_path for this pool (docs/gateway.md):
- * on the gateway those default to /metrics and /status (#388), operator.X = on
- * derives /metrics/<pool name>, and an explicit "" (or operator.X = off) turns
- * the format off, which turns its forwarding off with it because there is no
- * base to forward under. Returns a string the caller must not free (config, or
- * the literal defaults), or the derived form in `scratch`. NULL = off.
- *
- * Only called for a proxy_only pool, where the defaults apply; the branch is
- * written out here rather than asking fpm_operator_endpoint.c because the
- * validation side needs it BEFORE the operator endpoint is configured, and it
- * is four lines of the same decision. */
-const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
-	char *scratch, size_t scratch_len)
-{
-	const char *pathname = metrics ? "operator.metrics_path" : "operator.status_path";
-	const char *flagname = metrics ? "operator.metrics" : "operator.status";
-	const char *configured = metrics ? wp->config->operator_metrics_path : wp->config->operator_status_path;
-	int flag = metrics ? wp->config->operator_metrics : wp->config->operator_status;
-
-	if (configured && *configured) {
-		return configured;
-	}
-	if (fpm_conf_directive_was_set(wp->config, pathname)) {
-		return NULL;	/* explicit "" -- off; fpm_operator_endpoint.c logs the warning */
-	}
-	if (fpm_conf_directive_was_set(wp->config, flagname)) {
-		if (!flag) {
-			return NULL;	/* explicit operator.X = off is honoured, not overwritten by the default */
-		}
-		snprintf(scratch, scratch_len, "%s/%s", metrics ? "/metrics" : "/status", wp->config->name);
-		return scratch;
-	}
-	/* On the gateway both paths default to being set (#388). */
-	return metrics ? "/metrics" : "/status";
-}
-
-/* Does `path` (query already cut) fall in the operator namespace this gateway
- * owns? Both bases are checked; the bare base and anything below it are in.
- * "/metricsx" is not -- the check is on the segment boundary, so a route named
- * /metricsx is not shadowed. A path outside the namespace is routed normally;
- * one inside it is answered by the map or by the gateway's own 404, never
- * forwarded anywhere else. */
-static int fpm_http_operator_under_base(const struct fpm_http_gateway_s *gw, const char *path)
-{
-	const char *bases[2];
-	unsigned i;
-
-	bases[0] = gw->operator_metrics_base;
-	bases[1] = gw->operator_status_base;
-	for (i = 0; i < 2; i++) {
-		size_t len;
-
-		if (!bases[i]) {
-			continue;
-		}
-		len = strlen(bases[i]);
-		if (!strcmp(path, bases[i])) {
-			return 1;
-		}
-		if (!strncmp(path, bases[i], len) && path[len] == '/') {
-			return 1;
-		}
-	}
-	return 0;
-}
-
-/* The exact-match map lookup. No prefix matching here on purpose: only a pool
- * that exposed itself is in the map, so /metrics/api is forwarded and
- * /metrics/anything-else is the gateway's own 404. */
-static struct fpm_http_operator_entry_s *fpm_http_operator_lookup(struct fpm_http_gateway_s *gw,
-	const char *path)
-{
-	unsigned i;
-
-	for (i = 0; i < gw->noperator_entries; i++) {
-		/* .path and .target are both non-NULL for every published row (see
-		 * the INVARIANT on fpm_http_gateway_s.operator_entries); checked here
-		 * too so a lookup can never hand a caller a targetless entry. */
-		if (gw->operator_entries[i].path && gw->operator_entries[i].target
-				&& !strcmp(gw->operator_entries[i].path, path)) {
-			return &gw->operator_entries[i];
-		}
-	}
-	return NULL;
-}
-
 /* The shared tail of request dispatch: serialize the request for c->target (its
  * transport), then either answer a synchronous write failure or enqueue and
  * pump. Split out so a routed request and an operator-forwarded one -- which
  * set c->target and c->upstream_uri differently -- cannot drift. This is the
  * block fpm_http_request() used to inline; the comments explaining the order
  * live with the code that is still here. */
-static void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing)
+void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing)
 {
 	const char *target = c->log_target ? c->log_target : c->target->pool;
 	int error = c->target->ops->write_request(c, script_missing);
@@ -2963,131 +2871,6 @@ static void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, i
 		 * any other queued entry. */
 	}
 	fpm_http_pump(gw);
-}
-
-/* One request for the operator namespace of this gateway (issue #389).
- * Returns 1 when it answered (or took ownership of) the request, 0 when the
- * path is not in the namespace and normal handling should continue.
- *
- * Order, all of it load-bearing: this runs AFTER fpm_http_serve_ping() (a
- * ping is answered even if its path sits under a base) and BEFORE the static
- * lookup and routing, and the ACL is checked BEFORE the map lookup so a
- * stranger gets the same 403 for a pool that exists and one that does not.
- *
- * The map is exact-match on the RAW path (query cut, no percent-decoding) --
- * the same matcher ping.path and access.suppress_path[] use -- so "/%6detrics"
- * is not a way past it. A miss is a local 404 and never a forward: the
- * operator listener's own 404 lists every path it knows, which on loopback is
- * a convenience and on a public port would enumerate the pools. */
-static int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
-	const char *peer_addr, const char *effective_addr, const struct fpm_http_forwarded_result_s *fwd,
-	ev_uint16_t peer_port, struct fpm_http_client_s *client)
-{
-	const char *uri;
-	const char *query;
-	char path[512];
-	size_t path_len, local_len, query_len;
-	struct fpm_http_operator_entry_s *hit;
-	fpm_http_conn *c;
-	char *target_uri;
-
-	if (!gw->operator_enabled) {
-		return 0;
-	}
-	uri = evhttp_request_get_uri(req);
-	if (!uri) {
-		return 0;
-	}
-	/* Same libevent parse as the path and as the forwarded target (#534). */
-	{
-		const struct evhttp_uri *pu = evhttp_request_get_evhttp_uri(req);
-
-		query = pu ? evhttp_uri_get_query(pu) : NULL;
-	}
-	path_len = fpm_http_raw_path(req, path, sizeof(path));
-	if (!path_len) {
-		return 0;	/* empty, or too long to be one of this gateway's bases; route it */
-	}
-
-	if (!fpm_http_operator_under_base(gw, path)) {
-		return 0;
-	}
-
-	/* The ACL is about the direct network peer, exactly like gw->acl, and is
-	 * checked before the map so denied and nonexistent look the same. */
-	if (gw->operator_acl && !fpm_http_acl_check(gw->operator_acl, peer_addr)) {
-		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, "operator");
-		evhttp_send_error(req, 403, "Forbidden");
-		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
-		return 1;
-	}
-
-	hit = fpm_http_operator_lookup(gw, path);
-	if (!hit) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND, 0, "operator");
-		evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
-		fpm_http_count_local(gw);	/* #390: a miss is the gateway's own 404 */
-		return 1;
-	}
-
-	c = calloc(1, sizeof(*c));
-	if (!c) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
-		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
-		fpm_http_count_local(gw);
-		return 1;
-	}
-	c->gw = gw;
-	c->req = req;
-	c->evcon = evhttp_request_get_connection(req);
-	c->client = client;		/* #390: the connection's gauge node */
-	c->status = -1;
-	c->queue_wait_ms = -1;
-	c->fwd = *fwd;
-	c->peer_port = peer_port;
-	c->target = hit->target;
-	c->log_target = "operator";
-	if (peer_addr) {
-		strlcpy(c->peer_addr, peer_addr, sizeof(c->peer_addr));
-	}
-	if (effective_addr) {
-		strlcpy(c->remote_addr, effective_addr, sizeof(c->remote_addr));
-	}
-
-	/* The request line is rewritten to the operator listener's LOCAL path; the
-	 * query string is preserved because "?json"/"?full" is the status page
-	 * asked for a variant. Everything else about the request (method, body --
-	 * monitored pages are GETs) is serialized by the #344 HTTP transport. */
-	local_len = strlen(hit->local_uri);
-	/* `query` is evhttp_uri_get_query(): WITHOUT the leading '?'. The '?' is
-	 * written exactly once below -- writing it twice produced "/_m??json", and
-	 * the operator listener's fpm_operator_http_has_flag() then never matched
-	 * the variant. */
-	query_len = query ? strlen(query) + 1 : 0;
-	target_uri = malloc(local_len + query_len + 1);
-	if (!target_uri) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
-		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
-		fpm_http_conn_free(c);
-		fpm_http_count_local(gw);
-		return 1;
-	}
-	memcpy(target_uri, hit->local_uri, local_len);
-	if (query_len) {
-		target_uri[local_len] = '?';
-		memcpy(target_uri + local_len + 1, query, query_len - 1);
-	}
-	target_uri[local_len + query_len] = '\0';
-	c->upstream_uri_owned = target_uri;
-	c->upstream_uri = target_uri;
-
-	/* Issue #341's per-target counter describes traffic to a routed pool; an
-	 * operator target is not in gw->targets and never appears in that page, so
-	 * this only keeps the shared-struct field meaningful, it is not rendered. */
-	fpm_http_counter_incr(c->target->requests_total);
-
-	fpm_http_dispatch(gw, c, -1);
-	return 1;
 }
 
 void fpm_http_request(struct evhttp_request *req, void *arg)

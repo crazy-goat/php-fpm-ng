@@ -828,8 +828,6 @@ extern struct fpm_http_gateway_s *gateways;
 extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p);
 unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw);
-const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
-	char *scratch, size_t scratch_len);
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i);
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c);
@@ -837,12 +835,26 @@ size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc);
 void fpm_http_request(struct evhttp_request *req, void *arg);
 void fpm_http_plain_request(struct evhttp_request *req, void *arg);
 void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned index);
+void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target);
+void fpm_http_count_local(struct fpm_http_gateway_s *gw);
+void fpm_http_conn_free(fpm_http_conn *c);
+void fpm_http_counter_incr(atomic_t *counter);
+void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
+size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
 
 /* fpm_http_gw_proc.c */
 void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
 void fpm_http_cleanup(int which, void *arg);
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
+
+/* fpm_http_operator_fwd.c */
+const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
+	char *scratch, size_t scratch_len);
+int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+	const char *peer_addr, const char *effective_addr, const struct fpm_http_forwarded_result_s *fwd,
+	ev_uint16_t peer_port, struct fpm_http_client_s *client);
 
 /* fpm_http_route.c */
 void fpm_http_routes_free(struct fpm_http_gateway_s *gw);

@@ -811,12 +811,10 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len);
  * call at any time, including when nothing is paused. */
 void fpm_http_response_resume(fpm_http_conn *c);
 
-/* Issue #747: what fpm_http.c shares with the files it was split into
- * (fpm_http_route.c so far). Each group is named after the file that defines it. */
+/* Issue #747: what fpm_http.c shares with the files it was split into. Each
+ * group is named after the file that defines it. */
 
-/* fpm_http.c */
-extern struct fpm_http_gateway_s *gateways;
-extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
+/* shared constants */
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
 /* Issue #389: how many HTTP/1.1 connections the gateway may hold open to one
  * operator listener at a time. The operator endpoint is a single sequential
@@ -824,17 +822,27 @@ extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
  * so this is a guard against a burst of scrapes, not a per-worker reuse budget
  * like a target pool's pm.max_children. */
 #define FPM_HTTP_OPERATOR_UPSTREAMS 4
+
+/* fpm_http.c */
+extern struct fpm_http_gateway_s *gateways;
+extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p);
 unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw);
-void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
-void fpm_http_cleanup(int which, void *arg);
 const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
 	char *scratch, size_t scratch_len);
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i);
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
-int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c);
 size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc);
+void fpm_http_request(struct evhttp_request *req, void *arg);
+void fpm_http_plain_request(struct evhttp_request *req, void *arg);
+void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned index);
+
+/* fpm_http_gw_proc.c */
+void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
+void fpm_http_cleanup(int which, void *arg);
+int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
+void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 
 /* fpm_http_route.c */
 void fpm_http_routes_free(struct fpm_http_gateway_s *gw);

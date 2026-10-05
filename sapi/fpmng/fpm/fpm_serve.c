@@ -21,6 +21,9 @@
  * The from-source flow (build/prepare.sh) does not set the define, so this file
  * compiles to nothing there and `serve` is a Linux package feature.
  *
+ * `pack` (fpm_pack.c, issue #429) is dispatched from the same main(): it is a
+ * subcommand of the binary and needs the same hook ahead of the getopt loop.
+ *
  * THE TEMPORARY DIRECTORY
  *
  * It holds serve.conf and, in the default mode, the private unix socket between
@@ -47,6 +50,8 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
+
+#include "fpm_pack.h"
 
 #define FPM_SERVE_DIR_ENV "FPMNG_SERVE_DIR"
 #define FPM_SERVE_USAGE_EXIT 64 /* EX_USAGE, the same code upstream's usage exit uses */
@@ -526,6 +531,9 @@ int main(int argc, char *argv[])
 
 	if (argc >= 2 && strcmp(argv[1], "serve") == 0) {
 		return fpm_serve_main(argc, argv);
+	}
+	if (argc >= 2 && strcmp(argv[1], "pack") == 0) {
+		return fpm_pack_main(argc, argv);
 	}
 	/* A master that reloaded itself: its argument vector is already the
 	 * generated one, and the directory is still ours to remove. */

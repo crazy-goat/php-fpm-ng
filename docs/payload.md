@@ -82,6 +82,50 @@ the entry back to prove the append landed. It is idempotent: a binary that
 already carries the archive it would write is left alone, so a reused build
 tree does not collect one archive per run.
 
+## Packing an application
+
+```
+php-fpm-ng pack <app.phar> <php.ini> <fpm.conf> -o <output>
+```
+
+writes `<output>`: a copy of the running `php-fpm-ng` with the three files
+appended as one `kind=2` application payload. All three are mandatory and are
+stored byte for byte. Nothing is parsed or run: the PHAR and its stub are never
+opened by PHP, so packing executes no application code, and it needs no PHP CLI.
+
+```
+$ php-fpm-ng pack app.phar php.ini fpm.conf -o myapp
+php-fpm-ng pack: wrote myapp (PHAR 48213 bytes, php.ini 311 bytes, fpm.conf 702 bytes)
+$ php build/payload-pack.php list --binary=myapp
+kind=2 offset=1926447 size=49366 sha256=9c1f0e2a…
+kind=1 offset=1852560 size=73887 sha256=575a46e1a10b1678…
+```
+
+The payload is an archive with the entries `fpm.conf`, `php.ini` and `app.phar`,
+in that order. The distribution entry in front of it stays byte-identical.
+
+`pack` refuses, with a message naming the file, and writes nothing:
+
+- an input that is missing, unreadable, not a regular file or empty;
+- a PHAR without a `__HALT_COMPILER` marker, and a `php.ini` or `fpm.conf` with a
+  NUL byte;
+- an `<output>` that already exists (remove it first);
+- a running binary that already carries an application payload. Repack from an
+  unpacked `php-fpm-ng`; to upgrade, pack the new inputs with the new binary.
+
+The output is written under a temporary name next to it, read back with the same
+reader the runtime uses (including the SHA-256 check) and only then moved into
+place. The inputs are not validated beyond that: a PHAR that PHP cannot read, or
+an `fpm.conf` that `php-fpm-ng -t` rejects, is packed as it is. Run `-t` on the
+`fpm.conf` first.
+
+This is the packing half of the single-file application (epic #425). Running a
+packed executable is #430; until it lands, a packed `php-fpm-ng` behaves like the
+binary it was copied from. The same external requirements apply as for any
+`php-fpm-ng`: the output carries application code and configuration, and still
+needs the supported PHP runtime libraries and extensions on the host. Writable
+state (logs, cache, sessions, uploads) is not embedded.
+
 ## Appending your own
 
 ```
@@ -92,5 +136,4 @@ php build/payload-pack.php append --binary=PATH --kind=application \
 Appending never rewrites bytes an earlier append wrote: adding an application
 payload leaves the distribution entry, digest included, byte-identical. Only
 `--kind=distribution` is reachable from `fpmng-dist://`; the application kind
-is storage for the self-runner (`docs/NOTES.md` §"one file that contains the
-application") and has no configuration surface yet.
+is what `pack` writes (see above); it has no configuration surface yet.

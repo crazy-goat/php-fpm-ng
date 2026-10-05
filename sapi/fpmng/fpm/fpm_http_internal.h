@@ -838,10 +838,18 @@ void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned inde
 void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target);
 void fpm_http_count_local(struct fpm_http_gateway_s *gw);
-void fpm_http_conn_free(fpm_http_conn *c);
 void fpm_http_counter_incr(atomic_t *counter);
 void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
+void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
+		char *port_buf, size_t port_size);
+
+/* fpm_http_fcgi.c */
+void fpm_http_conn_free(fpm_http_conn *c);
 size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
+void fpm_http_normalize_target(struct evhttp_request *req);
+const char *fpm_http_request_path(struct evhttp_request *req);
+int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint);
+void fpm_http_finish_truncated(fpm_http_conn *c);
 
 /* fpm_http_gw_proc.c */
 void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);

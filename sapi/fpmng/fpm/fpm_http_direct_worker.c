@@ -98,6 +98,7 @@
 #include "SAPI.h"
 #include "fpm.h"
 #include "fpm_conf.h"
+#include "fpm_pack_run.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_worker.h"
@@ -1568,7 +1569,7 @@ static void fpm_worker_register_variables(zval *array)
 {
 	php_import_environment_variables(array);
 	php_register_variable("SCRIPT_FILENAME", fw.script, array);
-	php_register_variable("SCRIPT_NAME", fw.wp->config->http_front_controller, array);
+	php_register_variable("SCRIPT_NAME", fpm_pack_http_script_name(fw.wp->config->http_front_controller), array);
 	php_register_variable("DOCUMENT_ROOT", fw.root, array);
 	php_register_variable("SERVER_SOFTWARE", "php-fpm-ng/http-direct-worker", array);
 	php_register_variable("SERVER_ADDR", fw.server_addr, array);

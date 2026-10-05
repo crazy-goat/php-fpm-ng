@@ -61,6 +61,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_pool_type.h"
+#include "fpm_pack_run.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_pool_script.h"
 #include "fpm_pool_output_log.h"
@@ -444,6 +445,19 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (!c->supervisor_script || !*c->supervisor_script) {
 		zlog(ZLOG_ALERT, "[pool %s] pool.type = supervisor requires supervisor.script", c->name);
 		return -1;
+	}
+	if (fpm_pack_is_unresolved_path(c->supervisor_script)) {
+		zlog(ZLOG_ALERT, "[pool %s] supervisor.script '%s': fpmng-app:// names a file in the application PHAR, "
+			"and this php-fpm-ng carries none (see docs/payload.md)", c->name, c->supervisor_script);
+		return -1;
+	}
+	if (fpm_pack_is_app_path(c->supervisor_script)) {
+		const char *why = NULL;
+
+		if (0 > fpm_pack_validate_path(c->supervisor_script, &why)) {
+			zlog(ZLOG_ALERT, "[pool %s] supervisor.script '%s': %s", c->name, c->supervisor_script, why);
+			return -1;
+		}
 	}
 
 	if (!c->supervisor_restart || !*c->supervisor_restart) {

@@ -13,6 +13,7 @@ fpmng_skip_if_no_acme();
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-pack-app.inc";
 
 /* Issue #171. The acceptance criteria that can be checked without a CA:
  *
@@ -155,15 +156,13 @@ echo "config: a name that is not embedded is refused at startup\n";
 
 /* --- criterion 4: appending an application payload changes nothing ------- */
 $copy = sys_get_temp_dir() . '/fpmng-payload-copy-' . getmypid();
-check(copy($binary, $copy), 'cannot copy the binary');
-chmod($copy, 0700);
-
-$application = 'an application payload, contents irrelevant to this test';
-$offset = filesize($copy);
-$record = MAGIC . pack('V', KIND_APPLICATION) . pack('V', 0) . pack('P', $offset)
-    . pack('P', strlen($application)) . hash('sha256', $application, true)
-    . pack('P', $entries[0]['offset'] + $entries[0]['size']);
-file_put_contents($copy, $application . $record, FILE_APPEND);
+/* A real application payload (since #430 a packed binary reads it at startup,
+ * so a placeholder blob would be refused), written by `pack` itself. */
+$packDir = sys_get_temp_dir() . '/fpmng-payload-pack-' . getmypid();
+mkdir($packDir);
+fpmng_pack($binary, $packDir, fpmng_mini_phar(['index.php' => "<?php echo 1;\n"]), "extension=phar\n",
+    "[global]\nerror_log = /dev/null\n", $copy);
+rmdir($packDir);
 
 $after = records($copy);
 check(count($after) === count($entries) + 1, 'the appended entry did not join the chain');

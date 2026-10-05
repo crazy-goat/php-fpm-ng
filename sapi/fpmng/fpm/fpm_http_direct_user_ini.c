@@ -79,6 +79,7 @@
 #include "zend_hash.h"
 
 #include "fpm_http_direct_user_ini.h"
+#include "fpm_pack_run.h"
 #include "zlog.h"
 
 /* One entry per directory between root and dirname(script), inclusive. A
@@ -225,6 +226,13 @@ int fpm_http_direct_user_ini_init_child(const char *pool, const char *root, cons
 	memset(&fpm_direct_user_ini, 0, sizeof(fpm_direct_user_ini));
 	fpm_direct_user_ini.pool = pool;
 	fpm_direct_user_ini.initialised = 1;
+
+	/* A front controller inside the application PHAR (#430) has no directory
+	 * under the document root to scan; the archive is immutable, and the
+	 * embedded php.ini is where its settings belong. */
+	if (fpm_pack_is_app_path(script)) {
+		return 0;
+	}
 
 	/* The empty filename is how php.ini turns .user.ini off, here as
 	 * everywhere else. php_ini_has_per_dir_config() is checked per request

@@ -112,6 +112,7 @@
 #include "fpm_cron_schedule.h"
 #include "fpm_debug_clock.h"
 #include "fpm_payload_dist.h"
+#include "fpm_pack_run.h"
 #include "fpm_pool_watchdog.h"
 #include "fpm_events.h"
 #include "fpm_pool_script.h"
@@ -334,6 +335,19 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 		const char *why = NULL;
 
 		if (0 > fpm_payload_dist_validate(c->cron_script, &why)) {
+			zlog(ZLOG_ALERT, "[pool %s] cron.script '%s': %s", c->name, c->cron_script, why);
+			return -1;
+		}
+	}
+	if (fpm_pack_is_unresolved_path(c->cron_script)) {
+		zlog(ZLOG_ALERT, "[pool %s] cron.script '%s': fpmng-app:// names a file in the application PHAR, "
+			"and this php-fpm-ng carries none (see docs/payload.md)", c->name, c->cron_script);
+		return -1;
+	}
+	if (fpm_pack_is_app_path(c->cron_script)) {
+		const char *why = NULL;
+
+		if (0 > fpm_pack_validate_path(c->cron_script, &why)) {
 			zlog(ZLOG_ALERT, "[pool %s] cron.script '%s': %s", c->name, c->cron_script, why);
 			return -1;
 		}

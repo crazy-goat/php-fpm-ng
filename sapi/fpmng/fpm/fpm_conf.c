@@ -31,6 +31,7 @@
 #include "fpm_operator_endpoint.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
+#include "fpm_pack_run.h"
 #include "fpm_php.h"
 #include "fpm_sockets.h"
 #include "fpm_shm.h"
@@ -1877,6 +1878,10 @@ int fpm_conf_write_pid(void)
 static int fpm_conf_post_process(int force_daemon) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
+
+	if (0 > fpm_pack_check_runtime()) {
+		return -1;
+	}
 
 	if (fpm_global_config.pid_file) {
 		fpm_evaluate_full_path(&fpm_global_config.pid_file, NULL, PHP_LOCALSTATEDIR, 0);

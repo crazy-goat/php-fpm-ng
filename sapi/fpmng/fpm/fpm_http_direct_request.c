@@ -33,6 +33,7 @@
 #include "fpm_http_direct_request.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_acl.h"
+#include "fpm_pack_run.h"
 #include "zlog.h"
 
 /* Resolves the front controller (the worker script, under the worker
@@ -46,9 +47,25 @@ int fpm_http_direct_resolve_script(const char *base, const char *front_controlle
 {
 	char candidate[PATH_MAX];
 	struct stat st;
+	const char *why;
 
 	if (base ? !realpath(base, root) : !getcwd(root, PATH_MAX)) {
 		return -1;
+	}
+	if (fpm_pack_is_app_path(front_controller)) {
+		/* An entry of the application PHAR (#430) is not under the root and has
+		 * no realpath(): it is contained by being listed in the manifest, which
+		 * fpm_pack_validate_path() checks, and by the fixed spelling, which
+		 * keeps a request from choosing it. The root stays the chdir. */
+		if (fpm_pack_validate_path(front_controller, &why) < 0) {
+			zlog(ZLOG_ALERT, "http-direct: '%s': %s", front_controller, why);
+			return -1;
+		}
+		if (strlen(front_controller) >= PATH_MAX) {
+			return -1;
+		}
+		memcpy(script, front_controller, strlen(front_controller) + 1);
+		return 0;
 	}
 	if (snprintf(candidate, PATH_MAX, "%s%s", root, front_controller) >= PATH_MAX ||
 		!realpath(candidate, script) || stat(script, &st) < 0 || !S_ISREG(st.st_mode)) {
@@ -137,8 +154,19 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 		zlog(ZLOG_ALERT, "[pool %s] %s requires pm = static", c->name, labels->subject);
 		return -1;
 	}
-	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller || c->http_front_controller[0] != '/' ||
-		strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')) {
+	if (fpm_pack_is_unresolved_path(c->http_front_controller)) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.front_controller '%s': fpmng-app:// names a file in the application PHAR, "
+			"and this php-fpm-ng carries none (see docs/payload.md)", c->name, labels->subject, c->http_front_controller);
+		return -1;
+	}
+	if (fpm_pack_is_app_path(c->http_front_controller) && fpm_http_direct_declared(c->set_directives, "http.static") && c->http_static) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.static is not supported when http.front_controller is in the application PHAR "
+			"(public files inside a PHAR are not served)", c->name, labels->subject);
+		return -1;
+	}
+	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller ||
+		(c->http_front_controller[0] != '/' && !fpm_pack_is_app_path(c->http_front_controller)) ||
+		(!fpm_pack_is_app_path(c->http_front_controller) && (strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')))) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires an absolute chdir and a root-relative http.front_controller%s "
 			"without '..' or backslashes", c->name, labels->subject, labels->chdir_note);
 		return -1;
@@ -364,8 +392,8 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("REQUEST_URI", evhttp_request_get_uri(http));
 	ENV("QUERY_STRING", evhttp_uri_get_query(parsed));
 	ENV("SCRIPT_FILENAME", source->script);
-	ENV("SCRIPT_NAME", source->front_controller);
-	ENV("PHP_SELF", source->front_controller);
+	ENV("SCRIPT_NAME", fpm_pack_http_script_name(source->front_controller));
+	ENV("PHP_SELF", fpm_pack_http_script_name(source->front_controller));
 	ENV("PATH_INFO", evhttp_uri_get_path(parsed));
 	ENV("DOCUMENT_ROOT", source->root);
 	ENV("SERVER_PROTOCOL", protocol);

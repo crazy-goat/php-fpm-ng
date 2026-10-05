@@ -52,6 +52,7 @@
 #include <unistd.h>
 
 #include "fpm_pack.h"
+#include "fpm_pack_run.h"
 
 #define FPM_SERVE_DIR_ENV "FPMNG_SERVE_DIR"
 #define FPM_SERVE_USAGE_EXIT 64 /* EX_USAGE, the same code upstream's usage exit uses */
@@ -540,6 +541,12 @@ int main(int argc, char *argv[])
 	dir = getenv(FPM_SERVE_DIR_ENV);
 	if (dir != NULL && *dir != '\0' && fpm_serve_is_dir(dir)) {
 		fpm_serve_arm_cleanup(dir);
+		return fpmng_fpm_main(argc, argv);
+	}
+	/* A packed executable (#430) starts the application it carries; a binary
+	 * without one returns 0 here and goes on as before. */
+	if (fpm_pack_activate(&argc, &argv) < 0) {
+		return 78; /* EX_CONFIG */
 	}
 	return fpmng_fpm_main(argc, argv);
 }

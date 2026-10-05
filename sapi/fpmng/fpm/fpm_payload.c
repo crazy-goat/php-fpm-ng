@@ -34,6 +34,13 @@ static uint64_t fpm_payload_u64(const unsigned char *p)
 	return (uint64_t) fpm_payload_u32(p) | ((uint64_t) fpm_payload_u32(p + 4) << 32);
 }
 
+static const char *fpm_payload_argv0;
+
+void fpm_payload_set_argv0(const char *argv0)
+{
+	fpm_payload_argv0 = argv0;
+}
+
 const char *fpm_payload_self_path(void)
 {
 	static char resolved[4096];
@@ -76,9 +83,12 @@ const char *fpm_payload_self_path(void)
 	 * guessing which of several binaries is running -- refused rather than
 	 * guessed. */
 	resolved[0] = '\0';
-	if (fpm_globals.argv && fpm_globals.argv[0] && strchr(fpm_globals.argv[0], '/')) {
-		if (access(fpm_globals.argv[0], R_OK) == 0) {
-			snprintf(resolved, sizeof(resolved), "%s", fpm_globals.argv[0]);
+	if (fpm_payload_argv0 == NULL && fpm_globals.argv) {
+		fpm_payload_argv0 = fpm_globals.argv[0];
+	}
+	if (fpm_payload_argv0 && strchr(fpm_payload_argv0, '/')) {
+		if (access(fpm_payload_argv0, R_OK) == 0) {
+			snprintf(resolved, sizeof(resolved), "%s", fpm_payload_argv0);
 		}
 	}
 	return resolved[0] ? resolved : NULL;
@@ -182,6 +192,69 @@ int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *
 	*why = "the payload chain is longer than this build accepts";
 	fclose(fp);
 	return -1;
+}
+
+int fpm_payload_check_tail(const char *path, const char **why)
+{
+	unsigned char hdr[64], ph[56], record[FPM_PAYLOAD_MAGIC_SIZE];
+	uint64_t file_size, extent, phoff, shoff, phnum, shnum, phentsize, shentsize, i;
+	FILE *fp;
+	long size;
+
+	*why = NULL;
+	fp = fopen(path, "rb");
+	if (!fp) {
+		*why = strerror(errno);
+		return -1;
+	}
+	if (fseek(fp, 0, SEEK_END) != 0 || (size = ftell(fp)) < 0) {
+		*why = strerror(errno);
+		fclose(fp);
+		return -1;
+	}
+	file_size = (uint64_t) size;
+	if (file_size >= FPM_PAYLOAD_RECORD_SIZE && fseek(fp, (long) (file_size - FPM_PAYLOAD_RECORD_SIZE), SEEK_SET) == 0 &&
+			fread(record, 1, sizeof(record), fp) == sizeof(record) && memcmp(record, FPM_PAYLOAD_MAGIC, FPM_PAYLOAD_MAGIC_SIZE) == 0) {
+		fclose(fp);
+		return 0; /* a record ends the file; fpm_payload_find() validated the chain */
+	}
+	/* 64-bit little-endian ELF only (every platform this project supports);
+	 * anything else is not judged. */
+	if (fseek(fp, 0, SEEK_SET) != 0 || fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr) ||
+			memcmp(hdr, "\177ELF", 4) != 0 || hdr[4] != 2 || hdr[5] != 1) {
+		fclose(fp);
+		return 0;
+	}
+	phoff = fpm_payload_u64(hdr + 32);
+	shoff = fpm_payload_u64(hdr + 40);
+	phentsize = (uint64_t) hdr[54] | ((uint64_t) hdr[55] << 8);
+	phnum = (uint64_t) hdr[56] | ((uint64_t) hdr[57] << 8);
+	shentsize = (uint64_t) hdr[58] | ((uint64_t) hdr[59] << 8);
+	shnum = (uint64_t) hdr[60] | ((uint64_t) hdr[61] << 8);
+	extent = sizeof(hdr);
+	if (shoff && shnum && shoff + shentsize * shnum > extent) {
+		extent = shoff + shentsize * shnum;
+	}
+	if (phoff && phnum && phentsize >= sizeof(ph) && phoff + phentsize * phnum > extent) {
+		extent = phoff + phentsize * phnum;
+	}
+	for (i = 0; phoff && i < phnum && phnum <= 256 && phentsize >= sizeof(ph); i++) {
+		uint64_t end;
+
+		if (fseek(fp, (long) (phoff + i * phentsize), SEEK_SET) != 0 || fread(ph, 1, sizeof(ph), fp) != sizeof(ph)) {
+			break;
+		}
+		end = fpm_payload_u64(ph + 8) + fpm_payload_u64(ph + 32);
+		if (end > extent) {
+			extent = end;
+		}
+	}
+	fclose(fp);
+	if (file_size > extent) {
+		*why = "the file continues past the end of its ELF image with data that is not a payload record (a truncated or damaged packed executable?)";
+		return -1;
+	}
+	return 0;
 }
 
 int fpm_payload_read(const char *path, const struct fpm_payload_entry *entry,

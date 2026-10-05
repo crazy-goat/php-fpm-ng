@@ -9,6 +9,7 @@ if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux');
 <?php
 
 require_once "tester.inc";
+require_once "fpmng-pack-app.inc";
 
 /* Issue #429. `pack` is a subcommand of the binary, so the test runs the real
  * binary on three small files and then reads the result back with a reader
@@ -109,7 +110,7 @@ $phar = "$work/app.phar";
 $ini = "$work/php.ini";
 $conf = "$work/fpm.conf";
 $marker = "$work/stub-ran";
-$phar_bytes = "<?php\nfile_put_contents(" . var_export($marker, true) . ", 'ran');\n__HALT_COMPILER(); ?>\r\n" . random_bytes(300);
+$phar_bytes = fpmng_mini_phar(['index.php' => "<?php echo 1;\n"], "<?php\nfile_put_contents(" . var_export($marker, true) . ", 'ran');\n__HALT_COMPILER(); ?>\r\n");
 $ini_bytes = "; embedded\nmemory_limit = 64M\n";
 $conf_bytes = "[global]\ndaemonize = no\nerror_log = /dev/stderr\n";
 file_put_contents($phar, $phar_bytes);

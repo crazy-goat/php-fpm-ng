@@ -21,6 +21,7 @@
 #include "fpm_std_streams.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_payload_dist.h"
+#include "fpm_pack_run.h"
 #include "fpm_pool_type.h"
 #include "fpm_worker_pool.h"
 #include "fpm_stdio.h"
@@ -232,8 +233,11 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 
 		if (EG(exit_status) == 255) {
 			/* The wrapper above failed; there is nothing to open. */
-		} else if (fpm_payload_dist_is_path(script_path)) {
-			/* php_fopen_primary_script() cannot open this: it resolves the path
+		} else if (fpm_payload_dist_is_path(script_path) || fpm_pack_is_app_path(script_path)) {
+			/* An application PHAR entry (#430) takes the same road: a phar://
+			 * URL is not resolved by php_fopen_primary_script() either.
+			 *
+			 * php_fopen_primary_script() cannot open this: it resolves the path
 			 * through php_resolve_path(), which returns NULL for every scheme
 			 * except file:// (fopen_wrappers.c, "Don't resolve paths which
 			 * contain protocol"), and a NULL there is a FAILURE before any

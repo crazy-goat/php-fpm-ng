@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- New test `fpmng-reload-selective-operator-pid.phpt`: after a selective reload spared a pool, `/status?json&full` reports the carried-over worker as `live:1` with its own pid, and that worker is still the process serving requests afterwards (#631). Issue #631 reported the row reading `live:0, pid:0`; that no longer reproduces since #537, because the scoreboard survives the reload in a memfd and `fpm_reload_shm_prepare_adopt()` hands adoption the slot that already carries the worker's pid, so nothing has to stamp one. The test pins that, so a regression of the scoreboard carry-over is caught rather than discovered. No production change: the pid stamp #631 asked for changes nothing observable, so the issue is closed with the measurement instead.
+
 ### Fixed
 
 - `build/lint-c.sh` no longer lints `sapi/fpmng/fpm/fpm_tls_http_direct.c` against a build made without TLS: that file is compiled only with `FPMNG_TLS=1` and, unlike its guarded TLS siblings, has no `#ifdef HAVE_FPM_HTTP_TLS` fallback, so with a non-TLS flag set clang-tidy reported implicit declarations for what its headers hide. The skip is printed, a TLS build still lints the file, and CI (which builds with `FPMNG_TLS=1`) is unchanged. New hermetic `build/test-lint-c-tls-files.sh` (CI job `checks`) (#683).

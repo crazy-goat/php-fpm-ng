@@ -154,6 +154,18 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
+document root `SCRIPT_FILENAME` is built under) and, unless every routed path
+names an existing `.php` file, `http.front_controller` (the fallback script
+for paths that do not). With neither set, every request names a script that
+does not exist and the FastCGI upstream answers "Primary script unknown"; the
+master logs a WARNING saying so at startup.
+
+When every worker of a routed target is busy, the gateway answers `503` +
+`Retry-After` immediately (`http.pool_full_policy = reject`, the default);
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
+`wait` alternative.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
@@ -162,6 +174,29 @@ to a public address), IPv4-mapped IPv6 addresses and other non-loopback targets
 are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
+
+### Symlink deploys
+
+With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
+(`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
+document root with `realpath()` on every request that reaches the static-file
+lookup (#638): GET and HEAD for a path that is not `.php` and not a directory.
+Other requests, such as POST or `.php`, do not pay for it. The next
+request after the swap is served from the new release; no reload is needed.
+The containment check compares against the root resolved for that same
+request, so a symlink that leaves the release is still refused.
+
+`DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
+`chdir` path (`/srv/app/current/...`). PHP and OPcache resolve and cache that
+path themselves, so after a swap PHP may keep running the old release until its
+realpath cache (`realpath_cache_ttl`) or its OPcache entry expires, while
+static files already come from the new release. Not measured. A resolved
+variant (like nginx `$realpath_root`) is not implemented. Until it is, reset
+OPcache or reload the FastCGI pool in the deploy step. Also not measured: the
+cost of the extra `realpath()` per request.
+
+`http.front_controller` is checked against the document root only once, at
+startup, so that check stays pinned to the release that was live then.
 
 ### What the gateway type refuses
 

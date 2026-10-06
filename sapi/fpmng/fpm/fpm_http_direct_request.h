@@ -121,7 +121,7 @@ const char *fpm_http_direct_header_name_escape(const char *name, char *out, size
  * and returns false when it does not fit, leaving *total unchanged. */
 bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len);
 bool fpm_http_direct_status_final(long status);
-bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason);
+bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason);
 bool fpm_http_direct_status_bodyless(struct evhttp_request *http, int status);
 
 /* Client-certificate field formatting shared by fpm_connection_info() on both

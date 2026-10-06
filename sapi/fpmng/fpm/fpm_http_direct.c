@@ -656,7 +656,9 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 		if (!strcasecmp(name, "Status")) {
 			const char *reason;
 
-			if (!fpm_http_parse_cgi_status(value, &r->status, &reason) && !r->rejected) {
+			if (!fpm_http_parse_cgi_status(value, h->header_len - (size_t) (value - h->header), &r->status,
+					&reason) &&
+				!r->rejected) {
 				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%.64s', answering 502",
 					r->pool, value);
 				r->rejected = "invalid response Status";

@@ -1533,20 +1533,19 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
  * root, and respond without FastCGI.
  * ------------------------------------------------------------------------ */
 
-/* Resolved document root, once per gateway process. */
-static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
+/* Resolved document root for the one-time front controller check, into the
+ * caller's buffer. Static lookups do not use this: they hand gw->docroot to
+ * fpm_http_static_serve(), which resolves it per request (issue #638). It used
+ * to be cached in a function-level static, so a `current -> releases/N`
+ * symlink swap (Deployer, Envoyer, Capistrano) left static files coming from
+ * release N-1 while PHP ran release N. */
+static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw, char resolved[MAXPATHLEN])
 {
-	static char resolved[MAXPATHLEN];
-	static int done = 0;
-
-	if (!done) {
-		done = 1;
-		if (!realpath(gw->docroot, resolved)) {
-			resolved[0] = '\0';
-		}
+	if (!gw->docroot || !realpath(gw->docroot, resolved)) {
+		return NULL;
 	}
 
-	return resolved[0] ? resolved : NULL;
+	return resolved;
 }
 
 /* Validates http.front_controller once, in the master, before the first gateway
@@ -1569,14 +1568,19 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
  * calls this right after fpm_http_gateway_settings()); the master and every
  * gateway child share the same filesystem view for this pool (no chroot/chdir
  * happens between here and fpm_http_gateway_run()), so resolving the document
- * root here is exactly as valid as resolving it later in the child. */
+ * root here is exactly as valid as resolving it later in the child. That holds
+ * only for this one-time check: static lookups re-resolve the root per request,
+ * after their cheap early rejects,
+ * (issue #638), so after a symlink deploy front_controller_ok stays pinned to
+ * the release that was live at startup. */
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
 {
 	const char *fc = gw->front_controller;
 
 	gw->front_controller_ok = 0;
 	if (fc && *fc) {
-		const char *root = fpm_http_docroot_real(gw);
+		char root_buf[MAXPATHLEN];
+		const char *root = fpm_http_docroot_real(gw, root_buf);
 		char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
 
 		if (!root) {
@@ -1625,7 +1629,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 
 	memset(&st, 0, sizeof(st));
 	st.pool = gw->pool;
-	st.root = fpm_http_docroot_real(gw);	/* NULL when it does not resolve: nothing is served */
+	st.root_unresolved = gw->docroot;	/* resolved per request, after the cheap rejects; NULL or unresolvable serves nothing */
 	st.log = fpm_http_static_log_response;
 	st.log_ctx = &ctx;
 

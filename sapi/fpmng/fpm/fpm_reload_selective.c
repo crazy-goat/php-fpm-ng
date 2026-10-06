@@ -287,3 +287,67 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 }
 /* }}} */
+
+void fpm_reload_selective_discard_unadopted(void) /* {{{ */
+{
+	const char *existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
+	char *copy, *rest;
+	int killed = 0;
+
+	if (!existing || !*existing) {
+		return;
+	}
+
+	copy = strdup(existing);
+	/* Drop the variable first: whatever happens below, no later code path in
+	 * this process may find these pids again and treat them as its own. */
+	unsetenv(FPM_RELOAD_SELECTIVE_ENV);
+	if (!copy) {
+		return;
+	}
+
+	for (rest = copy; rest && *rest;) {
+		char *semi = strchr(rest, ';');
+		char *group = rest;
+		char *colon;
+		char *pid_list;
+
+		if (semi) {
+			*semi = '\0';
+			rest = semi + 1;
+		} else {
+			rest = NULL;
+		}
+
+		colon = strchr(group, ':');
+		if (!colon) {
+			continue;
+		}
+
+		for (pid_list = colon + 1; *pid_list;) {
+			char *comma = strchr(pid_list, ',');
+			pid_t pid;
+
+			if (comma) {
+				*comma = '\0';
+			}
+			pid = (pid_t) strtol(pid_list, NULL, 10);
+			pid_list = comma ? comma + 1 : pid_list + strlen(pid_list);
+
+			/* pid <= 1 is never a spared worker, and kill(2) reads 0 and -1
+			 * as "a whole process group" and "everything" (issue #567). */
+			if (pid > 1 && kill(pid, SIGTERM) == 0) {
+				killed++;
+			}
+		}
+	}
+
+	if (killed > 0) {
+		zlog(ZLOG_WARNING, "issue #690: this master is going down before it adopted %d child(ren) "
+						   "that a selective reload carried over; sent them SIGTERM so they do not "
+						   "outlive it holding their listening sockets",
+				killed);
+	}
+	free(copy);
+}
+/* }}} */

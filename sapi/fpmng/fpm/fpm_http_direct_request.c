@@ -15,6 +15,7 @@
  */
 #include "fpm_config.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,6 +32,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_acl.h"
 #include "fpm_pack_run.h"
@@ -416,58 +418,20 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("CONTENT_LENGTH", length);
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_HTTP_HEADER_NAME_MAX + sizeof("HTTP_")];
-		size_t i, len = strlen(kv->key);
+		char name[FPM_HTTP_HEADER_CGI_KEY_LEN];
+		int rc;
 
-		/* Content-* are already above under their CGI names; "Proxy" has no
-		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
-		 * several client libraries (httpoxy). */
-		if (!strcasecmp(kv->key, "Content-Type") || !strcasecmp(kv->key, "Content-Length") ||
-			!strcasecmp(kv->key, "Proxy")) {
-			continue;
-		}
-		if (len > FPM_HTTP_HEADER_NAME_MAX) {
+		/* CONTENT_TYPE is already above, from the first Content-Type header,
+		 * so the shared mapping (fpm_http_header_cgi.h) skips every
+		 * Content-Type line here: content_type_skip is 1. The skip rules, the
+		 * length bound and the upper-casing live there, not here. */
+		rc = fpm_http_header_cgi_key(kv->key, true, name, sizeof(name));
+		if (rc < 0) {
 			return -1;
 		}
-		/* "_" would collide with the "-" spelling below ("X_Real_IP" and
-		 * "X-Real-IP" are both HTTP_X_REAL_IP), letting a client override a
-		 * header the proxy in front set. Dropped, as nginx and Apache 2.4 do;
-		 * same rule as the gateway, fpm_http.c. Issue #595. */
-		if (memchr(kv->key, '_', len) != NULL) {
+		if (rc > 0) {
 			continue;
 		}
-		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in
-		 * this child, and the locale changes this mapping for plain US-ASCII
-		 * input. In tr_TR.UTF-8 and az_AZ.UTF-8 toupper('i') returns 'i' -- the
-		 * Turkish capital of 'i' is U+0130, which does not fit the single-byte
-		 * table -- so "If-Modified-Since" became HTTP_IF_MODiFiED_SiNCE and
-		 * nothing reading $_SERVER['HTTP_IF_MODIFIED_SINCE'] found it. Served and
-		 * measured on 192.168.8.50, glibc 2.43, php-8.5.9, 2026-09-09, with the
-		 * pre-fix binary. de_DE.ISO-8859-1 remaps 30 bytes above 0x7F on top of
-		 * that.
-		 *
-		 * Reachable through pool.executor = worker, where the boot script calls
-		 * setlocale() once and every later request's environment is derived
-		 * inside that same PHP request. Not reproducible on the classic executor
-		 * with today's php-src: ext/standard's request shutdown puts LC_ALL back
-		 * to "C" when setlocale() was called (ext/standard/basic_functions.c:448
-		 * in php-8.5.9), and request N+1's environment is built before its script
-		 * runs. That is upstream's bookkeeping, not a property of this transport,
-		 * so it is not what the mapping relies on: the CGI key a header lands
-		 * under is a security boundary -- the Proxy and Content-* exclusions
-		 * above are enforced by name -- and must not depend on process state the
-		 * application chose. Issue #105; same class as #102 on the response side. */
-		memcpy(name, "HTTP_", 5);
-		for (i = 0; i < len; i++) {
-			unsigned char c = (unsigned char) kv->key[i];
-
-			if (c >= 'a' && c <= 'z') {
-				name[5 + i] = (char) (c - ('a' - 'A'));
-			} else {
-				name[5 + i] = c == '-' ? '_' : (char) c;
-			}
-		}
-		name[5 + len] = '\0';
 		ENV(name, kv->value);
 	}
 #undef ENV
@@ -494,22 +458,54 @@ bool fpm_http_direct_status_final(long status)
 }
 
 /* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
- * digits. Only a final status (200..599, fpm_http_direct_status_final()) can
- * become the status line. The gateway's atoi() turned "abc" into 0 and
- * "99999" into itself and overflowed on a longer number. A 1xx became the
- * final answer, libevent dropped its body, and the client waited for a response
- * that never came (the shape of #451). *reason points into `value`, or ""
- * when absent. Issue #604 shares this parser with the buffered direct path. */
-bool fpm_http_parse_cgi_status(const char *value, int *code, const char **reason)
+ * digits, and only a final status (200..599, fpm_http_direct_status_final())
+ * may become the status line. atoi() turned "abc" into 0, "99999" into itself
+ * and overflowed on a longer number; a 1xx went out as the *final* answer, its
+ * body dropped by libevent, and the client waited for a response that never
+ * came (the shape of #451). *reason points into `value`, "" when absent.
+ *
+ * Issue #605: the reason goes out on the wire verbatim
+ * (evhttp_send_reply_start() frames whatever it is given), so it must not
+ * carry control bytes: an interior CR would split the status line, and
+ * anything below 0x20 or DEL has no business in a reason phrase. A bad
+ * reason is rejected (502, like a bad code) rather than stripped: stripping
+ * would silently rewrite what the upstream said, while the invalid_status
+ * path already logs the offending value, maps to 502 in the access log and
+ * drops the rest of the untrusted reply. The scan runs over all vlen bytes
+ * because `value` is strndup()ed: an embedded NUL would hide the tail from a
+ * strlen()-bounded loop while truncating the strdup() below, and '\n' cannot
+ * arrive at all (the caller splits lines on it), but '\r' (only the trailing
+ * one is stripped), NUL and the other controls can, from any non-PHP
+ * FastCGI upstream -- PHP's own header() already refuses CR, LF and NUL.
+ * The WARNING below names only the first 64 bytes up to any NUL; that
+ * truncation is accepted because the 502 decision does not depend on the
+ * logged text.
+ *
+ * Issue #604: one parser for the gateway and both HTTP-direct executors. */
+bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
 {
-	if (value[0] < '0' || value[0] > '9' || value[1] < '0' || value[1] > '9' || value[2] < '0' || value[2] > '9') {
+	size_t i;
+
+	if (vlen < 3 || !isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) ||
+			!isdigit((unsigned char) value[2])) {
 		return false;
 	}
-	if (value[3] != '\0' && value[3] != ' ') {
-		return false;
+	if (vlen == 3) {
+		*reason = "";
+	} else {
+		if (value[3] != ' ') {
+			return false;
+		}
+		for (i = 4; i < vlen; i++) {
+			unsigned char ch = (unsigned char) value[i];
+
+			if (ch < 0x20 || ch == 0x7f) {
+				return false;
+			}
+		}
+		*reason = value + 4;
 	}
 	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
-	*reason = value[3] == ' ' ? value + 4 : "";
 	return fpm_http_direct_status_final(*code);
 }
 

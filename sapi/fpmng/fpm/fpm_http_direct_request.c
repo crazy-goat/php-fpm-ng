@@ -15,6 +15,7 @@
  */
 #include "fpm_config.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -454,6 +455,51 @@ bool fpm_http_direct_header_dropped(const char *name)
 bool fpm_http_direct_status_final(long status)
 {
 	return status >= 200 && status <= 599;
+}
+
+/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
+ * digits, and only a final status (200..599, fpm_http_direct_status_final())
+ * may become the status line. atoi() turned "abc" into 0, "99999" into itself
+ * and overflowed on a longer number; a 1xx went out as the *final* answer, its
+ * body dropped by libevent, and the client waited for a response that never
+ * came (the shape of #451). *reason points into `value`, "" when absent.
+ *
+ * Issue #605: the reason goes out on the wire verbatim
+ * (evhttp_send_reply_start() frames whatever it is given), so it must not
+ * carry control bytes: an interior CR would split the status line, and
+ * anything below 0x20 or DEL has no business in a reason phrase. A bad
+ * reason is rejected, like a bad code, rather than stripped: stripping would
+ * silently rewrite what the upstream said. The scan runs over all vlen bytes,
+ * not up to the first NUL, so an embedded NUL cannot hide the tail of the
+ * reason from the check.
+ *
+ * Issue #604: one parser for the gateway (fpm_http_fcgi.c) and the classic
+ * http-direct executor (fpm_http_direct.c). */
+bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
+{
+	size_t i;
+
+	if (vlen < 3 || !isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) ||
+			!isdigit((unsigned char) value[2])) {
+		return false;
+	}
+	if (vlen == 3) {
+		*reason = "";
+	} else {
+		if (value[3] != ' ') {
+			return false;
+		}
+		for (i = 4; i < vlen; i++) {
+			unsigned char ch = (unsigned char) value[i];
+
+			if (ch < 0x20 || ch == 0x7f) {
+				return false;
+			}
+		}
+		*reason = value + 4;
+	}
+	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
+	return fpm_http_direct_status_final(*code);
 }
 
 /* libevent omits the framing headers for 204/205/304 but still appends a

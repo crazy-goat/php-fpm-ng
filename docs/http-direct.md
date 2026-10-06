@@ -1828,16 +1828,30 @@ which turned out to already be there, one of which is new, and one of which
 is not supported and, on the libevent this project links, cannot be added
 without a much larger change.
 
-### Custom response status codes: already unrestricted
+### Custom response status codes: 200–599
 
-`fpm_http_direct_status_final()` accepts any status 200–599 the application
-sets, via `http_response_code()` or a raw `header('Status: ...')` line — a
-non-standard code (e.g. `Status: 299`) reaches the wire exactly as PHP built
-it, unmodified. The only statuses this SAPI refuses are outside 200–599:
-1xx (see [`fpm_send_early_hints()`](#fpm_send_early_hintsarray-headers-bool)
-below for why), and anything above 599, which is not a valid status line at
-all. No code change was needed for this — it is existing behavior,
-documented here because issue #63 asked for it explicitly.
+`fpm_http_direct_status_final()` accepts every application status from 200
+through 599, including non-standard codes such as 299. This range applies to
+`http_response_code()` and a CGI `header('Status: ...')` line.
+
+The CGI `Status:` value must contain exactly three digits, optionally
+followed by a space and a reason phrase. The buffered classic executor and
+the gateway use the same parser, `fpm_http_parse_cgi_status()` (issues #604
+and #594). A malformed value or a code outside 200–599 produces
+`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value.
+The classic executor discards the script's headers and body, counts one
+rejected response, and records 502 in `access.log`. The first rejection
+cause determines the error status and diagnostic. These checks include
+`fpmng_respond()`, which uses the same buffered finalizer. See
+`sapi/fpmng/tests/fpmng-http-direct-upstream-status.phpt` for the regression
+cases.
+
+A non-final code set through `http_response_code()` still produces 500 on
+the buffered classic executor. Other response errors, such as a malformed
+header name, also retain 500. The worker executor keeps its existing
+argument validation; it does not use the CGI `Status:` parser. For an
+interim 103 response, use
+[`fpm_send_early_hints()`](#fpm_send_early_hintsarray-headers-bool) below.
 
 ### `fpm_send_early_hints(array $headers): bool`
 

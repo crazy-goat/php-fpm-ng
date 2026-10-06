@@ -42,7 +42,7 @@ foreach (scandir('/proc/self/fd') as $fd) {
         continue;
     }
     $target = @readlink("/proc/self/fd/$fd");
-    if (is_string($target) && str_starts_with($target, 'memfd:')) {
+    if (is_string($target) && str_starts_with($target, '/memfd:fpmng-shm')) {
         $memfds++;
     }
 }

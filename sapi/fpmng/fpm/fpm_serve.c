@@ -332,12 +332,10 @@ static char *fpm_serve_build_config(const struct fpm_serve_opts *o, const char *
 		max_spare = workers < 3 ? workers : 3;
 		fprintf(f,
 				"; The public port: static files from the root, everything else to the pool below.\n"
-				"; One gateway process: each gateway holds its own connections to the pool, so two of them would starve a one-worker pool.\n"
 				"[gateway]\n"
 				"pool.type = gateway\n"
 				"listen = \"%s\"\n"
 				"chdir = \"%s\"\n"
-				"http.gateways = 1\n"
 				"http.static = yes\n"
 				"http.front_controller = \"%s\"\n"
 				"http.route[app] = /\n"

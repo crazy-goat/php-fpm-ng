@@ -189,7 +189,7 @@ struct fpm_http_target_s;
  * The variable part is a flat array of atomic_t cells rather than a struct
  * with two flexible arrays (C allows only one). The layout and every access
  * are in fpm_http.c's fpm_http_counters_slot_cells()/fpm_http_counters_gauges():
- *   slots:  nslots x 3  [requests_total, rejected_total, upstreams_budget]
+ *   slots:  nslots x 4  [requests_total, rejected_total, upstreams_budget, reclaim_gen]
  *   gauges: nproc x (1 + nslots)
  *           [connections_open, upstreams_held[0 .. nslots)]
  *
@@ -203,14 +203,15 @@ struct fpm_http_target_s;
  * http.gateways, which a reload rebuilds: an exec-reload reruns the master and
  * the allocation is MAP_ANONYMOUS, so the counters reset on reload the way
  * every other pool's do (see docs/gateway.md). */
-/* The logical shape of one target row: three cells. The backing storage is
- * three atomic_t cells per row in fpm_http_counters_s.cells (see the accessors
+/* The logical shape of one target row: four cells. The backing storage is
+ * four atomic_t cells per row in fpm_http_counters_s.cells (see the accessors
  * in fpm_http.c), not an array of this struct -- it is kept as the named shape
  * the layout comment above and fpm_http_target_s refer to. */
 struct fpm_http_counters_slot {
 	atomic_t requests_total;	/* requests for this target label */
 	atomic_t rejected_total;	/* of those, answer 503 because the target was full */
 	atomic_t upstreams_budget;	/* shared: every process's upstreams_held summed */
+	atomic_t reclaim_gen;		/* issue #735: bumped by a process that found the budget held by its siblings */
 };
 
 struct fpm_http_counters_s {
@@ -285,6 +286,11 @@ struct fpm_http_target_s {
 	atomic_t *upstreams_used;		/* shared admission budget for this target */
 	atomic_t *requests_total;		/* requests routed to this target, whatever they answered */
 	atomic_t *rejected_total;		/* of those, how many found no budget and got 503 */
+	/* Issue #735: the row's reclaim generation. A process that wants a connection
+	 * while its siblings hold the whole budget bumps it; each sibling compares it
+	 * with reclaim_seen on its next tick and drops its idle connections. */
+	atomic_t *reclaim;
+	unsigned long reclaim_seen;		/* gateway process only */
 
 	/* gateway process only */
 	struct sockaddr_storage upstream_addr;
@@ -590,6 +596,9 @@ struct fpm_http_gateway_s {
 	 * outermost loop walks gw->waiting. Issue #129. */
 	int pumping;
 	int pump_again;
+	/* Issue #735: the sibling-coordination timer (fpm_http_tick()); NULL until
+	 * first needed and only ever used when http.gateways > 1. */
+	struct event *tick;
 	struct fpm_http_read_deadline_s *deadlines;	/* armed read deadlines, one per connection still reading its first request */
 };
 

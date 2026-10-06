@@ -10,6 +10,10 @@
 # lines are derived from the counts and names the old count-based gate measured
 # (apk 17 skips, apk-tls 6; #424, #500) and were not run by this change: the first
 # release.yml rehearsal confirms them, and its error output names any correction.
+# The *-fiber lines are the async branch's fiber-gated tests (issue #711). The
+# gate builds without --enable-fpmng-fiber in every cell, so they skip
+# everywhere; like the apk lines, they were not run by this change and the
+# first release.yml rehearsal confirms them.
 deb       SKIP  fpmng-acme-challenge                                 the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
 deb       SKIP  fpmng-acme-challenge-plain                           the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
 deb       SKIP  fpmng-acme-handover                                  the default deb is built without ACME and TLS (--enable-fpmng-acme / --enable-fpmng-tls); the TLS package runs it
@@ -48,3 +52,23 @@ apk-tls   SKIP  fpmng-acme-issue                                        the ACME
 apk-tls   SKIP  fpmng-acme-renew-failure                                the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
 apk,apk-tls SKIP  fpmng-http-direct-worker-tls-and-client-tls             the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
 apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)
+
+# Async-only fiber-gated tests (issue #711): each SKIPIF-skips on a binary
+# built without --enable-fpmng-fiber, which is every gate cell (release.yml
+# builds against the distribution SDK; fiber needs a patched libphp, so only
+# async/build-tree.sh provides it). The async-fiber CI cell runs them:
+# build/assert-fiber-tests-ran.sh fails that cell if one of them SKIPs there.
+*         SKIP  fpmng-fiber-disable-interceptions  the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-dropped-request        the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-exceptions             the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-flock                  the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-request-isolation      the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-sleep-concurrency      the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-sleep-resolution       the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-statics-reference      the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-stream-select          the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-fiber-tls-concurrency        the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-pool-type-fiber-matrix       the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-reload-listening-flags       the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-tier-experimental            the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)
+*         SKIP  fpmng-unrelated-listening-flags    the gate builds without --enable-fpmng-fiber in every cell (fiber needs a patched libphp); the async-fiber CI cell runs it (#711)

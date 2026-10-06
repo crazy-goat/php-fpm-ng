@@ -462,7 +462,7 @@ struct agg_s {
 	uint8_t type;
 	double buckets[FPMNG_METRICS_BUCKETS_MAX];
 	uint16_t nbuckets;
-	double v[FPMNG_METRICS_BUCKETS_MAX + 2];	/* jak w entry: counts..., sum, count */
+	double v[FPMNG_METRICS_BUCKETS_MAX + 2];	/* as in entry: counts..., sum, count */
 	double value;			/* counter/gauge: sum or max */
 	int have_type_conflict;
 };

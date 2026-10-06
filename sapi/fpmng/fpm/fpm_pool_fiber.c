@@ -416,7 +416,7 @@ int fpm_pool_fiber_wait_wake(struct timeval *timeout) /* {{{ */
 		return -1;
 	}
 
-	event_base_update_cache_time(fpm_fiber_base); /* jak w wait_fd */
+	event_base_update_cache_time(fpm_fiber_base); /* as in wait_fd */
 	if (event_assign(fr->ev, fpm_fiber_base, -1, 0, fpm_fiber_io_cb, fr) < 0 || (timeout && event_add(fr->ev, timeout) < 0)) {
 		return -1;
 	}

@@ -21,6 +21,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- `pool.type = cron` and `supervisor`: a script now gets the CLI variables `$_SERVER['argv']`, `$_SERVER['argc']`, `$argv`, `$argc`, `PHP_SELF`, `SCRIPT_NAME`, `SCRIPT_FILENAME` and `PATH_TRANSLATED`, all with the script path as `argv[0]`, even when `register_argc_argv` is off in php.ini. Laravel `schedule:run` no longer fails with `Undefined array key "PHP_SELF"`. The fix is in the shared `fpm_pool_script.c`. New test `fpmng-script-pools-cli-variables.phpt`; the wrapper workaround is removed from `docs/guides/framework-recipes.md` (#738).
+
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 
 - `pool.type = gateway`: a pool that routes to a FastCGI target but sets neither `chdir` nor `http.front_controller` now logs a WARNING at startup (`no chdir and no http.front_controller with a FastCGI target`), instead of answering "Primary script unknown" for every request with nothing pointing at the gateway's configuration. New test `fpmng-gateway-missing-docroot-warning.phpt`; `docs/gateway.md` states the docroot requirement and the `http.pool_full_policy` default next to the route example (#736).

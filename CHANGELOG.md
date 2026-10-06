@@ -21,7 +21,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
-- `reload.selective = yes`: when the new master gives up before it adopted the spared workers (a changed pool with an invalid directive, a listening address that cannot be bound, or a `SIGTERM` between sparing and `execvp()`), those workers were orphaned and kept the pool's listening socket. The master now sends `SIGTERM` to every pid still listed in `FPMNG_SELECTIVE_RELOAD_SURVIVORS` on its exit paths (`fpm_reload_selective_discard_unadopted()`) and logs a WARNING. A master that is killed outright is not covered. New test `fpmng-reload-selective-failed-init.phpt`; `docs/reload.md` describes it (#690).
+- `reload.selective = yes`: when the new master gives up before it adopted the spared workers (a changed pool with an invalid directive, a listening address that cannot be bound, a `SIGTERM` between sparing and `execvp()`, or a failed `execvp()`), those workers were orphaned and kept the pool's listening socket. The master now sends `SIGTERM` to every pid still listed in `FPMNG_SELECTIVE_RELOAD_SURVIVORS` on its exit paths and once after the initial fork loop (`fpm_reload_selective_discard_unadopted()`; `SIGTERM`, not `SIGQUIT`) and logs a WARNING. A master that is killed outright is not covered. New tests `fpmng-reload-selective-failed-init.phpt` and `fpmng-reload-selective-failed-exec.phpt`; `docs/reload.md` describes it (#690).
 
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 

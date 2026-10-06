@@ -201,6 +201,13 @@ int fpm_run(int *max_requests) /* {{{ */
 		}
 	}
 
+	/* Issue #690: whatever adoption did not consume (a spared pool that no
+	 * longer exists in this generation's config) must not stay in the
+	 * environment for the master's whole life, where pid reuse could turn it
+	 * into a kill of an unrelated process at shutdown. Only the master gets
+	 * here: a forked child jumped to run_child above. */
+	fpm_reload_selective_discard_unadopted();
+
 	/* run event loop forever */
 	fpm_event_loop(0);
 

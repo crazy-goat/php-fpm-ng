@@ -5,7 +5,7 @@
  * stream_select() takes SETS of descriptors from userland
  * (ext/standard/streamsfuncs.c: PHP_FUNCTION(stream_select)), unlike the
  * per-stream interception in fpm_pool_fiber_xport.c. The patch
- * (patches/0008-fiber-stream-select.patch, HAVE_FPMNG_FIBER) replaces exactly one
+ * (async/patches/0008-fiber-stream-select.patch, HAVE_FPMNG_FIBER) replaces exactly one
  * call, php_select(max_fd+1, &rfds, &wfds, &efds, tv_p), with
  * fpm_fiber_select() below — same signature, same postconditions. Everything
  * else in that function (argument parsing, building rfds/wfds/efds from the

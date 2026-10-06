@@ -1,5 +1,5 @@
 /* fpm-ng: pool.executor = fiber — surface of fpm_pool_fiber_xport.c used by
- * the TLS patch (patches/0007-fiber-tls-*.patch, gated on HAVE_FPMNG_FIBER_TLS).
+ * the TLS patch (async/patches/0007-fiber-tls-*.patch, gated on HAVE_FPMNG_FIBER_TLS).
  *
  * The patch lives in ext/openssl and needs two things from here: the ops
  * wrapper (so TLS reads/writes/connects suspend the fiber exactly like plain

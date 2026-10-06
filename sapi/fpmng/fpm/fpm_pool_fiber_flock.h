@@ -1,5 +1,5 @@
-/* fpm-ng: pool.executor = fiber — SPIKE, not wired into the build by default
- * outside this branch. Intercepts PHP_STREAM_OPTION_LOCKING on the plain
+/* fpm-ng: pool.executor = fiber — flock() suspension through the IO seam.
+ * Intercepts PHP_STREAM_OPTION_LOCKING on the plain
  * files stream (userland flock() and file_put_contents(..., LOCK_EX), both
  * of which funnel through php_stream_lock() -> php_stream_stdio_ops.set_option,
  * see main/streams/plain_wrapper.c and ext/standard/file.c in php-src) so

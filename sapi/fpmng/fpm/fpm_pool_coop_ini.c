@@ -82,7 +82,7 @@
  * switch (see the rationale above: safety and cost), so THAT PROCESS-WIDE FIELD
  * is not switched. Example: ini_set('precision', '5') fixes ini_get('precision')
  * ONLY for this request (fixed here), but the real precision used by
- * var_dump/serialize (core_globals.precision, set by OnUpdateLong) remains
+ * var_dump/serialize (EG(precision), set by OnUpdateLong) remains
  * process-wide while it is live — so it may leak to other in-flight requests
  * despite this fix. The only exception in this codebase is ext/session:
  * PS(mod) (set by OnUpdateSaveHandler) is safe because all ps_globals (including

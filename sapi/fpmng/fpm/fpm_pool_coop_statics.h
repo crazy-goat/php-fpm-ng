@@ -12,7 +12,7 @@
 struct fpm_worker_pool_s;
 
 /* Syntax-only check of pool.config->fiber_isolate_statics, called from
- * fpm_pool_type_fiber_validate() (fpm_pool_type.c), i.e. on the master side,
+ * fpm_pool_type_coop_fiber_validate() (fpm_pool_type_coop.c), i.e. on the master side,
  * before any child forks. Rejects a directive that cannot possibly be a list
  * of "Class\Name::property" entries -- this is the failure mode that must
  * stop the pool from starting rather than run isolation-disabled (an admin

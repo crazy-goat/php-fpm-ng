@@ -31,7 +31,7 @@
  *
  * TLS (ssl/tls/https/...) is non-blocking too, but not from here: it needs code
  * inside ext/openssl (the handshake and SSL_read/SSL_write loops live there and
- * poll internally), so it is done by patch 0007 (patches/0007-fiber-tls-*.patch,
+ * poll internally), so it is done by patch 0007 (async/patches/0007-fiber-tls-*.patch,
  * HAVE_FPMNG_FIBER_TLS), which wraps the ext/openssl ops table through our
  * fpm_fiber_xport_wrap() and re-arms the ssl/tls transports with its own
  * factory. That keeps every upstream behavior change in a gated patch with an
@@ -40,7 +40,7 @@
  * the seam and is switched off with this entry ("xport").
  *
  * What this does NOT catch (because it does not go through stream transports):
- * sleep(), curl, libpq (pdo_pgsql), ordinary files, DNS outside connect
+ * curl, libpq (pdo_pgsql), ordinary files, DNS outside connect
  * (gethostbyname, dns_get_record). The TLS handshake and SSL_read/SSL_write
  * block unless patch 0007 (HAVE_FPMNG_FIBER_TLS) is in — without it the ssl/tls
  * transports are upstream's and OpenSSL polls the whole process.
@@ -702,7 +702,7 @@ static php_stream *fpm_fiber_unix_factory(const char *proto, size_t protolen,
 }
 /* }}} */
 
-/* Exported for the TLS patch (0007, patches/0007-fiber-tls-*.patch): its
+/* Exported for the TLS patch (0007, async/patches/0007-fiber-tls-*.patch): its
  * ssl/tls factory returns a stream whose ops point DIRECTLY at ext/openssl's
  * table; wrapping happens on the first call from a request fiber
  * (fpm_fiber_tls_wrap_ops_once there calls into this). Returning NULL keeps

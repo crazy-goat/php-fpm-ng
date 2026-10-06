@@ -17,16 +17,16 @@
  * process-wide table), SIGALRM timer (pcntl_alarm), fork/exec.
  * The VALUE of ini entries (ini_get/ini_set) IS isolated per request — see
  * fpm_pool_coop_ini.[ch] — but only at ini_entry->value level; process globals
- * also updated by on_modify for some entries (for example core_globals.precision)
+ * also updated by on_modify for some entries (for example EG(precision))
  * are NOT isolated (exception: ext/session, see fpm_pool_coop_session.c) — see
  * the rationale in fpm_pool_coop_ini.c. This explains what validate() REJECTS
  * (OPcache enabled, max_execution_time != 0) and what the container BLOCKS with
  * zend_disable_functions (process-wide pcntl functions) — see fpm_pool_coop.c
  * and docs/fiber_errors.md.
  *
- * Reason for a separate file: removing either of the two types should mean
- * removing one file and one registry line, without touching the other type's
- * code (decision in NOTES 3s).
+ * Reason for a separate file: dropping the fiber executor should mean
+ * removing its files and one registry line, without touching this core
+ * (decision in NOTES 3s).
  */
 
 #ifndef FPM_POOL_COOP_H
@@ -143,7 +143,7 @@ fcgi_request *fpm_coop_req_free(struct fpm_coop_req_s *ctx);
 /* In-flight requests (log statistic). */
 unsigned fpm_coop_in_flight(void);
 
-/* Shared validation for both types: pm = static, NTS. Returns 0 or -1. */
+/* Pool validation for the coop core: pm = static, NTS. Returns 0 or -1. */
 struct fpm_worker_pool_s;
 int fpm_coop_validate(struct fpm_worker_pool_s *wp, const char *type_name);
 

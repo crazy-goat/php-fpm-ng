@@ -1,8 +1,9 @@
 /* fpm-ng: pool.executor = fiber — EXPERIMENT.
  *
  * One process, many in-flight FastCGI requests, each in its own engine fiber
- * (Zend/zend_fibers.h: zend_fiber_start/resume/suspend are ZEND_API) on clean
- * upstream php-src — no fork and no patches. The scheduler is libevent (the
+ * (Zend/zend_fibers.h: zend_fiber_start/resume/suspend are ZEND_API) — no fork;
+ * the only php-src changes are the two gated patches under async/patches/
+ * (0007 TLS transports, 0008 stream_select()). The scheduler is libevent (the
  * same library used by the HTTP gateway). The Fiber suspends in the stream
  * transport layer (php_stream_xport_register for "tcp"/"unix"), therefore only
  * on SOCKETS: fsockopen, mysqlnd, phpredis; the sleep family, stream_select()

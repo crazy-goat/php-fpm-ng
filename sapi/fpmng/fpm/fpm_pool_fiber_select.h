@@ -1,5 +1,5 @@
 /* fpm-ng: pool.executor = fiber — surface of fpm_pool_fiber_select.c used by
- * the stream_select() patch (patches/0008-fiber-stream-select.patch, gated on
+ * the stream_select() patch (async/patches/0008-fiber-stream-select.patch, gated on
  * HAVE_FPMNG_FIBER).
  *
  * The patch changes one call site in ext/standard/streamsfuncs.c

@@ -205,8 +205,8 @@
  *
  * Syntax that cannot possibly be "Class::property" (no "::", an empty
  * class or property name) is rejected at pool-validate time --
- * fpm_coop_statics_validate(), called from fpm_pool_type_fiber_validate()
- * (fpm_pool_type.c) on the master side, before any child forks -- exactly
+ * fpm_coop_statics_validate(), called from fpm_pool_type_coop_fiber_validate()
+ * (fpm_pool_type_coop.c) on the master side, before any child forks -- exactly
  * like a malformed http.allowed_clients/http.trusted_proxies ACL already
  * fails pool.type = http via fpm_http_acl_parse(). The pool does not start;
  * the admin sees the message immediately, same channel as any other

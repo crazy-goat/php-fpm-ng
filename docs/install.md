@@ -146,8 +146,7 @@ starts. See [`docs/http-direct.md`](http-direct.md) for the rest of the
 | `fastcgi` | yes | yes | upstream FPM's protocol handling; needs nothing from the engine that a distribution `libphp` does not export. |
 | `http-direct` | yes | yes | including `pool.executor = worker`. The HTTP listener lives entirely in this SAPI. |
 | `gateway` | yes | yes | issue #388: the proxy is a type of its own and runs no PHP child, so it needs nothing from the engine. `pool.type = http` (the proxy welded to its own workers) is retired and refused by name. |
-| fibers (`pool.executor = fiber`) | **no** | branch `async` only | `patches/0007` applies inside `libphp`. |
-| async | **no** | branch `async` only | `patches/0008`, likewise inside `libphp`. |
+| fibers (`pool.executor = fiber`) | **no** | branch `async` only | `async/patches/0007` and `0008` apply inside `libphp`. |
 | TLS termination (`http.tls_*`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #280): the code is beta, unaudited and network-facing, so the *default* package is the one without it. The second package below is built with it, and from source it is `FPMNG_TLS=1 ./build/libphp-build.sh out`. **This is a change against v0.2.0**, where the single package terminated TLS. |
 | the ACME client (`fpmng-dist://acme/...`) | **no** in `php-fpm-ng`, yes in `php-fpm-ng-tls` | yes | opt-in since v0.4.0 (issue #281), and it requires the TLS flag: `FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out`. The default package carries neither the challenge state nor the client scripts, and refuses `cron.script = fpmng-dist://acme/renew.php` at startup. Also a change against v0.2.0. |
 
@@ -345,7 +344,7 @@ HTTP/2 and QUIC do not exist in this tree; their names were reserved
   is built, although `fpm_metric_*()` work normally in workers
   (`sapi/fpmng/fpm/fpm_libphp_compat.c`).
 
-If you need `pool.executor = fiber` or async, use branch `async`; they are not
+If you need `pool.executor = fiber`, use branch `async`; it is not
 available on `main`.
 
 ## See also

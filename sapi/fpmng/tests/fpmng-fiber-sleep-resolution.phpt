@@ -54,10 +54,12 @@ $probe = <<<'PHP'
 $case = $_GET['case'] ?? 'missing';
 switch ($case) {
     // 500 ns is below the TIMER's timeval resolution, so the fiber executor
-    // drops it and returns at once; upstream would sleep 500 ns. The return
-    // contract is the same either way (boolean true), so this pins that the
-    // call neither errors nor hangs, not the nanoseconds themselves, which
-    // are below what microtime(true) can distinguish from zero anyway.
+    // drops it and returns at once; upstream would sleep 500 ns. This case
+    // cannot tell the two apart by timing — both return true in far under a
+    // second, below what microtime(true) resolves — so it pins only that the
+    // call neither errors nor hangs. The deviation itself is prose-pinned, not
+    // assertion-pinned: docs/fiber_async_io.md, the comment above
+    // tv.tv_usec in fpm_pool_fiber_sleep.c, and the CHANGELOG entry (#84).
     case 'submicro':
         $t0 = microtime(true);
         $r = time_nanosleep(0, 500);

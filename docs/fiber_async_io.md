@@ -37,6 +37,15 @@ scheduler's loop, not a blocking `getaddrinfo()`. Outside the streams layer,
 four more calls suspend the fiber instead of the process:
 
 - `sleep()`, `usleep()`, `time_nanosleep()` (`fpm_pool_fiber_sleep.c`);
+  known deviation (issue #84): the suspension deadline is a `struct timeval`,
+  so `time_nanosleep()` drops the sub-microsecond part of its nanoseconds —
+  `time_nanosleep(0, 500)` returns at once instead of sleeping 500 ns. A
+  nanosecond timer would mean a second deadline type through the seam and the
+  libevent backend for a sleep length nothing depends on, so the truncation
+  stays; `fpmng-fiber-sleep-resolution.phpt` pins it. An early wake-up
+  (`FPM_FIBER_IO_CANCELLED`, which the libevent backend never produces) is
+  answered with the deadline-minus-now remainder from both `sleep()` and
+  `time_nanosleep()`, matching upstream's `EINTR` contract;
 - `stream_select()` (`fpm_pool_fiber_select.c` + patch 0008), except with a
   non-empty `$except` set or a zero timeout;
 - `flock()` and `file_put_contents(..., LOCK_EX)` against a lock held by

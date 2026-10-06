@@ -39,6 +39,7 @@ fpmng-fiber-exceptions.phpt
 fpmng-fiber-flock.phpt
 fpmng-fiber-request-isolation.phpt
 fpmng-fiber-sleep-concurrency.phpt
+fpmng-fiber-sleep-resolution.phpt
 fpmng-fiber-statics-reference.phpt
 fpmng-fiber-stream-select.phpt
 fpmng-fiber-tls-concurrency.phpt

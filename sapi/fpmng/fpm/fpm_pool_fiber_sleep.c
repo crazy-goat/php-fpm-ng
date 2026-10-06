@@ -105,7 +105,12 @@ static ZEND_FASTCALL void fpm_fiber_zif_sleep(INTERNAL_FUNCTION_PARAMETERS) /* {
 			fpm_fiber_sleep_orig_sleep(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 			return;
 		case FPM_FIBER_IO_CANCELLED: {
-			/* Woken early: upstream returns the seconds left on EINTR. */
+			/* Woken early: upstream returns the seconds left on EINTR, rounded
+			 * up, computed here as deadline minus now — the same remainder
+			 * time_nanosleep() below returns as seconds/nanoseconds, so the
+			 * two agree about this case. Unreachable with the libevent backend
+			 * (see the file header); if an external wake-up source is ever
+			 * added, this branch becomes live with no change needed. */
 			struct timeval now;
 
 			gettimeofday(&now, NULL);
@@ -194,6 +199,13 @@ static ZEND_FASTCALL void fpm_fiber_zif_time_nanosleep(INTERNAL_FUNCTION_PARAMET
 	}
 
 	tv.tv_sec = (time_t) tv_sec;
+	/* Known deviation, accepted (issue #84): the TIMER operation behind the
+	 * suspension carries its deadline as struct timeval (fpm_pool_fiber_io.h),
+	 * so the sub-microsecond part of tv_nsec is dropped — time_nanosleep(0, 500)
+	 * returns at once instead of sleeping 500 ns. A nanosecond timer would
+	 * mean a second deadline type through the seam and the libevent backend
+	 * for a sleep length nothing depends on, so the truncation stays and
+	 * fpmng-fiber-sleep-resolution.phpt pins it instead of leaving it silent. */
 	tv.tv_usec = (suseconds_t) (tv_nsec / 1000);
 
 	{

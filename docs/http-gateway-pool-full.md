@@ -3,7 +3,9 @@
 When a gateway's shared upstream budget (`gw->upstreams_used` vs.
 `gw->max_upstreams`) is exhausted, `fpm_http_pump_once()` answers a queued
 request `503` + `Retry-After: 1` immediately (`FPM_HTTP_SERVICE_UNAVAIL`,
-`sapi/fpmng/fpm/fpm_http.c`). That remains the default for every pool. This
+`sapi/fpmng/fpm/fpm_http.c`), or after up to 100 ms when `http.gateways > 1`
+and a sibling process holds the workers (see "Several gateway processes"
+below). That remains the default for every pool. This
 document covers the opt-in alternative: instead of rejecting the instant the
 budget is full, hold the request on `gw->waiting` for a bounded time and
 dispatch it if an upstream frees up in time.

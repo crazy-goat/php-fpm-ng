@@ -32,7 +32,7 @@ chdir = $docroot
 http.gateways = 2
 http.pool_full_policy = wait
 http.pool_full_queue_max = 16
-http.pool_full_wait_ms = 4000
+http.pool_full_wait_ms = 1000
 http.route[small] = /
 [small]
 pool.type = fastcgi
@@ -51,26 +51,41 @@ $script = '/' . basename($tester->makeSourceFile());
 $httpAddr = $tester->getAddr('ipv4', '[http]');
 [$host, $port] = explode(':', $httpAddr);
 
-$bad = [];
-for ($i = 0; $i < 12; $i++) {
+// Two connections are opened before either sends a request, so the kernel hands
+// them to the gateway processes independently; the request on the second one
+// then often lands on the process that did not serve the first. 20 rounds, 40
+// requests.
+function request($fp, string $host, string $script): array
+{
     $start = microtime(true);
-    $fp = fsockopen($host, (int) $port, $errno, $errstr, 5);
-    if (!$fp) {
-        echo "FAIL: connect #$i: $errstr ($errno)\n";
-        exit(1);
-    }
     fwrite($fp, "GET $script HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n\r\n");
     $response = stream_get_contents($fp);
     fclose($fp);
-    $elapsed = microtime(true) - $start;
-    if (!str_contains($response, ' 200 ') || !str_contains((string) strstr($response, "\r\n\r\n"), 'ok')) {
-        $bad[] = "#$i: " . strtok($response, "\r\n");
-    } elseif ($elapsed > 2) {
-        $bad[] = sprintf("#%d took %.1f s", $i, $elapsed);
+    return [$response, microtime(true) - $start];
+}
+
+$bad = [];
+for ($i = 0; $i < 20; $i++) {
+    $pair = [];
+    for ($k = 0; $k < 2; $k++) {
+        $fp = fsockopen($host, (int) $port, $errno, $errstr, 5);
+        if (!$fp) {
+            echo "FAIL: connect #$i: $errstr ($errno)\n";
+            exit(1);
+        }
+        $pair[] = $fp;
+    }
+    foreach ($pair as $k => $fp) {
+        [$response, $elapsed] = request($fp, $host, $script);
+        if (!str_contains($response, ' 200 ') || !str_contains((string) strstr($response, "\r\n\r\n"), 'ok')) {
+            $bad[] = "#$i/$k: " . strtok($response, "\r\n");
+        } elseif ($elapsed > 0.8) {
+            $bad[] = sprintf("#%d/%d took %.1f s", $i, $k, $elapsed);
+        }
     }
 }
 if ($bad) {
-    echo "FAIL: " . count($bad) . " of 12 sequential requests failed:\n" . implode("\n", $bad) . "\n";
+    echo "FAIL: " . count($bad) . " of 40 requests failed:\n" . implode("\n", $bad) . "\n";
     exit(1);
 }
 

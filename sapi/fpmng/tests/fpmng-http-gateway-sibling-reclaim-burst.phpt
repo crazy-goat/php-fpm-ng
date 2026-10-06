@@ -10,14 +10,13 @@ fpmng_skip_if_pool_type_unsupported('gateway');
 
 require_once "tester.inc";
 
-// Issue #735. Each gateway process keeps its own idle upstream connections, and
-// the budget they pin is shared. After a burst the two processes hold, say, 4
-// idle connections each; when the next burst of 8 lands 6 + 2 on them, the
-// process with 3 needs a fourth connection, finds the budget full and -- before
-// the fix -- waited http.pool_full_wait_ms for a release that only the other
-// process could make, then answered 503 with 8 idle workers (3 of 10 runs in
-// the #602 review). A burst of N <= pm.max_children parallel requests must be
-// answered 200 in every round.
+// Issue #735, smoke check only. A burst of N <= pm.max_children parallel
+// requests must be answered 200 in every round with two gateway processes. This
+// test does NOT fail on the unfixed binary (0 of 12 runs measured by the
+// reviewer): the kernel spreads the connections too evenly to skew the idle
+// connections of the two processes. The tests that discriminate are the two
+// sequential ones, fpmng-http-gateway-sibling-reclaim.phpt and
+// fpmng-http-gateway-sibling-reclaim-wait.phpt.
 
 $docroot = __DIR__;
 

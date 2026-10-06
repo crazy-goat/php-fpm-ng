@@ -162,7 +162,10 @@ does not exist and the FastCGI upstream answers "Primary script unknown"; the
 master logs a WARNING saying so at startup.
 
 When every worker of a routed target is busy, the gateway answers `503` +
-`Retry-After` immediately (`http.pool_full_policy = reject`, the default);
+`Retry-After` immediately (`http.pool_full_policy = reject`, the default; up to
+100 ms later with `http.gateways > 1` when a sibling gateway process holds the
+workers, see the "Several gateway processes" section of
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md));
 [`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
 `wait` alternative.
 

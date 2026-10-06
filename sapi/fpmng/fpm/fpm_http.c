@@ -1045,7 +1045,7 @@ static unsigned fpm_http_waiting_len(struct fpm_http_target_s *t)
  * "somebody is waiting" state behind, and the worst a spurious bump costs is
  * one reconnect. With http.gateways = 1 none of this runs. */
 #define FPM_HTTP_TICK_MS 10
-/* How long the default policy (fail) lets a request wait for a sibling to give
+/* How long the default policy (reject) lets a request wait for a sibling to give
  * a connection back before it answers 503. Two ticks are enough for the round
  * trip (B bumps, A drops on its tick, B retries on its tick); the rest is
  * margin for a loaded machine. Only requests that find the budget held by a

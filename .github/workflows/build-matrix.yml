@@ -529,6 +529,9 @@ jobs:
       - name: verify a gateway survives its own read deadline (issue #90)
         run: ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
 
+      - name: verify a packed single-file application runs without its inputs (issue #431)
+        run: ./build/test-pack-smoke.sh "$PWD/build-out/bin/php-fpm-ng" "$(php-config8.5 --php-binary)"
+
       # Task 042: the redirect-only plain HTTP companion listener.
       - name: verify the redirect-only plain HTTP companion (task 042)
         run: ./build/test-http-plain-listener.sh "$PWD/build-out/bin/php-fpm-ng"

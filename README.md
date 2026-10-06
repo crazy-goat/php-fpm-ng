@@ -10,7 +10,8 @@ and which are beta is the table under [Support tiers](#support-tiers).
 [php-fpm + nginx](docs/guides/migrate-php-fpm-nginx.md),
 [NGINX Unit](docs/guides/migrate-nginx-unit.md),
 [supervisord + cron](docs/guides/migrate-supervisord-cron.md). Symfony and Laravel:
-[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md).
+[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md). One executable
+with your own PHAR, `php.ini` and `fpm.conf`: [`docs/guides/single-file-app.md`](docs/guides/single-file-app.md).
 
 **Target audience: small projects.** One VPS, one instance, typically an
 application plus one or two consumers plus a few cron jobs. Not k8s.

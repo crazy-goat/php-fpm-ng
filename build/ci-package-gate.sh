@@ -318,7 +318,7 @@ apk)
     cat >> "$OUT/stage2.sh" <<'EOF'
 # See the Debian branch: binutils, patch and the CLI are the test rig, not package
 # dependencies.
-apk add --no-cache --upgrade binutils patch php85 php85-openssl openssl >/dev/null
+apk add --no-cache --upgrade binutils patch php85 php85-openssl php85-phar openssl >/dev/null
 apk add --no-cache --allow-untrusted "$(find /out/repo -name "$PKGNAME-[0-9]*.apk" | head -1)"
 apk info -d "$PKGNAME"
 LICENSE_FILE=/usr/share/licenses/$PKGNAME/LICENSE

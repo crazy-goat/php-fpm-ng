@@ -686,7 +686,6 @@ struct _fpm_http_conn {
 	int headers_sent;
 	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
 	int read_paused;				/* issue #596: upstream->ev_read is removed because the client has not drained the response; see fpm_http_backpressure.c */
-
 	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
 	ev_uint16_t peer_port;
 	struct fpm_http_forwarded_result_s fwd;		/* resolved once in fpm_http_request() */
@@ -845,11 +844,11 @@ void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t
 
 /* fpm_http_fcgi.c */
 void fpm_http_conn_free(fpm_http_conn *c);
+void fpm_http_finish_truncated(fpm_http_conn *c);
 size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
 void fpm_http_normalize_target(struct evhttp_request *req);
 const char *fpm_http_request_path(struct evhttp_request *req);
 int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint);
-void fpm_http_finish_truncated(fpm_http_conn *c);
 
 /* fpm_http_gw_proc.c */
 void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);

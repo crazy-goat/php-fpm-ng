@@ -37,6 +37,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_static.h"
 #include "fpm_http_direct_conn.h"
 #include "fpm_http_direct_ops.h"
@@ -2467,6 +2468,12 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	}
 	w.listener = evhttp_accept_socket_with_handle(w.http, wp->listening_socket);
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
+	/* Issue #729: every child accepts on the one shared socket, so each child
+	 * installs its own backoff on its own evconnlistener. One that runs out of
+	 * descriptors pauses; its siblings keep accepting. */
+	if (fpm_http_accept_backoff_install(w.base, w.listener, wp->config->name, "http-direct") != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
+	}
 	action.sa_handler = fpm_direct_stop;
 	sigemptyset(&action.sa_mask);
 	/* SA_RESTART for the same reason upstream's fpm_signals_init_child() sets

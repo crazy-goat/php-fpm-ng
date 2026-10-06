@@ -71,6 +71,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - `fpm.conf` diagnostics after an `include=` name the real line of the including file: the line counter is put back when the included file has been read, so an error on a later line, and the "Unable to include" message, no longer carry a number from the end of the included file (#545).
 - The gateway listeners (the main one and `http.plain_listen`) pause accepting for 100 ms when `accept()` fails with `EMFILE`/`ENFILE` (or another non-retriable error) instead of spinning on one core until a descriptor is freed; the failure is logged at most once every 10 s (#687).
+- The `pool.type = http-direct` listeners (classic and worker executor, in every child) pause accepting for 100 ms when `accept()` fails with `EMFILE`/`ENFILE` (or another non-retriable error), reusing the gateway's backoff, instead of spinning on one core until a descriptor is freed; the failure is logged at most once every 10 s per child (#729).
 - `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
   `${{ }}` inside the `run:` script, matching `release.yml` (#583).

@@ -1,4 +1,4 @@
-/* Accept-error backoff for the gateway's listeners (issue #687).
+/* Accept-error backoff for the gateway's and http-direct's listeners (issues #687, #729).
  *
  * When accept() fails with EMFILE or ENFILE the pending connection stays in
  * the kernel queue, so the listening fd stays readable and the level-triggered
@@ -25,7 +25,7 @@
 #define FPM_HTTP_ACCEPT_BACKOFF_MS 100
 
 /* Installs the error callback on the listener behind `bound`. `pool` and
- * `what` (for example "main" or "http.plain_listen") are kept by reference
+ * `what` (for example "main", "http.plain_listen" or "http-direct") are kept by reference
  * for log lines and must outlive the event loop. Returns 0 on success, -1 on
  * allocation failure or when the resume timer cannot be created (the
  * listener then works as before, without the backoff). */

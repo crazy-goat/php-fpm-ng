@@ -109,6 +109,7 @@
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_conn.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_acl.h"
 #include "fpm_std_streams.h"
 #include "fpm_php.h"
@@ -2782,6 +2783,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	fw.listener = evhttp_accept_socket_with_handle(fw.http, wp->listening_socket);
 	if (!fw.listener) {
 		exit(FPM_EXIT_SOFTWARE);
+	}
+	/* Issue #729: same as the classic executor, one backoff per child on the
+	 * shared listening socket. */
+	if (fpm_http_accept_backoff_install(fw.base, fw.listener, wp->config->name, "http-direct") != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
 	}
 	zend_hash_init(&fw.pending, 16, NULL, fpm_worker_pending_dtor, 1);
 	zend_hash_init(&fw.watchers, 16, NULL, fpm_worker_watcher_dtor, 1);

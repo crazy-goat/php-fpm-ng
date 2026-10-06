@@ -408,6 +408,7 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
 	t->upstreams_used = &slot[2];
 	t->requests_total = &slot[0];
 	t->rejected_total = &slot[1];
+	t->reclaim = &slot[3];
 	return 0;
 }
 

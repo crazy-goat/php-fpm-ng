@@ -26,6 +26,12 @@ struct fpm_http_accept_backoff {
 	struct event *timer;
 	const char *pool;
 	const char *what;
+	/* Asked when the pause ends: false keeps the listener closed because the
+	 * owner's own gate (max_connections, accept_threshold cooldown, a request
+	 * in progress) wants it closed. NULL means always resume. */
+	int (*may_resume)(void *arg);
+	void *arg;
+	int paused;
 	time_t last_log;
 	unsigned long suppressed;
 };
@@ -33,7 +39,8 @@ struct fpm_http_accept_backoff {
 /* libevent hands the error callback only the listener: the user pointer of an
  * evhttp listener is evhttp's own (evconnlistener_set_cb() would replace it
  * and break accepting). A gateway process has at most the TLS listener and
- * http.plain_listen, so a fixed table keyed by listener is enough. */
+ * http.plain_listen; an http-direct child has exactly one listener. So a
+ * fixed table keyed by listener is enough. */
 #define FPM_HTTP_ACCEPT_BACKOFF_MAX 4
 static struct fpm_http_accept_backoff *fpm_http_accept_backoff_table[FPM_HTTP_ACCEPT_BACKOFF_MAX];
 
@@ -56,7 +63,10 @@ static void fpm_http_accept_backoff_resume(evutil_socket_t fd, short what, void 
 
 	(void) fd;
 	(void) what;
-	evconnlistener_enable(b->listener);
+	b->paused = 0;
+	if (!b->may_resume || b->may_resume(b->arg)) {
+		evconnlistener_enable(b->listener);
+	}
 }
 /* }}} */
 
@@ -76,8 +86,8 @@ static void fpm_http_accept_backoff_error(struct evconnlistener *listener, void 
 	 * itself, not only descriptor exhaustion: ENOBUFS and ENOMEM spin the
 	 * same way and clear the same way. */
 	evconnlistener_disable(listener);
-	if (b->timer) {
-		(void) event_add(b->timer, &tv);
+	if (b->timer && event_add(b->timer, &tv) == 0) {
+		b->paused = 1;
 	} else {
 		/* No timer to resume with: leaving the listener paused forever is
 		 * worse than spinning, so put it back. */
@@ -96,7 +106,7 @@ static void fpm_http_accept_backoff_error(struct evconnlistener *listener, void 
 /* }}} */
 
 int fpm_http_accept_backoff_install(struct event_base *base, struct evhttp_bound_socket *bound,
-		const char *pool, const char *what) /* {{{ */
+		const char *pool, const char *what, int (*may_resume)(void *arg), void *arg) /* {{{ */
 {
 	struct fpm_http_accept_backoff *b;
 	int slot;
@@ -121,7 +131,11 @@ int fpm_http_accept_backoff_install(struct event_base *base, struct evhttp_bound
 	b->listener = listener;
 	b->pool = pool;
 	b->what = what;
-	/* Lives as long as the process: the listener does. */
+	b->may_resume = may_resume;
+	b->arg = arg;
+	/* Lives as long as the listener: an owner that deletes the listener
+	 * (http-direct retiring or stopping) must call
+	 * fpm_http_accept_backoff_remove() first. */
 	b->timer = evtimer_new(base, fpm_http_accept_backoff_resume, b);
 	if (!b->timer) {
 		free(b);
@@ -130,6 +144,31 @@ int fpm_http_accept_backoff_install(struct event_base *base, struct evhttp_bound
 	fpm_http_accept_backoff_table[slot] = b;
 	evconnlistener_set_error_cb(listener, fpm_http_accept_backoff_error);
 	return 0;
+}
+/* }}} */
+
+int fpm_http_accept_backoff_paused(struct evhttp_bound_socket *bound) /* {{{ */
+{
+	struct fpm_http_accept_backoff *b = bound ? fpm_http_accept_backoff_find(evhttp_bound_socket_get_listener(bound)) : NULL;
+
+	return b && b->paused;
+}
+/* }}} */
+
+void fpm_http_accept_backoff_remove(struct evhttp_bound_socket *bound) /* {{{ */
+{
+	struct evconnlistener *listener = bound ? evhttp_bound_socket_get_listener(bound) : NULL;
+
+	for (int i = 0; listener && i < FPM_HTTP_ACCEPT_BACKOFF_MAX; i++) {
+		struct fpm_http_accept_backoff *b = fpm_http_accept_backoff_table[i];
+
+		if (b && b->listener == listener) {
+			fpm_http_accept_backoff_table[i] = NULL;
+			event_free(b->timer);
+			free(b);
+			return;
+		}
+	}
 }
 /* }}} */
 

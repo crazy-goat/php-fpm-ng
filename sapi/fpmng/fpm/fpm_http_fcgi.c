@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -608,56 +607,6 @@ void fpm_http_conn_free(fpm_http_conn *c)
 	free(c);
 }
 
-/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
- * digits, and only a final status (200..599, fpm_http_direct_status_final())
- * may become the status line. atoi() turned "abc" into 0, "99999" into itself
- * and overflowed on a longer number; a 1xx went out as the *final* answer, its
- * body dropped by libevent, and the client waited for a response that never
- * came (the shape of #451). *reason points into `value`, "" when absent.
- *
- * Issue #605: the reason goes out on the wire verbatim
- * (evhttp_send_reply_start() frames whatever it is given), so it must not
- * carry control bytes: an interior CR would split the status line, and
- * anything below 0x20 or DEL has no business in a reason phrase. A bad
- * reason is rejected (502, like a bad code) rather than stripped: stripping
- * would silently rewrite what the upstream said, while the invalid_status
- * path already logs the offending value, maps to 502 in the access log and
- * drops the rest of the untrusted reply. The scan runs over all vlen bytes
- * because `value` is strndup()ed: an embedded NUL would hide the tail from a
- * strlen()-bounded loop while truncating the strdup() below, and '\n' cannot
- * arrive at all (the caller splits lines on it), but '\r' (only the trailing
- * one is stripped), NUL and the other controls can, from any non-PHP
- * FastCGI upstream -- PHP's own header() already refuses CR, LF and NUL.
- * The WARNING below names only the first 64 bytes up to any NUL; that
- * truncation is accepted because the 502 decision does not depend on the
- * logged text. */
-static bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
-{
-	size_t i;
-
-	if (vlen < 3 || !isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) ||
-			!isdigit((unsigned char) value[2])) {
-		return false;
-	}
-	if (vlen == 3) {
-		*reason = "";
-	} else {
-		if (value[3] != ' ') {
-			return false;
-		}
-		for (i = 4; i < vlen; i++) {
-			unsigned char ch = (unsigned char) value[i];
-
-			if (ch < 0x20 || ch == 0x7f) {
-				return false;
-			}
-		}
-		*reason = value + 4;
-	}
-	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
-	return fpm_http_direct_status_final(*code);
-}
-
 /* The CGI header block is complete: "Status:" becomes the status line, the rest is copied. */
 void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 {
@@ -687,6 +636,17 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			key = strndup(line, klen);
 			value = strndup(v, vlen);
 			if (strcasecmp(key, "Status") == 0) {
+				/* Issue #605: a bad value is rejected with 502 through
+				 * invalid_status below, which keeps the rest of the untrusted
+				 * reply from being forwarded. The value is strndup()ed, so an
+				 * embedded NUL would truncate the strdup() of the reason;
+				 * fpm_http_parse_cgi_status() scans all vlen bytes for that
+				 * reason. '\n' cannot reach the parser (lines are split on it),
+				 * but '\r' (only the trailing one is stripped), NUL and other
+				 * controls can, from any non-PHP FastCGI upstream. The WARNING
+				 * names only the first 64 bytes up to any NUL; that truncation
+				 * is accepted because the 502 decision does not depend on the
+				 * logged text. */
 				const char *parsed_reason;
 
 				free(reason);

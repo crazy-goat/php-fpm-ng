@@ -37,6 +37,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_static.h"
 #include "fpm_http_direct_conn.h"
 #include "fpm_http_direct_ops.h"
@@ -148,9 +149,12 @@ struct fpm_direct_request {
 	struct evbuffer *output;
 	int status;
 	/* Non-NULL once the response cannot go out as the application built it.
-	 * Every cause ends the same way — 500, this text as the body — but an
-	 * operator reading the wire has to be able to tell them apart. */
+	 * The body names the first cause so an operator can distinguish an invalid
+	 * CGI Status (502, issue #604) from a transport limit or header error (500). */
 	const char *rejected;
+	/* Separate from status: a later Status header must not replace the first
+	 * rejection's code. Zero retains the existing 500 for other causes. */
+	int rejected_status;
 	/* Everything below is http.stream only; without it they stay zero and
 	 * this file behaves exactly as it did before issue #56. */
 	struct fpm_direct_worker *w;
@@ -311,6 +315,7 @@ static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
 	 * do, and that is the whole point of retiring one child rather than
 	 * reloading the pool. */
 	if (w->listener) {
+		fpm_http_accept_backoff_remove(w->listener);
 		evhttp_del_accept_socket(w->http, w->listener);
 		w->listener = NULL;
 	}
@@ -455,6 +460,7 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
 	if (fpm_direct_stopping) {
 		if (w->listener) {
+			fpm_http_accept_backoff_remove(w->listener);
 			evhttp_del_accept_socket(w->http, w->listener);
 			w->listener = NULL;
 		}
@@ -651,7 +657,16 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			value++;
 		}
 		if (!strcasecmp(name, "Status")) {
-			r->status = atoi(value);
+			const char *reason;
+
+			if (!fpm_http_parse_cgi_status(value, h->header_len - (size_t) (value - h->header), &r->status,
+					&reason) &&
+				!r->rejected) {
+				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%.64s', answering 502",
+					r->pool, value);
+				r->rejected = "invalid response Status";
+				r->rejected_status = 502;
+			}
 		} else if (!fpm_http_direct_header_dropped(name)) {
 			/* Same check as the worker executor, same reason (issue #102):
 			 * evhttp_add_header() stores a non-token name verbatim and writes
@@ -666,16 +681,16 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			 * error status — the worker's contract, and the reason this is a
 			 * 500 rather than a header quietly missing. */
 			if (!fpm_http_direct_header_name_ok(name)) {
-				char escaped[256];
-				/* The child's zlog fd is closed in fpm_stdio_init_child(), so
-				 * this reaches the error log only under
-				 * catch_workers_output = yes (issue #73). Still worth writing:
-				 * the 500 body deliberately does not echo the name back to
-				 * the client, so this is the only place it is recorded. */
-				zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
-					"an HTTP token, answering 500: '%s'", r->pool,
-					fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
 				if (!r->rejected) {
+					char escaped[256];
+					/* The child's zlog fd is closed in fpm_stdio_init_child(), as
+					 * issue #73 recorded, but issue #260 added the relay to the
+					 * master (fpm_child_log_init_child()). The WARNING reaches
+					 * error_log without catch_workers_output. The 500 body does
+					 * not include the name, so only this log identifies it. */
+					zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
+						"an HTTP token, answering 500: '%s'", r->pool,
+						fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
 					r->rejected = "malformed response header name";
 				}
 			} else if (!fpm_http_direct_header_charge(&total, name, strlen(value))) {
@@ -939,9 +954,9 @@ static void fpm_direct_stream_begin(struct fpm_direct_request *r)
 	/* Every reason to stay buffered, and each one matters:
 	 *  - the pool did not ask for streaming;
 	 *  - the client is already gone;
-	 *  - the response is doomed already, and the buffered tail still owes it a
-	 *    500 whose body names the cause -- impossible once a status line is on
-	 *    the wire;
+	 *  - the response is doomed already, and the buffered tail still owes it
+	 *    an error response whose body names the cause -- impossible once a
+	 *    status line is on the wire;
 	 *  - the status is not one evhttp_send_reply() would frame, which the
 	 *    buffered tail also refuses to send;
 	 *  - HEAD/204/205/304 carry no body, so there is nothing to stream and the
@@ -1269,11 +1284,11 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 		return;
 	}
 	if (r->rejected) {
-		/* The buffered path answers 500 with the cause as the body. Here the
-		 * status line left the process before the cause was known, so the only
-		 * signal left is an unterminated message. Counted the same way either
-		 * way: from the outside both are this pool failing to deliver the
-		 * response the application built (issue #64). */
+		/* The buffered path sends an error response with the cause as the body.
+		 * Here the status line left the process before the cause was known, so
+		 * the only signal left is an unterminated message. Both paths count a
+		 * response this pool failed to deliver as the application built it
+		 * (issue #64). */
 		fpm_http_direct_ops_rejected(r->w ? r->w->ops : NULL);
 		fpm_direct_stream_abort(r, r->rejected);
 		return;
@@ -1358,10 +1373,23 @@ static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on)
 		return;
 	}
 	if (on) {
-		evconnlistener_enable(l);
+		/* The accept backoff (issue #729) owns the listener until its pause
+		 * ends; the tick would otherwise cut it from 100 ms to 10 ms. */
+		if (!fpm_http_accept_backoff_paused(w->listener)) {
+			evconnlistener_enable(l);
+		}
 	} else {
 		evconnlistener_disable(l);
 	}
+}
+
+/* The accept backoff asks this at the end of a pause: the same conditions the
+ * tick re-opens the gate on. */
+static int fpm_direct_backoff_may_resume(void *arg)
+{
+	struct fpm_direct_worker *w = arg;
+
+	return !fpm_direct_retiring && !w->in_request && fpm_http_direct_conns_may_accept(w->conns);
 }
 
 /* Shared by the plain bevcb below and, through
@@ -1599,15 +1627,15 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 
 	if (r->rejected || !fpm_http_direct_status_final(r->status)) {
 		const char *why = r->rejected ? r->rejected : "response status is not a final status";
-		/* Counted at the one place both causes meet, rather than at each of
-		 * the four that set r->rejected: what an operator is looking for is
-		 * "this pool answered 500 instead of what the application built", and
-		 * that is this branch (issue #64). */
+		/* Count once at the finalizer, not at each rejection site: the counter
+		 * records a response this pool replaced, regardless of its cause
+		 * (issue #64). An invalid CGI Status uses 502 (issue #604); all other
+		 * causes retain 500. */
 		fpm_http_direct_ops_rejected(w->ops);
 		evbuffer_drain(r->output, evbuffer_get_length(r->output));
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
 		evbuffer_add_printf(r->output, "http-direct: %s\n", why);
-		r->status = 500;
+		r->status = r->rejected_status ? r->rejected_status : 500;
 	}
 	/* Discards the POC error body above on a HEAD as well: what may carry a
 	 * body is a property of the request and the status, not of who produced
@@ -2467,6 +2495,12 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	}
 	w.listener = evhttp_accept_socket_with_handle(w.http, wp->listening_socket);
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
+	/* Issue #729: every child accepts on the one shared socket, so each child
+	 * installs its own backoff on its own evconnlistener. One that runs out of
+	 * descriptors pauses; its siblings keep accepting. */
+	if (fpm_http_accept_backoff_install(w.base, w.listener, wp->config->name, "http-direct", fpm_direct_backoff_may_resume, &w) != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
+	}
 	action.sa_handler = fpm_direct_stop;
 	sigemptyset(&action.sa_mask);
 	/* SA_RESTART for the same reason upstream's fpm_signals_init_child() sets

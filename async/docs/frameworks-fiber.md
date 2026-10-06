@@ -644,6 +644,9 @@ weakened.
 ## What remains unmeasured
 
 - a classic/non-fiber baseline and a separate negative-control comparison;
+- a dedicated cross-framework failure comparison (does anything fail here that
+  passes in Symfony): nothing failed in this probe, so there is no Slim
+  failure to set against Symfony;
 - other Slim 4 minors and other PSR-7 implementations;
 - `pm.max_children > 1` and `fiber.revalidate_freq`;
 - longer-duration stability, production-style configuration, and Slim features

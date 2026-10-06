@@ -52,11 +52,14 @@ supervisor.script = $script
 supervisor.processes = 1
 supervisor.restart = never
 env[FPMNG_TEST_POOL] = sup
+php_admin_value[register_argc_argv] = 0
 [job]
 pool.type = cron
 cron.schedule = * * * * *
 cron.script = $script
 env[FPMNG_TEST_POOL] = job
+; Off, as php.ini-development sets it: the variables must not depend on it.
+php_admin_value[register_argc_argv] = 0
 EOT;
 
 $tester = new FPM\Tester($cfg, '<?php');

@@ -85,9 +85,11 @@ static void fpm_pool_script_register_server_variables(zval *track_vars_array) /*
 {
 	php_import_environment_variables(track_vars_array);
 
-	/* The four variables the CLI SAPI defines for a script
-	 * (sapi_cli_register_variables() in sapi/cli/php_cli.c), all the script
-	 * path as given: PHP_SELF is read by symfony/console (issue #738). The
+	/* The five variables the CLI SAPI defines for a script
+	 * (sapi_cli_register_variables() in sapi/cli/php_cli.c): four are the script
+	 * path as given, DOCUMENT_ROOT is empty (it replaces an inherited
+	 * DOCUMENT_ROOT environment variable, as in CLI). PHP_SELF is read by
+	 * symfony/console (issue #738). The
 	 * environment above comes first so that an inherited variable of the same
 	 * name does not win over the script's own. argv and argc come from
 	 * SG(request_info) in fpm_pool_script_run(). */
@@ -195,14 +197,16 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 	SG(server_context) = NULL;
 	SG(request_info).path_translated = estrdup(script_path);
 	/* CLI-style argv (issue #738): argv[0] is the script, as in "php script.php".
-	 * php_build_argv() reads these only when register_argc_argv is on, and a
-	 * php.ini may turn it off (php.ini-development does); the CLI SAPI has the
-	 * same variables regardless, so force it for this process. */
+	 * main/php_variables.c (php-8.5.4) registers $argv/$argc and
+	 * $_SERVER['argv'/'argc'] whenever SG(request_info).argc is non-zero, with
+	 * no register_argc_argv check (that setting only gates the query-string
+	 * branch), so a php.ini that turns it off does not hide them, as in CLI.
+	 * Measured: fpmng-script-pools-cli-variables.phpt runs a pool with
+	 * register_argc_argv = 0. */
 	script_argv[0] = (char *) script_path;
 	script_argv[1] = NULL;
 	SG(request_info).argc = 1;
 	SG(request_info).argv = script_argv;
-	PG(register_argc_argv) = 1;
 	fpm_pool_script_current_path = script_path;
 	SG(request_info).request_method = NULL;
 	SG(request_info).query_string = NULL;

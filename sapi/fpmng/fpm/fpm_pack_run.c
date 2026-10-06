@@ -405,7 +405,7 @@ static int fpm_pack_has_injected(int argc, char **argv)
 	}
 	dir_len = (size_t) (slash - ini);
 	if (strlen(conf) != dir_len + 1 + sizeof(FPM_PACK_ENTRY_CONF) - 1 || strncmp(conf, ini, dir_len) != 0 ||
-		strcmp(conf + dir_len, "/" FPM_PACK_ENTRY_CONF) != 0) {
+			strcmp(conf + dir_len, "/" FPM_PACK_ENTRY_CONF) != 0) {
 		return 0;
 	}
 	/* The last component of the directory is the 64 hex digit digest, its parent php-fpm-ng-app-<euid>. */
@@ -455,7 +455,7 @@ int fpm_pack_activate(int *argc, char ***argv)
 			/* This is a re-exec of a packed master; running on as a plain binary
 			 * would use the host's php.ini and fpm.conf. */
 			return fpm_pack_fail("cannot locate the running executable to read its payload",
-				"no /proc/self/exe and argv[0] is not a path");
+					"no /proc/self/exe and argv[0] is not a path");
 		}
 		/* No path, no way to tell whether a payload exists. */
 		return 0;
@@ -478,8 +478,8 @@ int fpm_pack_activate(int *argc, char ***argv)
 	}
 
 	if (fpm_pack_archive_find((unsigned char *) blob, blob_len, FPM_PACK_ENTRY_CONF, &conf_in, &conf_len) != 0 ||
-		fpm_pack_archive_find((unsigned char *) blob, blob_len, FPM_PACK_ENTRY_INI, &ini_in, &ini_len) != 0 ||
-		fpm_pack_archive_find((unsigned char *) blob, blob_len, FPM_PACK_ENTRY_PHAR, &phar_in, &phar_len) != 0) {
+			fpm_pack_archive_find((unsigned char *) blob, blob_len, FPM_PACK_ENTRY_INI, &ini_in, &ini_len) != 0 ||
+			fpm_pack_archive_find((unsigned char *) blob, blob_len, FPM_PACK_ENTRY_PHAR, &phar_in, &phar_len) != 0) {
 		ret = fpm_pack_fail("the application payload does not hold " FPM_PACK_ENTRY_CONF ", " FPM_PACK_ENTRY_INI " and " FPM_PACK_ENTRY_PHAR, NULL);
 		goto out;
 	}
@@ -535,13 +535,13 @@ int fpm_pack_activate(int *argc, char ***argv)
 			goto out;
 		}
 		if (fpm_pack_open_private_dir(basefd, strrchr(top, '/') + 1, top, dir_mode, &topfd) != 0 ||
-			fpm_pack_open_private_dir(topfd, hex, sub, dir_mode, &subfd) != 0) {
+				fpm_pack_open_private_dir(topfd, hex, sub, dir_mode, &subfd) != 0) {
 			goto out;
 		}
 	}
 	if (fpm_pack_put_file(subfd, sub, FPM_PACK_ENTRY_PHAR, (const char *) phar_in, phar_len, 0444) != 0 ||
-		fpm_pack_put_file(subfd, sub, FPM_PACK_ENTRY_INI, ini, ini_out_len, 0444) != 0 ||
-		fpm_pack_put_file(subfd, sub, FPM_PACK_ENTRY_CONF, conf, conf_out_len, 0400) != 0) {
+			fpm_pack_put_file(subfd, sub, FPM_PACK_ENTRY_INI, ini, ini_out_len, 0444) != 0 ||
+			fpm_pack_put_file(subfd, sub, FPM_PACK_ENTRY_CONF, conf, conf_out_len, 0400) != 0) {
 		goto out;
 	}
 

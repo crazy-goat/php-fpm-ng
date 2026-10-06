@@ -21,6 +21,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- `reload.selective = yes`: when the new master gives up before it adopted the spared workers (a changed pool with an invalid directive, a listening address that cannot be bound, or a `SIGTERM` between sparing and `execvp()`), those workers were orphaned and kept the pool's listening socket. The master now sends `SIGTERM` to every pid still listed in `FPMNG_SELECTIVE_RELOAD_SURVIVORS` on its exit paths (`fpm_reload_selective_discard_unadopted()`) and logs a WARNING. A master that is killed outright is not covered. New test `fpmng-reload-selective-failed-init.phpt`; `docs/reload.md` describes it (#690).
+
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 
 - `pool.type = gateway`: a pool that routes to a FastCGI target but sets neither `chdir` nor `http.front_controller` now logs a WARNING at startup (`no chdir and no http.front_controller with a FastCGI target`), instead of answering "Primary script unknown" for every request with nothing pointing at the gateway's configuration. New test `fpmng-gateway-missing-docroot-warning.phpt`; `docs/gateway.md` states the docroot requirement and the `http.pool_full_policy` default next to the route example (#736).

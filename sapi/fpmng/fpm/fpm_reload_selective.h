@@ -52,4 +52,17 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp);
  * loop covers it exactly as it would a crashed ordinary child. */
 void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp);
 
+/* Issue #690: sends SIGTERM to every pid still listed in FPM_RELOAD_SELECTIVE_ENV
+ * and unsets the variable. Adoption removes a pool's entry as it takes it, so
+ * what is left when this master is about to exit (initialisation failed before
+ * fpm_children_create_initial() reached the pool, or a signal ended a reload
+ * between sparing and execvp()) are workers nobody will ever adopt: they are
+ * detached from every master's bookkeeping, hold the pool's listening sockets
+ * and nothing tells them the master is gone. Called from the exit paths only
+ * (fpm_init() failure, fpm_pctl_exit()), never from the reload's own execvp(),
+ * where the variable is the handoff. A no-op when the variable is unset. A
+ * master that is killed outright (SIGKILL, crash) cannot call it; that case is
+ * not covered. */
+void fpm_reload_selective_discard_unadopted(void);
+
 #endif

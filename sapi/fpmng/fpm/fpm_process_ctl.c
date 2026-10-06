@@ -74,6 +74,7 @@ static void fpm_pctl_exit(void)
 	zlog(ZLOG_NOTICE, "exiting, bye-bye!");
 
 	fpm_conf_unlink_pid();
+	fpm_reload_selective_discard_unadopted();
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXIT_MAIN);
 	exit(FPM_EXIT_OK);
 }

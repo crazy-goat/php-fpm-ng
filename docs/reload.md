@@ -143,6 +143,25 @@ Details worth knowing:
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
 
+## A new master that fails before adopting (issue #690)
+
+The spared workers are in no master's bookkeeping between the old master's
+`execvp()` and `fpm_reload_selective_adopt()`. If the new master gives up in
+that window (an invalid directive in a changed pool, a listening address it
+cannot bind, a failure while starting another pool, or a `SIGTERM` that ends a
+reload between sparing and `execvp()`), nobody would ever stop them: they
+would keep the spared pool's listening socket open. So every exit path of the
+master (`fpm_init()` failing, `fpm_pctl_exit()`) calls
+`fpm_reload_selective_discard_unadopted()`
+(`sapi/fpmng/fpm/fpm_reload_selective.c`). It sends `SIGTERM` to each pid still
+listed in `FPMNG_SELECTIVE_RELOAD_SURVIVORS` and logs a WARNING (`issue #690`).
+Adoption removes a pool's entry as it takes it, so after a successful start
+nothing is left to discard.
+
+Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot run
+this code, and its spared workers stay orphaned. Workers do not poll their
+parent pid. Covered by `fpmng-reload-selective-failed-init.phpt`.
+
 ## Relationship to issue #329's rolling restart
 
 Issue #329 (`fpm_pool_supervisor.c`, `FPMNG_RELOAD_SURVIVORS`) is a

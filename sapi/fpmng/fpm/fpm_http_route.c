@@ -1004,6 +1004,41 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 }
 /* }}} */
 
+/* Issue #736: a gateway pool that routes to FastCGI builds SCRIPT_FILENAME as
+ * docroot + decoded path (fpm_http_build_request(), nginx-style
+ * fastcgi_split_path_info), and the docroot is the pool's chdir -- or the
+ * master's working directory when chdir is unset (see the gw->docroot
+ * assignment in fpm_http_init_pool_ex()). With neither chdir nor
+ * http.front_controller set by the admin, every request names a script that
+ * does not exist and the upstream answers "Primary script unknown", with
+ * nothing pointing at the gateway's configuration. Said once here, in the
+ * master, after the routing table is built (so the presence of a FastCGI
+ * target is known): a WARNING, not a refusal, because the master's working
+ * directory could in principle be the application directory. The was-set
+ * checks are deliberate: http.front_controller defaults to "/index.php"
+ * (fpm_conf.c), so reading the value could not tell "the admin set nothing"
+ * from "the defaults cover it". */
+static void fpm_http_warn_missing_docroot(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw)
+{
+	unsigned i;
+
+	if (!gw->proxy_only) {
+		return;
+	}
+	if (fpm_conf_directive_was_set(wp->config, "chdir") || fpm_conf_directive_was_set(wp->config, "http.front_controller")) {
+		return;
+	}
+	for (i = 0; i < gw->ntargets; i++) {
+		if (gw->targets[i].transport == FPM_HTTP_TARGET_FASTCGI) {
+			zlog(ZLOG_WARNING, "[pool %s] http: no chdir and no http.front_controller with a FastCGI target; "
+							   "SCRIPT_FILENAME is built under the master's working directory and the upstream "
+							   "answers 'Primary script unknown' for every request",
+					wp->config->name);
+			return;
+		}
+	}
+}
+
 /* Called once per gateway pool by the master, before any child forks.
  * capacity_override is needed by multi-request executors: a classic worker
  * holds one connection, while a Fiber holds many. 0 preserves the child-count
@@ -1236,6 +1271,9 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw);
 			return -1;
 		}
+		/* Issue #736: docroot warning, once in the master, after the routing
+		 * table is built so the presence of a FastCGI target is known. */
+		fpm_http_warn_missing_docroot(wp, gw);
 		/* Issue #389: the http.operator forwarding map, built once here in the
 		 * master from every pool's operator routes and inherited by every
 		 * gateway process through fork(). A reload rebuilds it like every

@@ -21,12 +21,18 @@ require_once "tester.inc";
  * Idle clients are opened until accept() in the one child fails with EMFILE;
  * the kernel queue keeps the rest, so the listening socket stays readable.
  * Without an evconnlistener error callback libevent only logs each failed
- * accept() to stderr, which in production is a busy loop on one core. Here
- * stderr is a pipe nobody drains, so an unfixed child blocks in write() and
- * uses no CPU: the CPU check catches only a callback that does not pause, and
- * the missing callback is caught by the log assertion (the "pausing accept"
- * WARNING comes from the callback). Afterwards the clients are closed and a
- * request must be answered. */
+ * accept() and the listener stays readable: a busy loop on one core. The child
+ * logs through the master, which drains the pipe, so the unfixed child really
+ * spins: measured with the fix reverted, about 200 CPU ticks in 2 s (classic
+ * and worker). The CPU check catches that, and the "pausing accept" WARNING
+ * comes from the callback.
+ *
+ * The child is then retired (SIGUSR1) while it is still out of descriptors. A
+ * backoff that outlives the listener it was installed on (retiring and
+ * stopping delete the listener, the 100 ms resume timer would then enable freed
+ * memory) kills the child with SIGSEGV about 100 ms later; the log must show no
+ * "exited on signal". Afterwards the clients are closed and a request must be
+ * answered by the replacement child. */
 
 $root = sys_get_temp_dir() . '/fpmng-direct-emfile-' . getmypid();
 @mkdir($root, 0700, true);
@@ -91,6 +97,8 @@ php_admin_value[max_execution_time] = 0
 php_admin_value[display_errors] = 0
 EOT;
 
+    // Makes a use of freed memory crash instead of passing by luck.
+    putenv('MALLOC_PERTURB_=165');
     $tester = new FPM\Tester($cfg, '<?php');
     $clients = [];
     try {
@@ -131,6 +139,11 @@ EOT;
         // Fails with a clear message when the error callback is missing.
         $tester->expectLogPattern('/WARNING: \[pool direct\] http: accept\(\) on the http-direct listener failed: .*; pausing accept for 100 ms/', true, 5);
         echo "$executor backoff-logged: ok\n";
+
+        $tester->signal('USR1', $child);
+        sleep(1);
+        $tester->expectNoLogPattern('/exited on signal/', true, 1);
+        echo "$executor retired-without-crash: ok\n";
 
         foreach ($clients as $fp) {
             fclose($fp);
@@ -179,10 +192,12 @@ try {
 classic exhausted: yes
 classic idle-while-exhausted: ok
 classic backoff-logged: ok
+classic retired-without-crash: ok
 classic recovered: ok
 worker exhausted: yes
 worker idle-while-exhausted: ok
 worker backoff-logged: ok
+worker retired-without-crash: ok
 worker recovered: ok
 Done
 --CLEAN--

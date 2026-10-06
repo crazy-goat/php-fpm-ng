@@ -518,6 +518,14 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	}
 }
 
+/* The accept backoff asks this at the end of a pause: the listener stays
+ * closed while the accept_threshold gate has it closed. */
+static int fpm_worker_backoff_may_resume(void *arg)
+{
+	(void) arg;
+	return !fw.accept_closed;
+}
+
 /* THE ACCEPT CEILING (issue #338)
  *
  * Every child of an http-direct pool accepts from the one listening socket the
@@ -568,7 +576,11 @@ static void fpm_worker_accept_enable(bool on)
 		return;
 	}
 	if (on) {
-		evconnlistener_enable(l);
+		/* Not while the accept backoff (issue #729) is paused: its timer
+		 * re-opens the listener, through fpm_worker_backoff_may_resume(). */
+		if (!fpm_http_accept_backoff_paused(fw.listener)) {
+			evconnlistener_enable(l);
+		}
 	} else {
 		evconnlistener_disable(l);
 	}
@@ -804,6 +816,7 @@ static void fpm_worker_finish_output(void)
 	 * arriving on an already-open keep-alive connection still can, and
 	 * fpm_worker_accept() answers it 503 itself now that stopping is set. */
 	if (fw.listener) {
+		fpm_http_accept_backoff_remove(fw.listener);
 		evhttp_del_accept_socket(fw.http, fw.listener);
 		fw.listener = NULL;
 	}
@@ -2786,7 +2799,7 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	}
 	/* Issue #729: same as the classic executor, one backoff per child on the
 	 * shared listening socket. */
-	if (fpm_http_accept_backoff_install(fw.base, fw.listener, wp->config->name, "http-direct") != 0) {
+	if (fpm_http_accept_backoff_install(fw.base, fw.listener, wp->config->name, "http-direct", fpm_worker_backoff_may_resume, NULL) != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
 	}
 	zend_hash_init(&fw.pending, 16, NULL, fpm_worker_pending_dtor, 1);

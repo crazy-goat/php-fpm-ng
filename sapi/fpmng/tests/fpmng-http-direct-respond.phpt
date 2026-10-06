@@ -50,7 +50,9 @@ if ($case === 'fatal') {
 if ($case === 'early') {
     echo 'early-body';
     fpmng_respond();
-    file_put_contents($marker, 'sleeping');
+    // The marker names the run that wrote it, so the streamed check below
+    // cannot pass on a late write from the buffered run on the other pool.
+    file_put_contents($marker, 'sleeping-' . ($_GET['who'] ?? 'unknown'));
     usleep(1500000);
     return;
 }
@@ -214,7 +216,16 @@ try {
         }
         preg_match('~Content-Length: (\d+)~i', $head, $m);
         verify(isset($m[1]), 'keep-alive: no Content-Length, framing is not byte-exact');
-        $bodies[] = (int) $m[1] === 0 ? '' : fread($fp, (int) $m[1]);
+        // Loop until the announced length is reached: a single fread() may
+        // return a short read on a slow or loaded socket and truncate the body.
+        $want = (int) $m[1];
+        $kb = '';
+        while (strlen($kb) < $want) {
+            $chunk = fread($fp, $want - strlen($kb));
+            verify($chunk !== '' && $chunk !== false, 'keep-alive: connection closed inside the body');
+            $kb .= $chunk;
+        }
+        $bodies[] = $kb;
     }
     fclose($fp);
     verify($bodies === ['sealed-body', 'plain-body'], 'keep-alive bodies: ' . implode('|', $bodies));
@@ -224,20 +235,26 @@ try {
     // on the wire while the script still has 1500 ms of work left. Without the
     // push in fpm_direct_send_buffered() the reply would only be queued, and
     // the event loop that writes it cannot run until the script returns.
+    // The bound is 1200 ms against the script's 1500 ms sleep: a response that
+    // waited for the script could never come in under it, while a finished-early
+    // response normally takes a few ms, so 1200 leaves room for TCP connect plus
+    // scheduling on a loaded box. fetch() measures from before connect.
     @unlink($marker);
-    [$status, $body, $ms] = fetch($addr, 'early');
+    [$status, $body, $ms] = fetch($addr, 'early&who=buffered');
     verify($status === 200 && $body === 'early-body', "buffered early: got $status '$body'");
-    verify($ms < 700, sprintf('the buffered response waited %.0f ms for the script', $ms));
+    verify($ms < 1200, sprintf('the buffered response waited %.0f ms for the script', $ms));
+    verify(awaitMarker($marker, 'sleeping-buffered') === 'sleeping-buffered', 'the buffered script did not run past fpmng_respond()');
     echo "buffered-early: ok\n";
 
     // The case the feature exists for: on a streaming pool the client has the
     // whole response while the script is still running. The script sleeps 1500
-    // ms after the call, so anything near that means the response waited for it.
+    // ms after the call, so anything near that means the response waited for it
+    // (same 1200 ms bound as above, for the same reason).
     @unlink($marker);
-    [$status, $body, $ms] = fetch($streamAddr, 'early');
+    [$status, $body, $ms] = fetch($streamAddr, 'early&who=stream');
     verify($status === 200 && $body === 'early-body', "early: got $status '$body'");
-    verify($ms < 700, sprintf('the streamed response waited %.0f ms for the script', $ms));
-    verify(awaitMarker($marker, 'sleeping') === 'sleeping', 'the streaming script did not run past fpmng_respond()');
+    verify($ms < 1200, sprintf('the streamed response waited %.0f ms for the script', $ms));
+    verify(awaitMarker($marker, 'sleeping-stream') === 'sleeping-stream', 'the streaming script did not run past fpmng_respond()');
     echo "streamed-early: ok\n";
 
     $tester->terminate();

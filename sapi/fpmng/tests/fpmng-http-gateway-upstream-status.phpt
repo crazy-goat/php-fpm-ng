@@ -106,6 +106,15 @@ foreach (['ctrl-soh' => "404 B\x01ad", 'ctrl-del' => "404 B\x7fad"] as $name => 
 $line = status_line($http, '/s.php?v=' . rawurlencode('404 Gone') . '&n=ctl');
 check($line === 'HTTP/1.1 404 Gone', 'control 404 Gone: ' . var_export($line, true));
 echo "control-reason: ok\n";
+/* Issue #605: bytes >= 0x80 are not controls -- a UTF-8 reason passes
+ * through verbatim. This pins the check against over-rejecting (e.g. a
+ * future switch to iscntrl(), which in some locales rejects high bytes).
+ * The \xc3\xa9 bytes survive PHP's header() untouched (probed on PHP
+ * 8.5.10: they arrive on the wire as-is, unlike CR/LF/NUL which header()
+ * refuses). */
+$line = status_line($http, '/s.php?v=' . rawurlencode("404 Caf\xc3\xa9") . '&n=ctl3');
+check($line === "HTTP/1.1 404 Caf\xc3\xa9", 'control utf8 reason: ' . var_export($line, true));
+echo "control-utf8: ok\n";
 $line = status_line($http, '/s.php?v=599&n=ctl2');
 check(str_starts_with($line, 'HTTP/1.1 599 '), 'control 599: ' . var_export($line, true));
 echo "control-bare: ok\n";
@@ -144,6 +153,7 @@ empty: 502
 ctrl-soh: 502
 ctrl-del: 502
 control-reason: ok
+control-utf8: ok
 control-bare: ok
 warning: ok
 access-log: ok

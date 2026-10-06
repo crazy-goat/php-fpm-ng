@@ -257,7 +257,6 @@ try {
     check(preg_match('/^cached=(\d+)$/m', $keys, $m) === 1 && (int) $m[1] > 0, "OPcache cached no script of the PHAR:\n$keys");
     check(str_contains($keys, "key=phar://$stateA/app.phar/public/index.php"), "the front controller is not in the OPcache:\n$keys");
     echo "state dir ok\n";
-    $evidenceA = $keys;
 
     /* 4. log reopen and re-exec keep the app. */
     check(rename($errLog, "$work/err.log.1"), 'rename log');

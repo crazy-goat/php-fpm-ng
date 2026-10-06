@@ -211,13 +211,14 @@ OPcache note: OPcache caches the entries of the PHAR read through `phar://`
 (`fpmng-pack-run.phpt` checks `num_cached_scripts > 0`), keyed by the digest
 path, so a repack plus SIGUSR2 never serves the old payload's scripts: the new
 state directory gives new keys, and timestamp validation covers the rest. One
-condition: OPcache silently skips a script whose modification time it cannot
-obtain, and a PHAR entry stored with mtime 0 reports exactly that. Such a PHAR
-still runs, but its scripts are not cached with the default
-`opcache.validate_timestamps=1`. Build the PHAR so that its entries carry a real
-mtime (some PHP builds write 0, check `getMTime()` on an entry), or set
-`opcache.validate_timestamps=0` in the embedded `php.ini`, which is safe here
-because the state directory is content-addressed and immutable.
+condition: OPcache silently skips a script whose modification time is 0
+(`ext/opcache/ZendAccelerator.c`, the timestamp check in PHP 8.5), and a PHAR
+entry stored with mtime 0 reports exactly that. Such a PHAR still runs, but its
+scripts are not cached. Setting `opcache.validate_timestamps=0` alone does not
+help, because the default `opcache.file_update_protection=2` triggers the same
+skip. Build the PHAR so that its entries carry a real mtime. Measured: the
+hand-written test fixture wrote mtime 0; other tools that normalize timestamps
+may do the same (not measured).
 
 ## Appending your own
 

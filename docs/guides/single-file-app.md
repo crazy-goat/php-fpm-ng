@@ -182,6 +182,5 @@ OPcache: scripts read through `phar://` are cached (`fpmng-pack-run.phpt` checks
 `num_cached_scripts > 0`). Two payloads never share cache keys because the digest
 is in the script path; stale code after an upgrade is avoided by that path and by
 timestamp validation. A PHAR entry with modification time 0 is silently not
-cached (OPcache needs a timestamp); build the PHAR with real mtimes, or set
-`opcache.validate_timestamps=0` in the embedded `php.ini`, which is safe because
-the state directory never changes.
+cached (OPcache skips timestamp 0, `ext/opcache/ZendAccelerator.c`); build the
+PHAR with real mtimes. `opcache.validate_timestamps=0` alone does not avoid this.

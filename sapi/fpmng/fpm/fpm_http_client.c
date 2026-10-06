@@ -216,6 +216,7 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 
 	TAILQ_FOREACH(header, in, next) {
 		if (fpm_http_http_header_dropped(header->key)
+			|| strchr(header->key, '_') != NULL
 			|| strcasecmp(header->key, "Host") == 0
 			|| strcasecmp(header->key, "Content-Length") == 0
 			|| strcasecmp(header->key, "X-Forwarded-For") == 0

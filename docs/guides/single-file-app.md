@@ -18,7 +18,7 @@ workflow and its limits.
   `php85-embed`, NTS only, the same as any `php-fpm-ng`
   ([`../install.md`](../install.md)). One executable per PHP minor.
 * The PHAR extension is not loaded by default here, so the embedded `php.ini`
-  must say `extension=phar`. On Alpine install `php85-phar` as well; on Ubuntu
+  must say `extension=phar`. On Alpine the apk package depends on `php85-phar` and pulls it in; on Ubuntu
   `phar.so` comes with `php8.5-common`. Any other extension your application
   needs must be installed on the host and named in the embedded `php.ini`; one
   that PHP did not load fails startup by name.

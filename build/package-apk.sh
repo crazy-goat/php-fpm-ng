@@ -103,7 +103,7 @@ pkgdesc="$PKGDESC ($RELEASE)"
 url="https://github.com/crazy-goat/php-fpm-ng"
 arch="$(abuild -A 2>/dev/null || echo x86_64)"
 license="MIT AND PHP-3.01 AND BSD-2-Clause"
-depends="$PHP_PKG-embed"
+depends="$PHP_PKG-embed $PHP_PKG-phar"
 provides="php-fpm-ng-any"
 replaces="$OTHER"
 options="!check !strip"
@@ -135,4 +135,4 @@ EOT
 APK=$(find "$OUT/repo" -name "$PKGNAME-[0-9]*.apk" | head -1)
 [ -n "$APK" ] || fail "abuild produced no $PKGNAME .apk under $OUT/repo"
 
-echo "package-apk.sh: PASS ($APK, depends on $PHP_PKG-embed)"
+echo "package-apk.sh: PASS ($APK, depends on $PHP_PKG-embed $PHP_PKG-phar)"

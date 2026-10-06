@@ -270,6 +270,8 @@ PHP.
 | toolchain and libraries | `build-essential libevent-dev libacl1-dev` | `build-base libevent-dev acl-dev` |
 | for `FPMNG_TLS=1` | `libssl-dev` | `openssl-dev` |
 
+The `php-fpm-ng` and `php-fpm-ng-tls` apk packages depend on `php85-phar` (needed by packed applications), so installing them on Alpine pulls it in.
+
 ```sh
 ./build/libphp-build.sh out                         # out/php-fpm-ng
 FPMNG_TLS=1 FPMNG_ACME=1 ./build/libphp-build.sh out  # the php-fpm-ng-tls binary

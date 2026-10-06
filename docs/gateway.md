@@ -179,7 +179,9 @@ transport with TLS rather than exposing the gateway's cleartext target hop.
 
 With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
 (`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
-document root with `realpath()` on every static-file request (#638). The next
+document root with `realpath()` on every request that reaches the static-file
+lookup (#638): GET and HEAD for a path that is not `.php` and not a directory.
+Other requests, such as POST or `.php`, do not pay for it. The next
 request after the swap is served from the new release; no reload is needed.
 The containment check compares against the root resolved for that same
 request, so a symlink that leaves the release is still refused.

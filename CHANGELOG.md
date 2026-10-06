@@ -21,7 +21,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
-- The gateway (`pool.type = gateway`) now resolves the document root (`chdir`) on every static-file request instead of once per process, so a `current -> releases/N` symlink swap (Deployer, Envoyer, Capistrano) is followed without a reload and static assets no longer come from the previous release. The containment check is unchanged. New test `fpmng-gateway-static-symlink-swap.phpt` (#638). `DOCUMENT_ROOT`/`SCRIPT_FILENAME` still carry the unresolved `chdir`; the optional `http.docroot_resolve` directive is not part of this change.
+- The gateway (`pool.type = gateway`) now resolves the document root (`chdir`) with `realpath()` once per request that reaches the static-file lookup (GET/HEAD of a non-`.php`, non-directory path; POST and `.php` requests pay nothing) instead of once per process, so a `current -> releases/N` symlink swap (Deployer, Envoyer, Capistrano) is followed without a reload and static assets no longer come from the previous release. The containment check is unchanged. New test `fpmng-gateway-static-symlink-swap.phpt` (#638). `DOCUMENT_ROOT`/`SCRIPT_FILENAME` still carry the unresolved `chdir`; the optional `http.docroot_resolve` directive is not part of this change.
 
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 

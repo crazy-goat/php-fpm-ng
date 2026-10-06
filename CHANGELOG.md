@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- New test `fpmng-reload-selective-operator-pid.phpt`: after a selective reload spared a pool, `/status?json&full` reports the carried-over worker as `live:1` with its own pid, and that worker is still the process serving requests afterwards (#631). Issue #631 reported the row reading `live:0, pid:0`; that no longer reproduces since #537, because the scoreboard survives the reload in a memfd and `fpm_reload_shm_prepare_adopt()` hands adoption the slot that already carries the worker's pid, so nothing has to stamp one. The test pins that, so a regression of the scoreboard carry-over is caught rather than discovered. No production change: the pid stamp #631 asked for changes nothing observable, so the issue is closed with the measurement instead.
+
 ### Fixed
 
 - Test `fpmng-http-direct-respond.phpt`: the keep-alive body read loops until the announced `Content-Length` is reached instead of a single `fread()`, the `early` timing bound is 1200 ms against the script's 1500 ms sleep (a response that waited for the script cannot come in under it, while connect plus scheduling on a loaded box fits), and the `early` marker names its run (`sleeping-buffered` vs `sleeping-stream`) with the buffered marker awaited before the streamed check, so the streamed assertion cannot pass on a late write from the other pool (#671).

@@ -58,6 +58,7 @@
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_children_extra.h"
 #include "fpm_pool_type.h"
 #include "fpm_tls_http.h"
@@ -517,12 +518,17 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0;
 	saw_host = 0;
 
-	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
+	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES>.
+	 * The skip rules, the length bound and the upper-casing live in
+	 * fpm_http_header_cgi_key() (fpm_http_header_cgi.h), shared with
+	 * fpm_http_direct_build_env(); the gateway maps Content-Type inline, so
+	 * content_type_skip is 0 here. */
 	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next)
 	{
-		smart_str name = { 0 };
+		char key[FPM_HTTP_HEADER_CGI_KEY_LEN];
 		const char *k = header->key;
 		const char *value = header->value;
+		int rc;
 
 		if (strcasecmp(k, "Host") == 0) {
 			saw_host = 1;
@@ -531,66 +537,14 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 			}
 		}
 
-		/* Content-Length is already above under its CGI name; "Proxy" has no
-		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
-		 * several client libraries (httpoxy, CVE-2016-5385), which is why
-		 * fpm_http_direct_build_env() refuses it too. Core deletes the key
-		 * from $_SERVER again -- or, when the process itself has an HTTP_PROXY
-		 * environment variable, overwrites it with that value
-		 * (check_http_proxy(), main/php_variables.c:861-874 in php-8.5.9) --
-		 * so the gateway was not exploitable through $_SERVER before this
-		 * line: measured on 192.168.8.50, 2026-09-09, `Proxy: attacker`
-		 * produced no HTTP_PROXY on either pool type. It still reached the
-		 * worker as a FastCGI parameter though, and getallheaders() reads
-		 * those directly, not $_SERVER (sapi/fpm/fpm_main.c
-		 * PHP_FUNCTION(apache_request_headers) -> fcgi_loadenv): same box, a
-		 * gateway built without this exclusion answered
-		 * {"proxy":"attacker", ...} with $_SERVER['HTTP_PROXY'] absent. The
-		 * exclusion is here so that a header this transport's sibling refuses
-		 * by name does not arrive because someone else's mitigation happens to
-		 * cover one of the ways to read it. Issue #115. */
-		if (strcasecmp(k, "Content-Length") == 0 || strcasecmp(k, "Proxy") == 0) {
+		rc = fpm_http_header_cgi_key(k, false, key, sizeof(key));
+		if (rc < 0) {
+			return HTTP_BADREQUEST; /* unreachable: the pre-scan above bounds every name */
+		}
+		if (rc > 0) {
 			continue;
 		}
-		/* A name with "_" would collide with its "-" spelling: the mapping below
-		 * turns "-" into "_", so "X_Real_IP" and "X-Real-IP" both become
-		 * HTTP_X_REAL_IP, and the last pair on the wire wins in $_SERVER
-		 * (fcgi_hash_set replaces an existing key). A client could then
-		 * override a header the reverse proxy in front set. nginx (default
-		 * underscores_in_headers off) and Apache 2.4 drop such headers when
-		 * they build the CGI environment; the gateway is the front server for
-		 * this hop, so it does the same. Same rule in
-		 * fpm_http_direct_build_env(). Issue #595. */
-		if (strchr(k, '_') != NULL) {
-			continue;
-		}
-		if (strcasecmp(k, "Content-Type") != 0) {
-			smart_str_appendl(&name, "HTTP_", sizeof("HTTP_") - 1);
-		}
-		/* Explicit range, not toupper(): the CGI key a header lands under is a
-		 * security boundary -- the Content-Length exclusion above is enforced by
-		 * name -- so the mapping must not depend on LC_CTYPE. Measured on
-		 * 192.168.8.50, glibc 2.43, 2026-09-09: in tr_TR.UTF-8 and az_AZ.UTF-8
-		 * toupper('i') returns 'i' (the Turkish capital of 'i' is U+0130, which
-		 * does not fit the single-byte table), so "If-Modified-Since" would
-		 * become HTTP_IF_MODiFiED_SiNCE; de_DE.ISO-8859-1 remaps 30 bytes above
-		 * 0x7F. Nothing calls setlocale() in the gateway process today -- it
-		 * translates HTTP to FastCGI and never executes application PHP -- but
-		 * that is an argument about when this code runs, not about what it
-		 * computes. Same mapping as fpm_http_direct_build_env(), issue #109;
-		 * #105 replaced the identical construct there. */
-		for (; *k; k++) {
-			unsigned char ch = (unsigned char) *k; /* not `c`: that is this connection */
-
-			if (ch >= 'a' && ch <= 'z') {
-				smart_str_appendc(&name, (char) (ch - ('a' - 'A')));
-			} else {
-				smart_str_appendc(&name, ch == '-' ? '_' : (char) ch);
-			}
-		}
-		smart_str_0(&name);
-		fpm_http_param(c, ZSTR_VAL(name.s), value);
-		smart_str_free(&name);
+		fpm_http_param(c, key, value);
 	}
 
 	/* No Host header at all: the authority still defines the host (RFC 9112

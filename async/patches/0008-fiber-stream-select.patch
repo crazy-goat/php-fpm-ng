@@ -26,7 +26,7 @@ Why here and not at the transport layer, like the rest of the fiber
 executor's socket interception (fpm_pool_fiber_xport.c): stream_select()
 takes SETS of descriptors from userland — some wrapped by us, some not, some
 not sockets at all — which the per-stream transport wrapper has no way to
-see. See tasks/nice-to-have/006-fiber-stream-select.md for the analysis.
+see. See async/README.md (Why 0008) for the analysis.
 
 What this does NOT change: the exceptfds set (efds) still falls back to the
 real select() call whenever it is non-empty — see fpm_fiber_select()'s

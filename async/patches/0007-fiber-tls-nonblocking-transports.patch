@@ -5,10 +5,13 @@ fpm-ng's configure sets it for --enable-fpmng-fiber with a static ext/openssl
 (sapi/fpmng/config.m4). Without it the files are byte-for-byte upstream.
 
 What changes when it is defined: ssl/sslv3/tls/tlsv1.x factories hand out
-streams whose waits (TLS handshake steps, SSL_read/SSL_write retries, the
-underlying TCP connect) suspend the fpm-ng request fiber instead of blocking
-the process. With pool.executor != fiber, in CLI, and outside a request fiber
-the code paths are upstream's, call for call.
+streams whose waits (TLS handshake steps, SSL_read/SSL_write retries)
+suspend the fpm-ng request fiber instead of blocking the process. The TCP
+connect and the DNS lookup inside the original factory still block:
+upstream allocates the ssl stream directly rather than through the "tcp"
+transport, so the xport factory (with its seam-driven DNS pre-resolution)
+never sees it. With pool.executor != fiber, in CLI, and outside a request
+fiber the code paths are upstream's, call for call.
 
 How: php_pollfd_for is re-pointed at fpm_fiber_xport_tls_wait for the duration
 of the handshake/IO (fpm_fiber_tls_wait); that helper waits through fpm-ng's
@@ -303,17 +306,7 @@ index 269de954..fe0c4fb2 100644
  	switch (option) {
  		case PHP_STREAM_OPTION_META_DATA_API:
  			if (sslsock->ssl_active) {
-@@ -3788,8 +3937,7 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
- 
- 			break;
- 
--		case PHP_STREAM_OPTION_XPORT_API:
--			switch(xparam->op) {
-+		case PHP_STREAM_OPTION_XPORT_API:			switch(xparam->op) {
- 
- 				case STREAM_XPORT_OP_CONNECT:
- 				case STREAM_XPORT_OP_CONNECT_ASYNC:
-@@ -3848,6 +3996,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
+@@ -3848,6 +3997,12 @@ static int php_openssl_sockop_set_option(php_stream *stream, int option, int val
  					/* fall through */
  					break;
  			}
@@ -326,7 +319,7 @@ index 269de954..fe0c4fb2 100644
  	}
  
  	return php_stream_socket_ops.set_option(stream, option, value, ptrparam);
-@@ -3924,6 +4078,137 @@ static const php_stream_ops php_openssl_socket_ops = {
+@@ -3924,6 +4079,137 @@ static const php_stream_ops php_openssl_socket_ops = {
  	php_openssl_sockop_set_option,
  };
  

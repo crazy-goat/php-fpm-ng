@@ -24,6 +24,7 @@
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fpm_metrics.h"
+#include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
@@ -93,12 +94,14 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 			return FPM_INIT_EXIT_OK;
 		} else {
 			zlog(ZLOG_ERROR, "FPM initialization failed");
+			fpm_reload_selective_discard_unadopted();
 			return FPM_INIT_ERROR;
 		}
 	}
 
 	if (0 > fpm_conf_write_pid()) {
 		zlog(ZLOG_ERROR, "FPM initialization failed");
+		fpm_reload_selective_discard_unadopted();
 		return FPM_INIT_ERROR;
 	}
 
@@ -197,6 +200,13 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 	}
+
+	/* Issue #690: whatever adoption did not consume (a spared pool that no
+	 * longer exists in this generation's config) must not stay in the
+	 * environment for the master's whole life, where pid reuse could turn it
+	 * into a kill of an unrelated process at shutdown. Only the master gets
+	 * here: a forked child jumped to run_child above. */
+	fpm_reload_selective_discard_unadopted();
 
 	/* run event loop forever */
 	fpm_event_loop(0);

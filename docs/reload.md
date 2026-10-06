@@ -143,6 +143,34 @@ Details worth knowing:
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
 
+## A new master that fails before adopting (issue #690)
+
+The spared workers are in no master's bookkeeping between the old master's
+`execvp()` and `fpm_reload_selective_adopt()`. If the master gives up in that
+window, nobody would ever stop them: they would keep the spared pool's
+listening socket open. The causes are an invalid directive in a changed pool,
+a listening address it cannot bind, a failure while starting another pool, a
+`SIGTERM` or `SIGQUIT` that ends a reload between sparing and `execvp()`, and
+an `execvp()` that fails (for example the binary was removed).
+
+So `fpm_reload_selective_discard_unadopted()`
+(`sapi/fpmng/fpm/fpm_reload_selective.c`) runs on these paths:
+`fpm_init()` failing, `fpm_pctl_exit()`, a failed `execvp()` in
+`fpm_pctl_exec()`, and once after the initial fork loop in `fpm_run()`. The last
+call removes entries that no pool of the new generation adopted (a pool that
+disappeared from the config), so a stale pid never stays in the environment.
+It sends `SIGTERM` to each pid still listed in
+`FPMNG_SELECTIVE_RELOAD_SURVIVORS` and logs a WARNING (`issue #690`). It uses
+`SIGTERM`, not the graceful `SIGQUIT`, even on a graceful stop: the pool type is
+unknown there, and a request in flight on a spared worker is cut. Adoption
+removes a pool's entry as it takes it, so after a successful start nothing is
+left to discard.
+
+Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
+run this code, and its spared workers stay orphaned. Workers do not poll their
+parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (failed init)
+and `fpmng-reload-selective-failed-exec.phpt` (failed `execvp()`).
+
 ## Relationship to issue #329's rolling restart
 
 Issue #329 (`fpm_pool_supervisor.c`, `FPMNG_RELOAD_SURVIVORS`) is a

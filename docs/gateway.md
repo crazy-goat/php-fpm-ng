@@ -175,6 +175,21 @@ are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
 
+### Symlink deploys
+
+With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
+(`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
+document root with `realpath()` on every static-file request (#638). The next
+request after the swap is served from the new release; no reload is needed.
+The containment check compares against the root resolved for that same
+request, so a symlink that leaves the release is still refused.
+
+`DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
+`chdir` path (`/srv/app/current/...`). PHP resolves it itself, so it can
+disagree with the static lookup for the short moment of a swap. A resolved
+variant (like nginx `$realpath_root`) is not implemented. Not measured: the
+cost of the extra `realpath()` per request.
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,

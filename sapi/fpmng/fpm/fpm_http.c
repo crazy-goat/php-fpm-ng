@@ -1533,20 +1533,20 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
  * root, and respond without FastCGI.
  * ------------------------------------------------------------------------ */
 
-/* Resolved document root, once per gateway process. */
-static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
+/* Resolved document root, re-resolved on every call into the caller's buffer
+ * (issue #638). It used to be cached in a function-level static, so a
+ * `current -> releases/N` symlink swap (Deployer, Envoyer, Capistrano) left
+ * static files coming from release N-1 while PHP ran release N. One realpath()
+ * on a short path is cheap next to the open()+fstat() a static hit costs
+ * anyway. The containment check in fpm_http_static_serve() is unchanged: it
+ * compares against whatever root this returns for the same request. */
+static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw, char resolved[MAXPATHLEN])
 {
-	static char resolved[MAXPATHLEN];
-	static int done = 0;
-
-	if (!done) {
-		done = 1;
-		if (!realpath(gw->docroot, resolved)) {
-			resolved[0] = '\0';
-		}
+	if (!gw->docroot || !realpath(gw->docroot, resolved)) {
+		return NULL;
 	}
 
-	return resolved[0] ? resolved : NULL;
+	return resolved;
 }
 
 /* Validates http.front_controller once, in the master, before the first gateway
@@ -1576,7 +1576,8 @@ void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
 
 	gw->front_controller_ok = 0;
 	if (fc && *fc) {
-		const char *root = fpm_http_docroot_real(gw);
+		char root_buf[MAXPATHLEN];
+		const char *root = fpm_http_docroot_real(gw, root_buf);
 		char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
 
 		if (!root) {
@@ -1622,10 +1623,11 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 {
 	struct fpm_http_static_log_ctx ctx = { gw, req, remote_addr };
 	struct fpm_http_static st;
+	char root_buf[MAXPATHLEN];
 
 	memset(&st, 0, sizeof(st));
 	st.pool = gw->pool;
-	st.root = fpm_http_docroot_real(gw);	/* NULL when it does not resolve: nothing is served */
+	st.root = fpm_http_docroot_real(gw, root_buf);	/* NULL when it does not resolve: nothing is served */
 	st.log = fpm_http_static_log_response;
 	st.log_ctx = &ctx;
 

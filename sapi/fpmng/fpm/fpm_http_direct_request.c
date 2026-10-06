@@ -31,6 +31,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_acl.h"
 #include "fpm_pack_run.h"
@@ -416,58 +417,20 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("CONTENT_LENGTH", length);
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_HTTP_HEADER_NAME_MAX + sizeof("HTTP_")];
-		size_t i, len = strlen(kv->key);
+		char name[FPM_HTTP_HEADER_CGI_KEY_LEN];
+		int rc;
 
-		/* Content-* are already above under their CGI names; "Proxy" has no
-		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
-		 * several client libraries (httpoxy). */
-		if (!strcasecmp(kv->key, "Content-Type") || !strcasecmp(kv->key, "Content-Length") ||
-			!strcasecmp(kv->key, "Proxy")) {
-			continue;
-		}
-		if (len > FPM_HTTP_HEADER_NAME_MAX) {
+		/* CONTENT_TYPE is already above, from the first Content-Type header,
+		 * so the shared mapping (fpm_http_header_cgi.h) skips every
+		 * Content-Type line here: content_type_skip is 1. The skip rules, the
+		 * length bound and the upper-casing live there, not here. */
+		rc = fpm_http_header_cgi_key(kv->key, true, name, sizeof(name));
+		if (rc < 0) {
 			return -1;
 		}
-		/* "_" would collide with the "-" spelling below ("X_Real_IP" and
-		 * "X-Real-IP" are both HTTP_X_REAL_IP), letting a client override a
-		 * header the proxy in front set. Dropped, as nginx and Apache 2.4 do;
-		 * same rule as the gateway, fpm_http.c. Issue #595. */
-		if (memchr(kv->key, '_', len) != NULL) {
+		if (rc > 0) {
 			continue;
 		}
-		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in
-		 * this child, and the locale changes this mapping for plain US-ASCII
-		 * input. In tr_TR.UTF-8 and az_AZ.UTF-8 toupper('i') returns 'i' -- the
-		 * Turkish capital of 'i' is U+0130, which does not fit the single-byte
-		 * table -- so "If-Modified-Since" became HTTP_IF_MODiFiED_SiNCE and
-		 * nothing reading $_SERVER['HTTP_IF_MODIFIED_SINCE'] found it. Served and
-		 * measured on 192.168.8.50, glibc 2.43, php-8.5.9, 2026-09-09, with the
-		 * pre-fix binary. de_DE.ISO-8859-1 remaps 30 bytes above 0x7F on top of
-		 * that.
-		 *
-		 * Reachable through pool.executor = worker, where the boot script calls
-		 * setlocale() once and every later request's environment is derived
-		 * inside that same PHP request. Not reproducible on the classic executor
-		 * with today's php-src: ext/standard's request shutdown puts LC_ALL back
-		 * to "C" when setlocale() was called (ext/standard/basic_functions.c:448
-		 * in php-8.5.9), and request N+1's environment is built before its script
-		 * runs. That is upstream's bookkeeping, not a property of this transport,
-		 * so it is not what the mapping relies on: the CGI key a header lands
-		 * under is a security boundary -- the Proxy and Content-* exclusions
-		 * above are enforced by name -- and must not depend on process state the
-		 * application chose. Issue #105; same class as #102 on the response side. */
-		memcpy(name, "HTTP_", 5);
-		for (i = 0; i < len; i++) {
-			unsigned char c = (unsigned char) kv->key[i];
-
-			if (c >= 'a' && c <= 'z') {
-				name[5 + i] = (char) (c - ('a' - 'A'));
-			} else {
-				name[5 + i] = c == '-' ? '_' : (char) c;
-			}
-		}
-		name[5 + len] = '\0';
 		ENV(name, kv->value);
 	}
 #undef ENV

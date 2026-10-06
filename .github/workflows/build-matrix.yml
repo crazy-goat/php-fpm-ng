@@ -257,6 +257,13 @@ jobs:
       - name: a red package cell uploads the failing .phpt evidence (issue #669)
         run: ./build/test-phpt-failure-artifact.sh
 
+      # Issue #683: build/lint-c.sh skips the TLS-only translation unit when
+      # commands.log shows a non-TLS build, and still lints it for a TLS one.
+      # Hermetic: fake commands.log files plus a clang-tidy stand-in, no build,
+      # no SDK, no network.
+      - name: lint skips the TLS-only file against a non-TLS build (issue #683)
+        run: ./build/test-lint-c-tls-files.sh
+
       # Issue #220 / #422: the packaged binary's libphp version guard, in all
       # three outcomes (another minor FATAL, another patch level a notice, the
       # same version silent), compiled against this job's real SDK. It used to

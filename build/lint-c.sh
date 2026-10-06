@@ -14,10 +14,19 @@
 # compile line of every translation unit, and the -I/-D flags are taken from
 # there, so php.h and the supplied feature macros resolve the way the real
 # build resolves them. Build it with the same FPMNG_TLS/FPMNG_ACME/
-# FPMNG_DEBUG_CLOCK toggles as the binary under test, or the files behind
-# those toggles are linted with their macros undefined. Without a directory
+# FPMNG_DEBUG_CLOCK toggles as the binary under test, so the files behind
+# those toggles are linted with their macros defined. Without a directory
 # clang-tidy still runs; expect missing-header noise -- useful only as a smoke
 # check of the config.
+#
+# One file needs more than flags: sapi/fpmng/fpm/fpm_tls_http_direct.c is
+# compiled only in TLS builds (build/libphp-build.sh sources(): fpm_tls_*
+# only with FPMNG_TLS=1), and unlike fpm_tls_http.c and fpm_tls_reload.c it
+# carries no #ifdef HAVE_FPM_HTTP_TLS guard that would make it an empty
+# translation unit otherwise -- its headers (fpm_tls_http.h, fpm_tls_reload.h)
+# hide the declarations behind that macro, so with a non-TLS flag set it
+# reports implicit declarations (issue #683). When commands.log shows a
+# non-TLS build that file is skipped below, visibly, instead of linted.
 #
 # Exit status: clang-tidy's. With WarningsAsErrors: '*' in .clang-tidy
 # (issue #414) any finding in our TUs/headers fails this script; the CI step
@@ -60,6 +69,20 @@ if [ -n "$BUILD_OUT" ]; then
 	done
 	EXTRA_ARGS="$EXTRA_ARGS $FLAGS"
 	echo "lint-c: compile flags from $LOG"
+	# The compile line says whether this was a TLS build: libphp-build.sh
+	# puts -DHAVE_FPM_HTTP_TLS=1 into DEFS (and so into every compile line)
+	# only with FPMNG_TLS=1, and compiles fpm_tls_*.c only then. Linting
+	# fpm_tls_http_direct.c without that macro reports implicit declarations
+	# for what its guarded headers hide (issue #683); its guarded siblings
+	# lint as empty translation units and stay in the list. FLAGS, not the
+	# whole line: only -I/-D tokens can carry the macro, never a path.
+	case "$FLAGS" in
+	*-DHAVE_FPM_HTTP_TLS=*) ;;
+	*)
+		FILES=$(printf '%s\n' "$FILES" | grep -v '/fpm_tls_http_direct\.c$' || true)
+		echo "lint-c: no HAVE_FPM_HTTP_TLS in $LOG -- skipping TLS-only sapi/fpmng/fpm/fpm_tls_http_direct.c"
+		;;
+	esac
 fi
 
 # EXTRA_ARGS and FILES are intentionally word-split; paths have no spaces.

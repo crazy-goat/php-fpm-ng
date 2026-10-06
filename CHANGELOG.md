@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Fixed
+
+- `build/lint-c.sh` no longer lints `sapi/fpmng/fpm/fpm_tls_http_direct.c` against a build made without TLS: that file is compiled only with `FPMNG_TLS=1` and, unlike its guarded TLS siblings, has no `#ifdef HAVE_FPM_HTTP_TLS` fallback, so with a non-TLS flag set clang-tidy reported implicit declarations for what its headers hide. The skip is printed, a TLS build still lints the file, and CI (which builds with `FPMNG_TLS=1`) is unchanged. New hermetic `build/test-lint-c-tls-files.sh` (CI job `checks`) (#683).
+
 ## [0.15.0] - 2026-10-06
 
 ### Added

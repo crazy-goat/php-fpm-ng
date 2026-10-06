@@ -473,7 +473,7 @@ static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* 
 		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
 		return -1;
 	}
-	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main") != 0) {
+	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", NULL, NULL) != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the main listener; running out of file descriptors will make it spin", gw->pool);
 	}
 	gw->tls_ready = 1;
@@ -758,7 +758,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 			zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed for http.plain_listen", gw->pool);
 			exit(FPM_EXIT_SOFTWARE);
 		}
-		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen") != 0) {
+		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", NULL, NULL) != 0) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on http.plain_listen; running out of file descriptors will make it spin", gw->pool);
 		}
 	}

@@ -228,6 +228,12 @@ run_child: /* only workers reach this point */
 		/* Assign the metrics slot BEFORE cleanup — afterwards the pool list and
 		 * earlier pools' pm.max_children disappear (see fpm_metrics.c). */
 		fpm_metrics_child_init();
+		/* Issue #691: the scoreboard and metrics memfds are close-on-exec,
+		 * not close-on-fork, so this child inherited them. It only ever
+		 * uses the mappings (see fpm_reload_shm_child_init()), and the next
+		 * thing this process runs may be a PHP script, which must not see
+		 * them through /proc/self/fd. */
+		fpm_reload_shm_child_init();
 
 		if (type && type->child_main) {
 			/* This type takes over the entire process permanently — it does not

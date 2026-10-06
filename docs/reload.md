@@ -142,6 +142,9 @@ Details worth knowing:
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
+- A forked worker keeps only the mappings: it closes the memfd descriptors
+  right after fork (close-on-exec is not close-on-fork), so a script running
+  in the worker cannot reach them through `/proc/self/fd` (issue #691).
 
 ## Relationship to issue #329's rolling restart
 

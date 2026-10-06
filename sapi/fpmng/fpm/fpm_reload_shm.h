@@ -66,6 +66,18 @@ void fpm_reload_shm_metrics_done(int kept);
  * on. */
 void fpm_reload_shm_register_metrics(int fd, size_t size, uint32_t slots, uint32_t limit);
 
+/* Worker child, at run_child (fpm.c) right after fpm_metrics_child_init():
+ * closes every memfd of this generation the child inherited by fork, keeping
+ * the MAP_SHARED mappings (issue #691). The child only ever touches the
+ * mappings: attaching to a metrics slot is pointer arithmetic
+ * (fpm_metrics_child_init()), and every use of a descriptor -- ftruncate()
+ * and fallocate() in fpm_metrics.c, the fstat() size check above -- runs in
+ * the master before any fork. Marking the process-local copies -1 stops any
+ * later accidental use in the child; the master's copies are untouched (they
+ * are per-process after fork) so a later selective reload can still spare
+ * them across execvp(). */
+void fpm_reload_shm_child_init(void);
+
 /* Called from fpm_reload_selective_spare_pool() once the pool's children are
  * detached: marks the pool's scoreboard and the metrics region for
  * inheritance and records the pool's metrics slot range. */

@@ -334,6 +334,31 @@ void fpm_reload_shm_register_metrics(int fd, size_t size, uint32_t slots, uint32
 }
 /* }}} */
 
+void fpm_reload_shm_child_init(void) /* {{{ */
+{
+	struct fpm_reload_shm_sb_s *s;
+
+	/* MFD_CLOEXEC closes across exec, not across fork: without this every
+	 * forked child keeps the scoreboard and metrics memfds open, and a PHP
+	 * script running in the child can see and resize them through
+	 * /proc/self/fd (issue #691). close() does not unmap, so the MAP_SHARED
+	 * mappings the child actually uses stay. Unchecked closes, like the
+	 * master's own cleanup above: on Linux a close of a valid descriptor
+	 * cannot leave it open (EINTR still closes), and EBADF only means it
+	 * was never backed by a memfd on this platform. */
+	for (s = own_sb; s; s = s->next) {
+		if (s->fd >= 0) {
+			close(s->fd);
+			s->fd = -1;
+		}
+	}
+	if (own_mx_fd >= 0) {
+		close(own_mx_fd);
+		own_mx_fd = -1;
+	}
+}
+/* }}} */
+
 static void fpm_reload_shm_append_env(const char *record) /* {{{ */
 {
 	const char *existing = getenv(FPM_RELOAD_SHM_ENV);

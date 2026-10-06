@@ -4,6 +4,9 @@
  * run with phar.readonly=1, and the PHAR must not come from the code under test,
  * so a small uncompressed, SHA-256-signed PHAR is written out by hand. */
 
+/* The entry timestamp must not be 0: OPcache does not cache a script whose
+ * mtime it cannot obtain, and phar reports 0 for such an entry (#787). */
+
 /** @param array<string,string> $files entry name => contents */
 function fpmng_mini_phar(array $files, string $stub = "<?php\n__HALT_COMPILER(); ?>\r\n"): string
 {
@@ -11,7 +14,7 @@ function fpmng_mini_phar(array $files, string $stub = "<?php\n__HALT_COMPILER();
     $data = '';
     foreach ($files as $name => $body) {
         $entries .= pack('V', strlen($name)) . $name
-            . pack('VVVVVV', strlen($body), 0, strlen($body), crc32($body), 0x1B6, 0);
+            . pack('VVVVVV', strlen($body), 1700000000, strlen($body), crc32($body), 0x1B6, 0);
         $data .= $body;
     }
     $manifest = pack('VnVV', count($files), 0x1100, 0x10000, 0) . pack('V', 0) . $entries;

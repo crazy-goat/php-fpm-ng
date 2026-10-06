@@ -178,7 +178,10 @@ by the release package gate against the installed `.deb` and `.apk`
 | ordinary unpacked execution, supplied-ini bootstrap | the rest of the `fpmng-*.phpt` suite, `fpmng-ini-bootstrap-policy.phpt`, `fpmng-ini-bootstrap-extension.phpt` |
 | ABI mismatch | `build/test-libphp-abi-guard.sh` (CI job `checks`) |
 
-OPcache: with these pools, `num_cached_scripts` stays 0 for scripts read only
-through `phar://` (measured by `fpmng-pack-run.phpt`); the isolation between two
-payloads is the digest in the script path, not a cache entry. OPcache support for
-archive scripts is therefore **not** claimed beyond that.
+OPcache: scripts read through `phar://` are cached (`fpmng-pack-run.phpt` checks
+`num_cached_scripts > 0`). Two payloads never share cache keys because the digest
+is in the script path; stale code after an upgrade is avoided by that path and by
+timestamp validation. A PHAR entry with modification time 0 is silently not
+cached (OPcache needs a timestamp); build the PHAR with real mtimes, or set
+`opcache.validate_timestamps=0` in the embedded `php.ini`, which is safe because
+the state directory never changes.

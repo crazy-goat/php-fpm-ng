@@ -24,7 +24,8 @@ require_once "fpmng-pack-app.inc";
  *   - SIGUSR1 reopens the log, SIGUSR2 re-execs the same app, SIGTERM stops;
  *   - a repack renamed over the running executable plus SIGUSR2 serves the new
  *     code from a different state directory (no stale code), with the OPcache
- *     script paths as evidence;
+ *     script paths as evidence, and OPcache caches the PHAR's scripts (none of the old
+ *     digest's keys remain);
  *   - the binary's own reader refuses a flipped byte and a truncation, and a
  *     missing entry, a bad conf, a missing extension and an unpacked binary
  *     with fpmng-app:// all fail before "ready", with a message. */
@@ -122,8 +123,13 @@ if (\$p === '/') {
 } elseif (\$p === '/res') {
     echo trim(file_get_contents(__DIR__ . '/../res/data.txt'));
 } elseif (\$p === '/opcache') {
-    \$st = opcache_get_status(false);
+    \$st = opcache_get_status(true);
     echo 'file=', __FILE__, "\\ncached=", \$st['opcache_statistics']['num_cached_scripts'], "\\nenabled=", (int) \$st['opcache_enabled'];
+    foreach (array_keys(\$st['scripts'] ?? []) as \$k) {
+        if (str_starts_with(\$k, 'phar://')) {
+            echo "\\nkey=", \$k;
+        }
+    }
 } else {
     echo 'route ', \$p;
 }
@@ -248,6 +254,8 @@ try {
     }
     [, $keys] = get($base, '/opcache');
     check(str_contains($keys, "file=phar://$stateA/app.phar/public/index.php\n") && str_contains($keys, 'enabled=1'), "script identity is not the state directory:\n$keys");
+    check(preg_match('/^cached=(\d+)$/m', $keys, $m) === 1 && (int) $m[1] > 0, "OPcache cached no script of the PHAR:\n$keys");
+    check(str_contains($keys, "key=phar://$stateA/app.phar/public/index.php"), "the front controller is not in the OPcache:\n$keys");
     echo "state dir ok\n";
     $evidenceA = $keys;
 
@@ -281,10 +289,10 @@ try {
     $stateB = array_values(array_diff($dirs, [$stateA]))[0];
     [, $keys] = get($base, '/opcache');
     check(str_contains($keys, "file=phar://$stateB/app.phar/public/index.php\n") && !str_contains($keys, $stateA), "script identity after the upgrade:\n$keys");
+    check(str_contains($keys, "key=phar://$stateB/app.phar/public/index.php") && !str_contains($keys, 'key=phar://' . $stateA), "stale or missing OPcache keys after the upgrade:\n$keys");
     waitFor(fn () => str_contains((string) file_get_contents("$work/sup.out"), 'lib-B'), 'the supervisor runs the new script');
     echo "upgrade ok\n";
-    $norm = fn (string $t) => preg_replace(['#[0-9a-f]{64}#', '#' . preg_quote($work, '#') . '#', '#app-\d+/#'], ['<digest>', '<work>', 'app-<euid>/'], $t);
-    echo "cache status before the upgrade:\n", $norm($evidenceA), "\nafter:\n", $norm($keys), "\n";
+    echo "opcache ok\n";
 
     /* 6. graceful stop. */
     proc_terminate($proc, 15);
@@ -367,14 +375,7 @@ state dir ok
 reopen ok
 reload ok
 upgrade ok
-cache status before the upgrade:
-file=phar://<work>/state/php-fpm-ng-app-<euid>/<digest>/app.phar/public/index.php
-cached=0
-enabled=1
-after:
-file=phar://<work>/state/php-fpm-ng-app-<euid>/<digest>/app.phar/public/index.php
-cached=0
-enabled=1
+opcache ok
 stop ok
 config refusals ok
 damaged payload refusals ok

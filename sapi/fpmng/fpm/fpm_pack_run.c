@@ -31,7 +31,8 @@
  * All three go to <base>/php-fpm-ng-app-<euid>/<payload sha256>/, where <base> is
  * $FPMNG_APP_DIR, else $TMPDIR, else /tmp. Content-addressed means two different
  * applications never share a path, so OPcache (which keys a PHAR by its archive
- * path, #426) cannot hand one application the other's cached scripts, and a
+ * path, #426) cannot hand one application the other's cached scripts (OPcache does cache
+ * PHAR entries that carry a non-zero mtime; one with mtime 0 is silently skipped), and a
  * repack under the same name gets a new directory. The directories are owned by
  * the effective uid and not writable by anyone else; nothing is followed through
  * a symlink; files are written under a temporary name and renamed into place.

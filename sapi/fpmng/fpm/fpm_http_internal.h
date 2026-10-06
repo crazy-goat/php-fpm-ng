@@ -811,5 +811,62 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len);
  * call at any time, including when nothing is paused. */
 void fpm_http_response_resume(fpm_http_conn *c);
 
+/* Issue #747: what fpm_http.c shares with the files it was split into. Each
+ * group is named after the file that defines it. */
+
+/* shared constants */
+#define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
+/* Issue #389: how many HTTP/1.1 connections the gateway may hold open to one
+ * operator listener at a time. The operator endpoint is a single sequential
+ * process (fpm_operator_http.c) that closes each connection after one response,
+ * so this is a guard against a burst of scrapes, not a per-worker reuse budget
+ * like a target pool's pm.max_children. */
+#define FPM_HTTP_OPERATOR_UPSTREAMS 4
+
+/* fpm_http.c */
+extern struct fpm_http_gateway_s *gateways;
+extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
+atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p);
+unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw);
+atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i);
+void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
+size_t fpm_http_counters_size(const struct fpm_http_counters_s *c);
+size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc);
+void fpm_http_request(struct evhttp_request *req, void *arg);
+void fpm_http_plain_request(struct evhttp_request *req, void *arg);
+void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned index);
+void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target);
+void fpm_http_count_local(struct fpm_http_gateway_s *gw);
+void fpm_http_counter_incr(atomic_t *counter);
+void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
+void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
+		char *port_buf, size_t port_size);
+
+/* fpm_http_fcgi.c */
+void fpm_http_conn_free(fpm_http_conn *c);
+size_t fpm_http_raw_path(struct evhttp_request *req, char *path, size_t path_size);
+void fpm_http_normalize_target(struct evhttp_request *req);
+const char *fpm_http_request_path(struct evhttp_request *req);
+int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint);
+void fpm_http_finish_truncated(fpm_http_conn *c);
+
+/* fpm_http_gw_proc.c */
+void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
+void fpm_http_cleanup(int which, void *arg);
+int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
+void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
+
+/* fpm_http_operator_fwd.c */
+const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
+	char *scratch, size_t scratch_len);
+int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
+	const char *peer_addr, const char *effective_addr, const struct fpm_http_forwarded_result_s *fwd,
+	ev_uint16_t peer_port, struct fpm_http_client_s *client);
+
+/* fpm_http_route.c */
+void fpm_http_routes_free(struct fpm_http_gateway_s *gw);
+void fpm_http_operator_free(struct fpm_http_gateway_s *gw);
+
 #endif /* HAVE_FPM_HTTP */
 #endif /* FPM_HTTP_INTERNAL_H */

@@ -636,6 +636,17 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			key = strndup(line, klen);
 			value = strndup(v, vlen);
 			if (strcasecmp(key, "Status") == 0) {
+				/* Issue #605: a bad value is rejected with 502 through
+				 * invalid_status below, which keeps the rest of the untrusted
+				 * reply from being forwarded. The value is strndup()ed, so an
+				 * embedded NUL would truncate the strdup() of the reason;
+				 * fpm_http_parse_cgi_status() scans all vlen bytes for that
+				 * reason. '\n' cannot reach the parser (lines are split on it),
+				 * but '\r' (only the trailing one is stripped), NUL and other
+				 * controls can, from any non-PHP FastCGI upstream. The WARNING
+				 * names only the first 64 bytes up to any NUL; that truncation
+				 * is accepted because the 502 decision does not depend on the
+				 * logged text. */
 				const char *parsed_reason;
 
 				free(reason);

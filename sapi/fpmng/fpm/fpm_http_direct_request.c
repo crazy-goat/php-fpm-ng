@@ -468,20 +468,13 @@ bool fpm_http_direct_status_final(long status)
  * (evhttp_send_reply_start() frames whatever it is given), so it must not
  * carry control bytes: an interior CR would split the status line, and
  * anything below 0x20 or DEL has no business in a reason phrase. A bad
- * reason is rejected (502, like a bad code) rather than stripped: stripping
- * would silently rewrite what the upstream said, while the invalid_status
- * path already logs the offending value, maps to 502 in the access log and
- * drops the rest of the untrusted reply. The scan runs over all vlen bytes
- * because `value` is strndup()ed: an embedded NUL would hide the tail from a
- * strlen()-bounded loop while truncating the strdup() below, and '\n' cannot
- * arrive at all (the caller splits lines on it), but '\r' (only the trailing
- * one is stripped), NUL and the other controls can, from any non-PHP
- * FastCGI upstream -- PHP's own header() already refuses CR, LF and NUL.
- * The WARNING below names only the first 64 bytes up to any NUL; that
- * truncation is accepted because the 502 decision does not depend on the
- * logged text.
+ * reason is rejected, like a bad code, rather than stripped: stripping would
+ * silently rewrite what the upstream said. The scan runs over all vlen bytes,
+ * not up to the first NUL, so an embedded NUL cannot hide the tail of the
+ * reason from the check.
  *
- * Issue #604: one parser for the gateway and both HTTP-direct executors. */
+ * Issue #604: one parser for the gateway (fpm_http_fcgi.c) and the classic
+ * http-direct executor (fpm_http_direct.c). */
 bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
 {
 	size_t i;

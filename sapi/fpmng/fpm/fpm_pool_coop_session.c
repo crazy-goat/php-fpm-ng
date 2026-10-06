@@ -172,8 +172,8 @@ void fpm_coop_session_container_start(void) /* {{{ */
 
 	mod = zend_hash_str_find_ptr(&module_registry, ZEND_STRL("session"));
 	if (!mod || !mod->request_startup_func || !mod->request_shutdown_func) {
-		zlog(ZLOG_WARNING, "[pool %s] coop-session: modul session bez RINIT/RSHUTDOWN w module_registry — "
-						   "izolacja stanu ext/session WYLACZONA",
+		zlog(ZLOG_WARNING, "[pool %s] coop-session: session module without RINIT/RSHUTDOWN in module_registry — "
+						   "ext/session state isolation DISABLED",
 				fpm_coop_pool_name());
 		return;
 	}
@@ -194,8 +194,8 @@ void fpm_coop_session_container_start(void) /* {{{ */
 	memcpy(fpm_coop_session_base, fpm_coop_session_globals_addr, sizeof(fpm_coop_session_base));
 	fpm_coop_session_ready = true;
 
-	zlog(ZLOG_NOTICE, "[pool %s] coop-session: izolacja stanu ext/session per request WLACZONA "
-					  "(punkt zaczepienia: wpis ini 'session.save_path', modul '%s')",
+	zlog(ZLOG_NOTICE, "[pool %s] coop-session: ext/session state isolation per request ENABLED "
+					  "(anchor: ini entry 'session.save_path', module '%s')",
 			fpm_coop_pool_name(), mod->name);
 }
 /* }}} */
@@ -234,7 +234,7 @@ void fpm_coop_session_request_startup(void) /* {{{ */
 	}
 	memcpy(fpm_coop_session_globals_addr, fpm_coop_session_base, sizeof(fpm_coop_session_base));
 	if (fpm_coop_session_mod->request_startup_func(fpm_coop_session_mod->type, fpm_coop_session_mod->module_number) == FAILURE) {
-		zlog(ZLOG_WARNING, "[pool %s] coop-session: RINIT modulu session nie powiodlo sie", fpm_coop_pool_name());
+		zlog(ZLOG_WARNING, "[pool %s] coop-session: session module RINIT failed", fpm_coop_pool_name());
 	}
 }
 /* }}} */

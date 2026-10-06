@@ -13,18 +13,15 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-06
+
 ### Added
 
 - The apk packages (`php-fpm-ng` and `php-fpm-ng-tls`) now depend on `php85-phar`, so a packed application runs on Alpine without a manual install. The apk test rig of `build/ci-package-gate.sh` no longer installs it by hand, so the gate proves the declared dependency (#789).
-
 - New user chapter `docs/guides/single-file-app.md`: the single-file workflow (inputs, `pack`, run, state directory, reload and upgrade, requirements, limits) and a map of which test covers which promise; linked from `README.md`. New `build/test-pack-smoke.sh`, run as a step of the `integration` job in `build-matrix.yml`: packs a fixture PHAR, deletes the inputs, and checks code, include, an `spl_autoload_register` autoload, a resource, embedded-over-host `php.ini`, refusal of a missing input and of a truncated executable, and upgrade by rename plus `SIGUSR2`; it prints `-v` and the SHA-256 of the binary and of the packed output. The apk package pulls in `php85-phar`, see #789.
 - `php-fpm-ng pack <app.phar> <php.ini> <fpm.conf> -o <output>`: writes a copy of the running binary with the three mandatory files appended, byte for byte, as one application payload (`kind=2`, archive entries `fpm.conf`, `php.ini`, `app.phar`); the distribution payload in front of it stays byte-identical. Nothing is parsed or run while packing, so no PHAR stub executes and no PHP CLI is needed. It refuses a missing, unreadable, non-regular or empty input, a file that is not a PHAR (no `__HALT_COMPILER`), a NUL byte in `php.ini` or `fpm.conf`, an `<output>` that exists, and a binary that already carries an application payload; the output is written under a temporary name, read back through the runtime reader (SHA-256 included) and only then linked into place. New files `sapi/fpmng/fpm/fpm_pack.c` and `fpm_pack.h`, dispatched from `main()` in `fpm_serve.c` (Linux packages, like `serve`); new test `fpmng-pack.phpt`; `docs/payload.md` documents it. Running a packed executable is #430 (#429).
 - A packed `php-fpm-ng` (`php-fpm-ng pack`, #429) now runs its application: the embedded `php.ini` is the only php.ini (no host php.ini, scan directory or `PHPRC`, decision D1), the embedded `fpm.conf` the only configuration, and `fpmng-app://<entry>` in a script path (`http.front_controller` of `http-direct`, `supervisor.script`, `cron.script`) selects an entry of the embedded PHAR. The payload is verified (SHA-256, and a binary cut short is refused instead of running as a plain binary), the PHAR is written read-only to a private, content-addressed state directory (`$FPMNG_APP_DIR`, `$TMPDIR` or `/tmp`, never removed) and the entries are checked against its manifest at startup. A bad payload, PHAR, entry, `fpm.conf` or `extension=` fails before "ready"; requests cannot leave the front controller; SIGUSR1, SIGUSR2 and SIGTERM work, and renaming a repack over the executable plus SIGUSR2 serves the new application. `http.static = yes` is refused for such a pool (public files inside a PHAR are not served), and a leftover temp file in the state directory is replaced instead of blocking every start. Not supported in a packed executable: `gateway`/`fastcgi` script entries and `.user.ini` for the archive front controller. New files `sapi/fpmng/fpm/fpm_pack_run.c` and `fpm_pack_run.h`, `fpm_payload_check_tail()`; new test `fpmng-pack-run.phpt` and shared `fpmng-pack-app.inc`; `fpmng-pack.phpt` now packs a valid PHAR; `docs/payload.md` documents it (#430).
 - `php-fpm-ng serve`: a zero-config dev server. It writes the configuration to a private temporary directory (removed on exit, with the private socket and a pid file whose path and the master pid are printed at start for `kill -USR2`) and runs the master in the foreground on it, logs and access log on standard error. Default: `pool.type = gateway` in front of one `fastcgi` pool on a private unix socket; `--direct` is one `http-direct` pool (classic executor); `--worker <file>` is `http-direct` with `pool.executor = worker` (implies `--direct`). Also `--root` (default `public/` if present, else the current directory), `--listen` (default `127.0.0.1:8080`), `--front-controller`, `--workers` (default the CPU count) and `--print-config`, whose output passes `php-fpm-ng -t`; `serve` refuses `-y`, exits 1 when the listen address cannot be bound, and refuses a root, address or front controller containing `"`, `\`, a line break, `${` or `$pool`; other characters (spaces, `&`, parentheses) are written quoted. The vendored `fpm_main.c` is unchanged: `build/libphp-build.sh` compiles it with `-Dmain=fpmng_fpm_main` and the new `sapi/fpmng/fpm/fpm_serve.c` supplies `main()` (not in the from-source flow). New test `fpmng-serve.phpt`, new guide `docs/guides/dev-server.md`, and `docs/guides/getting-started.md` leads with the command (#728).
-
-### Fixed
-
-- Packed application and OPcache: the "OPcache does not cache a PHAR" notes in `docs/payload.md`, `docs/guides/single-file-app.md` and `fpm_pack_run.c` were wrong. OPcache skips a script whose mtime is 0, and the `fpmng-pack*.phpt` fixture PHAR wrote mtime 0 for every entry; with a non-zero mtime the entries are cached. The fixture now sets one, `fpmng-pack-run.phpt` asserts cached scripts and that no old-digest key remains after a repack plus SIGUSR2, and the docs say that a PHAR with mtime 0 is silently not cached (#787).
 
 ### Changed
 
@@ -33,6 +30,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- Packed application and OPcache: the "OPcache does not cache a PHAR" notes in `docs/payload.md`, `docs/guides/single-file-app.md` and `fpm_pack_run.c` were wrong. OPcache skips a script whose mtime is 0, and the `fpmng-pack*.phpt` fixture PHAR wrote mtime 0 for every entry; with a non-zero mtime the entries are cached. The fixture now sets one, `fpmng-pack-run.phpt` asserts cached scripts and that no old-digest key remains after a repack plus SIGUSR2, and the docs say that a PHAR with mtime 0 is silently not cached (#787).
 - Test `fpmng-http-gateway-operator-two-gateways.phpt`: app's operator page is now compared across the two reads with `fpmng_pool_workers_idle` and `fpmng_pool_workers_active` dropped, because a `pm = static` child counts itself idle for the first time immediately before it enters the loop that accepts (and again at the end of every request it serves), while the master's "ready to handle connections" NOTICE does not wait for that first report, so an early read of the page could report fewer idle workers than a later one. A mismatch now prints both bodies, and every other line of the page is still compared byte for byte, so a gateway that forwards the wrong page still fails (#743).
 
 ## [0.14.0] - 2026-10-03
@@ -274,7 +272,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.11.1...v0.12.0

@@ -23,6 +23,7 @@
 #include "fpm_scale_down_drain.h"
 #include "fpm_conf.h"
 #include "fpm_conf_diff.h"
+#include "fpm_reload_config_check.h"
 #include "fpm_reload_selective.h"
 #include "zlog.h"
 
@@ -324,6 +325,18 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 						fpm_state_names[new_state], fpm_state_names[fpm_state]);
 					return;
 				/* TODO Add EMPTY_SWITCH_DEFAULT_CASE? */
+			}
+
+			/* issue #640: a reload may only start if the configuration the NEXT
+			 * generation would read loads. Checked here, before the state
+			 * changes and before the signal fan-out below, because from
+			 * fpm_pctl_exec() on -- every child already signalled, all of them
+			 * gone -- there is nothing left to keep serving. A refused reload
+			 * returns with the state untouched, so every pool keeps serving
+			 * and the next SIGUSR2 tries again (fpm_reload_config_check.h). */
+			if (new_state == FPM_PCTL_STATE_RELOADING &&
+					!fpm_reload_config_check(saved_argc, (const char *const *) saved_argv)) {
+				return;
 			}
 
 			fpm_signal_sent = 0;

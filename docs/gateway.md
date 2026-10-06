@@ -154,6 +154,18 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
+document root `SCRIPT_FILENAME` is built under) and, unless every routed path
+names an existing `.php` file, `http.front_controller` (the fallback script
+for paths that do not). With neither set, every request names a script that
+does not exist and the FastCGI upstream answers "Primary script unknown"; the
+master logs a WARNING saying so at startup.
+
+When every worker of a routed target is busy, the gateway answers `503` +
+`Retry-After` immediately (`http.pool_full_policy = reject`, the default);
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
+`wait` alternative.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal

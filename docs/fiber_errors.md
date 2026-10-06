@@ -28,7 +28,7 @@ None of the three problems has been **fixed** — fiber still has no per-request
 | Problem | Mechanism | What it is | What remains open |
 |---|---|---|---|
 | `max_execution_time` != 0 does not interrupt the request | `fpm_coop_validate()`: effective value (pool -> php.ini) != 0 => `ALERT` + startup refusal | refusal | there is no per-fiber timeout |
-| `set_time_limit(N)` arms the process-wide timer | `fpm_coop_req_run()`: `zend_restore_ini_entry("max_execution_time", DEACTIVATE)` after the script; `php_admin_value` additionally blocks `ini_set` | mitigation | during the request, SIGPROF can hit someone else's fiber |
+| `set_time_limit(N)` arms the process-wide timer | `fpm_coop_req_run()`: `zend_ini_deactivate()` after the script unwinds this request's ini changes (`OnUpdateTimeout` in stage DEACTIVATE disarms the timer); `php_admin_value` additionally blocks `ini_set` | mitigation | during the request, SIGPROF can hit someone else's fiber |
 | `pcntl_signal()` leaks between requests | `fpm_coop_container_start()`: `zend_disable_functions()` on the process-wide pcntl API | block | signal handlers are process-wide; no isolation |
 | `pcntl_fork()` duplicates the multi-request process | the same block (`pcntl_fork`, `pcntl_rfork`, `pcntl_forkx`, `pcntl_exec`) | block | — |
 
@@ -60,7 +60,7 @@ Consequence: **every** fiber pool without an explicit `php_admin_value[max_execu
 
 Validation only rejects the configuration. `set_time_limit(N)` (`main/main.c`, `PHP_FUNCTION(set_time_limit)`) goes through `zend_alter_ini_entry_ex(..., PHP_INI_STAGE_RUNTIME)` to `OnUpdateTimeout`, which calls `zend_set_timeout()` — the process timer gets armed. When it fires, `zend_timeout_handler` sets `EG(timed_out)` and the request that executes the next opcode — not necessarily the one that called `set_time_limit` — gets "Maximum execution time exceeded". This is not a crash: `zend_try` in `fpm_coop_execute` catches the bailout.
 
-Mitigation in `fpm_coop_req_run()`, after the script and after sending the headers: `zend_restore_ini_entry("max_execution_time", ZEND_INI_STAGE_DEACTIVATE)` — exactly what `zend_ini_deactivate()` does for all entries in classic `php_request_shutdown()`. `OnUpdateTimeout` in stage DEACTIVATE disarms the timer and does **not** re-arm it, and the ini value goes back to its initial one. Neither the timer nor `ini_get('max_execution_time')` survive the request that changed them.
+Mitigation in `fpm_coop_req_run()`, after the script and after sending the headers: `zend_ini_deactivate()` — the same call classic `php_request_shutdown()` makes: for every entry in EG(modified_ini_directives) it calls on_modify with stage DEACTIVATE, then clears the table. `OnUpdateTimeout` in stage DEACTIVATE disarms the timer and does **not** re-arm it, and the ini value goes back to its initial one. Neither the timer nor `ini_get('max_execution_time')` survive the request that changed them.
 
 Two observations from measurements:
 
@@ -164,7 +164,7 @@ Until this exists, the block stays.
 
 ## Confirmed working elements
 
-For `http/fiber` on a clean release build of PHP 8.5, previously confirmed (the transport under `http/fiber` is the built-in gateway; the measurements in `docs/flock-streams-spike-report.md` and `docs/sleep-yield-report.md` were taken on the retired optimized-FastCGI transport behind nginx (removed in 0.9.0, issue #376) — if fiber is ever promoted, those numbers have to be redone on `http`, see issue #379):
+For `http/fiber` on a clean release build of PHP 8.5, previously confirmed (the transport under `http/fiber` is the built-in gateway; the measurements in `docs/flock-streams-spike-report.md` and `docs/spike-sleep-yield-report.md` were taken on the retired optimized-FastCGI transport behind nginx (removed in 0.9.0, issue #376) — if fiber is ever promoted, those numbers have to be redone on `http`, see issue #379):
 
 - small and large responses;
 - binary POST;

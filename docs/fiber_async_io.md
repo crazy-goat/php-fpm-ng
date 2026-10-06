@@ -16,7 +16,7 @@ classic FPM it would only slow down one request.
 `fpm_pool_fiber_xport.c` replaces the `tcp` and `unix` transport factories via
 `php_stream_xport_register()` and suspends the fiber on read/write/connect
 instead of blocking. Task 005 extends the same to TLS: patch
-`patches/0007-fiber-tls-nonblocking-transports.patch` (compiled only with
+`async/patches/0007-fiber-tls-nonblocking-transports.patch` (compiled only with
 `--enable-fpmng-fiber` and a static ext/openssl — `HAVE_FPMNG_FIBER_TLS`)
 suspends the fiber inside the TLS handshake and inside `SSL_read`/`SSL_write`
 retries, and re-arms the `ssl`/`sslv3`/`tls`/`tlsv1.x` transports in the fiber

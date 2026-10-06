@@ -185,10 +185,16 @@ The containment check compares against the root resolved for that same
 request, so a symlink that leaves the release is still refused.
 
 `DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
-`chdir` path (`/srv/app/current/...`). PHP resolves it itself, so it can
-disagree with the static lookup for the short moment of a swap. A resolved
-variant (like nginx `$realpath_root`) is not implemented. Not measured: the
+`chdir` path (`/srv/app/current/...`). PHP and OPcache resolve and cache that
+path themselves, so after a swap PHP may keep running the old release until its
+realpath cache (`realpath_cache_ttl`) or its OPcache entry expires, while
+static files already come from the new release. Not measured. A resolved
+variant (like nginx `$realpath_root`) is not implemented. Until it is, reset
+OPcache or reload the FastCGI pool in the deploy step. Also not measured: the
 cost of the extra `realpath()` per request.
+
+`http.front_controller` is checked against the document root only once, at
+startup, so that check stays pinned to the release that was live then.
 
 ### What the gateway type refuses
 

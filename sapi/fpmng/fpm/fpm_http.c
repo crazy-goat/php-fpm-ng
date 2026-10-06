@@ -1569,7 +1569,10 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw, char res
  * calls this right after fpm_http_gateway_settings()); the master and every
  * gateway child share the same filesystem view for this pool (no chroot/chdir
  * happens between here and fpm_http_gateway_run()), so resolving the document
- * root here is exactly as valid as resolving it later in the child. */
+ * root here is exactly as valid as resolving it later in the child. That holds
+ * only for this one-time check: static lookups re-resolve the root per request
+ * (issue #638), so after a symlink deploy front_controller_ok stays pinned to
+ * the release that was live at startup. */
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
 {
 	const char *fc = gw->front_controller;

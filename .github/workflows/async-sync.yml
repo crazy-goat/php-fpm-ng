@@ -166,7 +166,15 @@ jobs:
             echo
             echo "A push that carries changes under \`.github/workflows/\` needs a"
             echo "token with the \`workflow\` scope. This run pushed with"
-            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`, which has no such scope."
+            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`."
+            echo
+            if [ "$ASYNC_SYNC_PUSH_TOKEN_SOURCE" = "ASYNC_SYNC_PUSH_TOKEN" ]; then
+              echo "The secret was set, so the scope may be fine -- the refusal"
+              echo "below may mean the secret holds the wrong token, or a ruleset"
+              echo "refused it."
+            else
+              echo "That token has no such scope."
+            fi
             echo
             echo "Fix it by adding the repository secret \`ASYNC_SYNC_PUSH_TOKEN\`"
             echo "(Settings -> Secrets and variables -> Actions -> New repository"
@@ -292,7 +300,15 @@ jobs:
             echo
             echo "A push that carries changes under \`.github/workflows/\` needs a"
             echo "token with the \`workflow\` scope. This run pushed with"
-            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`, which has no such scope."
+            echo "\`$ASYNC_SYNC_PUSH_TOKEN_SOURCE\`."
+            echo
+            if [ "$ASYNC_SYNC_PUSH_TOKEN_SOURCE" = "ASYNC_SYNC_PUSH_TOKEN" ]; then
+              echo "The secret was set, so the scope may be fine -- the refusal"
+              echo "below may mean async moved, the secret holds the wrong token,"
+              echo "or a ruleset refused it."
+            else
+              echo "That token has no such scope."
+            fi
             echo
             echo "Fix it by adding the repository secret \`ASYNC_SYNC_PUSH_TOKEN\`"
             echo "(Settings -> Secrets and variables -> Actions -> New repository"

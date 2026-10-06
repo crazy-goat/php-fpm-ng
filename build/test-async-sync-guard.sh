@@ -43,6 +43,12 @@ fail=0
 ok() { echo "ok   - $1"; }
 bad() { echo "FAIL - $1" >&2; fail=1; }
 
+# The workflow reports the push through this variable name and the script
+# reads it; a rename typo on either side would silently fall back to the
+# unset default, so pin the shared name.
+grep -Fq 'ASYNC_SYNC_PUSH_TOKEN_SOURCE' "$REPO/.github/workflows/async-sync.yml" && ok "workflow references ASYNC_SYNC_PUSH_TOKEN_SOURCE" || bad "workflow no longer references ASYNC_SYNC_PUSH_TOKEN_SOURCE"
+grep -Fq 'ASYNC_SYNC_PUSH_TOKEN_SOURCE' "$SCRIPT" && ok "script reads ASYNC_SYNC_PUSH_TOKEN_SOURCE" || bad "script no longer reads ASYNC_SYNC_PUSH_TOKEN_SOURCE"
+
 # run_script <workdir> <args...>: sets $rc
 run_script() {
 	_wd=$1; shift

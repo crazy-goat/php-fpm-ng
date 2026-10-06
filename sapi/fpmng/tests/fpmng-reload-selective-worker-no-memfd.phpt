@@ -118,7 +118,10 @@ try {
     $a = $tester->getListen('{{ADDR[a]}}');
 
     $pidBefore = workerPid(hit($a));
+    hit($a);
     check(workerMemfds(hit($a)) === 0, 'the worker holds memfd descriptors');
+    $before = counter($operator);
+    check($before === 3.0, 'before the reload: ' . var_export($before, true));
     echo "no memfds on start: ok\n";
 
     /* Byte-identical configuration: the reload spares the pool instead of
@@ -134,10 +137,12 @@ try {
     check(workerMemfds($after) === 0, 'the spared worker holds memfd descriptors');
     echo "no memfds after a sparing reload: ok\n";
 
-    /* The hit() above was the fourth request overall; the counter reaching 4
+    /* hit() above was the fourth request overall; the counter reaching 4
      * through the new master's endpoint proves the spared worker still
      * writes into the region the new master renders, i.e. closing the
-     * descriptors did not take the mappings with them. */
+     * descriptors did not take the mappings with them. The operator scrapes
+     * above and below run in the operator child, not in pool a, so they do
+     * not bump the counter. */
     $n = counter($operator);
     check($n === 4.0, 'after the reload the series is ' . var_export($n, true) . ', expected 4');
     echo "metrics continue: ok\n";

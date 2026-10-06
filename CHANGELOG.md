@@ -21,6 +21,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- `pool.type = gateway` with `http.gateways > 1`: a request that finds the shared upstream budget held by idle connections of a sibling gateway process no longer waits out `http.pool_full_wait_ms` (policy `wait`) or gets an immediate 503 (default policy). The process now asks its siblings through a shared counter to close their idle connections, and retries on a 10 ms timer; with the default policy it waits up to 100 ms for that before answering 503. Fixes 503 on sequential requests to a one-worker pool and on a burst of `pm.max_children` parallel requests. `php-fpm-ng serve` and `tests/frameworks/slim4/bin/run.sh` no longer need `http.gateways = 1`. New tests `fpmng-http-gateway-sibling-reclaim.phpt`, `fpmng-http-gateway-sibling-reclaim-wait.phpt` and `fpmng-http-gateway-sibling-reclaim-burst.phpt` (#735).
+
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 
 - `pool.type = gateway`: a pool that routes to a FastCGI target but sets neither `chdir` nor `http.front_controller` now logs a WARNING at startup (`no chdir and no http.front_controller with a FastCGI target`), instead of answering "Primary script unknown" for every request with nothing pointing at the gateway's configuration. New test `fpmng-gateway-missing-docroot-warning.phpt`; `docs/gateway.md` states the docroot requirement and the `http.pool_full_policy` default next to the route example (#736).

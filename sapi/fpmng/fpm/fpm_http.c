@@ -211,6 +211,7 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
  * upstreams_held gauge, defined with the other counter helpers further down. */
 static void fpm_http_counter_decr(atomic_t *counter);
 static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
+static void fpm_http_tick_arm(struct fpm_http_gateway_s *gw);
 
 /* Claims one of the TARGET pool's workers for a persistent connection, or
  * fails when they are all taken. Per target since issue #340: two prefixes
@@ -315,12 +316,12 @@ static void fpm_http_counter_sub(atomic_t *counter, unsigned long amount)
 /* Issue #390: the counters segment's two variable-length regions. The segment
  * is ONE flat atomic_t array because C lets a struct have only one flexible
  * array; these two accessors are the only place the layout arithmetic lives.
- * FPM_HTTP_COUNTERS_SLOT_CELLS is the slot stride (the three cells of
+ * FPM_HTTP_COUNTERS_SLOT_CELLS is the slot stride (the four cells of
  * fpm_http_counters_slot), and the process blocks follow the slots, each
  * (1 + nslots) cells: [connections_open, upstreams_held[0 .. nslots)]. */
-#define FPM_HTTP_COUNTERS_SLOT_CELLS 3u
+#define FPM_HTTP_COUNTERS_SLOT_CELLS 4u
 
-/* First cell of target row i: [requests_total, rejected_total, shared budget]. */
+/* First cell of target row i: [requests_total, rejected_total, shared budget, reclaim generation]. */
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i)
 {
 	return &c->cells[(size_t) i * FPM_HTTP_COUNTERS_SLOT_CELLS];
@@ -680,6 +681,7 @@ void fpm_http_request_done(fpm_http_upstream *up)
 	if (up->gw->idle_ms > 0) {
 		event_add(up->ev_read, &up->gw->idle_timeout);
 	}
+	fpm_http_tick_arm(up->gw);	/* issue #735: this connection is now idle; a sibling may need its worker */
 	fpm_http_pump(up->gw);
 }
 
@@ -1028,6 +1030,101 @@ static unsigned fpm_http_waiting_len(struct fpm_http_target_s *t)
 	return n;
 }
 
+/* Issue #735: the gateway processes of one pool share one admission budget but
+ * not their connections. A persistent upstream connection that sits idle in
+ * process A pins a worker, and process B cannot see it, let alone close it: B's
+ * request found the budget full, and was either queued until its own wait timer
+ * ran out (wait policy: 6 of 8 parallel requests answered 503 with 8 idle
+ * workers, measured by the #602 reviewer) or answered 503 at once (default
+ * policy: a pool of one worker answered 503 to sequential requests, measured in
+ * #728 on 18 of 25 runs). Process B now bumps the target's shared reclaim
+ * generation; every process runs a short timer while it has connections or
+ * queued requests (fpm_http_tick()), drops its IDLE connections to a target
+ * whose generation moved, and retries its own queue. Polling a counter in
+ * shared memory, not a wake-up signal: a dead process cannot leave a stale
+ * "somebody is waiting" state behind, and the worst a spurious bump costs is
+ * one reconnect. With http.gateways = 1 none of this runs. */
+#define FPM_HTTP_TICK_MS 10
+/* How long the default policy (fail) lets a request wait for a sibling to give
+ * a connection back before it answers 503. Two ticks are enough for the round
+ * trip (B bumps, A drops on its tick, B retries on its tick); the rest is
+ * margin for a loaded machine. Only requests that find the budget held by a
+ * sibling wait; a pool full of this process's own connections still answers 503
+ * at once. The wait policy has its own, longer bound. */
+#define FPM_HTTP_RECLAIM_GRACE_MS 100
+
+static int fpm_http_has_siblings(struct fpm_http_gateway_s *gw)
+{
+	return gw->counters && gw->counters->nproc > 1;
+}
+
+/* Does another gateway process hold part of this target's budget? */
+static int fpm_http_siblings_hold(struct fpm_http_target_s *t)
+{
+	atomic_t *mine = fpm_http_target_held(t);
+
+	return fpm_http_has_siblings(t->gw) && *t->upstreams_used > (mine ? *mine : 0);
+}
+
+static void fpm_http_tick(evutil_socket_t fd, short what, void *arg);
+
+static void fpm_http_tick_arm(struct fpm_http_gateway_s *gw)
+{
+	struct timeval tv = {0, FPM_HTTP_TICK_MS * 1000};
+
+	if (!fpm_http_has_siblings(gw)) {
+		return;
+	}
+	if (!gw->tick) {
+		gw->tick = evtimer_new(gw->base, fpm_http_tick, gw);
+		if (!gw->tick) {
+			return;
+		}
+	}
+	if (!evtimer_pending(gw->tick, NULL)) {
+		evtimer_add(gw->tick, &tv);
+	}
+}
+
+/* Returns 1 while the target still has something the next tick must look at. */
+static int fpm_http_tick_target(struct fpm_http_target_s *t)
+{
+	if (*t->reclaim != t->reclaim_seen) {
+		fpm_http_upstream *up, *next;
+
+		t->reclaim_seen = *t->reclaim;
+		for (up = TAILQ_FIRST(&t->upstreams); up; up = next) {
+			next = TAILQ_NEXT(up, link);
+			if (!up->busy && !up->connecting && !up->active) {
+				t->ops->drop(up);
+			}
+		}
+	}
+	return t->nupstreams > 0 || !TAILQ_EMPTY(&t->waiting);
+}
+
+static void fpm_http_tick(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	unsigned i;
+	int again = 0;
+
+	(void) fd;
+	(void) what;
+	for (i = 0; i < gw->ntargets; i++) {
+		again |= fpm_http_tick_target(&gw->targets[i]);
+	}
+	for (i = 0; i < gw->noperator_targets; i++) {
+		again |= fpm_http_tick_target(&gw->operator_targets[i]);
+	}
+	/* The drops above may have freed budget this process' own queue is waiting
+	 * for, and a sibling's drop since the last tick may have done the same. */
+	fpm_http_pump(gw);
+	if (again) {
+		fpm_http_tick_arm(gw);
+	}
+}
+
 /* One dispatch round for ONE target (issue #340). Split out of
  * fpm_http_pump_once() unchanged except for what it reads the queue, the
  * connection list and the budget from: a target that is full must not stop the
@@ -1110,6 +1207,43 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			 * fpm_http_pump()), which is what eventually empties it. Nothing
 			 * else about the queue cap changes: it was already applied when
 			 * the request was enqueued, not here. */
+			/* Issue #735: when the budget is held by sibling processes, ask them
+			 * to give idle connections back and retry on the next tick. */
+			if (fpm_http_siblings_hold(t)) {
+				fpm_http_counter_incr(t->reclaim);
+				fpm_http_tick_arm(gw);
+				if (gw->wait_policy != FPM_HTTP_POOL_FULL_WAIT) {
+					/* Default policy: a short grace instead of the wait
+					 * timer's bound, at most one queued request per worker
+					 * the target can have; the rest answer 503 below. */
+					fpm_http_conn *last = NULL;
+					unsigned kept = 0;
+					struct timeval grace = {0, FPM_HTTP_RECLAIM_GRACE_MS * 1000};
+
+					TAILQ_FOREACH(c, &t->waiting, link) {
+						if (kept >= t->max_upstreams) {
+							break;
+						}
+						if (!c->wait_timer) {
+							c->wait_timer = evtimer_new(gw->base, fpm_http_wait_expired, c);
+							if (!c->wait_timer) {
+								break;
+							}
+							evtimer_add(c->wait_timer, &grace);
+						}
+						last = c;
+						kept++;
+					}
+					if (last) {
+						while ((c = TAILQ_NEXT(last, link))) {
+							TAILQ_REMOVE(&t->waiting, c, link);
+							c->queued = 0;
+							fpm_http_reject_queued(c);
+						}
+						return;
+					}
+				}
+			}
 			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
 				return;
 			}
@@ -1136,7 +1270,11 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			c->wait_timer = NULL;
 			evutil_gettimeofday(&now, NULL);
 			evutil_timersub(&now, &c->wait_since, &spent);
-			c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+			/* The default policy's reclaim grace (issue #735) also owns a
+			 * timer; only the wait policy reports a wait. */
+			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
+				c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+			}
 		}
 		c->upstream = idle;
 		idle->busy = 1;

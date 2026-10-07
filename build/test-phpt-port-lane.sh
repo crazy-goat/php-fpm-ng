@@ -57,16 +57,23 @@ FAMILY_OFFSET=$(lane_const LANE_FAMILY_OFFSET)
 # $base + 4) moves the top of the family up, so it is followed one level.
 #
 # Derived by awk because that is what the checks CI job has; php would do it in
-# a third of the lines.
-measured=$(awk '
+# a third of the lines. The program lives in a file because the no-step case
+# below runs the same program.
+cat > "$WORK/family.awk" <<'AWK'
     FNR == 1 { delete base }
     /FPMNG_PHPT_PORT_SHIFT/ {
         line = $0
         # literal default of an override, getenv(...) ?: 28054, and an offset
         # applied to the whole expression, ...) + 12
         while (match(line, /[0-9][0-9][0-9][0-9][0-9]/)) {
-            n = substr(line, RSTART, RLENGTH) + 0
-            rest = substr(line, RSTART + RLENGTH)
+            # Save the outer match before the inner one below overwrites
+            # RSTART/RLENGTH: with the inner offsets, a failed inner match
+            # (RSTART=0, RLENGTH=-1) made substr(line, -1) return the whole
+            # line and the loop never advanced (issue #625 review, round 2).
+            mstart = RSTART
+            mlen = RLENGTH
+            n = substr(line, mstart, mlen) + 0
+            rest = substr(line, mstart + mlen)
             off = 0
             if (match(rest, /^[ \t]*\)?[ \t]*\+[ \t]*[0-9]+/)) {
                 # "+ 200 * (int) getenv('TEST_PHP_WORKER')" is the per-worker
@@ -80,7 +87,7 @@ measured=$(awk '
             }
             if (lo == 0 || n < lo) lo = n
             if (n + off > hi) hi = n + off
-            line = substr(line, RSTART + RLENGTH)
+            line = substr(line, mstart + mlen)
         }
         # the variable the literal was assigned to, for the rule below
         if (match($0, /\$[A-Za-z_][A-Za-z_0-9]*[ \t]*=[^=]*/)) {
@@ -107,7 +114,8 @@ measured=$(awk '
         }
     }
     END { printf "%d %d\n", lo, hi }
-' "$TESTS"/fpmng-*.phpt "$TESTS"/*.inc)
+AWK
+measured=$(awk -f "$WORK/family.awk" "$TESTS"/fpmng-*.phpt "$TESTS"/*.inc)
 
 measured_lo=$(printf '%s\n' "$measured" | awk '{print $1}')
 measured_hi=$(printf '%s\n' "$measured" | awk '{print $2}')
@@ -124,6 +132,19 @@ printf 'ok: the http-direct family measured over %s fpmng-*.phpt is %s..%s\n' \
 # names the layout instead of the run.
 [ "$((FAMILY_OFFSET + FAMILY_END - ORIGIN + 1))" -le "$((LANE_SIZE - TESTER_BLOCK_SIZE))" ] ||
     fail "the measured family does not fit a $LANE_SIZE-port lane after a $TESTER_BLOCK_SIZE-port Tester block"
+
+# The no-step shape. A family literal with no "+ <digits>" after it -- here
+# 29000 + (int) getenv(...) -- used to hang this measurement forever: the inner
+# match() of the offset probe failed, RSTART/RLENGTH became 0/-1, and
+# substr(line, -1) returned the whole line so the while never advanced. It must
+# terminate and report the literal (issue #625 review, round 2).
+cat > "$WORK/nostep.inc" <<'EOF'
+$port = (int) (getenv('FPMNG_SCRATCH_PORT') ?: 29000 + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
+EOF
+nostep=$(awk -f "$WORK/family.awk" "$WORK/nostep.inc")
+[ "$nostep" = "29000 29000" ] ||
+    fail "the family measurement does not terminate on a literal with no +N after it (got '$nostep')"
+echo "ok: the family measurement terminates on a literal with no +N after it"
 
 # --- 2. no test binds a TCP port the lane cannot move ------------------------
 #
@@ -163,8 +184,12 @@ cat > "$CLI" <<'CLIEOF'
 #!/bin/sh
 # Records its own argv, so a check can see what the runner asked run-tests.php
 # to do -- in particular whether it passed -j, which the placeholder itself
-# never does.
+# never does. It also records the TMPDIR it was started with: the runner hands
+# its environment to run-tests.php, which hands it to every test, so the last
+# invocation's TMPDIR is the TMPDIR the tests are started with (issue #625
+# review, round 2). The write overwrites, so the last invocation wins.
 if [ -n "$ARGV_LOG" ]; then printf '%s\n' "$@" > "$ARGV_LOG"; fi
+if [ -n "$ENV_LOG" ]; then printf 'TMPDIR=%s\n' "${TMPDIR-}" > "$ENV_LOG"; fi
 case "$1" in
   -v) echo "PHP 8.5.0 (cli)" ;;
   -n) printf '%s' "$STAND_IN_RESOLVES" ;;
@@ -181,9 +206,9 @@ RESOLVED_FPM=$(realpath "$FPM")
 # recorded, which is the whole lane: bounds, serial run, derived shift.
 lane_run() { # <base>
     base=$1
-    rm -rf "$WORK/res" "$WORK/argv.txt"
+    rm -rf "$WORK/res" "$WORK/argv.txt" "$WORK/env.txt"
     set +e
-    STAND_IN_RESOLVES="$RESOLVED_FPM" FPMNG_PHPT_PORT_BASE="$base" ARGV_LOG="$WORK/argv.txt" \
+    STAND_IN_RESOLVES="$RESOLVED_FPM" FPMNG_PHPT_PORT_BASE="$base" ARGV_LOG="$WORK/argv.txt" ENV_LOG="$WORK/env.txt" \
     TEST_PHP_EXECUTABLE="$CLI" TEST_PHP_FPM_EXECUTABLE="$FPM" \
         "$RUNNER" - "$WORK/res" > "$WORK/out.txt" 2>&1
     status=$?
@@ -308,13 +333,14 @@ lane_run "$BASE"
 # directory is a symlink (/var -> /private/var on macOS) that is a different
 # spelling of the same place.
 expect_metadata "tmp_root=$(realpath "$WORK/res")/.tmp"
-grep -qx "TMPDIR=$WORK/res/.tmp" "$WORK/argv.txt" && fail 'TMPDIR is not part of what the tests are started with'
+grep -qx "TMPDIR=$(realpath "$WORK/res")/.tmp" "$WORK/env.txt" ||
+    fail 'the runner did not hand the tests a TMPDIR inside its results directory'
 [ -d "$WORK/res/.tmp" ] && fail 'the lane left its temporary root behind after the run'
 echo "ok: a lane run hands its tests a temporary root inside its results directory, and removes it again"
 
-rm -rf "$WORK/res7" "$WORK/argv.txt"
+rm -rf "$WORK/res7" "$WORK/argv.txt" "$WORK/env.txt"
 set +e
-STAND_IN_RESOLVES="$RESOLVED_FPM" ARGV_LOG="$WORK/argv.txt" \
+STAND_IN_RESOLVES="$RESOLVED_FPM" ARGV_LOG="$WORK/argv.txt" ENV_LOG="$WORK/env.txt" \
 TEST_PHP_EXECUTABLE="$CLI" TEST_PHP_FPM_EXECUTABLE="$FPM" \
     "$RUNNER" - "$WORK/res7" > "$WORK/out7.txt" 2>&1
 set -e
@@ -326,7 +352,8 @@ grep -qF 'Port shift:' "$WORK/out7.txt" ||
     fail 'a run without a base does not print the shift it chose'
 grep -q -- '^-j' "$WORK/argv.txt" ||
     fail 'a run without a base is serial too; it should have passed -j'
-grep -qx 'TMPDIR=' "$WORK/argv.txt" && fail 'a run without a base moved TMPDIR'
+grep -qx "TMPDIR=$(realpath "$WORK/res7")/.tmp" "$WORK/env.txt" &&
+    fail 'a run without a base moved TMPDIR into its results directory'
 echo "ok: without a base the run keeps the historical ports, the automatic shift, -j and the system temporary directory"
 
 echo "all port-lane checks passed"

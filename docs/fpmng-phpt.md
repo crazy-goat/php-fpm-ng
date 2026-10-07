@@ -125,11 +125,12 @@ worker count; the default is the number of CPUs, at most 8, and `1` is a serial
 run with no `-j` at all. The tests spend their time waiting on a master they
 started, so they cost wall clock rather than CPU, which is why `-j` pays.
 
-Running tests side by side on one host needed five things, and
-`build/phpt-parallel.sh` does the first three on the throwaway tree before every
-run (the pinned copy under `third_party/php-src/` stays untouched, see
-`build/phpt-fixture-patches/README.md`); the fourth is a per-run decision the
-runner makes and the fifth is a lane the caller reserves.
+Running tests side by side on one host needed five things. `build/phpt-parallel.sh`
+sets the first four up on the throwaway tree before every run (the pinned copy
+under `third_party/php-src/` stays untouched, see
+`build/phpt-fixture-patches/README.md`); the fifth is a naming convention the
+tests themselves keep. The reserved lane below is a sixth, and the caller
+decides it.
 
 - **Port blocks per worker.** Upstream's `Tester::getPort()` starts every test
   at 9008, so two workers bound the same port. `run-tests.php` now passes each
@@ -165,6 +166,19 @@ runner makes and the fifth is a lane the caller reserves.
   `--CONFLICTS-- operator-default-listener` section and never run together.
   A new gateway test that reaches the default listener only through an include
   needs the section by hand if the script does not recognise it.
+- **Own names.** Temporary directories and sockets a test creates are named for
+  that test (`fpmng-sup-restart-<pid>`, not `fpmng-sup-<pid>`): a CLEAN section
+  that globs a shared prefix deletes the directory of a test running next to it.
+
+What a collision looks like: a test that ran fine on its own fails with
+`ERROR: unable to bind listening socket for address '127.0.0.1:<port>': Address
+already in use (98)` in its log, followed by `FPM initialization failed` and a
+`NOTICE does not match expected message` from the Tester. Look for the port in
+the other tests' configuration, or for a test that kept a master alive after
+its own failure. Note that `run-tests.php` retries a test once when its output
+says `address already in use` or when the test calls `usleep`/`sleep`, and
+reports it as `WARN ... passed on retry attempt`: a port collision that heals
+itself shows up as a WARN, not a FAIL, so a growing WARN count is the signal.
 
 ### A reserved port lane
 
@@ -299,19 +313,6 @@ script); it drives the runner through the lane, through the `TMPDIR` it hands
 the tests and through each of the refusals. The Tester half of it, that
 `portBase()` prefers a base over a shift and leaves the historical ports alone
 without one, is checked in `build/test-phpt-tree.sh`.
-- **Own names.** Temporary directories and sockets a test creates are named for
-  that test (`fpmng-sup-restart-<pid>`, not `fpmng-sup-<pid>`): a CLEAN section
-  that globs a shared prefix deletes the directory of a test running next to it.
-
-What a collision looks like: a test that ran fine on its own fails with
-`ERROR: unable to bind listening socket for address '127.0.0.1:<port>': Address
-already in use (98)` in its log, followed by `FPM initialization failed` and a
-`NOTICE does not match expected message` from the Tester. Look for the port in
-the other tests' configuration, or for a test that kept a master alive after
-its own failure. Note that `run-tests.php` retries a test once when its output
-says `address already in use` or when the test calls `usleep`/`sleep`, and
-reports it as `WARN ... passed on retry attempt`: a port collision that heals
-itself shows up as a WARN, not a FAIL, so a growing WARN count is the signal.
 
 `summary.txt` carries `min_pass_check`, and a full run fails when fewer than
 **half** the selected tests passed. The trap being defended is a run that skips

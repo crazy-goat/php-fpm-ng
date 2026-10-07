@@ -14,14 +14,14 @@
  * fails here exactly as it would against Let's Encrypt.
  *
  * Usage:
- *   php -n acme-fake-ca.inc <port|0> <workdir> <challenge-host:port> \
+ *   php -n acme-fake-ca.inc <port> <workdir> <challenge-host:port> \
  *       <ca-cert.pem> <ca-key.pem> <validity-days>
  *
- * It writes the port it bound to <workdir>/ca-ready once it is listening
- * (so pass 0 and read it back), appends one line per
- * request to <workdir>/ca-requests.log, and speaks plain HTTP because it
- * lives on loopback -- the client accepts an http:// directory only for hosts
- * that cannot be a production CA (Renewer::isNonProduction()).
+ * <port> is one of the run's own reserved-lane ports (issue #625). It writes
+ * the port it bound to <workdir>/ca-ready once it is listening, appends one
+ * line per request to <workdir>/ca-requests.log, and speaks plain HTTP because
+ * it lives on loopback -- the client accepts an http:// directory only for
+ * hosts that cannot be a production CA (Renewer::isNonProduction()).
  */
 
 error_reporting(E_ALL);

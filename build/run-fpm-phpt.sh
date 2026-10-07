@@ -38,7 +38,9 @@ measure. The tree is "-" for the one assembled from third_party/php-src/
 (build/phpt-tree.sh), or a directory with run-tests.php and sapi/fpmng/tests
 (build/prepare.sh makes one). TEST_FPM_EXTENSION_DIR and TEST_FPM_RUN_AS_ROOT are passed
 through when set. The results directory is created if necessary and should be
-dedicated to this run.
+dedicated to this run. FPMNG_PHPT_PORT_BASE is refused: the reserved port lane
+belongs to build/run-fpmng-phpt.sh, which serialises the run for it, and this
+runner does not.
 EOF
     exit 2
 }

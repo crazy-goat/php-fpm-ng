@@ -1661,6 +1661,46 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	}
 }
 
+/* Issue #641: one step of the graceful drain. A connection is idle when no
+ * request is in flight on it AND nothing of a finished response is still
+ * waiting to be flushed -- fpm_http_conn_free() clears cl->c the moment
+ * evhttp_send_reply_end() queues the last byte, so the output buffer is the
+ * only witness that the client has not received it yet. Idle connections are
+ * closed by shrinking their own bufferevent timeouts, exactly as
+ * fpm_http_client_idle_fire() does: evhttp owns the connection and
+ * bufferevent_free() underneath it is a use-after-free (issue #90). The close
+ * callback then removes the node from the index; the index is not touched
+ * here, so iterating it is safe.
+ *
+ * Returns the number of connections that are still doing work. The drain tick
+ * exits the loop when it is zero, and the deadline cuts it otherwise. */
+unsigned fpm_http_gateway_drain_step(struct fpm_http_gateway_s *gw)
+{
+	static const struct timeval now = {0, 1};
+	unsigned busy = 0, i;
+
+	for (i = 0; i < gw->client_index.bucket_count; i++) {
+		struct fpm_http_client_s *cl;
+
+		for (cl = gw->client_index.buckets[i]; cl; cl = cl->hash_next) {
+			struct bufferevent *bev = cl->evcon ? evhttp_connection_get_bufferevent(cl->evcon) : NULL;
+			int idle = 1;
+
+			if (cl->c) {
+				idle = 0;	/* a request is in flight */
+			} else if (bev && evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
+				idle = 0;	/* response not fully written to the client */
+			}
+			if (!idle) {
+				busy++;
+			} else if (bev) {
+				bufferevent_set_timeouts(bev, &now, &now);
+			}
+		}
+	}
+	return busy;
+}
+
 /* ------------------------------------------------------------------------ *
  * Responses the gateway provides ITSELF, without occupying a worker.
  *

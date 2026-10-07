@@ -51,6 +51,7 @@
 #include "fpm_shm.h"
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
+#include "fpm_clock.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_accept_backoff.h"
 #include "fpm_http_forwarded.h"
@@ -70,6 +71,7 @@
 #include "zlog.h"
 
 #include "fpm_http_internal.h"
+#include "fpm_http_drain.h"
 
 static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl);
 static void fpm_http_read_deadline_eof(evutil_socket_t fd, short what, void *arg);
@@ -473,6 +475,8 @@ static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* 
 		zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed", gw->pool);
 		return -1;
 	}
+	/* Issue #641: remembered so the graceful drain can stop accepting. */
+	gw->tls_bound = bound;
 	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", NULL, NULL) != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the main listener; running out of file descriptors will make it spin", gw->pool);
 	}
@@ -496,6 +500,15 @@ static void fpm_http_gateway_tls_listener_hook(void *arg) /* {{{ */
 }
 /* }}} */
 #endif
+
+/* Issue #641: SIGQUIT arrived. libevent delivers it here, in the event loop,
+ * so the drain is free to call evhttp -- nothing runs in signal context. */
+static void fpm_http_gateway_sigquit(evutil_socket_t fd, short what, void *arg)
+{
+	(void) fd;
+	(void) what;
+	fpm_http_drain_start((struct fpm_http_gateway_s *) arg);
+}
 
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
 {
@@ -522,12 +535,18 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	act.sa_handler = SIG_DFL;
 	sigaction(SIGTERM, &act, 0);
 	sigaction(SIGINT, &act, 0);
-	sigaction(SIGQUIT, &act, 0);
 	sigaction(SIGUSR1, &act, 0);
 	sigaction(SIGUSR2, &act, 0);
 	sigaction(SIGCHLD, &act, 0);
 	act.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &act, 0);
+	/* Issue #641: SIGQUIT is the graceful-drain signal, not SIG_DFL. The real
+	 * handler is the evsignal installed after the event base exists; ignoring
+	 * it until then keeps a SIGQUIT in the startup window from terminating
+	 * this process with a core dump. The master only sends it from
+	 * fpm_http_cleanup(), never as the log-rotation fan-out (SIGQUIT from
+	 * fpm_log.c reaches wp->children, and a gateway is not one). */
+	sigaction(SIGQUIT, &act, 0);
 	fpm_signals_unblock();
 
 	/* The pools' FastCGI listeners are the master's business. Skip a pool with
@@ -643,6 +662,21 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	gw->base = event_base_new();
 	gw->http = evhttp_new(gw->base);
+	/* Issue #641: SIGQUIT drains this process. evsignal runs the callback in
+	 * the event loop, so fpm_http_drain_start() may call evhttp safely. If it
+	 * cannot be installed, SIGQUIT stays ignored and the master's SIGKILL at
+	 * process_control_timeout is the only stop -- logged so that is not
+	 * silent. */
+	gw->sigquit = evsignal_new(gw->base, SIGQUIT, fpm_http_gateway_sigquit, gw);
+	if (!gw->sigquit || event_add(gw->sigquit, NULL) != 0) {
+		if (gw->sigquit) {
+			event_free(gw->sigquit);
+			gw->sigquit = NULL;
+		}
+		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch SIGQUIT; this gateway will be killed "
+						   "without draining in-flight requests",
+				gw->pool);
+	}
 	fpm_http_log_follow_init(gw);
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls || gw->tls_wait_for_cert) {
@@ -758,6 +792,9 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 			zlog(ZLOG_ERROR, "[pool %s] http: evhttp_accept_socket() failed for http.plain_listen", gw->pool);
 			exit(FPM_EXIT_SOFTWARE);
 		}
+		/* Issue #641: remembered so the graceful drain can stop accepting. */
+		gw->plain_http = plain;
+		gw->plain_bound = plain_bound;
 		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", NULL, NULL) != 0) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on http.plain_listen; running out of file descriptors will make it spin", gw->pool);
 		}
@@ -936,27 +973,98 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 }
 /* }}} */
 
+/* Issue #641: reap every gateway pid that has exited, returning how many are
+ * still alive. block != 0 waits for each pid (used after SIGKILL). ECHILD
+ * means the master's SIGCHLD path already reaped it; that is "gone", not an
+ * error. */
+static unsigned fpm_http_gateways_reap(int block)
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned i, alive = 0;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		for (i = 0; i < gw->nproc; i++) {
+			pid_t pid = gw->pids[i];
+			pid_t r;
+
+			if (pid <= 0) {
+				continue;
+			}
+			r = waitpid(pid, NULL, block ? 0 : WNOHANG);
+			if (r == pid || (r < 0 && errno == ECHILD)) {
+				gw->pids[i] = 0;
+			} else if (r == 0) {
+				alive++;
+			}
+		}
+	}
+	return alive;
+}
+
+/* Issue #641: ask every gateway to drain (SIGQUIT), wait up to `timeout`
+ * seconds, then SIGKILL what is left. One deadline for every gateway pool, so
+ * N pools do not multiply the wait. The gateway's own drain exits a little
+ * before this deadline, so the ordinary case is a clean exit, not a kill. */
+static void fpm_http_gateways_drain(int timeout)
+{
+	struct fpm_http_gateway_s *gw;
+	struct timeval start = { 0, 0 }, now, deadline;
+	unsigned i;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		for (i = 0; i < gw->nproc; i++) {
+			if (gw->pids[i] > 0) {
+				/* forget BEFORE signalling: this is a deliberate stop, not
+				 * a crash, so fpm_children_extra_handle_exit() must not
+				 * respawn it when the master's SIGCHLD handler reaps it */
+				fpm_children_extra_forget(gw->pids[i]);
+				kill(gw->pids[i], SIGQUIT);
+			}
+		}
+	}
+
+	fpm_clock_get(&start);
+	deadline = start;
+	deadline.tv_sec += timeout;
+
+	for (;;) {
+		if (fpm_http_gateways_reap(0) == 0) {
+			return;
+		}
+		fpm_clock_get(&now);
+		if (evutil_timercmp(&now, &deadline, >=)) {
+			break;
+		}
+		usleep(10000);
+	}
+
+	for (gw = gateways; gw; gw = gw->next) {
+		for (i = 0; i < gw->nproc; i++) {
+			if (gw->pids[i] > 0) {
+				zlog(ZLOG_NOTICE, "[pool %s] http gateway %u (pid %d) did not drain within "
+								  "process_control_timeout, killing it",
+						gw->pool, i, (int) gw->pids[i]);
+				kill(gw->pids[i], SIGKILL);
+			}
+		}
+	}
+	fpm_http_gateways_reap(1);
+}
+
 void fpm_http_cleanup(int which, void *arg) /* {{{ */
 {
 	struct fpm_http_gateway_s *gw, *next;
 	unsigned i;
 
+	/* Issue #641: SIGQUIT, not SIGTERM. A gateway asked to stop now drains --
+	 * stops accepting, closes idle keep-alive connections, finishes in-flight
+	 * requests -- and whatever is still alive at process_control_timeout is
+	 * SIGKILLed. The SIGTERM this replaces cut every in-flight request on
+	 * every reload and every stop. */
+	fpm_http_gateways_drain(fpm_global_config.process_control_timeout);
+
 	for (gw = gateways; gw; gw = next) {
 		next = gw->next;
-		for (i = 0; i < gw->nproc; i++) {
-			if (gw->pids[i] > 0) {
-				/* forget it BEFORE signalling it: this is a deliberate kill,
-				 * not a crash, so fpm_children_extra_handle_exit() must not
-				 * respawn it when the master's SIGCHLD handler reaps it */
-				fpm_children_extra_forget(gw->pids[i]);
-				kill(gw->pids[i], SIGTERM);
-			}
-		}
-		for (i = 0; i < gw->nproc; i++) {
-			if (gw->pids[i] > 0) {
-				waitpid(gw->pids[i], NULL, 0);
-			}
-		}
 		if (gw->listen_fd >= 0) {
 			close(gw->listen_fd);
 		}

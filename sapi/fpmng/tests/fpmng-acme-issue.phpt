@@ -155,9 +155,15 @@ $tester->start();
 $tester->expectLogStartNotices();
 $http = $tester->getAddr('ipv4', '[http]');
 
-/* The CA binds port 0 and reports what it got, so nothing here races it. */
+/* The CA binds a port of the run's own and reports what it got, so nothing here
+ * races it and its listener stays inside the run's reserved port lane
+ * (issue #625). A reserved lane port is not a guess: the port below is one the
+ * Tester handed out of this run's block, and nothing else in this run is given
+ * it. The CA still reads the real port back out of its own socket, so the
+ * handoff does not depend on the number being free. */
+$caAddr = $tester->getAddr('ipv4', '[ca]');
 $ca = proc_open(
-    [PHP_BINARY, '-n', "$here/acme-fake-ca.inc", '0', $root, $http,
+    [PHP_BINARY, '-n', "$here/acme-fake-ca.inc", (string) (int) substr($caAddr, strrpos($caAddr, ':') + 1), $root, $http,
         "$root/ca-cert.pem", "$root/ca-key.pem", '90'],
     [1 => ['file', "$root/ca-stdout.log", 'w'], 2 => ['file', "$root/ca-stderr.log", 'w']],
     $pipes

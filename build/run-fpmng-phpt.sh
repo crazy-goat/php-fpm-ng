@@ -53,6 +53,11 @@ the suite serially.
 Every test port moves by FPMNG_PHPT_PORT_SHIFT (issue #674). Unset, the runner
 picks the first shift (0, 100, ... 2400) whose port blocks nothing listens on,
 so a pool already running on the host does not break the run; set it to pin one.
+
+On a host shared with other work, reserve a lane instead: FPMNG_PHPT_PORT_BASE=21000
+keeps every listener of the run inside 21000-21999, so a second suite given another
+base cannot meet it. Lane mode runs the suite serially and refuses a conflicting
+TEST_FPM_JOBS or FPMNG_PHPT_PORT_SHIFT.
 EOF
     exit 2
 }
@@ -61,6 +66,37 @@ fail() {
     printf '%s\n' "run-fpmng-phpt.sh: $*" >&2
     exit 1
 }
+
+# The port lane's shape (issue #625). These four numbers are the whole layout,
+# and build/test-phpt-port-lane.sh asserts against them, so changing a port here
+# means changing it there too.
+#
+# LANE_SIZE is what the caller reserves by naming a base; 1000 is the size of
+# the lane ranges AGENTS.md's "Test box" section tells people to reserve, and it
+# is comfortably more than the two blocks below need.
+LANE_SIZE=1000
+# TESTER_BLOCK_SIZE is what tester.inc's portBase() gives one worker.
+TESTER_BLOCK_SIZE=200
+# HTTP_DIRECT_PORT_ORIGIN is the first port of the fixed-port family the
+# http-direct tests spell out, and HTTP_DIRECT_PORT_FAMILY_END the highest one
+# they reach (fpmng-pack-run.phpt's 28192). Measured over sapi/fpmng/tests/;
+# build/test-phpt-port-lane.sh re-derives both from the tests on every run, so a
+# new test that picks a port outside them fails there instead of silently
+# growing past the lane.
+HTTP_DIRECT_PORT_ORIGIN=28054
+HTTP_DIRECT_PORT_FAMILY_END=28192
+# LANE_FAMILY_OFFSET is where the family starts inside the lane, leaving the
+# Tester's block room to grow with the worker count.
+LANE_FAMILY_OFFSET=300
+
+# The layout has to add up before any run uses it: the family starts after the
+# Tester's block (so a pool listen port and a fixed-port test can never meet)
+# and still ends inside the lane. Both are properties of the constants above,
+# so they are checked once, here, and not once per base.
+[ "$LANE_FAMILY_OFFSET" -ge "$TESTER_BLOCK_SIZE" ] ||
+    fail "the port lane is inconsistent: LANE_FAMILY_OFFSET=$LANE_FAMILY_OFFSET starts inside the Tester's $TESTER_BLOCK_SIZE-port block"
+[ "$((LANE_FAMILY_OFFSET + HTTP_DIRECT_PORT_FAMILY_END - HTTP_DIRECT_PORT_ORIGIN + 1))" -le "$((LANE_SIZE - TESTER_BLOCK_SIZE))" ] ||
+    fail "the port lane is inconsistent: the http-direct family does not fit in LANE_SIZE=$LANE_SIZE at LANE_FAMILY_OFFSET=$LANE_FAMILY_OFFSET"
 
 [ "$#" -ge 2 ] || usage
 
@@ -90,6 +126,7 @@ SOURCE_COMMIT=unknown
 TESTER_FPM=not-measured
 HARNESS_DIR=
 TREE_DIR=
+TMP_ROOT=
 
 resolve_path() {
     input=$1
@@ -122,6 +159,12 @@ cleanup() {
     status=$?
     if [ -n "$HARNESS_DIR" ]; then
         rm -rf "$HARNESS_DIR"
+    fi
+    # The lane's own temporary root (issue #625): the tests wrote into it, and
+    # it is inside the results directory the caller keeps, so it goes with the
+    # run rather than with the caller's directory.
+    if [ -n "$TMP_ROOT" ]; then
+        rm -rf "$TMP_ROOT"
     fi
     if [ -n "$TREE_DIR" ]; then
         # run-tests.php leaves .diff/.out/.exp/.log next to each failed test;
@@ -334,6 +377,23 @@ write_metadata() {
         printf '%s\n' "TEST_FPM_TIMEOUT=${TEST_FPM_TIMEOUT-120}"
         printf '%s\n' "TEST_FPM_MIN_PASS=${TEST_FPM_MIN_PASS-unset}"
         printf '%s\n' "TEST_FPM_JOBS=${TEST_FPM_JOBS-unset}"
+        # The lane, if one was reserved, as the bounds a listener can fall
+        # between, and the shift the tests were handed to derive their own fixed
+        # ports from; without a lane, the historical ports and the shift the
+        # runner picked for this run.
+        if [ -n "$PORT_BASE" ] && [ -n "$PORT_SHIFT" ]; then
+            printf '%s\n' "port_lane=$PORT_BASE-$((PORT_BASE + LANE_SIZE - 1))"
+            printf '%s\n' "port_tester_block=$((PORT_BASE + 1))-$((PORT_BASE + TESTER_BLOCK_SIZE))"
+            printf '%s\n' "port_operator=$((PORT_BASE + TESTER_BLOCK_SIZE - 1))"
+            printf '%s\n' "port_http_direct_family=$((HTTP_DIRECT_PORT_ORIGIN + PORT_SHIFT))-$((HTTP_DIRECT_PORT_FAMILY_END + PORT_SHIFT))"
+            printf '%s\n' "port_shift=$PORT_SHIFT"
+            printf '%s\n' "tmp_root=$TMP_ROOT"
+        else
+            printf '%s\n' "port_lane=${PORT_BASE:-none}"
+            # A run that refused before the ports were chosen records that it
+            # did not choose them, rather than a shift of nothing.
+            printf '%s\n' "port_shift=${PORT_SHIFT:-not-chosen}"
+        fi
     } > "$METADATA"
 }
 
@@ -378,6 +438,150 @@ preflight_fail() {
     write_not_measured "$1"
     exit 1
 }
+
+# A reserved port lane (issue #625), or the historical ports plus a per-run
+# shift (issue #674).
+#
+# THE LANE LAYOUT. FPMNG_PHPT_PORT_BASE=B reserves the 1000 ports B .. B+999
+# for this run and for nothing else, which is what makes two suites on one host
+# independent of each other. Inside it:
+#
+#   B+1 .. B+200      the Tester's per-worker port blocks, 200 ports each
+#                     (tester.inc's portBase(), build/phpt-fixture-patches/).
+#                     A serial lane uses only worker 0's block.
+#   B+199             the operator endpoint of a gateway pool that names no
+#                     operator.*_listen: the last port of the block getPort()
+#                     never reaches, so it cannot meet a pool listen port
+#   B+300 .. B+438    the historical fixed-port family of the http-direct
+#                     tests, 28054 .. 28192, translated as one block
+#   B+439 .. B+999    unused; room for the family to grow
+#
+# Why 300 and not 1: the family and the Tester's block must not overlap, and
+# only the family has a size this repository cannot change without editing ~80
+# tests -- it is the union of their own expressions, measured, not a constant
+# anybody chose (build/test-phpt-port-lane.sh re-measures it). The Tester
+# block's size is the worker count times 200, which the run does control --
+# which is the other half of why a lane runs serially.
+#
+# The family is translated, not rebased, so the relative order of the ~80
+# expressions that read it survives and two tests that do not share a port today
+# still do not. That translation is FPMNG_PHPT_PORT_SHIFT, so it is negative
+# whenever the base sits below the historical 28054: -6754 for B=21000. The
+# tests read it with (int) getenv() and never look at its sign.
+PORT_BASE=${FPMNG_PHPT_PORT_BASE-}
+# PORT_SHIFT is chosen below, after the worker count the probing branch needs, so
+# it is empty while an earlier refusal can still report it (write_metadata runs
+# from every preflight_fail and set -u would stop the script instead).
+PORT_SHIFT=
+case "$PORT_BASE" in
+    '') ;;
+    *[!0-9]*) preflight_fail "FPMNG_PHPT_PORT_BASE must be a non-negative integer: $PORT_BASE" ;;
+    *)
+        [ "$PORT_BASE" -ge 1024 ] 2>/dev/null || preflight_fail "FPMNG_PHPT_PORT_BASE must be at least 1024: $PORT_BASE"
+        # The lane must end below the ephemeral range, or the kernel can hand
+        # an outgoing connection a port from inside it and the run meets itself.
+        [ "$((PORT_BASE + LANE_SIZE - 1))" -lt 32768 ] 2>/dev/null ||
+            preflight_fail "a lane of $LANE_SIZE ports must end below the ephemeral range (32768): FPMNG_PHPT_PORT_BASE=$PORT_BASE"
+        ;;
+esac
+
+# Parallel workers (issue #394). Most of the tests start a master and then wait
+# on it, so they cost wall clock, not CPU, and more workers than CPUs still
+# pay; the cap keeps a large box from loading itself into the timing tests'
+# bounds. tester.inc gives each worker its own block of ports
+# (build/phpt-fixture-patches/). 1 means serial, with no -j at all, so
+# TEST_PHP_WORKER stays unset and the ports are the upstream ones.
+JOBS=${TEST_FPM_JOBS-}
+if [ -n "$PORT_BASE" ]; then
+    # Refused rather than overridden: a caller who asked for -j8 asked for eight
+    # 200-port blocks, which the lane does not hold, and running serial anyway
+    # would be a different run from the one they asked for.
+    [ -z "$JOBS" ] || [ "$JOBS" = 1 ] ||
+        preflight_fail "FPMNG_PHPT_PORT_BASE reserves $LANE_SIZE ports for one serial run, but TEST_FPM_JOBS=$JOBS wants a 200-port block per worker and does not fit (drop TEST_FPM_JOBS, or drop the base)"
+    JOBS=1
+fi
+if [ -z "$JOBS" ]; then
+    JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
+    [ "$JOBS" -le 8 ] 2>/dev/null || JOBS=8
+fi
+case "$JOBS" in
+    ''|*[!0-9]*|0) preflight_fail "TEST_FPM_JOBS must be a positive integer: $JOBS" ;;
+esac
+JOBS_ARGS=
+[ "$JOBS" -gt 1 ] && JOBS_ARGS="-j$JOBS"
+
+# Per-run port shift (issue #674), unless a lane was asked for. The ports of the
+# tests are fixed numbers: the Tester's blocks start at 9008 and move by 200 per
+# worker, and the http-direct tests start at 28054 and move the same way. On a
+# shared host another php-fpm (or a leftover of a killed run) can hold one of
+# them, and then dozens of tests fail with "unable to bind listening socket".
+# Every port a test takes moves by FPMNG_PHPT_PORT_SHIFT, so the shift is picked
+# here, per run, as the first one whose two blocks (the Tester's and the
+# http-direct one) nothing listens on. The cap keeps the highest port below the
+# ephemeral range (32768). An explicit FPMNG_PHPT_PORT_SHIFT wins and is not
+# probed; without a way to list the listening sockets (no ss, no netstat) the
+# shift stays 0, the old ports.
+# A gateway pool's operator listener defaults to the host-global 127.0.0.1:9253;
+# tester.inc gives each gateway pool of a test a listen address of the run's own
+# (the last port of the worker's block, so it moves with the shift too).
+PORT_SHIFT=${FPMNG_PHPT_PORT_SHIFT-}
+case "$PORT_SHIFT" in
+    *[!0-9]*) preflight_fail "FPMNG_PHPT_PORT_SHIFT must be a non-negative integer: $PORT_SHIFT" ;;
+esac
+if [ -n "$PORT_BASE" ]; then
+    # Two mechanisms for one port range: the lane decides where the range IS,
+    # and the shift would decide again. Refuse instead of picking one silently.
+    [ -z "$PORT_SHIFT" ] || preflight_fail "set either FPMNG_PHPT_PORT_BASE (a reserved lane) or FPMNG_PHPT_PORT_SHIFT (a per-run offset), not both: $PORT_SHIFT"
+    # Nothing is probed here: the lane is reserved by the caller, so whether it
+    # is free is the caller's decision to make, and a run that probes would pick
+    # a shift outside the lane the caller reserved.
+    PORT_SHIFT=$((PORT_BASE + LANE_FAMILY_OFFSET - HTTP_DIRECT_PORT_ORIGIN))
+    # A private temporary root, for the same reason the lane is private. The
+    # tests name their temporary directories and unix sockets themselves, and
+    # fourteen of those names are fixed, with no pid in them
+    # (sapi/fpmng/tests/fpmng-raw-upstream.inc's fpmng-raw-$name,
+    # /fpmng-user-ini, /fpmng-430-run, /fpmng-728-serve and the rest), so two
+    # lanes sharing one /tmp delete each other's files in the middle of a test.
+    # Measured 2026-10-06, two full lanes at 21000 and 22000 in one network
+    # namespace: lane 21000's fpmng-http-direct-user-ini lost its directory to
+    # the other lane's --CLEAN--, the test was SIGKILLed at its timeout with the
+    # master still up, and the master it left behind held 21001-21003 for the
+    # rest of the run -- 84 of 212 tests then failed with "Address already in
+    # use". One TMPDIR per run closes the class, the --CLEAN-- globs that match
+    # a prefix included, because each of them now looks only inside its own.
+    TMP_ROOT=$RESULTS_DIR/.tmp
+    rm -rf "$TMP_ROOT"
+    mkdir -p "$TMP_ROOT" || preflight_fail "cannot create the lane's temporary directory: $TMP_ROOT"
+    export TMPDIR="$TMP_ROOT"
+    printf '%s\n' "Port lane: $PORT_BASE-$((PORT_BASE + LANE_SIZE - 1))" \
+        "(Tester $((PORT_BASE + 1))-$((PORT_BASE + TESTER_BLOCK_SIZE)), gateway operator $((PORT_BASE + TESTER_BLOCK_SIZE - 1))," \
+        "http-direct family $((HTTP_DIRECT_PORT_ORIGIN + PORT_SHIFT))-$((HTTP_DIRECT_PORT_FAMILY_END + PORT_SHIFT));" \
+        "port shift $PORT_SHIFT, temporary root $TMP_ROOT" >&2
+else
+    if [ -z "$PORT_SHIFT" ]; then
+        LISTENING=$( { ss -Hltn 2>/dev/null || netstat -an 2>/dev/null; } |
+            awk '/LISTEN/ { n = split($0, f, " "); for (i = 1; i <= n; i++) if (f[i] ~ /[.:][0-9]+$/ && f[i] !~ /^[0-9]+$/) { sub(/.*[.:]/, "", f[i]); print f[i]; break } }' |
+            sort -un )
+        PORT_SHIFT=0
+        if [ -n "$LISTENING" ]; then
+            BLOCK=$((200 * (JOBS + 1) + 120))
+            CAND=0
+            while [ "$CAND" -le 2400 ]; do
+                if ! printf '%s\n' "$LISTENING" | awk -v a=$((9008 + CAND)) -v b=$((28054 + CAND)) -v w="$BLOCK" \
+                    '($1 >= a && $1 < a + w) || ($1 >= b && $1 < b + w) { found = 1 } END { exit !found }'; then
+                    PORT_SHIFT=$CAND
+                    break
+                fi
+                CAND=$((CAND + 100))
+            done
+            if [ "$CAND" -gt 2400 ]; then
+                printf '%s\n' "warning: every port block up to a shift of 2400 has a listener; using the default ports" >&2
+            fi
+        fi
+    fi
+    printf '%s\n' "Port shift: $PORT_SHIFT" >&2
+fi
+export FPMNG_PHPT_PORT_SHIFT="$PORT_SHIFT"
 
 [ -n "$CLI_BIN_INPUT" ] || preflight_fail 'TEST_PHP_EXECUTABLE was not supplied'
 [ -n "$FPM_BIN_INPUT" ] || preflight_fail 'TEST_PHP_FPM_EXECUTABLE was not supplied'
@@ -455,64 +659,6 @@ SHOW_SLOW_MS=${TEST_FPM_SHOW_SLOW_MS-1000}
 case "$SHOW_SLOW_MS" in
     ''|*[!0-9]*) preflight_fail "TEST_FPM_SHOW_SLOW_MS must be a non-negative integer: $SHOW_SLOW_MS" ;;
 esac
-
-# Parallel workers (issue #394). Most of the 177 tests start a master and then
-# wait on it, so they cost wall clock, not CPU, and more workers than CPUs still
-# pay; the cap keeps a large box from loading itself into the timing tests'
-# bounds. tester.inc gives each worker its own block of ports
-# (build/phpt-fixture-patches/). 1 means serial, with no -j at all, so
-# TEST_PHP_WORKER stays unset and the ports are the upstream ones.
-JOBS=${TEST_FPM_JOBS-}
-if [ -z "$JOBS" ]; then
-    JOBS=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)
-    [ "$JOBS" -le 8 ] 2>/dev/null || JOBS=8
-fi
-case "$JOBS" in
-    ''|*[!0-9]*|0) preflight_fail "TEST_FPM_JOBS must be a positive integer: $JOBS" ;;
-esac
-JOBS_ARGS=
-[ "$JOBS" -gt 1 ] && JOBS_ARGS="-j$JOBS"
-
-# Per-run port shift (issue #674). The ports of the tests are fixed numbers: the
-# Tester's blocks start at 9008 and move by 200 per worker, and the http-direct
-# tests start at 28054 and move the same way. On a shared host another php-fpm
-# (or a leftover of a killed run) can hold one of them, and then dozens of tests
-# fail with "unable to bind listening socket". Every port a test takes moves by
-# FPMNG_PHPT_PORT_SHIFT, so the shift is picked here, per run, as the first one
-# whose two blocks (the Tester's and the http-direct one) nothing listens on.
-# The cap keeps the highest port below the ephemeral range (32768). An explicit
-# FPMNG_PHPT_PORT_SHIFT wins and is not probed; without a way to list the
-# listening sockets (no ss, no netstat) the shift stays 0, the old ports.
-# A gateway pool's operator listener defaults to the host-global 127.0.0.1:9253;
-# tester.inc gives each gateway pool of a test a listen address of the run's own
-# (the last port of the worker's block, so it moves with the shift too).
-PORT_SHIFT=${FPMNG_PHPT_PORT_SHIFT-}
-case "$PORT_SHIFT" in
-    *[!0-9]*) preflight_fail "FPMNG_PHPT_PORT_SHIFT must be a non-negative integer: $PORT_SHIFT" ;;
-esac
-if [ -z "$PORT_SHIFT" ]; then
-    LISTENING=$( { ss -Hltn 2>/dev/null || netstat -an 2>/dev/null; } |
-        awk '/LISTEN/ { n = split($0, f, " "); for (i = 1; i <= n; i++) if (f[i] ~ /[.:][0-9]+$/ && f[i] !~ /^[0-9]+$/) { sub(/.*[.:]/, "", f[i]); print f[i]; break } }' |
-        sort -un )
-    PORT_SHIFT=0
-    if [ -n "$LISTENING" ]; then
-        BLOCK=$((200 * (JOBS + 1) + 120))
-        CAND=0
-        while [ "$CAND" -le 2400 ]; do
-            if ! printf '%s\n' "$LISTENING" | awk -v a=$((9008 + CAND)) -v b=$((28054 + CAND)) -v w="$BLOCK" \
-                '($1 >= a && $1 < a + w) || ($1 >= b && $1 < b + w) { found = 1 } END { exit !found }'; then
-                PORT_SHIFT=$CAND
-                break
-            fi
-            CAND=$((CAND + 100))
-        done
-        if [ "$CAND" -gt 2400 ]; then
-            printf '%s\n' "warning: every port block up to a shift of 2400 has a listener; using the default ports" >&2
-        fi
-    fi
-fi
-export FPMNG_PHPT_PORT_SHIFT="$PORT_SHIFT"
-printf '%s\n' "Port shift: $PORT_SHIFT" >&2
 
 # The floor on PASS, and why this runner needs one at all.
 #

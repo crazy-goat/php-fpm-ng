@@ -1217,6 +1217,42 @@ the dot-segment rule and the conditional handling are the parts that have to be
 right, and a second copy of them is a second place to get them wrong. The
 gateway gained `Last-Modified` and `If-Modified-Since` from the same change.
 
+## Absolute-form request targets (issue #681)
+
+RFC 9112 3.2.2 obliges a server to accept `GET http://host/path HTTP/1.1`, and
+3.2.1 makes a target that starts with `/` origin-form whatever follows it. A
+direct pool reduces such a target to its origin-form path once, at the top of
+the request callback, exactly as the gateway does
+([`docs/gateway.md`](gateway.md#absolute-form-request-targets)):
+
+| Target sent | Path everything matches on | `REQUEST_URI` | `HTTP_HOST` |
+|---|---|---|---|
+| `/x?a=1` | `/x` | `/x?a=1` | the `Host` header |
+| `http://h/x?a=1` | `/x` | `/x?a=1` | the authority (`h`) |
+| `http://h` | `/` | `/` | the authority (`h`) |
+| `http:/x?a=1` | `/x` | `/x?a=1` | the `Host` header (no authority) |
+| `//h/x?a=1` | `//h/x` | `//h/x?a=1` | the `Host` header |
+
+An authority longer than 261 bytes is answered `400`, as on the gateway. A
+target with no path to reduce it to — asterisk-form, `OPTIONS *` — stays
+refused with `400`, which is what it always was.
+
+So `ping.path`, the static lookup, `PATH_INFO`, `REQUEST_URI` and
+`access.suppress_path[]` all see one path, whatever the client wrote, and none
+of them can be answered on one path and served on another: `GET
+http://host/assets/app.css` serves that file, `GET //host/assets/app.css` does
+not (its path is `//host/assets/app.css`, under the document root, and the
+static lookup finds nothing there), and both reach PHP with a `REQUEST_URI` and
+a `PATH_INFO` that agree. Before this the pool answered `400` to every
+absolute-form target, and read a network-path reference as a host plus a path
+for the static lookup while reporting the whole target as `REQUEST_URI`.
+
+`operator.status_path` and `operator.metrics_path` are **not** covered: since
+#275 they are answered on `operator.status_listen`, by the operator endpoint's
+own server, which reads the request line itself and so answers `404` to an
+absolute-form target on every pool type — the gateway's operator listener
+included. That is the same before and after this change.
+
 ## Operating a direct pool
 
 Since issue #59 a direct pool answers the pool-level operator directives an

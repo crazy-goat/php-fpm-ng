@@ -108,6 +108,10 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 int fpm_http_direct_resolve_script(const char *base, const char *front_controller,
 		char root[PATH_MAX], char script[PATH_MAX]);
 const char *fpm_http_direct_method(enum evhttp_cmd_type command);
+/* The ingress step, first thing in both request callbacks (#681). Reduces the
+ * request-target to the origin-form path every consumer below matches on, and
+ * refuses an authority HTTP_HOST could not carry. False = answer 400. */
+bool fpm_http_direct_normalize_target(struct evhttp_request *http);
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http);
 int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http_direct_env_source *source,
 		fpm_http_direct_env_cb emit, void *ctx);

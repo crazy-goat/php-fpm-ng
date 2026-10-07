@@ -2251,6 +2251,19 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
+	/* One path for the whole request, ahead of every consumer that reads what
+	 * to match on: the ACL needs no path, the capacity gate below and the
+	 * static lookup and ping.path after it all do (issue #681, the http-direct
+	 * half of the gateway's #534). An authority HTTP_HOST could not carry is
+	 * refused here with the 400 the gateway answers for the same target, and
+	 * after the ACL on purpose -- a client listen.allowed_clients excludes has
+	 * to get its 403 whatever else is true of the request it sent. */
+	if (!fpm_http_direct_normalize_target(http)) {
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
+		evhttp_send_error(http, 400, "Bad request");
+		return;
+	}
+
 	/* listen.allowed_clients, issue #59. Before anything else this function
 	 * does: a client that may not be here must not reach the static file
 	 * server, the status page or PHP, and must not be told which of them

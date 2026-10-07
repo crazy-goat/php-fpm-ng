@@ -681,6 +681,18 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 			return;
 		}
 	}
+	/* One path for the whole request, ahead of every consumer that reads what to
+	 * match on: the ACL needs no path, the saturation gate below and the ping
+	 * matcher after it both do (issue #681, the http-direct half of the gateway's
+	 * #534). An authority HTTP_HOST could not carry is a bad request, charged to
+	 * the counter fpm_http_direct_request_acceptable() answers for below. After
+	 * the ACL on purpose: a client listen.allowed_clients excludes has to get its
+	 * 403 whatever else is true of the request it sent. */
+	if (!fpm_http_direct_normalize_target(http)) {
+		fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_BAD_REQUEST);
+		fpm_worker_send_error(http, 400, "Bad request");
+		return;
+	}
 	if (fpm_worker_stopping || fw.ready_count >= fw.ready_max ||
 		zend_hash_num_elements(&fw.pending) >= fw.ready_max) {
 		fpm_http_direct_ops_worker_refused(fw.ops,

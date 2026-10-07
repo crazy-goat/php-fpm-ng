@@ -33,6 +33,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_http_header_cgi.h"
+#include "fpm_http_target.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_acl.h"
 #include "fpm_pack_run.h"
@@ -341,17 +342,50 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command)
 	}
 }
 
+/* The ingress step, first thing in both listeners' request callbacks (#681) and
+ * the http-direct half of what PR #680 did for the gateway: reduce the
+ * request-target to the origin-form path once, so ping.path, the static lookup,
+ * PATH_INFO and REQUEST_URI cannot disagree about which request arrived.
+ *
+ * fpm_http_normalize_target() only rewrites what libevent misreads -- a target
+ * starting with "//". An absolute-form target keeps libevent's authority and
+ * its path, and everything below reads that parse, which is the gateway's
+ * arrangement.
+ *
+ * An authority too long for FPM_HTTP_AUTHORITY_MAX is refused rather than
+ * dropped: fpm_http_direct_build_env() would otherwise have to choose between
+ * an HTTP_HOST that contradicts the Host header it kept and one it invented
+ * from a truncated authority, and the gateway answers 400 for the same target
+ * (fpm_http_request()). */
+bool fpm_http_direct_normalize_target(struct evhttp_request *http)
+{
+	char authority[FPM_HTTP_AUTHORITY_MAX];
+
+	fpm_http_normalize_target(http);
+	return fpm_http_absolute_authority(evhttp_request_get_uri(http),
+		authority, sizeof(authority)) >= 0;
+}
+
 /* Origin-form only: the script is selected solely by configuration, never by
  * the URI, the Host, PATH_INFO, or any client-supplied CGI-looking header.
  * Header names are bounded here, once, so that everything downstream may
- * assume FPM_HTTP_HEADER_NAME_MAX. */
+ * assume FPM_HTTP_HEADER_NAME_MAX.
+ *
+ * "Origin-form only" is a statement about what the request IS, not about the
+ * spelling the client used to write it. RFC 9112 3.2.2 obliges a server to
+ * accept "GET http://host/path HTTP/1.1" and to route it as "/path", and
+ * fpm_http_direct_normalize_target() has already reduced the target by the time
+ * this runs, so the test is the parsed path -- "/x" for an absolute-form
+ * request, "//h/x" for a network-path reference, and "*" (asterisk-form, which
+ * libevent hands back unparsed) for the one target that has no path to be
+ * origin-form. The gateway made the same move in #534. */
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http)
 {
-	const char *uri = evhttp_request_get_uri(http);
 	const struct evhttp_uri *parsed = evhttp_request_get_evhttp_uri(http);
+	const char *path = parsed ? fpm_http_request_path(http) : NULL;
 	struct evkeyval *kv;
 
-	if (!uri || uri[0] != '/' || !parsed || evhttp_uri_get_fragment(parsed) ||
+	if (!path || path[0] != '/' || evhttp_uri_get_fragment(parsed) ||
 		!fpm_http_direct_method(evhttp_request_get_command(http))) {
 		return false;
 	}
@@ -381,28 +415,46 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	const struct evhttp_uri *parsed = evhttp_request_get_evhttp_uri(http);
 	struct evkeyvalq *headers = evhttp_request_get_input_headers(http);
 	struct evkeyval *kv;
+	smart_str request_uri = { 0 };
+	char authority[FPM_HTTP_AUTHORITY_MAX];
 	char length[32], remote_port[16], protocol[32];
 	char *peer = NULL;
 	ev_uint16_t port = 0;
+	int have_authority, saw_host = 0;
 
 	snprintf(length, sizeof(length), "%zu", evbuffer_get_length(evhttp_request_get_input_buffer(http)));
 	evhttp_connection_get_peer(evhttp_request_get_connection(http), &peer, &port);
 	snprintf(remote_port, sizeof(remote_port), "%u", (unsigned) port);
 	snprintf(protocol, sizeof(protocol), "HTTP/%d.%d", http->major, http->minor);
-#define ENV(key, value) do { if (emit(ctx, key, fpm_http_direct_or_empty(value))) return -1; } while (0)
+	/* REQUEST_URI and PATH_INFO come from the normalized parse, not from the raw
+	 * target: an application and an operator then agree on the one path
+	 * ping.path and the static lookup already matched on, whatever the client
+	 * wrote (RFC 9112 3.2.1, 3.2.2 -- #681, the http-direct half of #534). */
+	fpm_http_origin_form(&request_uri, http);
+	smart_str_0(&request_uri);
+	/* An absolute-form authority replaces the Host header (RFC 9112 3.2.2), so
+	 * HTTP_HOST agrees with what the gateway sends on the same request. The
+	 * length of that authority is already bounded by
+	 * fpm_http_direct_normalize_target(). */
+	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(http),
+		authority, sizeof(authority)) > 0;
+#define ENV(key, value) do { if (emit(ctx, key, fpm_http_direct_or_empty(value))) goto fail; } while (0)
 	ENV("REQUEST_METHOD", fpm_http_direct_method(evhttp_request_get_command(http)));
-	ENV("REQUEST_URI", evhttp_request_get_uri(http));
+	ENV("REQUEST_URI", ZSTR_VAL(request_uri.s));
 	ENV("QUERY_STRING", evhttp_uri_get_query(parsed));
 	ENV("SCRIPT_FILENAME", source->script);
 	ENV("SCRIPT_NAME", fpm_pack_http_script_name(source->front_controller));
 	ENV("PHP_SELF", fpm_pack_http_script_name(source->front_controller));
-	ENV("PATH_INFO", evhttp_uri_get_path(parsed));
+	ENV("PATH_INFO", fpm_http_request_path(http));
 	ENV("DOCUMENT_ROOT", source->root);
 	ENV("SERVER_PROTOCOL", protocol);
 	ENV("SERVER_SOFTWARE", source->server_software);
 	ENV("GATEWAY_INTERFACE", "CGI/1.1");
 	ENV("SERVER_ADDR", source->server_addr);
 	ENV("SERVER_PORT", source->server_port);
+	/* libevent's host: the Host header when there is one, the parsed authority
+	 * when there is not. Left alone, as on the gateway, so the two transports
+	 * report SERVER_NAME for the same request identically. */
 	ENV("SERVER_NAME", evhttp_request_get_host(http));
 	ENV("REMOTE_ADDR", peer);
 	ENV("REMOTE_PORT", remote_port);
@@ -419,6 +471,7 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
 		char name[FPM_HTTP_HEADER_CGI_KEY_LEN];
+		const char *value = kv->value;
 		int rc;
 
 		/* CONTENT_TYPE is already above, from the first Content-Type header,
@@ -427,15 +480,31 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 		 * length bound and the upper-casing live there, not here. */
 		rc = fpm_http_header_cgi_key(kv->key, true, name, sizeof(name));
 		if (rc < 0) {
-			return -1;
+			goto fail;
 		}
 		if (rc > 0) {
 			continue;
 		}
-		ENV(name, kv->value);
+		if (!strcasecmp(kv->key, "Host")) {
+			saw_host = 1;
+			if (have_authority) {
+				value = authority;
+			}
+		}
+		ENV(name, value);
+	}
+	/* No Host header at all: the authority still defines the host (RFC 9112
+	 * 3.2.2), the same rule the gateway applies and the reason its
+	 * HTTP_HOST never depends on whether a proxy sent a Host line. */
+	if (have_authority && !saw_host) {
+		ENV("HTTP_HOST", authority);
 	}
 #undef ENV
+	smart_str_free(&request_uri);
 	return 0;
+fail:
+	smart_str_free(&request_uri);
+	return -1;
 }
 
 /* This transport owns framing. An application-supplied length, connection or

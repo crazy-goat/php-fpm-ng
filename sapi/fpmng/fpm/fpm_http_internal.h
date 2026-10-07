@@ -413,6 +413,7 @@ struct fpm_http_gateway_s {
 	int write_timeout_ms;				/* http.write_timeout, milliseconds; 0 = a stalled client write is never cut */
 	struct timeval write_timeout;			/* write_timeout_ms split into {sec, usec} for bufferevent_set_timeouts() */
 	size_t response_buffer;				/* http.response_buffer, bytes; 0 = never pause an upstream for a slow client (issue #596) */
+	int response_min_rate;				/* http.response_min_rate, bytes/s the client must drain while the upstream is paused; 0 = no minimum (issue #705) */
 	/* http.upstream_connect_timeout, milliseconds; 0 = a connect towards a target is never cut.
 	 * http.upstream_read_timeout, milliseconds; 0 = a silent target is never cut. Both bound
 	 * the gateway's own upstream connections and neither bounds total request time, only
@@ -721,6 +722,14 @@ struct _fpm_http_conn {
 	int headers_sent;
 	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
 	int read_paused;				/* issue #596: upstream->ev_read is removed because the client has not drained the response; see fpm_http_backpressure.c */
+	/* Issue #705: while read_paused, this one-shot timer re-checks every
+	 * FPM_HTTP_RESPONSE_MIN_RATE_WINDOW_MS that the client has drained at
+	 * least http.response_min_rate bytes/s; minrate_last_outlen is the
+	 * client's unwritten byte count at the previous check, and the timer is
+	 * stopped on resume and freed with the request. See
+	 * fpm_http_backpressure.c. */
+	struct event *minrate_timer;
+	size_t minrate_last_outlen;
 	char peer_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* direct TCP peer, before X-Forwarded-For */
 	ev_uint16_t peer_port;
 	struct fpm_http_forwarded_result_s fwd;		/* resolved once in fpm_http_request() */
@@ -864,6 +873,13 @@ void fpm_http_upstream_deadline_free(fpm_http_upstream *up);
 
 /* shared constants */
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */
+/* Issue #705: the window over which http.response_min_rate is measured while
+ * the gateway holds the upstream back for a slow client. Fixed rather than a
+ * second directive: the window sets how long a client may stall and still be
+ * kept, and one knob (the rate) is enough to configure. Five seconds tolerates
+ * a normal network stall and still cuts a client that trickles below the rate
+ * within one window. */
+#define FPM_HTTP_RESPONSE_MIN_RATE_WINDOW_MS 5000
 /* Issue #389: how many HTTP/1.1 connections the gateway may hold open to one
  * operator listener at a time. The operator endpoint is a single sequential
  * process (fpm_operator_http.c) that closes each connection after one response,

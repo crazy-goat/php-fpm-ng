@@ -58,6 +58,14 @@ void fpm_http_response_resume(fpm_http_conn *c)
 	 * fpm_http_request_done() when this request ends. */
 	if (up && !up->dead && up->fd >= 0) {
 		event_add(up->ev_read, NULL);
+		/* Issue #716: the upstream read deadline starts running again, with a
+		 * full interval, because the pause stopped it -- the gateway chose not to
+		 * read, so no progress could be observed and the pause must not be charged
+		 * to the target. arm() re-reads up->current->read_paused, which is what
+		 * makes this single call the right one for the other two callers of
+		 * fpm_http_response_resume() (the client close callback and
+		 * fpm_http_finish()) too. */
+		fpm_http_upstream_deadline_arm(up);
 	}
 }
 
@@ -85,6 +93,12 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len)
 		if (bev && evbuffer_get_length(bufferevent_get_output(bev)) > c->gw->response_buffer) {
 			c->read_paused = 1;
 			event_del(c->upstream->ev_read);
+			/* Issue #716: the upstream read deadline stops with the read. The
+			 * worker behind it is blocked in its write for as long as this pause
+			 * lasts, which is not its silence, so charging http.upstream_read_timeout
+			 * for it would time out a target that is producing perfectly well into
+			 * a socket buffer nobody is draining. */
+			fpm_http_upstream_deadline_stop(c->upstream);
 		}
 	}
 }

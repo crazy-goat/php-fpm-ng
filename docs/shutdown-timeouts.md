@@ -25,6 +25,7 @@ through the normal PHP shutdown path.
 |---|---|---|---|
 | `fastcgi`, `http` | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
 | `http-direct` with `pool.executor = worker` | none for the booted worker script; `worker.request_timeout` only bounds individual unanswered requests | reload sends SIGQUIT as a cooperative stop request; after `process_control_timeout` the master sends SIGTERM, then SIGKILL 1s later if still alive. Master termination sends SIGTERM immediately, then SIGKILL after `process_control_timeout` | global `process_control_timeout`; no worker-specific grace |
+| `gateway` | none for the proxy itself; `http.write_timeout` only closes a client that stops making progress on a response | reload and stop send SIGQUIT: the gateway stops accepting, closes idle keep-alive connections and finishes requests already dispatched to a worker; a request whose body is still being uploaded is cut (see below); the master `SIGKILL`s whatever is still alive after `process_control_timeout` | `process_control_timeout` |
 | `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
 | `cron` | `cron.timeout` (default 0 = no limit on a running script) — the master sends `cron.stop_signal` (default `SIGTERM`, issue #325) to the child first | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
 | `status` | none (no PHP work to finish) | `process_control_timeout` only | none |
@@ -32,6 +33,35 @@ through the normal PHP shutdown path.
 `process_control_timeout` is a **`[global]`** directive. It applies to every
 pool in the file. `supervisor.stop_timeout`, `cron.timeout`, and
 `request_terminate_timeout` are **per-pool**.
+
+A `gateway` pool is the one request-serving type whose stop grace is
+`process_control_timeout` alone (issue #641). A gateway runs no PHP: the work
+in flight is a proxy exchange between the client and a target worker, and the
+gateway itself has no per-request timeout to reuse. On stop and on reload the
+master sends the gateway `SIGQUIT`; the gateway stops accepting, closes every
+connection that is idle between keep-alive requests and lets in-flight requests
+finish, exiting a moment before the deadline. The master waits
+`process_control_timeout` and then `SIGKILL`s whatever is still alive, so a
+client that never reads is cut at the deadline and the reload still finishes.
+With the stock `process_control_timeout = 0` the gateway is killed at once,
+exactly as the `SIGTERM` it replaces did; set `process_control_timeout` to get
+a graceful gateway stop.
+
+**What "in flight" does not include (phase-1 limitation).** A request whose
+body has not finished arriving is not drained. The gateway's HTTP library
+buffers a whole body in memory before it proxies it (up to `http.max_body`,
+which caps that body but does not cause the buffering), so while a client is
+still uploading the request has not reached a target worker: the drain does not
+count the connection as in flight and the gateway exits at once. And even if the
+connection were held, it could not finish, because the master stops the target
+pool's workers before it drains the gateways (`fpm_pctl_action_next()` signals
+every child; `fpm_pctl_exec()` → `fpm_http_cleanup()` drains the gateways
+afterwards), so there is no worker left when the upload finally dispatches.
+Draining an upload therefore needs the gateway drained *before* the target
+workers are stopped, which phase 1 does not do;
+`fpmng-gateway-drain-upload.phpt` pins the current behaviour. Requests that
+reached a worker before the signal (a slow response, an SSE stream) are drained
+normally.
 
 For `pool.executor = worker`, `fpmng_worker_stopping()` is a notification to the
 booted PHP script, not an interrupt: the bridge must check it and wind down its
@@ -66,6 +96,7 @@ about one second), `supervisor.stop_timeout = 10s`, `cron.timeout = 0`,
 | pool type | child state | what happens |
 |---|---|---|
 | request-serving | handling a request | the master sends `SIGTERM`, then `SIGKILL` after ~1s if the request is still running — same as upstream FPM |
+| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641) |
 | `supervisor` | running a script iteration | the master kills the child after ~1s; **`supervisor.stop_timeout` never runs** because the master acts first |
 | `cron` | sleeping before the next run | the child exits immediately and **skips** that scheduled run — clean, no script execution |
 | `cron` | script already running | the master kills the child after ~1s; with default `cron.timeout = 0` there is no pool-level watchdog either |

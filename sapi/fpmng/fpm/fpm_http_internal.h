@@ -72,6 +72,7 @@ struct {								\
 } while (0)
 #endif
 #include <time.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -581,6 +582,22 @@ struct fpm_http_gateway_s {
 	/* gateway process only */
 	struct event_base *base;
 	struct evhttp *http;
+	/* Issue #641: the http.plain_listen companion listener and the bound
+	 * sockets of both listeners, kept so the graceful drain can stop accepting
+	 * on them (evhttp_del_accept_socket) without re-deriving either. NULL when
+	 * that listener is not open in this process. */
+	struct evhttp *plain_http;
+	struct evhttp_bound_socket *tls_bound;
+	struct evhttp_bound_socket *plain_bound;
+	/* Issue #641: SIGQUIT starts the graceful drain. libevent delivers it into
+	 * this process's own event loop (evsignal), so the drain callback may call
+	 * evhttp functions and close connections safely -- no work happens in
+	 * signal context. stopping is the drain flag; it is read by the drain tick
+	 * and set once by fpm_http_drain_start(). */
+	struct event *sigquit;
+	struct event *drain_tick;
+	volatile sig_atomic_t stopping;
+	struct timeval drain_deadline;
 	/* Issue #390: this process's own gauge block in gw->counters --
 	 * [connections_open, upstreams_held[0 .. nslots)]. Set in
 	 * fpm_http_gateway_run() from this process's slot index before the event
@@ -882,6 +899,10 @@ void fpm_http_counter_incr(atomic_t *counter);
 void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
 void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
 		char *port_buf, size_t port_size);
+/* Issue #641: one step of the graceful drain. Closes every idle client
+ * connection and returns the number still doing work (a request in flight, or
+ * a response not yet flushed to the client). */
+unsigned fpm_http_gateway_drain_step(struct fpm_http_gateway_s *gw);
 
 /* fpm_http_fcgi.c */
 void fpm_http_conn_free(fpm_http_conn *c);

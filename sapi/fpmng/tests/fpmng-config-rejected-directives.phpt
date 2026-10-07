@@ -347,6 +347,12 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_buffer = 1M",
     ["'http.response_buffer' is not supported by pool.type = http-direct"]
 );
+/* Issue #705: the minimum-progress rule that composes with it. */
+expectConfigFailure(
+    'direct-response-min-rate',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_min_rate = 1024",
+    ["'http.response_min_rate' is not supported by pool.type = http-direct"]
+);
 
 ?>
 Done
@@ -386,6 +392,7 @@ gateway-max-connections-per-client: rejected
 direct-keepalive-timeout: rejected
 direct-write-timeout: rejected
 direct-response-buffer: rejected
+direct-response-min-rate: rejected
 Done
 --CLEAN--
 <?php

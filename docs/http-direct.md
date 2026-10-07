@@ -966,8 +966,9 @@ its normal shutdown.
 Behind a gateway pool the budget is also spent while the gateway holds the
 response back from a slow end client (`http.response_buffer`, issue #596): the
 worker is blocked in its write for that time. Size it for the slowest download
-you want to serve, or set `http.response_buffer = 0` on the gateway. See
-[gateway.md](gateway.md).
+you want to serve, or set `http.response_buffer = 0` on the gateway. A client
+that trickles instead of stopping is cut by the gateway's `http.response_min_rate`
+(issue #705), which releases the worker; see [gateway.md](gateway.md).
 
 **Over TLS too, since issue #195.** The combination used to be refused at
 startup: writing from inside a running request means not re-entering the event

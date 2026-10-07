@@ -175,6 +175,7 @@ struct {								\
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
 #define FPM_HTTP_KEEPALIVE_TIMEOUT_MS 60000	/* http.keepalive_timeout default (ms); how long an idle keep-alive client connection may wait for its next request */
 #define FPM_HTTP_RESPONSE_BUFFER (1024 * 1024)	/* http.response_buffer default (bytes), issue #596 */
+#define FPM_HTTP_RESPONSE_MIN_RATE 256		/* http.response_min_rate default (bytes/s), issue #705 */
 #define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
 #define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)	/* http.max_body default; the gateway buffers a whole request body in memory (task 031) */

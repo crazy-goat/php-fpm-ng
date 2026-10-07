@@ -191,6 +191,7 @@ struct fpm_worker_pool_config_s {
 	int http_keepalive_timeout;		/* gateway: ms an idle keep-alive client connection may stay open between two requests; 0 = unlimited (issue #593) */
 	int http_write_timeout;			/* gateway: ms the client may stall a pending response write before the connection is closed; 0 = unlimited (issue #593) */
 	size_t http_response_buffer;		/* gateway: bytes of response the client may leave unread before the upstream is read no further; 0 = unlimited (issue #596) */
+	int http_response_min_rate;		/* gateway: minimum bytes per second the client must drain while the upstream is held back; 0 = no minimum (issue #705) */
 	int http_pool_full_policy;		/* FPM_HTTP_POOL_FULL_REJECT (default) or _WAIT; see fpm_http.c and docs/http-gateway-pool-full.md.
 						 * "wait" is only a sane trade for IO-light pools -- opt in per pool, never globally. */
 	int http_pool_full_queue_max;		/* wait policy only: bound on how many requests may sit on gw->waiting at once;

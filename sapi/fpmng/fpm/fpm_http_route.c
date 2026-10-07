@@ -842,6 +842,7 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->write_timeout.tv_sec = wp->config->http_write_timeout / 1000;
 	gw->write_timeout.tv_usec = (wp->config->http_write_timeout % 1000) * 1000;
 	gw->response_buffer = wp->config->http_response_buffer;
+	gw->response_min_rate = wp->config->http_response_min_rate;
 	gw->max_body = wp->config->http_max_body;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
@@ -1475,6 +1476,10 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_write_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.write_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_response_min_rate < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.response_min_rate must not be negative", wp->config->name);
 		return -1;
 	}
 	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the

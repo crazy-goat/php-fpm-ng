@@ -95,16 +95,29 @@ only while the client keeps up:
 | Directive | Meaning | Default |
 | --- | --- | --- |
 | `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
+| `http.response_min_rate` | Minimum bytes per second the client must drain while the upstream is held back for it. Below that the connection is closed and the worker is released. `0` = no minimum. | `256` |
 
-A larger value frees a PHP worker earlier for a slow client and costs gateway
-memory per slow client; a smaller one bounds the memory and holds the worker
-longer. The limit is checked after each piece of the response, so one read
-(16 KiB) can overshoot it, and the kernel socket buffers on the client and
-upstream side come on top. The write timeout above still closes a client that
-reads nothing; with `http.write_timeout = 0` such a client keeps its connection
-and one worker, but no longer grows the gateway's memory. Not measured: the
-gateway's RSS under many slow clients. `http.response_buffer` is refused on
-`http-direct`.
+A larger `http.response_buffer` frees a PHP worker earlier for a slow client and costs gateway
+memory per slow client; a smaller one bounds the memory and holds the worker longer. The limit
+is checked after each piece of the response, so one read (16 KiB) can overshoot it, and the
+kernel socket buffers on the client and upstream side come on top. The write timeout above
+still closes a client that reads nothing; with `http.write_timeout = 0` such a client keeps its
+connection and one worker, but no longer grows the gateway's memory. Not measured: the
+gateway's RSS under many slow clients. `http.response_buffer` and `http.response_min_rate` are
+refused on `http-direct`.
+
+`http.response_min_rate` is the minimum-progress rule that closes the trickle-reader path
+`http.response_buffer` opened (issue #705). It is measured over a fixed 5-second window and
+only while the upstream is actually held back, which is the only time the client, and not the
+upstream, is the bottleneck: the client must have drained at least `rate * 5` bytes in the last
+5 seconds, or the connection is closed the same way `http.read_timeout` closes one, and the
+worker's remaining output is drained as if the client had left. A legitimately slow but
+progressing download is therefore kept, however long it takes; only a client that has
+effectively stalled while still consuming a byte now and then is cut. A rate below
+`http.response_buffer / 5` (with the defaults, about 200 KiB/s) is the meaningful range: a
+client that can empty the whole buffer inside one window is never cut, because draining the
+buffer resumes the upstream and stops the clock. `http.write_timeout` remains the limit for a
+client that stops entirely.
 
 Two consequences of holding the worker back, both new with flow control:
 
@@ -124,19 +137,22 @@ Two consequences of holding the worker back, both new with flow control:
   `http.response_buffer = 0` to keep the old behaviour (the gateway buffers
   everything, bounded only by memory). `fpmng-http-gateway-stream-budget.phpt`
   pins both outcomes.
-- **A trickling reader holds a worker.** `http.write_timeout` is a stall timer:
-  it restarts whenever the client takes any bytes, so a client that reads one
-  byte per second is never cut by it. With flow control that client now keeps a
-  PHP worker (or target worker) blocked for as long as it trickles, so a few of
-  them can occupy all of `pm.max_children`. Before this change such a client
-  cost gateway memory only. There is no minimum-progress or total-time limit
-  for a response yet; it is tracked as a follow-up to #596.
+- **A trickling reader no longer holds a worker indefinitely.** `http.write_timeout`
+  is a stall timer: it restarts whenever the client takes any bytes, so a client
+  that reads one byte per second is never cut by it, and with flow control such a
+  client keeps a PHP worker (or target worker) blocked for as long as it trickles
+  -- a few of them can occupy all of `pm.max_children`. `http.response_min_rate`
+  closes that path: while the upstream is held back, a client that drains less
+  than the configured rate over a 5-second window is cut and the worker is
+  released, while a slower but steadily progressing client is kept (see the flow
+  control section above). `fpmng-http-gateway-min-rate.phpt` pins both outcomes.
 
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
 `http.max_connections` and `http.max_connections_per_client` are not supported
 on a gateway yet and are refused by `php-fpm-ng -t`.
-`http.keepalive_timeout` and `http.write_timeout` are refused on `http-direct`.
+`http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer` and
+`http.response_min_rate` are refused on `http-direct`.
 
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.

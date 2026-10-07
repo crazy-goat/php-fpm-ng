@@ -14,13 +14,23 @@ require_once "tester.inc";
  * notifies them that the master is gone, and they keep the pool's listening socket
  * -- so the port stays bound by a stray process after the failed reload.
  *
- * The failure is forced the plainest way: the reload rewrites only pool [change]
- * (the diff is by raw section text, docs/reload.md) and adds a directive the
- * parser refuses. The new master fails in fpm_conf_init_main(), before it ever
- * reaches fpm_children_create_initial() and fpm_reload_selective_adopt(), which is
- * the earliest place the pids can be lost. The fix is
+ * The failure is forced the plainest way that still exists: the reload rewrites
+ * only pool [change] (the diff is by raw section text, docs/reload.md) and moves
+ * it to a listening address this test process already holds. The new master
+ * fails in fpm_sockets_init_main(), before it ever reaches
+ * fpm_children_create_initial() and fpm_reload_selective_adopt(), which is the
+ * earliest place the pids can be lost. The fix is
  * fpm_reload_selective_discard_unadopted(), called where the master gives up.
  * Without it the worker of [keep] survives and the assertions below fail.
+ *
+ * It used to be an invalid directive instead, which failed the new master in
+ * fpm_conf_init_main() one stage earlier. Issue #640 took that away on purpose:
+ * a SIGUSR2 whose configuration does not load no longer reaches a new master at
+ * all -- the master asks its own `-t` first and keeps the pools that are running
+ * (fpm_reload_config_check.c, fpmng-reload-broken-config.phpt). A bind failure
+ * is the failure class the gate cannot see, because `-t` never binds anything
+ * (docs/reload.md, "What `-t` does not catch"), so it is the one that still
+ * gets a new master as far as fpm_sockets_init_main().
  *
  * The master's pid does not change across the reload under -F (tester.inc passes
  * it), so the pid file of the first generation is the one to watch. */
@@ -34,7 +44,7 @@ file_put_contents(getenv('FPMNG_WORKER_PIDFILE'), (string) getmypid());
 echo 'ok';
 PHP);
 
-$section = function (string $extra) use ($root, $pidFile): string {
+$section = function (string $changeListen) use ($root, $pidFile): string {
     return <<<CFG
 [global]
 error_log = {{FILE:LOG}}
@@ -50,13 +60,12 @@ chdir = $root
 http.front_controller = /front.php
 env[FPMNG_WORKER_PIDFILE] = $pidFile
 [change]
-listen = {{ADDR[change]}}
+listen = $changeListen
 pool.type = http-direct
 pm = static
 pm.max_children = 1
 chdir = $root
 http.front_controller = /front.php
-$extra
 CFG;
 };
 
@@ -111,8 +120,10 @@ function request(string $address): void
     }
 }
 
-$tester = new FPM\Tester($section(''), '<?php');
+$tester = new FPM\Tester($section('{{ADDR[change]}}'), '<?php');
 $keep = $tester->getAddr('ipv4', '[keep]');
+/* Held for the whole test: the address the reloaded master is sent to. */
+$hog = null;
 
 try {
     $tester->start([], false);
@@ -132,7 +143,19 @@ try {
     }
     echo "worker running: ok\n";
 
-    $tester->reload($section('no_such_directive_690 = 1'));
+    /* An address this process holds, so the new master's bind() fails. Port 0
+     * lets the kernel pick a free one, and stream_socket_get_name() reads it
+     * back -- nothing is assumed about the port number. */
+    $hog = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
+    if (!$hog) {
+        fail("cannot occupy a listening address: $error");
+    }
+    $occupied = (string) stream_socket_get_name($hog, false);
+    if ($occupied === '') {
+        fail('cannot read back the occupied address');
+    }
+
+    $tester->reload($section($occupied));
 
     if (!wait_gone($masterPid, 30)) {
         fail("master $masterPid did not exit after the reload that cannot initialise");
@@ -154,6 +177,9 @@ try {
 
     echo "Done\n";
 } finally {
+    if ($hog) {
+        fclose($hog);
+    }
     /* By pid and only these: the test must not leave a stray behind when it fails. */
     foreach ([$workerPid ?? 0, $masterPid ?? 0] as $pid) {
         if ($pid > 1 && pid_alive($pid)) {

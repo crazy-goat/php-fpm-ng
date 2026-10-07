@@ -275,13 +275,16 @@ function assertCleanServerClose(string $label, string $out, string $err): void
         . "\nstderr: " . var_export($err, true));
 }
 
-function reserveLocalPort(): int
+/* Issue #625: s_server has to bind a port, and asking the kernel for one (port
+ * 0) would put the control listener outside the run's port lane and leave a
+ * window between closing it here and s_server binding it. One of the Tester's
+ * own ports has neither problem: the lane is reserved, and nothing else in this
+ * run is given it. */
+function laneControlPort(FPM\Tester $tester): int
 {
-    $server = stream_socket_server('tcp://127.0.0.1:0', $errno, $error);
-    check((bool) $server, "reserve control port: $error");
-    $name = stream_socket_get_name($server, false);
-    fclose($server);
-    return (int) substr($name, strrpos($name, ':') + 1);
+    $addr = $tester->getAddr('ipv4', '[control]');
+
+    return (int) substr($addr, strrpos($addr, ':') + 1);
 }
 
 function tlsGet(int $port, string $path): string
@@ -330,7 +333,7 @@ try {
      * TLS shutdown after its one HTTP response, so s_client -msg must show a
      * RECEIVED close_notify. Without this, a detector that silently stopped
      * reading diagnostics would make every negative assertion meaningless. */
-    $controlPort = reserveLocalPort();
+    $controlPort = laneControlPort($tester);
     $controlServer = proc_open([
         'openssl', 's_server', '-accept', (string) $controlPort, '-naccept', '1', '-www',
         '-cert', "$root/cert.pem", '-key', "$root/key.pem", '-quiet',

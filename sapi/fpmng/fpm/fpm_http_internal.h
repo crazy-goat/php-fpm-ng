@@ -116,6 +116,7 @@ struct {								\
 #define FCGI_MAX_RECORD_LEN      65528
 #define FPM_HTTP_BAD_GATEWAY     502 /* libevent has no constant for it */
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
+#define FPM_HTTP_GATEWAY_TIMEOUT 504 /* libevent has no constant for it; http.upstream_* timeout, issue #716 */
 #define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
 
 typedef struct _fpm_http_conn fpm_http_conn;
@@ -412,6 +413,14 @@ struct fpm_http_gateway_s {
 	int write_timeout_ms;				/* http.write_timeout, milliseconds; 0 = a stalled client write is never cut */
 	struct timeval write_timeout;			/* write_timeout_ms split into {sec, usec} for bufferevent_set_timeouts() */
 	size_t response_buffer;				/* http.response_buffer, bytes; 0 = never pause an upstream for a slow client (issue #596) */
+	/* http.upstream_connect_timeout, milliseconds; 0 = a connect towards a target is never cut.
+	 * http.upstream_read_timeout, milliseconds; 0 = a silent target is never cut. Both bound
+	 * the gateway's own upstream connections and neither bounds total request time, only
+	 * time without progress; see fpm_http_upstream_timeout.c (issue #716). */
+	int upstream_connect_timeout_ms;
+	struct timeval upstream_connect_timeout;		/* upstream_connect_timeout_ms split into {sec, usec} for event_add() */
+	int upstream_read_timeout_ms;
+	struct timeval upstream_read_timeout;		/* upstream_read_timeout_ms split into {sec, usec} for event_add() */
 	/* http.pool_full_policy, issue #309. wait_policy is FPM_HTTP_POOL_FULL_REJECT
 	 * (the default, unchanged behavior: fpm_http_pump_once() drains gw->waiting
 	 * to a 503 the instant the budget is exhausted) or FPM_HTTP_POOL_FULL_WAIT,
@@ -747,6 +756,13 @@ struct _fpm_http_upstream {
 	int fd;
 	struct event *ev_read;
 	struct event *ev_write;				/* only pending while a write did not fit or we are connecting */
+	/* Issue #716: the one timer that bounds this connection towards its target --
+	 * http.upstream_connect_timeout while connecting, http.upstream_read_timeout while a
+	 * request is in flight. Created by fpm_http_upstream_deadline_new(), stopped by
+	 * fpm_http_upstream_deadline_stop() on every path that ends or pauses the connection,
+	 * freed by fpm_http_upstream_deadline_free() with the struct. NULL when the allocation
+	 * failed, which leaves the connection unbounded (OOM only). */
+	struct event *deadline;
 	int connecting;
 	smart_str pending;					/* not yet written to the pool */
 	size_t pending_off;
@@ -838,6 +854,13 @@ void fpm_http_response_resume(fpm_http_conn *c);
 
 /* Issue #747: what fpm_http.c shares with the files it was split into. Each
  * group is named after the file that defines it. */
+
+/* fpm_http_upstream_timeout.c (issue #716) */
+void fpm_http_upstream_deadline_expired(fpm_http_upstream *up);
+void fpm_http_upstream_deadline_new(fpm_http_upstream *up);
+void fpm_http_upstream_deadline_stop(fpm_http_upstream *up);
+void fpm_http_upstream_deadline_arm(fpm_http_upstream *up);
+void fpm_http_upstream_deadline_free(fpm_http_upstream *up);
 
 /* shared constants */
 #define FPM_HTTP_GATEWAYS_DEFAULT 2			/* http.gateways default; also the FPM_HTTP_GATEWAYS env fallback */

@@ -1628,8 +1628,8 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 
 /* Everything answered without PHP: a static file, ping, the status page, and
  * the two refusals. The URI is split here rather than taken from the request
- * object because %r is the path and %q the query string, the same split
- * fpm_request.c makes for the scoreboard. */
+ * object because %r is the request-target without the query string and %q
+ * carries the query, the same split fpm_request.c makes for the scoreboard. */
 static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_request *http,
 	const char *peer, const struct timeval *started, time_t started_epoch, int status, size_t bytes)
 {

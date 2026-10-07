@@ -784,7 +784,7 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	fpm_http_response_resume(c);
 	if (c->headers_sent) {
 		evhttp_send_reply_end(c->req);
-	} else if (c->cgi_headers.s && ZSTR_LEN(c->cgi_headers.s) > 0) {
+	} else if (c->cgi_headers.s) {
 		/* Issue #636: the upstream ended before the blank line that closes the
 		 * CGI header block, so what it said is not a reply yet -- the block is
 		 * unterminated, its last line may be half a header, and there is no
@@ -809,14 +809,14 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		 * head is complete, fpm_http_client.c), so it falls into the branch
 		 * below, and fpm_http_http_readcb() logs the truncation on the way.
 		 *
-		 * `explained` does not reach this branch: it says the reason is already
-		 * logged, which is true of a failure fpm_http_upstream_fail() could name
-		 * and of the mute case (#118) -- both of which cannot have a partial
-		 * block, since mute means not one byte came back. A clean EOF says
-		 * nothing at all, so the line below is the only record that this upstream
-		 * answered at all, and badly. It is written even when fpm_http_upstream_fail()
-		 * has already logged a transport error: that line names the errno, this
-		 * one names the decision taken because of it. */
+		 * The `if (!explained)` guard of the branch below is deliberately not
+		 * used here. A partial block means `reply_seen` is set, so `mute` is 0
+		 * and `explained` is `clean_eof` (fpm_http.c:630,662): 1 for a clean EOF
+		 * or an `END_REQUEST` (fpm_http_request_done() passes a bare 1,
+		 * fpm_http.c:674), where nothing has been logged and this line is the
+		 * only record; 0 when fpm_http_upstream_fail() has already named the
+		 * errno, and the line is written then too because it names the decision,
+		 * not the error. */
 		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' ended its reply after %zu bytes of an unterminated CGI header block; answering 502",
 				c->gw->pool, c->target->listen_address, ZSTR_LEN(c->cgi_headers.s));
 		c->status = FPM_HTTP_BAD_GATEWAY;

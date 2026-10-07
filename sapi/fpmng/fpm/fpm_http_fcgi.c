@@ -784,9 +784,43 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	fpm_http_response_resume(c);
 	if (c->headers_sent) {
 		evhttp_send_reply_end(c->req);
-	} else if (c->cgi_headers.s) {
-		fpm_http_start_reply(c, 0, 0); /* partial header block, ship what we have */
-		evhttp_send_reply_end(c->req);
+	} else if (c->cgi_headers.s && ZSTR_LEN(c->cgi_headers.s) > 0) {
+		/* Issue #636: the upstream ended before the blank line that closes the
+		 * CGI header block, so what it said is not a reply yet -- the block is
+		 * unterminated, its last line may be half a header, and there is no
+		 * telling where the head stops and the body starts. The old code shipped
+		 * the buffer with fpm_http_start_reply(c, 0, 0): a head length of zero
+		 * walks no header line at all (the loop runs from `line` to
+		 * `line + head_len`), so code stayed at its HTTP_OK initial value and
+		 * the whole buffer fell through to the body branch at the end of that
+		 * function. The client got a complete 200 whose body was the unfinished
+		 * header block, and evhttp_send_reply_end() closed it off. #533 in the
+		 * body case, one step earlier.
+		 *
+		 * The answer is the 502 an upstream with no answer at all gets below,
+		 * with the partial block dropped: not the connection abort of
+		 * fpm_http_finish_truncated(), which exists because
+		 * evhttp_send_reply_end() would put the terminating chunk on the wire and
+		 * make a truncated body look complete -- there is no reply here to
+		 * complete, not one byte of it is on the wire yet, and a client that gets
+		 * 502 can retry where a reseted connection teaches it nothing.
+		 * The HTTP transport already answers the same failure the same way: an
+		 * unfinished head leaves c->cgi_headers empty (it is filled only once a
+		 * head is complete, fpm_http_client.c), so it falls into the branch
+		 * below, and fpm_http_http_readcb() logs the truncation on the way.
+		 *
+		 * `explained` does not reach this branch: it says the reason is already
+		 * logged, which is true of a failure fpm_http_upstream_fail() could name
+		 * and of the mute case (#118) -- both of which cannot have a partial
+		 * block, since mute means not one byte came back. A clean EOF says
+		 * nothing at all, so the line below is the only record that this upstream
+		 * answered at all, and badly. It is written even when fpm_http_upstream_fail()
+		 * has already logged a transport error: that line names the errno, this
+		 * one names the decision taken because of it. */
+		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' ended its reply after %zu bytes of an unterminated CGI header block; answering 502",
+				c->gw->pool, c->target->listen_address, ZSTR_LEN(c->cgi_headers.s));
+		c->status = FPM_HTTP_BAD_GATEWAY;
+		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	} else {
 		if (!explained) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);

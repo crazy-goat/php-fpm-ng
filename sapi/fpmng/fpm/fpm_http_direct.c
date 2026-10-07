@@ -1603,7 +1603,10 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	}
 	e.uri = r->request_target;
 	e.match_path = snapshot.request_uri;
-	query = strchr(e.match_path, '?');
+	/* strchr() is const-preserving, so the cut is taken from the snapshot
+	 * array itself (the same bytes e.match_path points at) rather than from
+	 * the const field, which would discard the qualifier on assignment. */
+	query = strchr(snapshot.request_uri, '?');
 	if (query) {
 		*query = '\0';
 	}

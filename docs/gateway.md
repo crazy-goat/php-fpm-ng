@@ -89,6 +89,44 @@ them:
 | `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
 | `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
 
+Upstream limits (issue #716). What the gateway waits *for* on the target side. A
+target that never answers used to hold the client connection and one slot of the
+target's budget indefinitely -- with the default `request_terminate_timeout = 0`
+nothing ended it, and a fiber target refuses that directive at all (#610):
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.upstream_connect_timeout` | How long in ms a connect towards a target may stay unfulfilled (a SYN nobody answers, an accept queue the kernel has stopped draining). Cut after it: `504` if nothing was sent to the client yet. `0` = wait forever. | `5000` |
+| `http.upstream_read_timeout` | How long in ms a target may make **no progress** on a request in flight. Cut after it: `504` if the response head has not been sent, otherwise the client connection is closed without completing the reply (the rule of #533, since the body can no longer be made whole). `0` = never cut. | `60000` |
+
+`http.upstream_read_timeout` bounds time **without progress**, not total request
+time: every byte the target sends re-arms it, so a script that answers slowly but
+keeps producing is not cut. A script that computes for a minute before its first
+byte is, and the operator sees the 504 they would have seen from the proxy the
+gateway replaces. Raise it, or set `0` to keep waiting as before, for anything
+that legitimately takes longer.
+
+The two defaults are judgement calls, not measurements:
+
+- `5000` for the connect, which is the number `http.read_timeout` above already
+  uses. The target is on this host in every configuration this project ships -- a
+  Unix socket, or a loopback address, which is the only address a route may even
+  name for an `http-direct` target -- so a TCP connect that has not completed
+  within the time it takes to read a whole request is not a slow peer, it is a SYN
+  nobody will answer. Not measured: how long such a connect takes when it does
+  complete. A remote FastCGI target is allowed (unlike an `http-direct` one) and
+  should get a larger value.
+- `60000` for the read, which is nginx's `proxy_read_timeout` default and the same
+  minute `http.keepalive_timeout` above already uses.
+
+While the gateway has paused an upstream because the client is behind
+(`http.response_buffer`), the read deadline is stopped: the target is producing
+into a socket buffer nobody is draining, which is not silence, and
+`http.write_timeout` is what bounds that client.
+
+Both are refused on `http-direct`, like the gateway-only client limits above: a
+direct pool is the thing serving the request and has no upstream to wait for.
+
 Response flow control (issue #596). The gateway reads the upstream response
 only while the client keeps up:
 
@@ -151,8 +189,9 @@ Two consequences of holding the worker back, both new with flow control:
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
 `http.max_connections` and `http.max_connections_per_client` are not supported
 on a gateway yet and are refused by `php-fpm-ng -t`.
-`http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer` and
-`http.response_min_rate` are refused on `http-direct`.
+`http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer`,
+`http.response_min_rate` and the two `http.upstream_*` timeouts are refused on
+`http-direct`.
 
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.

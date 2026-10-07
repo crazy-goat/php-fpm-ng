@@ -178,6 +178,23 @@ struct {								\
 #define FPM_HTTP_RESPONSE_MIN_RATE 256		/* http.response_min_rate default (bytes/s), issue #705 */
 #define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
+/* Issue #716: the two upstream-side defaults. Both are judgement calls and both are
+ * documented in docs/gateway.md next to the directives:
+ *
+ *   - connect: 5000 ms, the same number as http.read_timeout above, and for the same
+ *     reason. The target is on this host in every configuration this project ships --
+ *     a Unix socket, or a loopback address, which is the only address a route may even
+ *     name for an http-direct target (fpm_http_route.c) -- so a TCP connect that has not
+ *     completed within the time it takes to read a whole request is not a slow peer, it
+ *     is a SYN nobody will answer. 0 keeps today's behaviour: wait forever.
+ *   - read: 60000 ms, which is nginx's proxy_read_timeout default and the same minute
+ *     http.keepalive_timeout above already uses. It bounds TIME WITHOUT PROGRESS, not
+ *     total request time, so a slow script that keeps producing output is not cut; a
+ *     script that computes for a minute before its first byte is, and the answer is
+ *     then the same 504 it would have got from the proxy an operator is replacing.
+ *     Raise it, or set 0 (unlimited, today's behaviour) for anything longer. */
+#define FPM_HTTP_UPSTREAM_CONNECT_TIMEOUT_MS 5000	/* http.upstream_connect_timeout default (ms), issue #716 */
+#define FPM_HTTP_UPSTREAM_READ_TIMEOUT_MS 60000	/* http.upstream_read_timeout default (ms), issue #716 */
 #define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)	/* http.max_body default; the gateway buffers a whole request body in memory (task 031) */
 /* Largest content length we put in a FastCGI record. The protocol allows
  * 0xffff, but every record we emit is padded to an 8-byte boundary
@@ -569,6 +586,10 @@ static void fpm_http_upstream_detach(fpm_http_upstream *up)
 	if (up->ev_write) {
 		event_del(up->ev_write);
 	}
+	/* Issue #716: the upstream deadline is stopped on this path too, so it can
+	 * never fire into a connection that is being torn down (the gateway's
+	 * SIGSEGV history: issues #90 and #443). */
+	fpm_http_upstream_deadline_stop(up);
 	close(up->fd);
 	up->fd = -1;
 	smart_str_free(&up->pending);
@@ -583,6 +604,10 @@ void fpm_http_upstream_free(fpm_http_upstream *up)
 	if (up->ev_write) {
 		event_free(up->ev_write);
 	}
+	/* Issue #716: freed last, and only here. fpm_http_upstream_deadline_stop()
+	 * has already removed it from the loop on every path that reaches this
+	 * function, so event_free() never runs from inside its own callback. */
+	fpm_http_upstream_deadline_free(up);
 	free(up);
 }
 
@@ -679,6 +704,9 @@ void fpm_http_request_done(fpm_http_upstream *up)
 	up->req_written = up->reply_seen = 0;
 	memset(up->rec_hdr, 0, sizeof(up->rec_hdr));
 	up->rec_hdr_len = up->rec_type = up->rec_len = up->rec_pad = 0;
+	/* Issue #716: no request in flight, so no read deadline -- the connection is
+	 * idle again, which is http.idle_timeout's business right below. */
+	fpm_http_upstream_deadline_arm(up);
 	if (up->gw->idle_ms > 0) {
 		event_add(up->ev_read, &up->gw->idle_timeout);
 	}
@@ -769,6 +797,12 @@ static void fpm_http_upstream_readcb(evutil_socket_t fd, short what, void *arg)
 	} while (n < 0 && errno == EINTR);
 
 	if (n > 0) {
+		/* Issue #716: http.upstream_read_timeout measures time without progress,
+		 * so bytes arriving are what re-arm it. Armed here, before the parser
+		 * runs, because the parser can end the request (fpm_http_request_done()
+		 * stops the timer for an idle connection) and an arm after it would then
+		 * be a no-op -- correct, but for the wrong reason. */
+		fpm_http_upstream_deadline_arm(up);
 		fpm_http_upstream_data(up, buf, n);
 	} else if (n == 0 || !fpm_http_would_block(errno)) {
 		fpm_http_upstream_fail(up, n == 0);
@@ -849,6 +883,10 @@ static void fpm_http_upstream_writecb(evutil_socket_t fd, short what, void *arg)
 		}
 		up->connecting = 0;
 		event_add(up->ev_read, NULL);
+		/* Issue #716: the connect is spent, the request is already in flight
+		 * (fpm_http_pump_target() dispatches before the first flush), so what is
+		 * armed from here is the read deadline. */
+		fpm_http_upstream_deadline_arm(up);
 	}
 	fpm_http_upstream_flush(up);
 }
@@ -911,12 +949,16 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 	}
 	up->ev_read = event_new(gw->base, up->fd, EV_READ | EV_PERSIST, t->ops->on_readable, up);
 	up->ev_write = event_new(gw->base, up->fd, EV_WRITE, fpm_http_upstream_writecb, up);
+	/* Issue #716: the read deadline's own timer. Created here rather than lazily
+	 * so every connection has it before the connect below can be in progress. */
+	fpm_http_upstream_deadline_new(up);
 
 	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
 			t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 			event_free(up->ev_read);
 			event_free(up->ev_write);
+			fpm_http_upstream_deadline_free(up);	/* issue #716, same three as the struct */
 			close(up->fd);
 			free(up);
 			fpm_http_budget_give_back(t);
@@ -924,6 +966,12 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 		}
 		up->connecting = 1;
 		event_add(up->ev_write, NULL);
+		/* Issue #716: the connect itself is now unbounded until this arm -- the
+		 * pool_full_wait bound below covers the queue, not this connection, which
+		 * already holds a budget slot. arm() picks the connect timeout because
+		 * up->connecting is set, whether or not a request has been dispatched onto
+		 * this connection yet. */
+		fpm_http_upstream_deadline_arm(up);
 	} else {
 		event_add(up->ev_read, NULL);
 	}
@@ -1281,6 +1329,12 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 		idle->busy = 1;
 		idle->req_written = idle->reply_seen = 0;
 		idle->current = c;
+		/* Issue #716: the request is now this connection's, so arm what it is
+		 * waiting on -- http.upstream_read_timeout, or the connect timeout still
+		 * if this connection has not finished connecting (nothing of the request
+		 * has reached the target yet, and the pump dispatches before the first
+		 * flush). */
+		fpm_http_upstream_deadline_arm(idle);
 		if (gw->idle_ms > 0 && !idle->connecting) {
 			event_add(idle->ev_read, NULL);		/* drop the idle deadline for the duration of the request */
 		}

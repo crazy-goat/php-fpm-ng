@@ -763,6 +763,33 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
 	struct bufferevent *bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
 	evutil_socket_t fd = bev ? bufferevent_getfd(bev) : -1;
 
+	/* Issue #635: the shutdown() below discards whatever is still in the
+	 * client's output buffer, but bytes_out counts every body byte handed to
+	 * libevent, so the access log used to claim bytes the client never got.
+	 * The buffer is a FIFO and the body is appended after the status line and
+	 * headers, so a pending tail of at most bytes_out is all body: the body
+	 * actually handed to the kernel is bytes_out - pending, clamped at zero
+	 * (pending >= bytes_out means nothing but the head of the reply, headers
+	 * and all, is still queued). A chunked reply carries its per-chunk framing
+	 * in the same buffer, so its count can be low by the framing of the chunks
+	 * still pending; a Content-Length or close-delimited reply is exact.
+	 *
+	 * A TLS client's ciphertext already handed to the SSL filter but not yet
+	 * written to the socket sits in the bufferevent below this one and is not
+	 * subtracted, so a TLS line can still overcount by that amount (not
+	 * measured).
+	 *
+	 * Delivering the buffer instead of dropping it (the issue's other
+	 * direction) needs a drain that outlives this request and a deferred
+	 * access-log line; the drop-and-correct path was chosen because it keeps
+	 * the connection's close callback and this function's synchronous
+	 * accounting as they are. docs/gateway.md says the buffered bytes are
+	 * dropped. */
+	if (bev) {
+		size_t pending = evbuffer_get_length(bufferevent_get_output(bev));
+
+		c->bytes_out -= MIN(c->bytes_out, pending);
+	}
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool);

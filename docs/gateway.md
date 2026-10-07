@@ -371,6 +371,60 @@ delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
 
+## An upstream that ends its reply inside the response head
+
+The same rule one step earlier. The CGI header block is complete only when its
+blank line arrives, so an upstream that stops before it -- a `fastcgi` worker
+killed between writing header lines, a target that closed the connection, a
+FastCGI application that sent `END_REQUEST` without ever closing its block --
+has not answered, only started to. The gateway answers **502 Bad Gateway**, the
+same answer an upstream with no answer at all gets, and the partial block is
+dropped rather than forwarded: it is unterminated, its last line may be half a
+header, and there is no telling where the head stops and the body starts.
+
+The WARNING names how much was buffered (`upstream '<address>' ended its reply
+after N bytes of an unterminated CGI header block; answering 502`), the access
+log records 502, and `fpmng_gateway_requests_total{target=...}` counts the
+request as any other routed request -- it counts requests, not successes.
+
+It is **not** the connection abort described above, and the reason is exactly
+what that section says: an abort is the answer when the reply has already
+started, because the only thing left to send would be the terminator, and
+sending it would make a truncated body look complete. Here nothing of the
+reply is on the wire yet, so a 502 is still truthful and costs the client one
+retry instead of a reseted connection. Measured on 2026-10-06 with
+`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets libevent's
+complete `502` page (`Connection: close`, as for every other gateway-generated
+502, not `Transfer-Encoding: chunked`), while the same reply before the fix was
+`200 OK` with the unfinished header block **as the body**:
+
+```
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+...
+2a
+Status: 200 OK
+Content-Type: text/plain
+
+0
+```
+
+An `http.route[]` HTTP target never reaches this branch -- its parser holds an
+unfinished head in its own buffer, so `fpm_http_start_reply()` is not reached,
+`c->cgi_headers` stays empty and the no-answer 502 answers it. That transport
+logs the truncation itself (`upstream '<address>' closed in the middle of the
+response head`) before the same 502 (#463, transport #462). The two transports
+now agree, which is what the FastCGI branch above was the odd one out about
+(#636).
+
+A header block above `FPM_HTTP_MAX_CGI_HEADERS` (64 KiB) with no blank line in
+sight is a different case and keeps its own answer: `fpm_http_stdout()` gives up
+on it being a header block and hands the buffer to the body as-is, so it is
+served as a `200` whose body is the block. Measured on 2026-10-06: a 120016-byte
+block in two `FCGI_STDOUT` records came back as `HTTP/1.1 200 OK` with the whole
+block as the body. It is the same class of problem as this section and wants
+the same decision taken on purpose; it is not changed here.
+
 ## Upstream status counters on keep-alive
 
 The gateway always sends `FCGI_KEEP_CONN`, so a `fastcgi` upstream hits the

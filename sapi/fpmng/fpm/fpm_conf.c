@@ -229,6 +229,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.keepalive_timeout",    &fpm_conf_set_integer,     WPO(http_keepalive_timeout) },
 	{ "http.write_timeout",        &fpm_conf_set_integer,     WPO(http_write_timeout) },
 	{ "http.response_buffer",      &fpm_conf_set_bytes,       WPO(http_response_buffer) },
+	{ "http.upstream_connect_timeout", &fpm_conf_set_integer,  WPO(http_upstream_connect_timeout) },
+	{ "http.upstream_read_timeout", &fpm_conf_set_integer,     WPO(http_upstream_read_timeout) },
 	{ "http.max_connections",      &fpm_conf_set_integer,     WPO(http_max_connections) },
 	{ "http.max_connections_per_client", &fpm_conf_set_integer, WPO(http_max_connections_per_client) },
 	/* Issue #389: http.operator and http.operator_allowed_clients stay in
@@ -1022,6 +1024,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_keepalive_timeout = 60000;	/* fpm-ng: FPM_HTTP_KEEPALIVE_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_write_timeout = 30000;	/* fpm-ng: FPM_HTTP_WRITE_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_response_buffer = 1024 * 1024;	/* fpm-ng: FPM_HTTP_RESPONSE_BUFFER in fpm_http.c */
+	wp->config->http_upstream_connect_timeout = 5000;	/* fpm-ng: FPM_HTTP_UPSTREAM_CONNECT_TIMEOUT_MS in fpm_http.c (issue #716) */
+	wp->config->http_upstream_read_timeout = 60000;	/* fpm-ng: FPM_HTTP_UPSTREAM_READ_TIMEOUT_MS in fpm_http.c (issue #716) */
 	wp->config->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;	/* fpm-ng: issue #309, off by default for every pool */
 	wp->config->cron_jitter_mode = FPM_CRON_JITTER_RANDOM;	/* fpm-ng: issue #322, matters only once cron.jitter > 0 */
 	wp->config->http_pool_full_queue_max = 32;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */

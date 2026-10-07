@@ -32,6 +32,7 @@ A typical Node server can control header, request, idle-socket, and keep-alive t
 - `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) — how long an idle keep-alive client connection may wait for its next request after a response completed. The first byte of the next request replaces it with `http.read_timeout`.
 - `http.write_timeout` (default 30000 ms, 0 = unlimited) — how long a client may make no progress on a pending response write; a client that never reads its response is closed.
 - `http.response_buffer` (default 1M, 0 = unlimited, issue #596) — response backpressure: past this many unwritten bytes for a client the gateway stops reading that request's upstream until the client drains the buffer.
+- `http.response_min_rate` (default 256 bytes/s, 0 = no minimum, issue #705) — minimum-progress rule that composes with the backpressure: while the upstream is held back, a client that drains less than this rate over a 5-second window is cut and the worker is released, so a trickling reader cannot hold a worker indefinitely.
 - `http.plain_listen` gets the same first-request read deadline and keep-alive limits.
 - `http.idle_timeout` (default 500 ms, 0 = never) — releases a pinned upstream connection after this much idle time on a keep-alive request; this protects a *worker slot*, not the client socket.
 

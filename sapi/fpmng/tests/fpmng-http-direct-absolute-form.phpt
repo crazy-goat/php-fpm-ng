@@ -9,9 +9,8 @@ require_once "tester.inc";
 /* The gateway reduces an absolute-form request-target to its origin-form path
  * at ingress (#534, PR #680). http-direct has its own listener and reads the
  * raw target, so every matcher and every CGI key it derives is checked here
- * against the same spelling an origin-form request produces: ping.path,
- * access.suppress_path[], the static lookup, REQUEST_URI, PATH_INFO and
- * HTTP_HOST.
+ * against the same spelling an origin-form request produces: ping.path, the
+ * static lookup, REQUEST_URI, PATH_INFO, HTTP_HOST and access.suppress_path[].
  *
  * The operator endpoint is deliberately not here: since #275 it is answered on
  * a listener of its own, by a server of its own (fpm_operator_http.c), for
@@ -43,6 +42,16 @@ ping.response = pong
 access.log = {{FILE:LOG:ACC}}
 access.format = "%m %r %s"
 access.suppress_path[] = /quiet
+access.suppress_path[] = /ping
+access.suppress_path[] = /assets/app.css
+[denied]
+listen = {{ADDR[denied]}}
+pool.type = http-direct
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = /index.php
+listen.allowed_clients = 192.0.2.1
 CFG;
 
 /* One connection per request, read to EOF: the target is written by hand so
@@ -99,25 +108,58 @@ try {
         'absolute static' => 'http://h/assets/app.css',
         'network-path static' => '//h/assets/app.css',
         'scheme-only path' => 'http:/x?a=1',
-        'long authority' => 'http://' . str_repeat('a', 300) . '/x',
-        'asterisk-form' => '*',
     ] as $what => $target) {
         [$status, $body] = fetch($http, $target, $what !== 'absolute no host header');
         printf("%-25s %s %s\n", $what . ':', $status, $body);
     }
 
-    /* access.suppress_path[] must match the same path ping.path does. The
-     * network-path reference is origin-form (RFC 9112 3.2.1), so its path is
-     * "//h/quiet" and no entry matches it -- exactly as on the gateway. */
+    /* access.suppress_path[] must match the same path ping.path does, for EVERY
+     * ending -- a locally answered response is logged by the same code, and the
+     * gateway compares the parsed path there too (fpm_http.c:496). Six responses
+     * below are suppressed by path: two answered by PHP, two by the ping
+     * matcher, two by the static lookup, each in both spellings.
+     *
+     * The network-path reference is origin-form (RFC 9112 3.2.1), so its path is
+     * "//h/quiet" and no entry matches it -- exactly as on the gateway.
+     *
+     * %r is the request-target as the client wrote it, so an absolute-form
+     * request logs its authority; the gateway's request line does the same
+     * (fpm_http.c:534). */
     $log = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
-    foreach (['/quiet', 'http://h/quiet', '//h/quiet', '/loud'] as $target) {
+    foreach ([
+        '/quiet', 'http://h/quiet',                     /* answered by PHP */
+        '/ping', 'http://h/ping',                       /* answered by the ping matcher */
+        '/assets/app.css', 'http://h/assets/app.css',   /* answered by the static lookup */
+        '/loud', 'http://h/loud', '//h/loud', '//h/quiet',
+    ] as $target) {
         fetch($http, $target);
     }
-    $content = accessLog($log, '/loud');
-    $quiet = array_values(array_filter(explode("\n", $content),
-        fn (string $line): bool => str_contains($line, 'quiet')));
-    printf("%-25s %s\n", 'quiet lines logged:', json_encode($quiet));
-    printf("%-25s %s\n", 'loud logged:', str_contains($content, '/loud') ? 'yes' : 'no');
+    /* Wait for the LAST request's line, not the first "/loud": a PHP ending
+     * sends its response before it writes the log line, so the line for an
+     * earlier request is not proof the last one landed. */
+    $content = accessLog($log, '//h/quiet');
+    printf("%-25s %s\n", 'logged:', json_encode(array_values(array_filter(
+        array_map('trim', explode("\n", $content)),
+        fn (string $l): bool => $l !== '')), JSON_UNESCAPED_SLASHES));
+
+    /* Last, because both are refusals and a refusal is logged: they would only
+     * add a 300-byte authority and an asterisk to the list above. */
+    foreach ([
+        'long authority' => 'http://' . str_repeat('a', 300) . '/x',
+        'asterisk-form' => '*',
+    ] as $what => $target) {
+        [$status] = fetch($http, $target);
+        printf("%-25s %s\n", $what . ':', $status);
+    }
+
+    /* The 400 above is for a malformed request, and a client
+     * listen.allowed_clients excludes must not be able to probe for one: it
+     * gets its 403 for every target, well-formed or not. */
+    $denied = $tester->getAddr('ipv4', '[denied]');
+    [$status] = fetch($denied, '/x');
+    printf("%-25s %s\n", 'denied /x:', $status);
+    [$status] = fetch($denied, 'http://' . str_repeat('a', 300) . '/x');
+    printf("%-25s %s\n", 'denied long authority:', $status);
 } finally {
     $tester->terminate();
     $tester->close();
@@ -140,9 +182,10 @@ origin static:            200 CSS
 absolute static:          200 CSS
 network-path static:      200 app://h/assets/app.css:h://h/assets/app.css
 scheme-only path:         200 app:/x?a=1:h:/x
-long authority:           400 <HTML><HEAD>
-asterisk-form:            400 <HTML><HEAD>
-quiet lines logged:       ["GET \/\/h\/quiet 200"]
-loud logged:              yes
+logged:                   ["GET /x 200","GET http://h/x 200","GET http://h 200","GET http://other.example:8080/x 200","GET http://other.example/x 200","GET //h/x 200","GET //h/assets/app.css 200","GET http:/x 200","GET /loud 200","GET http://h/loud 200","GET //h/loud 200","GET //h/quiet 200"]
+long authority:           400
+asterisk-form:            400
+denied /x:                403
+denied long authority:    403
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

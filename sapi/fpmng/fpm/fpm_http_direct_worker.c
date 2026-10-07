@@ -668,6 +668,15 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	 * http.max_connections_per_client, which this executor rejects. */
 	(void) fpm_http_direct_conns_request(fw.conns,
 		evhttp_connection_get_bufferevent(evhttp_request_get_connection(http)), NULL, NULL);
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
+	 * reduce the request-target to the one path every consumer below matches
+	 * on, so nothing can be answered on one path and served on another
+	 * (issue #681). This executor has no access log of its own
+	 * (access.log is refused below), so the order matches the gateway and
+	 * the classic executor for one reason only: one ingress order to reason
+	 * about. Normalizing cannot fail, so an excluded client still gets its
+	 * 403 from the ACL. */
+	fpm_http_direct_normalize_target(http);
 	/* Before the saturation check below: a client that may not be here learns
 	 * nothing about how busy the worker is. */
 	if (fw.acl) {
@@ -681,14 +690,10 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 			return;
 		}
 	}
-	/* One path for the whole request, ahead of every consumer that reads what to
-	 * match on: the ACL needs no path, the saturation gate below and the ping
-	 * matcher after it both do (issue #681, the http-direct half of the gateway's
-	 * #534). An authority HTTP_HOST could not carry is a bad request, charged to
-	 * the counter fpm_http_direct_request_acceptable() answers for below. After
-	 * the ACL on purpose: a client listen.allowed_clients excludes has to get its
-	 * 403 whatever else is true of the request it sent. */
-	if (!fpm_http_direct_normalize_target(http)) {
+	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
+	 * could not carry is a bad request, charged to the counter
+	 * fpm_http_direct_request_acceptable() answers for below. */
+	if (!fpm_http_direct_authority_acceptable(http)) {
 		fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_BAD_REQUEST);
 		fpm_worker_send_error(http, 400, "Bad request");
 		return;

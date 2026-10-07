@@ -108,10 +108,19 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 int fpm_http_direct_resolve_script(const char *base, const char *front_controller,
 		char root[PATH_MAX], char script[PATH_MAX]);
 const char *fpm_http_direct_method(enum evhttp_cmd_type command);
-/* The ingress step, first thing in both request callbacks (#681). Reduces the
- * request-target to the origin-form path every consumer below matches on, and
- * refuses an authority HTTP_HOST could not carry. False = answer 400. */
-bool fpm_http_direct_normalize_target(struct evhttp_request *http);
+/* The two ingress steps, in this order, first thing in both request callbacks
+ * (#681). Together they reduce the request-target to the origin-form path every
+ * consumer below matches on; they are two because the gateway's are two
+ * (fpm_http.c:2246 normalizes, fpm_http.c:2287 bounds the authority after the
+ * ACL), and the split is what keeps an excluded client's 403 free of any
+ * statement about its target.
+ *
+ * Normalizing first is not only the gateway's order, it is what makes every
+ * response's access-log suppress match exact: a request refused by the ACL
+ * still writes a line, and that line is matched on the same path the served
+ * ones are. False from the second = answer 400. */
+void fpm_http_direct_normalize_target(struct evhttp_request *http);
+bool fpm_http_direct_authority_acceptable(struct evhttp_request *http);
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http);
 int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http_direct_env_source *source,
 		fpm_http_direct_env_cb emit, void *ctx);

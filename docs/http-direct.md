@@ -1243,15 +1243,41 @@ of them can be answered on one path and served on another: `GET
 http://host/assets/app.css` serves that file, `GET //host/assets/app.css` does
 not (its path is `//host/assets/app.css`, under the document root, and the
 static lookup finds nothing there), and both reach PHP with a `REQUEST_URI` and
-a `PATH_INFO` that agree. Before this the pool answered `400` to every
-absolute-form target, and read a network-path reference as a host plus a path
-for the static lookup while reporting the whole target as `REQUEST_URI`.
+a `PATH_INFO` that agree. `access.suppress_path[]` is compared against that
+path for **every** response, whichever of the three endings wrote the line — a
+suppressed `ping.path` and a suppressed static file stay out of `access.log`
+whatever the client wrote, as on the gateway. Before this the pool answered
+`400` to every absolute-form target, read a network-path reference as a host
+plus a path for the static lookup while reporting the whole target as
+`REQUEST_URI`, and matched `access.suppress_path[]` against the raw
+request-target on the two endings that never reached PHP.
 
-`operator.status_path` and `operator.metrics_path` are **not** covered: since
-#275 they are answered on `operator.status_listen`, by the operator endpoint's
-own server, which reads the request line itself and so answers `404` to an
-absolute-form target on every pool type — the gateway's operator listener
-included. That is the same before and after this change.
+`%r` in `access.format` is deliberately **not** that path: it is the
+request-target as the client wrote it, the same string the gateway puts in its
+request line, and `%Q%q` still carries the query string exactly once.
+
+### What is not covered: the operator listener
+
+`operator.status_path` and `operator.metrics_path` are **not** covered by the
+table above, and the Definition of done for #681 asked for them. Since #275
+they are answered on `operator.status_listen`, by the operator endpoint's own
+server (`fpm_operator_http.c`), which parses the request line itself instead of
+using libevent, so it answers `404` to an absolute-form target — on the
+gateway's operator listener exactly as on this one, measured before and after
+this change:
+
+| Target sent to an operator listener | Answered |
+|---|---|
+| `/metrics/fcgi` | `200` |
+| `http://h/metrics/fcgi` | `404` |
+| `//h/metrics/fcgi` | `404` |
+
+So this is a shared gap in one server rather than a difference between the two
+pool types, it is fail-closed (`404`, nothing served), and it is left for a
+separate change: the reduction needs a second parse of its own, which is the
+drift this tree is built to avoid. It is a known gap, not an oversight — if a
+scraper behind a proxy sends absolute-form, it gets `404` from every pool type
+until that change lands.
 
 ## Operating a direct pool
 

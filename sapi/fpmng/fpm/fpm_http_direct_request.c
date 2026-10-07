@@ -350,18 +350,25 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command)
  * fpm_http_normalize_target() only rewrites what libevent misreads -- a target
  * starting with "//". An absolute-form target keeps libevent's authority and
  * its path, and everything below reads that parse, which is the gateway's
- * arrangement.
- *
- * An authority too long for FPM_HTTP_AUTHORITY_MAX is refused rather than
+ * arrangement. It is before the ACL on purpose, as on the gateway: a request
+ * the ACL refuses still writes an access-log line, and that line is matched on
+ * the same path the served ones are. */
+void fpm_http_direct_normalize_target(struct evhttp_request *http)
+{
+	fpm_http_normalize_target(http);
+}
+
+/* An authority too long for FPM_HTTP_AUTHORITY_MAX is refused rather than
  * dropped: fpm_http_direct_build_env() would otherwise have to choose between
  * an HTTP_HOST that contradicts the Host header it kept and one it invented
  * from a truncated authority, and the gateway answers 400 for the same target
- * (fpm_http_request()). */
-bool fpm_http_direct_normalize_target(struct evhttp_request *http)
+ * (fpm_http.c:2287). After the ACL on purpose: a client
+ * listen.allowed_clients excludes has to get its 403 whatever else is true of
+ * the request it sent. */
+bool fpm_http_direct_authority_acceptable(struct evhttp_request *http)
 {
 	char authority[FPM_HTTP_AUTHORITY_MAX];
 
-	fpm_http_normalize_target(http);
 	return fpm_http_absolute_authority(evhttp_request_get_uri(http),
 		authority, sizeof(authority)) >= 0;
 }

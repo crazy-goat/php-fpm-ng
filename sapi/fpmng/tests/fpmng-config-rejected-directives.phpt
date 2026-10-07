@@ -347,6 +347,18 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_buffer = 1M",
     ["'http.response_buffer' is not supported by pool.type = http-direct"]
 );
+/* Issue #716: the gateway's own upstream deadlines. A direct pool has no upstream
+ * connection to bound -- it is the thing serving the request. */
+expectConfigFailure(
+    'direct-upstream-connect-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.upstream_connect_timeout = 5000",
+    ["'http.upstream_connect_timeout' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'direct-upstream-read-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.upstream_read_timeout = 60000",
+    ["'http.upstream_read_timeout' is not supported by pool.type = http-direct"]
+);
 
 ?>
 Done
@@ -386,6 +398,8 @@ gateway-max-connections-per-client: rejected
 direct-keepalive-timeout: rejected
 direct-write-timeout: rejected
 direct-response-buffer: rejected
+direct-upstream-connect-timeout: rejected
+direct-upstream-read-timeout: rejected
 Done
 --CLEAN--
 <?php

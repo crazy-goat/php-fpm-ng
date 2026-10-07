@@ -12,6 +12,15 @@
  * directive. With the stock value of 0 the gateway is killed at once, exactly
  * as the SIGTERM it replaces did; an operator who wants a graceful stop sets
  * process_control_timeout, as docs/shutdown-timeouts.md already recommends.
+ *
+ * What "in flight" does NOT cover (phase-1 limitation, issue #641 review): a
+ * request whose body is still being uploaded. evhttp buffers a whole body
+ * before dispatching it, so such a request has not reached a target worker; and
+ * the master stops the target pool's workers before it drains the gateways
+ * (fpm_pctl_action_next() signals every child, fpm_pctl_exec() ->
+ * fpm_http_cleanup() drains the gateways after), so there is no worker left
+ * when the upload finally dispatches. Draining an upload needs the gateway
+ * drained before the workers are stopped, which this phase does not do.
  */
 #ifndef FPM_HTTP_DRAIN_H
 #define FPM_HTTP_DRAIN_H 1

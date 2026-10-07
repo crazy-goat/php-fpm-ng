@@ -496,7 +496,18 @@ static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* 
  * the log line is the whole signal. */
 static void fpm_http_gateway_tls_listener_hook(void *arg) /* {{{ */
 {
-	(void) fpm_http_gateway_open_tls_listener((struct fpm_http_gateway_s *) arg);
+	struct fpm_http_gateway_s *gw = arg;
+
+	/* Issue #641: a certificate that arrives during the drain must not
+	 * re-open the listener the drain just removed. Opening it would set a
+	 * fresh gw->tls_bound and resume accepting; every request that then
+	 * arrived would keep the drain alive until the deadline, exactly the
+	 * opposite of a graceful stop. The process is leaving anyway, so the
+	 * certificate is irrelevant to it. */
+	if (gw->stopping) {
+		return;
+	}
+	(void) fpm_http_gateway_open_tls_listener(gw);
 }
 /* }}} */
 #endif
@@ -545,9 +556,11 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * it until then keeps a SIGQUIT in the startup window from terminating
 	 * this process with a core dump. The master only sends it from
 	 * fpm_http_cleanup(), never as the log-rotation fan-out (SIGQUIT from
-	 * fpm_log.c reaches wp->children, and a gateway is not one). */
+	 * fpm_log.c reaches wp->children, and a gateway is not one). SIGQUIT stays
+	 * BLOCKED (fpm_signals_child_block() before the fork) until the evsignal
+	 * is installed below, so a SIGQUIT that arrives in this window is pending,
+	 * not discarded, and the drain starts as soon as the mask is lifted. */
 	sigaction(SIGQUIT, &act, 0);
-	fpm_signals_unblock();
 
 	/* The pools' FastCGI listeners are the master's business. Skip a pool with
 	 * no listener at all (requires_listen = 0: cron, supervisor) and a
@@ -677,6 +690,12 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 						   "without draining in-flight requests",
 				gw->pool);
 	}
+	/* Issue #641: lift the child signal mask only now, after the evsignal
+	 * exists. SIGQUIT was blocked since before the fork, so a stop/reload
+	 * signal that arrived during startup is delivered here, into the handler
+	 * just installed, instead of being discarded by SIG_IGN in a window that
+	 * used to run from the unblock to the evsignal_new() above. */
+	fpm_signals_unblock();
 	fpm_http_log_follow_init(gw);
 #ifdef HAVE_FPM_HTTP_TLS
 	if (gw->tls || gw->tls_wait_for_cert) {
@@ -990,7 +1009,15 @@ static unsigned fpm_http_gateways_reap(int block)
 			if (pid <= 0) {
 				continue;
 			}
-			r = waitpid(pid, NULL, block ? 0 : WNOHANG);
+			/* Retry on EINTR: the master's SIGCHLD handler has no
+			 * SA_RESTART (third_party/php-src/sapi/fpm/fpm/fpm_signals.c:199-215),
+			 * so a sibling gateway's death can interrupt this waitpid(). A
+			 * single interrupted pass that treated the pid as neither alive
+			 * nor gone would let fpm_http_gateways_drain() return before the
+			 * deadline and skip the SIGKILL while this gateway still ran. */
+			do {
+				r = waitpid(pid, NULL, block ? 0 : WNOHANG);
+			} while (r < 0 && errno == EINTR);
 			if (r == pid || (r < 0 && errno == ECHILD)) {
 				gw->pids[i] = 0;
 			} else if (r == 0) {

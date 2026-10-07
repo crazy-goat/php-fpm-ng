@@ -43,6 +43,7 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_target.h"
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -93,6 +94,12 @@ static const struct fpm_http_direct_labels fpm_direct_labels = {
 	.script_noun = "front controller",
 	.extra_directives = fpm_direct_extra_directives,
 };
+
+/* The request-target access.log's %r prints, and the bound on the copy
+ * fpm_direct_request keeps of it. One constant for both the copy and the local
+ * ending that fills one from libevent directly, so the two cannot print
+ * different lengths for the same target. */
+#define FPM_HTTP_DIRECT_TARGET_MAX 512
 
 struct fpm_direct_worker {
 	struct fpm_worker_pool_s *wp;
@@ -188,6 +195,15 @@ struct fpm_direct_request {
 	struct bufferevent *conn_bev;
 	struct timeval conn_accepted;
 	unsigned conn_requests;
+	/* The request-target as the client wrote it, copied while `http` is still
+	 * alive. access.log's %r is that string (issue #681), not the origin-form
+	 * REQUEST_URI, because the gateway logs the raw request line too
+	 * (fpm_http.c:534) and one access.format has to mean the same thing on
+	 * both. The streaming ending clears `http` before it logs, so the value
+	 * cannot be read back from libevent then. Sized like the local ending's
+	 * own buffer and truncated the same way, so a target longer than this
+	 * prints truncated here and there alike. */
+	char request_target[FPM_HTTP_DIRECT_TARGET_MAX];
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -787,6 +803,28 @@ static int fpm_direct_emit_env(void *ctx, const char *key, const char *value)
 	return evhttp_add_header(&r->env, key, value);
 }
 
+/* The request-target as the client wrote it, into r. Copied here, while
+ * r->http is still the whole request, because the streaming ending clears it
+ * before it logs and access.log's %r has to survive that (#681). Truncated the
+ * way fpm_direct_log_local() truncates the same string, so one target prints
+ * one way whichever ending writes the line. */
+static void fpm_direct_copy_request_target(struct fpm_direct_request *r)
+{
+	const char *uri = evhttp_request_get_uri(r->http);
+	size_t len;
+
+	if (!uri) {
+		r->request_target[0] = '\0';
+		return;
+	}
+	len = strlen(uri);
+	if (len >= sizeof(r->request_target)) {
+		len = sizeof(r->request_target) - 1;
+	}
+	memcpy(r->request_target, uri, len);
+	r->request_target[len] = '\0';
+}
+
 static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_direct_request *r)
 {
 	const struct fpm_http_direct_env_source source = {
@@ -802,6 +840,7 @@ static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_di
 	if (!fpm_http_direct_request_acceptable(r->http)) {
 		return -1;
 	}
+	fpm_direct_copy_request_target(r);
 	return fpm_http_direct_build_env(r->http, &source, fpm_direct_emit_env, r);
 }
 
@@ -1547,18 +1586,30 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	}
 	memset(&e, 0, sizeof(e));
 	e.method = snapshot.request_method;
-	/* %r is the path and %q the query string, so the two must not both carry
-	 * it. A direct pool puts REQUEST_URI -- query string and all -- into
-	 * SG(request_info).request_uri, because that is what $_SERVER and PHP_SELF
-	 * report here; upstream's fastcgi path happens to put SCRIPT_NAME there
-	 * instead. Cutting at the '?' is what makes one access.format mean the
-	 * same thing on both transports. The slot is this child's own snapshot,
-	 * so writing into it is local. */
+	/* %r is the request-target as the client wrote it, the spelling the
+	 * gateway logs (fpm_http.c:534), copied into r while libevent's request
+	 * object was still alive. The origin-form path is
+	 * match_path below instead, and it is what access.suppress_path[] compares
+	 * against -- one rule for both fields, for every ending (#681).
+	 *
+	 * %r must not carry the query string, because %Q%q does, so it is cut on
+	 * our own copy: neither the request nor the scoreboard slot is touched.
+	 * The query is libevent's parse, which is what the application sees. That
+	 * cut is also where the gateway differs: its request line keeps the query
+	 * (fpm_http.c:534), so the two logs agree only on query-less targets. */
+	query = strchr(r->request_target, '?');
+	if (query) {
+		*query = '\0';
+	}
+	e.uri = r->request_target;
+	e.match_path = snapshot.request_uri;
+	/* strchr() is const-preserving, so the cut is taken from the snapshot
+	 * array itself (the same bytes e.match_path points at) rather than from
+	 * the const field, which would discard the qualifier on assignment. */
 	query = strchr(snapshot.request_uri, '?');
 	if (query) {
 		*query = '\0';
 	}
-	e.uri = snapshot.request_uri;
 	e.query_string = snapshot.query_string;
 	e.script_filename = snapshot.script_filename;
 	e.remote_user = snapshot.auth_user;
@@ -1580,15 +1631,16 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 
 /* Everything answered without PHP: a static file, ping, the status page, and
  * the two refusals. The URI is split here rather than taken from the request
- * object because %r is the path and %q the query string, the same split
- * fpm_request.c makes for the scoreboard. */
+ * object because %r is the request-target without the query string and %q
+ * carries the query, the same split fpm_request.c makes for the scoreboard. */
 static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_request *http,
 	const char *peer, const struct timeval *started, time_t started_epoch, int status, size_t bytes)
 {
 	struct fpm_http_direct_access_entry e;
 	const char *raw = evhttp_request_get_uri(http);
 	const char *query = raw ? strchr(raw, '?') : NULL;
-	char path[512];
+	char match[FPM_HTTP_DIRECT_TARGET_MAX];
+	char path[FPM_HTTP_DIRECT_TARGET_MAX];
 
 	if (!w->access_log) {
 		return;
@@ -1605,6 +1657,17 @@ static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_requ
 		e.uri = path;
 		e.query_string = query ? query + 1 : "";
 	}
+	/* The path access.suppress_path[] is compared against: the origin-form one,
+	 * whatever the client wrote, so a suppressed response stays suppressed
+	 * whichever of its three endings wrote the line. Same value the PHP ending
+	 * gets from REQUEST_URI, and the same one ping.path and the static lookup
+	 * matched on (#681). NULL when libevent parsed nothing, which is a
+	 * response the request never got past -- match[0] is set first because
+	 * fpm_http_raw_path() writes nothing when it returns 0 (an asterisk-form
+	 * target, or a path that does not fit). */
+	match[0] = '\0';
+	fpm_http_raw_path(http, match, sizeof(match));
+	e.match_path = match[0] ? match : NULL;
 	e.method = fpm_http_direct_method(evhttp_request_get_command(http));
 	e.remote_addr = peer;
 	e.status = status;
@@ -2251,6 +2314,13 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
+	 * reduce the request-target to the one path every consumer below matches
+	 * on, so nothing can be answered on one path and served on another
+	 * (issue #681). Ahead of the ACL so that even a request the ACL refuses
+	 * writes an access-log line matched on the same path. */
+	fpm_http_direct_normalize_target(http);
+
 	/* listen.allowed_clients, issue #59. Before anything else this function
 	 * does: a client that may not be here must not reach the static file
 	 * server, the status page or PHP, and must not be told which of them
@@ -2262,6 +2332,15 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 403, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 403, "Forbidden");
+		return;
+	}
+	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
+	 * could not carry is a malformed request, and a client
+	 * listen.allowed_clients excludes must not be able to tell that from
+	 * anything else about the request it sent. */
+	if (!fpm_http_direct_authority_acceptable(http)) {
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
+		evhttp_send_error(http, 400, "Bad request");
 		return;
 	}
 	if (over_client_cap) {

@@ -525,6 +525,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 {
 	struct fpm_worker_pool_s *wp;
 	struct sigaction act;
+	sigset_t quit_set;
 	char title[128];
 	unsigned i;
 
@@ -551,15 +552,26 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	sigaction(SIGCHLD, &act, 0);
 	act.sa_handler = SIG_IGN;
 	sigaction(SIGPIPE, &act, 0);
-	/* Issue #641: SIGQUIT is the graceful-drain signal, not SIG_DFL. The real
-	 * handler is the evsignal installed after the event base exists; ignoring
-	 * it until then keeps a SIGQUIT in the startup window from terminating
-	 * this process with a core dump. The master only sends it from
-	 * fpm_http_cleanup(), never as the log-rotation fan-out (SIGQUIT from
-	 * fpm_log.c reaches wp->children, and a gateway is not one). SIGQUIT stays
-	 * BLOCKED (fpm_signals_child_block() before the fork) until the evsignal
-	 * is installed below, so a SIGQUIT that arrives in this window is pending,
-	 * not discarded, and the drain starts as soon as the mask is lifted. */
+	/* Issue #641: SIGQUIT is the graceful-drain signal, not SIG_DFL. Block it
+	 * for the whole startup window, then lift the block at the late
+	 * fpm_signals_unblock() below; a stop/reload signal that arrives before
+	 * the evsignal exists is then held pending instead of being discarded by
+	 * the SIG_IGN below. Nothing else blocks it: the gateway is forked in
+	 * fpm_http_gateway_spawn(), which does not go through fpm_children.c's
+	 * fpm_signals_child_block() (that path is only for struct fpm_child_s
+	 * children, fpm_children.c:569), and the master's mask is empty by then
+	 * (fpm_signals_init_main() unblocks everything, fpm_signals.c:220).
+	 * sigprocmask is used directly rather than fpm_signals_child_block(),
+	 * which also blocks SIGTERM and depends on fpm_signals_init_mask() having
+	 * run. The real handler is the evsignal installed after the event base
+	 * exists; ignoring SIGQUIT until then keeps a signal that is delivered
+	 * (rather than still blocked) from terminating this process with a core
+	 * dump. The master only sends SIGQUIT from fpm_http_cleanup(), never as
+	 * the log-rotation fan-out (SIGQUIT from fpm_log.c reaches wp->children,
+	 * and a gateway is not one). */
+	sigemptyset(&quit_set);
+	sigaddset(&quit_set, SIGQUIT);
+	sigprocmask(SIG_BLOCK, &quit_set, NULL);
 	sigaction(SIGQUIT, &act, 0);
 
 	/* The pools' FastCGI listeners are the master's business. Skip a pool with
@@ -690,11 +702,10 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 						   "without draining in-flight requests",
 				gw->pool);
 	}
-	/* Issue #641: lift the child signal mask only now, after the evsignal
-	 * exists. SIGQUIT was blocked since before the fork, so a stop/reload
-	 * signal that arrived during startup is delivered here, into the handler
-	 * just installed, instead of being discarded by SIG_IGN in a window that
-	 * used to run from the unblock to the evsignal_new() above. */
+	/* Issue #641: lift the SIGQUIT block only now, after the evsignal exists.
+	 * The block set at the top of this function held a stop/reload signal
+	 * that arrived during startup pending, so it is delivered here into the
+	 * handler just installed instead of being discarded by the SIG_IGN above. */
 	fpm_signals_unblock();
 	fpm_http_log_follow_init(gw);
 #ifdef HAVE_FPM_HTTP_TLS

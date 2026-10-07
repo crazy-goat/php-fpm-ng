@@ -48,10 +48,11 @@ exactly as the `SIGTERM` it replaces did; set `process_control_timeout` to get
 a graceful gateway stop.
 
 **What "in flight" does not include (phase-1 limitation).** A request whose
-body has not finished arriving is not drained. The gateway buffers a whole body
-in memory before it proxies it (`http.max_body`), so while a client is still
-uploading the request has not reached a target worker: the drain does not count
-the connection as in flight and the gateway exits at once. And even if the
+body has not finished arriving is not drained. The gateway's HTTP library
+buffers a whole body in memory before it proxies it (up to `http.max_body`,
+which caps that body but does not cause the buffering), so while a client is
+still uploading the request has not reached a target worker: the drain does not
+count the connection as in flight and the gateway exits at once. And even if the
 connection were held, it could not finish, because the master stops the target
 pool's workers before it drains the gateways (`fpm_pctl_action_next()` signals
 every child; `fpm_pctl_exec()` → `fpm_http_cleanup()` drains the gateways

@@ -16,7 +16,8 @@
 #      the whole process group, the runner included (#567); tester.inc moves
 #      its port range by FPMNG_PHPT_PORT_SHIFT, the per-run offset
 #      build/run-fpmng-phpt.sh picks so a run does not meet a pool that
-#      already listens on the host (#674).
+#      already listens on the host (#674), or by FPMNG_PHPT_PORT_BASE, the
+#      1000-port lane a shared host reserves for the run (#625).
 #   2. sapi/fpmng/tests/CONFLICTS is removed. Upstream ships it with the single
 #      word "all" (spurious failures on Azure), and run-tests.php then pulls
 #      every test of that directory out of the parallel pool and runs them one
@@ -53,11 +54,12 @@ apply_patch 0001-tester-port-base-per-worker.patch sapi/fpmng/tests/tester.inc '
 apply_patch 0002-run-tests-worker-env-for-tests.patch run-tests.php 'Issue #394 (php-fpm-ng)'
 apply_patch 0003-run-tests-no-retry-on-port-collision.patch run-tests.php 'Issue #562 (php-fpm-ng)'
 apply_patch 0004-tester-refuse-signal-to-pid-below-2.patch sapi/fpmng/tests/tester.inc 'Issue #567 (php-fpm-ng)'
-apply_patch 0005-tester-port-shift-per-run.patch sapi/fpmng/tests/tester.inc 'Issue #674 (php-fpm-ng)'
+apply_patch 0005-tester-port-shift-and-lane-base.patch sapi/fpmng/tests/tester.inc 'Issue #674 (php-fpm-ng)'
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"
 grep -q 'Issue #567 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc still signals pid 0 (the whole process group) after patching"
 grep -q 'Issue #674 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_SHIFT after patching"
+grep -q 'Issue #625 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_BASE after patching"
 grep -q 'Issue #562 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php still retries a test on 'address already in use' after patching"
 
 rm -f "$TESTS/CONFLICTS"

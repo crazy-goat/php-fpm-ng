@@ -36,9 +36,11 @@ if ($caKey === false) {
     exit(1);
 }
 
-/* Port 0 means "pick one": the caller reads the real port back out of
- * ca-ready, which is race-free, unlike binding a port in the test to find a
- * free one and then handing the number to a process that binds it again. */
+/* $port comes from the caller, one of the run's own (issue #625) so this
+ * listener stays inside the reserved lane. The real port is still read back out
+ * of the socket below and reported through ca-ready, which is what makes the
+ * handoff race-free: nothing depends on the number having been free a moment
+ * ago, only on this process having bound it. */
 $server = @stream_socket_server("tcp://127.0.0.1:$port", $errno, $errstr);
 if ($server === false) {
     fwrite(STDERR, "fake CA: cannot listen on $port: $errstr\n");

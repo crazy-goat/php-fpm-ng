@@ -273,6 +273,14 @@ preflight_fail() {
     exit 1
 }
 
+# Issue #625: the reserved lane is build/run-fpmng-phpt.sh's, and it is the only
+# one that knows the lane's layout. tester.inc would honour a base set in the
+# environment here too (its portBase() reads FPMNG_PHPT_PORT_BASE whatever
+# started it), and this runner does not serialise, so under -j the workers would
+# want one 200-port block each and walk out of the lane. Refused rather than
+# half-honoured.
+[ -z "${FPMNG_PHPT_PORT_BASE-}" ] || preflight_fail "FPMNG_PHPT_PORT_BASE belongs to build/run-fpmng-phpt.sh, which lays the lane out; this runner does not use it (unset it)"
+
 [ -n "$CLI_BIN_INPUT" ] || preflight_fail 'TEST_PHP_EXECUTABLE was not supplied'
 [ -n "$FPM_BIN_INPUT" ] || preflight_fail 'TEST_PHP_FPM_EXECUTABLE was not supplied'
 [ -x "$CLI_BIN_INPUT" ] || preflight_fail "TEST_PHP_EXECUTABLE is not executable: $CLI_BIN_INPUT"

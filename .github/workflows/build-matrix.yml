@@ -235,6 +235,15 @@ jobs:
       - name: phpt fixtures and binary-under-test guard (issue #423)
         run: ./build/test-phpt-tree.sh
 
+      # Issue #625: a run given FPMNG_PHPT_PORT_BASE keeps every listener of the
+      # suite inside the 1000 ports it reserved, so two runs on one host cannot
+      # meet. The family the runner translates is re-measured from the tests
+      # here, so a test that picks a port outside it fails this step instead of
+      # growing silently past the lane. Hermetic: shell-script stand-ins for
+      # the CLI and the binary, no build.
+      - name: phpt port lane bounds and refusals (issue #625)
+        run: ./build/test-phpt-port-lane.sh
+
       # Issue #678: the package gate scores by test name against
       # build/package-gate-expected.txt, not by pinned counts. Hermetic: a fake
       # results.tsv and a fake tests directory.

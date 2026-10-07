@@ -1253,8 +1253,10 @@ plus a path for the static lookup while reporting the whole target as
 request-target on the two endings that never reached PHP.
 
 `%r` in `access.format` is deliberately **not** that path: it is the
-request-target as the client wrote it, the same string the gateway puts in its
-request line, and `%Q%q` still carries the query string exactly once.
+request-target as the client wrote it (the absolute-form spelling survives),
+with the query string cut off -- `%Q%q` carries it instead, exactly once. The
+gateway differs here: its request-line `%r` keeps the query, so the two logs
+agree only on query-less targets (the gateway logs `GET /x?a=1 HTTP/1.0`).
 
 ### What is not covered: the operator listener
 

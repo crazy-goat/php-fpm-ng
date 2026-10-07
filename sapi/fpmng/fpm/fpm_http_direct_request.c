@@ -442,7 +442,7 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	/* An absolute-form authority replaces the Host header (RFC 9112 3.2.2), so
 	 * HTTP_HOST agrees with what the gateway sends on the same request. The
 	 * length of that authority is already bounded by
-	 * fpm_http_direct_normalize_target(). */
+	 * fpm_http_direct_authority_acceptable(). */
 	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(http),
 		authority, sizeof(authority)) > 0;
 #define ENV(key, value) do { if (emit(ctx, key, fpm_http_direct_or_empty(value))) goto fail; } while (0)

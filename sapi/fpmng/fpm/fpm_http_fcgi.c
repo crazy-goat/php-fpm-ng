@@ -598,6 +598,14 @@ void fpm_http_conn_free(fpm_http_conn *c)
 		event_free(c->wait_timer);
 		c->wait_timer = NULL;
 	}
+	/* Issue #705: the minimum-rate check is per response; every path that
+	 * frees the request frees it here. fpm_http_response_resume() has already
+	 * stopped it on the paths that call it; event_free() also removes a timer
+	 * that is still pending. */
+	if (c->minrate_timer) {
+		event_free(c->minrate_timer);
+		c->minrate_timer = NULL;
+	}
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);

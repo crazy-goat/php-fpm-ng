@@ -13,6 +13,18 @@ Type=exec
 ExecStart=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
 ; SIGUSR2 is FPM's reload: the master re-reads the configuration and replaces
 ; its children. SIGUSR1 reopens the log files, which is what logrotate wants.
+;
+; The -t before the signal is the configuration test the master itself runs
+; anyway (issue #640): the master refuses a SIGUSR2 reload whose configuration
+; does not load and keeps the pools that are running, so without this line
+; `systemctl reload` on a broken configuration is a successful no-op with the
+; reason only in the master's log. With it the reason is on the journal, where
+; the operator who asked for the reload is looking (measured: exit 78, the
+; diagnostics on stderr -- see docs/reload.md). Two ExecReload= lines run in
+; order and the operation stops at the first failure, which is the point
+; (systemd.service(5)); the arguments are ExecStart's, so the test loads
+; exactly what the reloaded master would load.
+ExecReload=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf -t
 ExecReload=/bin/kill -USR2 $MAINPID
 ; SIGQUIT is FPM's graceful stop -- children finish the request they are on.
 ; The default SIGTERM cuts them off mid-request.

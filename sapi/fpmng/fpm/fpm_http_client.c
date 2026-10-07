@@ -963,6 +963,9 @@ static void fpm_http_http_readcb(evutil_socket_t fd, short what, void *arg)
 	} while (n < 0 && errno == EINTR);
 
 	if (n > 0) {
+		/* Issue #716: the same time-without-progress arm as the FastCGI readcb has
+		 * (fpm_http.c), and for the same reason. */
+		fpm_http_upstream_deadline_arm(up);
 		fpm_http_http_data(up, buf, (size_t) n);
 	} else if (n == 0) {
 		struct fpm_http_http_state_s *st = up->http;

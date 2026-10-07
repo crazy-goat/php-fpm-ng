@@ -31,8 +31,11 @@
  * rewritten argument vector, so the directory has to outlive it; the path is kept
  * in the environment (FPMNG_SERVE_DIR, which survives execvp()), and every
  * generation of the master arms an atexit() handler for it. The handler only
- * acts in the process that armed it: the pool children are forks and inherit the
- * handler, and must not remove the directory when they exit.
+ * acts in the process that armed it, which is decided by FPMNG_SERVE_OWNER -- the
+ * master's pid, next to the path -- rather than by getpid(), because the pool
+ * children are forks that inherit the handler and the reload's configuration
+ * test (issue #640) is an exec of the same binary that is not the master.
+ * See fpm_serve_arm_cleanup().
  */
 
 #include "fpm_config.h"
@@ -55,6 +58,11 @@
 #include "fpm_pack_run.h"
 
 #define FPM_SERVE_DIR_ENV "FPMNG_SERVE_DIR"
+/* The pid allowed to remove that directory. In the environment rather than in a
+ * static, because a reload's execvp() keeps the pid and has to re-arm the
+ * handler, while every other process that execs this binary with FPMNG_SERVE_DIR
+ * in hand must not. See fpm_serve_arm_cleanup(). */
+#define FPM_SERVE_OWNER_ENV "FPMNG_SERVE_OWNER"
 #define FPM_SERVE_USAGE_EXIT 64 /* EX_USAGE, the same code upstream's usage exit uses */
 /* sun_path is 108 bytes, and the socket name is appended to the directory. */
 #define FPM_SERVE_DIR_MAX 80
@@ -402,16 +410,40 @@ static void fpm_serve_cleanup(void)
 	rmdir(fpm_serve_dir);
 }
 
+/* Arm the atexit() handler for `dir`, or deliberately not.
+ *
+ * The owner is the pid recorded in the environment, not getpid(): a reload
+ * execvp()s this binary with the SAME pid, and the handler must still be armed
+ * there -- that is the whole reason the directory outlives a reload. Recording
+ * the pid in FPM_SERVE_OWNER_ENV is what makes "only the process that armed it"
+ * survive that exec, and it is also what keeps the rule true for every OTHER
+ * process that execvp()s this binary with FPMNG_SERVE_DIR in its environment.
+ * Issue #640 added one: the reload gate's configuration test
+ * (fpm_reload_config_check.c) is the master exec'd a second time with the same
+ * argv plus -t, it inherits FPMNG_SERVE_DIR, and it is not the master. With the
+ * owner taken from getpid() that child armed the handler as itself, and its exit
+ * unlinked serve.conf, serve.pid and php.sock out from under the running server
+ * -- a reload that left nothing serving and no file to reload from.
+ *
+ * The pid is compared for equality and nothing else records one, so a reused pid
+ * would have to be the recorded value itself to arm the handler wrongly. */
 static void fpm_serve_arm_cleanup(const char *dir)
 {
+	const char *owner;
+
 	if (fpm_serve_dir != NULL) {
 		return;
 	}
-	fpm_serve_dir = strdup(dir);
-	fpm_serve_dir_owner = getpid();
-	if (fpm_serve_dir != NULL) {
-		atexit(fpm_serve_cleanup);
+	owner = getenv(FPM_SERVE_OWNER_ENV);
+	if (owner != NULL && *owner != '\0' && (pid_t) strtol(owner, NULL, 10) != getpid()) {
+		return;
 	}
+	fpm_serve_dir = strdup(dir);
+	if (fpm_serve_dir == NULL) {
+		return;
+	}
+	fpm_serve_dir_owner = getpid();
+	atexit(fpm_serve_cleanup);
 }
 
 static int fpm_serve_main(int argc, char **argv)
@@ -489,11 +521,20 @@ static int fpm_serve_main(int argc, char **argv)
 		fprintf(stderr, "php-fpm-ng serve: cannot create a directory under %s: %s\n", tmp, strerror(errno));
 		return 1;
 	}
-	fpm_serve_arm_cleanup(dir);
 	if ((rc = fpm_serve_check_value("the temporary directory cannot be written into a configuration file", dir)) != 0) {
 		return rc;
 	}
 	setenv(FPM_SERVE_DIR_ENV, dir, 1);
+	{
+		char owner[32];
+
+		snprintf(owner, sizeof(owner), "%ld", (long) getpid());
+		setenv(FPM_SERVE_OWNER_ENV, owner, 1);
+	}
+	/* Armed once, here, after both environment variables are in place: the
+	 * owner is this pid, and every generation of the master re-execs into it
+	 * while anything else that inherits FPMNG_SERVE_DIR does not arm at all. */
+	fpm_serve_arm_cleanup(dir);
 
 	snprintf(conf_path, sizeof(conf_path), "%s/serve.conf", dir);
 	snprintf(sock_path, sizeof(sock_path), "%s/php.sock", dir);

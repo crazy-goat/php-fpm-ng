@@ -287,6 +287,12 @@ jobs:
       - name: no retired names in the shipped examples (issue #639)
         run: ./build/test-shipped-configs.sh static
 
+      # Issue #847: the build output directory is not tracked and stays ignored,
+      # so a build cannot dirty a worktree or ride into a pull request with a
+      # `git add -A`. Hermetic: git only, no build, no binary.
+      - name: the build output directory stays out of git (issue #847)
+        run: ./build/test-no-tracked-build-output.sh
+
       # Task 013: clang-tidy over our C sources runs in the `lint` job, through
       # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
 

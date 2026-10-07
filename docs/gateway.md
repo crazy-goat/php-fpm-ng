@@ -371,6 +371,13 @@ delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
 
+Body bytes the gateway has read but not yet written to a slow client are
+**dropped**, not delivered: the close is immediate and there is no drain. The
+access-log byte count is reduced by the unsent output buffer, so the line
+reports what left the process rather than what the gateway had read (#635).
+The subtraction is exact for a `Content-Length` or close-delimited reply; a
+chunked reply's count can be low by the framing of the chunks still pending,
+because that framing sits in the same output buffer as the body.
 ## An upstream that ends its reply inside the response head
 
 The same rule one step earlier. The CGI header block is complete only when its

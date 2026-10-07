@@ -13,6 +13,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-10-07
+
 ### Added
 
 - The gateway (`pool.type = gateway`) now drains on stop and on reload instead of cutting in-flight requests (issue #641, phase 1). `fpm_http_cleanup()` used to `SIGTERM` every gateway process, so a reload (`SIGUSR2`) and a `systemctl stop` killed an SSE stream or a slow response mid-flight. The master now sends `SIGQUIT`: the gateway stops accepting, closes the connections idle between keep-alive requests, finishes in-flight requests up to the hard deadline and exits, and the master `SIGKILL`s whatever is still alive at the deadline. Only requests already dispatched to a target worker drain: a request whose body is still being uploaded is cut, because the master stops the target pool's workers first and drains the gateways later (`fpm_pctl_action_next()` signals every child, then `fpm_pctl_exec()` → `fpm_http_cleanup()` drains the gateways), so there is no worker left when the upload finally dispatches. `fpmng-gateway-drain-upload.phpt` pins that limitation (measured: with a 4 MiB upload 64 KiB in, the gateway was replaced 0.1 s after `SIGUSR2` with `process_control_timeout = 4`). Making uploads drain needs the gateway drained before the workers are stopped — phase 2 or a follow-up. The deadline is `process_control_timeout` — no new directive; with the stock `0` the gateway is killed at once, as before. `docs/shutdown-timeouts.md` gained the `gateway` row and the prose. New tests `fpmng-gateway-drain-reload.phpt` (an 8 MiB response survives a `SIGUSR2`) and `fpmng-gateway-drain-deadline.phpt` (a client that never reads is cut at the deadline and the reload still finishes); measured against the unfixed binary, the reload cut the first test's response at 1.8 MB of 8 MiB and replaced the gateway of the second in 0.05 s instead of at the 3 s deadline. Not in scope: nginx-style binary hot upgrade and fd handoff across `execvp()` (phase 2).
@@ -316,7 +318,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...v0.13.0

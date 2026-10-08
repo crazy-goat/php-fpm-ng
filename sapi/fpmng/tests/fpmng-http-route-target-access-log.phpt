@@ -106,21 +106,21 @@ if ($selfLine === null || $routedLine === null) {
 /* "/" fell through to the gateway's own pool ("web"), targets[0] -- a real
  * target, not the "no target at all" NULL case, so it gets its own name, not
  * "-". */
-if (!preg_match('/ target=web$/', $selfLine)) {
+if (!preg_match('/ target=web duration_ms=\S+ upstream_ms=\S+$/', $selfLine)) {
     echo "FAIL: self-target line has no target=web trailer:\n$selfLine\n";
     exit(1);
 }
 echo "self-line: target=web\n";
 
-if (!preg_match('/ target=events$/', $routedLine)) {
+if (!preg_match('/ target=events duration_ms=\S+ upstream_ms=\S+$/', $routedLine)) {
     echo "FAIL: routed line has no target=events trailer:\n$routedLine\n";
     exit(1);
 }
 echo "routed-line: target=events\n";
 
-/* Everything before the trailing field is unchanged CLF -- the field is
- * appended, not inserted. */
-if (!preg_match('/^\S+ - \S+ \[[^\]]+\] "GET \S+ HTTP\/\d\.\d" \d+ \d+ "[^"]*" "[^"]*" target=\S+$/', $routedLine)) {
+/* Everything before the trailing fields is unchanged CLF -- the fields are
+ * appended, not inserted (#341, #642). */
+if (!preg_match('/^\S+ - \S+ \[[^\]]+\] "GET \S+ HTTP\/\d\.\d" \d+ \d+ "[^"]*" "[^"]*" target=\S+ duration_ms=\S+ upstream_ms=\S+$/', $routedLine)) {
     echo "FAIL: routed line does not match the expected CLF+target shape:\n$routedLine\n";
     exit(1);
 }

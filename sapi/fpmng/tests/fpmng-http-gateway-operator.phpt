@@ -122,12 +122,17 @@ function gatewayFetch(string $url): array
  * rather than 0. Both are live gauges about the very connection the scrape is
  * happening over; normalise those sample lines and the rest must still match.
  * A pool's OWN page (app, api) is rendered by the operator child and reads none
- * of the gateway's segment, so it is compared byte for byte. */
+ * of the gateway's segment, so it is compared byte for byte.
+ * Issue #652: the request-duration histogram is observed when a response
+ * finishes, so the scrape that renders this page is in requests_total but not
+ * yet in its histogram row. That histogram has its own test
+ * (fpmng-gateway-request-duration-histogram.phpt), so its sample lines are
+ * normalised too. */
 function stripLiveConnectionGauges(string $body): string
 {
     $out = [];
     foreach (explode("\n", $body) as $line) {
-        if (preg_match('/^fpmng_gateway_(connections_open|upstreams_used)\{/', $line)) {
+        if (preg_match('/^fpmng_gateway_(connections_open|upstreams_used)\{|^fpmng_gateway_request_duration_seconds_/', $line)) {
             continue;
         }
         $out[] = $line;
@@ -229,7 +234,9 @@ try {
             $appLine = $line;
         }
     }
-    if ($appLine === null || !preg_match('/ target=operator$/', $appLine)) {
+    /* Issue #642: the #642 timing fields follow target=; the line still ends
+     * with upstream_ms=, so the target= check is anchored to its own field. */
+    if ($appLine === null || !preg_match('/ target=operator duration_ms=\S+ upstream_ms=\S+$/', $appLine)) {
         throw new RuntimeException("no target=operator line for /metrics/app:\n$content");
     }
     if (str_contains($content, '/metrics/api')) {

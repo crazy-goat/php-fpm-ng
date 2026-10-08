@@ -317,6 +317,19 @@ held requests per worker, or needs them to survive the ceiling, that is a
 design change: it has to come with a bound of its own, and it belongs to #68
 and its follow-ups, not to this limit.
 
+#### Requests that arrive while the worker stops (issue #668)
+
+Every stop of the worker runs the same drain. The stop comes from `worker.max_pending` saturation, `pm.max_requests`, `worker.max_memory`, `worker.max_lifetime`, `SIGQUIT` (the master sends it on a reload) or `SIGUSR1` (retires one child).
+
+The drain stops the listener and answers every held request `503`. Then it runs the event loop for 100 ms (`FPM_WORKER_GRACE_MS` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). No directive sets this window.
+
+During the window:
+
+- A request on an open connection that reaches the worker gets `503 Worker unavailable`.
+- The worker does not accept a new connection. The shared listening socket is left to the sibling workers.
+
+After the window, the worker closes its open connections without a reply. A request on an open connection that arrives after the window gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. Every worker exit takes 100 ms longer because of the window.
+
 #### `worker.max_pending` (issue #331)
 
 - **Default:** `256` (`FPM_WORKER_PENDING_MAX`).
@@ -1337,6 +1350,7 @@ documented spelling.
 | `pool`, `process manager`, `start time`, `start since` | the pool's scoreboard |
 | `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
 | `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
+| `listen queue`, `max listen queue`, `listen queue length` | the pool's scoreboard, sampled from TCP_INFO; only on a TCP listener in a Linux build (issue #644) |
 | `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
 | `non-php requests` | static files and pings: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
@@ -1350,6 +1364,11 @@ documented spelling.
 | `timed out connections` | connections dropped by the first-request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
+
+The `listen queue` lines follow the rules in
+[Saturation (issue #644)](operator-endpoint.md#saturation-issue-644). A classic
+pool uses `pm = static`, so its `max children reached` line reads `0`. That `0`
+means the count does not apply to a static pool.
 
 `refused requests` is the sum of `refused acl` and `refused capacity`, kept
 under its old name and its old meaning so a tool written against the fastcgi
@@ -1579,6 +1598,11 @@ What differs from a fastcgi pool:
 - `%e{VAR}` reads the CGI environment this pool built for the request, and `%R`
   is the direct peer address (never an `X-Forwarded-For`: a direct pool has no
   trusted-proxy list).
+- `%{HTTP_X_REQUEST_ID}e` prints the request id. This pool makes no id of its own.
+  A gateway in front of it sends the id with `http.request_id` (issue #642). The
+  pool does not check the header, so a client that reaches the pool directly sends
+  its own value. Prints `-` when there is no header. See
+  [`docs/gateway.md`](gateway.md#access-log-fields-and-request-id-issue-642).
 - `%r` is the request-target as the client wrote it (the absolute-form spelling
   survives), with the query string cut off -- `%Q%q` carries it instead, exactly
   once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller

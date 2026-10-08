@@ -25,6 +25,7 @@
 #include "fpm_conf_diff.h"
 #include "fpm_reload_config_check.h"
 #include "fpm_reload_selective.h"
+#include "fpm_reload_shm.h"
 #include "zlog.h"
 
 
@@ -105,6 +106,10 @@ static void fpm_pctl_exec(void)
 		optional_arg(9),
 		optional_arg(10)
 	);
+
+	/* Issue #692: before the cleanups, which free the pool list (the worker
+	 * pool cleanup). The expiry records need the pools. */
+	fpm_reload_shm_exec_records();
 
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXEC);
 

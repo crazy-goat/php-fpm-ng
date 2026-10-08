@@ -450,7 +450,7 @@ every such pool. A healthy pool shows `0`. The rules are in
 |---|---|---|---|---|
 | `fpmng_pool_consecutive_crashes{pool}` | `consecutive_crashes` | `consecutive crashes` | gauge | Fast failures in a row. |
 | `fpmng_pool_crash_gave_up{pool}` | `crash_gave_up` (`true` or `false`) | `crash gave up` (`yes` or `no`) | gauge | `1` once the pool gave up, `0` otherwise. |
-| `fpmng_pool_respawn_delay_ms{pool}` | `respawn_delay_ms` | `respawn delay ms` | gauge | The wait, in milliseconds, for the next child. `0` means no wait. |
+| `fpmng_pool_respawn_delay_ms{pool}` | `respawn_delay_ms` | `respawn delay ms` | gauge | The wait, in milliseconds, that the master chose for the next child. It is `0` when the master does not wait for a child, and again after the master forks that child. |
 
 ## Application metrics on a per-pool metrics path
 

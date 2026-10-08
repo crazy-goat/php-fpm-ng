@@ -43,13 +43,16 @@ struct fpm_crash_backoff_entry_s {
 	/* The respawn may not happen before this monotonic time. */
 	struct timeval next_spawn;
 
-	/* One-shot timer that calls fpm_children_make() at gate_due. */
+	/* One-shot timer that calls fpm_children_make() at gate_due. The event is
+	 * never fpm_event_del()'d: the timer walk in fpm_event_loop() keeps a pointer
+	 * to the next node, and a delete from a callback can free that node. A new
+	 * deadline is set with fpm_event_add() on the queued node instead. */
 	struct fpm_event_s gate_ev;
 	struct timeval gate_due;
-	int gate_armed;
+	int gate_armed; /* 1 while gate_ev is queued */
 
 	/* One-shot timer that checks, after a full window, the child spawned most
-	 * recently during a streak. */
+	 * recently during a streak. Re-armed in place, never deleted (see gate_ev). */
 	struct fpm_event_s survive_ev;
 	int survive_armed;
 	pid_t watch_pid;
@@ -173,12 +176,9 @@ static void fpm_crash_backoff_survive_fire(struct fpm_event_s *ev, short which, 
 
 	zlog(ZLOG_NOTICE, "[pool %s] crash streak of %u ended: child %d has lived a whole window",
 			e->wp->config->name, e->shared->consecutive_failures, (int) e->watch_pid);
+	/* The gate timer may stay queued. Its callback then finds no wait and only
+	 * calls fpm_children_make(), which is harmless. */
 	fpm_crash_backoff_clear(e);
-
-	if (e->gate_armed) {
-		fpm_event_del(&e->gate_ev);
-		e->gate_armed = 0;
-	}
 	fpm_children_make(e->wp, 1 /* in event loop */, 1, 0);
 }
 /* }}} */
@@ -206,6 +206,8 @@ int fpm_crash_backoff_init(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	e->wp = wp;
+	fpm_event_set_timer(&e->gate_ev, 0, fpm_crash_backoff_gate_fire, e);
+	fpm_event_set_timer(&e->survive_ev, 0, fpm_crash_backoff_survive_fire, e);
 	e->next = fpm_crash_backoff_entries;
 	fpm_crash_backoff_entries = e;
 	return 0;
@@ -289,15 +291,10 @@ int fpm_crash_backoff_may_spawn(struct fpm_worker_pool_s *wp) /* {{{ */
 	timersub(&e->next_spawn, &now, &left);
 	ms = (unsigned long) left.tv_sec * 1000UL + ((unsigned long) left.tv_usec + 999UL) / 1000UL;
 
-	/* The delay may now be shorter than the armed timer (a streak can end in
-	 * between). Re-arm for the earlier time. */
-	if (e->gate_armed && timercmp(&e->next_spawn, &e->gate_due, <)) {
-		fpm_event_del(&e->gate_ev);
-		e->gate_armed = 0;
-	}
-
-	if (!e->gate_armed) {
-		fpm_event_set_timer(&e->gate_ev, 0, fpm_crash_backoff_gate_fire, e);
+	/* Arm the gate, or move it earlier when a streak ended and a shorter delay
+	 * is now due. fpm_event_add() on a queued timer only sets its new deadline,
+	 * so this may run from inside a timer callback. */
+	if (!e->gate_armed || timercmp(&e->next_spawn, &e->gate_due, <)) {
 		fpm_event_add(&e->gate_ev, ms);
 		e->gate_due = e->next_spawn;
 		e->gate_armed = 1;
@@ -310,17 +307,21 @@ void fpm_crash_backoff_child_spawned(struct fpm_child_s *child) /* {{{ */
 {
 	struct fpm_crash_backoff_entry_s *e = fpm_crash_backoff_find(child->wp);
 
-	if (!e || e->shared->consecutive_failures == 0) {
+	if (!e) {
+		return;
+	}
+
+	/* The child that the wait was for is forked now, so the wait is over. */
+	e->shared->respawn_delay_ms = 0;
+
+	if (e->shared->consecutive_failures == 0) {
 		return;
 	}
 
 	e->watch_pid = child->pid;
 	e->watch_started = child->started;
 
-	if (e->survive_armed) {
-		fpm_event_del(&e->survive_ev);
-	}
-	fpm_event_set_timer(&e->survive_ev, 0, fpm_crash_backoff_survive_fire, e);
+	/* Moves the deadline of a queued survive timer to a full window from now. */
 	fpm_event_add(&e->survive_ev, FPM_CRASH_BACKOFF_WINDOW_S * 1000UL);
 	e->survive_armed = 1;
 }

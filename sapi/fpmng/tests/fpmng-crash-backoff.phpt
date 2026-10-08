@@ -146,6 +146,11 @@ try {
         "ramp does not count three crashes:\n$body");
     fpmng_saturation_check(fpmng_saturation_value($body, 'fpmng_pool_crash_gave_up{pool="ramp"}') === 0.0,
         "ramp gave up with pm.max_consecutive_failures = 0:\n$body");
+    /* The respawn delay is the wait for the next child. The child is forked
+     * now, so no wait is pending any more. */
+    fpmng_saturation_wait(static function () use ($metricsOf): bool {
+        return fpmng_saturation_value($metricsOf('ramp'), 'fpmng_pool_respawn_delay_ms{pool="ramp"}') === 0.0;
+    }, 'the ramp respawn delay to clear once its child is forked', static fn(): string => $metricsOf('ramp'));
     echo "ramp: the first respawn is at once, then the delay grows: ok\n";
 
     /* gave: the third fast failure gives up. The respawn then waits 30-60 s,

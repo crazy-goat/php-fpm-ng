@@ -35,6 +35,12 @@ with each failure, up to the longest value in this table.
 Each wait is a random value in the range that the table shows. The random part
 stops several pools from starting their children at the same moment.
 
+A row applies only when its failure count is below `pm.max_consecutive_failures`,
+or when that directive is `0`. With the default limit `6`, the sixth fast failure
+gives up the pool. The wait after it is the row 8 value, 30 s to 60 s, at once.
+So with the default limit the waits of rows 6 and 7 never happen. See
+[Give-up](#give-up).
+
 ## Give-up
 
 The directive `pm.max_consecutive_failures` sets how many fast failures in a row

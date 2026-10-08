@@ -40,7 +40,7 @@ struct fpm_crash_backoff_snapshot_s {
 	int has_state; /* 0 = this pool's type has no crash backoff */
 	unsigned consecutive_failures; /* fast failures in a row, 0 after a healthy child */
 	int gave_up; /* 1 once consecutive_failures reached pm.max_consecutive_failures */
-	unsigned long respawn_delay_ms; /* the delay the next respawn waits for, 0 = none */
+	unsigned long respawn_delay_ms; /* the wait chosen for the next child; 0 when none is pending or the child is forked */
 };
 
 /* Called in the master for each pool, before the first fork. Allocates the

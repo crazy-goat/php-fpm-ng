@@ -48,6 +48,7 @@
 #include "fpm_operator_pages.h"
 #include "fpm_operator_http.h"
 #include "fpm_operator_saturation.h"
+#include "fpm_crash_backoff.h"
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
 #include "fpm_metrics.h"
@@ -93,6 +94,10 @@ struct fpm_operator_page_row_s {
 	 * the listen queue, max_children_reached and slow requests. Left zeroed,
 	 * with every has_* clear, for every other type. */
 	struct fpm_operator_saturation_s sat;
+
+	/* serves_requests = 1 and a type with respawn_backoff (issue #727): the
+	 * crash streak of its pm children. has_state is 0 for every other type. */
+	struct fpm_crash_backoff_snapshot_s crash;
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
@@ -146,6 +151,7 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		 * thing. */
 		row.counter_value = copy->requests;
 		fpm_operator_saturation_read(wp, copy, &row.sat);
+		fpm_crash_backoff_read(wp, &row.crash);
 		fpm_scoreboard_free_copy(copy);
 	} else if (type->status) {
 		type->status(wp, &row.st);
@@ -253,6 +259,7 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 				row->counter, row->name, row->counter_value);
 		}
 		fpm_operator_saturation_render_prometheus(b, row->name, &row->sat);
+		fpm_crash_backoff_render_prometheus(b, row->name, &row->crash);
 		fpm_operator_page_row_prometheus_live(b, row);
 		return;
 	}
@@ -343,6 +350,12 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 		"# TYPE fpmng_pool_max_children_reached_total counter\n"
 		"# HELP fpmng_pool_slow_requests_total Requests slower than request_slowlog_timeout, only when it is set.\n"
 		"# TYPE fpmng_pool_slow_requests_total counter\n"
+		"# HELP fpmng_pool_consecutive_crashes Children in a row that exited within 10 seconds without serving a request, pm children with crash backoff only.\n"
+		"# TYPE fpmng_pool_consecutive_crashes gauge\n"
+		"# HELP fpmng_pool_crash_gave_up 1 once the pool gave up respawning (pm.max_consecutive_failures), pm children with crash backoff only.\n"
+		"# TYPE fpmng_pool_crash_gave_up gauge\n"
+		"# HELP fpmng_pool_respawn_delay_ms Delay the next respawn waits for, in milliseconds, pm children with crash backoff only.\n"
+		"# TYPE fpmng_pool_respawn_delay_ms gauge\n"
 		"# HELP fpmng_pool_runs_total Scheduled runs started since start, cron only.\n"
 		"# TYPE fpmng_pool_runs_total counter\n"
 		"# HELP fpmng_pool_restarts_total Times the supervised script was started again, supervisor only.\n"
@@ -447,6 +460,7 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
 		}
 		fpm_operator_saturation_render_json(b, &row->sat);
+		fpm_crash_backoff_render_json(b, &row->crash);
 		fpm_operator_page_row_json_live(b, row);
 		fpm_operator_buf_appendf(b, "}");
 		return;

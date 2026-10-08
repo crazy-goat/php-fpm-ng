@@ -68,6 +68,24 @@ expectConfigFailure(
     ["'pm.max_children' is not supported by pool.type = cron"]
 );
 
+/* Issue #727: pm.max_consecutive_failures belongs to fastcgi and http-direct
+ * only. The "pm." reject prefix refuses it on the other pm-less types. */
+expectConfigFailure(
+    'supervisor-max-consecutive-failures',
+    str_replace('[pool]', '[sup]', $base) . "\npool.type = supervisor\nsupervisor.script = {{FILE:*src.php}}\nsupervisor.processes = 1\npm.max_consecutive_failures = 3",
+    ["'pm.max_consecutive_failures' is not supported by pool.type = supervisor"]
+);
+expectConfigFailure(
+    'cron-max-consecutive-failures',
+    str_replace('[pool]', '[job]', $base) . "\npool.type = cron\ncron.schedule = * * * * *\ncron.script = {{FILE:*src.php}}\npm.max_consecutive_failures = 3",
+    ["'pm.max_consecutive_failures' is not supported by pool.type = cron"]
+);
+expectConfigFailure(
+    'fastcgi-max-consecutive-failures-negative',
+    $base . "\npm.max_consecutive_failures = -1",
+    ["pm.max_consecutive_failures must be 0 or a positive value"]
+);
+
 expectConfigFailure(
     'supervisor-executor',
     str_replace('[pool]', '[sup2]', $base) . "\npool.type = supervisor\npool.executor = fiber\nsupervisor.script = {{FILE:*src.php}}\nsupervisor.processes = 1",
@@ -266,6 +284,11 @@ expectConfigFailure(
     ["'pm.max_children' is not supported by pool.type = gateway"]
 );
 expectConfigFailure(
+    'gateway-max-consecutive-failures',
+    gatewayConfig("pm.max_consecutive_failures = 3\n"),
+    ["'pm.max_consecutive_failures' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
     'gateway-php-admin-value',
     gatewayConfig("php_admin_value[memory_limit] = 256M\n"),
     ["'php_admin_value' is not supported by pool.type = gateway"]
@@ -395,6 +418,9 @@ Done
 fastcgi-http-directive: rejected
 supervisor-listen: rejected
 cron-pm: rejected
+supervisor-max-consecutive-failures: rejected
+cron-max-consecutive-failures: rejected
+fastcgi-max-consecutive-failures-negative: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
 retired-fastcgi-ng: rejected
@@ -414,6 +440,7 @@ direct-user-ini-filename-separator: rejected
 direct-http-route: rejected
 retired-http-type: rejected
 gateway-pm: rejected
+gateway-max-consecutive-failures: rejected
 gateway-php-admin-value: rejected
 gateway-php-value: rejected
 gateway-environment: rejected

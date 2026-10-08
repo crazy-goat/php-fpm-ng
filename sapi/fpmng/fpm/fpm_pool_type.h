@@ -310,6 +310,16 @@ struct fpm_pool_type_s {
 	 * report. Not set for the types without a listener of their own. */
 	unsigned reports_saturation:1;
 
+	/* Issue #727: a child that fails fast is respawned with exponential
+	 * backoff and jitter (capped at about 60 s), and after pm.max_consecutive_failures
+	 * such children the operator pages say the pool gave up. fpm_crash_backoff.c
+	 * does the work; this bit only says whether the type's pm children are
+	 * subject to it. Set for fastcgi and for both executors of http-direct.
+	 * Not set for the types without a process manager of their own (cron,
+	 * supervisor, gateway, the operator endpoint), which have their own restart
+	 * policies. */
+	unsigned respawn_backoff:1;
+
 	/* How this type renders its status page on the operator endpoint. NULL is
 	 * the common case and means the generic per-pool JSON that
 	 * fpm_operator_page_render_json() produces for every type.

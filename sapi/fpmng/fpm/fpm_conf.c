@@ -160,6 +160,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "pm.max_spawn_rate",         &fpm_conf_set_integer,     WPO(pm_max_spawn_rate) },
 	{ "pm.process_idle_timeout",   &fpm_conf_set_time,        WPO(pm_process_idle_timeout) },
 	{ "pm.max_requests",           &fpm_conf_set_integer,     WPO(pm_max_requests) },
+	{ "pm.max_consecutive_failures", &fpm_conf_set_integer,   WPO(pm_max_consecutive_failures) },
 	{ "pm.status_path",            &fpm_conf_set_string,      WPO(pm_status_path) },
 	/* Issue #386: the operator listener's directives left the "pm." namespace.
 	 * These three old names are still PARSED -- so a config that uses one is
@@ -1052,6 +1053,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->listen_backlog = FPM_BACKLOG_DEFAULT;
 	wp->config->pm_max_spawn_rate = 32; /* 32 by default */
 	wp->config->pm_process_idle_timeout = 10; /* 10s by default */
+	wp->config->pm_max_consecutive_failures = 6; /* issue #727 */
 	wp->config->process_priority = 64; /* 64 means unset */
 	wp->config->process_dumpable = 0;
 	wp->config->clear_env = 1;
@@ -1508,6 +1510,12 @@ static int fpm_conf_check_pool_pm(struct fpm_worker_pool_s *wp, const struct fpm
 	/* pm.max_children */
 	if (type->requires_pm && wp->config->pm_max_children < 1) {
 		zlog(ZLOG_ALERT, "[pool %s] pm.max_children must be a positive value", wp->config->name);
+		return -1;
+	}
+
+	/* pm.max_consecutive_failures (issue #727): 0 means never give up. */
+	if (wp->config->pm_max_consecutive_failures < 0) {
+		zlog(ZLOG_ALERT, "[pool %s] pm.max_consecutive_failures must be 0 or a positive value", wp->config->name);
 		return -1;
 	}
 
@@ -2681,6 +2689,7 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\tpm.max_spawn_rate = %d",          wp->config->pm_max_spawn_rate);
 		zlog(ZLOG_NOTICE, "\tpm.process_idle_timeout = %d",    wp->config->pm_process_idle_timeout);
 		zlog(ZLOG_NOTICE, "\tpm.max_requests = %d",            wp->config->pm_max_requests);
+		zlog(ZLOG_NOTICE, "\tpm.max_consecutive_failures = %d", wp->config->pm_max_consecutive_failures);
 		zlog(ZLOG_NOTICE, "\tpm.status_path = %s",             STR2STR(wp->config->pm_status_path));
 		zlog(ZLOG_NOTICE, "\toperator.status_path = %s",       STR2STR(wp->config->operator_status_path));
 		zlog(ZLOG_NOTICE, "\toperator.status_listen = %s",     STR2STR(wp->config->operator_status_listen));

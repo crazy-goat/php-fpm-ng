@@ -30,6 +30,7 @@
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
 #include "fpm_sd_notify.h"
+#include "fpm_crash_backoff.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -180,6 +181,13 @@ int fpm_run(int *max_requests) /* {{{ */
 		if (type->init_main && 0 > type->init_main(wp)) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to initialize pool type '%s'",
 				wp->config->name, type->name);
+			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+			fpm_event_loop(1);
+		}
+
+		/* Issue #727: the crash backoff state is read by the operator endpoint,
+		 * a process forked below, so it is allocated here, before any fork. */
+		if (0 > fpm_crash_backoff_init(wp)) {
 			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
 			fpm_event_loop(1);
 		}

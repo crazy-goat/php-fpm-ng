@@ -25,7 +25,7 @@ through the normal PHP shutdown path.
 |---|---|---|---|
 | `fastcgi`, `http` | `request_terminate_timeout` (per request; default 0 = none) | `process_control_timeout` (master escalation after `SIGTERM` to the master) | `request_terminate_timeout` when set |
 | `http-direct` with `pool.executor = worker` | none for the booted worker script; `worker.request_timeout` only bounds individual unanswered requests | reload sends SIGQUIT as a cooperative stop request; after `process_control_timeout` the master sends SIGTERM, then SIGKILL 1s later if still alive. Master termination sends SIGTERM immediately, then SIGKILL after `process_control_timeout` | global `process_control_timeout`; no worker-specific grace |
-| `gateway` | none for the proxy itself; `http.write_timeout` only closes a client that stops making progress on a response | reload and stop send SIGQUIT: the gateway stops accepting, closes idle keep-alive connections and finishes requests already dispatched to a worker; a request whose body is still being uploaded is cut (see below); the master `SIGKILL`s whatever is still alive after `process_control_timeout` | `process_control_timeout` |
+| `gateway` | none for the proxy itself; `http.write_timeout` only closes a client that stops making progress on a response | reload and stop send SIGQUIT: the gateway stops accepting, closes idle keep-alive connections and finishes requests already dispatched to a worker; a request whose body is still being uploaded is cut (see below); the master `SIGKILL`s whatever is still alive after `process_control_timeout` (not a gateway with `http.ready_path`, see below) | `process_control_timeout` |
 | `supervisor` | `supervisor.stop_timeout` (default 10s) — our watchdog after `supervisor.stop_signal` (default `SIGTERM`, issue #324) to the child | `process_control_timeout` must be **≥** `supervisor.stop_timeout` or the master kills the child first | `supervisor.stop_timeout` |
 | `cron` | `cron.timeout` (default 0 = no limit on a running script) — the master sends `cron.stop_signal` (default `SIGTERM`, issue #325) to the child first | same: `process_control_timeout` must be **≥** `cron.timeout` when `cron.timeout > 0`, or the master wins | `cron.timeout` when set |
 | `status` | none (no PHP work to finish) | `process_control_timeout` only | none |
@@ -51,13 +51,16 @@ A gateway with `http.ready_path` first gets `SIGUSR1` at the start of the stop
 or the reload, before any child is signalled. It then keeps serving for a
 window that ends at `process_control_timeout` minus 100 ms. The probe answers
 `503 draining` during that window. The children of the pools that this gateway
-routes to also keep serving during the window, so the application answers new
-connections. They get their signal when the last such gateway exits. If such a
-gateway is still alive after `process_control_timeout`, the master signals the
-children at that time, and they get `process_control_timeout` more before
-`SIGTERM`. A stop or a reload of such a pool therefore takes up to about twice
-`process_control_timeout`. With the stock `0` there is no window and no child is
-held back. See `docs/gateway.md`, "Readiness probe".
+routes to also keep serving, so the application answers new connections. An
+ondemand pool forks a child for a new connection in the window.
+
+After the window the gateway drains for up to another `process_control_timeout`
+minus 100 ms. It stops accepting, and it exits when no request is in progress.
+The children held back for it get their stop signal when the gateway exits, or
+at `process_control_timeout` at the latest. The master then escalates after
+another `process_control_timeout`. A stop or a reload of such a pool therefore
+takes up to about twice `process_control_timeout`. With the stock `0` there is no
+window and no child is held back. See `docs/gateway.md`, "Readiness probe".
 
 **What "in flight" does not include (phase-1 limitation).** A request whose
 body has not finished arriving is not drained. The gateway's HTTP library
@@ -108,7 +111,7 @@ about one second), `supervisor.stop_timeout = 10s`, `cron.timeout = 0`,
 | pool type | child state | what happens |
 |---|---|---|
 | request-serving | handling a request | the master sends `SIGTERM`, then `SIGKILL` after ~1s if the request is still running — same as upstream FPM |
-| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms, and the children of the pools it routes to keep serving in that window and get `process_control_timeout` more after it (issue #646) |
+| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms, then drains for as long again; the children of the pools it routes to keep serving until the gateway exits or `process_control_timeout` passes, and then get `process_control_timeout` more (issue #646) |
 | `supervisor` | running a script iteration | the master kills the child after ~1s; **`supervisor.stop_timeout` never runs** because the master acts first |
 | `cron` | sleeping before the next run | the child exits immediately and **skips** that scheduled run — clean, no script execution |
 | `cron` | script already running | the master kills the child after ~1s; with default `cron.timeout = 0` there is no pool-level watchdog either |

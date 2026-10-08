@@ -41,6 +41,13 @@ static int fpm_signal_sent = 0;
  * fpm_pctl_kill_all() call is the release of those pools. */
 static int fpm_deferred_signo = 0;
 static int fpm_deferred_release = 0;
+
+/* Issue #646: 1 while the window of a gateway with http.ready_path is open: the
+ * held signal has not gone out yet and such a gateway is alive. */
+static int fpm_pctl_window_open(void)
+{
+	return fpm_deferred_signo != 0 && fpm_http_ready_gateways_alive();
+}
 #endif
 
 
@@ -136,6 +143,16 @@ static void fpm_pctl_exec(void)
 
 static void fpm_pctl_action_last(void)
 {
+#ifdef HAVE_FPM_HTTP
+	/* Issue #646: while a gateway's window is open the master does not finish.
+	 * The gateway still answers the probe, and the children held for it still
+	 * serve. The gateway's exit, or the escalation at process_control_timeout,
+	 * releases the held signal and then calls this again. */
+	if (fpm_pctl_window_open()) {
+		return;
+	}
+#endif
+
 	switch (fpm_state) {
 		case FPM_PCTL_STATE_RELOADING:
 			fpm_pctl_exec();
@@ -373,6 +390,17 @@ void fpm_pctl_release_deferred(void)
 		return;
 	}
 	fpm_pctl_timeout_set(fpm_global_config.process_control_timeout);
+}
+
+/* Issue #646: 1 when fpm_children_make() may fork a child of wp although the
+ * master is not in NORMAL state. Only an ondemand pool routed by a gateway with
+ * http.ready_path, and only while the window is open: its children are still
+ * held back, so the new child gets the release signal with the others. Other
+ * pools do not fork: their children serve what is in flight. */
+int fpm_pctl_may_fork_in_window(const struct fpm_worker_pool_s *wp)
+{
+	return fpm_pctl_window_open() && wp->config->pm == PM_STYLE_ONDEMAND &&
+			fpm_http_pool_routed_by_ready_gateway(wp);
 }
 #endif
 

@@ -54,9 +54,9 @@ static void fpm_http_drain_tick(evutil_socket_t fd, short what, void *arg)
 	}
 }
 
-/* Issue #646: the deadline both the soft window and the hard drain end at:
- * process_control_timeout less the margin, counted from now. Set once per
- * stop, by whichever drain starts first. */
+/* Issue #646: the deadline the soft window or the hard drain ends at:
+ * process_control_timeout less the margin, counted from now. The window sets
+ * it when the stop starts; the hard drain sets it again when the window ends. */
 static void fpm_http_drain_deadline_set(struct fpm_http_gateway_s *gw)
 {
 	struct timeval now;
@@ -88,9 +88,9 @@ static long fpm_http_drain_remaining_ms(const struct fpm_http_gateway_s *gw)
 	return (long) left.tv_sec * 1000 + (long) left.tv_usec / 1000;
 }
 
-/* Issue #646: the soft window is over. The hard drain takes over, using the
- * deadline the soft drain already set. The timer is not persistent, so it may
- * be freed from its own callback. */
+/* Issue #646: the soft window is over. The hard drain takes over with a deadline
+ * of its own (fpm_http_drain_start() sets it). The timer is not persistent, so
+ * it may be freed from its own callback. */
 static void fpm_http_drain_soft_timeout(evutil_socket_t fd, short what, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
@@ -143,9 +143,10 @@ void fpm_http_drain_start(struct fpm_http_gateway_s *gw)
 		event_free(gw->soft_timer);
 		gw->soft_timer = NULL;
 	}
-	if (!gw->soft_draining) {
-		fpm_http_drain_deadline_set(gw);
-	}
+	/* Issue #646: the hard drain gets its own deadline, counted from this call.
+	 * After a soft window that is the end of the window. Reusing the window's
+	 * deadline left 0 ms for the in-flight requests (review of #646). */
+	fpm_http_drain_deadline_set(gw);
 
 	/* Out of accept first: the listening socket belongs to the whole pool, so
 	 * every connection this process does not take is one the master is about

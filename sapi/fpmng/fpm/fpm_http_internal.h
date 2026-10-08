@@ -691,10 +691,10 @@ struct fpm_http_gateway_s {
 	/* Issue #646: the soft drain. Only a gateway with http.ready_path gets
 	 * SIGUSR1 from the master at the start of a stop or reload. It keeps its
 	 * listeners and answers the probe 503 until drain_deadline, then starts
-	 * the hard drain above by itself (soft_timer). SIGQUIT from the master
-	 * is ignored in the window, so the master's cleanup cannot cut it short.
-	 * ready_seen latches once every target could serve; ready_require_target
-	 * is http.ready_require_target. */
+	 * the hard drain above by itself (soft_timer), with a deadline of its own.
+	 * SIGQUIT from the master is ignored in the window, so the master's cleanup
+	 * cannot cut it short. ready_seen latches once at least one target could
+	 * serve; ready_require_target is http.ready_require_target. */
 	struct event *sigusr1;
 	struct event *soft_timer;
 	volatile sig_atomic_t soft_draining;

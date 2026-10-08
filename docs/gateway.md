@@ -405,27 +405,30 @@ gateway keeps its listeners open and keeps serving. A new connection to the
 probe path gets `503 draining`. A new connection to an application route gets
 the answer of its target.
 
-**Length of the window.** The window ends at the drain deadline. The deadline is
-`process_control_timeout` minus 100 ms, counted from the start of the stop or
-the reload. The window does not end early, even when no request is in progress.
-At the deadline the gateway stops accepting new connections. It finishes the
-requests in progress, then it exits. The master sends `SIGKILL` to a gateway
-that is still alive after `process_control_timeout`.
+**Length of the window.** The window ends `process_control_timeout` minus 100 ms
+after the start of the stop or the reload. The window does not end early, even
+when no request is in progress. When the window ends, the gateway stops
+accepting new connections and starts its drain. The drain has its own deadline,
+`process_control_timeout` minus 100 ms, counted from the end of the window. The
+gateway exits when no request is in progress, or at that deadline.
 
 **Target pools during the window.** The master does not signal the children of a
 pool that a gateway with `http.ready_path` routes to. Those children keep serving
-while the window is open. The master signals them when no such gateway is alive.
-So the application answers new connections during the window, as the gateway
-does. If such a gateway is still alive after `process_control_timeout`, the
-master signals the children at that time. The children then get
-`process_control_timeout` more before the master sends `SIGTERM`. The master
-signals the children of the other pools at the start of the stop.
+until the master signals them. So the application answers new connections during
+the window, as the gateway does. A pool with `pm = ondemand` that has no child
+forks one for a new connection in the window. The master signals the children of
+the other pools at the start of the stop.
 
-**Time of a stop or a reload.** The window lasts up to `process_control_timeout`.
-Then the held children get up to `process_control_timeout` more. A stop or a
-reload of such a pool therefore takes up to about twice `process_control_timeout`.
-Set the stop timeout of the service manager or the orchestrator above twice
-`process_control_timeout`.
+The master signals the held children when the last such gateway exits. If such a
+gateway is still alive at `process_control_timeout` after the stop, the master
+signals the children at that time. The children then get `process_control_timeout`
+more before the master escalates: `SIGTERM` after a stop or a reload that sent
+`SIGQUIT`, and `SIGKILL` after a stop that sent `SIGTERM`.
+
+**Time of a stop or a reload.** The window and the drain each last up to
+`process_control_timeout` minus 100 ms. A stop or a reload of such a pool
+therefore takes up to about twice `process_control_timeout`. Set the stop timeout
+of the service manager or the orchestrator above twice `process_control_timeout`.
 
 **The window needs `process_control_timeout`.** The stock value of
 `process_control_timeout` is 0. With this value there is no window, and no child
@@ -434,9 +437,9 @@ is held back. The master stops the gateway at once. The probe does not show
 examples below use 15s) to get a window. `process_control_timeout` is a
 `[global]` directive. It applies to every pool (see `docs/shutdown-timeouts.md`).
 
-**Signals during the window.** During the soft window the gateway ignores
-`SIGQUIT`. A `SIGQUIT` that you send by hand does not shorten the window. A
-gateway without a window starts its drain at once when it gets `SIGQUIT`.
+**Signals during the window.** During the window the gateway ignores `SIGQUIT`.
+A `SIGQUIT` that you send by hand does not shorten the window. A gateway without
+a window starts its drain at once when it gets `SIGQUIT`.
 
 **After the window.** When the window ends, the gateway stops accepting new
 connections. The master closes its copy of the listening socket after the
@@ -483,10 +486,11 @@ http.ready_path = /ready
 Example Docker health check. The image must contain `curl`. `curl -f` exits with
 an error for a status of 400 or more, so a `503` answer fails the check. The
 probe answers `draining` during a stop, so a check that runs in that time fails
-too. `docker stop` sends `SIGTERM` to the master. Set the stop timeout above twice
-`process_control_timeout`, for example `docker run --stop-timeout 35` with the
-15s above. Then Docker does not send `SIGKILL` before the window and the held
-children end:
+too. `docker stop` sends `SIGTERM` to PID 1 of the container, which must be the
+master. Start php-fpm-ng as PID 1, for example with the exec form of `CMD`. Set
+the stop timeout above twice `process_control_timeout`, for example
+`docker run --stop-timeout 35` with the 15s above. Then Docker does not send
+`SIGKILL` before the stop ends:
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=2s \
@@ -495,10 +499,10 @@ HEALTHCHECK --interval=10s --timeout=2s \
 
 Example Kubernetes readiness probe. Kubernetes counts an answer with a status of
 400 or more as a failed probe. With `failureThreshold: 1`, one `503` marks the
-pod not ready. The next `200` marks it ready again. Set
-`terminationGracePeriodSeconds` above twice `process_control_timeout`, so that
-the kubelet does not kill the pod before the window and the held children end.
-The value 35 is above twice the 15s above:
+pod not ready. The next `200` marks it ready again. Kubernetes sends `SIGTERM` to
+PID 1 of the container when it stops the pod. Set `terminationGracePeriodSeconds`
+above twice `process_control_timeout`, so that the kubelet does not kill the pod
+before the stop ends. The value 35 is above twice the 15s above:
 
 ```yaml
 spec:

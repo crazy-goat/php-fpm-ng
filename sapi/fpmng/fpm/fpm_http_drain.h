@@ -15,12 +15,16 @@
  * docs/shutdown-timeouts.md already recommends.
  *
  * Issue #646: a gateway with http.ready_path first runs a soft drain, which
- * lasts the same window and keeps it serving, so a probe sees 503 "draining"
- * and a new connection is answered, not refused (fpm_http_drain_soft_start()).
- * The window still ends at the same deadline. The children of the pools that
- * such a gateway routes to are held back for the same window
- * (fpm_http_pool_held_for_window()), so the application still answers while
- * the gateway does; they get their signal when the last such gateway exits
+ * lasts one window of process_control_timeout less the margin. It keeps
+ * serving, so a probe sees 503 "draining" and a new connection is answered,
+ * not refused (fpm_http_drain_soft_start()). When the window ends, the hard
+ * drain described above starts with a deadline of its own, of the same length
+ * (fpm_http_drain_start()). So the in-flight requests get the full time after
+ * the window, and the gateway exits at most about twice the timeout after the
+ * stop. The children of the pools that such a gateway routes to are held back
+ * (fpm_http_pool_held_for_window()), so the application still answers while the
+ * gateway does. They get their signal when the last such gateway exits, or at
+ * process_control_timeout after the stop at the latest
  * (fpm_pctl_release_deferred()).
  *
  * What "in flight" does NOT cover (phase-1 limitation, issue #641 review): a
@@ -43,14 +47,15 @@ struct fpm_worker_pool_s;
 /* Begins the drain in this gateway process. Idempotent: a second SIGQUIT is a
  * no-op, so a retrying master does not shorten the deadline. Must be called
  * from the process's own event loop (it is an evsignal callback), never from
- * signal context. The deadline is taken from the soft drain when one ran
- * (fpm_http_drain_soft_start), otherwise it starts now. */
+ * signal context. The deadline is process_control_timeout less the margin,
+ * counted from this call; after a soft window that is the end of the window
+ * (issue #646). */
 void fpm_http_drain_start(struct fpm_http_gateway_s *gw);
 
 /* Issue #646: the soft drain, started by SIGUSR1 from the master at the start
  * of a stop or reload, before the children are signalled. This process keeps
  * its listeners and serves, and the readiness probe answers 503 "draining".
- * The window ends at the same deadline the hard drain uses; then
+ * The window lasts process_control_timeout less the margin; then
  * fpm_http_drain_start() runs by itself. Only a gateway with http.ready_path
  * is sent SIGUSR1. Idempotent. Event-loop context only. */
 void fpm_http_drain_soft_start(struct fpm_http_gateway_s *gw);
@@ -68,11 +73,21 @@ int fpm_http_pool_routed_by_ready_gateway(const struct fpm_worker_pool_s *wp);
  * still alive, and it routes to wp. Read by fpm_pctl_kill_all(). */
 int fpm_http_pool_held_for_window(const struct fpm_worker_pool_s *wp);
 
+/* Issue #646: 1 while a gateway with http.ready_path has a live process. */
+int fpm_http_ready_gateways_alive(void);
+
 /* Issue #646: sends the signal that the first pass held back, to the pools
  * routed by a ready_path gateway, once no such gateway is alive, and re-arms
  * the master's timer for process_control_timeout from now. A no-op when
  * nothing is held. Defined in fpm_process_ctl.c. */
 void fpm_pctl_release_deferred(void);
+
+/* Issue #646: 1 when fpm_children_make() may fork a child of wp while the
+ * master is not in NORMAL state. That holds only for an ondemand pool routed by
+ * a ready_path gateway, while the signal of the window is still held back. An
+ * idle ondemand pool has no child, so a new connection in the window would
+ * wait for a child that nobody starts. Defined in fpm_process_ctl.c. */
+int fpm_pctl_may_fork_in_window(const struct fpm_worker_pool_s *wp);
 
 /* How often the drain tick checks for finished work and for the deadline. A
  * drained gateway exits within one tick of its last response, so this also

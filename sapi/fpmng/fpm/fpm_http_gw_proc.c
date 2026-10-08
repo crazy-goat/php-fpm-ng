@@ -1086,7 +1086,7 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 /* }}} */
 
 /* Issue #646: 1 while a gateway with http.ready_path has a live process. */
-static int fpm_http_ready_gateways_alive(void)
+int fpm_http_ready_gateways_alive(void)
 {
 	struct fpm_http_gateway_s *gw;
 	unsigned i;

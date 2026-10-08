@@ -26,6 +26,7 @@
 #include "fpm_reload_config_check.h"
 #include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
+#include "fpm_sd_notify.h"
 #include "zlog.h"
 
 
@@ -346,6 +347,15 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 
 			fpm_signal_sent = 0;
 			fpm_state = new_state;
+
+			/* Issue #643: the service manager hears about the transition at the
+			 * same point the reload or the stop becomes real. A refused reload
+			 * returned above, so it is never reported as RELOADING=1. */
+			if (new_state == FPM_PCTL_STATE_RELOADING) {
+				fpm_sd_notify_reloading();
+			} else if (new_state == FPM_PCTL_STATE_FINISHING || new_state == FPM_PCTL_STATE_TERMINATING) {
+				fpm_sd_notify_stopping();
+			}
 
 			zlog(ZLOG_DEBUG, "switching to '%s' state", fpm_state_names[fpm_state]);
 			ZEND_FALLTHROUGH;

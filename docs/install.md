@@ -74,10 +74,10 @@ systemctl status php-fpm-ng
 
 Those two are the only commands on this page that were not run in the image
 above -- a container has no init system. What was checked there instead is that
-`systemd-analyze verify` accepts the unit, that it is `Type=exec` (the packaged
-binary is built without systemd notification support, so `Type=notify` would
-hang), and that its `ExecStart` line starts a master which creates the socket
-and answers a FastCGI request.
+`systemd-analyze verify` accepts the unit, that it is `Type=notify`, and that its
+`ExecStart` line starts a master which creates the socket and answers a FastCGI
+request. The master sends `READY=1` after its sockets are bound. See
+`docs/systemd.md`.
 
 ## Alpine
 

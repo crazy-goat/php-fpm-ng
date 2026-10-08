@@ -4,12 +4,16 @@ Documentation=https://github.com/crazy-goat/php-fpm-ng
 After=network.target
 
 [Service]
-; Type=exec, not Type=notify. Upstream FPM's sd_notify() support is behind
-; HAVE_SYSTEMD, and build/libphp-build.sh leaves it unset on purpose -- it
-; would add a libsystemd link to a package whose whole selling point is that it
-; needs nothing but the distribution's libphp. Type=notify against a binary
-; that never notifies hangs the unit until its timeout.
-Type=exec
+; Type=notify: the master sends READY=1 once every pool has bound its listening
+; socket (issue #643), so "active" does not come before the sockets exist. The
+; notification is native (fpm_sd_notify.c, one datagram to NOTIFY_SOCKET), so
+; the package still needs no libsystemd. NotifyAccess=main: only the master
+; sends; the children never do.
+; No WatchdogSec= here. The watchdog is off by default, because a master that
+; systemd restarts for a missed ping is a behaviour the operator must choose.
+; To enable it, add WatchdogSec= in a drop-in (systemctl edit php-fpm-ng).
+Type=notify
+NotifyAccess=main
 ExecStart=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
 ; SIGUSR2 is FPM's reload: the master re-reads the configuration and replaces
 ; its children. SIGUSR1 reopens the log files, which is what logrotate wants.

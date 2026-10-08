@@ -1108,8 +1108,11 @@ static void fpm_http_wait_expired(evutil_socket_t fd, short what, void *arg)
 	c->queued = 0;
 	/* Issue #642: a request that waited out its bound logs the whole wait as
 	 * queue_ms, as a dispatched one does. The header is not sent for a 503, so
-	 * this only reaches the access log. */
-	{
+	 * this only reaches the access log. Only the wait policy has a wait to
+	 * report: the default policy's reclaim grace (issue #735) also lands here,
+	 * and c->wait_since is never set on that path, so the elapsed time would be
+	 * the wall clock minus zero. Same guard as fpm_http_pump(). */
+	if (c->gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
 		struct timeval now;
 
 		evutil_gettimeofday(&now, NULL);

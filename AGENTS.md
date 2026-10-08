@@ -122,6 +122,8 @@ TEST_FPM_TIMEOUT=120 \
 ./build/test-libphp-build-refusals.sh
 ./build/test-phpt-tree.sh
 ./build/test-package-gate-expected.sh
+./build/test-release-retention.sh   # CI job `checks`
+./build/test-phpt-failure-artifact.sh  # CI job `checks`
 ./build/test-shipped-configs.sh static   # `images <binary>` needs docker (CI job `examples`)
 ./build/test-doc-configs.sh "$PWD/out/php-fpm-ng"   # `php-fpm-ng -t` on every `ini verify` block of docs/guides/ (CI job `doc-configs`); run as non-root
 ./build/test-libphp-abi-guard.sh      # needs the SDK and a compiler
@@ -163,6 +165,16 @@ and a self-hosted runner on a public repository is a machine a pull request from
 can be made to execute code on. Re-registering one is a decision, not a convenience.
 
 - Work in your own directory (for example `~/rd/<issue>-<date>/`) and your own port range.
+- For a full owned .phpt suite on the box, reserve a port lane with
+  `FPMNG_PHPT_PORT_BASE`: it makes `build/run-fpmng-phpt.sh` keep every listener of the run
+  inside the 1000 ports from the base, give the run a temporary directory of its own
+  (`<results>/.tmp`, so two lanes cannot delete each other's files), run the suite serially,
+  and print the bounds it reserved (`Port lane:` line, also in the run's `metadata.txt`). Take
+  a base from a range nobody else uses — `21000` and `22000` for two concurrent lanes, `23000`
+  for a third — and keep every base below 31768 so a lane ends before the ephemeral range.
+  Without a base the runner instead picks a per-run port shift and stays parallel, which keeps
+  a *single* run clear of a pool someone else already has but does nothing about two runs of
+  this suite. The layout is in [`docs/fpmng-phpt.md`](docs/fpmng-phpt.md#parallel-runs).
 - Never `pkill php-fpm` or anything matching by binary name. Kill by port (`ss -lntp`) or by
   the pid file of your own pool.
 - MySQL (3306) and Redis (6379) are shared: use your own database and Redis index, never

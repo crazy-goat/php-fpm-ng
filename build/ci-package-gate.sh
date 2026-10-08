@@ -29,7 +29,42 @@
 # mounts, and -v paths are resolved by the host daemon.
 set -eu
 
-fail() { echo "ci-package-gate.sh: FAIL: $*" >&2; exit 1; }
+fail() {
+    echo "ci-package-gate.sh: FAIL: $*" >&2
+    # Issue #669: a failing .phpt leaves the only record of why it failed --
+    # the .diff/.out/.exp/.log run-tests.php writes next to it -- in the tree
+    # the suite ran in, and this script leaves that tree behind. Say where, on
+    # every fail(): issue #527 was a red cell that said nothing about them,
+    # which is why the fix for it could only be by analysis.
+    #
+    # Every fail(), not every failure: set -eu above exits 1 at the docker run
+    # of a stage that aborts, without reaching this function. Nothing is lost
+    # there, because a stage that never ran the suite wrote no .phpt evidence.
+    #
+    # Not the runner's own <results>/failed-artifacts/, which is what
+    # build/run-fpmng-phpt.sh:130 writes: that copy is guarded by a TREE_DIR
+    # this script never sets (it hands the runner a directory, so the runner
+    # assembled no tree of its own). release.yml uploads this directory as
+    # phpt-failure-<cell> when the cell is red.
+    #
+    # The guard is on the files, not on the directory, so the line stays off a
+    # failure that left no evidence -- a package that did not build has none,
+    # and neither does a cell that failed for any reason before the suite ran.
+    # Globs rather than a test for one file: a failing test does not
+    # necessarily produce all four extensions, and one of them existing is
+    # already something to point at. An unmatched glob is left as itself, so it
+    # never matches.
+    if [ -n "${OUT:-}" ]; then
+        evidence=$OUT/work/prepared/sapi/fpmng/tests
+        for f in "$evidence"/*.diff "$evidence"/*.out "$evidence"/*.exp "$evidence"/*.log; do
+            if [ -e "$f" ]; then
+                echo "ci-package-gate.sh: the failing tests' diffs and output are in $evidence/ (*.diff, *.out, *.exp, *.log)" >&2
+                break
+            fi
+        done
+    fi
+    exit 1
+}
 
 FLAVOUR=${1:?usage: build/ci-package-gate.sh deb|apk <outdir>}
 OUT=${2:?usage: build/ci-package-gate.sh deb|apk <outdir>}

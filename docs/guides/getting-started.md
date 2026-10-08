@@ -10,6 +10,20 @@ to `php-fpm-ng -t`, starts the master on the one marked `verify-run` and checks
 the answers shown in [Verify](#5-verify). The package manager and systemd steps
 are the only commands CI does not run (they need root and an init system).
 
+## Try it first: one command
+
+With the binary installed (step 1 below) and an application on disk, no
+configuration is needed to see it run:
+
+```sh
+cd /srv/app
+php-fpm-ng serve        # serves public/ on http://127.0.0.1:8080, Ctrl-C stops it
+```
+
+That is a development server, see [`dev-server.md`](dev-server.md); the rest of this
+page builds the real configuration it can print for you
+(`php-fpm-ng serve --print-config`).
+
 ## 1. Install
 
 Download the `.deb` of the latest release together with `SHA256SUMS`, check it

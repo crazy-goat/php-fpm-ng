@@ -216,6 +216,7 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 
 	TAILQ_FOREACH(header, in, next) {
 		if (fpm_http_http_header_dropped(header->key)
+			|| strchr(header->key, '_') != NULL
 			|| strcasecmp(header->key, "Host") == 0
 			|| strcasecmp(header->key, "Content-Length") == 0
 			|| strcasecmp(header->key, "X-Forwarded-For") == 0
@@ -962,6 +963,9 @@ static void fpm_http_http_readcb(evutil_socket_t fd, short what, void *arg)
 	} while (n < 0 && errno == EINTR);
 
 	if (n > 0) {
+		/* Issue #716: the same time-without-progress arm as the FastCGI readcb has
+		 * (fpm_http.c), and for the same reason. */
+		fpm_http_upstream_deadline_arm(up);
 		fpm_http_http_data(up, buf, (size_t) n);
 	} else if (n == 0) {
 		struct fpm_http_http_state_s *st = up->http;

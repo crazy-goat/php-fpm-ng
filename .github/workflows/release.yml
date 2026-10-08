@@ -97,13 +97,18 @@ jobs:
           open('release-notes.md', 'w', encoding='utf-8').write(text + install)
           PY
 
+      # A week, not the one day fpmng-canonical-build gets in build-matrix.yml:
+      # the consumer of this one is a job that can be re-run on its own days
+      # after the run that produced it, and that is the re-run window (issue
+      # #679). Size is no argument against it: 3.7 kB, measured on 2026-10-04
+      # over the Actions API.
       - name: keep the release notes for the release job
         if: github.ref_type == 'tag'
         uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: release-notes.md
-          retention-days: 1
+          retention-days: 7
 
   # Issue #575: the four package-gate cells do not depend on each other, so they
   # run in parallel and a rehearsal takes the time of the slowest cell, not the
@@ -168,11 +173,82 @@ jobs:
           CELL_NAME: ${{ matrix.cell }}
         run: ./build/ci-package-gate.sh "$CELL_KIND" "$PWD/out-package-$CELL_NAME"
 
+      # A week, not the one day fpmng-canonical-build gets in build-matrix.yml.
+      # The consumer of these four is the `release` job, which a maintainer can
+      # re-run on its own, so this handoff has to outlive the run it comes from
+      # (issue #679).
+      #
+      # Not the storage issue #261 was about: that was 34 MB uploaded once per
+      # run of build-matrix.yml. Measured on 2026-10-04 over the Actions API,
+      # these four are 7.6 + 10.0 + 8.0 + 10.7 MB, so the six extra days cost
+      # about 220 MB per run, and this workflow runs on a tag and on rehearsals,
+      # not on every push. Nor is the money: Actions artifacts share one pooled
+      # storage allowance with GitHub Packages (GitHub, "GitHub Actions
+      # billing"), which is free in a public repository, which this repository
+      # is (github.com/pricing; both checked 2026-10-04).
       - uses: actions/upload-artifact@v7
         with:
           name: package-${{ matrix.cell }}
           path: out-package-${{ matrix.cell }}
-          retention-days: 1
+          retention-days: 7
+
+      # Issue #669: the record of WHY a test failed, on its own.
+      #
+      # run-tests.php writes a .diff, .out, .exp and .log next to every failing
+      # test, and the tree the gate ran in is never removed afterwards --
+      # build/ci-package-gate.sh stages it at :383 and nothing after the suite
+      # takes it away. So a red cell has them under
+      # out-package-<cell>/work/prepared/sapi/fpmng/tests/. (The runner's own
+      # <results>/failed-artifacts/ copy is not the same thing and is empty
+      # here: build/run-fpmng-phpt.sh:126 only copies out of a tree it assembled
+      # itself, which is the "-" form build-matrix.yml:432 uses, not the
+      # directory build/ci-package-gate.sh:391 hands it.)
+      #
+      # A step of its own, after the gate step. Because the upload above is
+      # skipped the moment the gate fails -- a step with no `if:` gets the
+      # default `success()` (GitHub, "Evaluate expressions in workflows and
+      # actions", Status check functions) -- so a red cell has no
+      # package-<cell> artifact, and the release job below, which needs all
+      # four cells, does not run either. That is the workflow as it stands
+      # today, and it is not why #527 had no log: that gate ran the four cells
+      # in one job and uploaded no cell output at all until #677 added the
+      # matrix with this artifact (212b840, 2026-10-03), the day #527's fix
+      # merged, so there was nothing to skip then. And `if: failure()` is false
+      # until a step has failed, which is why this step comes after the gate
+      # and not above it. build/test-phpt-failure-artifact.sh (CI job `checks`)
+      # keeps both.
+      #
+      # Three days, from the failure this issue exists for: #527 opened
+      # 2026-09-30, its fix (#666) merged 2026-10-03T09:58, and the flake was
+      # chased in between -- evidence that expires before the investigation
+      # ends is the #527 outcome all over again. #261's storage argument does
+      # not pull the other way: that was 34 MB uploaded on every run of
+      # build-matrix.yml, and this exists only on a red cell of a workflow that
+      # runs on a tag and on rehearsals, with nothing downloading it. What is
+      # in it is not measured; the cell output it is a subset of is (7.6 + 10.0
+      # + 8.0 + 10.7 MB, quoted above).
+      #
+      # The name must not begin with "package-", the prefix the release job
+      # below downloads by pattern and renames into out-package-<cell>. Nothing
+      # reaches it today -- this artifact exists only when a cell failed, and
+      # release needs all four -- but a name that says "not a package" is
+      # cheaper to keep right than to unpick later.
+      #
+      # `warn` is the action's default; `error` would turn a gate that failed
+      # before any test ran -- a package that did not build -- into a second
+      # failure.
+      - name: upload the failing .phpt diffs and output
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: phpt-failure-${{ matrix.cell }}
+          path: |
+            out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.diff
+            out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.out
+            out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.exp
+            out-package-${{ matrix.cell }}/work/prepared/sapi/fpmng/tests/*.log
+          if-no-files-found: warn
+          retention-days: 3
 
   release:
     needs: [notes, packages]
@@ -236,9 +312,18 @@ jobs:
           retention-days: 14
 
       # Only a tag publishes. The rehearsal above stops at the artifact.
-      # --verify-tag refuses to create a tag from a release. Re-run safe: a
-      # leftover draft (an interrupted run) is completed and published. A
-      # published release is never touched: fix forward with a new tag.
+      # --verify-tag refuses to create a tag from a release.
+      #
+      # Re-run safe, but only for as long as the two downloads above are still
+      # there (a week): a leftover draft (an interrupted run) is completed and
+      # published, and a re-run of this job alone picks the `notes` and
+      # `packages` artifacts up again. Past that window they have expired, the
+      # download fails and nothing is published -- re-run all jobs, which builds
+      # and re-gates the packages again (issue #679). GitHub allows the re-run
+      # for 30 days after the run, so the button can still be there with the
+      # artifacts gone.
+      #
+      # A published release is never touched: fix forward with a new tag.
       - name: publish the release
         if: github.ref_type == 'tag'
         env:

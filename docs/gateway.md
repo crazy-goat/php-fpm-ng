@@ -89,22 +89,73 @@ them:
 | `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
 | `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
 
+Upstream limits (issue #716). What the gateway waits *for* on the target side. A
+target that never answers used to hold the client connection and one slot of the
+target's budget indefinitely -- with the default `request_terminate_timeout = 0`
+nothing ended it, and a fiber target refuses that directive at all (#610):
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.upstream_connect_timeout` | How long in ms a connect towards a target may stay unfulfilled (a SYN nobody answers, an accept queue the kernel has stopped draining). Cut after it: `504` if nothing was sent to the client yet. `0` = wait forever. | `5000` |
+| `http.upstream_read_timeout` | How long in ms a target may make **no progress** on a request in flight. Cut after it: `504` if the response head has not been sent, otherwise the client connection is closed without completing the reply (the rule of #533, since the body can no longer be made whole). `0` = never cut. | `60000` |
+
+`http.upstream_read_timeout` bounds time **without progress**, not total request
+time: every byte the target sends re-arms it, so a script that answers slowly but
+keeps producing is not cut. A script that computes for a minute before its first
+byte is, and the operator sees the 504 they would have seen from the proxy the
+gateway replaces. Raise it, or set `0` to keep waiting as before, for anything
+that legitimately takes longer.
+
+The two defaults are judgement calls, not measurements:
+
+- `5000` for the connect, which is the number `http.read_timeout` above already
+  uses. The target is on this host in every configuration this project ships -- a
+  Unix socket, or a loopback address, which is the only address a route may even
+  name for an `http-direct` target -- so a TCP connect that has not completed
+  within the time it takes to read a whole request is not a slow peer, it is a SYN
+  nobody will answer. Not measured: how long such a connect takes when it does
+  complete. A remote FastCGI target is allowed (unlike an `http-direct` one) and
+  should get a larger value.
+- `60000` for the read, which is nginx's `proxy_read_timeout` default and the same
+  minute `http.keepalive_timeout` above already uses.
+
+While the gateway has paused an upstream because the client is behind
+(`http.response_buffer`), the read deadline is stopped: the target is producing
+into a socket buffer nobody is draining, which is not silence, and
+`http.write_timeout` is what bounds that client.
+
+Both are refused on `http-direct`, like the gateway-only client limits above: a
+direct pool is the thing serving the request and has no upstream to wait for.
+
 Response flow control (issue #596). The gateway reads the upstream response
 only while the client keeps up:
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
 | `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
+| `http.response_min_rate` | Minimum bytes per second the client must drain while the upstream is held back for it. Below that the connection is closed and the worker is released. `0` = no minimum. | `256` |
 
-A larger value frees a PHP worker earlier for a slow client and costs gateway
-memory per slow client; a smaller one bounds the memory and holds the worker
-longer. The limit is checked after each piece of the response, so one read
-(16 KiB) can overshoot it, and the kernel socket buffers on the client and
-upstream side come on top. The write timeout above still closes a client that
-reads nothing; with `http.write_timeout = 0` such a client keeps its connection
-and one worker, but no longer grows the gateway's memory. Not measured: the
-gateway's RSS under many slow clients. `http.response_buffer` is refused on
-`http-direct`.
+A larger `http.response_buffer` frees a PHP worker earlier for a slow client and costs gateway
+memory per slow client; a smaller one bounds the memory and holds the worker longer. The limit
+is checked after each piece of the response, so one read (16 KiB) can overshoot it, and the
+kernel socket buffers on the client and upstream side come on top. The write timeout above
+still closes a client that reads nothing; with `http.write_timeout = 0` such a client keeps its
+connection and one worker, but no longer grows the gateway's memory. Not measured: the
+gateway's RSS under many slow clients. `http.response_buffer` and `http.response_min_rate` are
+refused on `http-direct`.
+
+`http.response_min_rate` is the minimum-progress rule that closes the trickle-reader path
+`http.response_buffer` opened (issue #705). It is measured over a fixed 5-second window and
+only while the upstream is actually held back, which is the only time the client, and not the
+upstream, is the bottleneck: the client must have drained at least `rate * 5` bytes in the last
+5 seconds, or the connection is closed the same way `http.read_timeout` closes one, and the
+worker's remaining output is drained as if the client had left. A legitimately slow but
+progressing download is therefore kept, however long it takes; only a client that has
+effectively stalled while still consuming a byte now and then is cut. A rate below
+`http.response_buffer / 5` (with the defaults, about 200 KiB/s) is the meaningful range: a
+client that can empty the whole buffer inside one window is never cut, because draining the
+buffer resumes the upstream and stops the clock. `http.write_timeout` remains the limit for a
+client that stops entirely.
 
 Two consequences of holding the worker back, both new with flow control:
 
@@ -124,19 +175,23 @@ Two consequences of holding the worker back, both new with flow control:
   `http.response_buffer = 0` to keep the old behaviour (the gateway buffers
   everything, bounded only by memory). `fpmng-http-gateway-stream-budget.phpt`
   pins both outcomes.
-- **A trickling reader holds a worker.** `http.write_timeout` is a stall timer:
-  it restarts whenever the client takes any bytes, so a client that reads one
-  byte per second is never cut by it. With flow control that client now keeps a
-  PHP worker (or target worker) blocked for as long as it trickles, so a few of
-  them can occupy all of `pm.max_children`. Before this change such a client
-  cost gateway memory only. There is no minimum-progress or total-time limit
-  for a response yet; it is tracked as a follow-up to #596.
+- **A trickling reader no longer holds a worker indefinitely.** `http.write_timeout`
+  is a stall timer: it restarts whenever the client takes any bytes, so a client
+  that reads one byte per second is never cut by it, and with flow control such a
+  client keeps a PHP worker (or target worker) blocked for as long as it trickles
+  -- a few of them can occupy all of `pm.max_children`. `http.response_min_rate`
+  closes that path: while the upstream is held back, a client that drains less
+  than the configured rate over a 5-second window is cut and the worker is
+  released, while a slower but steadily progressing client is kept (see the flow
+  control section above). `fpmng-http-gateway-min-rate.phpt` pins both outcomes.
 
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
 `http.max_connections` and `http.max_connections_per_client` are not supported
 on a gateway yet and are refused by `php-fpm-ng -t`.
-`http.keepalive_timeout` and `http.write_timeout` are refused on `http-direct`.
+`http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer`,
+`http.response_min_rate` and the two `http.upstream_*` timeouts are refused on
+`http-direct`.
 
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.
@@ -154,6 +209,21 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
+document root `SCRIPT_FILENAME` is built under) and, unless every routed path
+names an existing `.php` file, `http.front_controller` (the fallback script
+for paths that do not). With neither set, every request names a script that
+does not exist and the FastCGI upstream answers "Primary script unknown"; the
+master logs a WARNING saying so at startup.
+
+When every worker of a routed target is busy, the gateway answers `503` +
+`Retry-After` immediately (`http.pool_full_policy = reject`, the default; up to
+100 ms later with `http.gateways > 1` when a sibling gateway process holds the
+workers, see the "Several gateway processes" section of
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md));
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
+`wait` alternative.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
@@ -162,6 +232,29 @@ to a public address), IPv4-mapped IPv6 addresses and other non-loopback targets
 are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
+
+### Symlink deploys
+
+With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
+(`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
+document root with `realpath()` on every request that reaches the static-file
+lookup (#638): GET and HEAD for a path that is not `.php` and not a directory.
+Other requests, such as POST or `.php`, do not pay for it. The next
+request after the swap is served from the new release; no reload is needed.
+The containment check compares against the root resolved for that same
+request, so a symlink that leaves the release is still refused.
+
+`DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
+`chdir` path (`/srv/app/current/...`). PHP and OPcache resolve and cache that
+path themselves, so after a swap PHP may keep running the old release until its
+realpath cache (`realpath_cache_ttl`) or its OPcache entry expires, while
+static files already come from the new release. Not measured. A resolved
+variant (like nginx `$realpath_root`) is not implemented. Until it is, reset
+OPcache or reload the FastCGI pool in the deploy step. Also not measured: the
+cost of the extra `realpath()` per request.
+
+`http.front_controller` is checked against the document root only once, at
+startup, so that check stays pinned to the release that was live then.
 
 ### What the gateway type refuses
 
@@ -277,6 +370,67 @@ one, and a cache in front does not store the truncated body. A body that is
 delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
+
+Body bytes the gateway has read but not yet written to a slow client are
+**dropped**, not delivered: the close is immediate and there is no drain. The
+access-log byte count is reduced by the unsent output buffer, so the line
+reports what left the process rather than what the gateway had read (#635).
+The subtraction is exact for a `Content-Length` or close-delimited reply; a
+chunked reply's count can be low by the framing of the chunks still pending,
+because that framing sits in the same output buffer as the body.
+## An upstream that ends its reply inside the response head
+
+The same rule one step earlier. The CGI header block is complete only when its
+blank line arrives, so an upstream that stops before it -- a `fastcgi` worker
+killed between writing header lines, a target that closed the connection, a
+FastCGI application that sent `END_REQUEST` without ever closing its block --
+has not answered, only started to. The gateway answers **502 Bad Gateway**, the
+same answer an upstream with no answer at all gets, and the partial block is
+dropped rather than forwarded: it is unterminated, its last line may be half a
+header, and there is no telling where the head stops and the body starts.
+
+The WARNING names how much was buffered (`upstream '<address>' ended its reply
+after N bytes of an unterminated CGI header block; answering 502`), the access
+log records 502, and `fpmng_gateway_requests_total{target=...}` counts the
+request as any other routed request -- it counts requests, not successes.
+
+It is **not** the connection abort described above, and the reason is exactly
+what that section says: an abort is the answer when the reply has already
+started, because the only thing left to send would be the terminator, and
+sending it would make a truncated body look complete. Here nothing of the
+reply is on the wire yet, so a 502 is still truthful and costs the client one
+retry instead of a reseted connection. Measured on 2026-10-06 with
+`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets libevent's
+complete `502` page (`Connection: close`, as for every other gateway-generated
+502, not `Transfer-Encoding: chunked`), while the same reply before the fix was
+`200 OK` with the unfinished header block **as the body**:
+
+```
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+...
+2a
+Status: 200 OK
+Content-Type: text/plain
+
+0
+```
+
+An `http.route[]` HTTP target never reaches this branch -- its parser holds an
+unfinished head in its own buffer, so `fpm_http_start_reply()` is not reached,
+`c->cgi_headers` stays empty and the no-answer 502 answers it. That transport
+logs the truncation itself (`upstream '<address>' closed in the middle of the
+response head`) before the same 502 (#463, transport #462). The two transports
+now agree, which is what the FastCGI branch above was the odd one out about
+(#636).
+
+A header block above `FPM_HTTP_MAX_CGI_HEADERS` (64 KiB) with no blank line in
+sight is a different case and keeps its own answer: `fpm_http_stdout()` gives up
+on it being a header block and hands the buffer to the body as-is, so it is
+served as a `200` whose body is the block. Measured on 2026-10-06: a 120016-byte
+block in two `FCGI_STDOUT` records came back as `HTTP/1.1 200 OK` with the whole
+block as the body. It is the same class of problem as this section and wants
+the same decision taken on purpose; it is not changed here.
 
 ## Upstream status counters on keep-alive
 

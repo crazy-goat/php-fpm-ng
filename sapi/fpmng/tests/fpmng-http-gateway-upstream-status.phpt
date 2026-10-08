@@ -88,10 +88,33 @@ foreach (['abc' => 'abc', 'big' => '99999', 'neg' => '-5', 'huge' => '9999999999
     echo "$name: 502\n";
 }
 
+/* Issue #605: control bytes in the reason phrase are rejected like a bad
+ * code (502), not forwarded to the client -- the reason goes on the wire
+ * verbatim, so an interior CR would split the status line. PHP's own
+ * header() refuses CR, LF and NUL (measured on PHP 8.5.10: "new line
+ * detected" / "NUL bytes" warnings), so through this PHP worker only bytes
+ * like 0x01 and 0x7f arrive; a non-PHP FastCGI upstream can also send CR
+ * and NUL, which the same C check rejects by scanning the whole value
+ * ('\n' never arrives: the header block is split on it). */
+foreach (['ctrl-soh' => "404 B\x01ad", 'ctrl-del' => "404 B\x7fad"] as $name => $v) {
+    $line = status_line($http, '/s.php?v=' . rawurlencode($v) . "&n=$name");
+    check($line === 'HTTP/1.1 502 Bad Gateway', "reason '$name': " . var_export($line, true));
+    echo "$name: 502\n";
+}
+
 /* Controls: a valid status, with and without a reason, passes through. */
 $line = status_line($http, '/s.php?v=' . rawurlencode('404 Gone') . '&n=ctl');
 check($line === 'HTTP/1.1 404 Gone', 'control 404 Gone: ' . var_export($line, true));
 echo "control-reason: ok\n";
+/* Issue #605: bytes >= 0x80 are not controls -- a UTF-8 reason passes
+ * through verbatim. This pins the check against over-rejecting (e.g. a
+ * future switch to iscntrl(), which in some locales rejects high bytes).
+ * The \xc3\xa9 bytes survive PHP's header() untouched (probed on PHP
+ * 8.5.10: they arrive on the wire as-is, unlike CR/LF/NUL which header()
+ * refuses). */
+$line = status_line($http, '/s.php?v=' . rawurlencode("404 Caf\xc3\xa9") . '&n=ctl3');
+check($line === "HTTP/1.1 404 Caf\xc3\xa9", 'control utf8 reason: ' . var_export($line, true));
+echo "control-utf8: ok\n";
 $line = status_line($http, '/s.php?v=599&n=ctl2');
 check(str_starts_with($line, 'HTTP/1.1 599 '), 'control 599: ' . var_export($line, true));
 echo "control-bare: ok\n";
@@ -99,10 +122,11 @@ echo "control-bare: ok\n";
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/invalid Status .99999999999./');
 check(preg_match("/WARNING: \[pool gw\] http: upstream sent invalid Status 'abc'/", $errors) === 1, 'no WARNING for abc');
 check(preg_match("/invalid Status '103'/", $errors) === 1, 'no WARNING for 103');
+check(preg_match("/invalid Status '404 B\x01ad'/", $errors) === 1, 'no WARNING for control reason');
 echo "warning: ok\n";
 
 $acc = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC), '/n=ctl2/');
-foreach (['abc', 'big', 'neg', 'huge', 'info'] as $name) {
+foreach (['abc', 'big', 'neg', 'huge', 'info', 'ctrl-soh', 'ctrl-del'] as $name) {
     check(preg_match('/n=' . $name . '[^\n]* 502 /', $acc) === 1, "access log: no 502 for $name");
 }
 echo "access-log: ok\n";
@@ -126,7 +150,10 @@ cont: 502
 low: 502
 high: 502
 empty: 502
+ctrl-soh: 502
+ctrl-del: 502
 control-reason: ok
+control-utf8: ok
 control-bare: ok
 warning: ok
 access-log: ok

@@ -23,6 +23,7 @@
 #include "fpm_scale_down_drain.h"
 #include "fpm_conf.h"
 #include "fpm_conf_diff.h"
+#include "fpm_reload_config_check.h"
 #include "fpm_reload_selective.h"
 #include "zlog.h"
 
@@ -74,6 +75,7 @@ static void fpm_pctl_exit(void)
 	zlog(ZLOG_NOTICE, "exiting, bye-bye!");
 
 	fpm_conf_unlink_pid();
+	fpm_reload_selective_discard_unadopted();
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXIT_MAIN);
 	exit(FPM_EXIT_OK);
 }
@@ -110,6 +112,9 @@ static void fpm_pctl_exec(void)
 
 	execvp(saved_argv[0], saved_argv);
 	zlog(ZLOG_SYSERROR, "failed to reload: execvp() failed");
+	/* Issue #690: the spared workers were detached and listed for a next
+	 * master that will never exist. */
+	fpm_reload_selective_discard_unadopted();
 	exit(FPM_EXIT_SOFTWARE);
 }
 
@@ -320,6 +325,18 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 						fpm_state_names[new_state], fpm_state_names[fpm_state]);
 					return;
 				/* TODO Add EMPTY_SWITCH_DEFAULT_CASE? */
+			}
+
+			/* issue #640: a reload may only start if the configuration the NEXT
+			 * generation would read loads. Checked here, before the state
+			 * changes and before the signal fan-out below, because from
+			 * fpm_pctl_exec() on -- every child already signalled, all of them
+			 * gone -- there is nothing left to keep serving. A refused reload
+			 * returns with the state untouched, so every pool keeps serving
+			 * and the next SIGUSR2 tries again (fpm_reload_config_check.h). */
+			if (new_state == FPM_PCTL_STATE_RELOADING &&
+					!fpm_reload_config_check(saved_argc, (const char *const *) saved_argv)) {
+				return;
 			}
 
 			fpm_signal_sent = 0;

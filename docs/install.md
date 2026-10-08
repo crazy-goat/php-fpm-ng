@@ -92,6 +92,10 @@ The checksum line is spelled differently here because BusyBox `sha256sum` has
 no `--ignore-missing`: it would try to verify the `.deb` too and fail on a file
 you did not download. Piping the one line you care about is the same check.
 
+The apk package also depends on `php85-phar` (packed applications need the
+`phar` extension), so `apk add` pulls it in next to `php85-embed`; the
+`php-fpm-ng-tls` package has the same dependency.
+
 `--allow-untrusted` is not a workaround being tolerated: the package is
 unsigned by decision, the checksum above is what authenticates it, and apk is
 being told the truth about what it is being handed.

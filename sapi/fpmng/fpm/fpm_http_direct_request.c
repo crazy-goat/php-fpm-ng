@@ -15,6 +15,7 @@
  */
 #include "fpm_config.h"
 
+#include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,8 +32,11 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
+#include "fpm_http_target.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_acl.h"
+#include "fpm_pack_run.h"
 #include "zlog.h"
 
 /* Resolves the front controller (the worker script, under the worker
@@ -46,9 +50,25 @@ int fpm_http_direct_resolve_script(const char *base, const char *front_controlle
 {
 	char candidate[PATH_MAX];
 	struct stat st;
+	const char *why;
 
 	if (base ? !realpath(base, root) : !getcwd(root, PATH_MAX)) {
 		return -1;
+	}
+	if (fpm_pack_is_app_path(front_controller)) {
+		/* An entry of the application PHAR (#430) is not under the root and has
+		 * no realpath(): it is contained by being listed in the manifest, which
+		 * fpm_pack_validate_path() checks, and by the fixed spelling, which
+		 * keeps a request from choosing it. The root stays the chdir. */
+		if (fpm_pack_validate_path(front_controller, &why) < 0) {
+			zlog(ZLOG_ALERT, "http-direct: '%s': %s", front_controller, why);
+			return -1;
+		}
+		if (strlen(front_controller) >= PATH_MAX) {
+			return -1;
+		}
+		memcpy(script, front_controller, strlen(front_controller) + 1);
+		return 0;
 	}
 	if (snprintf(candidate, PATH_MAX, "%s%s", root, front_controller) >= PATH_MAX ||
 		!realpath(candidate, script) || stat(script, &st) < 0 || !S_ISREG(st.st_mode)) {
@@ -137,8 +157,19 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 		zlog(ZLOG_ALERT, "[pool %s] %s requires pm = static", c->name, labels->subject);
 		return -1;
 	}
-	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller || c->http_front_controller[0] != '/' ||
-		strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')) {
+	if (fpm_pack_is_unresolved_path(c->http_front_controller)) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.front_controller '%s': fpmng-app:// names a file in the application PHAR, "
+			"and this php-fpm-ng carries none (see docs/payload.md)", c->name, labels->subject, c->http_front_controller);
+		return -1;
+	}
+	if (fpm_pack_is_app_path(c->http_front_controller) && fpm_http_direct_declared(c->set_directives, "http.static") && c->http_static) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.static is not supported when http.front_controller is in the application PHAR "
+			"(public files inside a PHAR are not served)", c->name, labels->subject);
+		return -1;
+	}
+	if (!c->chdir || c->chdir[0] != '/' || !c->http_front_controller ||
+		(c->http_front_controller[0] != '/' && !fpm_pack_is_app_path(c->http_front_controller)) ||
+		(!fpm_pack_is_app_path(c->http_front_controller) && (strstr(c->http_front_controller, "..") || strchr(c->http_front_controller, '\\')))) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires an absolute chdir and a root-relative http.front_controller%s "
 			"without '..' or backslashes", c->name, labels->subject, labels->chdir_note);
 		return -1;
@@ -311,17 +342,57 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command)
 	}
 }
 
+/* The ingress step, first thing in both listeners' request callbacks (#681) and
+ * the http-direct half of what PR #680 did for the gateway: reduce the
+ * request-target to the origin-form path once, so ping.path, the static lookup,
+ * PATH_INFO and REQUEST_URI cannot disagree about which request arrived.
+ *
+ * fpm_http_normalize_target() only rewrites what libevent misreads -- a target
+ * starting with "//". An absolute-form target keeps libevent's authority and
+ * its path, and everything below reads that parse, which is the gateway's
+ * arrangement. It is before the ACL on purpose, as on the gateway: a request
+ * the ACL refuses still writes an access-log line, and that line is matched on
+ * the same path the served ones are. */
+void fpm_http_direct_normalize_target(struct evhttp_request *http)
+{
+	fpm_http_normalize_target(http);
+}
+
+/* An authority too long for FPM_HTTP_AUTHORITY_MAX is refused rather than
+ * dropped: fpm_http_direct_build_env() would otherwise have to choose between
+ * an HTTP_HOST that contradicts the Host header it kept and one it invented
+ * from a truncated authority, and the gateway answers 400 for the same target
+ * (fpm_http.c:2287). After the ACL on purpose: a client
+ * listen.allowed_clients excludes has to get its 403 whatever else is true of
+ * the request it sent. */
+bool fpm_http_direct_authority_acceptable(struct evhttp_request *http)
+{
+	char authority[FPM_HTTP_AUTHORITY_MAX];
+
+	return fpm_http_absolute_authority(evhttp_request_get_uri(http),
+		authority, sizeof(authority)) >= 0;
+}
+
 /* Origin-form only: the script is selected solely by configuration, never by
  * the URI, the Host, PATH_INFO, or any client-supplied CGI-looking header.
  * Header names are bounded here, once, so that everything downstream may
- * assume FPM_HTTP_HEADER_NAME_MAX. */
+ * assume FPM_HTTP_HEADER_NAME_MAX.
+ *
+ * "Origin-form only" is a statement about what the request IS, not about the
+ * spelling the client used to write it. RFC 9112 3.2.2 obliges a server to
+ * accept "GET http://host/path HTTP/1.1" and to route it as "/path", and
+ * fpm_http_direct_normalize_target() has already reduced the target by the time
+ * this runs, so the test is the parsed path -- "/x" for an absolute-form
+ * request, "//h/x" for a network-path reference, and "*" (asterisk-form, which
+ * libevent hands back unparsed) for the one target that has no path to be
+ * origin-form. The gateway made the same move in #534. */
 bool fpm_http_direct_request_acceptable(struct evhttp_request *http)
 {
-	const char *uri = evhttp_request_get_uri(http);
 	const struct evhttp_uri *parsed = evhttp_request_get_evhttp_uri(http);
+	const char *path = parsed ? fpm_http_request_path(http) : NULL;
 	struct evkeyval *kv;
 
-	if (!uri || uri[0] != '/' || !parsed || evhttp_uri_get_fragment(parsed) ||
+	if (!path || path[0] != '/' || evhttp_uri_get_fragment(parsed) ||
 		!fpm_http_direct_method(evhttp_request_get_command(http))) {
 		return false;
 	}
@@ -351,28 +422,46 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	const struct evhttp_uri *parsed = evhttp_request_get_evhttp_uri(http);
 	struct evkeyvalq *headers = evhttp_request_get_input_headers(http);
 	struct evkeyval *kv;
+	smart_str request_uri = { 0 };
+	char authority[FPM_HTTP_AUTHORITY_MAX];
 	char length[32], remote_port[16], protocol[32];
 	char *peer = NULL;
 	ev_uint16_t port = 0;
+	int have_authority, saw_host = 0;
 
 	snprintf(length, sizeof(length), "%zu", evbuffer_get_length(evhttp_request_get_input_buffer(http)));
 	evhttp_connection_get_peer(evhttp_request_get_connection(http), &peer, &port);
 	snprintf(remote_port, sizeof(remote_port), "%u", (unsigned) port);
 	snprintf(protocol, sizeof(protocol), "HTTP/%d.%d", http->major, http->minor);
-#define ENV(key, value) do { if (emit(ctx, key, fpm_http_direct_or_empty(value))) return -1; } while (0)
+	/* REQUEST_URI and PATH_INFO come from the normalized parse, not from the raw
+	 * target: an application and an operator then agree on the one path
+	 * ping.path and the static lookup already matched on, whatever the client
+	 * wrote (RFC 9112 3.2.1, 3.2.2 -- #681, the http-direct half of #534). */
+	fpm_http_origin_form(&request_uri, http);
+	smart_str_0(&request_uri);
+	/* An absolute-form authority replaces the Host header (RFC 9112 3.2.2), so
+	 * HTTP_HOST agrees with what the gateway sends on the same request. The
+	 * length of that authority is already bounded by
+	 * fpm_http_direct_authority_acceptable(). */
+	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(http),
+		authority, sizeof(authority)) > 0;
+#define ENV(key, value) do { if (emit(ctx, key, fpm_http_direct_or_empty(value))) goto fail; } while (0)
 	ENV("REQUEST_METHOD", fpm_http_direct_method(evhttp_request_get_command(http)));
-	ENV("REQUEST_URI", evhttp_request_get_uri(http));
+	ENV("REQUEST_URI", ZSTR_VAL(request_uri.s));
 	ENV("QUERY_STRING", evhttp_uri_get_query(parsed));
 	ENV("SCRIPT_FILENAME", source->script);
-	ENV("SCRIPT_NAME", source->front_controller);
-	ENV("PHP_SELF", source->front_controller);
-	ENV("PATH_INFO", evhttp_uri_get_path(parsed));
+	ENV("SCRIPT_NAME", fpm_pack_http_script_name(source->front_controller));
+	ENV("PHP_SELF", fpm_pack_http_script_name(source->front_controller));
+	ENV("PATH_INFO", fpm_http_request_path(http));
 	ENV("DOCUMENT_ROOT", source->root);
 	ENV("SERVER_PROTOCOL", protocol);
 	ENV("SERVER_SOFTWARE", source->server_software);
 	ENV("GATEWAY_INTERFACE", "CGI/1.1");
 	ENV("SERVER_ADDR", source->server_addr);
 	ENV("SERVER_PORT", source->server_port);
+	/* libevent's host: the Host header when there is one, the parsed authority
+	 * when there is not. Left alone, as on the gateway, so the two transports
+	 * report SERVER_NAME for the same request identically. */
 	ENV("SERVER_NAME", evhttp_request_get_host(http));
 	ENV("REMOTE_ADDR", peer);
 	ENV("REMOTE_PORT", remote_port);
@@ -388,62 +477,41 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 	ENV("CONTENT_LENGTH", length);
 	ENV("CONTENT_TYPE", evhttp_find_header(headers, "Content-Type"));
 	for (kv = headers->tqh_first; kv; kv = kv->next.tqe_next) {
-		char name[FPM_HTTP_HEADER_NAME_MAX + sizeof("HTTP_")];
-		size_t i, len = strlen(kv->key);
+		char name[FPM_HTTP_HEADER_CGI_KEY_LEN];
+		const char *value = kv->value;
+		int rc;
 
-		/* Content-* are already above under their CGI names; "Proxy" has no
-		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
-		 * several client libraries (httpoxy). */
-		if (!strcasecmp(kv->key, "Content-Type") || !strcasecmp(kv->key, "Content-Length") ||
-			!strcasecmp(kv->key, "Proxy")) {
+		/* CONTENT_TYPE is already above, from the first Content-Type header,
+		 * so the shared mapping (fpm_http_header_cgi.h) skips every
+		 * Content-Type line here: content_type_skip is 1. The skip rules, the
+		 * length bound and the upper-casing live there, not here. */
+		rc = fpm_http_header_cgi_key(kv->key, true, name, sizeof(name));
+		if (rc < 0) {
+			goto fail;
+		}
+		if (rc > 0) {
 			continue;
 		}
-		if (len > FPM_HTTP_HEADER_NAME_MAX) {
-			return -1;
-		}
-		/* "_" would collide with the "-" spelling below ("X_Real_IP" and
-		 * "X-Real-IP" are both HTTP_X_REAL_IP), letting a client override a
-		 * header the proxy in front set. Dropped, as nginx and Apache 2.4 do;
-		 * same rule as the gateway, fpm_http.c. Issue #595. */
-		if (memchr(kv->key, '_', len) != NULL) {
-			continue;
-		}
-		/* Explicit range, not toupper(): LC_CTYPE belongs to the application in
-		 * this child, and the locale changes this mapping for plain US-ASCII
-		 * input. In tr_TR.UTF-8 and az_AZ.UTF-8 toupper('i') returns 'i' -- the
-		 * Turkish capital of 'i' is U+0130, which does not fit the single-byte
-		 * table -- so "If-Modified-Since" became HTTP_IF_MODiFiED_SiNCE and
-		 * nothing reading $_SERVER['HTTP_IF_MODIFIED_SINCE'] found it. Served and
-		 * measured on 192.168.8.50, glibc 2.43, php-8.5.9, 2026-09-09, with the
-		 * pre-fix binary. de_DE.ISO-8859-1 remaps 30 bytes above 0x7F on top of
-		 * that.
-		 *
-		 * Reachable through pool.executor = worker, where the boot script calls
-		 * setlocale() once and every later request's environment is derived
-		 * inside that same PHP request. Not reproducible on the classic executor
-		 * with today's php-src: ext/standard's request shutdown puts LC_ALL back
-		 * to "C" when setlocale() was called (ext/standard/basic_functions.c:448
-		 * in php-8.5.9), and request N+1's environment is built before its script
-		 * runs. That is upstream's bookkeeping, not a property of this transport,
-		 * so it is not what the mapping relies on: the CGI key a header lands
-		 * under is a security boundary -- the Proxy and Content-* exclusions
-		 * above are enforced by name -- and must not depend on process state the
-		 * application chose. Issue #105; same class as #102 on the response side. */
-		memcpy(name, "HTTP_", 5);
-		for (i = 0; i < len; i++) {
-			unsigned char c = (unsigned char) kv->key[i];
-
-			if (c >= 'a' && c <= 'z') {
-				name[5 + i] = (char) (c - ('a' - 'A'));
-			} else {
-				name[5 + i] = c == '-' ? '_' : (char) c;
+		if (!strcasecmp(kv->key, "Host")) {
+			saw_host = 1;
+			if (have_authority) {
+				value = authority;
 			}
 		}
-		name[5 + len] = '\0';
-		ENV(name, kv->value);
+		ENV(name, value);
+	}
+	/* No Host header at all: the authority still defines the host (RFC 9112
+	 * 3.2.2), the same rule the gateway applies and the reason its
+	 * HTTP_HOST never depends on whether a proxy sent a Host line. */
+	if (have_authority && !saw_host) {
+		ENV("HTTP_HOST", authority);
 	}
 #undef ENV
+	smart_str_free(&request_uri);
 	return 0;
+fail:
+	smart_str_free(&request_uri);
+	return -1;
 }
 
 /* This transport owns framing. An application-supplied length, connection or
@@ -463,6 +531,51 @@ bool fpm_http_direct_header_dropped(const char *name)
 bool fpm_http_direct_status_final(long status)
 {
 	return status >= 200 && status <= 599;
+}
+
+/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
+ * digits, and only a final status (200..599, fpm_http_direct_status_final())
+ * may become the status line. atoi() turned "abc" into 0, "99999" into itself
+ * and overflowed on a longer number; a 1xx went out as the *final* answer, its
+ * body dropped by libevent, and the client waited for a response that never
+ * came (the shape of #451). *reason points into `value`, "" when absent.
+ *
+ * Issue #605: the reason goes out on the wire verbatim
+ * (evhttp_send_reply_start() frames whatever it is given), so it must not
+ * carry control bytes: an interior CR would split the status line, and
+ * anything below 0x20 or DEL has no business in a reason phrase. A bad
+ * reason is rejected, like a bad code, rather than stripped: stripping would
+ * silently rewrite what the upstream said. The scan runs over all vlen bytes,
+ * not up to the first NUL, so an embedded NUL cannot hide the tail of the
+ * reason from the check.
+ *
+ * Issue #604: one parser for the gateway (fpm_http_fcgi.c) and the classic
+ * http-direct executor (fpm_http_direct.c). */
+bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
+{
+	size_t i;
+
+	if (vlen < 3 || !isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) ||
+			!isdigit((unsigned char) value[2])) {
+		return false;
+	}
+	if (vlen == 3) {
+		*reason = "";
+	} else {
+		if (value[3] != ' ') {
+			return false;
+		}
+		for (i = 4; i < vlen; i++) {
+			unsigned char ch = (unsigned char) value[i];
+
+			if (ch < 0x20 || ch == 0x7f) {
+				return false;
+			}
+		}
+		*reason = value + 4;
+	}
+	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
+	return fpm_http_direct_status_final(*code);
 }
 
 /* libevent omits the framing headers for 204/205/304 but still appends a

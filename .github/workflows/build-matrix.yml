@@ -235,11 +235,43 @@ jobs:
       - name: phpt fixtures and binary-under-test guard (issue #423)
         run: ./build/test-phpt-tree.sh
 
+      # Issue #625: a run given FPMNG_PHPT_PORT_BASE keeps every listener of the
+      # suite inside the 1000 ports it reserved, so two runs on one host cannot
+      # meet. The family the runner translates is re-measured from the tests
+      # here, so a test that picks a port outside it fails this step instead of
+      # growing silently past the lane. Hermetic: shell-script stand-ins for
+      # the CLI and the binary, no build.
+      - name: phpt port lane bounds and refusals (issue #625)
+        run: ./build/test-phpt-port-lane.sh
+
       # Issue #678: the package gate scores by test name against
       # build/package-gate-expected.txt, not by pinned counts. Hermetic: a fake
       # results.tsv and a fake tests directory.
       - name: package gate scoring (issue #678)
         run: ./build/test-package-gate-expected.sh
+
+      # Issue #679: the artifacts the re-runnable `release` job downloads must
+      # outlive a re-run of that job alone, so every upload that job consumes keeps
+      # at least the re-run window. Hermetic: reads .github/workflows/release.yml,
+      # no network, no build, no YAML parser.
+      - name: release artifacts outlive a re-run of the release job (issue #679)
+        run: ./build/test-release-retention.sh
+
+      # Issue #669: a red package cell has to leave the failing .phpt tests'
+      # diff and output downloadable under its own name, which means an upload
+      # step gated on failure(), covering the files run-tests.php leaves next to
+      # a test, with a decided and short retention. Hermetic: reads
+      # .github/workflows/release.yml and build/ci-package-gate.sh, no network,
+      # no build, no YAML parser.
+      - name: a red package cell uploads the failing .phpt evidence (issue #669)
+        run: ./build/test-phpt-failure-artifact.sh
+
+      # Issue #683: build/lint-c.sh skips the TLS-only translation unit when
+      # commands.log shows a non-TLS build, and still lints it for a TLS one.
+      # Hermetic: fake commands.log files plus a clang-tidy stand-in, no build,
+      # no SDK, no network.
+      - name: lint skips the TLS-only file against a non-TLS build (issue #683)
+        run: ./build/test-lint-c-tls-files.sh
 
       # Issue #220 / #422: the packaged binary's libphp version guard, in all
       # three outcomes (another minor FATAL, another patch level a notice, the
@@ -254,6 +286,12 @@ jobs:
       # every shipped configuration) is the `examples` job.
       - name: no retired names in the shipped examples (issue #639)
         run: ./build/test-shipped-configs.sh static
+
+      # Issue #847: the build output directory is not tracked and stays ignored,
+      # so a build cannot dirty a worktree or ride into a pull request with a
+      # `git add -A`. Hermetic: git only, no build, no binary.
+      - name: the build output directory stays out of git (issue #847)
+        run: ./build/test-no-tracked-build-output.sh
 
       # Task 013: clang-tidy over our C sources runs in the `lint` job, through
       # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
@@ -512,6 +550,9 @@ jobs:
       # process with SIGSEGV. Real gateway processes, real TLS.
       - name: verify a gateway survives its own read deadline (issue #90)
         run: ./build/test-http-read-deadline.sh "$PWD/build-out/bin/php-fpm-ng"
+
+      - name: verify a packed single-file application runs without its inputs (issue #431)
+        run: ./build/test-pack-smoke.sh "$PWD/build-out/bin/php-fpm-ng" "$(php-config8.5 --php-binary)"
 
       # Task 042: the redirect-only plain HTTP companion listener.
       - name: verify the redirect-only plain HTTP companion (task 042)

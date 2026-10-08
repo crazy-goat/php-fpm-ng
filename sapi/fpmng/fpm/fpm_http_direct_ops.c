@@ -18,6 +18,7 @@
 #include "fpm_shm.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_direct_ops.h"
+#include "fpm_http_target.h"
 #include "fpm_operator_http.h"
 #include "zlog.h"
 
@@ -776,27 +777,23 @@ static void fpm_http_direct_ops_send(struct evhttp_request *http, const char *co
  * too, so "/%70ing" is not a way past a proxy rule written against the
  * documented spelling.
  *
+ * The path is fpm_http_raw_path()'s, the origin-form one the ingress
+ * normalization leaves behind (#681), and the gateway compares the very same
+ * value for its own ping (#534). Reading the raw request-target here instead is
+ * what let "GET http://host/ping" through the probe unanswered.
+ *
  * Only ping.path is here. operator.status_path left this listener in issue #275 and
  * is answered by the operator endpoint -- see the note in
  * fpm_http_direct_ops_init_child(). */
 int fpm_http_direct_ops_try_local(struct fpm_http_direct_ops *ops, struct evhttp_request *http,
 	int *status, size_t *bytes)
 {
-	const char *uri = evhttp_request_get_uri(http);
-	const char *query = uri ? strchr(uri, '?') : NULL;
-	size_t path_len;
 	struct evbuffer *body;
 	char path[512];
 
-	if (!ops || !uri || !ops->ping_path) {
+	if (!ops || !ops->ping_path || !fpm_http_raw_path(http, path, sizeof(path))) {
 		return 0;
 	}
-	path_len = query ? (size_t) (query - uri) : strlen(uri);
-	if (path_len >= sizeof(path)) {
-		return 0;
-	}
-	memcpy(path, uri, path_len);
-	path[path_len] = '\0';
 	if (!strcmp(path, ops->ping_path)) {
 		body = evbuffer_new();
 		if (!body) {

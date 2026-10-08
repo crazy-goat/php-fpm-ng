@@ -102,11 +102,26 @@ int fpm_payload_find(const char *path, uint32_t kind, struct fpm_payload_entry *
 int fpm_payload_read(const char *path, const struct fpm_payload_entry *entry,
 		char **data, size_t *size, const char **why);
 
+/* Whether the file ends where its ELF image ends, or in an intact payload
+ * record. fpm_payload_find() reports "no payload" for a file whose last bytes
+ * are not a record, which is right for a binary nothing was appended to and
+ * wrong for a packed executable that was cut short or had its last record
+ * damaged: both look the same to it. A runtime that is about to decide between
+ * "run the application" and "run as a plain php-fpm-ng" calls this first.
+ * Returns 0 when the tail is fine (also for a file it cannot judge, such as a
+ * non-ELF one), -1 with `why` set when bytes follow the ELF image without
+ * forming a record. */
+int fpm_payload_check_tail(const char *path, const char **why);
+
 /* The path of the running binary: /proc/self/exe where it exists, else the
  * argv[0] fpm-ng was started with (docs/NOTES.md:157-201 asks for both -- /proc
  * is mounted even in a scratch container, but a binary run outside one may have
  * no /proc at all). Returns a pointer into a static buffer, or NULL if neither
  * source produced a path that can be opened. */
 const char *fpm_payload_self_path(void);
+
+/* Gives fpm_payload_self_path() the argv[0] to fall back on before fpm_globals
+ * exists (main() calls this first). Call before the first fpm_payload_self_path(). */
+void fpm_payload_set_argv0(const char *argv0);
 
 #endif

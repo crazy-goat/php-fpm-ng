@@ -79,10 +79,10 @@ enum fpm_http_direct_refusal {
 };
 void fpm_http_direct_ops_refused(struct fpm_http_direct_ops *ops, enum fpm_http_direct_refusal why);
 
-/* Counts a response this child could not send as the application built it --
- * the body or the header budget was exceeded, or a header name was not a
- * token -- and turned into a 500. Separate from a refusal: the request was
- * accepted and ran, and what failed is the answer (issue #64). */
+/* Counts a response this child cannot send as the application built it.
+ * The buffered path uses 500 for a transport limit or header error and 502
+ * for an invalid CGI Status (issue #604). Separate from a refusal: the
+ * request ran, but its response failed (issue #64). */
 void fpm_http_direct_ops_rejected(struct fpm_http_direct_ops *ops);
 
 /* The gauges and the connection totals this child owns but does not itself

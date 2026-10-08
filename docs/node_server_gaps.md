@@ -32,6 +32,7 @@ A typical Node server can control header, request, idle-socket, and keep-alive t
 - `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) — how long an idle keep-alive client connection may wait for its next request after a response completed. The first byte of the next request replaces it with `http.read_timeout`.
 - `http.write_timeout` (default 30000 ms, 0 = unlimited) — how long a client may make no progress on a pending response write; a client that never reads its response is closed.
 - `http.response_buffer` (default 1M, 0 = unlimited, issue #596) — response backpressure: past this many unwritten bytes for a client the gateway stops reading that request's upstream until the client drains the buffer.
+- `http.response_min_rate` (default 256 bytes/s, 0 = no minimum, issue #705) — minimum-progress rule that composes with the backpressure: while the upstream is held back, a client that drains less than this rate over a 5-second window is cut and the worker is released, so a trickling reader cannot hold a worker indefinitely.
 - `http.plain_listen` gets the same first-request read deadline and keep-alive limits.
 - `http.idle_timeout` (default 500 ms, 0 = never) — releases a pinned upstream connection after this much idle time on a keep-alive request; this protects a *worker slot*, not the client socket.
 
@@ -183,7 +184,7 @@ SSE, reliable client-disconnect detection, and request-body streaming have the b
 ### Already in the plan
 
 - routing / a `try_files` equivalent — done (`http.front_controller`), remaining gaps tracked in task 018;
-- client timeouts — done (task 031, issue #593: `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout`; `http.idle_timeout` is the upstream-side timer, not a client one). Still open: a connection cap on the gateway (`http.max_connections*` are refused on a gateway for now) (the `EMFILE`/`ENFILE` accept backoff on the listener is done, issue #687);
+- client timeouts — done (task 031, issue #593: `http.read_timeout`, `http.keepalive_timeout`, `http.write_timeout`; `http.idle_timeout` is the upstream-side timer, not a client one). Still open: a connection cap on the gateway (`http.max_connections*` are refused on a gateway for now) (the `EMFILE`/`ENFILE` accept backoff on the listener is done, issue #687; http-direct has it too, issue #729);
 - request-body backpressure — decision made (task 031): whole-body buffering stays, bound is `http.max_body`;
 - `503 Retry-After` for a full pool — done (task 031);
 - TLS + ACME — TLS done, ACME tracked in task 020;

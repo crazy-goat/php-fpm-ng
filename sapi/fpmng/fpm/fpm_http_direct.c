@@ -37,11 +37,13 @@
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct.h"
 #include "fpm_http_direct_tls.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_static.h"
 #include "fpm_http_direct_conn.h"
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_target.h"
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_php.h"
 #include "fpm_request.h"
@@ -92,6 +94,12 @@ static const struct fpm_http_direct_labels fpm_direct_labels = {
 	.script_noun = "front controller",
 	.extra_directives = fpm_direct_extra_directives,
 };
+
+/* The request-target access.log's %r prints, and the bound on the copy
+ * fpm_direct_request keeps of it. One constant for both the copy and the local
+ * ending that fills one from libevent directly, so the two cannot print
+ * different lengths for the same target. */
+#define FPM_HTTP_DIRECT_TARGET_MAX 512
 
 struct fpm_direct_worker {
 	struct fpm_worker_pool_s *wp;
@@ -148,9 +156,12 @@ struct fpm_direct_request {
 	struct evbuffer *output;
 	int status;
 	/* Non-NULL once the response cannot go out as the application built it.
-	 * Every cause ends the same way — 500, this text as the body — but an
-	 * operator reading the wire has to be able to tell them apart. */
+	 * The body names the first cause so an operator can distinguish an invalid
+	 * CGI Status (502, issue #604) from a transport limit or header error (500). */
 	const char *rejected;
+	/* Separate from status: a later Status header must not replace the first
+	 * rejection's code. Zero retains the existing 500 for other causes. */
+	int rejected_status;
 	/* Everything below is http.stream only; without it they stay zero and
 	 * this file behaves exactly as it did before issue #56. */
 	struct fpm_direct_worker *w;
@@ -184,6 +195,15 @@ struct fpm_direct_request {
 	struct bufferevent *conn_bev;
 	struct timeval conn_accepted;
 	unsigned conn_requests;
+	/* The request-target as the client wrote it, copied while `http` is still
+	 * alive. access.log's %r is that string (issue #681), not the origin-form
+	 * REQUEST_URI, because the gateway logs the raw request line too
+	 * (fpm_http.c:534) and one access.format has to mean the same thing on
+	 * both. The streaming ending clears `http` before it logs, so the value
+	 * cannot be read back from libevent then. Sized like the local ending's
+	 * own buffer and truncated the same way, so a target longer than this
+	 * prints truncated here and there alike. */
+	char request_target[FPM_HTTP_DIRECT_TARGET_MAX];
 };
 
 static struct fpm_direct_request *fpm_direct_current;
@@ -311,6 +331,7 @@ static void fpm_direct_retire_enter(struct fpm_direct_worker *w)
 	 * do, and that is the whole point of retiring one child rather than
 	 * reloading the pool. */
 	if (w->listener) {
+		fpm_http_accept_backoff_remove(w->listener);
 		evhttp_del_accept_socket(w->http, w->listener);
 		w->listener = NULL;
 	}
@@ -455,6 +476,7 @@ static void fpm_direct_tick_body(struct fpm_direct_worker *w, int sweep)
 {
 	if (fpm_direct_stopping) {
 		if (w->listener) {
+			fpm_http_accept_backoff_remove(w->listener);
 			evhttp_del_accept_socket(w->http, w->listener);
 			w->listener = NULL;
 		}
@@ -651,7 +673,16 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			value++;
 		}
 		if (!strcasecmp(name, "Status")) {
-			r->status = atoi(value);
+			const char *reason;
+
+			if (!fpm_http_parse_cgi_status(value, h->header_len - (size_t) (value - h->header), &r->status,
+					&reason) &&
+				!r->rejected) {
+				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%.64s', answering 502",
+					r->pool, value);
+				r->rejected = "invalid response Status";
+				r->rejected_status = 502;
+			}
 		} else if (!fpm_http_direct_header_dropped(name)) {
 			/* Same check as the worker executor, same reason (issue #102):
 			 * evhttp_add_header() stores a non-token name verbatim and writes
@@ -666,16 +697,16 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			 * error status — the worker's contract, and the reason this is a
 			 * 500 rather than a header quietly missing. */
 			if (!fpm_http_direct_header_name_ok(name)) {
-				char escaped[256];
-				/* The child's zlog fd is closed in fpm_stdio_init_child(), so
-				 * this reaches the error log only under
-				 * catch_workers_output = yes (issue #73). Still worth writing:
-				 * the 500 body deliberately does not echo the name back to
-				 * the client, so this is the only place it is recorded. */
-				zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
-					"an HTTP token, answering 500: '%s'", r->pool,
-					fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
 				if (!r->rejected) {
+					char escaped[256];
+					/* The child's zlog fd is closed in fpm_stdio_init_child(), as
+					 * issue #73 recorded, but issue #260 added the relay to the
+					 * master (fpm_child_log_init_child()). The WARNING reaches
+					 * error_log without catch_workers_output. The 500 body does
+					 * not include the name, so only this log identifies it. */
+					zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
+						"an HTTP token, answering 500: '%s'", r->pool,
+						fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
 					r->rejected = "malformed response header name";
 				}
 			} else if (!fpm_http_direct_header_charge(&total, name, strlen(value))) {
@@ -772,6 +803,28 @@ static int fpm_direct_emit_env(void *ctx, const char *key, const char *value)
 	return evhttp_add_header(&r->env, key, value);
 }
 
+/* The request-target as the client wrote it, into r. Copied here, while
+ * r->http is still the whole request, because the streaming ending clears it
+ * before it logs and access.log's %r has to survive that (#681). Truncated the
+ * way fpm_direct_log_local() truncates the same string, so one target prints
+ * one way whichever ending writes the line. */
+static void fpm_direct_copy_request_target(struct fpm_direct_request *r)
+{
+	const char *uri = evhttp_request_get_uri(r->http);
+	size_t len;
+
+	if (!uri) {
+		r->request_target[0] = '\0';
+		return;
+	}
+	len = strlen(uri);
+	if (len >= sizeof(r->request_target)) {
+		len = sizeof(r->request_target) - 1;
+	}
+	memcpy(r->request_target, uri, len);
+	r->request_target[len] = '\0';
+}
+
 static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_direct_request *r)
 {
 	const struct fpm_http_direct_env_source source = {
@@ -787,6 +840,7 @@ static int fpm_direct_prepare_request(struct fpm_direct_worker *w, struct fpm_di
 	if (!fpm_http_direct_request_acceptable(r->http)) {
 		return -1;
 	}
+	fpm_direct_copy_request_target(r);
 	return fpm_http_direct_build_env(r->http, &source, fpm_direct_emit_env, r);
 }
 
@@ -939,9 +993,9 @@ static void fpm_direct_stream_begin(struct fpm_direct_request *r)
 	/* Every reason to stay buffered, and each one matters:
 	 *  - the pool did not ask for streaming;
 	 *  - the client is already gone;
-	 *  - the response is doomed already, and the buffered tail still owes it a
-	 *    500 whose body names the cause -- impossible once a status line is on
-	 *    the wire;
+	 *  - the response is doomed already, and the buffered tail still owes it
+	 *    an error response whose body names the cause -- impossible once a
+	 *    status line is on the wire;
 	 *  - the status is not one evhttp_send_reply() would frame, which the
 	 *    buffered tail also refuses to send;
 	 *  - HEAD/204/205/304 carry no body, so there is nothing to stream and the
@@ -1269,11 +1323,11 @@ static void fpm_direct_stream_finish(struct fpm_direct_request *r, int flush)
 		return;
 	}
 	if (r->rejected) {
-		/* The buffered path answers 500 with the cause as the body. Here the
-		 * status line left the process before the cause was known, so the only
-		 * signal left is an unterminated message. Counted the same way either
-		 * way: from the outside both are this pool failing to deliver the
-		 * response the application built (issue #64). */
+		/* The buffered path sends an error response with the cause as the body.
+		 * Here the status line left the process before the cause was known, so
+		 * the only signal left is an unterminated message. Both paths count a
+		 * response this pool failed to deliver as the application built it
+		 * (issue #64). */
 		fpm_http_direct_ops_rejected(r->w ? r->w->ops : NULL);
 		fpm_direct_stream_abort(r, r->rejected);
 		return;
@@ -1358,10 +1412,23 @@ static void fpm_direct_accept_enable(struct fpm_direct_worker *w, int on)
 		return;
 	}
 	if (on) {
-		evconnlistener_enable(l);
+		/* The accept backoff (issue #729) owns the listener until its pause
+		 * ends; the tick would otherwise cut it from 100 ms to 10 ms. */
+		if (!fpm_http_accept_backoff_paused(w->listener)) {
+			evconnlistener_enable(l);
+		}
 	} else {
 		evconnlistener_disable(l);
 	}
+}
+
+/* The accept backoff asks this at the end of a pause: the same conditions the
+ * tick re-opens the gate on. */
+static int fpm_direct_backoff_may_resume(void *arg)
+{
+	struct fpm_direct_worker *w = arg;
+
+	return !fpm_direct_retiring && !w->in_request && fpm_http_direct_conns_may_accept(w->conns);
 }
 
 /* Shared by the plain bevcb below and, through
@@ -1519,18 +1586,30 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	}
 	memset(&e, 0, sizeof(e));
 	e.method = snapshot.request_method;
-	/* %r is the path and %q the query string, so the two must not both carry
-	 * it. A direct pool puts REQUEST_URI -- query string and all -- into
-	 * SG(request_info).request_uri, because that is what $_SERVER and PHP_SELF
-	 * report here; upstream's fastcgi path happens to put SCRIPT_NAME there
-	 * instead. Cutting at the '?' is what makes one access.format mean the
-	 * same thing on both transports. The slot is this child's own snapshot,
-	 * so writing into it is local. */
+	/* %r is the request-target as the client wrote it, the spelling the
+	 * gateway logs (fpm_http.c:534), copied into r while libevent's request
+	 * object was still alive. The origin-form path is
+	 * match_path below instead, and it is what access.suppress_path[] compares
+	 * against -- one rule for both fields, for every ending (#681).
+	 *
+	 * %r must not carry the query string, because %Q%q does, so it is cut on
+	 * our own copy: neither the request nor the scoreboard slot is touched.
+	 * The query is libevent's parse, which is what the application sees. That
+	 * cut is also where the gateway differs: its request line keeps the query
+	 * (fpm_http.c:534), so the two logs agree only on query-less targets. */
+	query = strchr(r->request_target, '?');
+	if (query) {
+		*query = '\0';
+	}
+	e.uri = r->request_target;
+	e.match_path = snapshot.request_uri;
+	/* strchr() is const-preserving, so the cut is taken from the snapshot
+	 * array itself (the same bytes e.match_path points at) rather than from
+	 * the const field, which would discard the qualifier on assignment. */
 	query = strchr(snapshot.request_uri, '?');
 	if (query) {
 		*query = '\0';
 	}
-	e.uri = snapshot.request_uri;
 	e.query_string = snapshot.query_string;
 	e.script_filename = snapshot.script_filename;
 	e.remote_user = snapshot.auth_user;
@@ -1552,15 +1631,16 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 
 /* Everything answered without PHP: a static file, ping, the status page, and
  * the two refusals. The URI is split here rather than taken from the request
- * object because %r is the path and %q the query string, the same split
- * fpm_request.c makes for the scoreboard. */
+ * object because %r is the request-target without the query string and %q
+ * carries the query, the same split fpm_request.c makes for the scoreboard. */
 static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_request *http,
 	const char *peer, const struct timeval *started, time_t started_epoch, int status, size_t bytes)
 {
 	struct fpm_http_direct_access_entry e;
 	const char *raw = evhttp_request_get_uri(http);
 	const char *query = raw ? strchr(raw, '?') : NULL;
-	char path[512];
+	char match[FPM_HTTP_DIRECT_TARGET_MAX];
+	char path[FPM_HTTP_DIRECT_TARGET_MAX];
 
 	if (!w->access_log) {
 		return;
@@ -1577,6 +1657,17 @@ static void fpm_direct_log_local(struct fpm_direct_worker *w, struct evhttp_requ
 		e.uri = path;
 		e.query_string = query ? query + 1 : "";
 	}
+	/* The path access.suppress_path[] is compared against: the origin-form one,
+	 * whatever the client wrote, so a suppressed response stays suppressed
+	 * whichever of its three endings wrote the line. Same value the PHP ending
+	 * gets from REQUEST_URI, and the same one ping.path and the static lookup
+	 * matched on (#681). NULL when libevent parsed nothing, which is a
+	 * response the request never got past -- match[0] is set first because
+	 * fpm_http_raw_path() writes nothing when it returns 0 (an asterisk-form
+	 * target, or a path that does not fit). */
+	match[0] = '\0';
+	fpm_http_raw_path(http, match, sizeof(match));
+	e.match_path = match[0] ? match : NULL;
 	e.method = fpm_http_direct_method(evhttp_request_get_command(http));
 	e.remote_addr = peer;
 	e.status = status;
@@ -1599,15 +1690,15 @@ static void fpm_direct_send_buffered(struct fpm_direct_request *r, int flush)
 
 	if (r->rejected || !fpm_http_direct_status_final(r->status)) {
 		const char *why = r->rejected ? r->rejected : "response status is not a final status";
-		/* Counted at the one place both causes meet, rather than at each of
-		 * the four that set r->rejected: what an operator is looking for is
-		 * "this pool answered 500 instead of what the application built", and
-		 * that is this branch (issue #64). */
+		/* Count once at the finalizer, not at each rejection site: the counter
+		 * records a response this pool replaced, regardless of its cause
+		 * (issue #64). An invalid CGI Status uses 502 (issue #604); all other
+		 * causes retain 500. */
 		fpm_http_direct_ops_rejected(w->ops);
 		evbuffer_drain(r->output, evbuffer_get_length(r->output));
 		evhttp_clear_headers(evhttp_request_get_output_headers(http));
 		evbuffer_add_printf(r->output, "http-direct: %s\n", why);
-		r->status = 500;
+		r->status = r->rejected_status ? r->rejected_status : 500;
 	}
 	/* Discards the POC error body above on a HEAD as well: what may carry a
 	 * body is a property of the request and the status, not of who produced
@@ -2223,6 +2314,13 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
+	 * reduce the request-target to the one path every consumer below matches
+	 * on, so nothing can be answered on one path and served on another
+	 * (issue #681). Ahead of the ACL so that even a request the ACL refuses
+	 * writes an access-log line matched on the same path. */
+	fpm_http_direct_normalize_target(http);
+
 	/* listen.allowed_clients, issue #59. Before anything else this function
 	 * does: a client that may not be here must not reach the static file
 	 * server, the status page or PHP, and must not be told which of them
@@ -2234,6 +2332,15 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 403, 0);
 		evhttp_add_header(evhttp_request_get_output_headers(http), "Connection", "close");
 		evhttp_send_error(http, 403, "Forbidden");
+		return;
+	}
+	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
+	 * could not carry is a malformed request, and a client
+	 * listen.allowed_clients excludes must not be able to tell that from
+	 * anything else about the request it sent. */
+	if (!fpm_http_direct_authority_acceptable(http)) {
+		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
+		evhttp_send_error(http, 400, "Bad request");
 		return;
 	}
 	if (over_client_cap) {
@@ -2467,6 +2574,12 @@ void fpm_http_direct_child_main(struct fpm_worker_pool_s *wp)
 	}
 	w.listener = evhttp_accept_socket_with_handle(w.http, wp->listening_socket);
 	if (!w.listener) exit(FPM_EXIT_SOFTWARE);
+	/* Issue #729: every child accepts on the one shared socket, so each child
+	 * installs its own backoff on its own evconnlistener. One that runs out of
+	 * descriptors pauses; its siblings keep accepting. */
+	if (fpm_http_accept_backoff_install(w.base, w.listener, wp->config->name, "http-direct", fpm_direct_backoff_may_resume, &w) != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
+	}
 	action.sa_handler = fpm_direct_stop;
 	sigemptyset(&action.sa_mask);
 	/* SA_RESTART for the same reason upstream's fpm_signals_init_child() sets

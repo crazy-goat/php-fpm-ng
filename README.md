@@ -10,7 +10,8 @@ and which are beta is the table under [Support tiers](#support-tiers).
 [php-fpm + nginx](docs/guides/migrate-php-fpm-nginx.md),
 [NGINX Unit](docs/guides/migrate-nginx-unit.md),
 [supervisord + cron](docs/guides/migrate-supervisord-cron.md). Symfony and Laravel:
-[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md).
+[`docs/guides/framework-recipes.md`](docs/guides/framework-recipes.md). One executable
+with your own PHAR, `php.ini` and `fpm.conf`: [`docs/guides/single-file-app.md`](docs/guides/single-file-app.md).
 
 **Target audience: small projects.** One VPS, one instance, typically an
 application plus one or two consumers plus a few cron jobs. Not k8s.
@@ -154,6 +155,9 @@ its upstream meaning. See
 [`docs/operator-endpoint.md`](docs/operator-endpoint.md).
 
 ## Documentation map
+
+First run without a configuration file: `php-fpm-ng serve`
+([`docs/guides/dev-server.md`](docs/guides/dev-server.md)).
 
 php-fpm-ng is a **separate SAPI** in `sapi/fpmng/`, not a fork of php-src:
 `configure.ac` finds directories under `sapi/` by glob, so no existing file needs

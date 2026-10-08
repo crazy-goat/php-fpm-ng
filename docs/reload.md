@@ -376,13 +376,11 @@ Details worth knowing:
   order. The slots a replaced pool used in the previous generation are kept
   free of new ranges, because a #329 survivor of that pool may still write to
   its old slot. The reservation lasts until the survivor can no longer write.
-  The reservation lasts until the survivor can no longer write. The expiry is
-  set at the exec of the reload that spares the survivor. It adds 30 seconds,
-  the `supervisor.stop_timeout` of the pool, and 2 seconds of slack. A later
-  reload carries that expiry as a `Y` record and does not extend it (see
-  "Back-to-back selective reloads" below). The new pool's
-  slots are cleared by punching a hole in the memfd, which frees the memory
-  instead of faulting it in.
+  The expiry is set at the exec of the reload that spares the survivor. It adds
+  30 seconds, the `supervisor.stop_timeout` of the pool, and 2 seconds of slack.
+  A later reload carries that expiry as a `Y` record and does not extend it (see
+  "Back-to-back selective reloads" below). The new pool's slots are cleared by
+  punching a hole in the memfd, which frees the memory instead of faulting it in.
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
@@ -500,12 +498,12 @@ which writes to the slot range `R`. The master that spares `S` execs at time
    `U` is later than the exit time of `S`. The 2 seconds of slack cover the
    whole-second rounding of `FPM_NOW()`, the poll, and the signal delivery. They
    also cover the one-second difference between the two clock reads at the exec.
-3. The new master reserves `R` for its generation. Each later master carries `R`
-   with the expiry `U` as an absolute time, while `U` is later than the current
-   time. It does not extend `U`. So `R` stays reserved at least until `U`. If a
-   later reload keeps `p`, `R` is the range of `p` again. When a later reload
-   replaces `p`, it writes a new `X` record. That expiry is not earlier than `U`,
-   when `supervisor.stop_timeout` does not change.
+3. The new master reserves `R` for its generation. `R` belongs to no pool in this
+   generation. At the exec of a later reload, the old master writes `R` as a `Y`
+   record with the same `<until>`, if `<until>` is later than the current time.
+   This applies whether the later reload keeps `p` or replaces it. If the later
+   reload keeps `p`, `p` keeps the range it has in the running generation. So `R`
+   stays reserved at least until `U`, and no later master extends `U`.
 4. No other pool takes a slot of `R` before `U`. At `U`, `S` has already exited.
 
 Without `reload.selective = yes`, the metrics region is not inherited. A

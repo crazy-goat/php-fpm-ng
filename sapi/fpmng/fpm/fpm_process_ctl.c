@@ -31,6 +31,7 @@
 #include "fpm_http_drain.h"
 #include "fpm_pctl_window.h"
 #endif
+#include "fpm_crash_backoff.h"
 #include "zlog.h"
 
 
@@ -722,6 +723,13 @@ static void fpm_pctl_perform_idle_server_maintenance(struct timeval *now) /* {{{
 		}
 
 		if (idle < wp->config->pm_min_spare_servers) {
+			/* Issue #727: a respawn that waits out a crash backoff is not a busy
+			 * pool. Keep the spawn rate at 1, so the child after the wait is one child. */
+			if (!fpm_crash_backoff_may_spawn(wp)) {
+				wp->idle_spawn_rate = 1;
+				continue;
+			}
+
 			if (wp->running_children >= wp->config->pm_max_children) {
 				if (!wp->warn_max_children) {
 					fpm_scoreboard_update(0, 0, 0, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, wp->scoreboard);

@@ -1318,6 +1318,16 @@ listen.allowed_clients = 10.0.0.4,10.0.0.5
 chroot = /srv/jail
 ```
 
+### Crash backoff (issue #727)
+
+The master waits longer before it starts a new child that fails fast. A child
+that exits within 10 seconds, with no request served, is a fast failure. This
+applies to both executors. The directive `pm.max_consecutive_failures` sets how
+many fast failures in a row the pool allows. The default is `6`, and `0` means
+that the pool never gives up. The rules are in [`crash-backoff.md`](crash-backoff.md),
+and the operator endpoint shows the state as described in
+[Crash backoff](operator-endpoint.md#crash-backoff-issue-727).
+
 ### `ping.path` and `operator.status_path`
 
 **They are on two different sockets.**

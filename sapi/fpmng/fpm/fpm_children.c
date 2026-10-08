@@ -28,6 +28,7 @@
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
 #include "fpm_children_extra.h"
+#include "fpm_crash_backoff.h"
 #include "fpm_reload_selective.h"
 #include "fpm_scale_down_drain.h"
 #include "fpm_child_php_log.h"
@@ -399,6 +400,13 @@ void fpm_children_bury(void)
 
 			fpm_child_unlink(child);
 
+			/* Issue #727: classify the exit before the scoreboard slot is freed,
+			 * because the slot holds the request count that says whether the child
+			 * served anything. */
+			if (restart_child) {
+				fpm_crash_backoff_child_exited(child);
+			}
+
 			fpm_scoreboard_proc_free(child);
 
 			fpm_clock_get(&tv1);
@@ -577,6 +585,12 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 	 */
 	while (fpm_children_may_fork(wp) && wp->running_children < max && (fpm_global_config.process_max < 1 || fpm_globals.running_children < fpm_global_config.process_max)) {
 
+		/* Issue #727: a respawn after a fast failure waits out its backoff delay.
+		 * The gate arms a one-shot timer that calls this function again. */
+		if (!fpm_crash_backoff_may_spawn(wp)) {
+			break;
+		}
+
 		warned = 0;
 		child = fpm_resources_prepare(wp);
 
@@ -629,6 +643,7 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 					proc->pid = pid;
 				}
 				fpm_clock_get(&child->started);
+				fpm_crash_backoff_child_spawned(child);
 				fpm_parent_resources_use(child);
 
 				zlog(is_debug ? ZLOG_DEBUG : ZLOG_NOTICE, "[pool %s] child %d started", wp->config->name, (int) pid);

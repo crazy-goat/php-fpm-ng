@@ -4541,7 +4541,13 @@ changes the reload order, which issue #661 does not describe. This is a
 decision for the maintainer, and it needs a follow-up issue.
 
 Not measured under load: TLS listeners, `http.reuseport = on` and a unix public
-listener. The TLS fingerprint rule has no phpt test yet. The phpt tests are
-`fpmng-gateway-listener-reload.phpt` (one client, no refused and no reset
-connection), `fpmng-gateway-listener-rebind.phpt` and
-`fpmng-reload-selective-failed-exec.phpt`.
+listener. The TLS fingerprint rule has no phpt test yet. The phpt tests for the
+listener handover are:
+
+- `fpmng-gateway-listener-reload.phpt`: one client. It asserts no refused
+  connection. It counts resets and does not assert them.
+- `fpmng-gateway-listener-swap.phpt`
+- `fpmng-gateway-listener-rebind.phpt`
+- `fpmng-gateway-listener-stale-record.phpt`
+- `fpmng-gateway-listener-nocert-reload.phpt`
+- `fpmng-reload-selective-failed-exec.phpt`

@@ -26,7 +26,8 @@ require_once "tester.inc";
  * A reset is counted and not asserted. Under load the gateway still resets a few
  * connections across a reload: the pool workers stop before the gateway drains, and
  * after process_control_timeout the gateway closes the request still in flight
- * (docs/NOTES.md section 3ak). Asserting zero resets made the test flaky.
+ * (docs/NOTES.md section 3ak). Resets occur under load, so asserting zero resets
+ * would fail the test in those runs.
  *
  * A 502 is counted in 'other' and is not asserted here. It comes from a
  * persistent upstream connection that the app worker closed during the reload,

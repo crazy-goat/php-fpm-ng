@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: http.ready_path answers 200 while the gateway serves and 503 on a keep-alive connection during a drain (issue #646)
+fpm-ng: http.ready_path answers 200 while the gateway serves, 503 to a probe pipelined behind a request during a drain, and closes idle keep-alive connections (issue #646)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -13,11 +13,12 @@ require_once "tester.inc";
 
 /* Issue #646, phase 1. http.ready_path is answered by the gateway process
  * itself: 200 "ready" while it serves, 503 "draining" once SIGQUIT has set
- * gw->stopping. The drain also removes the listeners, so a new connection is
- * not answered during the drain at all. Only a client that already holds a
- * keep-alive connection can see the 503, which is why this test uses one: a
- * slow request keeps the connection busy, the drain waits for it, and the
- * probe is pipelined behind it on the same connection. #661 refines this. */
+ * gw->stopping. The drain removes the listeners, so a new connection is
+ * refused. The drain also closes an idle keep-alive connection at its first
+ * tick, so that connection gets no 503 at all. The 503 is seen only by a probe
+ * pipelined behind a request that is still in flight on the same connection:
+ * the slow request keeps that connection busy, the drain waits for it, and the
+ * probe is parsed after the slow reply. */
 
 const SLOW = 3;
 
@@ -96,6 +97,22 @@ function read_all($fp, int $seconds): string
     return $out;
 }
 
+/* Reads one reply on a connection that stays open: until the body $body has
+ * arrived, or until the read times out. */
+function read_until($fp, string $body, int $seconds): string
+{
+    stream_set_timeout($fp, $seconds);
+    $out = '';
+    while (!str_ends_with($out, $body)) {
+        $chunk = fread($fp, 8192);
+        if ($chunk === false || $chunk === '') {
+            break;
+        }
+        $out .= $chunk;
+    }
+    return $out;
+}
+
 /* One request on a fresh connection, closed by the client after the reply. */
 function get_once(string $http, string $path): string
 {
@@ -130,6 +147,19 @@ try {
     }
     echo "ready while serving: ok\n";
 
+    /* An idle keep-alive connection: one probe answered, then nothing. The
+     * drain closes it at its first tick, so after SIGQUIT the client reads
+     * only the close, with no bytes. */
+    $idle = @stream_socket_client("tcp://$http", $errno, $error, 5);
+    if (!$idle) {
+        throw new RuntimeException("connect: $error");
+    }
+    fwrite($idle, "GET /ready HTTP/1.1\r\nHost: test\r\n\r\n");
+    $r = read_until($idle, 'ready', 5);
+    if (!str_starts_with($r, 'HTTP/1.1 200') || !str_ends_with($r, 'ready')) {
+        throw new RuntimeException("the idle keep-alive connection is not 200 ready\n$r");
+    }
+
     /* The slow request and the probe share one keep-alive connection. The
      * gateway gets SIGQUIT, the drain signal, while the slow request is in
      * flight. The drain keeps that connection open, and the probe is parsed
@@ -144,6 +174,15 @@ try {
         . "GET /ready HTTP/1.1\r\nHost: test\r\n\r\n");
     usleep(500000);
     $tester->signal('QUIT', $oldGw);
+
+    $idleTail = read_all($idle, 5);
+    $idleClosed = feof($idle);
+    fclose($idle);
+    if ($idleTail !== '' || !$idleClosed) {
+        throw new RuntimeException("the idle keep-alive connection was not closed by the drain\n$idleTail");
+    }
+    echo "idle keep-alive connection closed by the drain: ok\n";
+
     $response = read_all($ka, 15);
     fclose($ka);
 
@@ -152,7 +191,7 @@ try {
             || !str_contains(substr($response, $second), 'draining')) {
         throw new RuntimeException("the probe behind a slow request is not 503 draining during the drain\n$response");
     }
-    echo "503 while draining on a keep-alive connection: ok\n";
+    echo "503 for a probe pipelined behind a slow request during the drain: ok\n";
 
     /* The drain ends once the probe connection is closed; the master then
      * replaces the gateway with a new process. */
@@ -186,7 +225,8 @@ try {
 ?>
 --EXPECT--
 ready while serving: ok
-503 while draining on a keep-alive connection: ok
+idle keep-alive connection closed by the drain: ok
+503 for a probe pipelined behind a slow request during the drain: ok
 new generation is ready: ok
 Done
 --CLEAN--

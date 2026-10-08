@@ -317,6 +317,19 @@ held requests per worker, or needs them to survive the ceiling, that is a
 design change: it has to come with a bound of its own, and it belongs to #68
 and its follow-ups, not to this limit.
 
+#### Requests that arrive while the worker stops (issue #668)
+
+Every stop of the worker runs the same drain. The stop comes from `worker.max_pending` saturation, `pm.max_requests`, `worker.max_memory`, `worker.max_lifetime`, `SIGQUIT` (the master sends it on a reload) or `SIGUSR1` (retires one child).
+
+The drain stops the listener and answers every held request `503`. Then it runs the event loop for 100 ms (`FPM_WORKER_GRACE_MS` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). No directive sets this window.
+
+During the window:
+
+- A request on an open connection that reaches the worker gets `503 Worker unavailable`.
+- The worker does not accept a new connection. The shared listening socket is left to the sibling workers.
+
+After the window, the worker closes its open connections without a reply. A request on an open connection that arrives after the window gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. Every worker exit takes 100 ms longer because of the window.
+
 #### `worker.max_pending` (issue #331)
 
 - **Default:** `256` (`FPM_WORKER_PENDING_MAX`).

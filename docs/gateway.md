@@ -192,6 +192,10 @@ process holds. The cap counts idle keep-alive connections too. With
 `http.gateways = 2`, the pool can hold twice the number. At the cap, the process
 stops accepting: a new client waits in the listen backlog until a connection
 closes. The process does not refuse that client.
+A client that opens a connection and sends no request keeps its slot until
+`http.read_timeout` closes the connection, or until the client closes it. The
+default is `5000`. With `http.read_timeout = 0` no deadline applies, so such a
+client holds its slot until it closes.
 
 `http.max_connections_per_client` caps the connections from one peer address
 inside the process cap. A client over this cap gets one of two answers: the

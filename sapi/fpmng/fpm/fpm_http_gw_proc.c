@@ -414,7 +414,7 @@ static void fpm_http_log_follow_readable(evutil_socket_t fd, short what, void *a
 	(void) what;
 
 	if (fpm_error_log_follow_child_adopt() > 0) {
-		gw->access_log = fpm_http_access_log_reopen(gw->access_log, gw->pool, gw->access_log_path);
+		gw->access_log = fpm_http_access_log_reopen(gw->access_log, gw->pool, gw->access_log_path, gw->access_format);
 	}
 }
 
@@ -647,7 +647,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * Opened after the drop so the file is created by the dropped-to identity,
 	 * which is also what lets this process reopen it after a logrotate on its
 	 * own (issue #137, fpm_http_log_follow_readable()). */
-	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
+	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path, gw->access_format);
 
 	/* One resolve per target, in this gateway process, exactly where the one
 	 * resolve used to be (issue #340). A name that no longer resolves is still

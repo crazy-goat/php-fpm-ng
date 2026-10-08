@@ -98,6 +98,7 @@ struct {								\
 #include "fpm_http_forwarded.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_request_id.h"
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 /* The request-target contract both ingresses read, since #681 (fpm_http_target.h). */
@@ -369,6 +370,14 @@ struct fpm_http_client_s {
 	struct fpm_http_gateway_s *gw;
 	struct evhttp_connection *evcon;
 	fpm_http_conn *c;
+	/* Issue #642: stamped in fpm_http_client_request_begin() for the request
+	 * in flight on this connection -- the start of the access log's
+	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves
+	 * one request at a time, so one stamp per node is enough. */
+	struct timeval request_started;
+	/* Issue #642: the id of the request in flight, "" when http.request_id is
+	 * off or no id could be made. Sent to the target and logged. */
+	char request_id[FPM_HTTP_REQUEST_ID_SIZE];
 	/* issue #490: exact links inside the process-local hash bucket. The close
 	 * callback already carries this node, so removal does not search by evcon
 	 * and there is no second list that could diverge from the index. */
@@ -455,7 +464,9 @@ struct fpm_http_gateway_s {
 	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
+	int request_id_mode; /* http.request_id: FPM_HTTP_REQUEST_ID_OFF/_GENERATE/_PROPAGATE, see fpm_http_request_id.h (#642) */
 	char *access_log_path;				/* http.access_log; NULL = disabled */
+	int access_format;				/* http.access_format: FPM_HTTP_ACCESS_FORMAT_COMBINED or _JSON, see fpm_http_access_log.h (#642) */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL in the master */
 	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
 	int front_controller_ok;			/* validated once by the master, before the first fork -- see fpm_http_front_controller_validate() */
@@ -764,6 +775,11 @@ struct _fpm_http_conn {
 	struct timeval wait_since;
 	struct event *wait_timer;
 	long queue_wait_ms;
+	/* Issue #642: set when the request is handed to an upstream (the pump),
+	 * the start of the access log's upstream_ms. upstream_started is 0 for a
+	 * request no target ever received, which prints upstream_ms=-. */
+	struct timeval upstream_since;
+	int upstream_started;
 };
 
 /* One persistent FastCGI connection to the pool, serving one request at a time.

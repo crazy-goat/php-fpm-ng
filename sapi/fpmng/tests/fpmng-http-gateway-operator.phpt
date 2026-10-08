@@ -229,7 +229,9 @@ try {
             $appLine = $line;
         }
     }
-    if ($appLine === null || !preg_match('/ target=operator$/', $appLine)) {
+    /* Issue #642: the #642 timing fields follow target=; the line still ends
+     * with upstream_ms=, so the target= check is anchored to its own field. */
+    if ($appLine === null || !preg_match('/ target=operator duration_ms=\S+ upstream_ms=\S+$/', $appLine)) {
         throw new RuntimeException("no target=operator line for /metrics/app:\n$content");
     }
     if (str_contains($content, '/metrics/api')) {

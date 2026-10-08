@@ -1847,7 +1847,7 @@ static void fpm_http_counters_row(struct fpm_http_gateway_s *gw, unsigned i,
 	 * block was zeroed by the master) are no longer in the number. */
 	out->upstreams_used = 0;
 	for (p = 0; p < gw->counters->nproc; p++) {
-		out->upstreams_used += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[1 + i];
+		out->upstreams_used += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i];
 	}
 	out->max_upstreams = i < gw->ntargets ? gw->targets[i].max_upstreams
 										  : (i == gw->ntargets ? FPM_HTTP_OPERATOR_UPSTREAMS : 0);
@@ -1942,13 +1942,21 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 			"# HELP fpmng_gateway_connections_open Client connections currently open to the gateway.\n"
 			"# TYPE fpmng_gateway_connections_open gauge\n"
 			"# HELP fpmng_gateway_ping_total ping.path answers, served by the gateway itself.\n"
-			"# TYPE fpmng_gateway_ping_total counter\n");
+			"# TYPE fpmng_gateway_ping_total counter\n"
+			"# HELP fpmng_gateway_responses_paused Client responses whose upstream is paused right now because the client has not read them (http.response_buffer).\n"
+			"# TYPE fpmng_gateway_responses_paused gauge\n"
+			"# HELP fpmng_gateway_responses_paused_total Times a response paused its upstream because the client had not read it, since the pool started.\n"
+			"# TYPE fpmng_gateway_responses_paused_total counter\n");
 
 	fpm_operator_buf_appendf(b,
 			"fpmng_gateway_connections_open{pool=\"%s\"} %lu\n"
-			"fpmng_gateway_ping_total{pool=\"%s\"} %lu\n",
+			"fpmng_gateway_ping_total{pool=\"%s\"} %lu\n"
+			"fpmng_gateway_responses_paused{pool=\"%s\"} %lu\n"
+			"fpmng_gateway_responses_paused_total{pool=\"%s\"} %lu\n",
 			gw->pool, fpm_http_connections_open(gw),
-			gw->pool, (unsigned long) gw->counters->ping_total);
+			gw->pool, (unsigned long) gw->counters->ping_total,
+			gw->pool, fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_RESPONSES_PAUSED),
+			gw->pool, (unsigned long) gw->counters->responses_paused_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {
 		struct fpm_http_gateway_row_s row;
@@ -1994,10 +2002,13 @@ void fpm_http_gateway_operator_status(struct fpm_worker_pool_s *wp, const char *
 
 	fpm_operator_buf_appendf(&reply->body,
 			"{\"pools\":[{\"name\":\"%s\",\"type\":\"gateway\",\"serves_requests\":false,"
-			"\"requests\":%lu,\"connections_open\":%lu,\"ping_total\":%lu}",
+			"\"requests\":%lu,\"connections_open\":%lu,\"ping_total\":%lu,"
+			"\"responses_paused\":%lu,\"responses_paused_total\":%lu}",
 			gw->pool, (unsigned long) gw->counters->requests_total,
 			fpm_http_connections_open(gw),
-			(unsigned long) gw->counters->ping_total);
+			(unsigned long) gw->counters->ping_total,
+			fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_RESPONSES_PAUSED),
+			(unsigned long) gw->counters->responses_paused_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {
 		struct fpm_http_gateway_row_s row;

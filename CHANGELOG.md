@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- The gateway (`pool.type = gateway`) now counts the responses it pauses. A response pauses its upstream when the client has not read `http.response_buffer` bytes (issue #596), and the pause was not visible before. Two new metrics show it: `fpmng_gateway_responses_paused_total`, a pool-wide counter of the pauses, and `fpmng_gateway_responses_paused`, a gauge of the responses paused at this time. The gauge is kept per gateway process, so a gateway killed while a response is paused leaves no count behind: the master zeroes its block. The `/status` pool row gains `responses_paused` and `responses_paused_total`. Documented in `docs/gateway.md` and `docs/operator-endpoint.md`; new test `fpmng-gateway-responses-paused-metrics.phpt` (issue #706).
+
 ## [0.16.0] - 2026-10-07
 
 ### Added

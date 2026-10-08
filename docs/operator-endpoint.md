@@ -263,8 +263,12 @@ forwarded operator pages (#389) and `target="-"` for local answers (including
 every request on `http.plain_listen`), the `fpmng_gateway_connections_open`
 gauge (per gateway process, summed by the renderer) and the pool-wide
 `fpmng_gateway_ping_total` counter, and one `fpmng_gateway_exposed_pool` line
-per pool the gateway forwards for. `/status` on the gateway is the same numbers
-as JSON, one row per target plus the pool row.
+per pool the gateway forwards for. The page also has the flow-control pair
+`fpmng_gateway_responses_paused`, a gauge of the paused responses of all gateway
+processes, and `fpmng_gateway_responses_paused_total`, a pool-wide counter of
+pauses (issue #706). `/status` on the gateway is the same numbers as JSON, one
+row per target plus the pool row. The pool row also has `responses_paused` and
+`responses_paused_total`.
 
 ### Known upstream bug: keep-alive counters (php/php-src#18956)
 

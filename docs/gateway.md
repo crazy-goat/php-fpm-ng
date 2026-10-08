@@ -135,6 +135,10 @@ only while the client keeps up:
 | `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
 | `http.response_min_rate` | Minimum bytes per second the client must drain while the upstream is held back for it. Below that the connection is closed and the worker is released. `0` = no minimum. | `256` |
 
+The gateway counts each pause. Read `fpmng_gateway_responses_paused_total` for the number of
+pauses. Read `fpmng_gateway_responses_paused` for the number of responses that are paused at
+this time. See [The gateway's own numbers](#the-gateways-own-numbers) (issue #706).
+
 A larger `http.response_buffer` frees a PHP worker earlier for a slow client and costs gateway
 memory per slow client; a smaller one bounds the memory and holds the worker longer. The limit
 is checked after each piece of the response, so one read (16 KiB) can overshoot it, and the
@@ -447,11 +451,13 @@ allocates in `.init_main`, before the first fork. It holds two kinds of data,
 and the difference is the point:
 
 - **Pool-wide monotonic counters** -- the baseline `requests` and ping totals,
-  and the per-target request/rejection counts. Every gateway process bumps them
+  the per-target request/rejection counts, and the paused-response total
+  (issue #706). Every gateway process bumps them
   with cmp-set atomics and no locking, and they **survive a respawned gateway
   process**: the segment belongs to the pool, not the process.
-- **Per gateway process gauges** -- `connections_open` and the per-target
-  `upstreams_used`. Each process writes only its own block, the renderer
+- **Per gateway process gauges** -- `connections_open`, `responses_paused`
+  (issue #706) and the per-target `upstreams_used`. Each process writes only
+  its own block, the renderer
   **sums** every block (the #333 live-gauges shape), and the master **zeroes a
   dead process's block** in `fpm_http_gateway_on_exit()`. A gauge is "currently
   open", and a process killed with connections open runs no close callback, so
@@ -485,13 +491,21 @@ equals the sum of the target rows below. Its own series label a **target**:
 `fpmng_gateway_connections_open{pool="<gw>"}` and
 `fpmng_gateway_ping_total{pool="<gw>"}` are the numbers no target owns: the
 first is the per-process sum described above, the second a pool-wide counter.
+`fpmng_gateway_responses_paused{pool="<gw>"}` and
+`fpmng_gateway_responses_paused_total{pool="<gw>"}` (issue #706) count the flow
+control of `http.response_buffer`. The gauge is the paused responses of all
+gateway processes, summed as above. The counter rises by one each time a
+response pauses its upstream. Neither series has a `target` label, because a
+pause is counted for the whole pool.
+
 The `/metrics` page also carries an **index**: one
 `fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`
 line per pool the gateway forwards for (#389), so a scraper that found the
 gateway knows where `<base>/<pool>` points. It is a discovery aid, not an
 aggregate of their series; that endpoint was removed in #278 and stays removed.
 `/status` on the gateway is the same numbers as JSON, one row per target plus a
-pool row, in the generic `{"pools":[...]}` shape.
+pool row, in the generic `{"pools":[...]}` shape. The pool row also has the keys
+`responses_paused` and `responses_paused_total` (issue #706).
 
 Only the monotonic counters survive a respawned gateway; the gauges are
 reconciled when a process dies, and the whole segment is rebuilt by a reload:

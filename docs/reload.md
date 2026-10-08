@@ -375,8 +375,10 @@ Details worth knowing:
   in a per-generation table in `fpm_metrics.c`, not recomputed from pool
   order. The slots a replaced pool used in the previous generation are kept
   free of new ranges, because a #329 survivor of that pool may still write to
-  its old slot; the new pool's slots are cleared by punching a hole in the
-  memfd, which frees the memory instead of faulting it in.
+  its old slot. The reservation lasts 30 seconds, and a second reload keeps
+  its expiry (see "Back-to-back selective reloads" below). The new pool's
+  slots are cleared by punching a hole in the memfd, which frees the memory
+  instead of faulting it in.
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
@@ -434,6 +436,73 @@ bridge. The two use distinct environment variables with distinct
 delimiter schemes specifically so that a config with both an unchanged
 pool and a separately-changed `supervisor` pool in the same reload cannot
 have one mechanism misparse the other's env var contents.
+
+### Back-to-back selective reloads (issue #692)
+
+This section covers a #329 survivor that still runs when a second selective
+reload starts. It states why no two live writers can share a metrics slot
+across back-to-back reloads, and it lists the limits that remain. The proof
+covers the survivors of pools that the new configuration keeps. Limit 2
+below covers the others.
+
+**The survivor keeps its deadline.** When a master spares a child, it writes
+the entry `pool-name:pid:deadline` to `FPMNG_RELOAD_SURVIVORS`. The deadline
+is the spare time plus `FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S`, which is 30
+seconds. The new master tracks the survivor. It retires the survivor at the
+deadline, or earlier when a replacement copy starts.
+
+**A master carries its survivor across a reload.** A master tracks at most one
+survivor for each pool. It does not spare another child of that pool while it
+tracks one. At its `execvp()`, the master writes each survivor that it still
+tracks back to `FPMNG_RELOAD_SURVIVORS`, with the same deadline. The
+`FPM_CLEANUP_PARENT_EXEC` cleanup `fpm_pool_supervisor_reload_survivor_carry()`
+does this. The next master tracks the survivor again and retires it at the
+same time. Before issue #692, the second reload neither signalled the survivor
+nor wrote it back, so the survivor was orphaned.
+
+**A slot reservation keeps its expiry.** When a master starts, it reserves the
+metrics slot range of each replaced pool until 30 seconds after its start
+(`fpm_metrics_reserve()`). At the next reload, the old master writes each
+reservation that still holds as a `Y:<base>:<count>:<until>` record. The new
+master keeps the same `<until>`. It does not extend it.
+
+**Why no two live writers share a slot.** Consider a survivor `S` of pool `p`,
+which writes to the slot range `R`:
+
+1. The old master spares `S` at time `t0`. The deadline of `S` is `t0 + 30`.
+2. The next master starts at time `t1`, which is later than `t0`. Pool `p` is
+   changed, so the next master reserves `R` until `t1 + 30`. That expiry is
+   not earlier than the deadline of `S`.
+3. Every later master keeps the deadline of `S` and the expiry of `R`. Neither
+   value grows.
+4. A pool that is not `p` takes a slot of `R` only after the expiry. At the
+   deadline, the master sends the stop signal to `S`.
+
+Without `reload.selective = yes`, the metrics region is not inherited. A
+survivor then writes only to the old region, and no new pool can share it.
+
+**Remaining limits.**
+
+1. A survivor that does not exit after its stop signal keeps running after its
+   deadline. The master does not send a second signal, and it does not escalate
+   to `SIGKILL`. Its slot can then be taken by a new pool. This was already true
+   before issue #692.
+2. A survivor of a pool that the new configuration removes has no master that
+   tracks it. Nothing retires it, and its slot range is reserved only until the
+   expiry. After the expiry, a new pool can take the slot while the survivor
+   still writes there. This also happens when the pool is removed in a later
+   reload. Issue #692 does not change this case. See `docs/supervisor.md`.
+3. The deadline and the expiry are wall-clock times (`time(NULL)`) in whole
+   seconds. If the clock steps back between a spare and the next start, the
+   expiry can come before the deadline. The window is the time of one `execvp()`,
+   normally well under a second.
+4. In a test build with `FPMNG_DEBUG_CLOCK_RATE` above 1, each process uses its
+   own debug clock. The carried times are then approximate. The packages do not
+   allow this clock.
+
+The test `fpmng-reload-survivor-back-to-back.phpt` runs two selective reloads
+with a survivor that writes into the slot of its pool. A pool added by the
+second reload must not show the survivor's counter.
 
 ### Accepted degradations of an adopted child
 

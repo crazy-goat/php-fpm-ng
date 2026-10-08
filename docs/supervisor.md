@@ -424,8 +424,9 @@ goes through the signal-then-`execvp()` sequence as before.
 `mmap(MAP_ANONYMOUS)` shared memory this pool type otherwise uses for all its
 other state, per `docs/NOTES.md` section 3p, does not), so the survivor's pid
 is handed to the new generation through a single environment variable, one
-`pool-name:pid` pair per pool that spared a child. The new generation reads
-its own pool's entry back out on startup, confirms the pid is still alive,
+`pool-name:pid:deadline` entry per pool that spared a child. The deadline is
+an absolute time, set when the child is spared (issue #692). The new generation
+reads its own pool's entry back out on startup, confirms the pid is still alive,
 and starts watching it — it is not a child this generation ever forked, so it
 is tracked the same way `pool.type = http`'s gateway processes are (a
 generic master-side "notice this pid's exit, but it is not a `pm.*` child"
@@ -471,7 +472,9 @@ forever.
   a reload to land in the exact same config change, which is narrow enough
   that a follow-up (a startup-time sweep that kills any env-var entry no pool
   claimed) was left for a separate issue rather than built speculatively here
-  (see `findings.md`).
+  (see `findings.md`). A pool removed by a later reload is the same case: its
+  survivor is carried once more and then no generation tracks it. The limits
+  are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)".
 - **Selective reload** — skipping *unrelated* pools entirely on a reload that
   only changed one of them — is issue #330's scope, not this one's. This
   issue is useful on its own even without it, per the original request: it

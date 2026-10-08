@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
 
 struct fpm_worker_pool_s;
 
@@ -56,6 +57,13 @@ int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *c
  * slot for a while, so the new generation must not hand those slots to
  * another writer. */
 void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count));
+
+/* Calls `cb` for every slot range that the previous generation itself kept
+ * reserved (a Y record, issue #692) and that is still reserved: `until` is the
+ * time the reservation expires, and expired ranges are not passed on. A #329
+ * survivor of an earlier reload may still write there after a later reload
+ * has dropped the pool that owned it. */
+void fpm_reload_shm_foreach_carried_range(void (*cb)(uint32_t base, uint32_t count, time_t until));
 
 /* Called by fpm_metrics_init_main() when it has finished with the inherited
  * descriptor, whether it kept it (`kept` != 0, the fd is then registered for

@@ -7,11 +7,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
+#include "fpm_debug_clock.h"
 #include "fpm_metrics.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_reload_shm.h"
 #include "fpm_scoreboard.h"
 #include "fpm_shm.h"
@@ -29,6 +32,7 @@ struct fpm_metrics_range_s {
 	struct fpm_metrics_range_s *next;
 	const char *name; /* wp->config->name: lives as long as the generation; NULL = reserved */
 	uint32_t base, count;
+	time_t until; /* reserved only: the reservation ends at this time (issue #692) */
 };
 
 static struct fpm_metrics_range_s *ranges = NULL;
@@ -59,6 +63,18 @@ int fpm_metrics_pool_range(const struct fpm_worker_pool_s *wp, uint32_t *base, u
 		}
 	}
 	return 0;
+}
+/* }}} */
+
+void fpm_metrics_foreach_reserved(void (*cb)(uint32_t base, uint32_t count, time_t until)) /* {{{ */
+{
+	struct fpm_metrics_range_s *r;
+
+	for (r = ranges; r; r = r->next) {
+		if (!r->name) {
+			cb(r->base, r->count, r->until);
+		}
+	}
 }
 /* }}} */
 
@@ -97,7 +113,7 @@ static uint32_t fpm_metrics_first_fit(uint32_t count) /* {{{ */
 }
 /* }}} */
 
-static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t count) /* {{{ */
+static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t count, time_t until) /* {{{ */
 {
 	struct fpm_metrics_range_s *r = calloc(1, sizeof(*r));
 
@@ -107,6 +123,7 @@ static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t coun
 	r->name = name;
 	r->base = base;
 	r->count = count;
+	r->until = until;
 	r->next = ranges;
 	ranges = r;
 }
@@ -114,10 +131,22 @@ static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t coun
 
 /* Slots of a replaced pool in the old generation: kept free of new ranges
  * because its #329 survivor can still be writing to its old slot, and two
- * writers on one slot race (issue #537). */
+ * writers on one slot race (issue #537). The survivor's deadline is
+ * FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S after its spare, and the spare
+ * happened in the previous generation, before this init, so this reservation
+ * outlasts it. A later reload keeps this expiry, it does not extend it
+ * (fpm_metrics_reserve_carried(), issue #692). */
 static void fpm_metrics_reserve(uint32_t base, uint32_t count) /* {{{ */
 {
-	fpm_metrics_add_range(NULL, base, count);
+	fpm_metrics_add_range(NULL, base, count, FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S);
+}
+/* }}} */
+
+/* A reservation the previous generation kept (Y record, issue #692): it keeps
+ * the expiry it was given, so a second reload cannot extend it. */
+static void fpm_metrics_reserve_carried(uint32_t base, uint32_t count, time_t until) /* {{{ */
+{
+	fpm_metrics_add_range(NULL, base, count, until);
 }
 /* }}} */
 
@@ -191,12 +220,15 @@ int fpm_metrics_init_main(void) /* {{{ */
 			uint32_t base, count;
 
 			if (wp->config->pm_max_children > 0 && fpm_reload_shm_inherited_range(wp->config->name, &base, &count) && count == (uint32_t) wp->config->pm_max_children && base + count <= inh_slots && !fpm_metrics_overlaps(base, count)) {
-				fpm_metrics_add_range(wp->config->name, base, count);
+				fpm_metrics_add_range(wp->config->name, base, count, 0);
 			}
 		}
 	}
 	if (have_inh) {
 		fpm_reload_shm_foreach_unspared_range(fpm_metrics_reserve);
+		/* Still reserved from an earlier reload (issue #692): a pool's
+		 * range that a later reload dropped has no X record any more. */
+		fpm_reload_shm_foreach_carried_range(fpm_metrics_reserve_carried);
 	}
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		uint32_t base;
@@ -204,7 +236,7 @@ int fpm_metrics_init_main(void) /* {{{ */
 		if (wp->config->pm_max_children > 0 && !fpm_metrics_range_of(wp, &base)) {
 			uint32_t count = (uint32_t) wp->config->pm_max_children;
 
-			fpm_metrics_add_range(wp->config->name, fpm_metrics_first_fit(count), count);
+			fpm_metrics_add_range(wp->config->name, fpm_metrics_first_fit(count), count, 0);
 		}
 	}
 	{
@@ -271,7 +303,7 @@ int fpm_metrics_init_main(void) /* {{{ */
 				if (wp->config->pm_max_children > 0) {
 					uint32_t count = (uint32_t) wp->config->pm_max_children;
 
-					fpm_metrics_add_range(wp->config->name, fpm_metrics_first_fit(count), count);
+					fpm_metrics_add_range(wp->config->name, fpm_metrics_first_fit(count), count, 0);
 					total += count;
 				}
 			}

@@ -14,6 +14,7 @@
 #include "fpm_reload_shm.h"
 #include "fpm_children.h"
 #include "fpm_conf.h"
+#include "fpm_debug_clock.h"
 #include "fpm_scoreboard.h"
 #include "fpm_shm.h"
 #include "fpm_worker_pool.h"
@@ -27,7 +28,12 @@
  *   X:<pool>:<base>:<count>                 any pool's metrics slot range in the
  *                                           old generation (spared or not): the
  *                                           ones without a B record are reserved,
- *                                           a #329 survivor may still write there */
+ *                                           a #329 survivor may still write there
+ *   Y:<base>:<count>:<until>                a slot range the old generation held
+ *                                           reserved and that is still reserved
+ *                                           until <until> (unix time): the
+ *                                           survivor of an earlier reload may
+ *                                           still write there (issue #692) */
 #define FPM_RELOAD_SHM_ENV "FPMNG_SELECTIVE_RELOAD_SHM"
 
 struct fpm_reload_shm_inh_s {
@@ -37,8 +43,12 @@ struct fpm_reload_shm_inh_s {
 	int fd;
 	size_t size;
 	uint32_t a, b;
+	time_t until; /* 'Y' only */
 	int claimed;
 };
+
+/* Defined in fpm_metrics.c. */
+void fpm_metrics_foreach_reserved(void (*cb)(uint32_t base, uint32_t count, time_t until));
 
 static struct fpm_reload_shm_inh_s *inherited = NULL;
 static int inherited_loaded = 0;
@@ -102,7 +112,7 @@ static void fpm_reload_shm_set_cloexec(int fd, int on) /* {{{ */
 }
 /* }}} */
 
-static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, size_t size, uint32_t a, uint32_t b) /* {{{ */
+static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, size_t size, uint32_t a, uint32_t b, time_t until) /* {{{ */
 {
 	struct fpm_reload_shm_inh_s *r = calloc(1, sizeof(*r));
 
@@ -115,6 +125,7 @@ static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, si
 	r->size = size;
 	r->a = a;
 	r->b = b;
+	r->until = until;
 	r->next = inherited;
 	inherited = r;
 }
@@ -144,18 +155,20 @@ static void fpm_reload_shm_load(void) /* {{{ */
 
 	for (rec = strtok_r(copy, ";", &save); rec; rec = strtok_r(NULL, ";", &save)) {
 		char name[256];
-		unsigned long long size;
+		unsigned long long size, until;
 		unsigned a, b;
 		int fd;
 
 		if (sscanf(rec, "S:%255[^:]:%d:%llu", name, &fd, &size) == 3) {
-			fpm_reload_shm_add_inherited('S', name, fd, (size_t) size, 0, 0);
+			fpm_reload_shm_add_inherited('S', name, fd, (size_t) size, 0, 0, 0);
 		} else if (sscanf(rec, "M:%d:%llu:%u:%u", &fd, &size, &a, &b) == 4) {
-			fpm_reload_shm_add_inherited('M', NULL, fd, (size_t) size, a, b);
+			fpm_reload_shm_add_inherited('M', NULL, fd, (size_t) size, a, b, 0);
 		} else if (sscanf(rec, "B:%255[^:]:%u:%u", name, &a, &b) == 3) {
-			fpm_reload_shm_add_inherited('B', name, -1, 0, a, b);
+			fpm_reload_shm_add_inherited('B', name, -1, 0, a, b, 0);
 		} else if (sscanf(rec, "X:%255[^:]:%u:%u", name, &a, &b) == 3) {
-			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b);
+			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b, 0);
+		} else if (sscanf(rec, "Y:%u:%u:%llu", &a, &b, &until) == 3) {
+			fpm_reload_shm_add_inherited('Y', NULL, -1, 0, a, b, (time_t) until);
 		}
 	}
 	free(copy);
@@ -309,6 +322,20 @@ void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t co
 }
 /* }}} */
 
+void fpm_reload_shm_foreach_carried_range(void (*cb)(uint32_t base, uint32_t count, time_t until)) /* {{{ */
+{
+	struct fpm_reload_shm_inh_s *r;
+	time_t now = FPM_NOW();
+
+	fpm_reload_shm_load();
+	for (r = inherited; r; r = r->next) {
+		if (r->kind == 'Y' && r->until > now) {
+			cb(r->a, r->b, r->until);
+		}
+	}
+}
+/* }}} */
+
 void fpm_reload_shm_metrics_done(int kept) /* {{{ */
 {
 	struct fpm_reload_shm_inh_s *r = fpm_reload_shm_find('M', NULL);
@@ -381,6 +408,18 @@ static void fpm_reload_shm_append_env(const char *record) /* {{{ */
 /* Defined in fpm_metrics.c. */
 int fpm_metrics_pool_range(const struct fpm_worker_pool_s *wp, uint32_t *base, uint32_t *count);
 
+static void fpm_reload_shm_carry_range(uint32_t base, uint32_t count, time_t until) /* {{{ */
+{
+	char rec[128];
+
+	if (until <= FPM_NOW()) {
+		return;
+	}
+	snprintf(rec, sizeof(rec), "Y:%u:%u:%lld", base, count, (long long) until);
+	fpm_reload_shm_append_env(rec);
+}
+/* }}} */
+
 void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	const char *name = wp->config->name;
@@ -414,6 +453,10 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 					fpm_reload_shm_append_env(rec);
 				}
 			}
+			/* Reserved ranges that are still reserved (issue #692): the
+			 * named ones above are reserved by the next generation through
+			 * X, these have no pool in this generation to name them. */
+			fpm_metrics_foreach_reserved(fpm_reload_shm_carry_range);
 		}
 		snprintf(rec, sizeof(rec), "B:%s:%u:%u", name, base, count);
 		fpm_reload_shm_append_env(rec);

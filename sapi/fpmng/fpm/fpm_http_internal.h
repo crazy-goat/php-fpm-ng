@@ -466,6 +466,7 @@ struct fpm_http_gateway_s {
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
 	int request_id_mode; /* http.request_id: FPM_HTTP_REQUEST_ID_OFF/_GENERATE/_PROPAGATE, see fpm_http_request_id.h (#642) */
 	char *access_log_path;				/* http.access_log; NULL = disabled */
+	int access_format;				/* http.access_format: FPM_HTTP_ACCESS_FORMAT_COMBINED or _JSON, see fpm_http_access_log.h (#642) */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL in the master */
 	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
 	int front_controller_ok;			/* validated once by the master, before the first fork -- see fpm_http_front_controller_validate() */

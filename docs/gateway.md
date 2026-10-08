@@ -254,7 +254,7 @@ Log Format fields keep their place. The gateway adds these fields after
 | `queue_ms` | Time the request waited for a free worker. This is the same value as the `X-Fpmng-Queue-Wait` header. | Only with `http.pool_full_policy = wait`. `0` when the request did not wait. A request that expires its wait bound logs the whole wait. Other rejections omit the field. |
 | `request_id` | The id of the request. See `http.request_id`. | Only when `http.request_id` is `generate` or `propagate` and the gateway has an id. |
 
-The gateway does not have a JSON access log format yet. All fields are text.
+The layout of the line is set by `http.access_format`. See [Access log format](#access-log-format).
 
 `http.request_id` gives one id to each request. The gateway writes the id to the
 access log, sends it to the target, and sends it back to the client:
@@ -284,9 +284,58 @@ or accept the value that the client sends.
 
 Limit: the gateway sends the `X-Request-Id` response header only with the replies that
 it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
-it, because that call clears the response headers first. Examples are `403`, `404`,
-`503` and `504`. The access log line of such a request still has the `request_id=`
-field.
+it, because that call clears the response headers first. Examples are `403` and `404`,
+and some `502`, `503` and `504` replies. The pool-full `503` does carry the header,
+because the gateway writes it with `evhttp_send_reply()`. The access log line of such a
+request still has the `request_id=` field.
+
+### Access log format
+
+`http.access_format` sets the layout of each line in `http.access_log`.
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.access_format` | `combined`: the Combined Log Format with the fields above. `json`: one JSON object for each request, with the keys below. | `combined` |
+
+The gateway writes each line with one `write()` call in both layouts. The directive is
+refused on `http-direct`.
+
+With `json`, every line has the same keys in the same order. An unknown value is `null`,
+not `-`. The keys `queue_ms` and `request_id` are `null` when `combined` leaves them out.
+
+This is one line for a request that went to the `api` target:
+
+```
+{"time":"08/Oct/2026:10:00:00 +0000","remote_addr":"203.0.113.7","remote_user":null,"method":"GET","uri":"/api/items","protocol":"HTTP/1.1","status":200,"bytes":812,"referer":null,"user_agent":"curl/8.5.0","target":"api","duration_ms":14,"upstream_ms":11,"queue_ms":null,"request_id":"3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b"}
+```
+
+| Key | Type | Value |
+| --- | --- | --- |
+| `time` | string | The request time, in the Combined Log Format form. |
+| `remote_addr` | string or `null` | The client address. |
+| `remote_user` | string or `null` | The user name from the `Authorization` header. |
+| `method` | string or `null` | The request method. |
+| `uri` | string or `null` | The request target. |
+| `protocol` | string | The protocol, for example `HTTP/1.1`. |
+| `status` | number or `null` | The status code. `null` when the connection failed before a response. |
+| `bytes` | number | The body bytes sent. |
+| `referer` | string or `null` | The `Referer` header. |
+| `user_agent` | string or `null` | The `User-Agent` header. |
+| `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
+| `duration_ms` | number or `null` | As in the field table above. |
+| `upstream_ms` | number or `null` | As in the field table above. |
+| `queue_ms` | number or `null` | As in the field table above. `null` where `combined` omits the field. |
+| `request_id` | string or `null` | The request id. `null` where `combined` omits the field. |
+
+The escaping rules for strings:
+
+- A quote and a backslash get a backslash in front.
+- The control bytes `\b`, `\f`, `\n`, `\r` and `\t` use their short escape. Other control bytes use `\u00XX`.
+- A valid UTF-8 sequence stays as it is.
+- A byte that is not valid UTF-8 becomes `\u00XX`, the code point U+00XX. For example, the byte `0xff` becomes `\u00ff`.
+- A value that is too long for the line is cut, so that the line keeps a fixed maximum size. A cut never splits an escape or a UTF-8 sequence.
+
+A JSON line never contains a raw control byte.
 
 ### Symlink deploys
 

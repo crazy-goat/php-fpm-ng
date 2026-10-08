@@ -231,6 +231,7 @@ struct fpm_worker_pool_config_s {
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
 	int http_request_id;			/* FPM_HTTP_REQUEST_ID_OFF (default), _GENERATE or _PROPAGATE; see fpm_http_request_id.h (issue #642) */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */
+	int http_access_format;			/* FPM_HTTP_ACCESS_FORMAT_COMBINED (default) or _JSON, see fpm_http_access_log.h (issue #642) */
 	char *http_front_controller;		/* nginx-style try_files: when the resolved SCRIPT_FILENAME does not exist, substitute this
 						 * script and put the original path into PATH_INFO. Default "/index.php" — the built-in PHP
 						 * server (php -S) gives the same effect with no configuration (see

@@ -1,5 +1,7 @@
-/* fpm-ng: HTTP gateway access log (http.access_log), Combined Log Format,
- * not configurable — see docs/NOTES.md for why (simplicity is valuable here).
+/* fpm-ng: HTTP gateway access log (http.access_log). The line is the Combined
+ * Log Format by default; http.access_format = json writes one JSON object per
+ * line instead (issue #642). There is no template language: the two layouts
+ * are fixed in fpm_http_access_log.c.
  *
  * Every http.gateways gateway process has its own descriptor for THE SAME file,
  * opened with O_APPEND. One write() per line on a regular O_APPEND file is
@@ -26,10 +28,20 @@
 
 struct fpm_http_access_log_s;
 
+/* http.access_format (issue #642): the layout of one line. COMBINED is the
+ * Combined Log Format with the trailing fields; JSON is one object per line
+ * with a fixed key set, see docs/gateway.md. The default is COMBINED. */
+enum {
+	FPM_HTTP_ACCESS_FORMAT_COMBINED = 0,
+	FPM_HTTP_ACCESS_FORMAT_JSON = 1
+};
+
 /* path == NULL or "" -> logging disabled, returns NULL (a valid "disabled"
  * handle for fpm_http_access_log_write()). Open errors are logged by zlog and
- * treated like "disabled" — a missing log must not prevent gateway startup. */
-struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const char *path);
+ * treated like "disabled" — a missing log must not prevent gateway startup.
+ * format is FPM_HTTP_ACCESS_FORMAT_*; it is kept in the handle, so a reopen
+ * keeps it. */
+struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const char *path, int format);
 
 void fpm_http_access_log_close(struct fpm_http_access_log_s *log);
 
@@ -52,13 +64,15 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log);
  * rotation: SIGUSR1 reaches the master only. The wakeup arrives over the
  * follow channel of that same header. */
 struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_log_s *log,
-		const char *pool, const char *path);
+		const char *pool, const char *path, int format);
 
 /* Issue #642: the trailing timing and correlation fields, printed after
  * target= in this order. A member that is not known prints "-" (duration_ms,
  * upstream_ms) or is left out of the line altogether (queue_ms, request_id),
  * so a line for a request that never waited or never got an id is the same
- * line it was before #642, plus the two always-present timing fields. */
+ * line it was before #642, plus the two always-present timing fields.
+ * In the JSON format every key is always present and an unknown value is
+ * null (see fpm_http_access_log.c). */
 struct fpm_http_access_log_extra_s {
 	long duration_ms; /* request fully read -> line written; < 0 -> "-" */
 	long upstream_ms; /* hand-off to the target -> line written; < 0 -> "-" (no target was used) */

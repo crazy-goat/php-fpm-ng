@@ -371,6 +371,18 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.request_id = generate",
     ["'http.request_id' is not supported by pool.type = http-direct"]
 );
+/* Issue #642: the access log layout is the gateway's too, and an unknown
+ * value is refused by name, as http.request_id refuses one. */
+expectConfigFailure(
+    'direct-access-format',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.access_format = json",
+    ["'http.access_format' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'gateway-access-format-unknown',
+    gatewayConfig("http.access_format = xml\n"),
+    ["invalid http.access_format (combined or json)"]
+);
 
 ?>
 Done
@@ -414,6 +426,8 @@ direct-response-min-rate: rejected
 direct-upstream-connect-timeout: rejected
 direct-upstream-read-timeout: rejected
 direct-request-id: rejected
+direct-access-format: rejected
+gateway-access-format-unknown: rejected
 Done
 --CLEAN--
 <?php

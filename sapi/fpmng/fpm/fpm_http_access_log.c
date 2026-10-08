@@ -15,6 +15,7 @@
 
 struct fpm_http_access_log_s {
 	int fd;
+	int format;	/* FPM_HTTP_ACCESS_FORMAT_*, fixed at open (issue #642) */
 };
 
 /* The flags live in one place so that open and reopen cannot drift apart:
@@ -32,7 +33,7 @@ static int fpm_http_access_log_open_fd(const char *pool, const char *path, const
 }
 /* }}} */
 
-struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const char *path) /* {{{ */
+struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const char *path, int format) /* {{{ */
 {
 	struct fpm_http_access_log_s *log;
 	int fd;
@@ -52,6 +53,7 @@ struct fpm_http_access_log_s *fpm_http_access_log_open(const char *pool, const c
 		return NULL;
 	}
 	log->fd = fd;
+	log->format = format;
 	return log;
 }
 /* }}} */
@@ -67,7 +69,7 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log) /* {{{ */
 /* }}} */
 
 struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_log_s *log, /* {{{ */
-		const char *pool, const char *path)
+		const char *pool, const char *path, int format)
 {
 	int fd;
 
@@ -75,7 +77,7 @@ struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_
 		return log;			/* logging disabled: `log` is NULL and stays NULL */
 	}
 	if (!log) {
-		return fpm_http_access_log_open(pool, path);
+		return fpm_http_access_log_open(pool, path, format);
 	}
 
 	/* Open the new file BEFORE giving up the old one: on failure this process
@@ -127,15 +129,146 @@ static size_t fpm_http_access_log_escape(const char *in, char *out, size_t out_s
 }
 /* }}} */
 
-/* Issue #642: a number member prints as "%ld", or as "-" when it is negative
- * (not known). */
-static void fpm_http_access_log_ms(char *out, size_t out_size, long ms) /* {{{ */
+/* Issue #642: a number member prints as "%ld", or as `unknown` when it is
+ * negative (not known): "-" in the Combined line, null in JSON. */
+static void fpm_http_access_log_ms(char *out, size_t out_size, long ms, const char *unknown) /* {{{ */
 {
 	if (ms >= 0) {
 		snprintf(out, out_size, "%ld", ms);
 	} else {
-		snprintf(out, out_size, "-");
+		snprintf(out, out_size, "%s", unknown);
 	}
+}
+/* }}} */
+
+/* Length of the valid UTF-8 sequence at `s` (2 to 4 bytes), or 0 when the
+ * byte at `s` does not start one. Overlong forms, surrogates and values above
+ * U+10FFFF are refused. The walk stops at the first byte that is not a
+ * continuation byte, so a NUL inside the sequence is never read past. */
+static size_t fpm_http_access_log_utf8_len(const unsigned char *s) /* {{{ */
+{
+	size_t need, i;
+	unsigned long cp;
+
+	if (s[0] >= 0xc2 && s[0] <= 0xdf) {
+		need = 2;
+		cp = s[0] & 0x1f;
+	} else if (s[0] >= 0xe0 && s[0] <= 0xef) {
+		need = 3;
+		cp = s[0] & 0x0f;
+	} else if (s[0] >= 0xf0 && s[0] <= 0xf4) {
+		need = 4;
+		cp = s[0] & 0x07;
+	} else {
+		return 0;
+	}
+	for (i = 1; i < need; i++) {
+		if ((s[i] & 0xc0) != 0x80) {
+			return 0;
+		}
+		cp = (cp << 6) | (s[i] & 0x3f);
+	}
+	if ((need == 3 && (cp < 0x800 || (cp >= 0xd800 && cp <= 0xdfff)))
+			|| (need == 4 && (cp < 0x10000 || cp > 0x10ffff))) {
+		return 0;
+	}
+	return need;
+}
+/* }}} */
+
+/* Issue #642: the JSON escape of one byte that is not part of a valid UTF-8
+ * sequence, or that is a control byte, a quote or a backslash. Writes the
+ * escape to `unit` (at most 6 bytes) and returns its length. */
+static size_t fpm_http_access_log_json_unit(unsigned char c, char unit[6]) /* {{{ */
+{
+	static const char hex[] = "0123456789abcdef";
+
+	switch (c) {
+	case '"':
+	case '\\':
+		unit[0] = '\\';
+		unit[1] = (char) c;
+		return 2;
+	case '\b':
+		unit[0] = '\\';
+		unit[1] = 'b';
+		return 2;
+	case '\f':
+		unit[0] = '\\';
+		unit[1] = 'f';
+		return 2;
+	case '\n':
+		unit[0] = '\\';
+		unit[1] = 'n';
+		return 2;
+	case '\r':
+		unit[0] = '\\';
+		unit[1] = 'r';
+		return 2;
+	case '\t':
+		unit[0] = '\\';
+		unit[1] = 't';
+		return 2;
+	default:
+		break;
+	}
+	if (c < 0x20 || c >= 0x7f) {
+		unit[0] = '\\';
+		unit[1] = 'u';
+		unit[2] = '0';
+		unit[3] = '0';
+		unit[4] = hex[c >> 4];
+		unit[5] = hex[c & 0xf];
+		return 6;
+	}
+	unit[0] = (char) c;
+	return 1;
+}
+/* }}} */
+
+/* Issue #642, http.access_format = json: writes `in` as a JSON string value,
+ * quotes included, or the literal null when `in` is NULL or "" (the JSON form
+ * of the "-" the Combined line prints). A valid UTF-8 sequence is copied as it
+ * is; every other byte goes through fpm_http_access_log_json_unit(), so a
+ * byte that is not valid UTF-8 becomes \u00XX (the byte read as U+00XX) and the
+ * line stays valid JSON whatever a client sent (remote_user comes from base64
+ * and may hold any byte). Output is bounded by out_size: the value stops before
+ * the first unit that does not fit together with the closing quote and the
+ * NUL, so an escape or a UTF-8 sequence is never cut in the middle. */
+static void fpm_http_access_log_json_value(char *out, size_t out_size, const char *in) /* {{{ */
+{
+	size_t o = 0;
+
+	if (out_size == 0) {
+		return;
+	}
+	if (!in || !*in) {
+		snprintf(out, out_size, "null");
+		return;
+	}
+	out[o++] = '"';
+	while (*in) {
+		unsigned char c = (unsigned char) *in;
+		char unit[6];
+		const char *src = unit;
+		size_t n = 0, take = 1;
+
+		if (c >= 0x80 && (take = fpm_http_access_log_utf8_len((const unsigned char *) in)) != 0) {
+			src = in;
+			n = take;
+		} else {
+			take = 1;
+			n = fpm_http_access_log_json_unit(c, unit);
+		}
+		if (o + n + 2 > out_size) {
+			break;
+		}
+		memcpy(out + o, src, n);
+		o += n;
+		in += take;
+	}
+	out[o++] = '"';
+	out[o] = '\0';
 }
 /* }}} */
 
@@ -156,6 +289,13 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	 * statuses are three digits and the negative case takes the "-" branch
 	 * below, but the buffer has to hold what the format can write. */
 	char status_buf[12];
+	/* Issue #642, JSON format: each value as a complete JSON value (quotes
+	 * included, or null). Buffers are the Combined ones plus room for the
+	 * quotes; the total stays well under `line`. */
+	char json_addr[130], json_user[258], json_method[40], json_uri[1026];
+	char json_referer[514], json_ua[514], json_target[130], json_request_id[160];
+	char status_json[12];
+	const char *unknown;
 	char timebuf[64];
 	time_t now;
 	struct tm tmv;
@@ -166,6 +306,7 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	if (!log) {
 		return;
 	}
+	unknown = log->format == FPM_HTTP_ACCESS_FORMAT_JSON ? "null" : "-";
 
 	now = time(NULL);
 	localtime_r(&now, &tmv);
@@ -190,36 +331,68 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 	if (!extra) {
 		extra = &none;
 	}
-	fpm_http_access_log_ms(duration_buf, sizeof(duration_buf), extra->duration_ms);
-	fpm_http_access_log_ms(upstream_buf, sizeof(upstream_buf), extra->upstream_ms);
-	fpm_http_access_log_ms(queue_buf, sizeof(queue_buf), extra->queue_ms);
+	fpm_http_access_log_ms(duration_buf, sizeof(duration_buf), extra->duration_ms, unknown);
+	fpm_http_access_log_ms(upstream_buf, sizeof(upstream_buf), extra->upstream_ms, unknown);
+	fpm_http_access_log_ms(queue_buf, sizeof(queue_buf), extra->queue_ms, unknown);
 	request_id = extra->request_id;
 
-	/* target (issue #341) and the #642 fields are trailing fields, not inserted
-	 * between existing ones -- see the header for why this is the one shape
-	 * that does not break a parser reading the classic Combined Log Format
-	 * fields by position. request_id is not escaped: an inbound id reaches
-	 * this point only after fpm_http_request_id_valid() accepted it. */
-	len = snprintf(line, sizeof(line),
-			"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\" target=%s"
-			" duration_ms=%s upstream_ms=%s%s%s%s%s\n",
-			addr_esc[0] ? addr_esc : "-",
-			user_esc[0] ? user_esc : "-",
-			timebuf,
-			method ? method : "-",
-			uri_esc[0] ? uri_esc : "-",
-			http_major, http_minor,
-			status_buf,
-			bytes_sent,
-			referer_esc[0] ? referer_esc : "-",
-			ua_esc[0] ? ua_esc : "-",
-			target_esc[0] ? target_esc : "-",
-			duration_buf,
-			upstream_buf,
-			extra->queue_ms >= 0 ? " queue_ms=" : "",
-			extra->queue_ms >= 0 ? queue_buf : "",
-			request_id && *request_id ? " request_id=" : "",
-			request_id && *request_id ? request_id : "");
+	if (log->format == FPM_HTTP_ACCESS_FORMAT_JSON) {
+		/* Issue #642: a fixed key set, every key on every line. An unknown
+		 * value is null, so a parser never sees a missing key. The buffers
+		 * above bound the line: about 3.2 KB at most, under `line`. */
+		fpm_http_access_log_json_value(json_addr, sizeof(json_addr), remote_addr);
+		fpm_http_access_log_json_value(json_user, sizeof(json_user), remote_user);
+		fpm_http_access_log_json_value(json_method, sizeof(json_method), method);
+		fpm_http_access_log_json_value(json_uri, sizeof(json_uri), uri);
+		fpm_http_access_log_json_value(json_referer, sizeof(json_referer), referer);
+		fpm_http_access_log_json_value(json_ua, sizeof(json_ua), user_agent);
+		fpm_http_access_log_json_value(json_target, sizeof(json_target), target);
+		fpm_http_access_log_json_value(json_request_id, sizeof(json_request_id), request_id);
+		if (status >= 0) {
+			snprintf(status_json, sizeof(status_json), "%d", status);
+		} else {
+			snprintf(status_json, sizeof(status_json), "null");
+		}
+		len = snprintf(line, sizeof(line),
+				"{\"time\":\"%s\",\"remote_addr\":%s,\"remote_user\":%s,\"method\":%s,\"uri\":%s,"
+				"\"protocol\":\"HTTP/%d.%d\",\"status\":%s,\"bytes\":%zu,\"referer\":%s,"
+				"\"user_agent\":%s,\"target\":%s,\"duration_ms\":%s,\"upstream_ms\":%s,"
+				"\"queue_ms\":%s,\"request_id\":%s}\n",
+				timebuf,
+				json_addr, json_user, json_method, json_uri,
+				http_major, http_minor,
+				status_json,
+				bytes_sent,
+				json_referer, json_ua, json_target,
+				duration_buf, upstream_buf, queue_buf,
+				json_request_id);
+	} else {
+		/* target (issue #341) and the #642 fields are trailing fields, not inserted
+		 * between existing ones -- see the header for why this is the one shape
+		 * that does not break a parser reading the classic Combined Log Format
+		 * fields by position. request_id is not escaped: an inbound id reaches
+		 * this point only after fpm_http_request_id_valid() accepted it. */
+		len = snprintf(line, sizeof(line),
+				"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\" target=%s"
+				" duration_ms=%s upstream_ms=%s%s%s%s%s\n",
+				addr_esc[0] ? addr_esc : "-",
+				user_esc[0] ? user_esc : "-",
+				timebuf,
+				method ? method : "-",
+				uri_esc[0] ? uri_esc : "-",
+				http_major, http_minor,
+				status_buf,
+				bytes_sent,
+				referer_esc[0] ? referer_esc : "-",
+				ua_esc[0] ? ua_esc : "-",
+				target_esc[0] ? target_esc : "-",
+				duration_buf,
+				upstream_buf,
+				extra->queue_ms >= 0 ? " queue_ms=" : "",
+				extra->queue_ms >= 0 ? queue_buf : "",
+				request_id && *request_id ? " request_id=" : "",
+				request_id && *request_id ? request_id : "");
+	}
 
 	if (len <= 0) {
 		return;

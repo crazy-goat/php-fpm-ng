@@ -41,11 +41,12 @@ foreach ((array) $messages as $message) {
 require_once "tester.inc";
 require_once "fpmng-operator.inc";
 
-/* Issue #652. The plain listener answers every request itself, with a
- * redirect to https, and that answer does not reach fpm_http_log_response().
- * It is timed by its own path, and it must land in the "-" row: the row its
- * requests_total was counted in. The "web" target gets no request, so its row
- * stays at zero. */
+/* Issue #652. The plain listener answers every request itself. Two answers are
+ * checked here: the redirect to https, which does not reach
+ * fpm_http_log_response() and is timed by the plain wrapper, and the ACME
+ * HTTP-01 answer, which does reach it. Each must be observed exactly once, in
+ * the "-" row: the row its requests_total was counted in. The "web" target gets
+ * no request, so its row stays at zero. */
 
 function run(string $cmd): void
 {
@@ -118,18 +119,25 @@ try {
     }
     echo "plain: 308\n";
 
+    $acme = plainStatus($plain, '/.well-known/acme-challenge/nope');
+    if ($acme !== '404') {
+        echo "FAIL: plain listener answered the ACME challenge with $acme, want 404 for an unknown token\n";
+        exit(1);
+    }
+    echo "plain acme: 404\n";
+
     $metrics = fpmng_operator_body($operator, '/metrics');
     $local = sample($metrics, 'fpmng_gateway_requests_total{pool="gw",target="-"}');
     $localInf = sample($metrics, 'fpmng_gateway_request_duration_seconds_bucket{pool="gw",target="-",le="+Inf"}');
     $localCount = sample($metrics, 'fpmng_gateway_request_duration_seconds_count{pool="gw",target="-"}');
     $web = sample($metrics, 'fpmng_gateway_request_duration_seconds_count{pool="gw",target="web"}');
-    if ($local !== 1 || $localCount !== 1 || $localInf !== 1) {
+    if ($local !== 2 || $localCount !== 2 || $localInf !== 2) {
         echo "FAIL: '-' row requests_total=" . var_export($local, true)
             . " count=" . var_export($localCount, true)
-            . " +Inf=" . var_export($localInf, true) . " (want 1 each)\n$metrics\n";
+            . " +Inf=" . var_export($localInf, true) . " (want 2 each)\n$metrics\n";
         exit(1);
     }
-    echo "local: requests_total=1, count=1, +Inf=1\n";
+    echo "local: requests_total=2, count=2, +Inf=2\n";
 
     if ($web !== 0) {
         echo "FAIL: web row count=" . var_export($web, true) . " (want 0)\n$metrics\n";
@@ -150,7 +158,8 @@ try {
 ?>
 --EXPECT--
 plain: 308
-local: requests_total=1, count=1, +Inf=1
+plain acme: 404
+local: requests_total=2, count=2, +Inf=2
 web: count=0
 Done
 --CLEAN--

@@ -424,8 +424,10 @@ const struct fpm_http_duration_bound_s fpm_http_duration_bounds[FPM_HTTP_DURATIO
  * time from the end of the request read (cl->request_started, stamped in
  * fpm_http_client_request_begin()) to `now`, so it includes the wait for a
  * target. Two cmp-set loops (one bucket, the sum), no lock: the same cost
- * class as the requests_total increment every request already pays. */
-static void fpm_http_duration_observe(struct fpm_http_gateway_s *gw, const struct fpm_http_client_s *cl,
+ * class as the requests_total increment every request already pays. A request
+ * is observed once: the second call for the same request returns at once, so
+ * requests_total and _count agree whichever path answered it. */
+static void fpm_http_duration_observe(struct fpm_http_gateway_s *gw, struct fpm_http_client_s *cl,
 		const struct timeval *now)
 {
 	struct timeval spent;
@@ -433,9 +435,10 @@ static void fpm_http_duration_observe(struct fpm_http_gateway_s *gw, const struc
 	unsigned row, b = 0;
 	atomic_t *slot;
 
-	if (!gw->counters) {
+	if (!gw->counters || cl->duration_observed) {
 		return;
 	}
+	cl->duration_observed = 1;
 	row = cl->duration_row == FPM_HTTP_DURATION_ROW_LOCAL ? gw->counters->nslots - 1 : cl->duration_row;
 	evutil_timersub(now, &cl->request_started, &spent);
 	us = spent.tv_sec < 0 ? 0 : (unsigned long) spent.tv_sec * 1000000UL + (unsigned long) spent.tv_usec;
@@ -1883,6 +1886,7 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	fpm_clock_get(&cl->request_started);
 	/* Issue #652: until the request is routed, it is the gateway's own answer. */
 	cl->duration_row = FPM_HTTP_DURATION_ROW_LOCAL;
+	cl->duration_observed = 0;
 	fpm_http_client_request_id_assign(gw, cl, req);
 	if (cl->ka_timer) {
 		event_del(cl->ka_timer);
@@ -2376,10 +2380,12 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 }
 
 /* Issue #652: every answer of the plain listener is local, so it is observed
- * in the "-" row, the row its requests_total was counted in. The answer has
- * several returns and does not reach fpm_http_log_response(), so it is timed
- * here, after the answer, once. The client node is looked up after the answer
- * because a close callback can run inside a send and free it. */
+ * in the "-" row, the row its requests_total was counted in. Most answers do
+ * not reach fpm_http_log_response(), so they are timed here, after the answer.
+ * The ACME answer does reach it, and it is observed there first; the flag in
+ * fpm_http_duration_observe() makes this second call a no-op. The client node
+ * is looked up after the answer because a close callback can run inside a
+ * send and free it. */
 void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;

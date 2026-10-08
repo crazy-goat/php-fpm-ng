@@ -233,7 +233,7 @@ struct fpm_http_counters_s {
 	atomic_t responses_paused_total;	/* issue #706: times a response paused its upstream, see fpm_http_backpressure.c */
 	unsigned nslots;		/* #targets + 2, see above */
 	unsigned nproc;			/* gateway processes (http.gateways) */
-	atomic_t cells[];		/* slots x 4, then nproc gauge blocks */
+	atomic_t cells[];		/* slots x FPM_HTTP_COUNTERS_SLOT_CELLS, then nproc gauge blocks */
 };
 
 /* Issue #706: the cells of one gateway process's gauge block, in this order.
@@ -412,6 +412,11 @@ struct fpm_http_client_s {
 	 * FPM_HTTP_DURATION_ROW_LOCAL for an answer the gateway gave itself. Reset
 	 * by fpm_http_client_request_begin(), set where the request is routed. */
 	unsigned duration_row;
+	/* Issue #652: 1 once the request in flight is in the histogram. A plain
+	 * listener's ACME answer reaches fpm_http_log_response() and then the
+	 * plain wrapper's timing, so the second call must not observe again.
+	 * Reset by fpm_http_client_request_begin(). */
+	unsigned duration_observed;
 	/* Issue #642: the id of the request in flight, "" when http.request_id is
 	 * off or no id could be made. Sent to the target and logged. */
 	char request_id[FPM_HTTP_REQUEST_ID_SIZE];

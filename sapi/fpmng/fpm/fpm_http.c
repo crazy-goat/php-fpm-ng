@@ -218,6 +218,7 @@ typedef struct _fpm_http_upstream fpm_http_upstream;
  * there when the HTTP/1.1 client transport arrived; the definitions moved
  * verbatim, comments included. */
 #include "fpm_http_internal.h"
+#include "fpm_http_direct_conn.h"
 
 struct fpm_http_gateway_s *gateways = NULL;
 
@@ -2078,6 +2079,19 @@ static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
 	return answered;
 }
 
+/* Issue #686: the per-client half of http.max_connections_per_client, judged
+ * for one request. A connection is judged once, on its first request or when
+ * the accept-time pickup gets to it, whichever is first (fpm_http_direct_conn.c).
+ * Nonzero means the connection is over the cap: the caller answers 503, and
+ * evhttp_send_error() closes the connection because it sends Connection: close. */
+static int fpm_http_gateway_request_capped(struct fpm_http_gateway_s *gw, struct evhttp_connection *evcon)
+{
+	if (!gw || !gw->conns || !evcon) {
+		return 0;
+	}
+	return fpm_http_direct_conns_request(gw->conns, evhttp_connection_get_bufferevent(evcon), NULL, NULL) < 0;
+}
+
 void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
@@ -2090,6 +2104,7 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	char authority[FPM_HTTP_AUTHORITY_MAX];
 	smart_str target = {0};
 	size_t len;
+	int over_client_cap;
 
 	fpm_http_normalize_target(req);
 	/* Issue #390 review: this listener bypassed all of the gateway's own
@@ -2108,7 +2123,14 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (gw && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
+	over_client_cap = fpm_http_gateway_request_capped(gw, evcon);
 	fpm_http_count_local(gw);
+	if (over_client_cap) {
+		/* Issue #686: over http.max_connections_per_client. Answered before the
+		 * HTTP-01 challenge and the redirect, as on the public listener. */
+		evhttp_send_error(req, 503, "Too many connections");
+		return;
+	}
 
 	/* HTTP-01 before anything else, including the redirect: the CA speaks
 	 * plain HTTP on purpose and must not be sent to :443 for a certificate
@@ -2337,6 +2359,7 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	const char *effective_addr;
 	struct fpm_http_client_s *client;
 	fpm_http_conn *c;
+	int over_client_cap;
 
 	fpm_http_normalize_target(req);
 	if (evcon) {
@@ -2362,6 +2385,9 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	if (gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
+	/* Issue #686: judged before the ACL, as on http-direct, so the ACL decides
+	 * which answer an excluded client gets and not whether it gets one. */
+	over_client_cap = fpm_http_gateway_request_capped(gw, evcon);
 
 	if (gw->acl && !fpm_http_acl_check(gw->acl, peer_addr)) {
 		/* ACL is about the direct network peer, so it (and its log entry) is
@@ -2369,6 +2395,12 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * here is exactly the one that made the TCP connection. */
 		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, NULL);
 		evhttp_send_error(req, 403, "Forbidden");
+		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
+		return;
+	}
+	if (over_client_cap) {
+		fpm_http_log_response(gw, req, peer_addr, NULL, 503, 0, NULL);
+		evhttp_send_error(req, 503, "Too many connections");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
 	}

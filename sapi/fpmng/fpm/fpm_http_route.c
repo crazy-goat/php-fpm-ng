@@ -850,6 +850,9 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->upstream_read_timeout.tv_sec = wp->config->http_upstream_read_timeout / 1000;
 	gw->upstream_read_timeout.tv_usec = (wp->config->http_upstream_read_timeout % 1000) * 1000;
 	gw->max_body = wp->config->http_max_body;
+	/* Issue #686: copied as they are; validation refuses a value that cannot apply. */
+	gw->max_connections = wp->config->http_max_connections;
+	gw->max_per_client = wp->config->http_max_connections_per_client;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
 	gw->wait_queue_max = wp->config->http_pool_full_queue_max;
@@ -1497,6 +1500,30 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_upstream_read_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.upstream_read_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	/* Issue #686: the same bounds and the same pairing rule as http-direct
+	 * (fpm_http_direct_request.c). Both limits are per gateway process. */
+	if (wp->config->http_max_connections < 0 || wp->config->http_max_connections > 1000000 ||
+			wp->config->http_max_connections_per_client < 0 ||
+			wp->config->http_max_connections_per_client > 1000000) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections and http.max_connections_per_client must be "
+						 "between 0 (unlimited) and 1000000",
+				wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_max_connections_per_client > 0 && wp->config->http_max_connections <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections_per_client requires http.max_connections, "
+						 "which is the cap the per-client count is taken against",
+				wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_max_connections > 0 &&
+			wp->config->http_max_connections_per_client > wp->config->http_max_connections) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections_per_client (%d) is above http.max_connections (%d), "
+						 "so it can never apply",
+				wp->config->name, wp->config->http_max_connections_per_client,
+				wp->config->http_max_connections);
 		return -1;
 	}
 	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the

@@ -317,18 +317,23 @@ expectConfigFailure(
     ['pool.type = gateway with no http.route[] serves nothing']
 );
 
-/* Issue #593: the gateway has no connection cap, and http.max_connections* are
- * read only by http-direct, so a gateway config naming them must fail instead
- * of leaving the public port believed to be limited. */
+/* Issue #686: the gateway accepts http.max_connections and
+ * http.max_connections_per_client (fpmng-http-gateway-connection-limits.phpt), so
+ * the pairing and bounds rules are what a gateway config can get wrong. */
 expectConfigFailure(
-    'gateway-max-connections',
-    gatewayConfig("http.max_connections = 10\n"),
-    ["'http.max_connections' is not supported by pool.type = gateway"]
+    'gateway-per-client-without-total',
+    gatewayConfig("http.max_connections_per_client = 2\n"),
+    ['http.max_connections_per_client requires http.max_connections']
 );
 expectConfigFailure(
-    'gateway-max-connections-per-client',
-    gatewayConfig("http.max_connections_per_client = 2\n"),
-    ["'http.max_connections_per_client' is not supported by pool.type = gateway"]
+    'gateway-per-client-above-total',
+    gatewayConfig("http.max_connections = 2\nhttp.max_connections_per_client = 3\n"),
+    ['http.max_connections_per_client (3) is above http.max_connections (2)']
+);
+expectConfigFailure(
+    'gateway-max-connections-range',
+    gatewayConfig("http.max_connections = 1000001\n"),
+    ['between 0 (unlimited) and 1000000']
 );
 /* ... and the gateway-only client limits are refused on http-direct. */
 expectConfigFailure(
@@ -399,8 +404,9 @@ gateway-clear-env: rejected
 gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
-gateway-max-connections: rejected
-gateway-max-connections-per-client: rejected
+gateway-per-client-without-total: rejected
+gateway-per-client-above-total: rejected
+gateway-max-connections-range: rejected
 direct-keepalive-timeout: rejected
 direct-write-timeout: rejected
 direct-response-buffer: rejected

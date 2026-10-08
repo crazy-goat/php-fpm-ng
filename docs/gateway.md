@@ -187,8 +187,18 @@ Two consequences of holding the worker back, both new with flow control:
 
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
-`http.max_connections` and `http.max_connections_per_client` are not supported
-on a gateway yet and are refused by `php-fpm-ng -t`.
+`http.max_connections` is the cap on the client connections that one gateway
+process holds. The cap counts idle keep-alive connections too. With
+`http.gateways = 2`, the pool can hold twice the number. At the cap, the process
+stops accepting: a new client waits in the listen backlog until a connection
+closes. The process does not refuse that client.
+
+`http.max_connections_per_client` caps the connections from one peer address
+inside the process cap. A client over this cap gets one of two answers: the
+process closes the connection without a response, or it sends `503`. A client
+must handle both. Both values must be between 0 and 1000000, and 0 means
+unlimited. The per-client cap requires `http.max_connections` and must not be
+above it. `php-fpm-ng -t` refuses a configuration that breaks these rules.
 `http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer`,
 `http.response_min_rate` and the two `http.upstream_*` timeouts are refused on
 `http-direct`.

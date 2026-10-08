@@ -13,6 +13,15 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- `pool.type = gateway` now applies `http.max_connections` (issue #686). It caps the client connections that one gateway process holds, including idle keep-alive connections. With `http.gateways = 2` the pool can hold twice the number. At the cap the process stops accepting: a new client waits in the listen backlog, and no connection is refused.
+- `pool.type = gateway` now applies `http.max_connections_per_client` (issue #686). It caps the connections from one peer address inside the process cap. A client over this cap gets either a closed connection without a response, or a `503` response.
+
+### Changed
+
+- `php-fpm-ng -t` accepts `http.max_connections` and `http.max_connections_per_client` on a gateway (issue #686). Before, both were refused. Each value must be between 0 and 1000000. `http.max_connections_per_client` requires `http.max_connections` and must not be above it.
+
 ## [0.16.0] - 2026-10-07
 
 ### Added

@@ -436,6 +436,11 @@ struct fpm_http_gateway_s {
 	int wait_ms;
 	struct timeval wait_bound;			/* wait_ms split into {sec, usec} for evtimer_add() */
 	size_t max_body;					/* http.max_body, bytes; evhttp buffers a whole body in memory before dispatch (task 031) */
+	/* Issue #686: http.max_connections and http.max_connections_per_client, per
+	 * gateway process; 0 = unlimited. Both count the public and the plain
+	 * listener together. See fpm_http_gw_proc.c for the accept gate. */
+	int max_connections;
+	int max_per_client;
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
@@ -629,6 +634,11 @@ struct fpm_http_gateway_s {
 	 * first needed and only ever used when http.gateways > 1. */
 	struct event *tick;
 	struct fpm_http_read_deadline_s *deadlines;	/* armed read deadlines, one per connection still reading its first request */
+	/* Issue #686: the connection cap of this process. conns is NULL unless
+	 * http.max_connections is set; cap_tick sweeps it and applies the accept
+	 * gate every 10 ms, and exists only alongside conns. */
+	struct fpm_http_direct_conns *conns;
+	struct event *cap_tick;
 };
 
 /* One armed read deadline per accepted connection (task 031). Bounds the total

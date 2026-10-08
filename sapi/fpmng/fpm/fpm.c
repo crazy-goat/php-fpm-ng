@@ -29,6 +29,7 @@
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
+#include "fpm_sd_notify.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -207,6 +208,13 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * into a kill of an unrelated process at shutdown. Only the master gets
 	 * here: a forked child jumped to run_child above. */
 	fpm_reload_selective_discard_unadopted();
+
+	/* Issue #643: READY=1 once every pool has bound its listening socket and
+	 * the initial children are forked. It says nothing about a gateway
+	 * accepting connections, and the unit's "active" state means the same.
+	 * The watchdog starts here too, so its first WATCHDOG=1 comes with READY. */
+	fpm_sd_notify_watchdog_start();
+	fpm_sd_notify_ready();
 
 	/* run event loop forever */
 	fpm_event_loop(0);

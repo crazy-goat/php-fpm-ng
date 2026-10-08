@@ -26,6 +26,7 @@
 #include "fpm_reload_config_check.h"
 #include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
+#include "fpm_sd_notify.h"
 #include "zlog.h"
 
 
@@ -341,11 +342,23 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 			 * and the next SIGUSR2 tries again (fpm_reload_config_check.h). */
 			if (new_state == FPM_PCTL_STATE_RELOADING &&
 					!fpm_reload_config_check(saved_argc, (const char *const *) saved_argv)) {
+				/* Issue #643: the unit's reload job waits for READY=1, and the
+				 * state did not change, so say RELOADING=1 and READY=1 to end
+				 * it. */
+				fpm_sd_notify_reload_refused();
 				return;
 			}
 
 			fpm_signal_sent = 0;
 			fpm_state = new_state;
+
+			/* Issue #643: the service manager hears about the transition at the
+			 * same point the reload or the stop becomes real. */
+			if (new_state == FPM_PCTL_STATE_RELOADING) {
+				fpm_sd_notify_reloading();
+			} else if (new_state == FPM_PCTL_STATE_FINISHING || new_state == FPM_PCTL_STATE_TERMINATING) {
+				fpm_sd_notify_stopping();
+			}
 
 			zlog(ZLOG_DEBUG, "switching to '%s' state", fpm_state_names[fpm_state]);
 			ZEND_FALLTHROUGH;

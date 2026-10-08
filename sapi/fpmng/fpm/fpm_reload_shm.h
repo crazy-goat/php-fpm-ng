@@ -42,6 +42,11 @@ void *fpm_reload_shm_alloc(size_t size, int *fd_out);
  * carried-over scoreboard is unusable and cannot be replaced. */
 int fpm_reload_shm_scoreboards(void);
 
+/* Master, called by fpm_pctl_exec() right before the PARENT_EXEC cleanups run:
+ * writes the expiry records (issue #692) that the next generation reads. It
+ * must run before the worker pool cleanup, which frees the pool list. */
+void fpm_reload_shm_exec_records(void);
+
 /* What the previous generation carried over for the metrics region, if
  * anything. Returns 1 and fills the out-parameters when a usable descriptor
  * is present (the caller validates `limit` and the size against its own

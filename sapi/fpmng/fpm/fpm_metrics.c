@@ -130,9 +130,9 @@ static void fpm_metrics_add_range(const char *name, uint32_t base, uint32_t coun
 /* Slots of a replaced pool in the old generation: kept free of new ranges
  * because its #329 survivor can still be writing to its old slot, and two
  * writers on one slot race (issue #537). `until` is the bound the previous
- * generation computed when it spared the survivor (fpm_pool_supervisor_slot_reserve_until(),
- * issue #692). A later reload keeps this expiry, it does not extend it
- * (fpm_metrics_reserve_carried()). */
+ * generation computed at its exec (fpm_pool_supervisor_slot_reserve_until(),
+ * issue #692). A later reload carries this expiry as a Y record, it does not
+ * extend it (fpm_metrics_reserve_carried()). */
 static void fpm_metrics_reserve(uint32_t base, uint32_t count, time_t until) /* {{{ */
 {
 	fpm_metrics_add_range(NULL, base, count, until);

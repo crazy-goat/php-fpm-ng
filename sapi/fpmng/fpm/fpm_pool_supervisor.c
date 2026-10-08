@@ -269,22 +269,24 @@ struct fpm_supervisor_shared_s {
 
 /* Issue #692: the stop signal goes out up to one poll after the deadline, and
  * FPM_NOW() rounds down to whole seconds, so the bound below needs this slack
- * on top of the stop window. The X records and the spares of one reload are
- * written a fraction of a second apart, which the slack also covers. */
+ * on top of the stop window. The survivor deadlines and the X records of one
+ * reload are both set at its execvp(), and their two FPM_NOW() reads may
+ * differ by one second, which the slack also covers. */
 #define FPM_SUPERVISOR_RELOAD_SURVIVOR_SLACK_S 2
 
 /* Issue #692: the latest time the metrics slot range of `wp` stays reserved
- * when the generation that owns `wp` spared a survivor at `spared`. The
- * survivor is signalled no later than spared + TIMEOUT (+ one poll), and its
- * own watchdog SIGKILLs it stop_timeout after that signal, so nothing it
- * writes lasts longer than this. Called for every pool whose range a reload
- * replaces (fpm_reload_shm_spare_pool()), not only for supervisor pools: the
+ * when the reload that replaces `wp` execs at `exec_at`. A fresh survivor gets
+ * the deadline exec_at + TIMEOUT (fpm_pool_supervisor_reload_survivor_carry()),
+ * so it is signalled no later than that (+ one poll), and its own watchdog
+ * SIGKILLs it stop_timeout after the signal. Nothing it writes lasts longer
+ * than this. Called at exec for every pool whose range a reload replaces
+ * (fpm_reload_shm_exec_records()), not only for supervisor pools: the
  * reservation is the same for all of them. */
-time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t spared) /* {{{ */
+time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t exec_at) /* {{{ */
 {
 	time_t stop = wp->config->supervisor_stop_timeout > 0 ? (time_t) wp->config->supervisor_stop_timeout : 0;
 
-	return spared + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S + stop + FPM_SUPERVISOR_RELOAD_SURVIVOR_SLACK_S;
+	return exec_at + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S + stop + FPM_SUPERVISOR_RELOAD_SURVIVOR_SLACK_S;
 }
 /* }}} */
 
@@ -310,6 +312,7 @@ struct fpm_supervisor_registry_s {
 	struct fpm_worker_pool_s *wp;
 	struct fpm_supervisor_shared_s *shared;
 	struct fpm_supervisor_reload_survivor_s *reload_survivor;	/* issue #329; NULL = none pending */
+	pid_t fresh_spare;				/* issue #692: child spared by THIS generation's reload, 0 = none; its deadline is set at exec */
 	struct fpm_supervisor_registry_s *next;
 };
 
@@ -548,9 +551,12 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
  * that against another pool's sanitized name): "name:pid:deadline" entries,
  * comma-separated. The deadline is an absolute time_t (issue #692): the time
  * after which the survivor is retired whatever its replacement did. It is
- * set once, when the child is spared, and every later generation keeps it,
- * so a survivor is signalled no later than FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S
- * after its own spare, however many reloads follow. It then exits within
+ * set at the reload's execvp(), not when the child is spared: the old master
+ * waits for its other children to exit between the two, and that wait is not
+ * bounded by FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S. Every later generation
+ * keeps the deadline, so a survivor is signalled no later than
+ * FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S after the exec that started its
+ * first tracking generation, however many reloads follow. It then exits within
  * stop_timeout of that signal (its own watchdog, fpm_pool_supervisor_sigterm()).
  *
  * fpm-ng pool names are the section header between '['
@@ -562,9 +568,9 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 #define FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV "FPMNG_RELOAD_SURVIVORS"
 
 /* Appends "wp->config->name:pid:deadline" to FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV's
- * current value (creating it if unset). Master only: called right after
- * detaching the child that pid belongs to, and again at exec for every
- * survivor this master still tracks (fpm_pool_supervisor_reload_survivor_carry()). */
+ * current value (creating it if unset). Master only: called at exec, for the
+ * child this master spared and for every survivor it still tracks
+ * (fpm_pool_supervisor_reload_survivor_carry()). */
 static void fpm_pool_supervisor_reload_survivor_env_add(const char *name, pid_t pid, time_t deadline) /* {{{ */
 {
 	const char *existing = getenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
@@ -666,7 +672,7 @@ static pid_t fpm_pool_supervisor_reload_survivor_env_take(const char *name, time
 void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct fpm_child_s *spared;
-	struct fpm_supervisor_registry_s *e;
+	struct fpm_supervisor_registry_s *e, *entry = NULL;
 
 	/* No spare capacity: with exactly one copy, detaching it would leave the
 	 * script with zero running copies for the ENTIRE reload instead of just
@@ -694,8 +700,15 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{
 					wp->config->name);
 				return;
 			}
+			entry = e;
 			break;
 		}
+	}
+
+	/* init_main() registers every supervisor pool before the first reload can
+	 * arrive. Without its entry, nothing would carry the child across the exec. */
+	if (!entry) {
+		return;
 	}
 
 	if (strchr(wp->config->name, ':') || strchr(wp->config->name, ',')) {
@@ -710,12 +723,11 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{
 		return;
 	}
 
-	/* The deadline starts here, at the spare, not at the next generation's
-	 * init. The metrics slot reservation is bounded from the same spare
-	 * (fpm_pool_supervisor_slot_reserve_until(), issue #692), so it outlives
-	 * the survivor's last write. */
-	fpm_pool_supervisor_reload_survivor_env_add(wp->config->name, spared->pid,
-		FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S);
+	/* The env entry and its deadline are written at the exec, not here: the old
+	 * master waits for its other children between this spare and the exec, and
+	 * the survivor's window must start when the new generation starts (issue #692,
+	 * fpm_pool_supervisor_reload_survivor_carry()). */
+	entry->fresh_spare = spared->pid;
 
 	zlog(ZLOG_NOTICE, "[pool %s] supervisor: sparing child %d from this reload's signal -- "
 		"it keeps running the current generation's script until a replacement copy is confirmed "
@@ -732,7 +744,8 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{
 	 * is this process's own heap, which the execvp() below discards exactly
 	 * like everything else non-shared; the NEW generation re-establishes its
 	 * own watch on this pid via fpm_pool_supervisor_reload_survivor_track()
-	 * once it reads the pid back out of the env var above. */
+	 * once it reads the pid back out of the env var that the carry hook writes
+	 * at exec. */
 }
 /* }}} */
 
@@ -858,8 +871,9 @@ static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *
 	surv->wp = wp;
 	surv->child = child;
 	surv->new_shared = entry->shared;
-	/* The absolute deadline the spare set (issue #692). An entry without one
-	 * can only come from an older binary; it gets the full timeout from now. */
+	/* The absolute deadline the old generation's exec set (issue #692). An
+	 * entry without one can only come from an older binary; it gets the full
+	 * timeout from now. */
 	surv->deadline = deadline > 0 ? deadline : FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
 
 	entry->reload_survivor = surv;
@@ -875,16 +889,27 @@ static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *
 }
 /* }}} */
 
-/* FPM_CLEANUP_PARENT_EXEC, issue #692. A survivor this master still tracks is
- * not in wp->children, so this reload's kill fan-out does not signal it, and
- * its env entry was consumed by env_take() in init_main(). Without this, the
- * NEW generation never hears of it: a second reload inside the survivor's
- * timeout orphans it, and its metrics slot reservation runs out while the
- * process still writes there. Write it back with its deadline unchanged, so
- * the next generation tracks it and retires it at the same absolute time. */
+/* FPM_CLEANUP_PARENT_EXEC, issue #692. Writes this master's survivor entries
+ * for the NEW generation, at the exec that starts it:
+ *
+ * - A child that this generation spared (fresh_spare) gets the deadline
+ *   exec + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S. It is not set at the spare:
+ *   the old master waits for its other children between the spare and this
+ *   exec, and that wait is not part of the timeout.
+ * - A survivor this master still tracks is not in wp->children, so this
+ *   reload's kill fan-out does not signal it, and its env entry was consumed
+ *   by env_take() in init_main(). Without this, the NEW generation never hears
+ *   of it: a second reload inside the survivor's timeout orphans it, and its
+ *   metrics slot reservation runs out while the process still writes there.
+ *   It keeps its deadline, so the next generation retires it at the same
+ *   absolute time.
+ *
+ * The slot reservations are written at the same exec, by
+ * fpm_reload_shm_exec_records(). */
 static void fpm_pool_supervisor_reload_survivor_carry(int which, void *arg) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *e;
+	time_t deadline = FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
 
 	(void) which;
 	(void) arg;
@@ -893,6 +918,8 @@ static void fpm_pool_supervisor_reload_survivor_carry(int which, void *arg) /* {
 		if (e->reload_survivor) {
 			fpm_pool_supervisor_reload_survivor_env_add(e->wp->config->name,
 				e->reload_survivor->child->pid, e->reload_survivor->deadline);
+		} else if (e->fresh_spare > 0) {
+			fpm_pool_supervisor_reload_survivor_env_add(e->wp->config->name, e->fresh_spare, deadline);
 		}
 	}
 }

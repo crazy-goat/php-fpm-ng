@@ -37,9 +37,9 @@ struct fpm_worker_pool_s;
 #define FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S 30
 
 /* Issue #692: the latest time the metrics slot range of `wp` must stay
- * reserved, when the generation that owns `wp` spared a survivor at `spared`.
- * See the implementation in fpm_pool_supervisor.c for the bound. */
-time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t spared);
+ * reserved, when the reload that replaces `wp` execs at `exec_at`. See the
+ * implementation in fpm_pool_supervisor.c for the bound. */
+time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t exec_at);
 
 /* Directives rejected for pool.type = supervisor. NULL-terminated, used as
  * .rejects in fpm_pool_types[]. */

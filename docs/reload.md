@@ -376,9 +376,11 @@ Details worth knowing:
   order. The slots a replaced pool used in the previous generation are kept
   free of new ranges, because a #329 survivor of that pool may still write to
   its old slot. The reservation lasts until the survivor can no longer write.
-  That time is the reload time plus 30 seconds, plus the `supervisor.stop_timeout`
-  of the pool, plus 2 seconds of slack. A second reload keeps that expiry and
-  does not extend it (see "Back-to-back selective reloads" below). The new pool's
+  The reservation lasts until the survivor can no longer write. The expiry is
+  set at the exec of the reload that spares the survivor. It adds 30 seconds,
+  the `supervisor.stop_timeout` of the pool, and 2 seconds of slack. A later
+  reload carries that expiry as a `Y` record and does not extend it (see
+  "Back-to-back selective reloads" below). The new pool's
   slots are cleared by punching a hole in the memfd, which frees the memory
   instead of faulting it in.
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
@@ -443,18 +445,22 @@ have one mechanism misparse the other's env var contents.
 
 This section covers a #329 survivor that still runs when a second selective
 reload starts. It states why no two live writers can share a metrics slot
-across back-to-back reloads, and it lists the limits that remain. The proof
+across back-to-back reloads. It also lists the limits that remain. The proof
 covers the survivors of pools that the new configuration keeps. Limit 2
 below covers the others.
 
-**The survivor keeps its deadline.** When a master spares a child, it writes
-the entry `pool-name:pid:deadline` to `FPMNG_RELOAD_SURVIVORS`. The deadline
-is the spare time plus `FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S`, which is 30
-seconds. The new master tracks the survivor. It sends the stop signal once: at
-the deadline, or earlier when a replacement copy starts.
+**The deadline starts at the exec.** A master writes the deadline of a spared
+child at its `execvp()`, not at the spare. The entry is `pool-name:pid:deadline`,
+written to `FPMNG_RELOAD_SURVIVORS`. The deadline is the exec time plus
+`FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S`, which is 30 seconds. The old master
+waits for its other children after the spare, and this wait can take longer
+than 30 seconds. A deadline set at the spare could expire before the new
+generation starts. The new master tracks the survivor. It sends the stop signal
+at least once: at the deadline, or earlier when a replacement copy starts.
 
-**The survivor exits within a bounded time.** When the survivor gets the stop
-signal, it starts a watchdog process. The watchdog sends `SIGKILL` after the
+**The survivor exits within a bounded time.** When the survivor gets its first
+stop signal, it starts a watchdog process. A later stop signal does not start a
+second watchdog. The watchdog sends `SIGKILL` after the
 `supervisor.stop_timeout` of the pool, if the survivor still runs. The survivor
 therefore exits no later than the deadline, plus one poll of 200 milliseconds,
 plus `supervisor.stop_timeout`. If `fork()` fails, no watchdog starts (see
@@ -462,38 +468,45 @@ limit 1 below).
 
 **A master carries its survivor across a reload.** A master tracks at most one
 survivor for each pool. It does not spare another child of that pool while it
-tracks one. At its `execvp()`, the master writes each survivor that it still
-tracks back to `FPMNG_RELOAD_SURVIVORS`, with the same deadline. The
+tracks one. At its `execvp()`, the master writes each survivor that it tracks
+back to `FPMNG_RELOAD_SURVIVORS`, with the same deadline. It also writes each
+child that it spares in this reload, with the deadline set at this exec. The
 `FPM_CLEANUP_PARENT_EXEC` cleanup `fpm_pool_supervisor_reload_survivor_carry()`
-does this. The next master tracks the survivor again and retires it at the
-same time. Before issue #692, the second reload neither signalled the survivor
-nor wrote it back, so the survivor was orphaned.
+does this. The next master tracks the survivor again and retires it at the same
+deadline. Before issue #692, the second reload neither signalled the survivor
+nor wrote it back, so no master tracked the survivor.
 
-**A slot reservation keeps its expiry.** When a reload spares an unchanged pool,
-the old master writes one `X:<pool>:<base>:<count>:<until>` record for the slot
-range of each pool it runs. This includes a changed pool that lost a child to a
-#329 survivor. The `<until>` is the spare time plus 30 seconds, plus the
-`supervisor.stop_timeout` of that pool, plus 2 seconds of slack
-(`fpm_pool_supervisor_slot_reserve_until()`). The new master reserves each range
-until `<until>` (`fpm_metrics_reserve()`). At the next reload, the old master
-writes each reservation that still holds as a `Y:<base>:<count>:<until>` record.
-The new master keeps the same `<until>`. It does not extend it. An `X` record
-without `<until>` comes from an older binary. The new master then uses the load
-time plus 30 seconds.
+**A slot reservation has an expiry.** At its `execvp()`, the old master writes
+one `X:<pool>:<base>:<count>:<until>` record for the slot range of each pool it
+runs. This includes a changed pool that lost a child to a #329 survivor. The
+`<until>` is the exec time plus 30 seconds, plus the `supervisor.stop_timeout`
+of that pool, plus 2 seconds of slack (`fpm_pool_supervisor_slot_reserve_until()`).
+The new master reserves the range of each pool that the reload does not spare
+(`fpm_metrics_reserve()`). A reserved range stays reserved for the whole
+generation. At the next reload, the old master writes each reserved range as a
+`Y:<base>:<count>:<until>` record, if its expiry is later than the current time.
+A `Y` record keeps its `<until>`. The new master does not extend it. An `X`
+record without `<until>` comes from an older binary. The new master then uses
+the load time plus 30 seconds.
 
 **Why no two live writers share a slot.** Consider a survivor `S` of pool `p`,
-which writes to the slot range `R`. A reload spares `S` at time `t0`, and it
-replaces `p`:
+which writes to the slot range `R`. The master that spares `S` execs at time
+`E`, and the new generation replaces `p`. Before `E`, the old master still owns
+`R`, and no new pool uses it. So the wait before `E` does not change the bound.
 
-1. `S` has the deadline `t0 + 30`. It gets the stop signal no later than
-   `t0 + 30 + 0.2`. It exits no later than `t0 + 30.2 + stop_timeout`.
-2. The same reload writes the expiry `U = t0 + 30 + stop_timeout + 2` for `R`.
+1. `S` has the deadline `E + 30`. It gets the stop signal no later than
+   `E + 30.2`. It exits no later than `E + 30.2 + stop_timeout`.
+2. The same exec writes the expiry `U = E + 30 + stop_timeout + 2` for `R`.
    `U` is later than the exit time of `S`. The 2 seconds of slack cover the
-   whole-second rounding of `FPM_NOW()`, the poll, and the signal delivery.
-3. Every later master keeps `U` as an absolute time. It does not extend `U`.
-   So `R` stays reserved at least until `U`.
-4. A pool that is not `p` takes a slot of `R` only after `U`. At `U`, `S` has
-   already exited.
+   whole-second rounding of `FPM_NOW()`, the poll, and the signal delivery. They
+   also cover the one-second difference between the two clock reads at the exec.
+3. The new master reserves `R` for its generation. Each later master carries `R`
+   with the expiry `U` as an absolute time, while `U` is later than the current
+   time. It does not extend `U`. So `R` stays reserved at least until `U`. If a
+   later reload keeps `p`, `R` is the range of `p` again. When a later reload
+   replaces `p`, it writes a new `X` record. That expiry is not earlier than `U`,
+   when `supervisor.stop_timeout` does not change.
+4. No other pool takes a slot of `R` before `U`. At `U`, `S` has already exited.
 
 Without `reload.selective = yes`, the metrics region is not inherited. A
 survivor then writes only to the old region, and no new pool can share it.
@@ -517,6 +530,8 @@ survivor then writes only to the old region, and no new pool can share it.
 4. In a test build with `FPMNG_DEBUG_CLOCK_RATE` above 1, each process uses its
    own debug clock. The carried times are then approximate. The packages do not
    allow this clock.
+5. The bound assumes one `supervisor.stop_timeout` value for the survivor and
+   for its expiry. A change of this value between two reloads is not tested.
 
 The test `fpmng-reload-survivor-back-to-back.phpt` runs two selective reloads
 with a survivor that writes into the slot of its pool. A pool added by the

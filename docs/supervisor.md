@@ -425,7 +425,8 @@ goes through the signal-then-`execvp()` sequence as before.
 other state, per `docs/NOTES.md` section 3p, does not), so the survivor's pid
 is handed to the new generation through a single environment variable, one
 `pool-name:pid:deadline` entry per pool that spared a child. The deadline is
-an absolute time, set when the child is spared (issue #692). The new generation
+an absolute time, set at the exec of the generation that spared the child
+(issue #692). The new generation
 reads its own pool's entry back out on startup, confirms the pid is still alive,
 and starts watching it — it is not a child this generation ever forked, so it
 is tracked the same way `pool.type = http`'s gateway processes are (a

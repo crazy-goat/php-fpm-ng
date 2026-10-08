@@ -428,11 +428,45 @@ static void fpm_reload_shm_carry_range(uint32_t base, uint32_t count, time_t unt
 }
 /* }}} */
 
+/* Issue #692: writes the expiry records, at the exec that starts the next
+ * generation. The expiries are relative to that exec, not to the spare: the
+ * old master waits for its other children between a spare and the exec, and a
+ * spared survivor's window starts at the exec too
+ * (fpm_pool_supervisor_reload_survivor_carry()). Called by fpm_pctl_exec()
+ * and not by a cleanup hook: the worker pool cleanup frees the pool list, and
+ * the cleanups run in reverse registration order, so a hook registered at init
+ * found no pools. */
+void fpm_reload_shm_exec_records(void) /* {{{ */
+{
+	struct fpm_worker_pool_s *o;
+	char rec[512];
+
+	if (!mx_recorded) {
+		return; /* no pool was spared with the metrics region: nothing to carry */
+	}
+
+	/* Every pool's old range, so the next master can keep new ranges
+	 * off the slots of pools that are about to be replaced. */
+	for (o = fpm_worker_all_pools; o; o = o->next) {
+		uint32_t ob, oc;
+
+		if (!strpbrk(o->config->name, ":;") && fpm_metrics_pool_range(o, &ob, &oc)) {
+			snprintf(rec, sizeof(rec), "X:%s:%u:%u:%lld", o->config->name, ob, oc,
+					(long long) fpm_pool_supervisor_slot_reserve_until(o, FPM_NOW()));
+			fpm_reload_shm_append_env(rec);
+		}
+	}
+	/* Reserved ranges that are still reserved (issue #692): the named ones above
+	 * are reserved by the next generation through X, these have no pool in this
+	 * generation to name them. */
+	fpm_metrics_foreach_reserved(fpm_reload_shm_carry_range);
+}
+/* }}} */
+
 void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	const char *name = wp->config->name;
 	struct fpm_reload_shm_sb_s *s;
-	struct fpm_worker_pool_s *o;
 	uint32_t base, count;
 	char rec[512];
 
@@ -451,21 +485,6 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			fpm_reload_shm_set_cloexec(own_mx_fd, 0);
 			snprintf(rec, sizeof(rec), "M:%d:%zu:%u:%u", own_mx_fd, own_mx_size, own_mx_slots, own_mx_limit);
 			fpm_reload_shm_append_env(rec);
-			/* Every pool's old range, so the next master can keep new ranges
-			 * off the slots of pools that are about to be replaced. */
-			for (o = fpm_worker_all_pools; o; o = o->next) {
-				uint32_t ob, oc;
-
-				if (!strpbrk(o->config->name, ":;") && fpm_metrics_pool_range(o, &ob, &oc)) {
-					snprintf(rec, sizeof(rec), "X:%s:%u:%u:%lld", o->config->name, ob, oc,
-							(long long) fpm_pool_supervisor_slot_reserve_until(o, FPM_NOW()));
-					fpm_reload_shm_append_env(rec);
-				}
-			}
-			/* Reserved ranges that are still reserved (issue #692): the
-			 * named ones above are reserved by the next generation through
-			 * X, these have no pool in this generation to name them. */
-			fpm_metrics_foreach_reserved(fpm_reload_shm_carry_range);
 		}
 		snprintf(rec, sizeof(rec), "B:%s:%u:%u", name, base, count);
 		fpm_reload_shm_append_env(rec);

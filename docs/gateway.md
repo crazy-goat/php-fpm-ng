@@ -422,7 +422,8 @@ closed connection. Probes that open a new connection for each check, such as
 Docker `HEALTHCHECK` and Kubernetes `httpGet`, do not see the `503`. They time
 out, or they get a refused connection with `http.reuseport`. Both count as a
 failed check. A `503` for new connections during a drain is not part of this
-phase.
+phase. Issue #661 (phase 2 of the graceful drain) covers the refused connections
+during an exec on reload. It does not decide the `503` for new connections.
 
 **Startup.** The gateway answers the probe only after its event loop starts.
 Before that, a new connection waits in the listen backlog, or it is refused. The

@@ -6,7 +6,8 @@
  * starts with '@' is in the abstract namespace (unix(7)), which is how systemd
  * names some of its sockets. The socket is opened for each message and closed
  * again. Messages are rare (one READY per start, one RELOADING and one READY
- * per reload, one STOPPING, and one WATCHDOG=1 per period), so a cached
+ * per reload, one RELOADING and one READY for a refused reload, one STOPPING,
+ * and one WATCHDOG=1 per period), so a cached
  * descriptor would only be state to get wrong across the execvp() of a reload.
  *
  * NOTIFY_SOCKET is deliberately NOT unset after it is read. A SIGUSR2 reload is
@@ -149,6 +150,18 @@ void fpm_sd_notify_reloading(void) /* {{{ */
 	snprintf(payload, sizeof(payload), "RELOADING=1\nMONOTONIC_USEC=%llu\n", usec);
 
 	fpm_sd_notify_send(payload);
+}
+/* }}} */
+
+void fpm_sd_notify_reload_refused(void) /* {{{ */
+{
+	/* systemd ignores a bare READY=1 while a reload job waits, and the job then
+	 * runs to TimeoutStartSec. Measured on systemd 259 with Type=notify-reload:
+	 * READY=1 alone, and RELOADING=1 without MONOTONIC_USEC, both time out.
+	 * RELOADING=1 with MONOTONIC_USEC, then READY=1, ends the job at once. The
+	 * generation does not change, so the pair says what READY=1 says. */
+	fpm_sd_notify_reloading();
+	fpm_sd_notify_send("READY=1\n");
 }
 /* }}} */
 

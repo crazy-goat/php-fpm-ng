@@ -1,9 +1,14 @@
-# systemd notification (`Type=notify`)
+# systemd notification (`Type=notify-reload`)
 
 The master of php-fpm-ng sends messages to systemd. The `.deb` unit,
-`packaging/deb/php-fpm-ng.service`, uses `Type=notify`. With this type, systemd
-waits for the first `READY=1` before it marks the service as started. The master
-sends the messages itself. It does not need libsystemd.
+`packaging/deb/php-fpm-ng.service`, uses `Type=notify-reload`. This type needs
+systemd 253 or later. The packaged target, ubuntu:26.04, has systemd 259.
+The master sends the messages itself. It does not need libsystemd.
+
+With this unit:
+
+- `systemctl start` waits for the first `READY=1`.
+- `systemctl reload` waits for the `READY=1` of the new master.
 
 ## The messages
 
@@ -14,27 +19,52 @@ sets `NotifyAccess=main`. Each message is one datagram to the socket that
 | Message | Sent when | Meaning |
 |---|---|---|
 | `READY=1` | Every pool has bound its listening socket and the first children are started. | The listening sockets are bound. This does not mean that a pool or a gateway answers requests. |
+| `RELOADING=1` with `MONOTONIC_USEC`, then `READY=1` | A reload that the configuration check refuses. | The master keeps its current generation. The `READY=1` ends the reload job of systemd. |
 | `RELOADING=1` with `MONOTONIC_USEC` | A reload (`SIGUSR2`) passes the configuration check. | A new generation of the master starts. Its `READY=1` follows when its pools listen again. |
 | `STOPPING=1` | The stop starts: `SIGQUIT`, `SIGTERM` or `SIGINT` reaches the master. | The master starts to stop. |
 | `WATCHDOG=1` | Every half of `WATCHDOG_USEC`, when systemd sets it. | The event loop of the master runs. The packaged unit does not set it. |
 
 ## Reload
 
-A reload that passes the configuration check sends `RELOADING=1`, then
-`READY=1`. A reload runs the master again with the same process ID. The new
-master keeps `NOTIFY_SOCKET`, so it can send its messages.
+A reload from `systemctl reload` has these steps:
 
-`systemctl reload` does not wait for that `READY=1`. The packaged unit has
-`Type=notify`, so systemd ends the reload when the `ExecReload=` commands exit.
-The second command, `kill -USR2`, exits when the signal is sent. The new master
-starts after that and sends `READY=1` when its pools listen. Measured on systemd
-259 with the packaged unit (paths changed): `systemctl reload` returned 80 ms to
-121 ms after it started. The new master logged its first line about 50 ms after
-`Reloaded` (3 runs). A script that needs the new master must wait for it.
+1. systemd runs the `ExecReload=` line. It runs the configuration check
+   (`-t`). If the check fails, the reload job fails. systemd sends no signal.
+2. systemd sends `SIGUSR2` (`ReloadSignal=`). The master checks the
+   configuration again. If the check passes, the master sends `RELOADING=1`
+   and starts the new generation.
+3. The new generation sends `READY=1` when its pools listen again. systemd
+   ends the reload job then, and `systemctl reload` returns.
 
-A reload that the configuration check refuses sends nothing. The reason is in
-the error log. The first `ExecReload=` line of the unit also writes the reason
-to the journal (see `docs/reload.md`).
+A reload runs the master again with the same process ID. The new master keeps
+`NOTIFY_SOCKET`, so it can send its messages.
+
+A reload that the configuration check refuses inside the master sends
+`RELOADING=1` with `MONOTONIC_USEC`, then `READY=1`. The master keeps the
+current generation, so `READY=1` is true. A bare `READY=1` does not end the
+reload job. Without the pair, systemd waits until `TimeoutStartSec=` expires.
+The first step rules out most broken configurations. The second step catches a
+change made after the first step ran.
+
+A `SIGUSR2` that does not come from `systemctl reload` runs no check in the
+unit. The master still checks the configuration itself. A refused reload then
+sends the same pair.
+
+Measured on systemd 259 with the packaged unit (paths changed), on a test box
+shared with other runs:
+
+- Start, valid configuration, 3 runs: `systemctl start` returns 57 ms to 95 ms
+  after the start.
+- Stop, 3 runs: `systemctl stop` returns 45 ms to 80 ms after the stop.
+- Valid reload, 3 runs: `systemctl reload` returns with exit status 0 after
+  116 ms to 163 ms. The new generation listens.
+- Refused by the `-t` line of the unit, 1 run: `systemctl reload` fails with
+  exit status 1 after 60 ms. The unit stays active.
+- Refused inside the master, 1 run: `systemctl reload` returns with exit status 0
+  after 101 ms. The unit stays active and the pools keep listening.
+
+The reason for a refused reload is in the error log. The first `ExecReload=`
+line of the unit also writes the reason to the journal (see `docs/reload.md`).
 
 ## The watchdog
 

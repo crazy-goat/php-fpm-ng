@@ -79,12 +79,14 @@ a master which creates the socket and answers a FastCGI request. The image above
 installed the `v0.2.0` package. That package ships a `Type=exec` unit, so this
 check covers that unit only.
 
-The unit in `packaging/deb/php-fpm-ng.service` is `Type=notify` from issue
-#643 on. No package with that unit exists yet. Measured for issue #643, on a
-host with systemd 259 and not in the image: the unit with the `ExecStart` and
-`ExecReload` paths changed and `User=piotr` added passes `systemd-analyze verify`.
-`systemctl start` returns 57 ms to 67 ms after it starts, when the master sends
-`READY=1` (3 runs). `systemctl stop` ends the master in 28 ms to 42 ms (3 runs).
+The unit in `packaging/deb/php-fpm-ng.service` is `Type=notify-reload` from
+issue #643 on, and it needs systemd 253 or later. No package with that unit
+exists yet. Measured for issue #643, on a host with systemd 259 and not in the
+image: the unit with the `ExecStart` and `ExecReload` paths changed and
+`User=piotr` added passes `systemd-analyze verify`. `systemctl start` returns
+57 ms to 95 ms after it starts, when the master sends `READY=1` (3 runs).
+`systemctl stop` ends the master in 45 ms to 80 ms (3 runs). The test box was
+shared with other runs, so these ranges are wide.
 Not measured: the `.deb` built from this change, installed in `ubuntu:26.04`.
 The master sends `READY=1` after its sockets are bound. See `docs/systemd.md`.
 

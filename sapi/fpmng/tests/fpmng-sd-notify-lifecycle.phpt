@@ -18,14 +18,18 @@ require_once "tester.inc";
  *     test reads it, a TCP connect to each pool succeeds. This proves the
  *     sockets are listening. It does NOT prove that a request is answered,
  *     which is why docs/systemd.md says READY means "bound", not "serving".
- *  2. A reload the configuration check refuses sends nothing: RELOADING=1 is
- *     sent only after the check passed (fpm_pctl(), fpm_process_ctl.c).
+ *  2. A reload the configuration check refuses sends RELOADING=1 with
+ *     MONOTONIC_USEC, then READY=1, and nothing else: the unit's reload job
+ *     (Type=notify-reload) waits for READY=1 after ReloadSignal=, and a bare
+ *     READY=1 does not end it. The running generation is still the one serving
+ *     (fpm_pctl(), fpm_process_ctl.c).
  *  3. A reload that passes sends RELOADING=1 with MONOTONIC_USEC, and the new
  *     generation sends READY=1 once its pools listen again. The new master is
  *     an execvp() of the old one, so NOTIFY_SOCKET must survive the exec.
  *  4. SIGQUIT (the packaged unit's KillSignal) sends STOPPING=1, and the
  *     master exits.
- * The whole sequence is exactly READY, RELOADING, READY, STOPPING. */
+ * The whole sequence is exactly READY, RELOADING and READY (refused),
+ * RELOADING, READY, STOPPING. */
 
 $root = sys_get_temp_dir() . '/fpmng-sd-notify-lifecycle-' . getmypid();
 @mkdir($root, 0700, true);
@@ -141,8 +145,9 @@ try {
     }
     echo "READY=1 after both pools listen\n";
 
-    /* 2. A refused reload sends nothing. pm.max_children = 0 is refused by
-     * the configuration check, and the running generation keeps serving. */
+    /* 2. A refused reload sends RELOADING=1 with a monotonic time, then READY=1,
+     * and nothing else. pm.max_children = 0 is refused by the configuration
+     * check, and the running generation keeps serving. */
     writeConfig($conf, $root, $log, $addrA, $addrB, 'broken on purpose', 0);
     exec("kill -USR2 $masterPid");
     $deadline = time() + 30;
@@ -152,11 +157,22 @@ try {
     if (!str_contains((string) @file_get_contents($log), 'reload refused')) {
         fail("the broken configuration was not refused\n" . (string) @file_get_contents($log));
     }
+    $refused = next_datagram($srv, 30);
+    if ($refused === null || preg_match('/\ARELOADING=1\nMONOTONIC_USEC=\d+\n\z/', $refused) !== 1) {
+        fail('a refused reload did not send RELOADING=1 with MONOTONIC_USEC: ' . var_export($refused, true));
+    }
+    $refusedReady = next_datagram($srv, 30);
+    if ($refusedReady !== "READY=1\n") {
+        fail('a refused reload did not send READY=1 after RELOADING=1: ' . var_export($refusedReady, true));
+    }
     $unexpected = next_datagram($srv, 2);
     if ($unexpected !== null) {
-        fail('a refused reload sent a datagram: ' . var_export($unexpected, true));
+        fail('a refused reload sent a third datagram: ' . var_export($unexpected, true));
     }
-    echo "refused reload sent nothing\n";
+    if (!listening($addrA) || !listening($addrB)) {
+        fail("the running pools stopped listening after a refused reload\n" . (string) @file_get_contents($log));
+    }
+    echo "refused reload: RELOADING=1, then READY=1, the pools keep listening\n";
 
     /* 3. A valid reload: RELOADING=1 with a monotonic time, then READY=1 from
      * the new generation, once its pools listen again. */
@@ -216,7 +232,7 @@ try {
 ?>
 --EXPECTF--
 READY=1 after both pools listen
-refused reload sent nothing
+refused reload: RELOADING=1, then READY=1, the pools keep listening
 reload: RELOADING=1, then READY=1 after both pools listen
 stop: STOPPING=1, then the master exits
 Done

@@ -21,10 +21,17 @@
 void fpm_sd_notify_ready(void);
 
 /* RELOADING=1 with MONOTONIC_USEC. Called from fpm_pctl() when a reload has
- * passed the configuration check and the state changes to 'reloading'. A
- * refused reload does not reach this point, so systemd never sees a reload
- * that did not happen. */
+ * passed the configuration check and the state changes to 'reloading'. */
 void fpm_sd_notify_reloading(void);
+
+/* RELOADING=1 with MONOTONIC_USEC, then READY=1, for a reload the configuration
+ * check refused. Called from fpm_pctl() instead of fpm_sd_notify_reloading().
+ * The master keeps its current generation, so READY=1 is true, and the pair
+ * ends the reload job that systemd started (Type=notify-reload waits for
+ * READY=1 after ReloadSignal=). A bare READY=1 does not end the job. The -t
+ * line of the unit catches most broken configurations before the signal; this
+ * covers the rest, so systemd does not wait for TimeoutStartSec. */
+void fpm_sd_notify_reload_refused(void);
 
 /* STOPPING=1. Called from fpm_pctl() when the master enters 'finishing' or
  * 'terminating' (SIGQUIT, SIGINT, SIGTERM, or a failed start). */

@@ -237,8 +237,8 @@ The handoff runs in these steps:
    block the bind of a fastcgi pool on the same address.
 4. A gateway of the new generation takes a socket over when its bind text and
    its TLS fingerprint match. It takes a socket over only when it listens at
-   once. A gateway with `http.tls_wait_for_cert` does not, because it does not
-   listen at once.
+   once. A gateway in the NO_CERT state of `http.tls_wait_for_cert` does not,
+   because it does not listen at once.
 5. Any inherited socket that no gateway takes over is closed. The gateway
    binds its address as before. A record whose descriptor is not a listening
    TCP socket is ignored, and the descriptor is left open.

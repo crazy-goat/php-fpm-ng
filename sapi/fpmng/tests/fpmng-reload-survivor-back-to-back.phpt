@@ -26,9 +26,10 @@ require_once "fpmng-operator.inc";
  * spared by both reloads, so the metrics region is carried across both execs.
  *
  * supervisor.start_jitter is random in [0, 30] seconds. The survivor is still
- * unconfirmed at reload B unless the jitter drawn for the new copies is
- * shorter than the gap between the reloads, so the test fails on an unfixed
- * build in almost every run and passes on every run of a fixed build. */
+ * unconfirmed at reload B unless a copy of the new generation drew a delay
+ * shorter than the gap between the reloads. Then the survivor is retired before
+ * reload B, nothing is carried, and the run checks only the slot. In the other
+ * runs an unfixed build fails the carry check. */
 $root = sys_get_temp_dir() . '/fpmng-reload-surv-b2b-' . getmypid();
 @mkdir($root, 0700, true);
 $alive = "$root/alive.log";
@@ -198,8 +199,19 @@ try {
     check($hits === 1.0, "pool [n] did not count its hit: n_hits = " . var_export($hits, true));
 
     /* The survivor of reload A is carried across reload B (issue #692): the
-     * generation that reload B started tracks it again, and logs it again. */
-    check(substr_count((string) @file_get_contents($logFile), 'is still running the previous') >= 2,
+     * generation that reload B started tracks it again, and logs it again.
+     * A copy of the new generation may confirm its start first. The generation
+     * of reload A then retires the survivor before reload B, and nothing is
+     * carried. Its retire line is logged before the exec, so it comes before
+     * the second track line, which tells the two cases apart. */
+    $log = (string) @file_get_contents($logFile);
+    check(preg_match('/reload survivor pid (\d+) is still running the previous/', $log, $m) === 1,
+        'reload A: the log does not name the survivor');
+    $track = "reload survivor pid {$m[1]} is still running the previous";
+    $trackedAgain = strpos($log, $track, strpos($log, $track) + 1);
+    $retired = strpos($log, "retiring reload survivor pid {$m[1]} ");
+    $retiredBeforeB = $retired !== false && ($trackedAgain === false || $retired < $trackedAgain);
+    check($retiredBeforeB || $trackedAgain !== false,
         'reload B: the survivor of reload A was not carried into the next generation');
 
     /* The region was carried across both execs only if [h] was spared by
@@ -217,8 +229,9 @@ try {
 } finally {
     $tester->terminate();
     $tester->close();
-    /* The survivor is not a child of any running master, so terminate()
-     * does not reach it. It checks the stop file every 20 ms and kills itself.
+    /* terminate() does not stop the survivor: a master exit does not signal
+     * the survivor it tracks, so the survivor outlives every master. It checks
+     * the stop file every 20 ms and kills itself.
      * It must see the file before cleanup() removes it, or it keeps the
      * test's listener open for the next test in this port lane. */
     @touch($stop);

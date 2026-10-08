@@ -267,6 +267,27 @@ struct fpm_supervisor_shared_s {
  * enough that polling it costs nothing worth measuring. */
 #define FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS 200
 
+/* Issue #692: the stop signal goes out up to one poll after the deadline, and
+ * FPM_NOW() rounds down to whole seconds, so the bound below needs this slack
+ * on top of the stop window. The X records and the spares of one reload are
+ * written a fraction of a second apart, which the slack also covers. */
+#define FPM_SUPERVISOR_RELOAD_SURVIVOR_SLACK_S 2
+
+/* Issue #692: the latest time the metrics slot range of `wp` stays reserved
+ * when the generation that owns `wp` spared a survivor at `spared`. The
+ * survivor is signalled no later than spared + TIMEOUT (+ one poll), and its
+ * own watchdog SIGKILLs it stop_timeout after that signal, so nothing it
+ * writes lasts longer than this. Called for every pool whose range a reload
+ * replaces (fpm_reload_shm_spare_pool()), not only for supervisor pools: the
+ * reservation is the same for all of them. */
+time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t spared) /* {{{ */
+{
+	time_t stop = wp->config->supervisor_stop_timeout > 0 ? (time_t) wp->config->supervisor_stop_timeout : 0;
+
+	return spared + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S + stop + FPM_SUPERVISOR_RELOAD_SURVIVOR_SLACK_S;
+}
+/* }}} */
+
 /* State for ONE child of ONE pool that a reload spared from the kill fan-out
  * (fpm_pool_supervisor_reload_spare_child()) and that THIS generation
  * (fpm_pool_supervisor_init_main(), after execvp()) is now watching for
@@ -528,8 +549,9 @@ int fpm_pool_supervisor_validate(struct fpm_worker_pool_s *wp) /* {{{ */
  * comma-separated. The deadline is an absolute time_t (issue #692): the time
  * after which the survivor is retired whatever its replacement did. It is
  * set once, when the child is spared, and every later generation keeps it,
- * so a survivor never lives longer than FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S
- * after its own spare, however many reloads follow.
+ * so a survivor is signalled no later than FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S
+ * after its own spare, however many reloads follow. It then exits within
+ * stop_timeout of that signal (its own watchdog, fpm_pool_supervisor_sigterm()).
  *
  * fpm-ng pool names are the section header between '['
  * and ']' in the config (fpm_conf.c, untouched) and in every configuration
@@ -689,8 +711,9 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{
 	}
 
 	/* The deadline starts here, at the spare, not at the next generation's
-	 * init: the reservation of this child's metrics slot (fpm_metrics_reserve())
-	 * starts later, so it always outlives the survivor (issue #692). */
+	 * init. The metrics slot reservation is bounded from the same spare
+	 * (fpm_pool_supervisor_slot_reserve_until(), issue #692), so it outlives
+	 * the survivor's last write. */
 	fpm_pool_supervisor_reload_survivor_env_add(wp->config->name, spared->pid,
 		FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S);
 

@@ -55,8 +55,9 @@ int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *c
 /* Calls `cb` for the slot range of every pool of the previous generation that
  * was NOT spared. A #329 survivor of such a pool may still write to its old
  * slot for a while, so the new generation must not hand those slots to
- * another writer. */
-void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count));
+ * another writer. `until` is the time after which the range may be reused:
+ * no survivor can write there any more (issue #692). */
+void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count, time_t until));
 
 /* Calls `cb` for every slot range that the previous generation itself kept
  * reserved (a Y record, issue #692) and that is still reserved: `until` is the

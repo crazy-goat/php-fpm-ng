@@ -29,6 +29,7 @@
 #include "fpm_sd_notify.h"
 #ifdef HAVE_FPM_HTTP
 #include "fpm_http_drain.h"
+#include "fpm_pctl_window.h"
 #endif
 #include "zlog.h"
 
@@ -36,18 +37,9 @@
 static int fpm_state = FPM_PCTL_STATE_NORMAL;
 static int fpm_signal_sent = 0;
 #ifdef HAVE_FPM_HTTP
-/* Issue #646: the signal that the first pass held back for the pools a gateway
- * with http.ready_path routes to (0: nothing held), and whether the current
- * fpm_pctl_kill_all() call is the release of those pools. */
-static int fpm_deferred_signo = 0;
+/* Issue #646: whether the current fpm_pctl_kill_all() call is the release of
+ * the held pools (fpm_pctl_window.h keeps the hold itself). */
 static int fpm_deferred_release = 0;
-
-/* Issue #646: 1 while the window of a gateway with http.ready_path is open: the
- * held signal has not gone out yet and such a gateway is alive. */
-static int fpm_pctl_window_open(void)
-{
-	return fpm_deferred_signo != 0 && fpm_http_ready_gateways_alive();
-}
 #endif
 
 
@@ -214,7 +206,7 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 #ifdef HAVE_FPM_HTTP
 	/* Issue #646: a first pass decides the hold again from scratch. */
 	if (fpm_signal_sent == 0) {
-		fpm_deferred_signo = 0;
+		fpm_pctl_window_reset();
 	}
 #endif
 
@@ -252,16 +244,15 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 #ifdef HAVE_FPM_HTTP
 		/* Issue #646: the children of a pool that a gateway with http.ready_path
 		 * routes to keep serving while that gateway's window is open. The first
-		 * pass only holds them back; fpm_pctl_release_deferred() sends the
-		 * signal later, and only to these pools. Log rotation (NORMAL state) is
-		 * never held. */
+		 * pass only holds them back (fpm_pctl_window.c); fpm_pctl_release_deferred()
+		 * sends the signal later, and only to these pools. Log rotation (NORMAL
+		 * state) is never held. */
 		if (fpm_deferred_release) {
 			if (!fpm_http_pool_routed_by_ready_gateway(wp)) {
 				continue;
 			}
-		} else if (fpm_state != FPM_PCTL_STATE_NORMAL && fpm_signal_sent == 0 &&
-				fpm_http_pool_held_for_window(wp)) {
-			fpm_deferred_signo = signo;
+		} else if (fpm_pctl_window_hold_pool(wp, signo,
+				fpm_state != FPM_PCTL_STATE_NORMAL && fpm_signal_sent == 0)) {
 			continue;
 		}
 #endif
@@ -347,7 +338,7 @@ static void fpm_pctl_action_next(void)
 		/* Issue #646: the window outlived process_control_timeout while its
 		 * gateway is still alive. The held children get the first signal now,
 		 * with a full timeout of their own, before any escalation. */
-		if (fpm_deferred_signo) {
+		if (fpm_pctl_window_held_signo()) {
 			fpm_pctl_release_deferred();
 			return;
 		}
@@ -374,12 +365,11 @@ static void fpm_pctl_action_next(void)
  * was left of the timer that started with the stop. */
 void fpm_pctl_release_deferred(void)
 {
-	int signo = fpm_deferred_signo;
+	int signo = fpm_pctl_window_take_held();
 
 	if (!signo) {
 		return;
 	}
-	fpm_deferred_signo = 0;
 
 	fpm_deferred_release = 1;
 	fpm_pctl_kill_all(signo);
@@ -392,16 +382,6 @@ void fpm_pctl_release_deferred(void)
 	fpm_pctl_timeout_set(fpm_global_config.process_control_timeout);
 }
 
-/* Issue #646: 1 when fpm_children_make() may fork a child of wp although the
- * master is not in NORMAL state. Only an ondemand pool routed by a gateway with
- * http.ready_path, and only while the window is open: its children are still
- * held back, so the new child gets the release signal with the others. Other
- * pools do not fork: their children serve what is in flight. */
-int fpm_pctl_may_fork_in_window(const struct fpm_worker_pool_s *wp)
-{
-	return fpm_pctl_window_open() && wp->config->pm == PM_STYLE_ONDEMAND &&
-			fpm_http_pool_routed_by_ready_gateway(wp);
-}
 #endif
 
 void fpm_pctl(int new_state, int action) /* {{{ */
@@ -447,6 +427,15 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 				fpm_sd_notify_reload_refused();
 				return;
 			}
+
+			/* Issue #646: a stop or a reload that is already in progress is
+			 * overridden (SIGTERM after SIGQUIT, say). The new signal is not held
+			 * for the gateways' windows: the children get it at once. */
+#ifdef HAVE_FPM_HTTP
+			if (fpm_state != FPM_PCTL_STATE_NORMAL) {
+				fpm_pctl_window_escalate();
+			}
+#endif
 
 			fpm_signal_sent = 0;
 			fpm_state = new_state;

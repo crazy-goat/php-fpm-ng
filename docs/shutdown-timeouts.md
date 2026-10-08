@@ -56,11 +56,14 @@ ondemand pool forks a child for a new connection in the window.
 
 After the window the gateway drains for up to another `process_control_timeout`
 minus 100 ms. It stops accepting, and it exits when no request is in progress.
-The children held back for it get their stop signal when the gateway exits, or
-at `process_control_timeout` at the latest. The master then escalates after
-another `process_control_timeout`. A stop or a reload of such a pool therefore
-takes up to about twice `process_control_timeout`. With the stock `0` there is no
-window and no child is held back. See `docs/gateway.md`, "Readiness probe".
+The children held back for it get the signal of the stop or the reload when the
+gateway exits, or at `process_control_timeout` at the latest. `SIGQUIT` lets a
+running request finish. `SIGTERM` ends it at once, and its client gets `502`. The
+master then escalates after another `process_control_timeout`: `SIGTERM` after a
+`SIGQUIT`, `SIGKILL` after a `SIGTERM`. A stop or a reload of such a pool
+therefore takes up to about twice `process_control_timeout`. With the stock `0`
+there is no window and no child is held back. See `docs/gateway.md`, "Readiness
+probe".
 
 **What "in flight" does not include (phase-1 limitation).** A request whose
 body has not finished arriving is not drained. The gateway's HTTP library
@@ -111,7 +114,7 @@ about one second), `supervisor.stop_timeout = 10s`, `cron.timeout = 0`,
 | pool type | child state | what happens |
 |---|---|---|
 | request-serving | handling a request | the master sends `SIGTERM`, then `SIGKILL` after ~1s if the request is still running — same as upstream FPM |
-| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms, then drains for as long again; the children of the pools it routes to keep serving until the gateway exits or `process_control_timeout` passes, and then get `process_control_timeout` more (issue #646) |
+| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms, then drains for as long again; the children of the pools it routes to keep serving until the gateway exits or `process_control_timeout` passes, and then get the stop signal: `SIGQUIT` lets a running request finish, `SIGTERM` ends it at once (issue #646) |
 | `supervisor` | running a script iteration | the master kills the child after ~1s; **`supervisor.stop_timeout` never runs** because the master acts first |
 | `cron` | sleeping before the next run | the child exits immediately and **skips** that scheduled run — clean, no script execution |
 | `cron` | script already running | the master kills the child after ~1s; with default `cron.timeout = 0` there is no pool-level watchdog either |

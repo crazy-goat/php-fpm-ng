@@ -79,15 +79,9 @@ int fpm_http_ready_gateways_alive(void);
 /* Issue #646: sends the signal that the first pass held back, to the pools
  * routed by a ready_path gateway, once no such gateway is alive, and re-arms
  * the master's timer for process_control_timeout from now. A no-op when
- * nothing is held. Defined in fpm_process_ctl.c. */
+ * nothing is held. Defined in fpm_process_ctl.c; the hold itself is in
+ * fpm_pctl_window.h. */
 void fpm_pctl_release_deferred(void);
-
-/* Issue #646: 1 when fpm_children_make() may fork a child of wp while the
- * master is not in NORMAL state. That holds only for an ondemand pool routed by
- * a ready_path gateway, while the signal of the window is still held back. An
- * idle ondemand pool has no child, so a new connection in the window would
- * wait for a child that nobody starts. Defined in fpm_process_ctl.c. */
-int fpm_pctl_may_fork_in_window(const struct fpm_worker_pool_s *wp);
 
 /* How often the drain tick checks for finished work and for the deadline. A
  * drained gateway exits within one tick of its last response, so this also

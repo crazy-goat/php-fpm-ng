@@ -421,9 +421,15 @@ the other pools at the start of the stop.
 
 The master signals the held children when the last such gateway exits. If such a
 gateway is still alive at `process_control_timeout` after the stop, the master
-signals the children at that time. The children then get `process_control_timeout`
-more before the master escalates: `SIGTERM` after a stop or a reload that sent
-`SIGQUIT`, and `SIGKILL` after a stop that sent `SIGTERM`.
+signals the children at that time. The signal is the one that the stop or the
+reload sends: `SIGQUIT` for a reload or a graceful stop, `SIGTERM` for a stop
+with `SIGTERM`. After a `SIGQUIT` the master escalates to `SIGTERM`, and after a
+`SIGTERM` to `SIGKILL`, each after another `process_control_timeout`.
+
+**A `SIGTERM` stop cuts in-flight requests.** A child that gets `SIGTERM` stops
+at once. A request that is still running at the release gets `502 Bad Gateway`.
+`docker stop` and the kubelet send `SIGTERM` by default. For a graceful drain,
+set the stop signal to `SIGQUIT`: see the Docker and Kubernetes examples below.
 
 **Time of a stop or a reload.** The window and the drain each last up to
 `process_control_timeout` minus 100 ms. A stop or a reload of such a pool
@@ -440,6 +446,11 @@ examples below use 15s) to get a window. `process_control_timeout` is a
 **Signals during the window.** During the window the gateway ignores `SIGQUIT`.
 A `SIGQUIT` that you send by hand does not shorten the window. A gateway without
 a window starts its drain at once when it gets `SIGQUIT`.
+
+**A second stop signal.** A stop or a reload in progress can be overridden by a
+further signal to the master, for example `SIGTERM` after `SIGQUIT`. The further
+signal is not held for the window. The children get it at once, and a request
+that is running then is cut.
 
 **After the window.** When the window ends, the gateway stops accepting new
 connections. The master closes its copy of the listening socket after the
@@ -483,32 +494,43 @@ http.route[app] = /
 http.ready_path = /ready
 ```
 
-Example Docker health check. The image must contain `curl`. `curl -f` exits with
-an error for a status of 400 or more, so a `503` answer fails the check. The
-probe answers `draining` during a stop, so a check that runs in that time fails
-too. `docker stop` sends `SIGTERM` to PID 1 of the container, which must be the
-master. Start php-fpm-ng as PID 1, for example with the exec form of `CMD`. Set
-the stop timeout above twice `process_control_timeout`, for example
-`docker run --stop-timeout 35` with the 15s above. Then Docker does not send
-`SIGKILL` before the stop ends:
+Example Docker health check and stop signal. The image must contain `curl`.
+`curl -f` exits with an error for a status of 400 or more, so a `503` answer fails
+the check. The probe answers `draining` during a stop, so a check that runs in
+that time fails too. `STOPSIGNAL SIGQUIT` makes `docker stop` send `SIGQUIT` to
+PID 1 of the container, which must be the master. Without it, `docker stop` sends
+`SIGTERM`, and a request still running at the release gets `502`. Start php-fpm-ng
+as PID 1, for example with the exec form of `CMD`. Set the stop timeout above
+twice `process_control_timeout`, for example `docker run --stop-timeout 35` with
+the 15s above. Then Docker does not send `SIGKILL` before the stop ends:
 
 ```dockerfile
+STOPSIGNAL SIGQUIT
 HEALTHCHECK --interval=10s --timeout=2s \
   CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
 ```
 
-Example Kubernetes readiness probe. Kubernetes counts an answer with a status of
-400 or more as a failed probe. With `failureThreshold: 1`, one `503` marks the
-pod not ready. The next `200` marks it ready again. Kubernetes sends `SIGTERM` to
-PID 1 of the container when it stops the pod. Set `terminationGracePeriodSeconds`
-above twice `process_control_timeout`, so that the kubelet does not kill the pod
-before the stop ends. The value 35 is above twice the 15s above:
+Example Kubernetes readiness probe and stop signal. Kubernetes counts an answer
+with a status of 400 or more as a failed probe. With `failureThreshold: 1`, one
+`503` marks the pod not ready. The next `200` marks it ready again. When the
+kubelet stops the pod, it sends the container's stop signal to PID 1. That signal
+is `SIGTERM` unless the pod sets `lifecycle.stopSignal`. The `lifecycle.stopSignal`
+field is alpha since Kubernetes 1.33. It needs the `ContainerStopSignals` feature
+gate and `spec.os.name: linux`. This repository did not run this example on a
+cluster. Without the field, a request still running at the release gets `502`.
+Set `terminationGracePeriodSeconds` above twice `process_control_timeout`, so that
+the kubelet does not kill the pod before the stop ends. The value 35 is above
+twice the 15s above:
 
 ```yaml
 spec:
+  os:
+    name: linux
   terminationGracePeriodSeconds: 35
   containers:
     - name: app
+      lifecycle:
+        stopSignal: SIGQUIT
       readinessProbe:
         httpGet:
           path: /ready

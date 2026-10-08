@@ -33,7 +33,7 @@
 #include "fpm_child_php_log.h"
 #include "fpm_log.h"
 #ifdef HAVE_FPM_HTTP
-#include "fpm_http_drain.h"
+#include "fpm_pctl_window.h"
 #endif
 
 #include "zlog.h"

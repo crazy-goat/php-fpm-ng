@@ -2202,13 +2202,18 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
  * the ping check and before the operator namespace, so no child, queue slot
  * or pool counter is touched.
  *
- * Phase-1 limit (#646): the drain removes the listeners, so a new connection
- * is refused during the drain. The drain tick closes each idle keep-alive
- * connection within FPM_HTTP_DRAIN_TICK_MS (fpm_http_drain.h). So the 503
- * reaches a request only when the gateway reads it before the drain closes
- * that connection: on an idle connection, or pipelined behind a request still
- * in flight on the same connection. fpmng-http-gateway-ready-path.phpt covers
- * the pipelined case and the idle close. */
+ * Phase-1 limit (#646): the drain stops this process from accepting, so a new
+ * connection gets no answer from it. Without http.reuseport the master still
+ * holds the listening socket (fpm_http_route.c:1366 closes it only with
+ * reuseport), so the connection waits in the backlog. The drain tick closes
+ * each idle keep-alive connection within FPM_HTTP_DRAIN_TICK_MS
+ * (fpm_http_drain.h). So the 503 reaches a request only when the gateway reads
+ * it before the drain closes that connection: on an idle connection, or
+ * pipelined behind a request still in flight on the same connection. The
+ * master signals the gateway from its exit and reload cleanup
+ * (fpm_process_ctl.c), which runs after its pool children have exited, so
+ * until then this answers 200. fpmng-http-gateway-ready-path.phpt covers the
+ * pipelined case and the idle close. */
 static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
 	char path[512];

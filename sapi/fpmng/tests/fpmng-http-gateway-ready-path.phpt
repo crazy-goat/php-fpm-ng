@@ -13,12 +13,13 @@ require_once "tester.inc";
 
 /* Issue #646, phase 1. http.ready_path is answered by the gateway process
  * itself: 200 "ready" while it serves, 503 "draining" once SIGQUIT has set
- * gw->stopping. The drain removes the listeners, so a new connection is
- * refused. The drain also closes an idle keep-alive connection at its first
- * tick, so that connection gets no 503 at all. The 503 is seen only by a probe
- * pipelined behind a request that is still in flight on the same connection:
- * the slow request keeps that connection busy, the drain waits for it, and the
- * probe is parsed after the slow reply. */
+ * gw->stopping. A new connection gets no answer during the drain (docs/gateway.md,
+ * "Limit of phase 1"); this test does not check that. The drain also closes an
+ * idle keep-alive connection at its first tick, so that connection gets no 503
+ * at all. The 503 is seen only by a probe pipelined behind a request that is
+ * still in flight on the same connection: the slow request keeps that
+ * connection busy, the drain waits for it, and the probe is parsed after the
+ * slow reply. */
 
 const SLOW = 3;
 

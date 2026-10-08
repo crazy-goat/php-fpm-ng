@@ -382,42 +382,57 @@ answers it before routing, like `ping.path`. The path follows the same rules as
 contains only `[alphanum]/_-.~`. It must differ from `ping.path`. The default is
 off.
 
+The gateway answers a request on this path with any method, as `ping.path` does.
+
 The probe answers with the state of the gateway process:
 
 | State | Response |
 | --- | --- |
 | The gateway serves requests | `200 OK`, body `ready` |
-| The gateway drains (for example, after `SIGQUIT` or a reload) | `503 Service Unavailable`, body `draining`, in the cases listed under the limit below |
+| The gateway drains (see "When the drain starts") | `503 Service Unavailable`, body `draining`, only in the cases listed under the limit below |
 
 The probe does not check the targets. `ready` means that the gateway process
-serves requests. It does not mean that a FastCGI or HTTP target is alive.
+serves requests. It does not mean that a FastCGI or HTTP target is alive. The
+gateway can answer `ready` before the first target child is created.
 
-**Limit of phase 1 (issue #646).** A drain removes the listeners, so a new
-connection is refused. The drain also closes each idle keep-alive connection at
-the next drain tick. The first tick comes 20 ms after `SIGQUIT`. A client sees
-`503` only when the gateway reads the probe before the drain closes that
-connection. That happens in two cases:
+**When the drain starts.** A `SIGQUIT` sent to the gateway process starts its
+drain at once. A `SIGQUIT` sent to the master, and a reload, do not start it at
+once. The master signals its gateways from its exit and reload cleanup. That
+cleanup runs after the pool children have exited. Until then the probe answers
+`200 OK`, even while the pool children still drain.
+
+**Limit of phase 1 (issue #646).** The drain stops the gateway from accepting
+new connections. A new connection gets no answer from the gateway. Without
+`http.reuseport`, the master still holds the listening socket, so the connection
+waits in the listen backlog until the probe times out. With `http.reuseport`,
+the gateway closes its own socket, and a new connection is refused.
+
+The drain also closes each idle keep-alive connection at the next drain tick.
+The first tick comes 20 ms after the drain starts. A client sees `503` only when
+the gateway reads the probe before the drain closes that connection. That
+happens in two cases:
 
 1. The probe arrives on an idle keep-alive connection before the drain closes
    it.
 2. The probe is pipelined behind a request that is still in flight on the same
    connection.
 
-In every other case the client sees a refused or a closed connection. Probes
-that open a new connection for each check, such as Docker `HEALTHCHECK` and
-Kubernetes `httpGet`, see a refused connection during a drain. Both count that
-as a failed check. A `503` for new connections during a drain is not part of
-this phase.
+In every other case the client does not get a `503`. It gets no answer, or a
+closed connection. Probes that open a new connection for each check, such as
+Docker `HEALTHCHECK` and Kubernetes `httpGet`, do not see the `503`. They time
+out, or they get a refused connection with `http.reuseport`. Both count as a
+failed check. A `503` for new connections during a drain is not part of this
+phase.
 
 **Startup.** The gateway answers the probe only after its event loop starts.
-Before that, a connection waits in the listen backlog, or it is refused. The
-probe never answers `503` during startup. This phase has no startup state. The
-plain listener (`http.plain_listen`) does not answer this path. It keeps its
-redirect.
+Before that, a new connection waits in the listen backlog, or it is refused. The
+probe never answers `503` during startup, because this phase has no startup
+state. The plain listener (`http.plain_listen`) does not answer this path. It
+keeps its redirect.
 
-**Not in this phase.** The probe never answers `503` because every target is
-down. The gateway keeps no health state per target, so it cannot tell that all
-targets are dead. This needs a design for target health first.
+**Not in this phase.** The probe does not answer `503` when a target is down.
+The gateway keeps no health state per target, so it cannot tell that all targets
+are dead. A design for target health comes first.
 
 **Operator pages.** The probe answers before the operator pages. Do not set
 `http.ready_path` to the path of an operator page.
@@ -441,8 +456,9 @@ HEALTHCHECK --interval=10s --timeout=2s \
 ```
 
 Example Kubernetes readiness probe. Kubernetes opens a new connection for each
-probe. During a drain the probe gets a refused connection. Kubernetes counts
-that as a failed probe, and the pod is marked not ready:
+probe. During a drain the probe gets no answer, or a refused connection with
+`http.reuseport`. Kubernetes counts that as a failed probe. With
+`failureThreshold: 1`, one failed probe marks the pod not ready:
 
 ```yaml
 readinessProbe:

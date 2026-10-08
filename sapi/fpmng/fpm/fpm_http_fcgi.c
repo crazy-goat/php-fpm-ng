@@ -606,6 +606,11 @@ void fpm_http_conn_free(fpm_http_conn *c)
 		event_free(c->minrate_timer);
 		c->minrate_timer = NULL;
 	}
+	/* Issue #706: the paused-responses gauge is taken back here as well as in
+	 * fpm_http_response_resume(), because fpm_http_finish_truncated() frees a
+	 * request without resuming it. This does not re-arm the upstream: the
+	 * callers that free a request this way drop the upstream themselves. */
+	fpm_http_response_unpause(c);
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);

@@ -227,7 +227,6 @@ void fpm_http_pump(struct fpm_http_gateway_s *gw);
 static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
 /* Issue #390 review: the budget helpers below also maintain this process's own
  * upstreams_held gauge, defined with the other counter helpers further down. */
-static void fpm_http_counter_decr(atomic_t *counter);
 static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
 static void fpm_http_tick_arm(struct fpm_http_gateway_s *gw);
 
@@ -293,7 +292,7 @@ void fpm_http_counter_incr(atomic_t *counter)
  * gauge, unlike the counters above, can go down; guarded at zero so a close
  * that races a missing increment cannot underflow the unsigned atomic. No
  * locking, same cmp-set loop as its siblings. */
-static void fpm_http_counter_decr(atomic_t *counter)
+void fpm_http_counter_decr(atomic_t *counter)
 {
 	unsigned long value;
 
@@ -349,14 +348,14 @@ atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p)
 {
 	return &c->cells[(size_t) c->nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
-		+ (size_t) p * (1u + c->nslots)];
+		+ (size_t) p * FPM_HTTP_GAUGE_BLOCK_CELLS(c->nslots)];
 }
 
 size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc)
 {
 	return sizeof(struct fpm_http_counters_s)
 		+ ((size_t) nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
-			+ (size_t) nproc * (1u + nslots)) * sizeof(atomic_t);
+			+ (size_t) nproc * FPM_HTTP_GAUGE_BLOCK_CELLS(nslots)) * sizeof(atomic_t);
 }
 
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c)
@@ -397,25 +396,32 @@ static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t)
 	if (!t->gw || !t->gw->gauges) {
 		return NULL;
 	}
-	return &t->gw->gauges[1 + t->slot_index];
+	return &t->gw->gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + t->slot_index];
 }
 
-/* Issue #390: the pool-wide connections_open the renderer reports: the sum of
- * every gateway process's own cell. A process that died with connections open
- * has had its block zeroed by the master, so its connections left the sum with
- * it -- the whole reason the gauge is per-process (see fpm_http_counters_s). */
-unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
+/* Issue #706: the pool-wide value of one per-process gauge cell (an
+ * FPM_HTTP_GAUGE_* index): the sum of every gateway process's own cell. A
+ * process that died has had its block zeroed by the master, so its share left
+ * the sum with it -- the whole reason the gauges are per-process (see
+ * fpm_http_counters_s). */
+unsigned long fpm_http_gauge_sum(struct fpm_http_gateway_s *gw, unsigned cell)
 {
 	unsigned p;
-	unsigned long open = 0;
+	unsigned long sum = 0;
 
 	if (!gw || !gw->counters) {
 		return 0;
 	}
 	for (p = 0; p < gw->counters->nproc; p++) {
-		open += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[0];
+		sum += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[cell];
 	}
-	return open;
+	return sum;
+}
+
+/* Issue #390: the pool-wide connections_open the renderer reports. */
+unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
+{
+	return fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_CONNECTIONS_OPEN);
 }
 
 /* Issue #390 review: a gateway process is gone (SIGKILL, OOM, crash), and the
@@ -425,7 +431,9 @@ unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
  * slot, to make the renderer's sums drop with the process and to give its
  * upstream reservations back to the shared budget:
  *
- *   - connections_open: zeroing the cell is enough, the renderer sums cells.
+ *   - connections_open and responses_paused (issue #706): zeroing the cell is
+ *     enough, the renderer sums cells. A paused response dies with its process,
+ *     so the paused count does not leak either.
  *   - upstreams_held[row]: return each to that row's shared upstreams_budget,
  *     so a crash does not shrink the pool's admission budget for the life of
  *     the segment; then zero the cell so the rendered gauge follows.
@@ -443,14 +451,15 @@ void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned inde
 		return;
 	}
 	gauges = fpm_http_counters_gauges(gw->counters, index);
-	gauges[0] = 0;
+	gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN] = 0;
+	gauges[FPM_HTTP_GAUGE_RESPONSES_PAUSED] = 0;
 	for (i = 0; i < gw->counters->nslots; i++) {
-		unsigned long held = (unsigned long) gauges[1 + i];
+		unsigned long held = (unsigned long) gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i];
 		atomic_t *budget = &fpm_http_counters_slot_cells(gw->counters, i)[2];
 
 		if (held) {
 			fpm_http_counter_sub(budget, held);
-			gauges[1 + i] = 0;
+			gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i] = 0;
 		}
 	}
 }
@@ -1540,7 +1549,7 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 		return NULL;
 	}
 	if (gw->gauges) {
-		fpm_http_counter_incr(&gw->gauges[0]);
+		fpm_http_counter_incr(&gw->gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN]);
 	}
 	evhttp_connection_set_closecb(evcon, fpm_http_client_closed, cl);
 	return cl;
@@ -1590,7 +1599,7 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	 * cleanup can re-enter, and must not find this connection still indexed. */
 	fpm_http_client_index_remove(&gw->client_index, cl);
 	if (gw->gauges) {
-		fpm_http_counter_decr(&gw->gauges[0]);
+		fpm_http_counter_decr(&gw->gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN]);
 	}
 	if (c) {
 		fpm_http_conn_free(c);

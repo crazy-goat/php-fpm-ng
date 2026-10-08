@@ -33,10 +33,11 @@
  * Consequences of that reference, both bounded and both deliberate:
  *
  * - A connection evhttp has finished with keeps its fd until this file
- *   notices and drops the reference. For a connection still reading its first
- *   request the EOF watcher notices immediately; for one that is only being
- *   counted, the worker's 10 ms tick sweep does, so an fd can outlive its
- *   connection by one tick.
+ *   notices and drops the reference. A peer close is noticed at once by the
+ *   EOF watcher, for a connection still reading its first request. Otherwise,
+ *   and always when the peer stays silent after evhttp closed the connection
+ *   (issue #686), the worker's 10 ms tick sweep notices, so an fd can outlive
+ *   its connection by one tick.
  * - The sweep is a pointer read per tracked connection, 100 times a second.
  *   http.max_connections is what bounds the number of tracked connections --
  *   which is why validation requires it whenever
@@ -131,10 +132,12 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns);
 
 /* Releases connections evhttp has finished with, by walking the tracked list.
- * Call from the worker's tick. Not a no-op when no limit is configured: since
- * issue #64 a node with track_live set outlives its first request, and this is
- * what collects it. A caller that does not call this must not set track_live
- * and must not set either limit. */
+ * That includes a connection evhttp closed before its first request arrived
+ * (http.read_timeout, or a 400): its peer may never send the byte or FIN the
+ * EOF watcher waits for (issue #686). Call from the worker's tick. Not a no-op
+ * when no limit is configured: since issue #64 a node with track_live set
+ * outlives its first request, and this is what collects it. A caller that does
+ * not call this must not set track_live and must not set either limit. */
 void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns);
 
 /* What this file knows, for the status page (issue #64). All three are this

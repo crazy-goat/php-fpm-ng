@@ -74,10 +74,21 @@ systemctl status php-fpm-ng
 
 Those two are the only commands on this page that were not run in the image
 above -- a container has no init system. What was checked there instead is that
-`systemd-analyze verify` accepts the unit, that it is `Type=exec` (the packaged
-binary is built without systemd notification support, so `Type=notify` would
-hang), and that its `ExecStart` line starts a master which creates the socket
-and answers a FastCGI request.
+`systemd-analyze verify` accepts the unit, and that its `ExecStart` line starts
+a master which creates the socket and answers a FastCGI request. The image above
+installed the `v0.2.0` package. That package ships a `Type=exec` unit, so this
+check covers that unit only.
+
+The unit in `packaging/deb/php-fpm-ng.service` is `Type=notify-reload` from
+issue #643 on, and it needs systemd 253 or later. No package with that unit
+exists yet. Measured for issue #643, on a host with systemd 259 and not in the
+image: the unit with the `ExecStart` and `ExecReload` paths changed and
+`User=piotr` added passes `systemd-analyze verify`. `systemctl start` returns
+57 ms to 95 ms after it starts, when the master sends `READY=1` (3 runs).
+`systemctl stop` ends the master in 45 ms to 80 ms (3 runs). The test box was
+shared with other runs, so these ranges are wide.
+Not measured: the `.deb` built from this change, installed in `ubuntu:26.04`.
+The master sends `READY=1` after its sockets are bound. See `docs/systemd.md`.
 
 ## Alpine
 

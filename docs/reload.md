@@ -208,20 +208,21 @@ Both packaged units run the test themselves, so an operator gets the reason on
 the spot instead of a silent no-op:
 
 - systemd — `/lib/systemd/system/php-fpm-ng.service`
-  (`packaging/deb/php-fpm-ng.service`), two `ExecReload=` lines, which
-  `systemd.service(5)` says run in order and stop at the first failure:
+  (`packaging/deb/php-fpm-ng.service`), one `ExecReload=` line, the
+  configuration test, and `ReloadSignal=SIGUSR2`. systemd sends the signal only
+  after the `ExecReload=` line exits with status 0:
 
   ```
   ExecReload=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf -t
-  ExecReload=/bin/kill -USR2 $MAINPID
+  ReloadSignal=SIGUSR2
   ```
 
   Measured on the container CI uses, with that exact command and `stderr` on a
   file instead of a tty (which is what a unit gives it): exit status **78** and
   the diagnostics on `stderr`, i.e. on the journal — plus the same lines in the
   `error_log` the configuration names, because a non-tty `stderr` makes `-t`
-  use the file too. *Not measured:* an actual `systemctl reload`, this
-  environment has no systemd; the ordering is `systemd.service(5)`, not a test.
+  use the file too. The `systemctl reload` behaviour is measured in
+  `docs/systemd.md` (Reload).
 
 - OpenRC — `/etc/init.d/php-fpm-ng` (`packaging/apk/php-fpm-ng.initd`), the
   same command before `supervise-daemon --signal USR2`, and `reload` returns
@@ -235,6 +236,14 @@ the spot instead of a silent no-op:
   docker exec <container> php-fpm-ng -t --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
   docker kill --signal USR2 <container>
   ```
+
+With the packaged systemd unit, the master also reports the reload to systemd.
+It sends `RELOADING=1` when a reload passes the configuration check. It sends
+`READY=1` when the pools of the new generation listen again. A refused reload
+sends `RELOADING=1` and then `READY=1`, because the master keeps its current
+generation. The `systemctl reload` command returns when the `READY=1` arrives.
+A script that runs `systemctl reload` then has the new generation listening, or
+the old one still serving after a refusal. See `docs/systemd.md`.
 
 ## `reload.selective` — restart only the pools that changed (issue #330)
 

@@ -109,20 +109,41 @@ static int handed_is_configured(const char *key) /* {{{ */
 }
 /* }}} */
 
-void fpm_http_handoff_begin(void) /* {{{ */
+/* True when fd is a listening socket of an IPv4 or IPv6 family. The record
+ * names a descriptor number only. A stale or foreign FPMNG_HTTP_LISTENERS can
+ * name any open descriptor, and one that is not a listening TCP socket must
+ * neither be adopted nor closed: it may be some other pool's socket. */
+static int handed_is_listening_tcp(int fd) /* {{{ */
+{
+	struct sockaddr_storage ss;
+	socklen_t len = sizeof(ss);
+	int accepting = 0;
+	socklen_t optlen = sizeof(accepting);
+
+	if (getsockopt(fd, SOL_SOCKET, SO_ACCEPTCONN, &accepting, &optlen) != 0 || !accepting) {
+		return 0;
+	}
+	if (getsockname(fd, (struct sockaddr *) &ss, &len) != 0) {
+		return 0;
+	}
+	return ss.ss_family == AF_INET || ss.ss_family == AF_INET6;
+}
+/* }}} */
+
+int fpm_http_handoff_begin(void) /* {{{ */
 {
 	const char *env = getenv(FPM_HTTP_HANDOFF_ENV);
 	char *list, *save = NULL, *tok;
 	unsigned i;
 
 	if (!env) {
-		return;
+		return 0;
 	}
 	list = strdup(env);
 	unsetenv(FPM_HTTP_HANDOFF_ENV);
 	if (!list) {
 		zlog(ZLOG_ERROR, "http: cannot read the listeners of the previous generation: out of memory");
-		return;
+		return 0;
 	}
 
 	for (tok = strtok_r(list, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
@@ -133,7 +154,7 @@ void fpm_http_handoff_begin(void) /* {{{ */
 		/* "<fd>:<16 hex digits>:<bind>". The bind text is never empty. */
 		fd = strtol(tok, &colon, 10);
 		if (colon == tok || *colon != ':' || fd < 0 || fd > INT_MAX || strlen(colon) < 19 ||
-				colon[17] != ':' || fcntl((int) fd, F_GETFD) < 0) {
+				colon[17] != ':' || !handed_is_listening_tcp((int) fd)) {
 			continue;
 		}
 		memcpy(tls, colon + 1, 16);
@@ -157,6 +178,7 @@ void fpm_http_handoff_begin(void) /* {{{ */
 		free(handed[i].key);
 		handed[i].key = NULL;
 	}
+	return 0;
 }
 /* }}} */
 
@@ -317,5 +339,14 @@ void fpm_http_handoff_export(void) /* {{{ */
 	zlog(ZLOG_NOTICE, "http: handing %u gateway listener(s) to the next generation", count);
 }
 /* }}} */
+
+#else /* HAVE_FPM_HTTP */
+
+/* No gateway, so no listener of a previous generation to take over. fpm_init()
+ * calls this in every build. */
+int fpm_http_handoff_begin(void)
+{
+	return 0;
+}
 
 #endif /* HAVE_FPM_HTTP */

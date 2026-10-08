@@ -31,9 +31,7 @@
 #include "fpm_debug_clock.h"
 #include "fpm_sd_notify.h"
 #include "fpm_crash_backoff.h"
-#ifdef HAVE_FPM_HTTP
 #include "fpm_http_handoff.h"
-#endif
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -91,6 +89,8 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	    0 > fpm_env_init_main()           ||
 	    0 > fpm_signals_init_main()       ||
 	    0 > fpm_children_init_main()      ||
+	    /* Issue #661: before fpm_sockets_init_main() binds any pool, see fpm_http_handoff.h. */
+	    0 > fpm_http_handoff_begin()      ||
 	    0 > fpm_sockets_init_main()       ||
 	    0 > fpm_worker_pool_init_main()   ||
 	    0 > fpm_event_init_main()) {
@@ -161,12 +161,6 @@ int fpm_run(int *max_requests) /* {{{ */
 		fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
 		fpm_event_loop(1);
 	}
-
-#ifdef HAVE_FPM_HTTP
-	/* Issue #661: the listeners the previous generation handed over, read
-	 * before any pool binds, so that a stale one cannot block a bind. */
-	fpm_http_handoff_begin();
-#endif
 
 	/* Initialize pool types before child fork — HTTP gateways then inherit the
 	 * same final stdio state as workers. */

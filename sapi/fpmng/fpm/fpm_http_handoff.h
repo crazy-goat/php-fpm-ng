@@ -44,11 +44,14 @@ struct fpm_worker_pool_s;
  * the same TLS setup for the purpose of adopting a listener. */
 void fpm_http_handoff_tls_fp(const struct fpm_worker_pool_s *wp, char out[17]);
 
-/* The next master, called once before the pools are initialized. Reads
- * FPM_HTTP_HANDOFF_ENV and unsets it. Closes every inherited socket whose bind
- * text is not the listen or http.plain_listen address of a gateway in the
- * configuration, so that it cannot block a bind of another pool type. */
-void fpm_http_handoff_begin(void);
+/* The next master, called from fpm_init() after the configuration is read and
+ * before fpm_sockets_init_main(). Every pool type binds its socket after this
+ * call, so an inherited gateway socket that no gateway of the configuration
+ * uses is closed before it can block a bind of another pool type (a fastcgi
+ * pool on the old gateway address, for example). Reads FPM_HTTP_HANDOFF_ENV and
+ * unsets it. Returns 0; the chain in fpm_init() tests the result like the
+ * other init steps. */
+int fpm_http_handoff_begin(void);
 
 /* The next master, called once after the pools are initialized and before the
  * first child is forked. Closes the inherited sockets that no gateway took

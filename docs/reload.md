@@ -228,14 +228,17 @@ The handoff runs in these steps:
    gateway listener that does not use `http.reuseport`. It writes one record
    per socket to `FPMNG_HTTP_LISTENERS`. A record is
    `<fd>:<tls fingerprint>:<bind text>`, and the records are comma-separated.
-3. The new master reads `FPMNG_HTTP_LISTENERS` and removes it, before it forks
-   any child.
+3. The new master reads `FPMNG_HTTP_LISTENERS` and removes it, after the
+   configuration is read and before any pool binds its socket. A socket that no
+   gateway of the new configuration uses is closed at this point, so it cannot
+   block the bind of a fastcgi pool on the same address.
 4. A gateway of the new generation takes a socket over when its bind text and
    its TLS fingerprint match. It takes a socket over only when it listens at
    once. A gateway with `http.tls_wait_for_cert` does not, because it does not
    listen at once.
 5. Any inherited socket that no gateway takes over is closed. The gateway
-   binds its address as before.
+   binds its address as before. A record whose descriptor is not a listening
+   TCP socket is ignored, and the descriptor is left open.
 
 The bind text must match as written. `0.0.0.0:8080` and `*:8080` are different
 texts, so the gateway binds a new socket. The TLS fingerprint is a hash of the

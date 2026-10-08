@@ -170,13 +170,17 @@ static void fpm_sd_notify_watchdog_tick(struct fpm_event_s *ev, short which, voi
 
 void fpm_sd_notify_watchdog_start(void) /* {{{ */
 {
+	const char *notify_text = getenv("NOTIFY_SOCKET");
 	const char *usec_text = getenv("WATCHDOG_USEC");
 	const char *pid_text = getenv("WATCHDOG_PID");
 	char *end = NULL;
 	unsigned long long usec;
 	unsigned long period;
 
-	if (usec_text == NULL || *usec_text == '\0' || fpm_globals.is_child) {
+	/* Checked first: without NOTIFY_SOCKET no ping can be sent, so the timer
+	 * would send nothing, and a bad WATCHDOG_USEC would still log a WARNING
+	 * for a service manager that is not there. */
+	if (notify_text == NULL || *notify_text == '\0' || usec_text == NULL || *usec_text == '\0' || fpm_globals.is_child) {
 		return;
 	}
 

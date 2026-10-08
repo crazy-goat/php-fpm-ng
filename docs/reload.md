@@ -239,7 +239,8 @@ the spot instead of a silent no-op:
 With the packaged systemd unit, the master also reports the reload to systemd.
 It sends `RELOADING=1` when a reload passes the configuration check. It sends
 `READY=1` when the pools of the new generation listen again. A refused reload
-sends nothing. See `docs/systemd.md`.
+sends nothing. `systemctl reload` returns before that `READY=1`, so a script
+that needs the new generation waits for it. See `docs/systemd.md`.
 
 ## `reload.selective` — restart only the pools that changed (issue #330)
 

@@ -25,7 +25,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Changed
 
-- The `.deb` unit `php-fpm-ng.service` uses `Type=notify` and `NotifyAccess=main` instead of `Type=exec` (issue #643). `systemctl start` waits for `READY=1`, which the master sends after its pools bind their sockets. The watchdog stays off unless a drop-in sets `WatchdogSec=`.
+- The `.deb` unit `php-fpm-ng.service` uses `Type=notify` and `NotifyAccess=main` instead of `Type=exec` (issue #643). `systemctl start` waits for `READY=1`, which the master sends after its pools bind their sockets. The watchdog stays off unless a drop-in sets `WatchdogSec=`. `systemctl reload` does not wait for the `READY=1` of the new master: it returns after the configuration check passes and the signal is sent. See `docs/systemd.md`.
 - Gateway access log: each line has the trailing fields above. The fields before `target=` do not change. A parser that expects the line to end after `target=` must accept the new fields.
 
 ### Fixed

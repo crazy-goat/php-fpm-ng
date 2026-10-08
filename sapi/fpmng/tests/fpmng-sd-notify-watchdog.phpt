@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: WATCHDOG=1 at half of WATCHDOG_USEC, from the master only, and not for another WATCHDOG_PID (issue #643)
+fpm-ng: WATCHDOG=1 at half of WATCHDOG_USEC, from the master only, not for another WATCHDOG_PID, nothing without NOTIFY_SOCKET (issue #643)
 --SKIPIF--
 <?php include "fpmng-skipif.inc"; ?>
 --FILE--
@@ -13,12 +13,18 @@ require_once "tester.inc";
  * default is no pings at all; that default is covered by the lifecycle test,
  * which expects READY, RELOADING, READY, STOPPING and nothing else.
  *
- * Two runs, both with WATCHDOG_USEC=1000000 (one ping every 500 ms):
- *  A. WATCHDOG_PID names a process that is not this master. systemd uses
- *     WATCHDOG_PID for a process that is meant to ping, so this master must
- *     stay silent: no WATCHDOG=1 for two seconds after READY=1.
- *  B. WATCHDOG_PID is not set. The master sends WATCHDOG=1 at once, then READY=1,
- *     then at least three more pings within five seconds. */
+ * Three runs:
+ *  A. WATCHDOG_USEC=1000000 (one ping every 500 ms), WATCHDOG_PID names a
+ *     process that is not this master. systemd uses WATCHDOG_PID for a process
+ *     that is meant to ping, so this master must stay silent: no WATCHDOG=1 for
+ *     two seconds after READY=1.
+ *  B. WATCHDOG_USEC=1000000, WATCHDOG_PID is not set. The master sends
+ *     WATCHDOG=1 at once, then READY=1, then at least three more pings within
+ *     five seconds.
+ *  C. NOTIFY_SOCKET is not set and WATCHDOG_USEC is not a number. Nothing can
+ *     be sent without NOTIFY_SOCKET, so the master must not report the bad
+ *     value either (fpm_sd_notify_watchdog_start() checks NOTIFY_SOCKET first).
+ *     The value is bad on purpose: a valid one would show nothing in the log. */
 
 $root = sys_get_temp_dir() . '/fpmng-sd-notify-watchdog-' . getmypid();
 @mkdir($root, 0700, true);
@@ -54,6 +60,16 @@ function next_datagram($srv, float $seconds): ?string
     }
     $data = stream_socket_recvfrom($srv, 4096);
     return $data === false ? null : $data;
+}
+
+function listening(string $address): bool
+{
+    $fp = @stream_socket_client("tcp://$address", $errno, $error, 2);
+    if ($fp === false) {
+        return false;
+    }
+    fclose($fp);
+    return true;
 }
 
 function start_master(string $conf, string $notify)
@@ -179,6 +195,47 @@ try {
     proc_close($proc);
     $proc = null;
 
+    /* Run C. putenv() without a value removes the variable, so the master
+     * starts with no NOTIFY_SOCKET at all. The pool is up before the check
+     * runs; the master reaches its watchdog call right after forking the
+     * children, and one second is enough for that call to log a WARNING. */
+    putenv('NOTIFY_SOCKET');
+    putenv('WATCHDOG_USEC=abc');
+    putenv('WATCHDOG_PID=');
+    @unlink($log);
+    $proc = proc_open([FPM\Tester::findExecutable(), '-n', '-y', $conf, '-F'],
+        [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+    if (!is_resource($proc)) {
+        fail('cannot start the master (run C)');
+    }
+    $pid = (int) proc_get_status($proc)['pid'];
+    $deadline = time() + 30;
+    while (time() < $deadline && !listening($addr)) {
+        usleep(100000);
+    }
+    if (!listening($addr)) {
+        fail("run C: the pool does not listen\n" . (string) @file_get_contents($log));
+    }
+    sleep(1);
+    exec("kill -QUIT $pid");
+    $deadline = time() + 60;
+    while (time() < $deadline && pid_alive($pid)) {
+        usleep(100000);
+    }
+    if (pid_alive($pid)) {
+        fail("run C: master $pid is still running after SIGQUIT");
+    }
+    if (str_contains((string) @file_get_contents($log), 'sd_notify')) {
+        fail("run C: a WATCHDOG_USEC warning without NOTIFY_SOCKET\n" . (string) @file_get_contents($log));
+    }
+    $m = next_datagram($srv, 1);
+    if ($m !== null) {
+        fail('run C: a datagram arrived without NOTIFY_SOCKET: ' . var_export($m, true));
+    }
+    proc_close($proc);
+    $proc = null;
+    echo "no NOTIFY_SOCKET: no WATCHDOG_USEC warning and no datagram\n";
+
     echo "Done\n";
 } finally {
     putenv('WATCHDOG_USEC=');
@@ -201,6 +258,7 @@ try {
 --EXPECTF--
 WATCHDOG_PID names another process: no WATCHDOG=1
 WATCHDOG=1 at a period of half WATCHDOG_USEC
+no NOTIFY_SOCKET: no WATCHDOG_USEC warning and no datagram
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

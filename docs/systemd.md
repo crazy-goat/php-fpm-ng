@@ -24,6 +24,14 @@ A reload that passes the configuration check sends `RELOADING=1`, then
 `READY=1`. A reload runs the master again with the same process ID. The new
 master keeps `NOTIFY_SOCKET`, so it can send its messages.
 
+`systemctl reload` does not wait for that `READY=1`. The packaged unit has
+`Type=notify`, so systemd ends the reload when the `ExecReload=` commands exit.
+The second command, `kill -USR2`, exits when the signal is sent. The new master
+starts after that and sends `READY=1` when its pools listen. Measured on systemd
+259 with the packaged unit (paths changed): `systemctl reload` returned 80 ms to
+121 ms after it started. The new master logged its first line about 50 ms after
+`Reloaded` (3 runs). A script that needs the new master must wait for it.
+
 A reload that the configuration check refuses sends nothing. The reason is in
 the error log. The first `ExecReload=` line of the unit also writes the reason
 to the journal (see `docs/reload.md`).
@@ -41,8 +49,8 @@ To use the watchdog:
 3. Run `systemctl restart php-fpm-ng`.
 
 systemd sets `WATCHDOG_USEC` from `WatchdogSec=`. The master sends `WATCHDOG=1`
-every half of that time. The master ignores `WATCHDOG_USEC` when `WATCHDOG_PID`
-names another process.
+every half of that time. The master ignores `WATCHDOG_USEC` when `NOTIFY_SOCKET`
+is not set, and when `WATCHDOG_PID` names another process.
 
 The pings come from the event loop of the master. If the loop stops, the pings
 stop. systemd then kills the master and marks the service as failed. The
@@ -63,7 +71,9 @@ failure is logged too.
 ## Without systemd
 
 If `NOTIFY_SOCKET` is unset or empty, the master sends nothing. It writes
-nothing about the missing socket. The master runs the same way as under systemd.
+nothing about the missing socket. It also ignores `WATCHDOG_USEC`, so a value
+that is not a number is not reported either. The master runs the same way as
+under systemd.
 
 ## What the master does not send
 

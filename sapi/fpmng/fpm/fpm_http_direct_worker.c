@@ -132,6 +132,14 @@
  * on its own stop timeout at this point, and losing the reply is no worse than
  * the silent close this whole path exists to prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
+/* How long fpm_worker_finish_output() keeps driving the base, after it has
+ * stopped the listener, so that a request already on the wire over a
+ * keep-alive connection is read and answered 503 by fpm_worker_accept() instead
+ * of meeting the silent close evhttp_free() gives it (issue #668). Bounded for
+ * the reason FPM_WORKER_FLUSH_BUDGET is, and short because it covers requests
+ * already sent, not new connections: the listener is gone, so nothing new can
+ * arrive by that road. Every worker exit lasts this long, which is the price. */
+#define FPM_WORKER_GRACE_MS 100
 /* worker.request_timeout's sweep runs more often than the timeout itself so
  * that an expired request is caught within one sweep interval of its
  * deadline, not one whole timeout period late. Floored so a short timeout
@@ -795,6 +803,40 @@ static void fpm_worker_flush_deadline(evutil_socket_t fd, short events, void *ar
 	event_base_loopbreak(fw.base);
 }
 
+static bool fpm_worker_grace_expired;
+
+static void fpm_worker_grace_deadline(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	(void) arg;
+	fpm_worker_grace_expired = true;
+	event_base_loopbreak(fw.base);
+}
+
+/* issue #668: the grace drain. Called by fpm_worker_finish_output() once the
+ * listener is gone and stopping is set. A request already on the wire over a
+ * keep-alive connection is read here: evhttp hands it to fpm_worker_accept(),
+ * which answers 503 because stopping is set. Without this drain the request is
+ * not read at all, and evhttp_free() closes its connection without a reply.
+ * The loop runs for the whole window even when no connection has anything to
+ * say, so a worker exit takes FPM_WORKER_GRACE_MS longer. */
+static void fpm_worker_grace_drain(void)
+{
+	struct event *deadline;
+	struct timeval grace = { 0, FPM_WORKER_GRACE_MS * 1000 };
+
+	fpm_worker_grace_expired = false;
+	deadline = evtimer_new(fw.base, fpm_worker_grace_deadline, NULL);
+	if (deadline && evtimer_add(deadline, &grace) == 0) {
+		while (!fpm_worker_grace_expired && event_base_loop(fw.base, EVLOOP_ONCE) == 0) {
+		}
+	}
+	if (deadline) {
+		event_free(deadline);
+	}
+}
+
 /* The last thing child_main() does with the transport, and the only place that
  * enforces the invariant every client is owed: an accepted connection is never
  * closed without a response that actually reached the socket. Two distinct
@@ -898,6 +940,11 @@ static void fpm_worker_finish_output(void)
 			"clients can reconnect (issue #342)",
 			fw.wp->config->name, streams_ended);
 	}
+	/* After the pending walk: the walk has answered every entry, so the timers
+	 * the drain runs (the request-timeout sweep) find nothing to answer with a
+	 * 504. Before the early return below, so a 503 the drain queues is flushed
+	 * by the code that flushes every other reply here. */
+	fpm_worker_grace_drain();
 	if (!fw.unflushed && !fw.ws_unflushed) {
 		return;
 	}

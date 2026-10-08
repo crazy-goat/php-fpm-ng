@@ -33,6 +33,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - Selective reload (`reload.selective = yes`): a metrics slot that a #329 survivor still writes to is no longer given to a new pool after a second reload. Before this fix, the second reload dropped the survivor from its bookkeeping, and the slot reservation ran out while the survivor still ran. The survivor keeps its deadline across reloads. The deadline starts at the exec of the reload that spares the survivor, not at the spare, because the old master waits for its other children in between. The survivor gets the stop signal at most 30 seconds after that exec. A replaced pool keeps its slots reserved for `supervisor.stop_timeout` plus 2 seconds more than before, counted from that exec, so that its survivor can exit in that time. A later reload carries that expiry and does not extend it. The limits are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)". `fpmng-reload-survivor-back-to-back.phpt` covers the case (issue #692).
 
+- `pool.executor = worker` (`pool.type = http-direct`): a request that the client sent on an open keep-alive connection just before the worker stopped got no reply, and the connection closed silently. The worker now reads such a request for 100 ms after it stops, and answers it `503 Worker unavailable` (issue #668). A request that arrives after that window still gets no reply; see "Requests that arrive while the worker stops" in `docs/http-direct.md`. Every worker exit takes 100 ms longer.
+
 ## [0.16.0] - 2026-10-07
 
 ### Added

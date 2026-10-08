@@ -374,6 +374,68 @@ cost of the extra `realpath()` per request.
 `http.front_controller` is checked against the document root only once, at
 startup, so that check stays pinned to the release that was live then.
 
+### Readiness probe: `http.ready_path` (issue #646)
+
+`http.ready_path` sets a path that the gateway answers itself. The gateway
+answers it before routing, like `ping.path`. The path follows the same rules as
+`ping.path`: it starts with `/`, it is at least two characters long, and it
+contains only `[alphanum]/_-.~`. It must differ from `ping.path`. The default is
+off.
+
+The probe answers with the state of the gateway process:
+
+| State | Response |
+| --- | --- |
+| The gateway serves requests | `200 OK`, body `ready` |
+| The gateway drains (for example, after `SIGQUIT` or a reload) | `503 Service Unavailable`, body `draining` |
+
+The probe does not check the targets. `ready` means that the gateway process
+serves requests. It does not mean that a FastCGI or HTTP target is alive.
+
+**Limit of phase 1 (issue #646).** A drain removes the listeners at once, so a
+new connection is refused. A `503` reaches only a client that already has an
+open keep-alive connection when the drain starts. A probe that opens a new
+connection sees a refused connection instead. Issue #661 refines this behavior.
+
+**Startup.** The gateway answers the probe only after its event loop starts.
+Before that, a probe waits in the listen backlog or is refused. The probe never
+answers `503` during startup. The plain listener (`http.plain_listen`) does not
+answer this path. It keeps its redirect.
+
+**Operator pages.** The probe answers before the operator pages. Do not set
+`http.ready_path` to the path of an operator page.
+
+Example for a gateway pool:
+
+```ini
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:8080
+http.route[app] = /
+http.ready_path = /ready
+```
+
+Example Docker health check. The image must contain `curl`. `curl -f` fails on
+the `503`:
+
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=2s \
+  CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
+```
+
+Example Kubernetes readiness probe. Kubernetes opens a new connection for each
+probe. During a drain the probe fails with a refused connection, so the pod
+still leaves the service:
+
+```yaml
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+  periodSeconds: 5
+  failureThreshold: 1
+```
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,

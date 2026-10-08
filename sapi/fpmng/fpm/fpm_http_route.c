@@ -905,6 +905,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		gw->ping_response = strdup(wp->config->ping_response ? wp->config->ping_response : "pong");
 	}
 
+	/* http.ready_path -- issue #646. fpm_conf.c has already validated it. */
+	if (wp->config->http_ready_path && *wp->config->http_ready_path) {
+		gw->ready_path = strdup(wp->config->http_ready_path);
+	}
+
 	/* access.suppress_path[], copied the same way http-direct's access log
 	 * does (fpm_http_direct_access_log.c) -- see fpm_http_log_suppressed(). */
 	{

@@ -2194,6 +2194,63 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 	return 1;
 }
 
+/* http.ready_path, answered directly by the gateway process -- issue #646.
+ * 200 "ready" while the gateway serves; 503 "draining" once gw->stopping is
+ * set by SIGQUIT (fpm_http_drain_start()). Same matching as ping.path in
+ * fpm_http_serve_ping(): origin-form path, query string cut off, whole path
+ * compared, no percent-decoding. Called from fpm_http_request() right after
+ * the ping check and before the operator namespace, so no child, queue slot
+ * or pool counter is touched.
+ *
+ * Phase-1 limit (#646): the drain removes the listeners, so the 503 reaches
+ * only a client that already holds an open keep-alive connection when the
+ * drain starts. A new connection is refused during the drain. #661 refines
+ * this. */
+static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
+{
+	char path[512];
+	struct evkeyvalq *out;
+	struct evbuffer *body;
+	const char *text = "ready";
+	const char *reason = "OK";
+	int code = HTTP_OK;
+	size_t bytes;
+
+	if (!gw->ready_path || !fpm_http_raw_path(req, path, sizeof(path))) {
+		return 0;
+	}
+	if (strcmp(path, gw->ready_path) != 0) {
+		return 0;
+	}
+
+	if (gw->stopping) {
+		text = "draining";
+		reason = "Service Unavailable";
+		code = HTTP_SERVUNAVAIL;
+	}
+
+	body = evbuffer_new();
+	if (!body || evbuffer_add_printf(body, "%s", text) < 0) {
+		if (body) {
+			evbuffer_free(body);
+		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		return 1;
+	}
+
+	out = evhttp_request_get_output_headers(req);
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	/* Same no-cache headers as ping.path: a cached readiness answer is a lie. */
+	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
+	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+	bytes = evbuffer_get_length(body);
+	fpm_http_log_response(gw, req, remote_addr, NULL, code, bytes, NULL);
+	evhttp_send_reply(req, code, reason, body);
+	evbuffer_free(body);
+	return 1;
+}
+
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
@@ -2654,6 +2711,13 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	 * operator base. */
 	if (fpm_http_serve_ping(gw, req, effective_addr)) {
 		fpm_http_count_ping(gw);	/* #390: local answer, and its own ping count */
+		return;
+	}
+
+	/* http.ready_path (issue #646): the readiness probe, next to ping and
+	 * before the operator namespace. It answers 503 while the gateway drains. */
+	if (fpm_http_serve_ready(gw, req, effective_addr)) {
+		fpm_http_count_local(gw);	/* #390: a local answer, no ping_total */
 		return;
 	}
 

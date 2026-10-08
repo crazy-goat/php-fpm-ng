@@ -1237,6 +1237,7 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->plain_listen_address);
 		free(gw->ping_path);
 		free(gw->ping_response);
+		free(gw->ready_path);
 		{
 			unsigned j;
 

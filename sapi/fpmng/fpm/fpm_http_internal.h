@@ -526,6 +526,10 @@ struct fpm_http_gateway_s {
 	char *ping_path;
 	char *ping_response;
 
+	/* http.ready_path, answered locally -- issue #646. NULL = the directive is
+	 * unset. Copied the same way as ping_path; fpm_conf.c has validated it. */
+	char *ready_path;
+
 	/* access.suppress_path[], copied the same way -- fpm_http_log_response()
 	 * checks every entry before writing a line. First real consumer of the
 	 * directive on this listener (issue #382); see

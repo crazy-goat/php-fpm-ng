@@ -175,12 +175,14 @@ struct fpm_http_target_s;
  *     the per-target request/rejection counters. These live in the header and
  *     in one slot per target label, each written with a cmp-set loop and no
  *     locking, and they SURVIVE a gateway process respawn (that is what makes
- *     a counter a counter). Slots are nslots = #targets + 2: rows
+ *     a counter a counter). The paused-response total (issue #706) is in the
+ *     header too. Slots are nslots = #targets + 2: rows
  *     [0, ntargets) are the routed targets in gw->targets order, row
  *     [ntargets] is target="operator" (#389's forwarded operator requests),
  *     row [ntargets + 1] is target="-", the requests this gateway answered
  *     itself.
- *   - PER GATEWAY PROCESS GAUGES: connections_open and the
+ *   - PER GATEWAY PROCESS GAUGES: connections_open, responses_paused (issue
+ *     #706: responses whose upstream is paused right now) and the
  *     upstreams_held[target] that a process currently holds. These are the
  *     #333 live_gauges shape: each process writes only its own block, the
  *     renderer SUMS every block, and the master ZEROES a dead process's block
@@ -194,8 +196,9 @@ struct fpm_http_target_s;
  * with two flexible arrays (C allows only one). The layout and every access
  * are in fpm_http.c's fpm_http_counters_slot_cells()/fpm_http_counters_gauges():
  *   slots:  nslots x 4  [requests_total, rejected_total, upstreams_budget, reclaim_gen]
- *   gauges: nproc x (1 + nslots)
- *           [connections_open, upstreams_held[0 .. nslots)]
+ *   gauges: nproc x (2 + nslots)
+ *           [connections_open, responses_paused, upstreams_held[0 .. nslots)]
+ *           -- the FPM_HTTP_GAUGE_* cell indexes below name them.
  *
  * upstreams_budget is the shared admission budget (issue #340): every gateway
  * process reserves against it atomically, and the master returns a dead
@@ -221,10 +224,20 @@ struct fpm_http_counters_slot {
 struct fpm_http_counters_s {
 	atomic_t requests_total;	/* every request the gateway accepted */
 	atomic_t ping_total;		/* ping.path answers */
+	atomic_t responses_paused_total;	/* issue #706: times a response paused its upstream, see fpm_http_backpressure.c */
 	unsigned nslots;		/* #targets + 2, see above */
 	unsigned nproc;			/* gateway processes (http.gateways) */
-	atomic_t cells[];		/* slots x 3, then nproc gauge blocks */
+	atomic_t cells[];		/* slots x 4, then nproc gauge blocks */
 };
+
+/* Issue #706: the cells of one gateway process's gauge block, in this order.
+ * The per-target upstreams_held cells come last, so a fixed gauge added later
+ * goes before them and only these macros move. Every index into a block is
+ * spelled with one of them. */
+#define FPM_HTTP_GAUGE_CONNECTIONS_OPEN	0u
+#define FPM_HTTP_GAUGE_RESPONSES_PAUSED	1u
+#define FPM_HTTP_GAUGE_UPSTREAMS_HELD	2u	/* + target row index, nslots cells */
+#define FPM_HTTP_GAUGE_BLOCK_CELLS(nslots) (FPM_HTTP_GAUGE_UPSTREAMS_HELD + (nslots))
 
 /* Which wire protocol the gateway speaks to a target. Only FastCGI is
  * implemented here; HTTP/1.1 towards a pool.type = http-direct target is #344,
@@ -599,7 +612,8 @@ struct fpm_http_gateway_s {
 	volatile sig_atomic_t stopping;
 	struct timeval drain_deadline;
 	/* Issue #390: this process's own gauge block in gw->counters --
-	 * [connections_open, upstreams_held[0 .. nslots)]. Set in
+	 * [connections_open, responses_paused, upstreams_held[0 .. nslots)] (issue
+	 * #706 added the second cell). Set in
 	 * fpm_http_gateway_run() from this process's slot index before the event
 	 * loop starts; NULL only if the counters segment failed to allocate (in
 	 * which case the gateway refused to start). The renderer sums every
@@ -853,6 +867,11 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len);
 /* Reads the upstream again if fpm_http_response_chunk() stopped it. Safe to
  * call at any time, including when nothing is paused. */
 void fpm_http_response_resume(fpm_http_conn *c);
+/* Issue #706: clears the paused state without touching the upstream, and
+ * returns 1 if the response was paused. The paused-responses gauge is
+ * maintained here, so every path that ends a pause goes through it:
+ * fpm_http_response_resume() and fpm_http_conn_free(). */
+int fpm_http_response_unpause(fpm_http_conn *c);
 
 /* Issue #747: what fpm_http.c shares with the files it was split into. Each
  * group is named after the file that defines it. */
@@ -885,6 +904,7 @@ extern struct fpm_http_gateway_s *gateways;
 extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p);
 unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw);
+unsigned long fpm_http_gauge_sum(struct fpm_http_gateway_s *gw, unsigned cell);
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i);
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c);
@@ -896,6 +916,7 @@ void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request 
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target);
 void fpm_http_count_local(struct fpm_http_gateway_s *gw);
 void fpm_http_counter_incr(atomic_t *counter);
+void fpm_http_counter_decr(atomic_t *counter);
 void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
 void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
 		char *port_buf, size_t port_size);

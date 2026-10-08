@@ -599,7 +599,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		unsigned g;
 
 		gw->gauges = fpm_http_counters_gauges(gw->counters, index);
-		for (g = 0; g < 1u + gw->counters->nslots; g++) {
+		for (g = 0; g < FPM_HTTP_GAUGE_BLOCK_CELLS(gw->counters->nslots); g++) {
 			gw->gauges[g] = 0;
 		}
 	}

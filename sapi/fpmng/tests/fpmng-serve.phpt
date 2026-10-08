@@ -4,6 +4,7 @@ fpm-ng: `php-fpm-ng serve` runs an app without a configuration file (default, --
 <?php
 include "fpmng-skipif.inc";
 if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux');
+fpmng_skip_if_no_serve_wrap();
 ?>
 --FILE--
 <?php

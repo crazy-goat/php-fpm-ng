@@ -4,6 +4,7 @@ fpm-ng: a packed executable runs its embedded application, refuses damaged or un
 <?php
 include "fpmng-skipif.inc";
 if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux');
+fpmng_skip_if_no_serve_wrap();
 ?>
 --FILE--
 <?php

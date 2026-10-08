@@ -4,6 +4,7 @@ fpm-ng: `php-fpm-ng pack` embeds a PHAR, a php.ini and an fpm.conf as an applica
 <?php
 include "fpmng-skipif.inc";
 if (PHP_OS_FAMILY !== 'Linux') die('skip requires Linux');
+fpmng_skip_if_no_serve_wrap();
 ?>
 --FILE--
 <?php

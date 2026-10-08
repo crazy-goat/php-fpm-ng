@@ -8,6 +8,7 @@ include "fpmng-skipif.inc";
  * test -- build/embed-payload.sh says so at build time, and
  * fpm_payload_dist_validate() says so at startup. */
 fpmng_skip_if_no_acme();
+fpmng_skip_if_no_serve_wrap();
 ?>
 --FILE--
 <?php

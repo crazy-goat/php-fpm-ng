@@ -68,3 +68,31 @@ function fpmng_skip_if_no_acme(): void
             . '(configure without --enable-fpmng-acme, issue #281)');
     }
 }
+
+/* The first line of `pack --help` in the binary built by build/libphp-build.sh
+ * (fpm_pack.c). A binary without the wrapper does not print it. */
+const FPMNG_PACK_USAGE = 'Usage: php-fpm-ng pack <app.phar>';
+
+/**
+ * Skip the test unless the binary under test has the serve and pack subcommands.
+ *
+ * Both are dispatched by main() in sapi/fpmng/fpm/fpm_serve.c, which is compiled
+ * only with FPMNG_SERVE_WRAP (build/libphp-build.sh). A from-source build
+ * (async/build-tree.sh, build/prepare.sh) has no such main(): the vendored
+ * getopt loop refuses `pack` with its own usage text and exits non-zero. Asked
+ * of the binary, like the ACME gate: the wrapper answers `pack --help` with
+ * FPMNG_PACK_USAGE and exit status 0.
+ */
+function fpmng_skip_if_no_serve_wrap(): void
+{
+    $binary = FPM\Tester::findExecutable();
+
+    $output = [];
+    $status = 0;
+    exec(escapeshellarg($binary) . ' pack --help 2>&1', $output, $status);
+
+    if ($status !== 0 || !str_contains(implode("\n", $output), FPMNG_PACK_USAGE)) {
+        die('skip php-fpm-ng built without the serve and pack subcommands '
+            . '(from-source build, FPMNG_SERVE_WRAP not set, see fpm_serve.c)');
+    }
+}

@@ -109,16 +109,22 @@ respected, but each copy's actual wake-up instant, inside that window, differs
 from its siblings'.
 
 **`supervisor.start_jitter = <seconds>`** adds a random extra delay, in
-`[0, jitter]` seconds inclusive, before the very first script execution of
-each of the pool's `supervisor.processes` copies — spreading the fork+exec+PHP
-bootstrap cost across the startup window instead of paying all of it at once.
-It applies only to that first execution per copy; every later restart of that
-process (or of any process) is `supervisor.restart_jitter`'s job instead. The
-pool tracks how many of its `supervisor.processes` cold-start slots have
-already been handed out, and consumes one the moment a process decides to
-apply (or skip) the delay — not after that process's script has run — so a
-process that crashes immediately and is respawned does not draw a second
-cold-start allowance just because a slower sibling has not started yet.
+`[0, jitter]` seconds inclusive, before the first script execution of each copy
+of the pool. The delay spreads the cost of fork, exec and PHP bootstrap across
+the startup window. It applies only to the first execution of a copy. Every
+later restart uses `supervisor.restart_jitter` instead.
+
+Each pool has `supervisor.processes` cold-start slots. A copy takes one slot
+when it first reaches the top of its restart loop. It takes the slot whether or
+not `supervisor.start_jitter` is set. The first start of a copy that takes a
+slot does not wait for the pool-wide restart backoff. That copy still waits for
+its own `start_jitter` delay. Every later start of a copy waits for the backoff
+as before.
+
+The skip is bounded. A respawned copy also takes a free slot. So a respawn can
+skip the backoff once, while a sibling copy has not yet reached its loop. A
+failed first start counts toward `supervisor.restart_max` and sets the backoff,
+as any other failure does.
 
 Neither directive is seeded from `rand()`/`srand()`: that state is process-wide
 and survives `fork()`, so every process forked from the master without an

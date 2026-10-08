@@ -225,9 +225,12 @@ The handoff runs in these steps:
 
 1. The old master drains its gateways, as before.
 2. The old master clears `FD_CLOEXEC` on the listening socket of each TCP
-   gateway listener that does not use `http.reuseport`. It writes one record
-   per socket to `FPMNG_HTTP_LISTENERS`. A record is
-   `<fd>:<tls fingerprint>:<bind text>`, and the records are comma-separated.
+   gateway listener that does not use `http.reuseport` and is in the `LISTEN`
+   state. A gateway listener in the NO_CERT state of `http.tls_wait_for_cert`
+   is bound but not listening. It is not handed over, and it closes on the
+   `execvp()`. The old master writes one record per handed socket to
+   `FPMNG_HTTP_LISTENERS`. A record is `<fd>:<tls fingerprint>:<bind text>`,
+   and the records are comma-separated.
 3. The new master reads `FPMNG_HTTP_LISTENERS` and removes it, after the
    configuration is read and before any pool binds its socket. A socket that no
    gateway of the new configuration uses is closed at this point, so it cannot

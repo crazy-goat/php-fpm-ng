@@ -94,7 +94,7 @@ static int handed_is_configured(const char *key) /* {{{ */
 	struct fpm_worker_pool_s *wp;
 
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
-		if (fpm_pool_type_of(wp)->init_main != fpm_http_init_pool) {
+		if (!fpm_pool_type_of(wp)->proxy_only) {
 			continue;
 		}
 		if (strcmp(key, wp->config->listen_address) == 0) {
@@ -109,11 +109,14 @@ static int handed_is_configured(const char *key) /* {{{ */
 }
 /* }}} */
 
-/* True when fd is a listening socket of an IPv4 or IPv6 family. The record
- * names a descriptor number only. A stale or foreign FPMNG_HTTP_LISTENERS can
- * name any open descriptor, and one that is not a listening TCP socket must
- * neither be adopted nor closed: it may be some other pool's socket. */
-static int handed_is_listening_tcp(int fd) /* {{{ */
+/* True when fd is a listening socket of an IPv4 or IPv6 family. The next master
+ * uses it for the descriptors of a record: the record names a descriptor number
+ * only, and a stale or foreign FPMNG_HTTP_LISTENERS can name any open descriptor.
+ * One that is not a listening TCP socket must neither be adopted nor closed: it
+ * may be some other pool's socket. The old master uses it in export_key(): a
+ * socket that is bound but not listening (NO_CERT) is not exported, because the
+ * next master would reject its record and leave the descriptor open with no owner. */
+static int is_listening_tcp(int fd) /* {{{ */
 {
 	struct sockaddr_storage ss;
 	socklen_t len = sizeof(ss);
@@ -154,7 +157,7 @@ int fpm_http_handoff_begin(void) /* {{{ */
 		/* "<fd>:<16 hex digits>:<bind>". The bind text is never empty. */
 		fd = strtol(tok, &colon, 10);
 		if (colon == tok || *colon != ':' || fd < 0 || fd > INT_MAX || strlen(colon) < 19 ||
-				colon[17] != ':' || !handed_is_listening_tcp((int) fd)) {
+				colon[17] != ':' || !is_listening_tcp((int) fd)) {
 			continue;
 		}
 		memcpy(tls, colon + 1, 16);
@@ -232,22 +235,17 @@ void fpm_http_handoff_finish(void) /* {{{ */
 /* }}} */
 
 /* The bind text of one gateway listener that can go to the next generation,
- * or NULL. Only a TCP listener of a proxy_only gateway without reuseport
- * qualifies: a unix listener is a dup() of the pool's own socket, and a
- * reuseport gateway's children bind their own sockets. */
+ * or NULL. Only a listening TCP socket of a proxy_only gateway without reuseport
+ * qualifies: a unix listener is a dup() of the pool's own socket, a reuseport
+ * gateway's children bind their own sockets, and a socket in NO_CERT is bound
+ * but not listening. */
 static char *export_key(const struct fpm_http_gateway_s *gw, int which) /* {{{ */
 {
 	int fd = which ? gw->plain_listen_fd : gw->listen_fd;
 	const char *bind = which ? gw->plain_listen_address : gw->listen_address;
-	struct sockaddr_storage ss;
-	socklen_t len = sizeof(ss);
 	char *key;
 
-	if (fd < 0 || !gw->proxy_only || gw->reuseport || !bind) {
-		return NULL;
-	}
-	if (getsockname(fd, (struct sockaddr *) &ss, &len) != 0 ||
-			(ss.ss_family != AF_INET && ss.ss_family != AF_INET6)) {
+	if (fd < 0 || !gw->proxy_only || gw->reuseport || !bind || !is_listening_tcp(fd)) {
 		return NULL;
 	}
 	key = strdup(bind);

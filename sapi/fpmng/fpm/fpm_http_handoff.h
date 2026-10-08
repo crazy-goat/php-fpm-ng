@@ -59,9 +59,10 @@ int fpm_http_handoff_begin(void);
 void fpm_http_handoff_finish(void);
 
 /* The old master, from fpm_http_cleanup() at FPM_CLEANUP_PARENT_EXEC, after the
- * gateways drained. Hands every TCP listener of a proxy_only gateway that does
- * not use reuseport to the next generation. A handed socket is set to -1 in its
- * gateway, so the caller does not close it. */
+ * gateways drained. Hands every listening TCP socket of a proxy_only gateway
+ * that does not use reuseport to the next generation. A bound socket that is not
+ * listening (NO_CERT) is not handed over: it keeps FD_CLOEXEC and closes on exec.
+ * A handed socket is set to -1 in its gateway, so the caller does not close it. */
 void fpm_http_handoff_export(void);
 
 /* Replaces fpm_http_listen() for the public and the plain listener of a

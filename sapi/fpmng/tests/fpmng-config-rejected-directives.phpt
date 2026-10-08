@@ -412,6 +412,46 @@ expectConfigFailure(
     ["invalid http.access_format (combined or json)"]
 );
 
+/* Issue #646: the readiness path is a gateway option. A FastCGI pool and a
+ * direct pool refuse it by name, and the gateway checks the path like ping.path. */
+expectConfigFailure(
+    'fastcgi-ready-path',
+    $base . "\nhttp.ready_path = /ready",
+    ["'http.ready_path' is not supported by pool.type = fastcgi"]
+);
+expectConfigFailure(
+    'direct-ready-path',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.ready_path = /ready",
+    ["'http.ready_path' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'gateway-ready-path-no-slash',
+    gatewayConfig("http.ready_path = ready\n"),
+    ["the ready path 'ready' must start with a '/'"]
+);
+expectConfigFailure(
+    'gateway-ready-path-charset',
+    gatewayConfig("http.ready_path = /ready?x\n"),
+    ["the ready path '/ready?x' must contain only the following characters"]
+);
+expectConfigFailure(
+    'gateway-ready-path-same-as-ping',
+    gatewayConfig("ping.path = /ping\nhttp.ready_path = /ping\n"),
+    ["http.ready_path and ping.path are both '/ping'"]
+);
+/* Issue #646: the require-target switch needs a readiness path, and a FastCGI
+ * pool refuses it by name. */
+expectConfigFailure(
+    'gateway-ready-require-target-no-path',
+    gatewayConfig("http.ready_require_target = yes\n"),
+    ["http.ready_require_target needs http.ready_path"]
+);
+expectConfigFailure(
+    'fastcgi-ready-require-target',
+    $base . "\nhttp.ready_require_target = yes",
+    ["'http.ready_require_target' is not supported by pool.type = fastcgi"]
+);
+
 ?>
 Done
 --EXPECT--
@@ -461,6 +501,13 @@ direct-upstream-read-timeout: rejected
 direct-request-id: rejected
 direct-access-format: rejected
 gateway-access-format-unknown: rejected
+fastcgi-ready-path: rejected
+direct-ready-path: rejected
+gateway-ready-path-no-slash: rejected
+gateway-ready-path-charset: rejected
+gateway-ready-path-same-as-ping: rejected
+gateway-ready-require-target-no-path: rejected
+fastcgi-ready-require-target: rejected
 Done
 --CLEAN--
 <?php

@@ -374,6 +374,171 @@ cost of the extra `realpath()` per request.
 `http.front_controller` is checked against the document root only once, at
 startup, so that check stays pinned to the release that was live then.
 
+### Readiness probe: `http.ready_path` (issue #646)
+
+`http.ready_path` sets a path that the gateway answers itself. The gateway
+answers it before it routes the request and before the operator namespace. The
+path follows the same rules as `ping.path`: it starts with `/`, it is at least
+two characters long, and it contains only `[alphanum]/_-.~`. It must differ from
+`ping.path`. The default is off. The probe only reads state. It does not change
+the gateway or any target.
+
+The gateway checks the states in the order of this table. The first state that
+applies gives the answer:
+
+| Order | State | Response |
+| --- | --- | --- |
+| 1 | Draining: a stop or a reload has started | `503 Service Unavailable`, body `draining` |
+| 2 | Starting: no target pool has a child that accepts requests | `503 Service Unavailable`, body `starting` |
+| 3 | No live target: only with `http.ready_require_target = yes`, and no child of any target pool accepts requests | `503 Service Unavailable`, body `no live target` |
+| 4 | Ready | `200 OK`, body `ready` |
+
+**Starting.** The probe answers `starting` until at least one target pool has a
+child that accepts requests. A target with `pm = ondemand` counts as serving at
+once. After a target pool has served once, the probe does not answer `starting`
+again. The probe can still answer `draining` or `no live target` later.
+
+**Draining.** A stop or a reload starts a drain window in each gateway with
+`http.ready_path`. The master sends `SIGUSR1` to these gateways before it
+signals any child of a pool. From then on the probe answers `draining`. The
+gateway keeps its listeners open and keeps serving. A new connection to the
+probe path gets `503 draining`. A new connection to an application route gets
+the answer of its target.
+
+**Length of the window.** The window ends `process_control_timeout` minus 100 ms
+after the start of the stop or the reload. The window does not end early, even
+when no request is in progress. When the window ends, the gateway stops
+accepting new connections and starts its drain. The drain has its own deadline,
+`process_control_timeout` minus 100 ms, counted from the end of the window. The
+gateway exits when no request is in progress, or at that deadline.
+
+**Target pools during the window.** The master does not signal the children of a
+pool that a gateway with `http.ready_path` routes to. Those children keep serving
+until the master signals them. So the application answers new connections during
+the window, as the gateway does. A pool with `pm = ondemand` that has no child
+forks one for a new connection in the window. The master signals the children of
+the other pools at the start of the stop.
+
+The master signals the held children when the last such gateway exits. If such a
+gateway is still alive at `process_control_timeout` after the stop, the master
+signals the children at that time. The signal is the one that the stop or the
+reload sends: `SIGQUIT` for a reload or a graceful stop, `SIGTERM` for a stop
+with `SIGTERM`. After a `SIGQUIT` the master escalates to `SIGTERM`, and after a
+`SIGTERM` to `SIGKILL`, each after another `process_control_timeout`.
+
+**A `SIGTERM` stop cuts in-flight requests.** A child that gets `SIGTERM` stops
+at once. A request that is still running at the release gets `502 Bad Gateway`.
+`docker stop` and the kubelet send `SIGTERM` by default. For a graceful drain,
+set the stop signal to `SIGQUIT`: see the Docker and Kubernetes examples below.
+
+**Time of a stop or a reload.** The window and the drain each last up to
+`process_control_timeout` minus 100 ms. A stop or a reload of such a pool
+therefore takes up to about twice `process_control_timeout`. Set the stop timeout
+of the service manager or the orchestrator above twice `process_control_timeout`.
+
+**The window needs `process_control_timeout`.** The stock value of
+`process_control_timeout` is 0. With this value there is no window, and no child
+is held back. The master stops the gateway at once. The probe does not show
+`draining` for a stop. Set `process_control_timeout` to a number of seconds (the
+examples below use 15s) to get a window. `process_control_timeout` is a
+`[global]` directive. It applies to every pool (see `docs/shutdown-timeouts.md`).
+
+**Signals during the window.** During the window the gateway ignores `SIGQUIT`.
+A `SIGQUIT` that you send by hand does not shorten the window. A gateway without
+a window starts its drain at once when it gets `SIGQUIT`.
+
+**A second stop signal.** A stop or a reload in progress can be overridden by a
+further signal to the master, for example `SIGTERM` after `SIGQUIT`. The further
+signal is not held for the window. The children get it at once, and a request
+that is running then is cut.
+
+**After the window.** When the window ends, the gateway stops accepting new
+connections. The master closes its copy of the listening socket after the
+gateways have exited. Listener inheritance across the exec of a reload is issue
+#661. It is not part of issue #646.
+
+**Startup.** Until at least one target pool has a child that accepts requests,
+the probe answers `starting`. So a `200` does not come before a target serves.
+
+**Require a target.** `http.ready_require_target = yes` makes the probe answer
+`no live target` when no child of any target pool accepts requests. A target
+pool that does not serve does not block `ready` while another target pool
+serves. A target with `pm = ondemand` never counts as dead. The default is `no`.
+The directive needs `http.ready_path`. A `fastcgi` pool refuses both directives.
+An `http-direct` pool refuses `http.ready_path`.
+
+**Operator pages and the plain listener.** The probe answers before the operator
+namespace. Do not set `http.ready_path` to a path under the operator base. The
+plain listener (`http.plain_listen`) does not answer the probe. It answers only
+the HTTP-01 challenge and its redirect to `https`. Use the public listener for
+the probe.
+
+Example for a gateway pool. The `[global]` value gives a stop or a reload a
+window of about 15 s, in which the probe answers `503 draining`:
+
+```ini
+[global]
+process_control_timeout = 15s
+
+[app]
+pool.type = fastcgi
+listen = /run/php-fpm-ng/app.sock
+chdir = /var/www/app
+pm = static
+pm.max_children = 4
+
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:8080
+http.route[app] = /
+http.ready_path = /ready
+```
+
+Example Docker health check and stop signal. The image must contain `curl`.
+`curl -f` exits with an error for a status of 400 or more, so a `503` answer fails
+the check. The probe answers `draining` during a stop, so a check that runs in
+that time fails too. `STOPSIGNAL SIGQUIT` makes `docker stop` send `SIGQUIT` to
+PID 1 of the container, which must be the master. Without it, `docker stop` sends
+`SIGTERM`, and a request still running at the release gets `502`. Start php-fpm-ng
+as PID 1, for example with the exec form of `CMD`. Set the stop timeout above
+twice `process_control_timeout`, for example `docker run --stop-timeout 35` with
+the 15s above. Then Docker does not send `SIGKILL` before the stop ends:
+
+```dockerfile
+STOPSIGNAL SIGQUIT
+HEALTHCHECK --interval=10s --timeout=2s \
+  CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
+```
+
+Example Kubernetes readiness probe and stop signal. Kubernetes counts an answer
+with a status of 400 or more as a failed probe. With `failureThreshold: 1`, one
+`503` marks the pod not ready. The next `200` marks it ready again. When the
+kubelet stops the pod, it sends the container's stop signal to PID 1. That signal
+is `SIGTERM` unless the pod sets `lifecycle.stopSignal`. The `lifecycle.stopSignal`
+field is alpha since Kubernetes 1.33. It needs the `ContainerStopSignals` feature
+gate and `spec.os.name: linux`. This repository did not run this example on a
+cluster. Without the field, a request still running at the release gets `502`.
+Set `terminationGracePeriodSeconds` above twice `process_control_timeout`, so that
+the kubelet does not kill the pod before the stop ends. The value 35 is above
+twice the 15s above:
+
+```yaml
+spec:
+  os:
+    name: linux
+  terminationGracePeriodSeconds: 35
+  containers:
+    - name: app
+      lifecycle:
+        stopSignal: SIGQUIT
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+        periodSeconds: 5
+        failureThreshold: 1
+```
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,

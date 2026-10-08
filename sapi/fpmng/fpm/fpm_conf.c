@@ -250,6 +250,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
 	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
 	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
+	{ "http.ready_path",           &fpm_conf_set_string,      WPO(http_ready_path) },
+	{ "http.ready_require_target", &fpm_conf_set_boolean,     WPO(http_ready_require_target) },
 	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
@@ -1192,6 +1194,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_trusted_proxies);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
+	free(wpc->http_ready_path);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif
@@ -1708,6 +1711,48 @@ static int fpm_conf_check_pool_ping_access_log(struct fpm_worker_pool_s *wp)
 	return 0;
 }
 
+/* http.ready_path (issue #646): the same path rules as ping.path. It must also
+ * differ from ping.path, because the gateway answers both before routing, so
+ * one of them would never be seen. http.ready_require_target only means
+ * something to that probe, so it needs the path. */
+static int fpm_conf_check_pool_ready_path(struct fpm_worker_pool_s *wp)
+{
+	char *ready = wp->config->http_ready_path;
+	size_t i;
+
+	if (!ready || !*ready) {
+		if (wp->config->http_ready_require_target) {
+			zlog(ZLOG_ERROR, "[pool %s] http.ready_require_target needs http.ready_path", wp->config->name);
+			return -1;
+		}
+		return 0;
+	}
+
+	if (*ready != '/') {
+		zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' must start with a '/'", wp->config->name, ready);
+		return -1;
+	}
+
+	if (strlen(ready) < 2) {
+		zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' is not long enough", wp->config->name, ready);
+		return -1;
+	}
+
+	for (i = 0; i < strlen(ready); i++) {
+		if (!isalnum((unsigned char)ready[i]) && ready[i] != '/' && ready[i] != '-' && ready[i] != '_' && ready[i] != '.' && ready[i] != '~') {
+			zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, ready);
+			return -1;
+		}
+	}
+
+	if (wp->config->ping_path && strcmp(ready, wp->config->ping_path) == 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.ready_path and ping.path are both '%s'; the gateway answers each of them itself, so they must differ", wp->config->name, ready);
+		return -1;
+	}
+
+	return 0;
+}
+
 /* request_terminate_timeout, slowlog and request_slowlog_*. */
 static int fpm_conf_check_pool_timeouts(struct fpm_worker_pool_s *wp)
 {
@@ -1953,6 +1998,7 @@ static int fpm_conf_process_all_pools(void)
 
 		if (!type || 0 > fpm_conf_check_pool_basics(wp, type) || 0 > fpm_conf_check_pool_pm(wp, type)
 				|| 0 > fpm_conf_check_pool_operator(wp, type) || 0 > fpm_conf_check_pool_ping_access_log(wp)
+				|| 0 > fpm_conf_check_pool_ready_path(wp)
 				|| 0 > fpm_conf_check_pool_timeouts(wp) || 0 > fpm_conf_check_pool_paths(wp)
 				|| 0 > fpm_conf_prepare_pool_runtime(wp)) {
 			return -1;

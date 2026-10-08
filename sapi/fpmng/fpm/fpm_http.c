@@ -153,6 +153,8 @@ struct {								\
 #include "fpm_http_access_log.h"
 #include "fpm_http_request_id.h"
 #include "fpm_clock.h"
+#include "fpm_scoreboard.h"
+#include "fpm_request.h"
 /* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
  * request header name (issue #115) and on the whole request header block
  * (issue #117) is the same on both transports, so each has one definition. */
@@ -2194,6 +2196,144 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 	return 1;
 }
 
+/* Issue #646: how many children of one routed target can serve requests, read
+ * from the target pool's scoreboard. A slot counts when used is set, its pid is
+ * positive (the test fpm_http_direct_ops_slot_pid() makes), and the child has
+ * left FPM_REQUEST_CREATING, that is it reached its accept loop. A child that
+ * dies before that, such as one that fails its chdir(), never counts, even
+ * while the master keeps forking it again. A NULL scoreboard counts as zero. */
+static unsigned fpm_http_target_accepting(const struct fpm_http_target_s *t)
+{
+	unsigned i, accepting = 0;
+
+	if (!t->scoreboard) {
+		return 0;
+	}
+	for (i = 0; i < t->scoreboard->nprocs; i++) {
+		const volatile struct fpm_scoreboard_proc_s *p = &t->scoreboard->procs[i];
+
+		if (p->used && p->pid > 0 && p->request_stage != FPM_REQUEST_CREATING) {
+			accepting++;
+		}
+	}
+	return accepting;
+}
+
+/* Issue #646: the readiness state, as the probe reports it. Order matters:
+ *
+ * - draining (503) from the first moment of a stop or reload, while the soft
+ *   window runs (gw->soft_draining) and after the hard drain began (gw->stopping);
+ * - starting (503) until at least one target can serve, that is it has a child
+ *   that accepts requests. A target that never serves (a chdir that fails, say)
+ *   does not hold the probe at 503 while another target serves. An ondemand
+ *   target counts as able to serve: it starts its children on demand, so having
+ *   none is its normal idle state. Once the gateway has seen a target serve, the
+ *   state is latched (gw->ready_seen), so a later gap does not turn the probe
+ *   back into "starting";
+ * - no live target (503), only with http.ready_require_target: no target can
+ *   serve, no child of any target accepts requests. An ondemand target is never
+ *   dead;
+ * - ready (200) otherwise.
+ *
+ * The probe only reads. The latch is this process's own memory. */
+static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **text, int *code, const char **reason)
+{
+	unsigned t;
+	int any_serving = 0;
+
+	if (gw->stopping || gw->soft_draining) {
+		*text = "draining";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	for (t = 0; t < gw->ntargets; t++) {
+		const struct fpm_http_target_s *target = &gw->targets[t];
+
+		if (target->ondemand || fpm_http_target_accepting(target) > 0) {
+			any_serving = 1;
+		}
+	}
+
+	if (!gw->ready_seen) {
+		if (!any_serving) {
+			*text = "starting";
+			*reason = "Service Unavailable";
+			*code = HTTP_SERVUNAVAIL;
+			return;
+		}
+		gw->ready_seen = 1;
+	}
+
+	if (gw->ready_require_target && !any_serving) {
+		*text = "no live target";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	*text = "ready";
+	*reason = "OK";
+	*code = HTTP_OK;
+}
+
+/* http.ready_path, answered directly by the gateway process -- issue #646.
+ * 200 "ready" while the gateway serves. 503 "starting" until at least one target
+ * can serve, "draining" from the start of a stop or reload (the soft window, see
+ * fpm_http_drain_soft_start()) and after the hard drain began, and (opt-in,
+ * http.ready_require_target) "no live target" when no target has a live child.
+ * Same matching as ping.path in fpm_http_serve_ping(): origin-form path, query
+ * string cut off, whole path compared, no percent-decoding. Called from
+ * fpm_http_request() right after the ping check and before the operator
+ * namespace, so no child, queue slot or pool counter is touched: the probe
+ * reads the target scoreboards and nothing else.
+ *
+ * During the drain the gateway keeps its listeners, so a new connection is
+ * answered (503 for this path), not refused. The hard drain (fpm_http_drain.c)
+ * stops accepting when the window ends. fpmng-http-gateway-ready-states.phpt
+ * and fpmng-http-gateway-ready-drain.phpt cover the states. */
+static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
+{
+	char path[512];
+	struct evkeyvalq *out;
+	struct evbuffer *body;
+	const char *text;
+	const char *reason;
+	int code;
+	size_t bytes;
+
+	if (!gw->ready_path || !fpm_http_raw_path(req, path, sizeof(path))) {
+		return 0;
+	}
+	if (strcmp(path, gw->ready_path) != 0) {
+		return 0;
+	}
+
+	fpm_http_ready_state(gw, &text, &code, &reason);
+
+	body = evbuffer_new();
+	if (!body || evbuffer_add_printf(body, "%s", text) < 0) {
+		if (body) {
+			evbuffer_free(body);
+		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		return 1;
+	}
+
+	out = evhttp_request_get_output_headers(req);
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	/* Same no-cache headers as ping.path: a cached readiness answer is a lie. */
+	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
+	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+	bytes = evbuffer_get_length(body);
+	fpm_http_log_response(gw, req, remote_addr, NULL, code, bytes, NULL);
+	evhttp_send_reply(req, code, reason, body);
+	evbuffer_free(body);
+	return 1;
+}
+
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
@@ -2654,6 +2794,13 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	 * operator base. */
 	if (fpm_http_serve_ping(gw, req, effective_addr)) {
 		fpm_http_count_ping(gw);	/* #390: local answer, and its own ping count */
+		return;
+	}
+
+	/* http.ready_path (issue #646): the readiness probe, next to ping and
+	 * before the operator namespace. It answers 503 while the gateway drains. */
+	if (fpm_http_serve_ready(gw, req, effective_addr)) {
+		fpm_http_count_local(gw);	/* #390: a local answer, no ping_total */
 		return;
 	}
 

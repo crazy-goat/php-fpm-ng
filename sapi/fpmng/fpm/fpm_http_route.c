@@ -367,6 +367,17 @@ static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 	}
 }
 
+/* Issue #646: hands the readiness probe the target pool's scoreboard and its
+ * process manager, and records the pool itself for the master's stop order.
+ * The scoreboard is shared memory the master made before it forked this
+ * gateway, so the gateway reads the live slots. */
+static void fpm_http_target_watch(struct fpm_http_target_s *t, const struct fpm_worker_pool_s *pool)
+{
+	t->scoreboard = pool->scoreboard;
+	t->ondemand = pool->config->pm == PM_STYLE_ONDEMAND;
+	t->worker_pool = pool;
+}
+
 /* Fills one target in and points it at its row in the pool's counters segment.
  * own_capacity is the gateway's own connection budget, which differs from the
  * pool's child count for a multi-request executor (see fpm_http_init_pool_ex());
@@ -505,6 +516,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 					FPM_HTTP_TARGET_FASTCGI, own_capacity) != 0) {
 			return -1;
 		}
+		fpm_http_target_watch(&gw->targets[0], wp);
 		gw->routes[0].prefix = strdup("/");
 		if (!gw->routes[0].prefix) {
 			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
@@ -530,6 +542,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 					target->config->listen_address, transport, capacity) != 0) {
 			return -1;
 		}
+		fpm_http_target_watch(&gw->targets[ti], target);
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
 			gw->routes[ri].prefix = strndup(prefix, prefix_len);
 			if (!gw->routes[ri].prefix) {
@@ -904,6 +917,12 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		gw->ping_path = strdup(wp->config->ping_path);
 		gw->ping_response = strdup(wp->config->ping_response ? wp->config->ping_response : "pong");
 	}
+
+	/* http.ready_path -- issue #646. fpm_conf.c has already validated it. */
+	if (wp->config->http_ready_path && *wp->config->http_ready_path) {
+		gw->ready_path = strdup(wp->config->http_ready_path);
+	}
+	gw->ready_require_target = wp->config->http_ready_require_target ? 1 : 0;
 
 	/* access.suppress_path[], copied the same way http-direct's access log
 	 * does (fpm_http_direct_access_log.c) -- see fpm_http_log_suppressed(). */

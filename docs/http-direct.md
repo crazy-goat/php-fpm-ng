@@ -1337,6 +1337,7 @@ documented spelling.
 | `pool`, `process manager`, `start time`, `start since` | the pool's scoreboard |
 | `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
 | `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
+| `listen queue`, `max listen queue`, `listen queue length` | the pool's scoreboard, sampled from TCP_INFO; only on a TCP listener in a Linux build (issue #644) |
 | `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
 | `non-php requests` | static files and pings: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
@@ -1350,6 +1351,11 @@ documented spelling.
 | `timed out connections` | connections dropped by the first-request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
+
+The `listen queue` lines follow the rules in
+[Saturation (issue #644)](operator-endpoint.md#saturation-issue-644). A classic
+pool uses `pm = static`, so its `max children reached` line reads `0`. That `0`
+means the count does not apply to a static pool.
 
 `refused requests` is the sum of `refused acl` and `refused capacity`, kept
 under its old name and its old meaning so a tool written against the fastcgi

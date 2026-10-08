@@ -243,7 +243,9 @@ that request total is a real, per-request count since issue #333 — see
 that executor does and does not report, including the two extra gauges
 (`fpmng_pool_worker_pending`, `fpmng_pool_worker_watchers`) it adds on top of
 the shape below, and [Per-slot worker metrics](#per-slot-worker-metrics-issue-339)
-below for a further, more detailed set. A pool that does not serve requests (`cron`, `supervisor`) reports its state,
+below for a further, more detailed set. A `fastcgi` pool and an `http-direct`
+pool also report the saturation numbers in [Saturation (issue #644)](#saturation-issue-644).
+A pool that does not serve requests (`cron`, `supervisor`) reports its state,
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs. A `cron` pool with
 `cron.expect_within` set also reports `stale`, and a `supervisor` pool whose
@@ -375,6 +377,66 @@ because what they count outlives any one worker occupying any one slot:
 | `fpmng_pool_worker_recycles_total` | `pool`, `reason` (`max_requests`, `saturation`, `max_memory`, `max_lifetime`, `script_returned`, `signal`) | Times a worker in this pool was told to stop, by reason. `max_requests`/`max_memory`/`max_lifetime` are the matching `pm.max_requests`/`worker.max_memory`/`worker.max_lifetime` directives; `saturation` is this worker recycling itself after refusing a request it had no room for; `script_returned` is a script that exited on its own without ever being asked to stop; `signal` is every other stop signal (shutdown, reload, `FPM\Tester::terminate()`, …). `max_lifetime` is an addition beyond the metric's original proposal in issue #339, added because `worker.max_lifetime` (issue #334) is an existing, distinct recycle trigger the reason list would otherwise have no way to report. |
 | `fpmng_pool_worker_abandoned_total` | `pool` | Requests this pool never answered at all: still pending when a worker's shutdown drain gave up on them, or a streamed response whose bytes never reached the socket before the worker exited. |
 | `fpmng_pool_worker_client_gone_total` | `pool` | Requests whose client disconnected before this pool had sent any answer for them. |
+
+### Saturation (issue #644)
+
+A `fastcgi` pool and an `http-direct` pool with `pool.executor = classic` report
+three numbers that show how close the pool is to its limits. The master process
+writes them to the pool's scoreboard. The operator page reads them and does not
+change them. The `worker` executor does not report them. Use the per-slot series
+above for that executor.
+
+Each series is present only when the pool can give a correct number:
+
+| Series | JSON key (`fastcgi` status page) | Type | Present when |
+|---|---|---|---|
+| `fpmng_pool_listen_queue{pool}` | `listen_queue` | gauge | The listener is TCP and the build reads TCP_INFO (Linux). |
+| `fpmng_pool_listen_queue_max{pool}` | `listen_queue_max` | gauge | The same as `listen_queue`. |
+| `fpmng_pool_listen_queue_length{pool}` | `listen_queue_length` | gauge | The same as `listen_queue`. |
+| `fpmng_pool_max_children_reached_total{pool}` | `max_children_reached` | counter | `pm` is `dynamic` or `ondemand`. |
+| `fpmng_pool_slow_requests_total{pool}` | `slow_requests` | counter | `request_slowlog_timeout` is set. |
+
+An absent series means "not measured". It does not mean zero.
+
+The classic status page uses other key names: `listen queue`, `max listen queue`
+and `listen queue length`. It keeps its existing `max children reached` and
+`slow requests` lines and prints them on every classic pool.
+
+#### Listen queue
+
+The master samples the kernel's listen queue about once per second. Only a TCP
+listener has this queue. A unix socket listener never shows the three listen
+queue series.
+
+- `listen_queue`: connections that wait for `accept()` now.
+- `listen_queue_max`: the highest `listen_queue` since the pool started.
+- `listen_queue_length`: the backlog that the kernel allows for the listener.
+
+A build without TCP_INFO does not sample the queue. A macOS development build
+is one example. On that build the three series are absent.
+
+#### max_children_reached
+
+The counter rises once for each episode. An episode starts when the master finds
+the pool at `pm.max_children`. It ends when the pool can start a child again. A
+pool that stays at its limit adds one, not one per heartbeat.
+
+The series is absent when `pm` is `static`. A classic pool must use `pm = static`
+in a shipped build, so it never shows this series. On its status page the
+`max children reached` line reads `0`. That `0` means the count does not apply.
+
+#### slow_requests
+
+The counter rises for each request that runs longer than
+`request_slowlog_timeout`. It can rise while the request still runs. A pool
+without `request_slowlog_timeout` does not trace requests, so the series is
+absent.
+
+#### Selective reload
+
+Under `reload.selective = yes`, a pool that the reload spares keeps its values.
+The master that starts after the reload counts episodes from zero. So
+`max_children_reached` can rise again while the pool is still at its limit.
 
 ## Application metrics on a per-pool metrics path
 

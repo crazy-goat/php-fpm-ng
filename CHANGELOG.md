@@ -17,6 +17,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - The gateway (`pool.type = gateway`) now counts the responses it pauses. A response pauses its upstream when the client has not read `http.response_buffer` bytes (issue #596), and the pause was not visible before. Two new metrics show it: `fpmng_gateway_responses_paused_total`, a pool-wide counter of the pauses, and `fpmng_gateway_responses_paused`, a gauge of the responses paused at this time. The gauge is kept per gateway process, so a gateway killed while a response is paused leaves no count behind: the master zeroes its block. The `/status` pool row gains `responses_paused` and `responses_paused_total`. Documented in `docs/gateway.md` and `docs/operator-endpoint.md`; new test `fpmng-gateway-responses-paused-metrics.phpt` (issue #706).
 
+### Fixed
+
+- Supervisor pool (`pool.type = supervisor`): the first start of a copy no longer waits for the pool-wide restart backoff. Before this fix, a copy that reached its restart loop after a sibling's failure waited for the whole `supervisor.restart_delay` before its first start. Each copy now skips that wait on its first start, while the pool has cold-start slots left (`supervisor.processes` per pool). The copy still waits for its own `supervisor.start_jitter` delay. Every later start waits for the backoff as before. A respawned copy can also take a free slot. So the skip is bounded, but not limited to the original copies. `docs/supervisor.md` describes this. `fpmng-supervisor-jitter.phpt` has a new pool without `start_jitter`. The pool catches the regression: on the unfixed binary, a late copy started at offset 601 s (measured on the test box). The test no longer needs the workaround that #731 added (issue #734).
+
 ## [0.16.0] - 2026-10-07
 
 ### Added

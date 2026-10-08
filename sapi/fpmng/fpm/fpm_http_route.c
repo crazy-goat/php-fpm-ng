@@ -368,12 +368,14 @@ static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 }
 
 /* Issue #646: hands the readiness probe the target pool's scoreboard and its
- * process manager. The scoreboard is shared memory the master made before it
- * forked this gateway, so the gateway reads the live slots. */
+ * process manager, and records the pool itself for the master's stop order.
+ * The scoreboard is shared memory the master made before it forked this
+ * gateway, so the gateway reads the live slots. */
 static void fpm_http_target_watch(struct fpm_http_target_s *t, const struct fpm_worker_pool_s *pool)
 {
 	t->scoreboard = pool->scoreboard;
 	t->ondemand = pool->config->pm == PM_STYLE_ONDEMAND;
+	t->worker_pool = pool;
 }
 
 /* Fills one target in and points it at its row in the pool's counters segment.

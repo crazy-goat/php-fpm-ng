@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: http.ready_path answers 503 "starting" until a target child accepts, and http.ready_require_target answers 503 "no live target" once every target is dead (issue #646)
+fpm-ng: http.ready_path answers 503 "starting" until a target child accepts, answers 200 while at least one target serves, and http.ready_require_target answers 503 "no live target" once every target is dead (issue #646)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -160,6 +160,46 @@ function starting_case(string $locked, string $extra): void
     }
 }
 
+/* Partial: two targets, one of them never serves. The probe is the at-least-one
+ * rule: a target that cannot serve does not hold back "ready" while the other
+ * one serves, even with http.ready_require_target. */
+function partial_case(string $live, string $locked): void
+{
+    @mkdir($live, 0700, true);
+    file_put_contents("$live/app.php", <<<'PHP'
+<?php
+echo 'app';
+PHP);
+    @mkdir($locked, 0600, true);
+    chmod($locked, 0600);
+    $cfg = config($live, "http.ready_require_target = yes\nhttp.route[bad] = /admin")
+        . "\n[bad]\npool.type = fastcgi\nlisten = {{ADDR[bad]}}\nchdir = $locked\npm = static\npm.max_children = 1";
+    $tester = new FPM\Tester($cfg, '<?php');
+    try {
+        $tester->start([], false);
+        $tester->switchLogSource('{{FILE:LOG}}');
+        $tester->expectLogStartNotices();
+        $http = $tester->getAddr('ipv4', '[http]');
+        wait_for_master($http);
+
+        $deadline = microtime(true) + 20;
+        do {
+            $r = get_once($http, '/ready');
+        } while (!str_starts_with($r, 'HTTP/1.1 200') && microtime(true) < $deadline);
+        if (!str_starts_with($r, 'HTTP/1.1 200')) {
+            throw new RuntimeException("the probe is not 200 ready while one target serves and one never does\n$r");
+        }
+        echo "200 ready with one target serving and one locked target (require target): ok\n";
+    } finally {
+        $tester->terminate();
+        $tester->close();
+        @unlink("$live/app.php");
+        @rmdir($live);
+        @chmod($locked, 0700);
+        @rmdir($locked);
+    }
+}
+
 /* Dead: the target served, then its chdir is gone and its children are
  * killed. The master starts children again, they fail, and no child is live.
  * With http.ready_require_target the probe turns 503 "no live target". */
@@ -231,6 +271,7 @@ PHP);
 try {
     starting_case("$root/locked-1", '');
     starting_case("$root/locked-2", "http.ready_require_target = yes");
+    partial_case("$root/live-3", "$root/locked-3");
     dead_case("$root/live-1", "http.ready_require_target = yes", true);
     dead_case("$root/live-2", '', false);
     echo "Done\n";
@@ -241,6 +282,7 @@ try {
 --EXPECT--
 503 starting while no target child accepts: ok
 503 starting while no target child accepts (require target): ok
+200 ready with one target serving and one locked target (require target): ok
 503 no live target once every target is dead (require target): ok
 200 ready once every target was dead, without http.ready_require_target: ok
 Done

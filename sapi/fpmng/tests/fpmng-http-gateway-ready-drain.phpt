@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: http.ready_path answers 503 "draining" to a NEW connection during the soft window of a stop and of a reload, and the gateway keeps serving until the window ends (issue #646)
+fpm-ng: during the soft window of a stop and of a reload, http.ready_path answers the probe 503 "draining" and the application 200 on NEW connections, and the gateway exits without a respawn (issue #646)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -12,11 +12,13 @@ fpmng_skip_if_pool_type_unsupported('gateway');
 require_once "tester.inc";
 
 /* Issue #646. At the start of a stop or a reload the master sends SIGUSR1 to
- * every gateway of a pool with http.ready_path, before any child is signalled.
- * The gateway keeps its listeners for the whole window (process_control_timeout
- * less a margin) and answers the probe 503 "draining", so a probe that opens a
- * NEW connection during the window gets an answer, not a refusal. The children
- * exit at once here; the window still holds the master in its cleanup. */
+ * every gateway of a pool with http.ready_path. The gateway keeps its listeners
+ * for the whole window (process_control_timeout less a margin) and answers the
+ * probe 503 "draining", so a probe that opens a NEW connection during the window
+ * gets an answer, not a refusal. The children of the pool the gateway routes to
+ * are held back for the same window, so the application still answers 200 on a
+ * NEW connection. When the gateway exits, the children get their signal. The
+ * gateway that ends its window is logged as a NOTICE and is not respawned. */
 
 $root = sys_get_temp_dir() . '/fpmng-gw-ready-drain-' . getmypid();
 @mkdir($root, 0700, true);
@@ -172,6 +174,14 @@ function window_probe(string $cfg, string $signal, string $label): void
         }
         echo "503 draining for a new connection during the $label window: ok\n";
 
+        /* The children are held for the window, so the application answers. */
+        $app = get_once($http, '/app.php');
+        /* The reply is chunked: the body is one chunk holding "app". */
+        if (!str_starts_with($app, 'HTTP/1.1 200') || !str_contains($app, "\r\napp\r\n")) {
+            throw new RuntimeException("an application request during the $label window is not 200 app\n$app");
+        }
+        echo "application 200 for a new connection during the $label window: ok\n";
+
         /* The old gateway exits when the window closes. A stop then ends the
          * master. A reload execs a new master under the same pid, so it stays. */
         $deadline = microtime(true) + 30;
@@ -181,6 +191,8 @@ function window_probe(string $cfg, string $signal, string $label): void
         if (process_alive($gateway)) {
             throw new RuntimeException("the gateway is still alive after the $label window");
         }
+        /* The window's end is a NOTICE, not a respawn WARNING (issue #646). */
+        $tester->expectLogNotice('http gateway \d+ \(pid \d+\) finished its drain during a stop or reload, not respawned', 'gw');
         if ($signal === 'QUIT') {
             while (process_alive($master) && microtime(true) < $deadline) {
                 usleep(100000);
@@ -206,6 +218,8 @@ try {
 --EXPECT--
 ready before the stop: ok
 503 draining for a new connection during the stop window: ok
+application 200 for a new connection during the stop window: ok
 ready before the reload: ok
 503 draining for a new connection during the reload window: ok
+application 200 for a new connection during the reload window: ok
 Done

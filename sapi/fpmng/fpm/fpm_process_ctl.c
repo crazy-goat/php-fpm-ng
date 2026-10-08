@@ -35,6 +35,13 @@
 
 static int fpm_state = FPM_PCTL_STATE_NORMAL;
 static int fpm_signal_sent = 0;
+#ifdef HAVE_FPM_HTTP
+/* Issue #646: the signal that the first pass held back for the pools a gateway
+ * with http.ready_path routes to (0: nothing held), and whether the current
+ * fpm_pctl_kill_all() call is the release of those pools. */
+static int fpm_deferred_signo = 0;
+static int fpm_deferred_release = 0;
+#endif
 
 
 static const char *fpm_state_names[] = {
@@ -187,6 +194,13 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 		selective_pass = fpm_conf_diff_begin_reload_pass(fpm_globals.config);
 	}
 
+#ifdef HAVE_FPM_HTTP
+	/* Issue #646: a first pass decides the hold again from scratch. */
+	if (fpm_signal_sent == 0) {
+		fpm_deferred_signo = 0;
+	}
+#endif
+
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		struct fpm_child_s *child;
 		const struct fpm_pool_type_s *wp_type = fpm_pool_type_of(wp);
@@ -217,6 +231,23 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 				wp_type && wp_type->reload_spare_child) {
 			wp_type->reload_spare_child(wp);
 		}
+
+#ifdef HAVE_FPM_HTTP
+		/* Issue #646: the children of a pool that a gateway with http.ready_path
+		 * routes to keep serving while that gateway's window is open. The first
+		 * pass only holds them back; fpm_pctl_release_deferred() sends the
+		 * signal later, and only to these pools. Log rotation (NORMAL state) is
+		 * never held. */
+		if (fpm_deferred_release) {
+			if (!fpm_http_pool_routed_by_ready_gateway(wp)) {
+				continue;
+			}
+		} else if (fpm_state != FPM_PCTL_STATE_NORMAL && fpm_signal_sent == 0 &&
+				fpm_http_pool_held_for_window(wp)) {
+			fpm_deferred_signo = signo;
+			continue;
+		}
+#endif
 
 		for (child = wp->children; child; child = child->next) {
 			int child_signo = signo;
@@ -295,6 +326,15 @@ static void fpm_pctl_action_next(void)
 		}
 		timeout = fpm_global_config.process_control_timeout;
 	} else {
+#ifdef HAVE_FPM_HTTP
+		/* Issue #646: the window outlived process_control_timeout while its
+		 * gateway is still alive. The held children get the first signal now,
+		 * with a full timeout of their own, before any escalation. */
+		if (fpm_deferred_signo) {
+			fpm_pctl_release_deferred();
+			return;
+		}
+#endif
 		if (fpm_signal_sent == SIGQUIT) {
 			sig = SIGTERM;
 		} else {
@@ -307,6 +347,34 @@ static void fpm_pctl_action_next(void)
 	fpm_signal_sent = sig;
 	fpm_pctl_timeout_set(timeout);
 }
+
+#ifdef HAVE_FPM_HTTP
+/* Issue #646: sends the signal that the first pass held back, to the pools a
+ * gateway with http.ready_path routes to. Called when the last such gateway
+ * exits (fpm_http_gateway_on_exit()), or when the window outlives
+ * process_control_timeout (fpm_pctl_action_next()). The timer is re-armed from
+ * here: the children get process_control_timeout after the release, not what
+ * was left of the timer that started with the stop. */
+void fpm_pctl_release_deferred(void)
+{
+	int signo = fpm_deferred_signo;
+
+	if (!signo) {
+		return;
+	}
+	fpm_deferred_signo = 0;
+
+	fpm_deferred_release = 1;
+	fpm_pctl_kill_all(signo);
+	fpm_deferred_release = 0;
+
+	if (!fpm_globals.running_children) {
+		fpm_pctl_action_last();
+		return;
+	}
+	fpm_pctl_timeout_set(fpm_global_config.process_control_timeout);
+}
+#endif
 
 void fpm_pctl(int new_state, int action) /* {{{ */
 {

@@ -2223,20 +2223,23 @@ static unsigned fpm_http_target_accepting(const struct fpm_http_target_s *t)
  *
  * - draining (503) from the first moment of a stop or reload, while the soft
  *   window runs (gw->soft_draining) and after the hard drain began (gw->stopping);
- * - starting (503) until every target has a child that accepts requests. An
- *   ondemand target counts as serving: it starts its children on demand, so
- *   having none is its normal idle state. Once the gateway has seen every target
- *   serve, the state is latched (gw->ready_seen), so a later gap does not turn
- *   the probe back into "starting";
- * - no live target (503), only with http.ready_require_target: no child of
- *   any target accepts requests. An ondemand target is never dead;
+ * - starting (503) until at least one target can serve, that is it has a child
+ *   that accepts requests. A target that never serves (a chdir that fails, say)
+ *   does not hold the probe at 503 while another target serves. An ondemand
+ *   target counts as able to serve: it starts its children on demand, so having
+ *   none is its normal idle state. Once the gateway has seen a target serve, the
+ *   state is latched (gw->ready_seen), so a later gap does not turn the probe
+ *   back into "starting";
+ * - no live target (503), only with http.ready_require_target: no target can
+ *   serve, no child of any target accepts requests. An ondemand target is never
+ *   dead;
  * - ready (200) otherwise.
  *
  * The probe only reads. The latch is this process's own memory. */
 static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **text, int *code, const char **reason)
 {
-	unsigned t, accepting;
-	int all_serving = 1, all_dead = 1;
+	unsigned t;
+	int any_serving = 0;
 
 	if (gw->stopping || gw->soft_draining) {
 		*text = "draining";
@@ -2248,17 +2251,13 @@ static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **tex
 	for (t = 0; t < gw->ntargets; t++) {
 		const struct fpm_http_target_s *target = &gw->targets[t];
 
-		accepting = fpm_http_target_accepting(target);
-		if (!target->ondemand && accepting == 0) {
-			all_serving = 0;
-		}
-		if (target->ondemand || accepting > 0) {
-			all_dead = 0;
+		if (target->ondemand || fpm_http_target_accepting(target) > 0) {
+			any_serving = 1;
 		}
 	}
 
 	if (!gw->ready_seen) {
-		if (!all_serving) {
+		if (!any_serving) {
 			*text = "starting";
 			*reason = "Service Unavailable";
 			*code = HTTP_SERVUNAVAIL;
@@ -2267,7 +2266,7 @@ static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **tex
 		gw->ready_seen = 1;
 	}
 
-	if (gw->ready_require_target && all_dead) {
+	if (gw->ready_require_target && !any_serving) {
 		*text = "no live target";
 		*reason = "Service Unavailable";
 		*code = HTTP_SERVUNAVAIL;
@@ -2280,8 +2279,8 @@ static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **tex
 }
 
 /* http.ready_path, answered directly by the gateway process -- issue #646.
- * 200 "ready" while the gateway serves. 503 "starting" until every target can
- * serve, "draining" from the start of a stop or reload (the soft window, see
+ * 200 "ready" while the gateway serves. 503 "starting" until at least one target
+ * can serve, "draining" from the start of a stop or reload (the soft window, see
  * fpm_http_drain_soft_start()) and after the hard drain began, and (opt-in,
  * http.ready_require_target) "no live target" when no target has a live child.
  * Same matching as ping.path in fpm_http_serve_ping(): origin-form path, query
@@ -2292,8 +2291,8 @@ static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **tex
  *
  * During the drain the gateway keeps its listeners, so a new connection is
  * answered (503 for this path), not refused. The hard drain (fpm_http_drain.c)
- * stops accepting when the window ends. fpmng-http-gateway-ready-path.phpt
- * covers the states. */
+ * stops accepting when the window ends. fpmng-http-gateway-ready-states.phpt
+ * and fpmng-http-gateway-ready-drain.phpt cover the states. */
 static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
 	char path[512];

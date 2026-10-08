@@ -377,13 +377,11 @@ startup, so that check stays pinned to the release that was live then.
 ### Readiness probe: `http.ready_path` (issue #646)
 
 `http.ready_path` sets a path that the gateway answers itself. The gateway
-answers it before routing and before the operator pages, as `ping.path` does.
-The path follows the same rules as `ping.path`: it starts with `/`, it is at
-least two characters long, and it contains only `[alphanum]/_-.~`. It must
-differ from `ping.path`. The default is off.
-
-The gateway answers this path with any method. The probe only reads state. It
-does not change the gateway or any target.
+answers it before it routes the request and before the operator namespace. The
+path follows the same rules as `ping.path`: it starts with `/`, it is at least
+two characters long, and it contains only `[alphanum]/_-.~`. It must differ from
+`ping.path`. The default is off. The probe only reads state. It does not change
+the gateway or any target.
 
 The gateway checks the states in the order of this table. The first state that
 applies gives the answer:
@@ -391,67 +389,75 @@ applies gives the answer:
 | Order | State | Response |
 | --- | --- | --- |
 | 1 | Draining: a stop or a reload has started | `503 Service Unavailable`, body `draining` |
-| 2 | Starting: not every target pool has a child that accepts requests | `503 Service Unavailable`, body `starting` |
+| 2 | Starting: no target pool has a child that accepts requests | `503 Service Unavailable`, body `starting` |
 | 3 | No live target: only with `http.ready_require_target = yes`, and no child of any target pool accepts requests | `503 Service Unavailable`, body `no live target` |
 | 4 | Ready | `200 OK`, body `ready` |
 
-**Starting.** The probe answers `starting` until every target pool has a child
-that accepts requests. A target with `pm = ondemand` counts as serving at once,
-because it starts its children on demand. After the first `ready` answer, the
-probe never answers `starting` again. Draining and `http.ready_require_target`
-can still change the answer.
+**Starting.** The probe answers `starting` until at least one target pool has a
+child that accepts requests. A target with `pm = ondemand` counts as serving at
+once. After a target pool has served once, the probe does not answer `starting`
+again. The probe can still answer `draining` or `no live target` later.
 
-**Draining.** A stop or a reload starts a drain window. The master sends
-`SIGUSR1` to each gateway of a pool with `http.ready_path`. It does this before
-it signals any pool child. From that moment the probe answers `draining`. The
-gateway keeps its listening sockets and keeps serving. A new connection during
-the window gets the `503 draining` answer.
+**Draining.** A stop or a reload starts a drain window in each gateway with
+`http.ready_path`. The master sends `SIGUSR1` to these gateways before it
+signals any child of a pool. From then on the probe answers `draining`. The
+gateway keeps its listeners open and keeps serving. A new connection to the
+probe path gets `503 draining`. A new connection to an application route gets
+the answer of its target.
 
 **Length of the window.** The window ends at the drain deadline. The deadline is
 `process_control_timeout` minus 100 ms, counted from the start of the stop or
-the reload. Requests in progress can finish before the deadline. At the
-deadline the gateway stops accepting new connections and exits. The master
-sends `SIGKILL` to a gateway that is still alive.
+the reload. The window does not end early, even when no request is in progress.
+At the deadline the gateway stops accepting new connections. It finishes the
+requests in progress, then it exits. The master sends `SIGKILL` to a gateway
+that is still alive after `process_control_timeout`.
 
-**Target pools during the window.** The master signals the pool children right
-after it signals the gateways, as before. A target pool can therefore be gone
-while its gateway still serves. A request that the window routes to a stopped
-target fails as a request to an unreachable target does. The probe does not
-depend on the targets, except for `http.ready_require_target`.
+**Target pools during the window.** The master does not signal the children of a
+pool that a gateway with `http.ready_path` routes to. Those children keep serving
+while the window is open. The master signals them when no such gateway is alive.
+So the application answers new connections during the window, as the gateway
+does. If such a gateway is still alive after `process_control_timeout`, the
+master signals the children at that time. The children then get
+`process_control_timeout` more before the master sends `SIGTERM`. The master
+signals the children of the other pools at the start of the stop.
 
-**Time of a stop or a reload.** The master waits for its gateways. A stop or a
-reload of a pool with `http.ready_path` lasts up to the window, even when no
-request is in progress.
+**Time of a stop or a reload.** The window lasts up to `process_control_timeout`.
+Then the held children get up to `process_control_timeout` more. A stop or a
+reload of such a pool therefore takes up to about twice `process_control_timeout`.
+Set the stop timeout of the service manager or the orchestrator above twice
+`process_control_timeout`.
 
 **The window needs `process_control_timeout`.** The stock value of
-`process_control_timeout` is 0, and then the window is empty. The gateway starts
-its hard drain at once, and a new connection during a stop gets no `503`. Set
-`process_control_timeout` to a number of seconds (the examples below use 15s)
-to get a window for the probe. The value applies to every pool, as before (see
-`docs/shutdown-timeouts.md`).
+`process_control_timeout` is 0. With this value there is no window, and no child
+is held back. The master stops the gateway at once. The probe does not show
+`draining` for a stop. Set `process_control_timeout` to a number of seconds (the
+examples below use 15s) to get a window. `process_control_timeout` is a
+`[global]` directive. It applies to every pool (see `docs/shutdown-timeouts.md`).
 
-**Signals during the window.** The master sends `SIGQUIT` to its gateways in its
-cleanup. During the window the gateway ignores that signal. A `SIGQUIT` sent to
-a gateway process by hand starts the drain at once, without a window. The
-gateway then stops accepting new connections at once.
+**Signals during the window.** During the soft window the gateway ignores
+`SIGQUIT`. A `SIGQUIT` that you send by hand does not shorten the window. A
+gateway without a window starts its drain at once when it gets `SIGQUIT`.
 
-**After the window.** Without `http.reuseport`, the master keeps the listening
-socket. A new connection then waits in the listen backlog. With
-`http.reuseport`, the gateway closes its own socket. A new connection then gets
-a refused connection. A reload ends with an exec of the master. Issue #661
-covers the listener handover across that exec. It is not part of issue #646.
+**After the window.** When the window ends, the gateway stops accepting new
+connections. The master closes its copy of the listening socket after the
+gateways have exited. Listener inheritance across the exec of a reload is issue
+#661. It is not part of issue #646.
 
-**Startup.** Before the gateway starts its event loop, a new connection waits in
-the listen backlog, or it is refused. The plain listener (`http.plain_listen`)
-does not answer this path. It keeps its redirect.
+**Startup.** Until at least one target pool has a child that accepts requests,
+the probe answers `starting`. So a `200` does not come before a target serves.
 
 **Require a target.** `http.ready_require_target = yes` makes the probe answer
 `no live target` when no child of any target pool accepts requests. A target
-with `pm = ondemand` never counts as dead. The default is `no`. The directive
-needs `http.ready_path`. A `fastcgi` pool and an `http-direct` pool refuse it.
+pool that does not serve does not block `ready` while another target pool
+serves. A target with `pm = ondemand` never counts as dead. The default is `no`.
+The directive needs `http.ready_path`. A `fastcgi` pool refuses both directives.
+An `http-direct` pool refuses `http.ready_path`.
 
-**Operator pages.** The probe answers before the operator pages. Do not set
-`http.ready_path` to the path of an operator page.
+**Operator pages and the plain listener.** The probe answers before the operator
+namespace. Do not set `http.ready_path` to a path under the operator base. The
+plain listener (`http.plain_listen`) does not answer the probe. It answers only
+the HTTP-01 challenge and its redirect to `https`. Use the public listener for
+the probe.
 
 Example for a gateway pool. The `[global]` value gives a stop or a reload a
 window of about 15 s, in which the probe answers `503 draining`:
@@ -474,12 +480,13 @@ http.route[app] = /
 http.ready_path = /ready
 ```
 
-Example Docker health check. The image must contain `curl`. `curl -f` fails on
-a `503` answer. The container is `unhealthy` while the gateway starts and while
-it drains. A stop of the container (`docker stop` sends `SIGTERM` to the master)
-starts the window. The next health check then reports `unhealthy`. Set the stop
-timeout above `process_control_timeout`, for example `docker run --stop-timeout 20`,
-so that Docker does not send `SIGKILL` before the window ends:
+Example Docker health check. The image must contain `curl`. `curl -f` exits with
+an error for a status of 400 or more, so a `503` answer fails the check. The
+probe answers `draining` during a stop, so a check that runs in that time fails
+too. `docker stop` sends `SIGTERM` to the master. Set the stop timeout above twice
+`process_control_timeout`, for example `docker run --stop-timeout 35` with the
+15s above. Then Docker does not send `SIGKILL` before the window and the held
+children end:
 
 ```dockerfile
 HEALTHCHECK --interval=10s --timeout=2s \
@@ -488,13 +495,14 @@ HEALTHCHECK --interval=10s --timeout=2s \
 
 Example Kubernetes readiness probe. Kubernetes counts an answer with a status of
 400 or more as a failed probe. With `failureThreshold: 1`, one `503` marks the
-pod not ready. The first `200` after that marks it ready again. Set
-`terminationGracePeriodSeconds` above `process_control_timeout`, so that the
-kubelet does not kill the pod before the window ends:
+pod not ready. The next `200` marks it ready again. Set
+`terminationGracePeriodSeconds` above twice `process_control_timeout`, so that
+the kubelet does not kill the pod before the window and the held children end.
+The value 35 is above twice the 15s above:
 
 ```yaml
 spec:
-  terminationGracePeriodSeconds: 20
+  terminationGracePeriodSeconds: 35
   containers:
     - name: app
       readinessProbe:

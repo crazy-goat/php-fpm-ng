@@ -50,9 +50,14 @@ a graceful gateway stop.
 A gateway with `http.ready_path` first gets `SIGUSR1` at the start of the stop
 or the reload, before any child is signalled. It then keeps serving for a
 window that ends at `process_control_timeout` minus 100 ms. The probe answers
-`503 draining` during that window, and the master waits for the window, so a
-stop or a reload of such a pool takes up to that long. With the stock `0` the
-window is empty. See `docs/gateway.md`, "Readiness probe".
+`503 draining` during that window. The children of the pools that this gateway
+routes to also keep serving during the window, so the application answers new
+connections. They get their signal when the last such gateway exits. If such a
+gateway is still alive after `process_control_timeout`, the master signals the
+children at that time, and they get `process_control_timeout` more before
+`SIGTERM`. A stop or a reload of such a pool therefore takes up to about twice
+`process_control_timeout`. With the stock `0` there is no window and no child is
+held back. See `docs/gateway.md`, "Readiness probe".
 
 **What "in flight" does not include (phase-1 limitation).** A request whose
 body has not finished arriving is not drained. The gateway's HTTP library
@@ -103,7 +108,7 @@ about one second), `supervisor.stop_timeout = 10s`, `cron.timeout = 0`,
 | pool type | child state | what happens |
 |---|---|---|
 | request-serving | handling a request | the master sends `SIGTERM`, then `SIGKILL` after ~1s if the request is still running — same as upstream FPM |
-| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms (issue #646) |
+| `gateway` | proxying a request | the master sends `SIGQUIT`, then `SIGKILL` at once because `process_control_timeout = 0`; set `process_control_timeout` for the drain to have time (issue #641). With `http.ready_path` the gateway serves first for a window of `process_control_timeout` minus 100 ms, and the children of the pools it routes to keep serving in that window and get `process_control_timeout` more after it (issue #646) |
 | `supervisor` | running a script iteration | the master kills the child after ~1s; **`supervisor.stop_timeout` never runs** because the master acts first |
 | `cron` | sleeping before the next run | the child exits immediately and **skips** that scheduled run — clean, no script execution |
 | `cron` | script already running | the master kills the child after ~1s; with default `cron.timeout = 0` there is no pool-level watchdog either |

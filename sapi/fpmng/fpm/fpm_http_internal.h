@@ -307,6 +307,7 @@ struct fpm_http_transport_s {
 };
 
 struct fpm_scoreboard_s;
+struct fpm_worker_pool_s;
 
 /* One backend pool this gateway may send requests to. */
 struct fpm_http_target_s {
@@ -322,6 +323,11 @@ struct fpm_http_target_s {
 	 * not a dead target there. NULL = not watched; the probe counts it as dead. */
 	const struct fpm_scoreboard_s *scoreboard;
 	int ondemand;
+	/* Issue #646: the target's own worker pool, the identity the master uses to
+	 * hold its children back while the window of a gateway with http.ready_path
+	 * runs (fpm_http_pool_held_for_window()). The gateway's own pool for an own
+	 * target. */
+	const struct fpm_worker_pool_s *worker_pool;
 
 	/* how many persistent connections all the gateways of this pool may hold
 	 * to THIS target together; sized from the target pool's own

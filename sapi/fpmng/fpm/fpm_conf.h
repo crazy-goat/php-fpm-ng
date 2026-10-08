@@ -84,6 +84,12 @@ struct fpm_worker_pool_config_s {
 	int pm_max_spawn_rate;
 	int pm_process_idle_timeout;
 	int pm_max_requests;
+	/* Issue #727: consecutive children that exit within the crash window
+	 * without serving a request. Reaching it logs one ALERT and marks the pool
+	 * as given up on the operator pages. 0 = never give up; the respawn delay
+	 * stays capped either way. Default 6. Refused on pool types without
+	 * respawn_backoff (see fpm_pool_type_s). */
+	int pm_max_consecutive_failures;
 	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every non-fastcgi type refuses it; operator.status_path is the separate HTTP endpoint (issue #386). */
 	/* fpm-ng: the per-pool operator endpoint's directives. Issue #386 moved
 	 * these out of the "pm." namespace, which never described them. See

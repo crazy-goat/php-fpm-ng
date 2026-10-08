@@ -244,7 +244,8 @@ that executor does and does not report, including the two extra gauges
 (`fpmng_pool_worker_pending`, `fpmng_pool_worker_watchers`) it adds on top of
 the shape below, and [Per-slot worker metrics](#per-slot-worker-metrics-issue-339)
 below for a further, more detailed set. A `fastcgi` pool and an `http-direct`
-pool also report the saturation numbers in [Saturation (issue #644)](#saturation-issue-644).
+pool also report the saturation numbers in [Saturation (issue #644)](#saturation-issue-644),
+and the crash backoff numbers in [Crash backoff (issue #727)](#crash-backoff-issue-727).
 A pool that does not serve requests (`cron`, `supervisor`) reports its state,
 when it last started, how many consecutive failures it has had, its last exit
 code, and — for `cron` — when it next runs. A `cron` pool with
@@ -437,6 +438,19 @@ absent.
 Under `reload.selective = yes`, a pool that the reload spares keeps its values.
 The master that starts after the reload counts episodes from zero. So
 `max_children_reached` can rise again while the pool is still at its limit.
+
+### Crash backoff (issue #727)
+
+A `fastcgi` pool and an `http-direct` pool, with either `pool.executor`, report
+the state of the restarts of their pm children. The three series are present on
+every such pool. A healthy pool shows `0`. The rules are in
+[`crash-backoff.md`](crash-backoff.md).
+
+| Series | JSON key (`fastcgi` status page) | Text key (`http-direct` status page) | Type | Value |
+|---|---|---|---|---|
+| `fpmng_pool_consecutive_crashes{pool}` | `consecutive_crashes` | `consecutive crashes` | gauge | Fast failures in a row. |
+| `fpmng_pool_crash_gave_up{pool}` | `crash_gave_up` (`true` or `false`) | `crash gave up` (`yes` or `no`) | gauge | `1` once the pool gave up, `0` otherwise. |
+| `fpmng_pool_respawn_delay_ms{pool}` | `respawn_delay_ms` | `respawn delay ms` | gauge | The wait, in milliseconds, for the next child. `0` means no wait. |
 
 ## Application metrics on a per-pool metrics path
 

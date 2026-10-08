@@ -20,6 +20,7 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_target.h"
 #include "fpm_operator_http.h"
+#include "fpm_operator_saturation.h"
 #include "zlog.h"
 
 /* One slot per child. See the header for why there is no lock. */
@@ -557,6 +558,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_worker_pool_s *wp, int js
 	const struct fpm_http_direct_ops_shared *shared = fpm_http_direct_ops_shared_get(wp);
 	struct fpm_scoreboard_s *copy = fpm_scoreboard_copy(wp->scoreboard, 0);
 	struct fpm_http_direct_ops_slot total;
+	struct fpm_operator_saturation_s sat;
 	char start[64];
 	struct tm tm;
 	time_t now = time(NULL);
@@ -566,6 +568,7 @@ static void fpm_http_direct_ops_status_body(struct fpm_worker_pool_s *wp, int js
 		return;
 	}
 	fpm_http_direct_ops_totals(shared, wp->scoreboard, &total);
+	fpm_operator_saturation_read(wp, copy, &sat);
 	if (localtime_r(&copy->start_epoch, &tm) && strftime(start, sizeof(start), "%d/%b/%Y:%H:%M:%S %z", &tm)) {
 		/* nothing: start is filled in */
 	} else {
@@ -630,6 +633,22 @@ static void fpm_http_direct_ops_status_body(struct fpm_worker_pool_s *wp, int js
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_ACL],
 			total.requests_refused[FPM_HTTP_DIRECT_REFUSED_CAPACITY],
 			total.conn_refused, total.conn_timed_out, total.responses_rejected, total.retiring);
+	}
+	/* Issue #644: the listen queue lines appear only where the pool can
+	 * measure it (a TCP listener on a build with TCP_INFO). Other pools keep
+	 * the page as it was. */
+	if (sat.has_listen_queue) {
+		if (json) {
+			fpm_operator_buf_appendf(out,
+				",\"listen queue\":%lu,\"max listen queue\":%lu,\"listen queue length\":%lu",
+				sat.listen_queue, sat.listen_queue_max, sat.listen_queue_length);
+		} else {
+			fpm_operator_buf_appendf(out,
+				"listen queue:         %lu\n"
+				"max listen queue:     %lu\n"
+				"listen queue length:  %lu\n",
+				sat.listen_queue, sat.listen_queue_max, sat.listen_queue_length);
+		}
 	}
 	fpm_http_direct_ops_status_workers(shared, wp->scoreboard, json, full, out);
 	fpm_scoreboard_free_copy(copy);

@@ -298,6 +298,18 @@ struct fpm_pool_type_s {
 	 * the name of a pool type. */
 	unsigned operator_endpoint:1;
 
+	/* Issue #644: this type's operator pages also carry the saturation numbers
+	 * upstream FPM keeps in the scoreboard -- the listen queue (current,
+	 * high-water mark, backlog length), max_children_reached and slow requests.
+	 * fpm_operator_saturation.c decides, per pool, which of them the page can
+	 * honestly report; this bit only says whether the type reports them at all.
+	 *
+	 * Set for fastcgi and for the classic executor of http-direct. Not set for
+	 * the worker executor: it has per-slot queue series of its own (issue #339)
+	 * and rejects request_slowlog_timeout, so it has no slow-request count to
+	 * report. Not set for the types without a listener of their own. */
+	unsigned reports_saturation:1;
+
 	/* How this type renders its status page on the operator endpoint. NULL is
 	 * the common case and means the generic per-pool JSON that
 	 * fpm_operator_page_render_json() produces for every type.

@@ -172,13 +172,15 @@ struct fpm_supervisor_shared_s {
 	 * so that this field stays a plain count of an event that happened. */
 	unsigned long starts;
 
-	/* issue #323: how many of the pool's supervisor_processes cold-start jitter
-	 * slots have already been handed out. Bumped at the moment a process
-	 * decides to apply (or skip, because the roll was 0) start_jitter, not
-	 * after its script has run -- a process that crashes immediately afterwards
-	 * still consumed its slot. Without this, a process respawned after an early
-	 * crash would re-enter fpm_pool_supervisor_child_main() with a fresh
-	 * is_first_iteration and, so long as some slower sibling had kept "starts"
+	/* issue #323: how many of the pool's supervisor_processes cold-start slots
+	 * have already been handed out. Bumped at the moment a process decides it
+	 * owes its cold start (its first iteration in
+	 * fpm_pool_supervisor_child_main()), whether or not start_jitter is set,
+	 * and not after its script has run -- a process that crashes immediately
+	 * afterwards still consumed its slot. The same slot also exempts that first
+	 * start from the backoff (issue #734). Without this, a process respawned
+	 * after an early crash would re-enter fpm_pool_supervisor_child_main() with
+	 * a fresh is_first_iteration and, so long as some slower sibling had kept "starts"
 	 * (above) under supervisor_processes, would be granted a SECOND cold-start
 	 * delay on top of the backoff it had already served -- exactly what
 	 * start_jitter's docs promise will not happen. Shared, not local, for the
@@ -1449,8 +1451,18 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * CHECK to once per process (this process's first trip through the loop):
 	 * without it, a process whose script keeps exiting instantly would retry
 	 * the "do I still owe a cold start" question every iteration instead of
-	 * only its very first. */
+	 * only its very first.
+	 *
+	 * issue #734: that question is answered BEFORE the pool-wide backoff wait
+	 * below, not after it. shared->next_allowed_start is written by whichever
+	 * copy failed last, so a copy that reaches this loop after a sibling's
+	 * failure used to sleep out the whole restart_delay before its very first
+	 * start. A copy that still owes its cold start skips that wait; its own
+	 * start_jitter delay still applies. Every later start of a process waits for
+	 * the backoff as before. The slot is consumed whether or not start_jitter is
+	 * set, so the exemption does not depend on the jitter directive. */
 	int is_first_iteration = 1;
+	int owes_cold_start = 0;	/* set by the first iteration, cleared once it is applied */
 
 	for (;;) {
 		time_t now, started, duration;
@@ -1463,7 +1475,16 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 		}
 
 		now = FPM_NOW();
-		if (shared->next_allowed_start > now) {
+		if (is_first_iteration) {
+			is_first_iteration = 0;
+			owes_cold_start = shared->cold_starts_issued <
+				(unsigned long) (c->supervisor_processes > 0 ? c->supervisor_processes : 1);
+			if (owes_cold_start) {
+				shared->cold_starts_issued++;
+			}
+		}
+
+		if (!owes_cold_start && shared->next_allowed_start > now) {
 			time_t wait_for = shared->next_allowed_start - now;
 
 			/* issue #323: restart_jitter is drawn HERE, independently by
@@ -1497,25 +1518,27 @@ void fpm_pool_supervisor_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 			}
 		}
 
-		if (is_first_iteration) {
-			is_first_iteration = 0;
-			if (c->supervisor_start_jitter > 0 &&
-					shared->cold_starts_issued < (unsigned long) (c->supervisor_processes > 0 ? c->supervisor_processes : 1)) {
-				unsigned delay;
+		if (owes_cold_start) {
+			unsigned delay = 0;
 
-				shared->cold_starts_issued++;
+			owes_cold_start = 0;
+			if (c->supervisor_start_jitter > 0) {
 				delay = fpm_pool_supervisor_jitter((unsigned) c->supervisor_start_jitter);
-
-				if (delay > 0) {
-					fpm_pool_supervisor_wait((time_t) delay);
-					if (supervisor_term_requested) {
-						break;
-					}
-					if (shared->terminal) {
-						break;
-					}
+			}
+			if (delay > 0) {
+				fpm_pool_supervisor_wait((time_t) delay);
+				if (supervisor_term_requested) {
+					break;
 				}
 			}
+		}
+
+		/* A sibling copy may have exhausted supervisor_restart_max while this
+		 * copy waited for its cold-start delay or for the backoff. The backoff
+		 * wait above checks this too, but a copy that owes its cold start skips
+		 * that wait (issue #734), so the check runs for every start here. */
+		if (shared->terminal) {
+			break;
 		}
 
 		started = FPM_NOW();

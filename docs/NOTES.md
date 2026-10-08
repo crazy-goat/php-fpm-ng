@@ -4469,3 +4469,79 @@ test which warns here run after run is visible as the flake it is rather than
 absorbed into a total. The rejected alternative was an `EXPECT_WARN=0` of its
 own, which is what the script was doing by accident; it turns a flake into a
 six-minute rerun and says nothing about which test caused it.
+
+## 3ak. A gateway listener crosses the reload; the reset cost stays (issue #661, 2026-10-08)
+
+A reload refused connections. The old master closed each gateway listener
+before the `execvp()`, and the new master bound it again. A client that
+connected in that gap got `ECONNREFUSED`. The fix keeps the listening socket
+open across the exec and hands it to the next master. The rules are in
+`docs/reload.md`, "Gateway listeners across the reload (issue #661)".
+
+The load test ran on the test box (piotr@192.168.8.50). The base build is
+`main` at 191fa46. The new build is the branch of issue #661. The test uses:
+
+- one `pool.type = gateway` with `http.gateways = 1`, and one `fastcgi` pool
+  with `pm = static` and `pm.max_children = 8`;
+- `process_control_timeout = 10`;
+- four PHP client processes. Each one connects in a loop with
+  `Connection: close` and requests `/app.php`;
+- `SIGUSR2` to the master at 10 s of a 20 s run;
+- five runs for each build.
+
+The driver counts each attempt once: `ok`, `refused` (`ECONNREFUSED`),
+`reset` (the connection closed with no byte of a reply), `timeout`, `non200`
+(with its status code) and `connect_other`. The total of the driver adds the
+`status_502` key a second time. The tables below use the sum of the outcome
+counters.
+
+Base build, 5 runs:
+
+| Run   | Requests | ok     | refused | reset | 502 |
+|-------|----------|--------|---------|-------|-----|
+| 1     | 109316   | 109284 | 21      | 7     | 4   |
+| 2     | 106569   | 106542 | 18      | 7     | 2   |
+| 3     | 106770   | 106706 | 53      | 7     | 4   |
+| 4     | 108929   | 108895 | 24      | 7     | 3   |
+| 5     | 108701   | 108667 | 24      | 7     | 3   |
+| Total | 540285   | 540094 | 140     | 35    | 16  |
+
+New build, 5 runs:
+
+| Run   | Requests | ok     | refused | reset | 502 |
+|-------|----------|--------|---------|-------|-----|
+| 1     | 108120   | 108112 | 0       | 4     | 4   |
+| 2     | 110674   | 110668 | 0       | 3     | 3   |
+| 3     | 106414   | 106407 | 0       | 3     | 4   |
+| 4     | 108029   | 108022 | 0       | 3     | 4   |
+| 5     | 109491   | 109484 | 0       | 3     | 4   |
+| Total | 542728   | 542693 | 0       | 16    | 19  |
+
+Each new run logs one `took over the listener` line and one `handing` line,
+and the master is alive after the reload. No run had a timeout. A first trial
+with `pm.max_children = 2` is not in the tables: four clients filled the pool,
+and 42 % of the answers were not `200`. The `max_children = 8` setting is the
+one used for all ten runs.
+
+The refusals are gone. The resets and the `502` responses are not gone, and
+the base build shows them too, so they are not caused by the handoff. The log
+of a run shows this order:
+
+1. The reload starts. A persistent upstream connection that the app worker
+   closed gives `upstream ... closed ... without one byte of a reply`, and the
+   client gets `502`.
+2. The old pool workers stop. The old gateway starts its drain.
+3. The requests still in flight need an app worker. Only the new generation
+   has one, and it starts after the drain.
+4. After `process_control_timeout` (10 s) the gateway stops waiting. It closes
+   the connections that are still in flight, and the client gets a reset.
+
+Fixing step 4 means that the gateways drain before the pool workers stop. That
+changes the reload order, which issue #661 does not describe. This is a
+decision for the maintainer, and it needs a follow-up issue.
+
+Not measured under load: TLS listeners, `http.reuseport = on` and a unix public
+listener. The TLS fingerprint rule has no phpt test yet. The phpt tests are
+`fpmng-gateway-listener-reload.phpt` (one client, no refused and no reset
+connection), `fpmng-gateway-listener-rebind.phpt` and
+`fpmng-reload-selective-failed-exec.phpt`.

@@ -70,6 +70,7 @@
 #include "zlog.h"
 
 #include "fpm_http_internal.h"
+#include "fpm_http_handoff.h"
 
 static int cleanup_registered = 0;
 
@@ -1103,6 +1104,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->plain_listen_fd = -1;
 		gw->pool = strdup(wp->config->name);
 		gw->listen_address = strdup(wp->config->listen_address);
+		fpm_http_handoff_tls_fp(wp, gw->listen_tls_fp);
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
 		gw->backlog = wp->config->listen_backlog;
 		fpm_http_gateway_settings(wp, gw, &nproc_wanted, &reuseport);
@@ -1228,15 +1230,15 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				reuseport = 0;
 				gw->reuseport = 0;
 			} else {
-				gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->listen_address,
-						gw->backlog, reuseport, !gw->tls_wait_for_cert);
+				gw->listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->listen_address,
+						gw->backlog, reuseport, !gw->tls_wait_for_cert, gw->listen_tls_fp);
 				/* No master-owned socket for this pool: make the unused slot
 				 * explicit so nothing -- the child's listener-socket close
 				 * loop in particular -- treats fd 0 as this pool's listener. */
 				wp->listening_socket = -1;
 			}
 		} else {
-			gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert);
+			gw->listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert, gw->listen_tls_fp);
 		}
 		if (gw->listen_fd < 0) {
 			fpm_http_operator_free(gw); /* issue #389 */
@@ -1255,7 +1257,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return 0;
 		}
 		if (gw->plain_listen_address) {
-			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1);
+			gw->plain_listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1, gw->listen_tls_fp);
 			if (gw->plain_listen_fd < 0) {
 				close(gw->listen_fd);
 				fpm_http_operator_free(gw); /* issue #389 */

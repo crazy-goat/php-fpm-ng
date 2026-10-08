@@ -31,6 +31,9 @@
 #include "fpm_debug_clock.h"
 #include "fpm_sd_notify.h"
 #include "fpm_crash_backoff.h"
+#ifdef HAVE_FPM_HTTP
+#include "fpm_http_handoff.h"
+#endif
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -159,6 +162,12 @@ int fpm_run(int *max_requests) /* {{{ */
 		fpm_event_loop(1);
 	}
 
+#ifdef HAVE_FPM_HTTP
+	/* Issue #661: the listeners the previous generation handed over, read
+	 * before any pool binds, so that a stale one cannot block a bind. */
+	fpm_http_handoff_begin();
+#endif
+
 	/* Initialize pool types before child fork — HTTP gateways then inherit the
 	 * same final stdio state as workers. */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
@@ -192,6 +201,12 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 	}
+
+#ifdef HAVE_FPM_HTTP
+	/* Issue #661: closes the handed-over listeners no gateway took. Before the
+	 * first fork, so no child inherits one. */
+	fpm_http_handoff_finish();
+#endif
 
 	/* create initial children in all pools */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {

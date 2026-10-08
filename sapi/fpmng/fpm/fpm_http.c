@@ -290,6 +290,20 @@ void fpm_http_counter_incr(atomic_t *counter)
 	} while (!atomic_cmp_set(counter, value, value + 1));
 }
 
+/* Issue #652: the same loop as fpm_http_counter_incr(), by an amount -- the
+ * duration sum of the request-duration histogram, in microseconds. */
+static void fpm_http_counter_add(atomic_t *counter, unsigned long amount)
+{
+	unsigned long value;
+
+	if (!counter) {
+		return;
+	}
+	do {
+		value = *counter;
+	} while (!atomic_cmp_set(counter, value, value + amount));
+}
+
 /* Issue #390: the decrementing half, for the one gauge (connections_open). A
  * gauge, unlike the counters above, can go down; guarded at zero so a close
  * that races a missing increment cannot underflow the unsigned atomic. No
@@ -335,12 +349,12 @@ static void fpm_http_counter_sub(atomic_t *counter, unsigned long amount)
 /* Issue #390: the counters segment's two variable-length regions. The segment
  * is ONE flat atomic_t array because C lets a struct have only one flexible
  * array; these two accessors are the only place the layout arithmetic lives.
- * FPM_HTTP_COUNTERS_SLOT_CELLS is the slot stride (the four cells of
- * fpm_http_counters_slot), and the process blocks follow the slots, each
+ * FPM_HTTP_COUNTERS_SLOT_CELLS (fpm_http_internal.h) is the slot stride: the
+ * four cells of fpm_http_counters_slot and the request-duration histogram of
+ * the row (issue #652), and the process blocks follow the slots, each
  * (1 + nslots) cells: [connections_open, upstreams_held[0 .. nslots)]. */
-#define FPM_HTTP_COUNTERS_SLOT_CELLS 4u
 
-/* First cell of target row i: [requests_total, rejected_total, shared budget, reclaim generation]. */
+/* First cell of target row i: [requests_total, rejected_total, shared budget, reclaim generation, duration buckets, duration sum]. */
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i)
 {
 	return &c->cells[(size_t) i * FPM_HTTP_COUNTERS_SLOT_CELLS];
@@ -386,6 +400,51 @@ static void fpm_http_count_ping(struct fpm_http_gateway_s *gw)
 	if (gw && gw->counters) {
 		fpm_http_counter_incr(&gw->counters->ping_total);
 	}
+}
+
+/* Issue #652: the Prometheus client default buckets, in seconds, as `le`
+ * labels and in microseconds. An observation goes into the first bucket whose
+ * bound it does not exceed (inclusive, the Prometheus rule). */
+const struct fpm_http_duration_bound_s fpm_http_duration_bounds[FPM_HTTP_DURATION_BUCKETS] = {
+	{ "0.005", 5000UL },
+	{ "0.01", 10000UL },
+	{ "0.025", 25000UL },
+	{ "0.05", 50000UL },
+	{ "0.1", 100000UL },
+	{ "0.25", 250000UL },
+	{ "0.5", 500000UL },
+	{ "1", 1000000UL },
+	{ "2.5", 2500000UL },
+	{ "5", 5000000UL },
+	{ "10", 10000000UL },
+};
+
+/* Issue #652: one finished response into the request-duration histogram of
+ * the row the request was counted in (cl->duration_row). The duration is the
+ * time from the end of the request read (cl->request_started, stamped in
+ * fpm_http_client_request_begin()) to `now`, so it includes the wait for a
+ * target. Two cmp-set loops (one bucket, the sum), no lock: the same cost
+ * class as the requests_total increment every request already pays. */
+static void fpm_http_duration_observe(struct fpm_http_gateway_s *gw, const struct fpm_http_client_s *cl,
+		const struct timeval *now)
+{
+	struct timeval spent;
+	unsigned long us;
+	unsigned row, b = 0;
+	atomic_t *slot;
+
+	if (!gw->counters) {
+		return;
+	}
+	row = cl->duration_row == FPM_HTTP_DURATION_ROW_LOCAL ? gw->counters->nslots - 1 : cl->duration_row;
+	evutil_timersub(now, &cl->request_started, &spent);
+	us = spent.tv_sec < 0 ? 0 : (unsigned long) spent.tv_sec * 1000000UL + (unsigned long) spent.tv_usec;
+	while (b < FPM_HTTP_DURATION_BUCKETS && us > fpm_http_duration_bounds[b].us) {
+		b++;
+	}
+	slot = fpm_http_counters_slot_cells(gw->counters, row);
+	fpm_http_counter_incr(&slot[FPM_HTTP_SLOT_BUCKET_CELL + b]);
+	fpm_http_counter_add(&slot[FPM_HTTP_SLOT_SUM_CELL], us);
 }
 
 /* Issue #390 review: this process's own upstreams_held cell for target t, or
@@ -571,18 +630,27 @@ void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request 
 	struct fpm_http_access_log_extra_s extra = { -1, -1, -1, NULL };
 	struct fpm_http_client_s *cl;
 	struct evhttp_connection *evcon;
-	struct timeval now;
+	struct timeval now = { 0, 0 };
+	int timed;
 
+	evcon = evhttp_request_get_connection(req);
+	cl = evcon ? fpm_http_client_index_find(&gw->client_index, evcon) : NULL;
+	/* Issue #652: the duration histogram is fed before the access log's own
+	 * checks, so a gateway without http.access_log, or a path that
+	 * access.suppress_path[] hides, still counts the response. One clock read
+	 * serves both the histogram and the access log's duration_ms. */
+	timed = cl && cl->request_started.tv_sec;
+	if (timed) {
+		fpm_clock_get(&now);
+		fpm_http_duration_observe(gw, cl, &now);
+	}
 	if (!gw->access_log) {
 		return;
 	}
 	if (fpm_http_log_suppressed(gw, req)) {
 		return;
 	}
-	evcon = evhttp_request_get_connection(req);
-	cl = evcon ? fpm_http_client_index_find(&gw->client_index, evcon) : NULL;
-	if (cl && cl->request_started.tv_sec) {
-		fpm_clock_get(&now);
+	if (timed) {
 		extra.duration_ms = fpm_http_elapsed_ms(&cl->request_started, &now);
 		if (cl->request_id[0]) {
 			extra.request_id = cl->request_id;
@@ -1813,6 +1881,8 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 		return;
 	}
 	fpm_clock_get(&cl->request_started);
+	/* Issue #652: until the request is routed, it is the gateway's own answer. */
+	cl->duration_row = FPM_HTTP_DURATION_ROW_LOCAL;
 	fpm_http_client_request_id_assign(gw, cl, req);
 	if (cl->ka_timer) {
 		event_del(cl->ka_timer);
@@ -2188,7 +2258,7 @@ static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
 	return answered;
 }
 
-void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
 	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
@@ -2303,6 +2373,30 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	free(location);
 	free(redirect_host);
 	smart_str_free(&target);
+}
+
+/* Issue #652: every answer of the plain listener is local, so it is observed
+ * in the "-" row, the row its requests_total was counted in. The answer has
+ * several returns and does not reach fpm_http_log_response(), so it is timed
+ * here, after the answer, once. The client node is looked up after the answer
+ * because a close callback can run inside a send and free it. */
+void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	struct fpm_http_client_s *cl;
+	struct timeval now;
+
+	fpm_http_plain_answer(req, arg);
+	if (!gw || !gw->counters || !evcon) {
+		return;
+	}
+	cl = fpm_http_client_index_find(&gw->client_index, evcon);
+	if (!cl || !cl->request_started.tv_sec) {
+		return;
+	}
+	fpm_clock_get(&now);
+	fpm_http_duration_observe(gw, cl, &now);
 }
 
 /* ------------------------------------------------------------------- routing */
@@ -2584,6 +2678,9 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * below). What upstreams_used/_max describe is pressure on the target;
 		 * this is the traffic that pressure is a rate OF. */
 		fpm_http_counter_incr(c->target->requests_total);
+		if (client) {
+			client->duration_row = c->target->slot_index; /* Issue #652: the same row */
+		}
 		fpm_http_dispatch(gw, c, script_missing);
 	}
 }

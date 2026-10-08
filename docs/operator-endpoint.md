@@ -266,7 +266,7 @@ gauge (per gateway process, summed by the renderer) and the pool-wide
 per pool the gateway forwards for. The page also has the flow-control pair
 `fpmng_gateway_responses_paused`, a gauge of the paused responses of all gateway
 processes, and `fpmng_gateway_responses_paused_total`, a pool-wide counter of
-pauses (issue #706). `/status` on the gateway is the same numbers as JSON, one
+pauses (issue #706). Each target also has a request-duration histogram, `fpmng_gateway_request_duration_seconds` (issue #652). Its buckets and timing rules are in [`gateway.md`](gateway.md). `/status` on the gateway is the same numbers as JSON, one
 row per target plus the pool row. The pool row also has `responses_paused` and
 `responses_paused_total`.
 

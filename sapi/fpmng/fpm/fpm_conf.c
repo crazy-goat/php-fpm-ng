@@ -250,6 +250,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
 	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
 	{ "http.ready_path",           &fpm_conf_set_string,      WPO(http_ready_path) },
+	{ "http.ready_require_target", &fpm_conf_set_boolean,     WPO(http_ready_require_target) },
 	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
@@ -1704,13 +1705,18 @@ static int fpm_conf_check_pool_ping_access_log(struct fpm_worker_pool_s *wp)
 
 /* http.ready_path (issue #646): the same path rules as ping.path. It must also
  * differ from ping.path, because the gateway answers both before routing, so
- * one of them would never be seen. */
+ * one of them would never be seen. http.ready_require_target only means
+ * something to that probe, so it needs the path. */
 static int fpm_conf_check_pool_ready_path(struct fpm_worker_pool_s *wp)
 {
 	char *ready = wp->config->http_ready_path;
 	size_t i;
 
 	if (!ready || !*ready) {
+		if (wp->config->http_ready_require_target) {
+			zlog(ZLOG_ERROR, "[pool %s] http.ready_require_target needs http.ready_path", wp->config->name);
+			return -1;
+		}
 		return 0;
 	}
 

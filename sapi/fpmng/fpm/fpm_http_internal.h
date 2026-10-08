@@ -306,6 +306,8 @@ struct fpm_http_transport_s {
 	void (*drop)(fpm_http_upstream *up);
 };
 
+struct fpm_scoreboard_s;
+
 /* One backend pool this gateway may send requests to. */
 struct fpm_http_target_s {
 	struct fpm_http_gateway_s *gw;
@@ -313,6 +315,13 @@ struct fpm_http_target_s {
 	char *listen_address;			/* where that pool takes requests */
 	enum fpm_http_transport_e transport;
 	const struct fpm_http_transport_s *ops;
+	/* Issue #646: the target pool's scoreboard and process manager, read by the
+	 * readiness probe to tell whether the target has a child that accepts
+	 * requests (starting), and whether it has no live child at all (dead). An
+	 * ondemand pool starts its children on demand, so an empty scoreboard is
+	 * not a dead target there. NULL = not watched; the probe counts it as dead. */
+	const struct fpm_scoreboard_s *scoreboard;
+	int ondemand;
 
 	/* how many persistent connections all the gateways of this pool may hold
 	 * to THIS target together; sized from the target pool's own
@@ -673,6 +682,18 @@ struct fpm_http_gateway_s {
 	struct event *drain_tick;
 	volatile sig_atomic_t stopping;
 	struct timeval drain_deadline;
+	/* Issue #646: the soft drain. Only a gateway with http.ready_path gets
+	 * SIGUSR1 from the master at the start of a stop or reload. It keeps its
+	 * listeners and answers the probe 503 until drain_deadline, then starts
+	 * the hard drain above by itself (soft_timer). SIGQUIT from the master
+	 * is ignored in the window, so the master's cleanup cannot cut it short.
+	 * ready_seen latches once every target could serve; ready_require_target
+	 * is http.ready_require_target. */
+	struct event *sigusr1;
+	struct event *soft_timer;
+	volatile sig_atomic_t soft_draining;
+	int ready_seen;
+	int ready_require_target;
 	/* Issue #390: this process's own gauge block in gw->counters --
 	 * [connections_open, responses_paused, upstreams_held[0 .. nslots)] (issue
 	 * #706 added the second cell). Set in

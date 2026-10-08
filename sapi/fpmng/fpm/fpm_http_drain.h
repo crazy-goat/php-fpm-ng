@@ -13,6 +13,11 @@
  * as the SIGTERM it replaces did; an operator who wants a graceful stop sets
  * process_control_timeout, as docs/shutdown-timeouts.md already recommends.
  *
+ * Issue #646: a gateway with http.ready_path first runs a soft drain, which
+ * lasts the same window and keeps it serving, so a probe sees 503 "draining"
+ * and a new connection is answered, not refused (fpm_http_drain_soft_start()).
+ * The window still ends at the same deadline.
+ *
  * What "in flight" does NOT cover (phase-1 limitation, issue #641 review): a
  * request whose body is still being uploaded. evhttp buffers a whole body
  * before dispatching it, so such a request has not reached a target worker; and
@@ -34,8 +39,22 @@ struct fpm_http_gateway_s;
 /* Begins the drain in this gateway process. Idempotent: a second SIGQUIT is a
  * no-op, so a retrying master does not shorten the deadline. Must be called
  * from the process's own event loop (it is an evsignal callback), never from
- * signal context. */
+ * signal context. The deadline is taken from the soft drain when one ran
+ * (fpm_http_drain_soft_start), otherwise it starts now. */
 void fpm_http_drain_start(struct fpm_http_gateway_s *gw);
+
+/* Issue #646: the soft drain, started by SIGUSR1 from the master at the start
+ * of a stop or reload, before the children are signalled. This process keeps
+ * its listeners and serves, and the readiness probe answers 503 "draining".
+ * The window ends at the same deadline the hard drain uses; then
+ * fpm_http_drain_start() runs by itself. Only a gateway with http.ready_path
+ * is sent SIGUSR1. Idempotent. Event-loop context only. */
+void fpm_http_drain_soft_start(struct fpm_http_gateway_s *gw);
+
+/* Issue #646: the master's side. Sends SIGUSR1 to every gateway process of a
+ * pool with http.ready_path, so the probe answers 503 from the first moment of
+ * a stop or reload. Called from fpm_pctl() at the state change. */
+void fpm_http_gateways_soft_drain(void);
 
 /* How often the drain tick checks for finished work and for the deadline. A
  * drained gateway exits within one tick of its last response, so this also

@@ -618,9 +618,26 @@ static void fpm_http_gateway_tls_listener_hook(void *arg) /* {{{ */
  * so the drain is free to call evhttp -- nothing runs in signal context. */
 static void fpm_http_gateway_sigquit(evutil_socket_t fd, short what, void *arg)
 {
+	struct fpm_http_gateway_s *gw = arg;
+
 	(void) fd;
 	(void) what;
-	fpm_http_drain_start((struct fpm_http_gateway_s *) arg);
+	/* Issue #646: during the soft window the master's SIGQUIT (sent by its
+	 * cleanup once the children are gone) must not cut the window short. The
+	 * window ends at its own deadline, which then starts the hard drain. */
+	if (gw->soft_draining && !gw->stopping) {
+		return;
+	}
+	fpm_http_drain_start(gw);
+}
+
+/* Issue #646: SIGUSR1 from the master starts the soft drain. Only gateways
+ * with http.ready_path install this handler (fpm_http_gateway_run()). */
+static void fpm_http_gateway_sigusr1(evutil_socket_t fd, short what, void *arg)
+{
+	(void) fd;
+	(void) what;
+	fpm_http_drain_soft_start((struct fpm_http_gateway_s *) arg);
 }
 
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
@@ -673,6 +690,16 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * and a gateway is not one). */
 	sigemptyset(&quit_set);
 	sigaddset(&quit_set, SIGQUIT);
+	/* Issue #646: a gateway with http.ready_path also takes SIGUSR1 (the soft
+	 * drain). Same rule as SIGQUIT: held blocked, then ignored, until its
+	 * evsignal exists, so a SIGUSR1 sent during startup is not lost and does
+	 * not terminate the process (SIGUSR1 is SIG_DFL here). Other gateways keep
+	 * the default. */
+	if (gw->ready_path) {
+		sigaddset(&quit_set, SIGUSR1);
+		act.sa_handler = SIG_IGN;
+		sigaction(SIGUSR1, &act, 0);
+	}
 	sigprocmask(SIG_BLOCK, &quit_set, NULL);
 	sigaction(SIGQUIT, &act, 0);
 
@@ -803,6 +830,18 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch SIGQUIT; this gateway will be killed "
 						   "without draining in-flight requests",
 				gw->pool);
+	}
+	if (gw->ready_path) {
+		gw->sigusr1 = evsignal_new(gw->base, SIGUSR1, fpm_http_gateway_sigusr1, gw);
+		if (!gw->sigusr1 || event_add(gw->sigusr1, NULL) != 0) {
+			if (gw->sigusr1) {
+				event_free(gw->sigusr1);
+				gw->sigusr1 = NULL;
+			}
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot watch SIGUSR1; the readiness probe will not "
+							   "answer 503 while this gateway stops or reloads",
+					gw->pool);
+		}
 	}
 	/* Issue #641: lift the SIGQUIT block only now, after the evsignal exists.
 	 * The block set at the top of this function held a stop/reload signal
@@ -1142,6 +1181,29 @@ static unsigned fpm_http_gateways_reap(int block)
 		}
 	}
 	return alive;
+}
+
+/* Issue #646: the master's side of the soft drain. Called from fpm_pctl() at
+ * the start of a stop or reload, before any child is signalled, so the probe
+ * answers 503 "draining" from the first moment. Only gateways of a pool with
+ * http.ready_path are signalled; they keep serving until their window ends.
+ * Not forgotten (no fpm_children_extra_forget): a gateway that dies in the
+ * window is not respawned anyway, because the state is no longer NORMAL. */
+void fpm_http_gateways_soft_drain(void)
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned i;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		if (!gw->ready_path) {
+			continue;
+		}
+		for (i = 0; i < gw->nproc; i++) {
+			if (gw->pids[i] > 0) {
+				kill(gw->pids[i], SIGUSR1);
+			}
+		}
+	}
 }
 
 /* Issue #641: ask every gateway to drain (SIGQUIT), wait up to `timeout`

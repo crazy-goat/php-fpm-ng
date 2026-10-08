@@ -416,6 +416,18 @@ expectConfigFailure(
     gatewayConfig("ping.path = /ping\nhttp.ready_path = /ping\n"),
     ["http.ready_path and ping.path are both '/ping'"]
 );
+/* Issue #646: the require-target switch needs a readiness path, and a FastCGI
+ * pool refuses it by name. */
+expectConfigFailure(
+    'gateway-ready-require-target-no-path',
+    gatewayConfig("http.ready_require_target = yes\n"),
+    ["http.ready_require_target needs http.ready_path"]
+);
+expectConfigFailure(
+    'fastcgi-ready-require-target',
+    $base . "\nhttp.ready_require_target = yes",
+    ["'http.ready_require_target' is not supported by pool.type = fastcgi"]
+);
 
 ?>
 Done
@@ -467,6 +479,8 @@ direct-ready-path: rejected
 gateway-ready-path-no-slash: rejected
 gateway-ready-path-charset: rejected
 gateway-ready-path-same-as-ping: rejected
+gateway-ready-require-target-no-path: rejected
+fastcgi-ready-require-target: rejected
 Done
 --CLEAN--
 <?php

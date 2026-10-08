@@ -153,6 +153,8 @@ struct {								\
 #include "fpm_http_access_log.h"
 #include "fpm_http_request_id.h"
 #include "fpm_clock.h"
+#include "fpm_scoreboard.h"
+#include "fpm_request.h"
 /* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
  * request header name (issue #115) and on the whole request header block
  * (issue #117) is the same on both transports, so each has one definition. */
@@ -2194,34 +2196,112 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 	return 1;
 }
 
-/* http.ready_path, answered directly by the gateway process -- issue #646.
- * 200 "ready" while the gateway serves; 503 "draining" once gw->stopping is
- * set by SIGQUIT (fpm_http_drain_start()). Same matching as ping.path in
- * fpm_http_serve_ping(): origin-form path, query string cut off, whole path
- * compared, no percent-decoding. Called from fpm_http_request() right after
- * the ping check and before the operator namespace, so no child, queue slot
- * or pool counter is touched.
+/* Issue #646: how many children of one routed target can serve requests, read
+ * from the target pool's scoreboard. A slot counts when used is set, its pid is
+ * positive (the test fpm_http_direct_ops_slot_pid() makes), and the child has
+ * left FPM_REQUEST_CREATING, that is it reached its accept loop. A child that
+ * dies before that, such as one that fails its chdir(), never counts, even
+ * while the master keeps forking it again. A NULL scoreboard counts as zero. */
+static unsigned fpm_http_target_accepting(const struct fpm_http_target_s *t)
+{
+	unsigned i, accepting = 0;
+
+	if (!t->scoreboard) {
+		return 0;
+	}
+	for (i = 0; i < t->scoreboard->nprocs; i++) {
+		const volatile struct fpm_scoreboard_proc_s *p = &t->scoreboard->procs[i];
+
+		if (p->used && p->pid > 0 && p->request_stage != FPM_REQUEST_CREATING) {
+			accepting++;
+		}
+	}
+	return accepting;
+}
+
+/* Issue #646: the readiness state, as the probe reports it. Order matters:
  *
- * Phase-1 limit (#646): the drain stops this process from accepting, so a new
- * connection gets no answer from it. Without http.reuseport the master still
- * holds the listening socket (fpm_http_init_pool_ex() in fpm_http_route.c
- * closes it only with reuseport), so the connection waits in the backlog. The drain tick closes
- * each idle keep-alive connection within FPM_HTTP_DRAIN_TICK_MS
- * (fpm_http_drain.h). So the 503 reaches a request only when the gateway reads
- * it before the drain closes that connection: on an idle connection, or
- * pipelined behind a request still in flight on the same connection. The
- * master signals the gateway from its exit and reload cleanup
- * (fpm_process_ctl.c), which runs after its pool children have exited, so
- * until then this answers 200. fpmng-http-gateway-ready-path.phpt covers the
- * pipelined case and the idle close. */
+ * - draining (503) from the first moment of a stop or reload, while the soft
+ *   window runs (gw->soft_draining) and after the hard drain began (gw->stopping);
+ * - starting (503) until every target has a child that accepts requests. An
+ *   ondemand target counts as serving: it starts its children on demand, so
+ *   having none is its normal idle state. Once the gateway has seen every target
+ *   serve, the state is latched (gw->ready_seen), so a later gap does not turn
+ *   the probe back into "starting";
+ * - no live target (503), only with http.ready_require_target: no child of
+ *   any target accepts requests. An ondemand target is never dead;
+ * - ready (200) otherwise.
+ *
+ * The probe only reads. The latch is this process's own memory. */
+static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **text, int *code, const char **reason)
+{
+	unsigned t, accepting;
+	int all_serving = 1, all_dead = 1;
+
+	if (gw->stopping || gw->soft_draining) {
+		*text = "draining";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	for (t = 0; t < gw->ntargets; t++) {
+		const struct fpm_http_target_s *target = &gw->targets[t];
+
+		accepting = fpm_http_target_accepting(target);
+		if (!target->ondemand && accepting == 0) {
+			all_serving = 0;
+		}
+		if (target->ondemand || accepting > 0) {
+			all_dead = 0;
+		}
+	}
+
+	if (!gw->ready_seen) {
+		if (!all_serving) {
+			*text = "starting";
+			*reason = "Service Unavailable";
+			*code = HTTP_SERVUNAVAIL;
+			return;
+		}
+		gw->ready_seen = 1;
+	}
+
+	if (gw->ready_require_target && all_dead) {
+		*text = "no live target";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	*text = "ready";
+	*reason = "OK";
+	*code = HTTP_OK;
+}
+
+/* http.ready_path, answered directly by the gateway process -- issue #646.
+ * 200 "ready" while the gateway serves. 503 "starting" until every target can
+ * serve, "draining" from the start of a stop or reload (the soft window, see
+ * fpm_http_drain_soft_start()) and after the hard drain began, and (opt-in,
+ * http.ready_require_target) "no live target" when no target has a live child.
+ * Same matching as ping.path in fpm_http_serve_ping(): origin-form path, query
+ * string cut off, whole path compared, no percent-decoding. Called from
+ * fpm_http_request() right after the ping check and before the operator
+ * namespace, so no child, queue slot or pool counter is touched: the probe
+ * reads the target scoreboards and nothing else.
+ *
+ * During the drain the gateway keeps its listeners, so a new connection is
+ * answered (503 for this path), not refused. The hard drain (fpm_http_drain.c)
+ * stops accepting when the window ends. fpmng-http-gateway-ready-path.phpt
+ * covers the states. */
 static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
 {
 	char path[512];
 	struct evkeyvalq *out;
 	struct evbuffer *body;
-	const char *text = "ready";
-	const char *reason = "OK";
-	int code = HTTP_OK;
+	const char *text;
+	const char *reason;
+	int code;
 	size_t bytes;
 
 	if (!gw->ready_path || !fpm_http_raw_path(req, path, sizeof(path))) {
@@ -2231,11 +2311,7 @@ static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_req
 		return 0;
 	}
 
-	if (gw->stopping) {
-		text = "draining";
-		reason = "Service Unavailable";
-		code = HTTP_SERVUNAVAIL;
-	}
+	fpm_http_ready_state(gw, &text, &code, &reason);
 
 	body = evbuffer_new();
 	if (!body || evbuffer_add_printf(body, "%s", text) < 0) {

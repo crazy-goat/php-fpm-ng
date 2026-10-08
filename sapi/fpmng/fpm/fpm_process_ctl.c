@@ -27,6 +27,9 @@
 #include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
 #include "fpm_sd_notify.h"
+#ifdef HAVE_FPM_HTTP
+#include "fpm_http_drain.h"
+#endif
 #include "zlog.h"
 
 
@@ -359,6 +362,13 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 			} else if (new_state == FPM_PCTL_STATE_FINISHING || new_state == FPM_PCTL_STATE_TERMINATING) {
 				fpm_sd_notify_stopping();
 			}
+
+			/* Issue #646: the gateways with a readiness probe learn of the stop
+			 * or reload now, before any child is signalled, so the probe answers
+			 * 503 from the first moment and keeps serving until their window ends. */
+#ifdef HAVE_FPM_HTTP
+			fpm_http_gateways_soft_drain();
+#endif
 
 			zlog(ZLOG_DEBUG, "switching to '%s' state", fpm_state_names[fpm_state]);
 			ZEND_FALLTHROUGH;

@@ -1579,6 +1579,11 @@ What differs from a fastcgi pool:
 - `%e{VAR}` reads the CGI environment this pool built for the request, and `%R`
   is the direct peer address (never an `X-Forwarded-For`: a direct pool has no
   trusted-proxy list).
+- `%{HTTP_X_REQUEST_ID}e` prints the request id. This pool makes no id of its own.
+  A gateway in front of it sends the id with `http.request_id` (issue #642). The
+  pool does not check the header, so a client that reaches the pool directly sends
+  its own value. Prints `-` when there is no header. See
+  [`docs/gateway.md`](gateway.md#access-log-fields-and-request-id-issue-642).
 - `%r` is the request-target as the client wrote it (the absolute-form spelling
   survives), with the query string cut off -- `%Q%q` carries it instead, exactly
   once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller

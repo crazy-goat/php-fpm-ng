@@ -28,6 +28,7 @@
 #include "fpm_stdio.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
+#include "fpm_http_access_log.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
@@ -65,6 +66,8 @@ static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset)
 static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_request_id(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_access_format(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, intptr_t offset);
@@ -242,7 +245,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.operator_allowed_clients", &fpm_conf_set_string,  WPO(http_operator_allowed_clients) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
+	{ "http.request_id",           &fpm_conf_set_request_id,  WPO(http_request_id) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
+	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
 	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
 	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
@@ -745,6 +750,46 @@ static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t 
 }
 /* }}} */
 
+/* http.request_id (issue #642): off (default), generate, or propagate. Anything
+ * else is refused, the same way http.pool_full_policy refuses an unknown value
+ * instead of guessing. See fpm_http_request_id.h for what each value does. */
+static char *fpm_conf_set_request_id(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s  *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "off")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_OFF;
+	} else if (zend_string_equals_literal_ci(val, "generate")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_GENERATE;
+	} else if (zend_string_equals_literal_ci(val, "propagate")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_PROPAGATE;
+	} else {
+		return "invalid http.request_id (off, generate or propagate)";
+	}
+	return NULL;
+}
+/* }}} */
+
+/* http.access_format (issue #642): combined (default) or json. Anything else
+ * is refused, as http.request_id refuses an unknown value. The two layouts are
+ * described in fpm_http_access_log.h. */
+static char *fpm_conf_set_access_format(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s  *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "combined")) {
+		c->http_access_format = FPM_HTTP_ACCESS_FORMAT_COMBINED;
+	} else if (zend_string_equals_literal_ci(val, "json")) {
+		c->http_access_format = FPM_HTTP_ACCESS_FORMAT_JSON;
+	} else {
+		return "invalid http.access_format (combined or json)";
+	}
+	return NULL;
+}
+/* }}} */
+
 /* cron.jitter_mode (issue #322): random (default) picks a new delay each run;
  * stable derives one fixed per-pool delay from the pool name, so consecutive
  * runs of the SAME pool never show jitter between each other while DIFFERENT
@@ -1029,6 +1074,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_upstream_connect_timeout = 5000;	/* fpm-ng: FPM_HTTP_UPSTREAM_CONNECT_TIMEOUT_MS in fpm_http.c (issue #716) */
 	wp->config->http_upstream_read_timeout = 60000;	/* fpm-ng: FPM_HTTP_UPSTREAM_READ_TIMEOUT_MS in fpm_http.c (issue #716) */
 	wp->config->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;	/* fpm-ng: issue #309, off by default for every pool */
+	wp->config->http_request_id = FPM_HTTP_REQUEST_ID_OFF;	/* fpm-ng: issue #642, off by default for every pool */
+	wp->config->http_access_format = FPM_HTTP_ACCESS_FORMAT_COMBINED;	/* fpm-ng: issue #642, the Combined line by default */
 	wp->config->cron_jitter_mode = FPM_CRON_JITTER_RANDOM;	/* fpm-ng: issue #322, matters only once cron.jitter > 0 */
 	wp->config->http_pool_full_queue_max = 32;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
 	wp->config->http_pool_full_wait_ms = 500;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */

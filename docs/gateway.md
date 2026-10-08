@@ -237,6 +237,106 @@ are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
 
+### Access log fields and request id (issue #642)
+
+The gateway writes one line for each request to `http.access_log`. The Combined
+Log Format fields keep their place. The gateway adds these fields after
+`target=`:
+
+```
+203.0.113.7 - - [08/Oct/2026:10:00:00 +0000] "GET /api/items HTTP/1.1" 200 812 "-" "curl/8.5.0" target=api duration_ms=14 upstream_ms=11 request_id=3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b
+```
+
+| Field | Meaning | When it is printed |
+| --- | --- | --- |
+| `duration_ms` | Time from the end of the request read to the write of the line. | Always. `-` when the gateway did not record the start of the request. |
+| `upstream_ms` | Time from the hand-off to a target to the write of the line. | Always. `-` when no target got the request. For example: a ping, a static file, or a `503` sent before the hand-off. |
+| `queue_ms` | Time the request waited for a free worker. This is the same value as the `X-Fpmng-Queue-Wait` header. | Only with `http.pool_full_policy = wait`. `0` when the request did not wait. A request that expires its wait bound logs the whole wait. Other rejections omit the field. |
+| `request_id` | The id of the request. See `http.request_id`. | Only when `http.request_id` is `generate` or `propagate` and the gateway has an id. |
+
+The layout of the line is set by `http.access_format`. See [Access log format](#access-log-format).
+
+`http.request_id` gives one id to each request. The gateway writes the id to the
+access log, sends it to the target, and sends it back to the client:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.request_id` | `off`: no id. `generate`: the gateway makes a new id for each request. `propagate`: the gateway keeps a valid inbound id from a trusted proxy and makes a new id for every other request. | `off` |
+
+The rules:
+
+- A generated id has 32 lowercase hexadecimal characters. The gateway makes it from 128 random bits from `getentropy()`.
+- With `propagate`, the gateway keeps the inbound `X-Request-Id` header only when the TCP peer of the connection is in `http.trusted_proxies`. The address in `X-Forwarded-For` does not count.
+- An inbound id has 1 to 128 characters. Each character is one of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`. The gateway replaces any other value with a new id. It never cuts an id.
+- A FastCGI target gets the id in `HTTP_X_REQUEST_ID`. An `http-direct` target gets the id in an `X-Request-Id` header.
+- With `generate` or `propagate`, the gateway does not send the client's `X-Request-Id` header to the target. With `off`, the gateway forwards that header like any other header.
+- The client gets the id in an `X-Request-Id` response header. If the target sends its own `X-Request-Id` header, the gateway id wins.
+
+The default is `off`. With `off`, the gateway sends no `X-Request-Id` header and
+writes no `request_id=` field. `http.request_id` is refused on `http-direct`, as the
+other gateway limits are. The gateway does not read a `traceparent` header. It
+forwards `traceparent` to the target like any other header.
+
+An `http-direct` pool does not make an id. Its `access.format` can print the
+`X-Request-Id` header that the pool receives, with `%{HTTP_X_REQUEST_ID}e`. The pool
+does not check that header. Put the pool behind a gateway with `http.request_id` set,
+or accept the value that the client sends.
+
+Limit: the gateway sends the `X-Request-Id` response header only with the replies that
+it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
+it, because that call clears the response headers first. Examples are `403` and `404`,
+and some `502`, `503` and `504` replies. The pool-full `503` does carry the header,
+because the gateway writes it with `evhttp_send_reply()`. The access log line of such a
+request still has the `request_id=` field.
+
+### Access log format
+
+`http.access_format` sets the layout of each line in `http.access_log`.
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.access_format` | `combined`: the Combined Log Format with the fields above. `json`: one JSON object for each request, with the keys below. | `combined` |
+
+The gateway writes each line with one `write()` call in both layouts. The directive is
+refused on `http-direct`.
+
+With `json`, every line has the same keys in the same order. An unknown value is `null`,
+not `-`. The keys `queue_ms` and `request_id` are `null` when `combined` leaves them out.
+
+This is one line for a request that went to the `api` target:
+
+```
+{"time":"08/Oct/2026:10:00:00 +0000","remote_addr":"203.0.113.7","remote_user":null,"method":"GET","uri":"/api/items","protocol":"HTTP/1.1","status":200,"bytes":812,"referer":null,"user_agent":"curl/8.5.0","target":"api","duration_ms":14,"upstream_ms":11,"queue_ms":null,"request_id":"3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b"}
+```
+
+| Key | Type | Value |
+| --- | --- | --- |
+| `time` | string | The request time, in the Combined Log Format form. |
+| `remote_addr` | string or `null` | The client address. |
+| `remote_user` | string or `null` | The user name from the `Authorization` header. |
+| `method` | string or `null` | The request method. |
+| `uri` | string or `null` | The request target. |
+| `protocol` | string | The protocol, for example `HTTP/1.1`. |
+| `status` | number or `null` | The status code. `null` when the connection failed before a response. |
+| `bytes` | number | The body bytes sent. |
+| `referer` | string or `null` | The `Referer` header. |
+| `user_agent` | string or `null` | The `User-Agent` header. |
+| `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
+| `duration_ms` | number or `null` | As in the field table above. |
+| `upstream_ms` | number or `null` | As in the field table above. |
+| `queue_ms` | number or `null` | As in the field table above. `null` where `combined` omits the field. |
+| `request_id` | string or `null` | The request id. `null` where `combined` omits the field. |
+
+The escaping rules for strings:
+
+- A quote and a backslash get a backslash in front.
+- The control bytes `\b`, `\f`, `\n`, `\r` and `\t` use their short escape. Other control bytes use `\u00XX`.
+- A valid UTF-8 sequence stays as it is.
+- A byte that is not valid UTF-8 becomes `\u00XX`, the code point U+00XX. For example, the byte `0xff` becomes `\u00ff`.
+- A value that is too long for the line is cut, so that the line keeps a fixed maximum size. A cut never splits an escape or a UTF-8 sequence.
+
+A JSON line never contains a raw control byte.
+
 ### Symlink deploys
 
 With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
@@ -487,6 +587,7 @@ equals the sum of the target rows below. Its own series label a **target**:
 | `fpmng_gateway_upstreams_max` | a routed pool | the target's own `pm.max_children` |
 | `fpmng_gateway_requests_total` | `operator` | operator pages forwarded through `http.operator` (#389) |
 | `fpmng_gateway_requests_total` | `-` | requests the gateway answered itself (ping, static, ACME, 404, 403) |
+| `fpmng_gateway_request_duration_seconds` (histogram) | a routed pool, `operator` or `-` | the duration of each answered request, see below |
 
 `fpmng_gateway_connections_open{pool="<gw>"}` and
 `fpmng_gateway_ping_total{pool="<gw>"}` are the numbers no target owns: the
@@ -497,6 +598,14 @@ control of `http.response_buffer`. The gauge is the paused responses of all
 gateway processes, summed as above. The counter rises by one each time a
 response pauses its upstream. Neither series has a `target` label, because a
 pause is counted for the whole pool.
+
+`fpmng_gateway_request_duration_seconds` (issue #652) is a Prometheus histogram for each `target`. The `le` buckets are the Prometheus client defaults: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds, and `+Inf`. Each target has a `_bucket` series for each `le`, a `_sum` series in seconds, and a `_count` series. The `_count` series equals the `+Inf` bucket.
+
+The duration starts when the gateway reads the whole request. The duration ends when the gateway finishes the response. The gateway finishes the response when the target sends its whole answer. The duration includes the wait for a free connection to the target. A paused upstream delays the end, so a slow client can make a duration longer. The duration does not wait for the client to read the bytes that are still in the output buffer.
+
+The histogram counts a request once, when its response finishes. A client that closes the connection early counts in `fpmng_gateway_requests_total`, but not in the histogram. The access log has no line for such a request either. The `-` target also counts the ping answers and the answers of the plain listener (`http.plain_listen`).
+
+`fpmng_gateway_requests_total` counts a request when it arrives. So a request that is still running is in the counter, but not yet in the histogram. When no request is running, `_count` equals `fpmng_gateway_requests_total` for each target, except for a client that closed early.
 
 The `/metrics` page also carries an **index**: one
 `fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`

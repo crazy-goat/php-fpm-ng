@@ -887,6 +887,8 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
 		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
 	}
+	gw->request_id_mode = wp->config->http_request_id; /* issue #642 */
+	gw->access_format = wp->config->http_access_format; /* issue #642 */
 
 	if (wp->config->http_access_log && *wp->config->http_access_log) {
 		gw->access_log_path = strdup(wp->config->http_access_log);
@@ -1918,6 +1920,38 @@ unsigned long fpm_http_gateway_baseline_requests(struct fpm_worker_pool_s *wp) /
 }
 /* }}} */
 
+/* Issue #652: the request-duration histogram of every row, in the Prometheus
+ * histogram shape: one _bucket line per `le` (cumulative, the last one is
+ * +Inf), then _sum in seconds and _count. The sum is kept in microseconds and
+ * printed as seconds with six decimals, so no float arithmetic is involved.
+ * _count is the +Inf bucket by construction, so the two always agree within one
+ * scrape. */
+static void fpm_http_render_duration(struct fpm_http_gateway_s *gw, struct fpm_operator_buf_s *b) /* {{{ */
+{
+	unsigned i, k;
+
+	for (i = 0; i < gw->counters->nslots; i++) {
+		const atomic_t *slot = fpm_http_counters_slot_cells(gw->counters, i);
+		const char *target = fpm_http_counters_slot_label(gw, i);
+		unsigned long cumulative = 0, sum = (unsigned long) slot[FPM_HTTP_SLOT_SUM_CELL];
+
+		for (k = 0; k <= FPM_HTTP_DURATION_BUCKETS; k++) {
+			cumulative += (unsigned long) slot[FPM_HTTP_SLOT_BUCKET_CELL + k];
+			fpm_operator_buf_appendf(b,
+					"fpmng_gateway_request_duration_seconds_bucket{pool=\"%s\",target=\"%s\",le=\"%s\"} %lu\n",
+					gw->pool, target,
+					k < FPM_HTTP_DURATION_BUCKETS ? fpm_http_duration_bounds[k].le : "+Inf",
+					cumulative);
+		}
+		fpm_operator_buf_appendf(b,
+				"fpmng_gateway_request_duration_seconds_sum{pool=\"%s\",target=\"%s\"} %lu.%06lu\n"
+				"fpmng_gateway_request_duration_seconds_count{pool=\"%s\",target=\"%s\"} %lu\n",
+				gw->pool, target, sum / 1000000UL, sum % 1000000UL,
+				gw->pool, target, cumulative);
+	}
+}
+/* }}} */
+
 /* Issue #341, fpm_pool_type_s.render_metrics_prometheus for pool.type = gateway.
  * Runs in the operator endpoint's OWN child (see fpm_http.h) and reads the one
  * segment fpm_http_routes_build() allocated before any child forked. */
@@ -1946,7 +1980,9 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 			"# HELP fpmng_gateway_responses_paused Client responses whose upstream is paused right now because the client has not read them (http.response_buffer).\n"
 			"# TYPE fpmng_gateway_responses_paused gauge\n"
 			"# HELP fpmng_gateway_responses_paused_total Times a response paused its upstream because the client had not read it, since the pool started.\n"
-			"# TYPE fpmng_gateway_responses_paused_total counter\n");
+			"# TYPE fpmng_gateway_responses_paused_total counter\n"
+			"# HELP fpmng_gateway_request_duration_seconds Time from the whole request being read to its response being complete, queue wait included, per target.\n"
+			"# TYPE fpmng_gateway_request_duration_seconds histogram\n");
 
 	fpm_operator_buf_appendf(b,
 			"fpmng_gateway_connections_open{pool=\"%s\"} %lu\n"
@@ -1973,6 +2009,7 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 				gw->pool, row.target, row.rejected);
 	}
 
+	fpm_http_render_duration(gw, b);
 	fpm_http_render_exposed_pools(gw, b);
 }
 /* }}} */

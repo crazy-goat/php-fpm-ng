@@ -42,6 +42,7 @@
 #include <string.h>
 #include <errno.h>
 
+#include "fpm_conf.h"
 #include "fpm_http_internal.h"
 #include "fpm_http_direct_request.h"
 #include "zlog.h"
@@ -214,6 +215,8 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 		smart_str_appends(&c->out, "\r\n");
 	}
 
+	/* Issue #642: with http.request_id on, the client's X-Request-Id is dropped
+	 * below and the gateway's own id is sent instead, after this loop. */
 	TAILQ_FOREACH(header, in, next) {
 		if (fpm_http_http_header_dropped(header->key)
 			|| strchr(header->key, '_') != NULL
@@ -221,12 +224,20 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 			|| strcasecmp(header->key, "Content-Length") == 0
 			|| strcasecmp(header->key, "X-Forwarded-For") == 0
 			|| strcasecmp(header->key, "X-Forwarded-Proto") == 0
-			|| strcasecmp(header->key, "X-Forwarded-Port") == 0) {
+			|| strcasecmp(header->key, "X-Forwarded-Port") == 0
+			|| (c->gw->request_id_mode != FPM_HTTP_REQUEST_ID_OFF && strcasecmp(header->key, "X-Request-Id") == 0)) {
 			continue;
 		}
 		smart_str_appends(&c->out, header->key);
 		smart_str_appends(&c->out, ": ");
 		smart_str_appends(&c->out, header->value);
+		smart_str_appends(&c->out, "\r\n");
+	}
+
+	/* Issue #642: the request id, as the X-Request-Id header of this hop. */
+	if (c->client && c->client->request_id[0]) {
+		smart_str_appends(&c->out, "X-Request-Id: ");
+		smart_str_appends(&c->out, c->client->request_id);
 		smart_str_appends(&c->out, "\r\n");
 	}
 

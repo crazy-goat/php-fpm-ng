@@ -365,6 +365,12 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.upstream_read_timeout = 60000",
     ["'http.upstream_read_timeout' is not supported by pool.type = http-direct"]
 );
+/* Issue #642: the gateway's correlation id. A direct pool writes no id. */
+expectConfigFailure(
+    'direct-request-id',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.request_id = generate",
+    ["'http.request_id' is not supported by pool.type = http-direct"]
+);
 
 ?>
 Done
@@ -407,6 +413,7 @@ direct-response-buffer: rejected
 direct-response-min-rate: rejected
 direct-upstream-connect-timeout: rejected
 direct-upstream-read-timeout: rejected
+direct-request-id: rejected
 Done
 --CLEAN--
 <?php

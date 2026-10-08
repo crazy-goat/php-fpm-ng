@@ -54,6 +54,18 @@ void fpm_http_access_log_close(struct fpm_http_access_log_s *log);
 struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_log_s *log,
 		const char *pool, const char *path);
 
+/* Issue #642: the trailing timing and correlation fields, printed after
+ * target= in this order. A member that is not known prints "-" (duration_ms,
+ * upstream_ms) or is left out of the line altogether (queue_ms, request_id),
+ * so a line for a request that never waited or never got an id is the same
+ * line it was before #642, plus the two always-present timing fields. */
+struct fpm_http_access_log_extra_s {
+	long duration_ms; /* request fully read -> line written; < 0 -> "-" */
+	long upstream_ms; /* hand-off to the target -> line written; < 0 -> "-" (no target was used) */
+	long queue_ms; /* time on the pool queue (http.pool_full_policy = wait); < 0 -> field omitted */
+	const char *request_id; /* http.request_id; NULL or "" -> field omitted */
+};
+
 /* log == NULL -> no-op. remote_user may be NULL/empty (becomes "-").
  * status < 0 -> "-" instead of a code (for example, the connection failed
  * before a response).
@@ -73,8 +85,10 @@ struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_
  * challenge, an ACL rejection before routing ran). A caller passes target ==
  * NULL for both; only fpm_http_log_response() in fpm_http.c decides which
  * case it is, from whether the gateway's own http.route[] is set. */
+/* extra == NULL is the same as every member "not known". */
 void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *remote_addr,
 		const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
-		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target);
+		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target,
+		const struct fpm_http_access_log_extra_s *extra);
 
 #endif

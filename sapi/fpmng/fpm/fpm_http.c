@@ -151,6 +151,8 @@ struct {								\
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_request_id.h"
+#include "fpm_clock.h"
 /* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
  * request header name (issue #115) and on the whole request header block
  * (issue #117) is the same on both transports, so each has one definition. */
@@ -531,6 +533,18 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
 	return 0;
 }
 
+static struct fpm_http_client_s *fpm_http_client_index_find(struct fpm_http_client_index_s *index, const struct evhttp_connection *evcon);
+
+/* Issue #642: whole milliseconds from `from` to `to`, the unit of every timing
+ * field in the access log. */
+static long fpm_http_elapsed_ms(const struct timeval *from, const struct timeval *to)
+{
+	struct timeval spent;
+
+	evutil_timersub(to, from, &spent);
+	return (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+}
+
 /* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
  * straight from the evhttp_request, callers only supply what they already know
  * (effective remote_addr, remote_user if any, final status, body bytes sent).
@@ -551,11 +565,36 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
 void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target)
 {
+	/* Issue #642: the timing and id fields, all "not known" unless the request
+	 * is still on a tracked connection. The client node is found by evcon, so
+	 * every call site keeps passing only what it passed before. */
+	struct fpm_http_access_log_extra_s extra = { -1, -1, -1, NULL };
+	struct fpm_http_client_s *cl;
+	struct evhttp_connection *evcon;
+	struct timeval now;
+
 	if (!gw->access_log) {
 		return;
 	}
 	if (fpm_http_log_suppressed(gw, req)) {
 		return;
+	}
+	evcon = evhttp_request_get_connection(req);
+	cl = evcon ? fpm_http_client_index_find(&gw->client_index, evcon) : NULL;
+	if (cl && cl->request_started.tv_sec) {
+		fpm_clock_get(&now);
+		extra.duration_ms = fpm_http_elapsed_ms(&cl->request_started, &now);
+		if (cl->request_id[0]) {
+			extra.request_id = cl->request_id;
+		}
+		/* cl->c is the request in flight: set once it was handed to a
+		 * target (fpm_http_dispatch), cleared by fpm_http_conn_free(). */
+		if (cl->c && cl->c->upstream_started) {
+			extra.upstream_ms = fpm_http_elapsed_ms(&cl->c->upstream_since, &now);
+		}
+		if (cl->c) {
+			extra.queue_ms = cl->c->queue_wait_ms;
+		}
 	}
 	fpm_http_access_log_write(gw->access_log, remote_addr, remote_user,
 		fpm_http_method_name(evhttp_request_get_command(req)), evhttp_request_get_uri(req),
@@ -567,7 +606,8 @@ void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request 
 		 * target field is non-NULL and the field prints. The has_routes gate
 		 * keeps a gateway that never opted into routing (and therefore has no
 		 * target field to print) byte-for-byte what it was before #341. */
-		(gw->has_routes || target) ? target : NULL);
+		(gw->has_routes || target) ? target : NULL,
+		&extra);
 }
 
 /* ---------------------------------------------------------------- upstream connections */
@@ -1066,6 +1106,15 @@ static void fpm_http_wait_expired(evutil_socket_t fd, short what, void *arg)
 	(void) what;
 	TAILQ_REMOVE(&c->target->waiting, c, link);
 	c->queued = 0;
+	/* Issue #642: a request that waited out its bound logs the whole wait as
+	 * queue_ms, as a dispatched one does. The header is not sent for a 503, so
+	 * this only reaches the access log. */
+	{
+		struct timeval now;
+
+		evutil_gettimeofday(&now, NULL);
+		c->queue_wait_ms = fpm_http_elapsed_ms(&c->wait_since, &now);
+	}
 	fpm_http_reject_queued(c);
 }
 
@@ -1334,6 +1383,9 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 				c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
 			}
 		}
+		/* Issue #642: the start of upstream_ms in the access log. */
+		fpm_clock_get(&c->upstream_since);
+		c->upstream_started = 1;
 		c->upstream = idle;
 		idle->busy = 1;
 		idle->req_written = idle->reply_seen = 0;
@@ -1697,6 +1749,50 @@ static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
 	}
 }
 
+/* Issue #642: picks the id of the request starting on cl. With propagate, the
+ * client's own X-Request-Id is kept only when the DIRECT peer is in
+ * http.trusted_proxies -- the same rule that gates X-Forwarded-*
+ * (fpm_http_forwarded.h). Any other id is one the client made up. A value
+ * that fpm_http_request_id_valid() refuses is replaced, never truncated.
+ * Returns false when the caller has to generate one. */
+static bool fpm_http_client_request_id_inbound(struct fpm_http_gateway_s *gw,
+		struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	const char *inbound;
+	char *peer = NULL;
+	ev_uint16_t port = 0;
+
+	if (gw->request_id_mode != FPM_HTTP_REQUEST_ID_PROPAGATE || !gw->trusted_proxies_acl || !cl->evcon) {
+		return false;
+	}
+	evhttp_connection_get_peer(cl->evcon, &peer, &port);
+	inbound = evhttp_find_header(evhttp_request_get_input_headers(req), "X-Request-Id");
+	if (!peer || !inbound || !fpm_http_acl_check(gw->trusted_proxies_acl, peer) || !fpm_http_request_id_valid(inbound)) {
+		return false;
+	}
+	snprintf(cl->request_id, sizeof(cl->request_id), "%s", inbound);
+	return true;
+}
+
+/* Issue #642: the request's id, if http.request_id is on, and the start time
+ * for duration_ms. The id is also the X-Request-Id response header; the
+ * header is removed again by any evhttp_send_error() reply, which clears the
+ * output headers (see fpm_http_start_reply() for the replies that keep it). */
+static void fpm_http_client_request_id_assign(struct fpm_http_gateway_s *gw,
+		struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	cl->request_id[0] = '\0';
+	if (gw->request_id_mode == FPM_HTTP_REQUEST_ID_OFF) {
+		return;
+	}
+	if (!fpm_http_client_request_id_inbound(gw, cl, req)) {
+		(void) fpm_http_request_id_generate(cl->request_id);
+	}
+	if (cl->request_id[0]) {
+		evhttp_add_header(evhttp_request_get_output_headers(req), "X-Request-Id", cl->request_id);
+	}
+}
+
 /* Called first thing for every request dispatched on a connection, from both
  * listeners. A request reaching a gencb has been read completely, so the
  * keep-alive clock (and the first-byte watcher) are spent; the completion hook
@@ -1713,6 +1809,8 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	if (!gw || !cl) {
 		return;
 	}
+	fpm_clock_get(&cl->request_started);
+	fpm_http_client_request_id_assign(gw, cl, req);
 	if (cl->ka_timer) {
 		event_del(cl->ka_timer);
 	}

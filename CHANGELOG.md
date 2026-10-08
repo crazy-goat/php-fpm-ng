@@ -16,6 +16,12 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 ### Added
 
 - The gateway (`pool.type = gateway`) now counts the responses it pauses. A response pauses its upstream when the client has not read `http.response_buffer` bytes (issue #596), and the pause was not visible before. Two new metrics show it: `fpmng_gateway_responses_paused_total`, a pool-wide counter of the pauses, and `fpmng_gateway_responses_paused`, a gauge of the responses paused at this time. The gauge is kept per gateway process, so a gateway killed while a response is paused leaves no count behind: the master zeroes its block. The `/status` pool row gains `responses_paused` and `responses_paused_total`. Documented in `docs/gateway.md` and `docs/operator-endpoint.md`; new test `fpmng-gateway-responses-paused-metrics.phpt` (issue #706).
+- Gateway access log timing fields (issue #642). Each line of `http.access_log` ends with `duration_ms` (time from the end of the request read to the write of the line) and `upstream_ms` (time from the hand-off to a target to the write of the line; `-` when no target got the request). With `http.pool_full_policy = wait`, the line also ends with `queue_ms`, the same value as the `X-Fpmng-Queue-Wait` header.
+- `http.request_id` (issue #642): `off` (default), `generate` or `propagate`. With `generate` or `propagate`, the gateway makes one id for each request. The id is in a `request_id=` field of the access log, in `HTTP_X_REQUEST_ID` for a FastCGI target, in an `X-Request-Id` header for an HTTP route target, and in an `X-Request-Id` response header. `propagate` keeps an inbound `X-Request-Id` only from a direct peer in `http.trusted_proxies`. The directive is refused on `http-direct`, whose `access.format` can print the id with `%{HTTP_X_REQUEST_ID}e`. `docs/gateway.md` has the rules.
+
+### Changed
+
+- Gateway access log: each line has the trailing fields above. The fields before `target=` do not change. A parser that expects the line to end after `target=` must accept the new fields.
 
 ## [0.16.0] - 2026-10-07
 

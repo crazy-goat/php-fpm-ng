@@ -237,6 +237,57 @@ are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
 
+### Access log fields and request id (issue #642)
+
+The gateway writes one line for each request to `http.access_log`. The Combined
+Log Format fields keep their place. The gateway adds these fields after
+`target=`:
+
+```
+203.0.113.7 - - [08/Oct/2026:10:00:00 +0000] "GET /api/items HTTP/1.1" 200 812 "-" "curl/8.5.0" target=api duration_ms=14 upstream_ms=11 request_id=3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b
+```
+
+| Field | Meaning | When it is printed |
+| --- | --- | --- |
+| `duration_ms` | Time from the end of the request read to the write of the line. | Always. `-` when the gateway did not record the start of the request. |
+| `upstream_ms` | Time from the hand-off to a target to the write of the line. | Always. `-` when no target got the request. For example: a ping, a static file, or a `503` sent before the hand-off. |
+| `queue_ms` | Time the request waited for a free worker. This is the same value as the `X-Fpmng-Queue-Wait` header. | Only with `http.pool_full_policy = wait`. `0` when the request did not wait. A request that expires its wait bound logs the whole wait. Other rejections omit the field. |
+| `request_id` | The id of the request. See `http.request_id`. | Only when `http.request_id` is `generate` or `propagate` and the gateway has an id. |
+
+The gateway does not have a JSON access log format yet. All fields are text.
+
+`http.request_id` gives one id to each request. The gateway writes the id to the
+access log, sends it to the target, and sends it back to the client:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.request_id` | `off`: no id. `generate`: the gateway makes a new id for each request. `propagate`: the gateway keeps a valid inbound id from a trusted proxy and makes a new id for every other request. | `off` |
+
+The rules:
+
+- A generated id has 32 lowercase hexadecimal characters. The gateway makes it from 128 random bits from `getentropy()`.
+- With `propagate`, the gateway keeps the inbound `X-Request-Id` header only when the TCP peer of the connection is in `http.trusted_proxies`. The address in `X-Forwarded-For` does not count.
+- An inbound id has 1 to 128 characters. Each character is one of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`. The gateway replaces any other value with a new id. It never cuts an id.
+- A FastCGI target gets the id in `HTTP_X_REQUEST_ID`. An `http-direct` target gets the id in an `X-Request-Id` header.
+- With `generate` or `propagate`, the gateway does not send the client's `X-Request-Id` header to the target. With `off`, the gateway forwards that header like any other header.
+- The client gets the id in an `X-Request-Id` response header. If the target sends its own `X-Request-Id` header, the gateway id wins.
+
+The default is `off`. With `off`, the gateway sends no `X-Request-Id` header and
+writes no `request_id=` field. `http.request_id` is refused on `http-direct`, as the
+other gateway limits are. The gateway does not read a `traceparent` header. It
+forwards `traceparent` to the target like any other header.
+
+An `http-direct` pool does not make an id. Its `access.format` can print the
+`X-Request-Id` header that the pool receives, with `%{HTTP_X_REQUEST_ID}e`. The pool
+does not check that header. Put the pool behind a gateway with `http.request_id` set,
+or accept the value that the client sends.
+
+Limit: the gateway sends the `X-Request-Id` response header only with the replies that
+it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
+it, because that call clears the response headers first. Examples are `403`, `404`,
+`503` and `504`. The access log line of such a request still has the `request_id=`
+field.
+
 ### Symlink deploys
 
 With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically

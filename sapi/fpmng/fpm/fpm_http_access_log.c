@@ -127,13 +127,30 @@ static size_t fpm_http_access_log_escape(const char *in, char *out, size_t out_s
 }
 /* }}} */
 
+/* Issue #642: a number member prints as "%ld", or as "-" when it is negative
+ * (not known). */
+static void fpm_http_access_log_ms(char *out, size_t out_size, long ms) /* {{{ */
+{
+	if (ms >= 0) {
+		snprintf(out, out_size, "%ld", ms);
+	} else {
+		snprintf(out, out_size, "-");
+	}
+}
+/* }}} */
+
 void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *remote_addr, /* {{{ */
 		const char *remote_user, const char *method, const char *uri, int http_major, int http_minor,
-		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target)
+		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target,
+		const struct fpm_http_access_log_extra_s *extra)
 {
 	char line[4096];
 	char uri_esc[1024], referer_esc[512], ua_esc[512];
 	char addr_esc[128], user_esc[256], target_esc[128];
+	/* Issue #642: the trailing timing fields. 21 is enough for any long. */
+	char duration_buf[24], upstream_buf[24], queue_buf[24];
+	struct fpm_http_access_log_extra_s none = { -1, -1, -1, NULL };
+	const char *request_id;
 	/* 12, not 8: the format is "%d" and `status` is an int, so gcc's
 	 * -Wformat-truncation counts up to 11 characters plus the NUL. Real
 	 * statuses are three digits and the negative case takes the "-" branch
@@ -170,23 +187,39 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 		snprintf(status_buf, sizeof(status_buf), "-");
 	}
 
-	/* target (issue #341): a trailing field, not inserted between existing
-	 * ones -- see the header for why this is the one shape that does not
-	 * break a parser reading the classic Combined Log Format fields by
-	 * position. */
+	if (!extra) {
+		extra = &none;
+	}
+	fpm_http_access_log_ms(duration_buf, sizeof(duration_buf), extra->duration_ms);
+	fpm_http_access_log_ms(upstream_buf, sizeof(upstream_buf), extra->upstream_ms);
+	fpm_http_access_log_ms(queue_buf, sizeof(queue_buf), extra->queue_ms);
+	request_id = extra->request_id;
+
+	/* target (issue #341) and the #642 fields are trailing fields, not inserted
+	 * between existing ones -- see the header for why this is the one shape
+	 * that does not break a parser reading the classic Combined Log Format
+	 * fields by position. request_id is not escaped: an inbound id reaches
+	 * this point only after fpm_http_request_id_valid() accepted it. */
 	len = snprintf(line, sizeof(line),
-		"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\" target=%s\n",
-		addr_esc[0] ? addr_esc : "-",
-		user_esc[0] ? user_esc : "-",
-		timebuf,
-		method ? method : "-",
-		uri_esc[0] ? uri_esc : "-",
-		http_major, http_minor,
-		status_buf,
-		bytes_sent,
-		referer_esc[0] ? referer_esc : "-",
-		ua_esc[0] ? ua_esc : "-",
-		target_esc[0] ? target_esc : "-");
+			"%s - %s [%s] \"%s %s HTTP/%d.%d\" %s %zu \"%s\" \"%s\" target=%s"
+			" duration_ms=%s upstream_ms=%s%s%s%s%s\n",
+			addr_esc[0] ? addr_esc : "-",
+			user_esc[0] ? user_esc : "-",
+			timebuf,
+			method ? method : "-",
+			uri_esc[0] ? uri_esc : "-",
+			http_major, http_minor,
+			status_buf,
+			bytes_sent,
+			referer_esc[0] ? referer_esc : "-",
+			ua_esc[0] ? ua_esc : "-",
+			target_esc[0] ? target_esc : "-",
+			duration_buf,
+			upstream_buf,
+			extra->queue_ms >= 0 ? " queue_ms=" : "",
+			extra->queue_ms >= 0 ? queue_buf : "",
+			request_id && *request_id ? " request_id=" : "",
+			request_id && *request_id ? request_id : "");
 
 	if (len <= 0) {
 		return;

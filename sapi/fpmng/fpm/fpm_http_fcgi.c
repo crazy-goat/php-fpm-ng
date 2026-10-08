@@ -535,6 +535,11 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 				value = authority;
 			}
 		}
+		/* Issue #642: with http.request_id on, the client's X-Request-Id is
+		 * never forwarded. The gateway's own id replaces it, below. */
+		if (c->gw->request_id_mode != FPM_HTTP_REQUEST_ID_OFF && strcasecmp(k, "X-Request-Id") == 0) {
+			continue;
+		}
 
 		rc = fpm_http_header_cgi_key(k, false, key, sizeof(key));
 		if (rc < 0) {
@@ -550,6 +555,12 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	 * 3.2.2), same as the Host line the http transport sends. */
 	if (have_authority && !saw_host) {
 		fpm_http_param(c, "HTTP_HOST", authority);
+	}
+
+	/* Issue #642: the request id, as HTTP_X_REQUEST_ID (the name a CGI
+	 * environment gives X-Request-Id). Empty when the id could not be made. */
+	if (c->client && c->client->request_id[0]) {
+		fpm_http_param(c, "HTTP_X_REQUEST_ID", c->client->request_id);
 	}
 
 	if (c->params_oversize) {
@@ -672,6 +683,10 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 							c->gw->pool, value);
 					invalid_status = true;
 				}
+			} else if (c->client && c->client->request_id[0] && strcasecmp(key, "X-Request-Id") == 0) {
+				/* Issue #642: the gateway's own id is already on this response
+				 * (fpm_http_client_request_id_assign()). A second copy from the
+				 * target would be a second, conflicting id. */
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -692,6 +707,9 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 
 		evhttp_clear_headers(out);
 		evhttp_add_header(out, "Content-Type", "text/plain");
+		if (c->client && c->client->request_id[0]) { /* issue #642: the clear above dropped it */
+			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
+		}
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		evbuffer_add_printf(msg, "Bad Gateway\n");
 		c->bytes_out += evbuffer_get_length(msg);

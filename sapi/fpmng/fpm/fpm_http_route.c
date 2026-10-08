@@ -887,6 +887,7 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
 		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
 	}
+	gw->request_id_mode = wp->config->http_request_id; /* issue #642 */
 
 	if (wp->config->http_access_log && *wp->config->http_access_log) {
 		gw->access_log_path = strdup(wp->config->http_access_log);

@@ -229,6 +229,7 @@ struct fpm_worker_pool_config_s {
 	struct key_value_s *http_routes;
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
+	int http_request_id;			/* FPM_HTTP_REQUEST_ID_OFF (default), _GENERATE or _PROPAGATE; see fpm_http_request_id.h (issue #642) */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */
 	char *http_front_controller;		/* nginx-style try_files: when the resolved SCRIPT_FILENAME does not exist, substitute this
 						 * script and put the original path into PATH_INFO. Default "/index.php" — the built-in PHP
@@ -381,6 +382,15 @@ enum {
 enum {
 	FPM_HTTP_POOL_FULL_REJECT = 0,
 	FPM_HTTP_POOL_FULL_WAIT = 1
+};
+
+/* http.request_id (issue #642), see fpm_http_request_id.h. Default is
+ * FPM_HTTP_REQUEST_ID_OFF (0): no id, no X-Request-Id header, no request_id=
+ * field in the access log. */
+enum {
+	FPM_HTTP_REQUEST_ID_OFF = 0,
+	FPM_HTTP_REQUEST_ID_GENERATE = 1,
+	FPM_HTTP_REQUEST_ID_PROPAGATE = 2
 };
 
 /* cron.jitter_mode, see fpm_pool_cron.c (issue #322). Default is

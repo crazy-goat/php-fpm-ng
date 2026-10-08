@@ -587,6 +587,7 @@ equals the sum of the target rows below. Its own series label a **target**:
 | `fpmng_gateway_upstreams_max` | a routed pool | the target's own `pm.max_children` |
 | `fpmng_gateway_requests_total` | `operator` | operator pages forwarded through `http.operator` (#389) |
 | `fpmng_gateway_requests_total` | `-` | requests the gateway answered itself (ping, static, ACME, 404, 403) |
+| `fpmng_gateway_request_duration_seconds` (histogram) | a routed pool, `operator` or `-` | the duration of each answered request, see below |
 
 `fpmng_gateway_connections_open{pool="<gw>"}` and
 `fpmng_gateway_ping_total{pool="<gw>"}` are the numbers no target owns: the
@@ -597,6 +598,14 @@ control of `http.response_buffer`. The gauge is the paused responses of all
 gateway processes, summed as above. The counter rises by one each time a
 response pauses its upstream. Neither series has a `target` label, because a
 pause is counted for the whole pool.
+
+`fpmng_gateway_request_duration_seconds` (issue #652) is a Prometheus histogram for each `target`. The `le` buckets are the Prometheus client defaults: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds, and `+Inf`. Each target has a `_bucket` series for each `le`, a `_sum` series in seconds, and a `_count` series. The `_count` series equals the `+Inf` bucket.
+
+The duration starts when the gateway reads the whole request. The duration ends when the gateway finishes the response. The gateway finishes the response when the target sends its whole answer. The duration includes the wait for a free connection to the target. A paused upstream delays the end, so a slow client can make a duration longer. The duration does not wait for the client to read the bytes that are still in the output buffer.
+
+The histogram counts a request once, when its response finishes. A client that closes the connection early counts in `fpmng_gateway_requests_total`, but not in the histogram. The access log has no line for such a request either. The `-` target also counts the ping answers and the answers of the plain listener (`http.plain_listen`).
+
+`fpmng_gateway_requests_total` counts a request when it arrives. So a request that is still running is in the counter, but not yet in the histogram. When no request is running, `_count` equals `fpmng_gateway_requests_total` for each target, except for a client that closed early.
 
 The `/metrics` page also carries an **index**: one
 `fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`

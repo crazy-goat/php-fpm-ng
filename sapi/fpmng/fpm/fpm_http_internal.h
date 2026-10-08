@@ -173,8 +173,9 @@ struct fpm_http_target_s;
  * The segment has two kinds of data, and the difference matters:
  *
  *   - POOL-WIDE and MONOTONIC: the accepted-request total, the ping total and
- *     the per-target request/rejection counters. These live in the header and
- *     in one slot per target label, each written with a cmp-set loop and no
+ *     the per-target request/rejection counters and the per-target request
+ *     duration histogram (issue #652). These live in the header and in one
+ *     slot per target label, each written with a cmp-set loop and no
  *     locking, and they SURVIVE a gateway process respawn (that is what makes
  *     a counter a counter). The paused-response total (issue #706) is in the
  *     header too. Slots are nslots = #targets + 2: rows
@@ -196,7 +197,10 @@ struct fpm_http_target_s;
  * The variable part is a flat array of atomic_t cells rather than a struct
  * with two flexible arrays (C allows only one). The layout and every access
  * are in fpm_http.c's fpm_http_counters_slot_cells()/fpm_http_counters_gauges():
- *   slots:  nslots x 4  [requests_total, rejected_total, upstreams_budget, reclaim_gen]
+ *   slots:  nslots x FPM_HTTP_COUNTERS_SLOT_CELLS
+ *           [requests_total, rejected_total, upstreams_budget, reclaim_gen,
+ *            duration buckets (FPM_HTTP_DURATION_BUCKETS + 1 cells, per bucket,
+ *            not cumulative), duration_sum (microseconds)]
  *   gauges: nproc x (2 + nslots)
  *           [connections_open, responses_paused, upstreams_held[0 .. nslots)]
  *           -- the FPM_HTTP_GAUGE_* cell indexes below name them.
@@ -211,10 +215,11 @@ struct fpm_http_target_s;
  * http.gateways, which a reload rebuilds: an exec-reload reruns the master and
  * the allocation is MAP_ANONYMOUS, so the counters reset on reload the way
  * every other pool's do (see docs/gateway.md). */
-/* The logical shape of one target row: four cells. The backing storage is
- * four atomic_t cells per row in fpm_http_counters_s.cells (see the accessors
- * in fpm_http.c), not an array of this struct -- it is kept as the named shape
- * the layout comment above and fpm_http_target_s refer to. */
+/* The logical shape of the first four cells of one target row. The backing
+ * storage is atomic_t cells in fpm_http_counters_s.cells (see the accessors in
+ * fpm_http.c), not an array of this struct -- it is kept as the named shape
+ * the layout comment above and fpm_http_target_s refer to. The duration
+ * histogram cells follow these four (FPM_HTTP_SLOT_BUCKET_CELL). */
 struct fpm_http_counters_slot {
 	atomic_t requests_total;	/* requests for this target label */
 	atomic_t rejected_total;	/* of those, answer 503 because the target was full */
@@ -228,7 +233,7 @@ struct fpm_http_counters_s {
 	atomic_t responses_paused_total;	/* issue #706: times a response paused its upstream, see fpm_http_backpressure.c */
 	unsigned nslots;		/* #targets + 2, see above */
 	unsigned nproc;			/* gateway processes (http.gateways) */
-	atomic_t cells[];		/* slots x 4, then nproc gauge blocks */
+	atomic_t cells[];		/* slots x FPM_HTTP_COUNTERS_SLOT_CELLS, then nproc gauge blocks */
 };
 
 /* Issue #706: the cells of one gateway process's gauge block, in this order.
@@ -239,6 +244,32 @@ struct fpm_http_counters_s {
 #define FPM_HTTP_GAUGE_RESPONSES_PAUSED	1u
 #define FPM_HTTP_GAUGE_UPSTREAMS_HELD	2u	/* + target row index, nslots cells */
 #define FPM_HTTP_GAUGE_BLOCK_CELLS(nslots) (FPM_HTTP_GAUGE_UPSTREAMS_HELD + (nslots))
+
+/* Issue #390, #652: the slot stride. The first four cells are the counters
+ * named in fpm_http_counters_slot; then the request-duration histogram of the
+ * row, FPM_HTTP_DURATION_BUCKETS finite buckets and one +Inf bucket, and the
+ * sum of the observed durations in microseconds. A bucket cell counts the
+ * observations that fell into that bucket only; the renderer makes them
+ * cumulative, so no cell is ever rewritten by more than one increment. */
+#define FPM_HTTP_SLOT_COUNTER_CELLS 4u
+#define FPM_HTTP_DURATION_BUCKETS 11u /* finite upper bounds, see fpm_http_duration_bounds[] */
+#define FPM_HTTP_SLOT_BUCKET_CELL FPM_HTTP_SLOT_COUNTER_CELLS
+#define FPM_HTTP_SLOT_SUM_CELL (FPM_HTTP_SLOT_BUCKET_CELL + FPM_HTTP_DURATION_BUCKETS + 1u)
+#define FPM_HTTP_COUNTERS_SLOT_CELLS (FPM_HTTP_SLOT_SUM_CELL + 1u)
+
+/* Issue #652: one finite bucket bound, as the Prometheus `le` label prints it
+ * and in microseconds, the unit the duration is measured in. The table is the
+ * Prometheus client default (0.005 s to 10 s), so a request longer than 10 s
+ * lands in the +Inf bucket only. Defined in fpm_http.c. */
+struct fpm_http_duration_bound_s {
+	const char *le;
+	unsigned long us;
+};
+extern const struct fpm_http_duration_bound_s fpm_http_duration_bounds[FPM_HTTP_DURATION_BUCKETS];
+
+/* Issue #652: the value of fpm_http_client_s.duration_row for a request the
+ * gateway answers itself. It is the "-" row, the last one. */
+#define FPM_HTTP_DURATION_ROW_LOCAL ((unsigned) -1)
 
 /* Which wire protocol the gateway speaks to a target. Only FastCGI is
  * implemented here; HTTP/1.1 towards a pool.type = http-direct target is #344,
@@ -375,6 +406,17 @@ struct fpm_http_client_s {
 	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves
 	 * one request at a time, so one stamp per node is enough. */
 	struct timeval request_started;
+	/* Issue #652: the counters row the duration of the request in flight is
+	 * observed under -- the row its requests_total was counted in: the routed
+	 * target, "operator" for a forwarded operator page, or
+	 * FPM_HTTP_DURATION_ROW_LOCAL for an answer the gateway gave itself. Reset
+	 * by fpm_http_client_request_begin(), set where the request is routed. */
+	unsigned duration_row;
+	/* Issue #652: 1 once the request in flight is in the histogram. A plain
+	 * listener's ACME answer reaches fpm_http_log_response() and then the
+	 * plain wrapper's timing, so the second call must not observe again.
+	 * Reset by fpm_http_client_request_begin(). */
+	unsigned duration_observed;
 	/* Issue #642: the id of the request in flight, "" when http.request_id is
 	 * off or no id could be made. Sent to the target and logged. */
 	char request_id[FPM_HTTP_REQUEST_ID_SIZE];

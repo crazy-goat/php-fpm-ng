@@ -35,6 +35,7 @@
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
+#include <event2/listener.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/util.h>
 
@@ -54,6 +55,7 @@
 #include "fpm_clock.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_accept_backoff.h"
+#include "fpm_http_direct_conn.h"
 #include "fpm_http_forwarded.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
@@ -355,6 +357,102 @@ void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct buffere
 	}
 }
 
+/* Issue #686: the connection cap. A gateway process accepts on two listeners at
+ * most (the public one and http.plain_listen), and both feed one
+ * fpm_http_direct_conns object, so http.max_connections is one number per
+ * process. That object is the one http-direct uses (fpm_http_direct_conn.c). It
+ * holds one bufferevent reference per connection and counts every connection
+ * evhttp has not released yet.
+ *
+ * At the cap both listeners are disabled. The kernel then queues further
+ * connections in the listen backlog, and none is refused. The gate is applied
+ * in three places: after each accept, on the 10 ms tick, and in the accept
+ * backoff's resume check. It never touches a listener once the drain has
+ * started, because the drain has removed both of them. */
+static int fpm_http_gateway_accepting(struct fpm_http_gateway_s *gw)
+{
+	return !gw->stopping && fpm_http_direct_conns_may_accept(gw->conns);
+}
+
+static void fpm_http_gateway_listener_set(struct evhttp_bound_socket *bound, int on)
+{
+	struct evconnlistener *l = bound ? evhttp_bound_socket_get_listener(bound) : NULL;
+
+	if (!l) {
+		return;
+	}
+	if (!on) {
+		evconnlistener_disable(l);
+	} else if (!fpm_http_accept_backoff_paused(bound)) {
+		/* The backoff owns the listener until its pause ends (issue #729). */
+		evconnlistener_enable(l);
+	}
+}
+
+/* Applies the gate to both listeners. Does nothing without a cap. */
+static void fpm_http_gateway_gate(struct fpm_http_gateway_s *gw)
+{
+	int on;
+
+	if (!gw->conns || gw->stopping) {
+		return;
+	}
+	on = fpm_http_gateway_accepting(gw);
+	fpm_http_gateway_listener_set(gw->tls_bound, on);
+	fpm_http_gateway_listener_set(gw->plain_bound, on);
+}
+
+/* The accept backoff asks this at the end of a pause (fpm_http_accept_backoff.h). */
+static int fpm_http_gateway_may_resume(void *arg)
+{
+	return fpm_http_gateway_accepting((struct fpm_http_gateway_s *) arg);
+}
+
+/* Issue #686: called from both bevcbs, with the bufferevent they return. */
+static void fpm_http_gateway_accepted(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
+{
+	if (!gw->conns) {
+		return;
+	}
+	fpm_http_direct_conns_accepted(gw->conns, bev);
+	fpm_http_gateway_gate(gw);
+}
+
+static void fpm_http_gateway_cap_tick(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+
+	(void) fd;
+	(void) what;
+	fpm_http_direct_conns_sweep(gw->conns);
+	fpm_http_gateway_gate(gw);
+}
+
+/* Issue #686: creates the cap when http.max_connections is set. Runs before any
+ * listener is opened, so no connection is accepted without it. */
+static void fpm_http_gateway_cap_init(struct fpm_http_gateway_s *gw)
+{
+	struct fpm_http_direct_conns_limits limits = { 0 };
+	struct timeval interval = { 0, 10000 };
+
+	if (gw->max_connections <= 0) {
+		return;
+	}
+	limits.pool = gw->pool;
+	limits.max_connections = gw->max_connections;
+	limits.max_per_client = gw->max_per_client;
+	/* The total counts every connection this process holds, not only those
+	 * still waiting for their first request, so a node is kept for the whole
+	 * life of its connection and the tick is what releases it. */
+	limits.track_live = 1;
+	gw->conns = fpm_http_direct_conns_new(gw->base, &limits);
+	gw->cap_tick = gw->conns ? event_new(gw->base, -1, EV_PERSIST, fpm_http_gateway_cap_tick, gw) : NULL;
+	if (!gw->cap_tick || event_add(gw->cap_tick, &interval) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot set up http.max_connections: this gateway will not start", gw->pool);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+}
+
 /* The gateway's bevcb: builds the bufferevent for a new client connection and
  * arms its read deadline. TLS connections get their SSL bufferevent from
  * fpm_tls_http_bevcb() with the pool's CURRENT SSL_CTX (gw->tls_ctx), so a
@@ -376,6 +474,7 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
+	fpm_http_gateway_accepted(gw, bev);
 	return bev;
 }
 
@@ -391,6 +490,7 @@ static struct bufferevent *fpm_http_plain_bevcb(struct event_base *base, void *a
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
+	fpm_http_gateway_accepted(gw, bev);
 	return bev;
 }
 
@@ -477,9 +577,11 @@ static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* 
 	}
 	/* Issue #641: remembered so the graceful drain can stop accepting. */
 	gw->tls_bound = bound;
-	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", NULL, NULL) != 0) {
+	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", fpm_http_gateway_may_resume, gw) != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the main listener; running out of file descriptors will make it spin", gw->pool);
 	}
+	/* Issue #686: a listener opened while the cap is full starts closed. */
+	fpm_http_gateway_gate(gw);
 	gw->tls_ready = 1;
 	return 0;
 }
@@ -771,6 +873,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * idle timer restarted on every received byte, so a slow-loris client
 	 * trickling one byte at a time would never trip it. See
 	 * struct fpm_http_read_deadline_s. */
+	fpm_http_gateway_cap_init(gw);
 	evhttp_set_bevcb(gw->http, fpm_http_bevcb, gw);
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 												 EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
@@ -825,9 +928,11 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		/* Issue #641: remembered so the graceful drain can stop accepting. */
 		gw->plain_http = plain;
 		gw->plain_bound = plain_bound;
-		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", NULL, NULL) != 0) {
+		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", fpm_http_gateway_may_resume, gw) != 0) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on http.plain_listen; running out of file descriptors will make it spin", gw->pool);
 		}
+		/* Issue #686: as for the main listener, a listener opened at the cap starts closed. */
+		fpm_http_gateway_gate(gw);
 	}
 
 	event_base_dispatch(gw->base);

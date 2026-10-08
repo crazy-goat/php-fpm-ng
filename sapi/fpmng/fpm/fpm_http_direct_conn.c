@@ -3,6 +3,7 @@
 
 #include "fpm_config.h"
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -28,6 +29,10 @@ struct fpm_direct_conn {
 	socklen_t peer_len;
 	int checked;	/* the per-client cap has already passed judgement on this one */
 	int served;			/* the first request arrived: only the limits keep this node */
+	/* Refused by the pickup pass for http.max_connections_per_client. The node
+	 * stays tracked, and is closed rather than forgotten, until evhttp has let
+	 * go: see fpm_direct_conn_check_peer(). */
+	int over_client_cap;
 	/* issue #62 (fpm_connection_info()): when this node was created (the
 	 * bevcb, i.e. accept time) and how many requests have completed
 	 * fpm_http_direct_conns_request() on it so far. */
@@ -40,6 +45,8 @@ struct fpm_direct_conn {
 	 * is a walk per connection. */
 	struct fpm_direct_conn *next;
 	struct fpm_direct_conn *prev;
+	/* Chain in the index by bufferevent address, see fpm_direct_conn_index_insert(). */
+	struct fpm_direct_conn *hash_next;
 };
 
 struct fpm_http_direct_conns {
@@ -50,6 +57,13 @@ struct fpm_http_direct_conns {
 	 * that ended. */
 	struct fpm_direct_conn *list;
 	struct fpm_direct_conn *tail;
+	/* Every node by its bufferevent, so that fpm_http_direct_conns_request()
+	 * finds its node in O(1). Walking the list from the head per request is
+	 * O(N) for N up to http.max_connections, and a keep-alive connection can
+	 * sit deep in it; issue #490 removed the same walk from the gateway's
+	 * client list. bucket_count is 0 until the first node, then a power of two. */
+	struct fpm_direct_conn **buckets;
+	size_t bucket_count;
 	unsigned live;
 	unsigned long timed_out;
 	unsigned long refused;
@@ -108,6 +122,105 @@ static void fpm_direct_conn_link_front(struct fpm_http_direct_conns *conns, stru
 	conns->list = c;
 }
 
+#define FPM_DIRECT_CONN_INDEX_INITIAL_BUCKETS 64U
+
+/* The bufferevent address is the key. It is stable and unique while a node
+ * exists, because the node holds a reference to it. splitmix64's finalizer: the
+ * addresses are aligned, so the low bits alone would not spread them. */
+static size_t fpm_direct_conn_hash(const struct bufferevent *bev)
+{
+	uint64_t x = (uintptr_t) bev;
+
+	x += UINT64_C(0x9e3779b97f4a7c15);
+	x = (x ^ (x >> 30)) * UINT64_C(0xbf58476d1ce4e5b9);
+	x = (x ^ (x >> 27)) * UINT64_C(0x94d049bb133111eb);
+	return (size_t) (x ^ (x >> 31));
+}
+
+static struct fpm_direct_conn *fpm_direct_conn_index_find(const struct fpm_http_direct_conns *conns,
+	const struct bufferevent *bev)
+{
+	struct fpm_direct_conn *c;
+
+	if (!conns->bucket_count) {
+		return NULL;
+	}
+	for (c = conns->buckets[fpm_direct_conn_hash(bev) & (conns->bucket_count - 1)]; c; c = c->hash_next) {
+		if (c->bev == bev) {
+			return c;
+		}
+	}
+	return NULL;
+}
+
+/* Doubles the buckets and rehashes every node. Returns 0 on OOM, which leaves
+ * the old table in place. */
+static int fpm_direct_conn_index_grow(struct fpm_http_direct_conns *conns)
+{
+	size_t count = conns->bucket_count
+		? conns->bucket_count * 2 : FPM_DIRECT_CONN_INDEX_INITIAL_BUCKETS;
+	struct fpm_direct_conn **buckets;
+	size_t i;
+
+	if (count < conns->bucket_count || count > SIZE_MAX / sizeof(*buckets)) {
+		return 0;
+	}
+	buckets = calloc(count, sizeof(*buckets));
+	if (!buckets) {
+		return 0;
+	}
+	for (i = 0; i < conns->bucket_count; i++) {
+		struct fpm_direct_conn *c = conns->buckets[i];
+
+		while (c) {
+			struct fpm_direct_conn *next = c->hash_next;
+			size_t bucket = fpm_direct_conn_hash(c->bev) & (count - 1);
+
+			c->hash_next = buckets[bucket];
+			buckets[bucket] = c;
+			c = next;
+		}
+	}
+	free(conns->buckets);
+	conns->buckets = buckets;
+	conns->bucket_count = count;
+	return 1;
+}
+
+/* Called before the node is linked, while conns->live still counts only the
+ * nodes already indexed. Returns 0 when the node cannot be indexed, which can
+ * only happen when the very first allocation fails: a longer chain after a
+ * failed grow is slower, not wrong. */
+static int fpm_direct_conn_index_insert(struct fpm_http_direct_conns *conns, struct fpm_direct_conn *c)
+{
+	size_t bucket;
+
+	if (conns->live >= conns->bucket_count) {
+		(void) fpm_direct_conn_index_grow(conns);
+	}
+	if (!conns->bucket_count) {
+		return 0;
+	}
+	bucket = fpm_direct_conn_hash(c->bev) & (conns->bucket_count - 1);
+	c->hash_next = conns->buckets[bucket];
+	conns->buckets[bucket] = c;
+	return 1;
+}
+
+/* Precondition: the node is indexed, so its bucket is non-empty. */
+static void fpm_direct_conn_index_remove(struct fpm_http_direct_conns *conns, struct fpm_direct_conn *c)
+{
+	struct fpm_direct_conn **p = &conns->buckets[fpm_direct_conn_hash(c->bev) & (conns->bucket_count - 1)];
+
+	while (*p && *p != c) {
+		p = &(*p)->hash_next;
+	}
+	if (*p) {
+		*p = c->hash_next;
+	}
+	c->hash_next = NULL;
+}
+
 /* Precondition: the node is linked. fpm_direct_conn_unlink() below trusts
  * prev == NULL to mean "this is the head" and writes conns->list, so calling
  * this on a node that is not in the list would orphan every node after the
@@ -118,6 +231,7 @@ static void fpm_direct_conn_link_front(struct fpm_http_direct_conns *conns, stru
 static void fpm_direct_conn_forget(struct fpm_direct_conn *c)
 {
 	fpm_direct_conn_unlink(c);
+	fpm_direct_conn_index_remove(c->conns, c);
 	c->conns->live--;
 	if (c->deadline) {
 		event_free(c->deadline);
@@ -195,6 +309,22 @@ static int fpm_direct_conn_abandoned(const struct fpm_direct_conn *c)
 	return readcb == NULL && writecb == NULL && eventcb == NULL;
 }
 
+/* Whether the sweeps may release this node. A node that never got its first
+ * request is released too, once evhttp has let go: the EOF watcher only sees a
+ * close from the peer, and a peer that stays silent after evhttp closed the
+ * connection (http.read_timeout, or a 400 for a malformed request) would hold
+ * the fd and the http.max_connections slot until the child dies. An unserved
+ * node is judged only after its pickup, because until then its bufferevent is
+ * the one the bevcb has just returned, and evhttp sets that one's callbacks
+ * after the bevcb returns. */
+static int fpm_direct_conn_released(const struct fpm_direct_conn *c)
+{
+	if (!c->served && c->fd < 0) {
+		return 0;
+	}
+	return fpm_direct_conn_abandoned(c);
+}
+
 /* EV_READ on a connection whose first request has not arrived. Only a real EOF
  * releases the node: the watcher also fires for every trickle byte, and those
  * are the client's business until the deadline says otherwise. */
@@ -253,7 +383,10 @@ static unsigned fpm_direct_conn_peer_count(struct fpm_http_direct_conns *conns,
 		if (c != self) {
 			fpm_direct_conn_resolve(c);
 		}
-		if (c == self || c->peer_len != self->peer_len) {
+		/* A connection the pickup refused is closing; it no longer belongs to
+		 * its client's count, the same as a served connection the sweep has
+		 * released. */
+		if (c == self || c->over_client_cap || c->peer_len != self->peer_len) {
 			continue;
 		}
 		/* Compared as the kernel returned them, address and port together
@@ -278,17 +411,22 @@ static unsigned fpm_direct_conn_peer_count(struct fpm_http_direct_conns *conns,
 }
 
 /* Judges one connection against http.max_connections_per_client, once. Returns
- * -1 when the connection was over the cap, in which case the node is gone --
- * the caller must not touch it again.
+ * -1 when the connection was over the cap.
  *
  * `drop` says whether this file is also the one that ends the connection. From
- * the pickup pass it is: nobody else is going to. From inside evhttp's request
- * callback it is NOT, and must not be: fpm_direct_conn_drop() sets the write
- * timeout to 1 us as well as the read one, and the 503 the caller is about to
- * send is a write. A client whose receive window is full would have the
- * response torn down by that timer mid-send, making the refusal's shape depend
- * on the peer's TCP window. evhttp_send_error() closes the connection by
- * itself (Connection: close), which is what that path wants anyway. */
+ * the pickup pass it is: nobody else is going to. The node is then kept, marked
+ * over_client_cap, and not forgotten. A request that is already in the socket
+ * can still be read in the same loop pass, before the 1 us timeout takes
+ * effect; had the node been forgotten, that request would find nothing in
+ * fpm_http_direct_conns_request() and be served uncounted. The request path
+ * refuses the marked node instead, and the sweep releases it once evhttp has let
+ * go. From inside evhttp's request callback drop is NOT set, and the node is
+ * forgotten: fpm_direct_conn_drop() sets the write timeout to 1 us as well as
+ * the read one, and the 503 the caller is about to send is a write. A client
+ * whose receive window is full would have the response torn down by that timer
+ * mid-send, making the refusal's shape depend on the peer's TCP window.
+ * evhttp_send_error() closes the connection by itself (Connection: close), which
+ * is what that path wants anyway. */
 static int fpm_direct_conn_check_peer(struct fpm_direct_conn *c, int drop)
 {
 	if (c->checked || c->conns->limits.max_per_client <= 0) {
@@ -323,7 +461,9 @@ static int fpm_direct_conn_check_peer(struct fpm_direct_conn *c, int drop)
 			c->conns->limits.pool, c->conns->limits.max_per_client);
 	}
 	if (drop) {
+		c->over_client_cap = 1;
 		fpm_direct_conn_drop(c);
+		return -1;
 	}
 	fpm_direct_conn_forget(c);
 	return -1;
@@ -384,6 +524,7 @@ void fpm_http_direct_conns_free(struct fpm_http_direct_conns *conns)
 		/* NOLINTNEXTLINE(clang-analyzer-unix.Malloc) -- false positive, see above */
 		fpm_direct_conn_forget(conns->list);
 	}
+	free(conns->buckets);
 	free(conns);
 }
 
@@ -437,6 +578,17 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
 			return;
 		}
 	}
+	/* Indexed before it is linked, so every later exit goes through forget(),
+	 * which removes it from the index. */
+	if (!fpm_direct_conn_index_insert(conns, c)) {
+		if (c->deadline) {
+			event_free(c->deadline);
+		}
+		event_free(c->watch);
+		bufferevent_decref(bev);
+		free(c);
+		return;
+	}
 	fpm_direct_conn_link_front(conns, c);
 	conns->live++;
 	/* Either timer failing to arm leaves a node nothing can ever release: the
@@ -467,10 +619,8 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 	if (!conns || !bev) {
 		return 0;
 	}
-	for (c = conns->list; c; c = c->next) {
-		if (c->bev != bev) {
-			continue;
-		}
+	c = fpm_direct_conn_index_find(conns, bev);
+	if (c) {
 		c->requests++;
 		if (accepted_out) {
 			*accepted_out = c->accepted;
@@ -478,13 +628,18 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 		if (requests_out) {
 			*requests_out = c->requests;
 		}
-		/* The per-client cap is settled here and not left to the pickup pass,
-		 * because the pickup is a zero-delay timer and this is the request
-		 * callback: which of the two runs first inside one loop iteration is
-		 * libevent's business, and it demonstrably varies. A cap that answers
-		 * the request it is refusing is not a cap, so the last moment before
-		 * the answer has to be a moment at which it is enforced. For a
-		 * connection the pickup already judged this costs one branch. */
+		/* The per-client cap is settled here as well as in the pickup pass.
+		 * The pickup is a zero-delay timer and this is the request callback:
+		 * which of the two runs first inside one loop iteration is libevent's
+		 * business, and it demonstrably varies. A pickup that refuses a
+		 * connection closes it, but a request already in the socket can still
+		 * get through, so the last moment before the answer has to be a moment
+		 * at which the cap is enforced. For a connection the pickup already
+		 * judged this costs one branch. */
+		if (c->over_client_cap) {
+			fpm_direct_conn_forget(c);
+			return -1;
+		}
 		fpm_direct_conn_resolve(c);
 		if (fpm_direct_conn_check_peer(c, 0) < 0) {
 			return -1;
@@ -551,9 +706,7 @@ static void fpm_direct_conn_sweep_all(struct fpm_http_direct_conns *conns)
 
 	for (c = conns->tail; c; c = prev) {
 		prev = c->prev;
-		/* Only connections past their first request: the others have the EOF
-		 * watcher, which notices the same thing without waiting for a tick. */
-		if (c->served && fpm_direct_conn_abandoned(c)) {
+		if (fpm_direct_conn_released(c)) {
 			fpm_direct_conn_forget(c);
 		}
 	}
@@ -598,7 +751,7 @@ void fpm_http_direct_conns_sweep(struct fpm_http_direct_conns *conns)
 	while (budget-- > 0 && conns->tail) {
 		struct fpm_direct_conn *c = conns->tail;
 
-		if (c->served && fpm_direct_conn_abandoned(c)) { /* NOLINT(clang-analyzer-unix.Malloc) -- reported here, not at the forget() below; false positive, see above */
+		if (fpm_direct_conn_released(c)) { /* NOLINT(clang-analyzer-unix.Malloc) -- reported here, not at the forget() below; false positive, see above */
 			fpm_direct_conn_forget(c);
 			continue;
 		}

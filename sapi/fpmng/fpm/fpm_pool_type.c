@@ -330,6 +330,8 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.listening_socket_nodelay = 1,
 		.baseline_counter = "requests",
 		.operator_endpoint = 1,
+		/* Issue #644: listen queue, max_children_reached and slow requests. */
+		.reports_saturation = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
@@ -418,6 +420,9 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * and has a response to display errors in. */
 		.child_logs_via_master        = 1,
 		.operator_endpoint            = 1,
+		/* Issue #644: this is the classic executor, so the saturation numbers
+		 * apply here; the worker variant below does not set it. */
+		.reports_saturation           = 1,
 		/* Not the generic per-pool summary: this type's own page, moved onto
 		 * the operator listener unchanged by issue #275. */
 		.operator_status              = fpm_http_direct_ops_render_status,

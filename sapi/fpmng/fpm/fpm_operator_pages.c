@@ -47,6 +47,7 @@
 #include "fpm_children.h"
 #include "fpm_operator_pages.h"
 #include "fpm_operator_http.h"
+#include "fpm_operator_saturation.h"
 #include "fpm_pool_type.h"
 #include "fpm_scoreboard.h"
 #include "fpm_metrics.h"
@@ -87,6 +88,11 @@ struct fpm_operator_page_row_s {
 
 	/* serves_requests = 1 */
 	int idle, active;
+
+	/* serves_requests = 1 and fpm_pool_type_s.reports_saturation (issue #644):
+	 * the listen queue, max_children_reached and slow requests. Left zeroed,
+	 * with every has_* clear, for every other type. */
+	struct fpm_operator_saturation_s sat;
 
 	/* serves_requests = 0 */
 	struct fpm_pool_status_s st;
@@ -139,6 +145,7 @@ static void fpm_operator_page_collect(struct fpm_operator_buf_s *b, fpm_operator
 		 * pool is that number under a name, not a second count of the same
 		 * thing. */
 		row.counter_value = copy->requests;
+		fpm_operator_saturation_read(wp, copy, &row.sat);
 		fpm_scoreboard_free_copy(copy);
 	} else if (type->status) {
 		type->status(wp, &row.st);
@@ -245,6 +252,7 @@ static void fpm_operator_page_row_prometheus(struct fpm_operator_buf_s *b, const
 			fpm_operator_buf_appendf(b, "fpmng_pool_%s_total{pool=\"%s\"} %lu\n",
 				row->counter, row->name, row->counter_value);
 		}
+		fpm_operator_saturation_render_prometheus(b, row->name, &row->sat);
 		fpm_operator_page_row_prometheus_live(b, row);
 		return;
 	}
@@ -325,6 +333,16 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 		"# TYPE fpmng_pool_workers_active gauge\n"
 		"# HELP fpmng_pool_requests_total Requests served since start (pools that serve requests).\n"
 		"# TYPE fpmng_pool_requests_total counter\n"
+		"# HELP fpmng_pool_listen_queue Connections waiting in the listen queue now, TCP listeners on Linux only.\n"
+		"# TYPE fpmng_pool_listen_queue gauge\n"
+		"# HELP fpmng_pool_listen_queue_max Highest listen queue seen since start, TCP listeners on Linux only.\n"
+		"# TYPE fpmng_pool_listen_queue_max gauge\n"
+		"# HELP fpmng_pool_listen_queue_length Listen backlog the kernel allows, TCP listeners on Linux only.\n"
+		"# TYPE fpmng_pool_listen_queue_length gauge\n"
+		"# HELP fpmng_pool_max_children_reached_total Times pm.max_children was reached, pm dynamic and ondemand only.\n"
+		"# TYPE fpmng_pool_max_children_reached_total counter\n"
+		"# HELP fpmng_pool_slow_requests_total Requests slower than request_slowlog_timeout, only when it is set.\n"
+		"# TYPE fpmng_pool_slow_requests_total counter\n"
 		"# HELP fpmng_pool_runs_total Scheduled runs started since start, cron only.\n"
 		"# TYPE fpmng_pool_runs_total counter\n"
 		"# HELP fpmng_pool_restarts_total Times the supervised script was started again, supervisor only.\n"
@@ -428,6 +446,7 @@ static void fpm_operator_page_row_json(struct fpm_operator_buf_s *b, const struc
 		if (row->counter) {
 			fpm_operator_buf_appendf(b, ",\"%s\":%lu", row->counter, row->counter_value);
 		}
+		fpm_operator_saturation_render_json(b, &row->sat);
 		fpm_operator_page_row_json_live(b, row);
 		fpm_operator_buf_appendf(b, "}");
 		return;

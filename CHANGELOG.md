@@ -13,6 +13,8 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-10-09
+
 ### Added
 
 - `http.ready_path` on `pool.type = gateway` (issue #646): a readiness probe that the gateway answers itself. It answers `200 ready` when at least one target pool has a child that accepts requests. Before that it answers `503 starting`. From the first moment of a stop or a reload it answers `503 draining`. The master sends `SIGUSR1` to these gateways at that moment. During the window the gateway keeps answering new connections, so a Docker `HEALTHCHECK` or a Kubernetes `httpGet` probe gets the `503`. The window ends at `process_control_timeout` minus 100 ms. Then the gateway drains its in-flight requests for up to the same time again. The children of the pools that such a gateway routes to keep serving until the master signals them, so the application answers too. An ondemand pool forks a child for a new connection in the window. The children get the signal of the stop when the last such gateway exits, or at `process_control_timeout` after the stop at the latest. A `SIGQUIT` stop lets a running request finish. A `SIGTERM` stop, which `docker stop` and the kubelet send by default, cuts a request that is still running at that point, and its client gets `502`; set `STOPSIGNAL SIGQUIT` or `lifecycle.stopSignal` for a graceful drain. A second stop signal, such as `SIGTERM` after `SIGQUIT`, is not held. The master then escalates after another `process_control_timeout`. A stop or a reload of such a pool therefore lasts up to about twice `process_control_timeout`. The stock `process_control_timeout = 0` leaves no window, so set it. The examples in `docs/gateway.md` use 15s and a stop timeout of 35s. The new directive `http.ready_require_target` (default `no`, needs `http.ready_path`) answers `503 no live target` when no child of any target pool accepts requests. `http.ready_path` is refused on `pool.type = fastcgi` and `pool.type = http-direct`, and `http.ready_require_target` is refused on `pool.type = fastcgi`. See `docs/gateway.md`.
@@ -353,7 +355,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...v0.14.0

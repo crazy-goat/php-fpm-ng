@@ -6,6 +6,7 @@
 
 #include "fpm.h"
 #include "fpm_http.h"
+#include "fpm_http_handoff.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -1343,6 +1344,13 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 	 * SIGKILLed. The SIGTERM this replaces cut every in-flight request on
 	 * every reload and every stop. */
 	fpm_http_gateways_drain(fpm_global_config.process_control_timeout);
+
+	/* Issue #661: a reload execs, and the listeners stay open across the exec,
+	 * so a client that connects meanwhile waits in the accept queue instead of
+	 * getting ECONNREFUSED. A stop or a plain exit closes them, as before. */
+	if (which == FPM_CLEANUP_PARENT_EXEC) {
+		fpm_http_handoff_export();
+	}
 
 	for (gw = gateways; gw; gw = next) {
 		next = gw->next;

@@ -101,17 +101,24 @@ file is untouched, and the next `SIGUSR2` tries again from the top — measured
 by `fpmng-reload-broken-config.phpt`, which also asserts the worker pid that
 answers after the refusal is the one that answered before it.
 
-### When the check cannot be run, the reload goes ahead
+### When the check cannot run, the reload goes ahead or is refused
 
-Only a check that **ran and refused** cancels the reload. A `fork()` that
-failed, an `execvp()` that failed (the binary this master was started from was
-removed — a package upgrade in progress, say), or a check killed by a signal
-logs a **WARNING** and lets the reload proceed exactly as it did before #640.
-Refusing there would mean that a transient fork/exec failure leaves an operator
-with a service that can never reload again, and it would make the failed-`execvp()`
-path of `fpm_pctl_exec()` unreachable, which is the path issue #690's
-discard-the-spared-workers logic exists for
-(`fpmng-reload-selective-failed-exec.phpt`).
+Two kinds of failure stop the check from running. Each has its own outcome.
+
+- **The `execvp()` of the check fails.** The binary this master was started
+  from is missing, for example during a package upgrade. The reload is
+  **refused**, and one ERROR line says so. The pools that run keep serving,
+  and the next `SIGUSR2` tries again. Before issue #661 this case logged a
+  WARNING and the reload went ahead. The old generation had already drained
+  its gateways, so the service went down.
+- **A `fork()` or a `pipe()` fails, or the check is killed by a signal.** The
+  master logs a **WARNING** and the reload goes ahead, as it did before #640. A
+  transient fork failure must not leave the service unable to reload.
+
+The failed `execvp()` in `fpm_pctl_exec()` (issue #690) is now reached only
+when the binary is removed between the check and the exec.
+`fpmng-reload-selective-failed-exec.phpt` tests the refusal. It checks that
+the master, its worker and its listener keep running.
 
 ### What `-t` does catch
 
@@ -173,7 +180,9 @@ Verified against this tree, not assumed:
    check: at reload time **the running generation still holds every one of its
    addresses**, so a check that bound anything would fail every reload on the
    host. A reload can still fail on a bind collision, which is what the #690
-   discard path is for.
+   discard path is for. A gateway listener that the next generation takes over
+   is not bound again, so a bind collision cannot happen there (see "Gateway
+   listeners across the reload" below).
 2. **A `pid` path that cannot be written.** `fpm_conf_write_pid()` is called
    after the point `-t` returns from (`fpm.c:102`).
 3. **A script or document root that is not there yet.** `chroot`/`chdir` must
@@ -194,13 +203,82 @@ Verified against this tree, not assumed:
    and out of scope here. The window is **documented here, not closed**.
 6. **Whether the generation that is being replaced can be replaced at all.**
    The gate says the configuration loads. After that the old master still stops
-   every child and re-execs, and an OOM at that moment, a `SIGTERM` between the
+   every child and re-execs. An OOM at that moment, a `SIGTERM` between the
    check and the exec, or an `execvp()` that fails still ends the generation.
+   Then the master exits, and the gateway listeners it handed on close with it.
 
 So the gate's failure mode is "the service keeps running the configuration it
 already has", never "the service is down because of the check" — except through
-the last two items above, which are the reload's own pre-existing risks and are
-unchanged by it.
+the last two items above, which are the reload's own pre-existing risks. The
+listener handoff of issue #661 does not change them.
+
+### Gateway listeners across the reload (issue #661)
+
+Before issue #661, a reload closed each gateway listener before the
+`execvp()`, and the new master bound it again. A client that connected in
+that gap got `ECONNREFUSED`. Now the old master keeps the TCP listening socket
+open across the `execvp()`. The socket stays in the `LISTEN` state, so a
+connection made during the reload waits in the kernel accept queue. The new
+master accepts it.
+
+The handoff runs in these steps:
+
+1. The old master drains its gateways, as before.
+2. The old master clears `FD_CLOEXEC` on the listening socket of each TCP
+   gateway listener that does not use `http.reuseport` and is in the `LISTEN`
+   state. A gateway listener in the NO_CERT state of `http.tls_wait_for_cert`
+   is bound but not listening. It is not handed over, and it closes on the
+   `execvp()`. The old master writes one record per handed socket to
+   `FPMNG_HTTP_LISTENERS`. A record is `<fd>:<tls fingerprint>:<bind text>`,
+   and the records are comma-separated.
+3. The new master reads `FPMNG_HTTP_LISTENERS` and removes it, after the
+   configuration is read and before any pool binds its socket. A socket that no
+   gateway of the new configuration uses is closed at this point, so it cannot
+   block the bind of a fastcgi pool on the same address.
+4. A gateway of the new generation takes a socket over when its bind text and
+   its TLS fingerprint match. It takes a socket over only when it listens at
+   once. A gateway in the NO_CERT state of `http.tls_wait_for_cert` does not,
+   because it does not listen at once.
+5. Any inherited socket that no gateway takes over is closed. The gateway
+   binds its address as before. A record whose descriptor is not a listening
+   TCP socket is ignored, and the descriptor is left open.
+
+The bind text must match as written. `0.0.0.0:8080` and `*:8080` are different
+texts, so the gateway binds a new socket. The TLS fingerprint is a hash of the
+values of `http.tls_cert`, `http.tls_key`, `http.tls_min_version`,
+`http.tls_sni_cert`, `http.tls_verify_client`, `http.tls_client_ca` and
+`http.tls_wait_for_cert`. It uses the configuration values, not the file
+contents. A gateway that moves to another address does not take the old socket
+over. The old socket closes, and the old address is free after the reload.
+
+The new master logs these lines:
+
+- NOTICE `[pool NAME] http: took over the listener on ADDR from the previous generation`, when a gateway takes a socket over.
+- NOTICE `http: closing the listener on ADDR of the previous generation: no gateway uses that address now`, when the new configuration has no gateway on that address.
+- WARNING `http: closing the listener on ADDR of the previous generation: no gateway took it over`, when a socket is still not taken over after start-up.
+
+Not covered by the handoff:
+
+- `http.reuseport = on`. Each gateway child binds its own socket, and the
+  master socket closes before the exec, as before. A client can still get
+  `ECONNREFUSED` during a reload with reuseport.
+- A unix socket as the public listener. It is not passed on.
+- An `execvp()` that fails after the check passed. See item 6 in "What `-t`
+  does not catch".
+- Overlapping generations, where two masters hold the same socket at once. This
+  case is out of scope.
+
+Measured on the test box, with four clients that connect in a loop with
+`Connection: close`, and a reload at 10 s of a 20 s run: the reload refused
+140 connections in five runs without this change, and none in five runs with
+it. Resets and `502` responses are not zero yet. The numbers and the cause are
+in `docs/NOTES.md`, section 3ak.
+
+Under load, a reload still resets some in-flight requests, and some requests
+get `502`. The pool workers stop when the reload starts. The gateways still
+have requests in flight, and they wait `process_control_timeout` before they
+close those connections. Issue #661 does not change this order. A change of
+the order is a separate decision, and it is open.
 
 ### Reloading from a supervisor
 

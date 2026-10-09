@@ -31,6 +31,7 @@
 #include "fpm_debug_clock.h"
 #include "fpm_sd_notify.h"
 #include "fpm_crash_backoff.h"
+#include "fpm_http_handoff.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -88,6 +89,8 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	    0 > fpm_env_init_main()           ||
 	    0 > fpm_signals_init_main()       ||
 	    0 > fpm_children_init_main()      ||
+	    /* Issue #661: before fpm_sockets_init_main() binds any pool, see fpm_http_handoff.h. */
+	    0 > fpm_http_handoff_begin()      ||
 	    0 > fpm_sockets_init_main()       ||
 	    0 > fpm_worker_pool_init_main()   ||
 	    0 > fpm_event_init_main()) {
@@ -192,6 +195,12 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 	}
+
+#ifdef HAVE_FPM_HTTP
+	/* Issue #661: closes the handed-over listeners no gateway took. Before the
+	 * first fork, so no child inherits one. */
+	fpm_http_handoff_finish();
+#endif
 
 	/* create initial children in all pools */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {

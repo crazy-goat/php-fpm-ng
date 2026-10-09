@@ -481,6 +481,7 @@ struct fpm_http_gateway_s {
 	int plain_listen_fd;
 	int backlog;
 	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (http.reuseport) */
+	char listen_tls_fp[17];		/* fpm_http_handoff_tls_fp() of this gateway; see fpm_http_handoff.h */
 	unsigned nproc;
 	pid_t *pids;
 	struct fpm_http_gw_slot_s **slots;		/* one per pids[i], see fpm_http_gw_slot_s */

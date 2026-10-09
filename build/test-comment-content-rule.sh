@@ -21,3 +21,6 @@ grep -q 'opportunistically' "$WORKFLOW"
 
 grep -q 'AGENTS.md#comments-what-earns-one' "$ROOT_README"
 grep -q 'AGENTS.md#comments-what-earns-one' "$FPMNG_README"
+
+# Run the executor-async rule test
+sh "$REPO/build/test-executor-async-rule.sh"

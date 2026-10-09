@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include <sys/random.h>
+#include <unistd.h> /* musl declares getentropy() here, not in <sys/random.h> */
 
 #include "fpm_http_request_id.h"
 

@@ -84,6 +84,12 @@ struct fpm_worker_pool_config_s {
 	int pm_max_spawn_rate;
 	int pm_process_idle_timeout;
 	int pm_max_requests;
+	/* Issue #727: consecutive children that exit within the crash window
+	 * without serving a request. Reaching it logs one ALERT and marks the pool
+	 * as given up on the operator pages. 0 = never give up; the respawn delay
+	 * stays capped either way. Default 6. Refused on pool types without
+	 * respawn_backoff (see fpm_pool_type_s). */
+	int pm_max_consecutive_failures;
 	char *pm_status_path;		/* fpm-ng: upstream meaning on pool.type = fastcgi only — a path answered on the pool's own FastCGI socket (fpm_status.c). Every non-fastcgi type refuses it; operator.status_path is the separate HTTP endpoint (issue #386). */
 	/* fpm-ng: the per-pool operator endpoint's directives. Issue #386 moved
 	 * these out of the "pm." namespace, which never described them. See
@@ -191,6 +197,9 @@ struct fpm_worker_pool_config_s {
 	int http_keepalive_timeout;		/* gateway: ms an idle keep-alive client connection may stay open between two requests; 0 = unlimited (issue #593) */
 	int http_write_timeout;			/* gateway: ms the client may stall a pending response write before the connection is closed; 0 = unlimited (issue #593) */
 	size_t http_response_buffer;		/* gateway: bytes of response the client may leave unread before the upstream is read no further; 0 = unlimited (issue #596) */
+	int http_response_min_rate;		/* gateway: minimum bytes per second the client must drain while the upstream is held back; 0 = no minimum (issue #705) */
+	int http_upstream_connect_timeout;	/* gateway: ms a connect towards a target may stay unfulfilled before the request is answered 504; 0 = wait forever (issue #716) */
+	int http_upstream_read_timeout;		/* gateway: ms a target may make no progress on a request in flight before it is cut; 0 = never cut (issue #716) */
 	int http_pool_full_policy;		/* FPM_HTTP_POOL_FULL_REJECT (default) or _WAIT; see fpm_http.c and docs/http-gateway-pool-full.md.
 						 * "wait" is only a sane trade for IO-light pools -- opt in per pool, never globally. */
 	int http_pool_full_queue_max;		/* wait policy only: bound on how many requests may sit on gw->waiting at once;
@@ -226,7 +235,11 @@ struct fpm_worker_pool_config_s {
 	struct key_value_s *http_routes;
 	char *http_allowed_clients;		/* like listen.allowed_clients, but for the HTTP gateway; empty = no restriction */
 	char *http_trusted_proxies;		/* addresses trusted for X-Forwarded-* headers; empty = trust nobody (safe default), see fpm_http_forwarded.c */
+	int http_request_id;			/* FPM_HTTP_REQUEST_ID_OFF (default), _GENERATE or _PROPAGATE; see fpm_http_request_id.h (issue #642) */
 	char *http_access_log;			/* path to the HTTP gateway access log; empty = disabled, see fpm_http_access_log.c */
+	int http_access_format;			/* FPM_HTTP_ACCESS_FORMAT_COMBINED (default) or _JSON, see fpm_http_access_log.h (issue #642) */
+	char *http_ready_path;			/* readiness probe: 200 while serving, 503 while starting, draining or (opt-in) with no live target (issue #646); NULL = off */
+	int http_ready_require_target;		/* http.ready_require_target = yes|no; default no. yes: the probe answers 503 when every target has no live child (issue #646) */
 	char *http_front_controller;		/* nginx-style try_files: when the resolved SCRIPT_FILENAME does not exist, substitute this
 						 * script and put the original path into PATH_INFO. Default "/index.php" — the built-in PHP
 						 * server (php -S) gives the same effect with no configuration (see
@@ -378,6 +391,15 @@ enum {
 enum {
 	FPM_HTTP_POOL_FULL_REJECT = 0,
 	FPM_HTTP_POOL_FULL_WAIT = 1
+};
+
+/* http.request_id (issue #642), see fpm_http_request_id.h. Default is
+ * FPM_HTTP_REQUEST_ID_OFF (0): no id, no X-Request-Id header, no request_id=
+ * field in the access log. */
+enum {
+	FPM_HTTP_REQUEST_ID_OFF = 0,
+	FPM_HTTP_REQUEST_ID_GENERATE = 1,
+	FPM_HTTP_REQUEST_ID_PROPAGATE = 2
 };
 
 /* cron.jitter_mode, see fpm_pool_cron.c (issue #322). Default is

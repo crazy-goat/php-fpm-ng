@@ -24,10 +24,14 @@
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fpm_metrics.h"
+#include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
+#include "fpm_sd_notify.h"
+#include "fpm_crash_backoff.h"
+#include "fpm_http_handoff.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -85,6 +89,8 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	    0 > fpm_env_init_main()           ||
 	    0 > fpm_signals_init_main()       ||
 	    0 > fpm_children_init_main()      ||
+	    /* Issue #661: before fpm_sockets_init_main() binds any pool, see fpm_http_handoff.h. */
+	    0 > fpm_http_handoff_begin()      ||
 	    0 > fpm_sockets_init_main()       ||
 	    0 > fpm_worker_pool_init_main()   ||
 	    0 > fpm_event_init_main()) {
@@ -93,12 +99,14 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 			return FPM_INIT_EXIT_OK;
 		} else {
 			zlog(ZLOG_ERROR, "FPM initialization failed");
+			fpm_reload_selective_discard_unadopted();
 			return FPM_INIT_ERROR;
 		}
 	}
 
 	if (0 > fpm_conf_write_pid()) {
 		zlog(ZLOG_ERROR, "FPM initialization failed");
+		fpm_reload_selective_discard_unadopted();
 		return FPM_INIT_ERROR;
 	}
 
@@ -179,7 +187,20 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
 			fpm_event_loop(1);
 		}
+
+		/* Issue #727: the crash backoff state is read by the operator endpoint,
+		 * a process forked below, so it is allocated here, before any fork. */
+		if (0 > fpm_crash_backoff_init(wp)) {
+			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+			fpm_event_loop(1);
+		}
 	}
+
+#ifdef HAVE_FPM_HTTP
+	/* Issue #661: closes the handed-over listeners no gateway took. Before the
+	 * first fork, so no child inherits one. */
+	fpm_http_handoff_finish();
+#endif
 
 	/* create initial children in all pools */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
@@ -197,6 +218,20 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 	}
+
+	/* Issue #690: whatever adoption did not consume (a spared pool that no
+	 * longer exists in this generation's config) must not stay in the
+	 * environment for the master's whole life, where pid reuse could turn it
+	 * into a kill of an unrelated process at shutdown. Only the master gets
+	 * here: a forked child jumped to run_child above. */
+	fpm_reload_selective_discard_unadopted();
+
+	/* Issue #643: READY=1 once every pool has bound its listening socket and
+	 * the initial children are forked. It says nothing about a gateway
+	 * accepting connections, and the unit's "active" state means the same.
+	 * The watchdog starts here too, so its first WATCHDOG=1 comes with READY. */
+	fpm_sd_notify_watchdog_start();
+	fpm_sd_notify_ready();
 
 	/* run event loop forever */
 	fpm_event_loop(0);
@@ -228,6 +263,12 @@ run_child: /* only workers reach this point */
 		/* Assign the metrics slot BEFORE cleanup — afterwards the pool list and
 		 * earlier pools' pm.max_children disappear (see fpm_metrics.c). */
 		fpm_metrics_child_init();
+		/* Issue #691: the scoreboard and metrics memfds are close-on-exec,
+		 * not close-on-fork, so this child inherited them. It only ever
+		 * uses the mappings (see fpm_reload_shm_child_init()), and the next
+		 * thing this process runs may be a PHP script, which must not see
+		 * them through /proc/self/fd. */
+		fpm_reload_shm_child_init();
 
 		if (type && type->child_main) {
 			/* This type takes over the entire process permanently — it does not

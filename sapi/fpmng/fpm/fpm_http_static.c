@@ -203,14 +203,14 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_request *req,
 		const char *path, size_t path_len, int *script_missing)
 {
-	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], etag[64], modified[64];
+	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], root_buf[MAXPATHLEN], etag[64], modified[64];
 	struct evkeyvalq *out;
 	struct stat stbuf;
-	const char *type;
+	const char *type, *root = st->root;
 	size_t root_len;
 	int fd, cmd;
 
-	if (!st->root) {
+	if (!root && !st->root_unresolved) {
 		return 0;
 	}
 	cmd = evhttp_request_get_command(req);
@@ -246,9 +246,18 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 		return 1;
 	}
 
-	root_len = strlen(st->root);
+	/* Resolved here, after every cheap reject above, so a POST or a .php
+	 * request pays no realpath() (issue #638). A root that does not resolve
+	 * serves nothing. */
+	if (!root) {
+		if (!realpath(st->root_unresolved, root_buf)) {
+			return 0;
+		}
+		root = root_buf;
+	}
+	root_len = strlen(root);
 
-	if ((size_t) snprintf(candidate, sizeof(candidate), "%s%s", st->root, path) >= sizeof(candidate)) {
+	if ((size_t) snprintf(candidate, sizeof(candidate), "%s%s", root, path) >= sizeof(candidate)) {
 		fpm_http_static_refuse(st, req);
 		return 1;
 	}
@@ -264,7 +273,7 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 	if (script_missing) {
 		*script_missing = 0;	/* the file is there, whatever open()/fstat() below say about it */
 	}
-	if (strncmp(resolved, st->root, root_len) != 0 || (resolved[root_len] && resolved[root_len] != '/')) {
+	if (strncmp(resolved, root, root_len) != 0 || (resolved[root_len] && resolved[root_len] != '/')) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", st->pool, path);
 		fpm_http_static_refuse(st, req);
 		return 1;

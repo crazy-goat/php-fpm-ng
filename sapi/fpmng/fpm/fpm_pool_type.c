@@ -87,11 +87,6 @@ static const char *const fpm_pool_gateway_rejects[] = {
 	"process.dumpable",
 	/* AppArmor confines a PHP child; the gateway process is not confined. */
 	"apparmor_hat",
-	/* Issue #593: the gateway has no connection cap. Both are read only by the
-	 * http-direct code (fpm_http_direct.c), so accepting them here would leave
-	 * an operator believing the public port is limited while it is not. */
-	"http.max_connections",
-	"http.max_connections_per_client",
 	"fiber.",
 	"worker.",
 	NULL
@@ -217,6 +212,9 @@ static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.tier                         = FPM_TIER_BETA,
 	.requires_listen              = 1,
 	.requires_pm                  = 1,
+	/* Issue #727: the worker executor's children are respawned by the same
+	 * master path, so they get the same crash backoff as the classic one. */
+	.respawn_backoff              = 1,
 	.serves_requests              = 1,
 	.listening_socket_nonblocking = 1,
 	.listening_socket_nodelay     = 1,
@@ -330,6 +328,10 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		.listening_socket_nodelay = 1,
 		.baseline_counter = "requests",
 		.operator_endpoint = 1,
+		/* Issue #644: listen queue, max_children_reached and slow requests. */
+		.reports_saturation = 1,
+		/* Issue #727: crash backoff for children that fail fast. */
+		.respawn_backoff = 1,
 		.rejects         = fpm_pool_fastcgi_rejects,
 	},
 	{
@@ -418,6 +420,11 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * and has a response to display errors in. */
 		.child_logs_via_master        = 1,
 		.operator_endpoint            = 1,
+		/* Issue #644: this is the classic executor, so the saturation numbers
+		 * apply here; the worker variant below does not set it. */
+		.reports_saturation           = 1,
+		/* Issue #727: crash backoff for children that fail fast. */
+		.respawn_backoff              = 1,
 		/* Not the generic per-pool summary: this type's own page, moved onto
 		 * the operator listener unchanged by issue #275. */
 		.operator_status              = fpm_http_direct_ops_render_status,

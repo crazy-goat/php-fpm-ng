@@ -125,10 +125,12 @@ worker count; the default is the number of CPUs, at most 8, and `1` is a serial
 run with no `-j` at all. The tests spend their time waiting on a master they
 started, so they cost wall clock rather than CPU, which is why `-j` pays.
 
-Running tests side by side on one host needed four things, and
-`build/phpt-parallel.sh` does the first three on the throwaway tree before every
-run (the pinned copy under `third_party/php-src/` stays untouched, see
-`build/phpt-fixture-patches/README.md`):
+Running tests side by side on one host needed five things. `build/phpt-parallel.sh`
+sets the first four up on the throwaway tree before every run (the pinned copy
+under `third_party/php-src/` stays untouched, see
+`build/phpt-fixture-patches/README.md`); the fifth is a naming convention the
+tests themselves keep. The reserved lane below is a sixth, and the caller
+decides it.
 
 - **Port blocks per worker.** Upstream's `Tester::getPort()` starts every test
   at 9008, so two workers bound the same port. `run-tests.php` now passes each
@@ -140,13 +142,15 @@ run (the pinned copy under `third_party/php-src/` stays untouched, see
 - **A per-run shift.** The blocks above are fixed numbers, so another php-fpm on
   a shared host that already holds 9208 or 28254 made dozens of tests fail with
   "Address already in use" (issue #674). Every port a test takes now also moves
-  by `FPMNG_PHPT_PORT_SHIFT` (the Tester through `0005-tester-port-shift-per-run.patch`,
-  the http-direct tests in their own port expression). `build/run-fpmng-phpt.sh`
-  picks it per run: the first shift of 0, 100, ... 2400 for which nothing listens
-  on the Tester's block or on the http-direct block (`ss`, else `netstat`; with
-  neither it stays 0), and prints `Port shift: N`. Set `FPMNG_PHPT_PORT_SHIFT`
-  yourself to pin it. The check is a snapshot: a pool started after it can still
-  collide. A gateway pool also opens the operator endpoint on the host-global
+  by `FPMNG_PHPT_PORT_SHIFT` (the Tester through
+  `0005-tester-port-shift-and-lane-base.patch`, the http-direct tests in their
+  own port expression). `build/run-fpmng-phpt.sh` picks it per run: the first
+  shift of 0, 100, ... 2400 for which nothing listens on the Tester's block or
+  on the http-direct block (`ss`, else `netstat`; with neither it stays 0), and
+  prints `Port shift: N`. Set `FPMNG_PHPT_PORT_SHIFT` yourself to pin it. The
+  check is a snapshot: a pool started after it can still collide, and it says
+  nothing about a second run of this suite, which would pick the same shift. A
+  gateway pool also opens the operator endpoint on the host-global
   `127.0.0.1:9253`, which a master of someone else's run can hold; the Tester
   therefore adds `operator.status_listen` / `operator.metrics_listen` on a port of
   the run's own (the last port of the worker's block, which `getPort()` never
@@ -175,6 +179,140 @@ its own failure. Note that `run-tests.php` retries a test once when its output
 says `address already in use` or when the test calls `usleep`/`sleep`, and
 reports it as `WARN ... passed on retry attempt`: a port collision that heals
 itself shows up as a WARN, not a FAIL, so a growing WARN count is the signal.
+
+### A reserved port lane
+
+The shift above is a snapshot of what a listener held at one moment, which is
+the right answer for "a pool somebody else already has" and no answer at all for
+"another run of this suite": both runs probe, both find the same free range, and
+both take it. That is what issue #625 was reported as (a full run on the shared
+test box with 3 FAIL, all of them "Address already in use" from another run's
+master).
+
+`FPMNG_PHPT_PORT_BASE=B` is the answer. It reserves the 1000 ports `B .. B+999`
+for one run and moves every port of that run into them, so two runs given
+different bases cannot meet whatever else the host is doing. It also gives the
+run a temporary directory of its own.
+
+```sh
+FPMNG_PHPT_PORT_BASE=21000 TEST_PHP_EXECUTABLE=... TEST_PHP_FPM_EXECUTABLE=... \
+    build/run-fpmng-phpt.sh - "$PWD/lane-a"          # 21000-21999
+FPMNG_PHPT_PORT_BASE=22000 ... \
+    build/run-fpmng-phpt.sh - "$PWD/lane-b"          # 22000-22999, at the same time
+```
+
+The layout inside a lane, and the one sentence for each part of it:
+
+| ports | who | why there |
+|---|---|---|
+| `B+1 .. B+200` | the Tester's per-worker block (`tester.inc`'s `portBase()`) | the historical `9000` origin, replaced rather than shifted, so the block lands at `B` whatever `B` is |
+| `B+199` | the operator endpoint of a gateway pool that names no `operator.*_listen` | the last port of the block `getPort()` never reaches, so it cannot meet a pool listen port |
+| `B+300 .. B+438` | the http-direct tests' fixed-port family, `28054 .. 28192`, translated | the family is ~80 independent expressions; translating them as one block keeps the order they had, so two tests that do not share a port today still do not |
+| `B+439 .. B+999` | nothing | room for the family to grow |
+
+Five consequences, all of them deliberate:
+
+- **A lane run is serial.** Each worker wants its own 200-port block, so `-j8`
+  would want eight of them plus the family, which the lane does not hold. The
+  runner refuses a `TEST_FPM_JOBS` above 1 rather than running serial anyway.
+- **`FPMNG_PHPT_PORT_SHIFT` goes negative.** Translating `28054` to `B+300` for
+  a base below 28054 is a negative shift (-6754 for `B=21000`). The tests read
+  it with `(int) getenv()` and never look at its sign, and the runner derives it
+  itself, so a caller only ever sets a non-negative one — the two variables
+  together are refused.
+- **The base must end below 32768.** Otherwise the kernel can hand an outgoing
+  connection a port from inside the lane.
+- **The run's `TMPDIR` is `<results>/.tmp`.** Ports were only half of what two
+  lanes share: fourteen of the tests name their temporary directory or unix
+  socket with no pid in it — `fpmng-raw-upstream.inc`'s `fpmng-raw-$name`,
+  `/fpmng-user-ini`, `/fpmng-430-run`, `/fpmng-728-serve` and the rest — so two
+  lanes in one `/tmp` delete each other's files mid-test. The `--CLEAN--`
+  globs that match such a prefix are the sharp end of it. Measured 2026-10-06
+  on two lanes at 21000 and 22000 in one network namespace: lane 21000's
+  `fpmng-http-direct-user-ini` lost its directory to the other lane's
+  `--CLEAN--`, the test was SIGKILLed at its timeout with its master still up,
+  and the master it left behind held 21001-21003 for the rest of the run — 84
+  of 212 tests then failed with "Address already in use". One `TMPDIR` per run
+  closes the whole class, because every one of those globs now looks only inside
+  its own. The runner removes it again on exit.
+- **A lane run is slower**, because it is serial: see the measurements below.
+- **One test read the host's process table instead of its own master's children.**
+  `fpmng-http-gateway-type.phpt` counted the `http gateway gw` lines of `ps -eo`
+  for every php-fpm-ng on the box, so in a pair of lanes it counted the other
+  lane's two gateways as well and failed with "expected exactly 2 gateway
+  processes for gw, found 3". It now filters on the master pid from its own pid
+  file, which is what `fpmng-gateway-counters.phpt` and
+  `fpmng-gateway-counters-respawn-gauge.phpt` already did for exactly this
+  reason.
+- **Four tests used to ask the kernel for a free port**, which put their helper
+  listeners (`php8.5` as a TLS origin in
+  `fpmng-http-direct-worker-buffered-streams.phpt` and
+  `fpmng-http-direct-worker-tls-and-client-tls.phpt`, `openssl s_server` as a
+  control in `fpmng-http-direct-worker-ws-tls.phpt`, and the fake ACME CA in
+  `fpmng-acme-issue.phpt`) in the ephemeral range instead of in the lane. All four
+  take a port of the run's own now. The CA was the awkward one: it deliberately
+  bound port 0, because "bind a port in the test to find a free one and then hand
+  the number to a process that binds it again" is a race. A port out of the run's
+  reserved block is not that — nothing else in the run is given it — and the CA
+  still reads the real port back out of its own socket, so the handoff is still
+  race-free.
+
+Measured on the container image this repository builds in (`fpmng-dev:8.5`,
+PHP 8.5.4, `TEST_FPM_TIMEOUT=120`, `ss -Hltnp` sampled every 200 ms for the
+length of the run).
+
+**One lane, `FPMNG_PHPT_PORT_BASE=21000`, the whole owned suite** (212 tests):
+
+| | |
+|---|---|
+| `ss -Hltnp` samples during the run | 992 |
+| distinct listening addresses seen | 49 |
+| of those, outside 21000-21999 | **0** |
+| result | `PASS=212 FAIL=0 WARN=0 SKIP=0` of 212, `run_exit_status=0` |
+| wall clock | 280 s |
+
+The addresses were the lane's own blocks and nothing else: `21001`-`21004` (the
+Tester block), `21199` (the gateway operator default), `21300`-`21438` (the
+http-direct family, the top being `fpmng-pack-run.phpt`'s 28192), and the helper
+processes of the four tests listed above on ports of the same block.
+
+**Two lanes, `FPMNG_PHPT_PORT_BASE=21000` and `22000`, the whole owned suite
+each, at the same time, in one network namespace** (same container, so the same
+loopback and the same `/tmp`; `TEST_FPM_TIMEOUT=180`):
+
+| | lane 21000 | lane 22000 |
+|---|---|---|
+| `measurement_status` | MEASURED | MEASURED |
+| `run_exit_status` | 0 | 0 |
+| PASS | 212 | 212 |
+| FAIL/ERROR | 0 | 0 |
+| WARN | 0 | 0 |
+| SKIP | 0 | 0 |
+| "Address already in use" anywhere in the run | none | none |
+
+Both together took 282 s, against 280 s for one of them alone: the suite is
+wall-clock-bound (each test waits on a master it started), which is also why
+`-j` pays so little.
+
+**The default run is untouched.** The same 212 tests with no
+`FPMNG_PHPT_PORT_BASE`: `Port shift: 0`, `port_lane=none`, `port_shift=0`,
+`PASS=212 FAIL=0`, and `-j` still passed to `run-tests.php`. The upstream
+`.phpt` suite is unchanged too (`PASS=120 SKIP=16 WARN=1`, 4 declared
+deviations, `run_exit_status=1`, measured identically with this branch's
+`build/run-fpm-phpt.sh` and with it stashed); that runner now only *refuses* the
+variable, with `NOT MEASURED: FPMNG_PHPT_PORT_BASE belongs to
+build/run-fpmng-phpt.sh, which lays the lane out; this runner does not use it
+(unset it)`.
+
+What keeps the lane honest is `build/test-phpt-port-lane.sh` (hermetic, in the
+`checks` CI job). It re-derives the family bounds from the tests themselves, so
+a new test that picks a port outside `28054 .. 28192` fails the check instead of
+growing silently past the lane; it fails any owned test that binds a literal TCP
+address (the places that do are `-t`-only configurations and are listed in the
+script); it drives the runner through the lane, through the `TMPDIR` it hands
+the tests and through each of the refusals. The Tester half of it, that
+`portBase()` prefers a base over a shift and leaves the historical ports alone
+without one, is checked in `build/test-phpt-tree.sh`.
 
 `summary.txt` carries `min_pass_check`, and a full run fails when fewer than
 **half** the selected tests passed. The trap being defended is a run that skips

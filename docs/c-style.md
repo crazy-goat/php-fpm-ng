@@ -67,8 +67,9 @@ diagnostic pragma when the compiler needs one), never by widening this config.
 
 ## CI
 
-The `checks` job in `.github/workflows/build-matrix.yml` runs
-`build/lint-c.sh` and is **blocking**. It landed non-blocking
+The `lint` job in `.github/workflows/build-matrix.yml` runs
+`bin/lint.sh` (which calls `build/lint-c.sh` for the C pass) and is
+**blocking**. It landed non-blocking
 (`continue-on-error: true`) on purpose -- a red build on day one for
 pre-existing findings teaches people to ignore the job -- but that backlog was
 emptied by issues #107 and #111, and `continue-on-error` was dropped on

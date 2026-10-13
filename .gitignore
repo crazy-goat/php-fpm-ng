@@ -1,4 +1,8 @@
 build-dir/
+# The output directory of build/libphp-build.sh (AGENTS.md "Commands"). A build
+# overwrites it, so it must never be tracked; a tracked copy made every worktree
+# dirty after every build and let a `git add -A` commit object files (#847).
+/out/
 *.log
 php-fpm
 php-fpm-*

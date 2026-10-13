@@ -14,14 +14,14 @@
  * fails here exactly as it would against Let's Encrypt.
  *
  * Usage:
- *   php -n acme-fake-ca.inc <port|0> <workdir> <challenge-host:port> \
+ *   php -n acme-fake-ca.inc <port> <workdir> <challenge-host:port> \
  *       <ca-cert.pem> <ca-key.pem> <validity-days>
  *
- * It writes the port it bound to <workdir>/ca-ready once it is listening
- * (so pass 0 and read it back), appends one line per
- * request to <workdir>/ca-requests.log, and speaks plain HTTP because it
- * lives on loopback -- the client accepts an http:// directory only for hosts
- * that cannot be a production CA (Renewer::isNonProduction()).
+ * <port> is one of the run's own reserved-lane ports (issue #625). It writes
+ * the port it bound to <workdir>/ca-ready once it is listening, appends one
+ * line per request to <workdir>/ca-requests.log, and speaks plain HTTP because
+ * it lives on loopback -- the client accepts an http:// directory only for
+ * hosts that cannot be a production CA (Renewer::isNonProduction()).
  */
 
 error_reporting(E_ALL);
@@ -36,9 +36,11 @@ if ($caKey === false) {
     exit(1);
 }
 
-/* Port 0 means "pick one": the caller reads the real port back out of
- * ca-ready, which is race-free, unlike binding a port in the test to find a
- * free one and then handing the number to a process that binds it again. */
+/* $port comes from the caller, one of the run's own (issue #625) so this
+ * listener stays inside the reserved lane. The real port is still read back out
+ * of the socket below and reported through ca-ready, which is what makes the
+ * handoff race-free: nothing depends on the number having been free a moment
+ * ago, only on this process having bound it. */
 $server = @stream_socket_server("tcp://127.0.0.1:$port", $errno, $errstr);
 if ($server === false) {
     fwrite(STDERR, "fake CA: cannot listen on $port: $errstr\n");

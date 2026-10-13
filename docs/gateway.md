@@ -89,22 +89,77 @@ them:
 | `http.keepalive_timeout` | How long in ms an idle keep-alive connection may wait for its next request. `0` = unlimited. | `60000` |
 | `http.write_timeout` | How long in ms a client may make no progress on a pending response before the connection is closed. `0` = unlimited. | `30000` |
 
+Upstream limits (issue #716). What the gateway waits *for* on the target side. A
+target that never answers used to hold the client connection and one slot of the
+target's budget indefinitely -- with the default `request_terminate_timeout = 0`
+nothing ended it, and a fiber target refuses that directive at all (#610):
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.upstream_connect_timeout` | How long in ms a connect towards a target may stay unfulfilled (a SYN nobody answers, an accept queue the kernel has stopped draining). Cut after it: `504` if nothing was sent to the client yet. `0` = wait forever. | `5000` |
+| `http.upstream_read_timeout` | How long in ms a target may make **no progress** on a request in flight. Cut after it: `504` if the response head has not been sent, otherwise the client connection is closed without completing the reply (the rule of #533, since the body can no longer be made whole). `0` = never cut. | `60000` |
+
+`http.upstream_read_timeout` bounds time **without progress**, not total request
+time: every byte the target sends re-arms it, so a script that answers slowly but
+keeps producing is not cut. A script that computes for a minute before its first
+byte is, and the operator sees the 504 they would have seen from the proxy the
+gateway replaces. Raise it, or set `0` to keep waiting as before, for anything
+that legitimately takes longer.
+
+The two defaults are judgement calls, not measurements:
+
+- `5000` for the connect, which is the number `http.read_timeout` above already
+  uses. The target is on this host in every configuration this project ships -- a
+  Unix socket, or a loopback address, which is the only address a route may even
+  name for an `http-direct` target -- so a TCP connect that has not completed
+  within the time it takes to read a whole request is not a slow peer, it is a SYN
+  nobody will answer. Not measured: how long such a connect takes when it does
+  complete. A remote FastCGI target is allowed (unlike an `http-direct` one) and
+  should get a larger value.
+- `60000` for the read, which is nginx's `proxy_read_timeout` default and the same
+  minute `http.keepalive_timeout` above already uses.
+
+While the gateway has paused an upstream because the client is behind
+(`http.response_buffer`), the read deadline is stopped: the target is producing
+into a socket buffer nobody is draining, which is not silence, and
+`http.write_timeout` is what bounds that client.
+
+Both are refused on `http-direct`, like the gateway-only client limits above: a
+direct pool is the thing serving the request and has no upstream to wait for.
+
 Response flow control (issue #596). The gateway reads the upstream response
 only while the client keeps up:
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
 | `http.response_buffer` | Bytes of response the gateway keeps unwritten for one client. Above this it stops reading that request's upstream (the worker blocks in its write) until the client has drained the buffer. `0` = unlimited. | `1M` |
+| `http.response_min_rate` | Minimum bytes per second the client must drain while the upstream is held back for it. Below that the connection is closed and the worker is released. `0` = no minimum. | `256` |
 
-A larger value frees a PHP worker earlier for a slow client and costs gateway
-memory per slow client; a smaller one bounds the memory and holds the worker
-longer. The limit is checked after each piece of the response, so one read
-(16 KiB) can overshoot it, and the kernel socket buffers on the client and
-upstream side come on top. The write timeout above still closes a client that
-reads nothing; with `http.write_timeout = 0` such a client keeps its connection
-and one worker, but no longer grows the gateway's memory. Not measured: the
-gateway's RSS under many slow clients. `http.response_buffer` is refused on
-`http-direct`.
+The gateway counts each pause. Read `fpmng_gateway_responses_paused_total` for the number of
+pauses. Read `fpmng_gateway_responses_paused` for the number of responses that are paused at
+this time. See [The gateway's own numbers](#the-gateways-own-numbers) (issue #706).
+
+A larger `http.response_buffer` frees a PHP worker earlier for a slow client and costs gateway
+memory per slow client; a smaller one bounds the memory and holds the worker longer. The limit
+is checked after each piece of the response, so one read (16 KiB) can overshoot it, and the
+kernel socket buffers on the client and upstream side come on top. The write timeout above
+still closes a client that reads nothing; with `http.write_timeout = 0` such a client keeps its
+connection and one worker, but no longer grows the gateway's memory. Not measured: the
+gateway's RSS under many slow clients. `http.response_buffer` and `http.response_min_rate` are
+refused on `http-direct`.
+
+`http.response_min_rate` is the minimum-progress rule that closes the trickle-reader path
+`http.response_buffer` opened (issue #705). It is measured over a fixed 5-second window and
+only while the upstream is actually held back, which is the only time the client, and not the
+upstream, is the bottleneck: the client must have drained at least `rate * 5` bytes in the last
+5 seconds, or the connection is closed the same way `http.read_timeout` closes one, and the
+worker's remaining output is drained as if the client had left. A legitimately slow but
+progressing download is therefore kept, however long it takes; only a client that has
+effectively stalled while still consuming a byte now and then is cut. A rate below
+`http.response_buffer / 5` (with the defaults, about 200 KiB/s) is the meaningful range: a
+client that can empty the whole buffer inside one window is never cut, because draining the
+buffer resumes the upstream and stops the clock. `http.write_timeout` remains the limit for a
+client that stops entirely.
 
 Two consequences of holding the worker back, both new with flow control:
 
@@ -124,19 +179,37 @@ Two consequences of holding the worker back, both new with flow control:
   `http.response_buffer = 0` to keep the old behaviour (the gateway buffers
   everything, bounded only by memory). `fpmng-http-gateway-stream-budget.phpt`
   pins both outcomes.
-- **A trickling reader holds a worker.** `http.write_timeout` is a stall timer:
-  it restarts whenever the client takes any bytes, so a client that reads one
-  byte per second is never cut by it. With flow control that client now keeps a
-  PHP worker (or target worker) blocked for as long as it trickles, so a few of
-  them can occupy all of `pm.max_children`. Before this change such a client
-  cost gateway memory only. There is no minimum-progress or total-time limit
-  for a response yet; it is tracked as a follow-up to #596.
+- **A trickling reader no longer holds a worker indefinitely.** `http.write_timeout`
+  is a stall timer: it restarts whenever the client takes any bytes, so a client
+  that reads one byte per second is never cut by it, and with flow control such a
+  client keeps a PHP worker (or target worker) blocked for as long as it trickles
+  -- a few of them can occupy all of `pm.max_children`. `http.response_min_rate`
+  closes that path: while the upstream is held back, a client that drains less
+  than the configured rate over a 5-second window is cut and the worker is
+  released, while a slower but steadily progressing client is kept (see the flow
+  control section above). `fpmng-http-gateway-min-rate.phpt` pins both outcomes.
 
 `http.plain_listen` has the first-request deadline and the keep-alive limit too.
 `http.idle_timeout` is **not** a client timeout: it is the upstream-side timer.
-`http.max_connections` and `http.max_connections_per_client` are not supported
-on a gateway yet and are refused by `php-fpm-ng -t`.
-`http.keepalive_timeout` and `http.write_timeout` are refused on `http-direct`.
+`http.max_connections` is the cap on the client connections that one gateway
+process holds. The cap counts idle keep-alive connections too. With
+`http.gateways = 2`, the pool can hold twice the number. At the cap, the process
+stops accepting: a new client waits in the listen backlog until a connection
+closes. The process does not refuse that client.
+A client that opens a connection and sends no request keeps its slot until
+`http.read_timeout` closes the connection, or until the client closes it. The
+default is `5000`. With `http.read_timeout = 0` no deadline applies, so such a
+client holds its slot until it closes.
+
+`http.max_connections_per_client` caps the connections from one peer address
+inside the process cap. A client over this cap gets one of two answers: the
+process closes the connection without a response, or it sends `503`. A client
+must handle both. Both values must be between 0 and 1000000, and 0 means
+unlimited. The per-client cap requires `http.max_connections` and must not be
+above it. `php-fpm-ng -t` refuses a configuration that breaks these rules.
+`http.keepalive_timeout`, `http.write_timeout`, `http.response_buffer`,
+`http.response_min_rate` and the two `http.upstream_*` timeouts are refused on
+`http-direct`.
 
 `http.operator*` stays in `http.`, on purpose: it does not configure the
 operator listener, it configures what the gateway does with its own port.
@@ -154,6 +227,21 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
+document root `SCRIPT_FILENAME` is built under) and, unless every routed path
+names an existing `.php` file, `http.front_controller` (the fallback script
+for paths that do not). With neither set, every request names a script that
+does not exist and the FastCGI upstream answers "Primary script unknown"; the
+master logs a WARNING saying so at startup.
+
+When every worker of a routed target is busy, the gateway answers `503` +
+`Retry-After` immediately (`http.pool_full_policy = reject`, the default; up to
+100 ms later with `http.gateways > 1` when a sibling gateway process holds the
+workers, see the "Several gateway processes" section of
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md));
+[`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
+`wait` alternative.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
@@ -162,6 +250,294 @@ to a public address), IPv4-mapped IPv6 addresses and other non-loopback targets
 are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
+
+### Access log fields and request id (issue #642)
+
+The gateway writes one line for each request to `http.access_log`. The Combined
+Log Format fields keep their place. The gateway adds these fields after
+`target=`:
+
+```
+203.0.113.7 - - [08/Oct/2026:10:00:00 +0000] "GET /api/items HTTP/1.1" 200 812 "-" "curl/8.5.0" target=api duration_ms=14 upstream_ms=11 request_id=3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b
+```
+
+| Field | Meaning | When it is printed |
+| --- | --- | --- |
+| `duration_ms` | Time from the end of the request read to the write of the line. | Always. `-` when the gateway did not record the start of the request. |
+| `upstream_ms` | Time from the hand-off to a target to the write of the line. | Always. `-` when no target got the request. For example: a ping, a static file, or a `503` sent before the hand-off. |
+| `queue_ms` | Time the request waited for a free worker. This is the same value as the `X-Fpmng-Queue-Wait` header. | Only with `http.pool_full_policy = wait`. `0` when the request did not wait. A request that expires its wait bound logs the whole wait. Other rejections omit the field. |
+| `request_id` | The id of the request. See `http.request_id`. | Only when `http.request_id` is `generate` or `propagate` and the gateway has an id. |
+
+The layout of the line is set by `http.access_format`. See [Access log format](#access-log-format).
+
+`http.request_id` gives one id to each request. The gateway writes the id to the
+access log, sends it to the target, and sends it back to the client:
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.request_id` | `off`: no id. `generate`: the gateway makes a new id for each request. `propagate`: the gateway keeps a valid inbound id from a trusted proxy and makes a new id for every other request. | `off` |
+
+The rules:
+
+- A generated id has 32 lowercase hexadecimal characters. The gateway makes it from 128 random bits from `getentropy()`.
+- With `propagate`, the gateway keeps the inbound `X-Request-Id` header only when the TCP peer of the connection is in `http.trusted_proxies`. The address in `X-Forwarded-For` does not count.
+- An inbound id has 1 to 128 characters. Each character is one of `A-Z`, `a-z`, `0-9`, `.`, `_` or `-`. The gateway replaces any other value with a new id. It never cuts an id.
+- A FastCGI target gets the id in `HTTP_X_REQUEST_ID`. An `http-direct` target gets the id in an `X-Request-Id` header.
+- With `generate` or `propagate`, the gateway does not send the client's `X-Request-Id` header to the target. With `off`, the gateway forwards that header like any other header.
+- The client gets the id in an `X-Request-Id` response header. If the target sends its own `X-Request-Id` header, the gateway id wins.
+
+The default is `off`. With `off`, the gateway sends no `X-Request-Id` header and
+writes no `request_id=` field. `http.request_id` is refused on `http-direct`, as the
+other gateway limits are. The gateway does not read a `traceparent` header. It
+forwards `traceparent` to the target like any other header.
+
+An `http-direct` pool does not make an id. Its `access.format` can print the
+`X-Request-Id` header that the pool receives, with `%{HTTP_X_REQUEST_ID}e`. The pool
+does not check that header. Put the pool behind a gateway with `http.request_id` set,
+or accept the value that the client sends.
+
+Limit: the gateway sends the `X-Request-Id` response header only with the replies that
+it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
+it, because that call clears the response headers first. Examples are `403` and `404`,
+and some `502`, `503` and `504` replies. The pool-full `503` does carry the header,
+because the gateway writes it with `evhttp_send_reply()`. The access log line of such a
+request still has the `request_id=` field.
+
+### Access log format
+
+`http.access_format` sets the layout of each line in `http.access_log`.
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.access_format` | `combined`: the Combined Log Format with the fields above. `json`: one JSON object for each request, with the keys below. | `combined` |
+
+The gateway writes each line with one `write()` call in both layouts. The directive is
+refused on `http-direct`.
+
+With `json`, every line has the same keys in the same order. An unknown value is `null`,
+not `-`. The keys `queue_ms` and `request_id` are `null` when `combined` leaves them out.
+
+This is one line for a request that went to the `api` target:
+
+```
+{"time":"08/Oct/2026:10:00:00 +0000","remote_addr":"203.0.113.7","remote_user":null,"method":"GET","uri":"/api/items","protocol":"HTTP/1.1","status":200,"bytes":812,"referer":null,"user_agent":"curl/8.5.0","target":"api","duration_ms":14,"upstream_ms":11,"queue_ms":null,"request_id":"3f9c2a1e7b4d4f0e9a6c1d2b3e4f5a6b"}
+```
+
+| Key | Type | Value |
+| --- | --- | --- |
+| `time` | string | The request time, in the Combined Log Format form. |
+| `remote_addr` | string or `null` | The client address. |
+| `remote_user` | string or `null` | The user name from the `Authorization` header. |
+| `method` | string or `null` | The request method. |
+| `uri` | string or `null` | The request target. |
+| `protocol` | string | The protocol, for example `HTTP/1.1`. |
+| `status` | number or `null` | The status code. `null` when the connection failed before a response. |
+| `bytes` | number | The body bytes sent. |
+| `referer` | string or `null` | The `Referer` header. |
+| `user_agent` | string or `null` | The `User-Agent` header. |
+| `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
+| `duration_ms` | number or `null` | As in the field table above. |
+| `upstream_ms` | number or `null` | As in the field table above. |
+| `queue_ms` | number or `null` | As in the field table above. `null` where `combined` omits the field. |
+| `request_id` | string or `null` | The request id. `null` where `combined` omits the field. |
+
+The escaping rules for strings:
+
+- A quote and a backslash get a backslash in front.
+- The control bytes `\b`, `\f`, `\n`, `\r` and `\t` use their short escape. Other control bytes use `\u00XX`.
+- A valid UTF-8 sequence stays as it is.
+- A byte that is not valid UTF-8 becomes `\u00XX`, the code point U+00XX. For example, the byte `0xff` becomes `\u00ff`.
+- A value that is too long for the line is cut, so that the line keeps a fixed maximum size. A cut never splits an escape or a UTF-8 sequence.
+
+A JSON line never contains a raw control byte.
+
+### Symlink deploys
+
+With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
+(`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
+document root with `realpath()` on every request that reaches the static-file
+lookup (#638): GET and HEAD for a path that is not `.php` and not a directory.
+Other requests, such as POST or `.php`, do not pay for it. The next
+request after the swap is served from the new release; no reload is needed.
+The containment check compares against the root resolved for that same
+request, so a symlink that leaves the release is still refused.
+
+`DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
+`chdir` path (`/srv/app/current/...`). PHP and OPcache resolve and cache that
+path themselves, so after a swap PHP may keep running the old release until its
+realpath cache (`realpath_cache_ttl`) or its OPcache entry expires, while
+static files already come from the new release. Not measured. A resolved
+variant (like nginx `$realpath_root`) is not implemented. Until it is, reset
+OPcache or reload the FastCGI pool in the deploy step. Also not measured: the
+cost of the extra `realpath()` per request.
+
+`http.front_controller` is checked against the document root only once, at
+startup, so that check stays pinned to the release that was live then.
+
+### Readiness probe: `http.ready_path` (issue #646)
+
+`http.ready_path` sets a path that the gateway answers itself. The gateway
+answers it before it routes the request and before the operator namespace. The
+path follows the same rules as `ping.path`: it starts with `/`, it is at least
+two characters long, and it contains only `[alphanum]/_-.~`. It must differ from
+`ping.path`. The default is off. The probe only reads state. It does not change
+the gateway or any target.
+
+The gateway checks the states in the order of this table. The first state that
+applies gives the answer:
+
+| Order | State | Response |
+| --- | --- | --- |
+| 1 | Draining: a stop or a reload has started | `503 Service Unavailable`, body `draining` |
+| 2 | Starting: no target pool has a child that accepts requests | `503 Service Unavailable`, body `starting` |
+| 3 | No live target: only with `http.ready_require_target = yes`, and no child of any target pool accepts requests | `503 Service Unavailable`, body `no live target` |
+| 4 | Ready | `200 OK`, body `ready` |
+
+**Starting.** The probe answers `starting` until at least one target pool has a
+child that accepts requests. A target with `pm = ondemand` counts as serving at
+once. After a target pool has served once, the probe does not answer `starting`
+again. The probe can still answer `draining` or `no live target` later.
+
+**Draining.** A stop or a reload starts a drain window in each gateway with
+`http.ready_path`. The master sends `SIGUSR1` to these gateways before it
+signals any child of a pool. From then on the probe answers `draining`. The
+gateway keeps its listeners open and keeps serving. A new connection to the
+probe path gets `503 draining`. A new connection to an application route gets
+the answer of its target.
+
+**Length of the window.** The window ends `process_control_timeout` minus 100 ms
+after the start of the stop or the reload. The window does not end early, even
+when no request is in progress. When the window ends, the gateway stops
+accepting new connections and starts its drain. The drain has its own deadline,
+`process_control_timeout` minus 100 ms, counted from the end of the window. The
+gateway exits when no request is in progress, or at that deadline.
+
+**Target pools during the window.** The master does not signal the children of a
+pool that a gateway with `http.ready_path` routes to. Those children keep serving
+until the master signals them. So the application answers new connections during
+the window, as the gateway does. A pool with `pm = ondemand` that has no child
+forks one for a new connection in the window. The master signals the children of
+the other pools at the start of the stop.
+
+The master signals the held children when the last such gateway exits. If such a
+gateway is still alive at `process_control_timeout` after the stop, the master
+signals the children at that time. The signal is the one that the stop or the
+reload sends: `SIGQUIT` for a reload or a graceful stop, `SIGTERM` for a stop
+with `SIGTERM`. After a `SIGQUIT` the master escalates to `SIGTERM`, and after a
+`SIGTERM` to `SIGKILL`, each after another `process_control_timeout`.
+
+**A `SIGTERM` stop cuts in-flight requests.** A child that gets `SIGTERM` stops
+at once. A request that is still running at the release gets `502 Bad Gateway`.
+`docker stop` and the kubelet send `SIGTERM` by default. For a graceful drain,
+set the stop signal to `SIGQUIT`: see the Docker and Kubernetes examples below.
+
+**Time of a stop or a reload.** The window and the drain each last up to
+`process_control_timeout` minus 100 ms. A stop or a reload of such a pool
+therefore takes up to about twice `process_control_timeout`. Set the stop timeout
+of the service manager or the orchestrator above twice `process_control_timeout`.
+
+**The window needs `process_control_timeout`.** The stock value of
+`process_control_timeout` is 0. With this value there is no window, and no child
+is held back. The master stops the gateway at once. The probe does not show
+`draining` for a stop. Set `process_control_timeout` to a number of seconds (the
+examples below use 15s) to get a window. `process_control_timeout` is a
+`[global]` directive. It applies to every pool (see `docs/shutdown-timeouts.md`).
+
+**Signals during the window.** During the window the gateway ignores `SIGQUIT`.
+A `SIGQUIT` that you send by hand does not shorten the window. A gateway without
+a window starts its drain at once when it gets `SIGQUIT`.
+
+**A second stop signal.** A stop or a reload in progress can be overridden by a
+further signal to the master, for example `SIGTERM` after `SIGQUIT`. The further
+signal is not held for the window. The children get it at once, and a request
+that is running then is cut.
+
+**After the window.** When the window ends, the gateway stops accepting new
+connections. The master closes its copy of the listening socket after the
+gateways have exited. Listener inheritance across the exec of a reload is issue
+#661. It is not part of issue #646.
+
+**Startup.** Until at least one target pool has a child that accepts requests,
+the probe answers `starting`. So a `200` does not come before a target serves.
+
+**Require a target.** `http.ready_require_target = yes` makes the probe answer
+`no live target` when no child of any target pool accepts requests. A target
+pool that does not serve does not block `ready` while another target pool
+serves. A target with `pm = ondemand` never counts as dead. The default is `no`.
+The directive needs `http.ready_path`. A `fastcgi` pool refuses both directives.
+An `http-direct` pool refuses `http.ready_path`.
+
+**Operator pages and the plain listener.** The probe answers before the operator
+namespace. Do not set `http.ready_path` to a path under the operator base. The
+plain listener (`http.plain_listen`) does not answer the probe. It answers only
+the HTTP-01 challenge and its redirect to `https`. Use the public listener for
+the probe.
+
+Example for a gateway pool. The `[global]` value gives a stop or a reload a
+window of about 15 s, in which the probe answers `503 draining`:
+
+```ini
+[global]
+process_control_timeout = 15s
+
+[app]
+pool.type = fastcgi
+listen = /run/php-fpm-ng/app.sock
+chdir = /var/www/app
+pm = static
+pm.max_children = 4
+
+[gw]
+pool.type = gateway
+listen = 127.0.0.1:8080
+http.route[app] = /
+http.ready_path = /ready
+```
+
+Example Docker health check and stop signal. The image must contain `curl`.
+`curl -f` exits with an error for a status of 400 or more, so a `503` answer fails
+the check. The probe answers `draining` during a stop, so a check that runs in
+that time fails too. `STOPSIGNAL SIGQUIT` makes `docker stop` send `SIGQUIT` to
+PID 1 of the container, which must be the master. Without it, `docker stop` sends
+`SIGTERM`, and a request still running at the release gets `502`. Start php-fpm-ng
+as PID 1, for example with the exec form of `CMD`. Set the stop timeout above
+twice `process_control_timeout`, for example `docker run --stop-timeout 35` with
+the 15s above. Then Docker does not send `SIGKILL` before the stop ends:
+
+```dockerfile
+STOPSIGNAL SIGQUIT
+HEALTHCHECK --interval=10s --timeout=2s \
+  CMD curl -fsS http://127.0.0.1:8080/ready || exit 1
+```
+
+Example Kubernetes readiness probe and stop signal. Kubernetes counts an answer
+with a status of 400 or more as a failed probe. With `failureThreshold: 1`, one
+`503` marks the pod not ready. The next `200` marks it ready again. When the
+kubelet stops the pod, it sends the container's stop signal to PID 1. That signal
+is `SIGTERM` unless the pod sets `lifecycle.stopSignal`. The `lifecycle.stopSignal`
+field is alpha since Kubernetes 1.33. It needs the `ContainerStopSignals` feature
+gate and `spec.os.name: linux`. This repository did not run this example on a
+cluster. Without the field, a request still running at the release gets `502`.
+Set `terminationGracePeriodSeconds` above twice `process_control_timeout`, so that
+the kubelet does not kill the pod before the stop ends. The value 35 is above
+twice the 15s above:
+
+```yaml
+spec:
+  os:
+    name: linux
+  terminationGracePeriodSeconds: 35
+  containers:
+    - name: app
+      lifecycle:
+        stopSignal: SIGQUIT
+      readinessProbe:
+        httpGet:
+          path: /ready
+          port: 8080
+        periodSeconds: 5
+        failureThreshold: 1
+```
 
 ### What the gateway type refuses
 
@@ -278,6 +654,67 @@ delimited by the upstream closing its connection ends normally. An HTTP/1.0
 client gets a close-delimited reply, which no close can mark as incomplete
 (#533).
 
+Body bytes the gateway has read but not yet written to a slow client are
+**dropped**, not delivered: the close is immediate and there is no drain. The
+access-log byte count is reduced by the unsent output buffer, so the line
+reports what left the process rather than what the gateway had read (#635).
+The subtraction is exact for a `Content-Length` or close-delimited reply; a
+chunked reply's count can be low by the framing of the chunks still pending,
+because that framing sits in the same output buffer as the body.
+## An upstream that ends its reply inside the response head
+
+The same rule one step earlier. The CGI header block is complete only when its
+blank line arrives, so an upstream that stops before it -- a `fastcgi` worker
+killed between writing header lines, a target that closed the connection, a
+FastCGI application that sent `END_REQUEST` without ever closing its block --
+has not answered, only started to. The gateway answers **502 Bad Gateway**, the
+same answer an upstream with no answer at all gets, and the partial block is
+dropped rather than forwarded: it is unterminated, its last line may be half a
+header, and there is no telling where the head stops and the body starts.
+
+The WARNING names how much was buffered (`upstream '<address>' ended its reply
+after N bytes of an unterminated CGI header block; answering 502`), the access
+log records 502, and `fpmng_gateway_requests_total{target=...}` counts the
+request as any other routed request -- it counts requests, not successes.
+
+It is **not** the connection abort described above, and the reason is exactly
+what that section says: an abort is the answer when the reply has already
+started, because the only thing left to send would be the terminator, and
+sending it would make a truncated body look complete. Here nothing of the
+reply is on the wire yet, so a 502 is still truthful and costs the client one
+retry instead of a reseted connection. Measured on 2026-10-06 with
+`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets libevent's
+complete `502` page (`Connection: close`, as for every other gateway-generated
+502, not `Transfer-Encoding: chunked`), while the same reply before the fix was
+`200 OK` with the unfinished header block **as the body**:
+
+```
+HTTP/1.1 200 OK
+Transfer-Encoding: chunked
+...
+2a
+Status: 200 OK
+Content-Type: text/plain
+
+0
+```
+
+An `http.route[]` HTTP target never reaches this branch -- its parser holds an
+unfinished head in its own buffer, so `fpm_http_start_reply()` is not reached,
+`c->cgi_headers` stays empty and the no-answer 502 answers it. That transport
+logs the truncation itself (`upstream '<address>' closed in the middle of the
+response head`) before the same 502 (#463, transport #462). The two transports
+now agree, which is what the FastCGI branch above was the odd one out about
+(#636).
+
+A header block above `FPM_HTTP_MAX_CGI_HEADERS` (64 KiB) with no blank line in
+sight is a different case and keeps its own answer: `fpm_http_stdout()` gives up
+on it being a header block and hands the buffer to the body as-is, so it is
+served as a `200` whose body is the block. Measured on 2026-10-06: a 120016-byte
+block in two `FCGI_STDOUT` records came back as `HTTP/1.1 200 OK` with the whole
+block as the body. It is the same class of problem as this section and wants
+the same decision taken on purpose; it is not changed here.
+
 ## Upstream status counters on keep-alive
 
 The gateway always sends `FCGI_KEEP_CONN`, so a `fastcgi` upstream hits the
@@ -293,11 +730,13 @@ allocates in `.init_main`, before the first fork. It holds two kinds of data,
 and the difference is the point:
 
 - **Pool-wide monotonic counters** -- the baseline `requests` and ping totals,
-  and the per-target request/rejection counts. Every gateway process bumps them
+  the per-target request/rejection counts, and the paused-response total
+  (issue #706). Every gateway process bumps them
   with cmp-set atomics and no locking, and they **survive a respawned gateway
   process**: the segment belongs to the pool, not the process.
-- **Per gateway process gauges** -- `connections_open` and the per-target
-  `upstreams_used`. Each process writes only its own block, the renderer
+- **Per gateway process gauges** -- `connections_open`, `responses_paused`
+  (issue #706) and the per-target `upstreams_used`. Each process writes only
+  its own block, the renderer
   **sums** every block (the #333 live-gauges shape), and the master **zeroes a
   dead process's block** in `fpm_http_gateway_on_exit()`. A gauge is "currently
   open", and a process killed with connections open runs no close callback, so
@@ -327,17 +766,34 @@ equals the sum of the target rows below. Its own series label a **target**:
 | `fpmng_gateway_upstreams_max` | a routed pool | the target's own `pm.max_children` |
 | `fpmng_gateway_requests_total` | `operator` | operator pages forwarded through `http.operator` (#389) |
 | `fpmng_gateway_requests_total` | `-` | requests the gateway answered itself (ping, static, ACME, 404, 403) |
+| `fpmng_gateway_request_duration_seconds` (histogram) | a routed pool, `operator` or `-` | the duration of each answered request, see below |
 
 `fpmng_gateway_connections_open{pool="<gw>"}` and
 `fpmng_gateway_ping_total{pool="<gw>"}` are the numbers no target owns: the
 first is the per-process sum described above, the second a pool-wide counter.
+`fpmng_gateway_responses_paused{pool="<gw>"}` and
+`fpmng_gateway_responses_paused_total{pool="<gw>"}` (issue #706) count the flow
+control of `http.response_buffer`. The gauge is the paused responses of all
+gateway processes, summed as above. The counter rises by one each time a
+response pauses its upstream. Neither series has a `target` label, because a
+pause is counted for the whole pool.
+
+`fpmng_gateway_request_duration_seconds` (issue #652) is a Prometheus histogram for each `target`. The `le` buckets are the Prometheus client defaults: 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 and 10 seconds, and `+Inf`. Each target has a `_bucket` series for each `le`, a `_sum` series in seconds, and a `_count` series. The `_count` series equals the `+Inf` bucket.
+
+The duration starts when the gateway reads the whole request. The duration ends when the gateway finishes the response. The gateway finishes the response when the target sends its whole answer. The duration includes the wait for a free connection to the target. A paused upstream delays the end, so a slow client can make a duration longer. The duration does not wait for the client to read the bytes that are still in the output buffer.
+
+The histogram counts a request once, when its response finishes. A client that closes the connection early counts in `fpmng_gateway_requests_total`, but not in the histogram. The access log has no line for such a request either. The `-` target also counts the ping answers and the answers of the plain listener (`http.plain_listen`).
+
+`fpmng_gateway_requests_total` counts a request when it arrives. So a request that is still running is in the counter, but not yet in the histogram. When no request is running, `_count` equals `fpmng_gateway_requests_total` for each target, except for a client that closed early.
+
 The `/metrics` page also carries an **index**: one
 `fpmng_gateway_exposed_pool{pool="<pool>",metrics="<base>/<pool>",status="<base>/<pool>"} 1`
 line per pool the gateway forwards for (#389), so a scraper that found the
 gateway knows where `<base>/<pool>` points. It is a discovery aid, not an
 aggregate of their series; that endpoint was removed in #278 and stays removed.
 `/status` on the gateway is the same numbers as JSON, one row per target plus a
-pool row, in the generic `{"pools":[...]}` shape.
+pool row, in the generic `{"pools":[...]}` shape. The pool row also has the keys
+`responses_paused` and `responses_paused_total` (issue #706).
 
 Only the monotonic counters survive a respawned gateway; the gauges are
 reconciled when a process dies, and the whole segment is rebuilt by a reload:

@@ -362,7 +362,7 @@ void fpm_http_direct_access_log_write(struct fpm_http_direct_access_log_s *log,
 		return;
 	}
 	for (i = 0; i < log->suppress_count; i++) {
-		if (entry->uri && !strcmp(entry->uri, log->suppress[i])) {
+		if (entry->match_path && !strcmp(entry->match_path, log->suppress[i])) {
 			return;
 		}
 	}

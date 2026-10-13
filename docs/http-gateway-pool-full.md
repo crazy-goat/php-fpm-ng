@@ -3,7 +3,9 @@
 When a gateway's shared upstream budget (`gw->upstreams_used` vs.
 `gw->max_upstreams`) is exhausted, `fpm_http_pump_once()` answers a queued
 request `503` + `Retry-After: 1` immediately (`FPM_HTTP_SERVICE_UNAVAIL`,
-`sapi/fpmng/fpm/fpm_http.c`). That remains the default for every pool. This
+`sapi/fpmng/fpm/fpm_http.c`), or after up to 100 ms when `http.gateways > 1`
+and a sibling process holds the workers (see "Several gateway processes"
+below). That remains the default for every pool. This
 document covers the opt-in alternative: instead of rejecting the instant the
 budget is full, hold the request on `gw->waiting` for a bounded time and
 dispatch it if an upstream frees up in time.
@@ -31,6 +33,27 @@ config validation (`fpm_http_validate_pool()`) refuses startup if either is
 `<= 0`, rather than silently treating a misconfigured pool as unbounded. An
 unbounded queue or an unbounded wait is exactly the slowloris/hoarding hazard
 the 503 exists to avoid.
+
+## Several gateway processes (issue #735)
+
+The budget is shared by all `http.gateways` processes, but each process keeps
+its own persistent upstream connections, and an idle connection pins a worker
+until `http.idle_timeout`. A process that finds the budget held by its siblings
+bumps a per-target reclaim counter in shared memory. Every gateway process
+checks it on a 10 ms timer (only while it has connections or queued requests,
+and only when `http.gateways > 1`) and closes its idle connections to that
+target, then retries its own queue (`fpm_http_tick()`,
+`sapi/fpmng/fpm/fpm_http.c`).
+
+- With `wait`, a queued request is therefore dispatched within about two ticks
+  after a sibling's idle connection is closed, not after `http.pool_full_wait_ms`.
+- With the default `reject`, a request that finds the budget held by a sibling
+  waits up to 100 ms (`FPM_HTTP_RECLAIM_GRACE_MS`) for that reclaim before the
+  503. A pool whose budget is held only by this process still answers 503 at
+  once. A pool whose siblings hold only busy connections answers 503 after the
+  100 ms.
+- A reclaim closes idle connections, so under contention the gateways reconnect
+  more often. `http.gateways = 1` is not affected.
 
 ## When to opt in
 

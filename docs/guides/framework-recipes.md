@@ -146,19 +146,17 @@ session and cache drivers because the box had no database.
 
 ```php
 <?php
-// A cron pool runs this file without a CLI argv, and Laravel's console reads it.
-$_SERVER['argv'] = ['artisan', 'schedule:run'];
-$_SERVER['argc'] = 2;
-$_SERVER['PHP_SELF'] = 'artisan';
-
 require __DIR__.'/../vendor/autoload.php';
 $app = require __DIR__.'/../bootstrap/app.php';
 $kernel = $app->make(Illuminate\Contracts\Console\Kernel::class);
 exit($kernel->call('schedule:run'));
 ```
 
-Without the three `$_SERVER` lines the run fails with `Undefined array key
-"PHP_SELF"` from Symfony's `DumpCompletionCommand` (observed, Laravel 13.34.0).
+A cron or supervisor script sees the same `$_SERVER['argv']`, `argc`, `PHP_SELF`
+and `SCRIPT_FILENAME` as a CLI script (`argv[0]` is the script path), which
+Laravel's console reads. Older versions did not define them and the run failed
+with `Undefined array key "PHP_SELF"`; they needed three `$_SERVER` lines in
+this file.
 
 ## Two traps in `env[...]`
 

@@ -1,6 +1,7 @@
 --TEST--
 fpm-ng: supervisor.start_jitter/supervisor.restart_jitter spread cold starts and
-restarts within bounds, without breaking restart_max/backoff accounting (issue #323)
+restarts within bounds, without breaking restart_max/backoff accounting (issue #323),
+and every copy of a pool makes its first start without a sibling's backoff (issue #734)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --ENV--
@@ -25,36 +26,45 @@ require_once "fpmng-operator.inc";
  * last_start is whole seconds of the scaled clock, so every figure below has
  * one second of quantisation, and the bounds allow for it.
  *
- * Four pools, one FPM instance, run concurrently so this test pays FPM's
+ * Five pools, one FPM instance, run concurrently so this test pays FPM's
  * startup/shutdown cost once:
  *
  *   ref    -- supervisor.restart = never, script exits 0. Starts at once, with
  *             no jitter: its last_start is the master's own "pool start" on
  *             the scaled clock, the zero the cold offsets are measured from
  *             (the test process has no way to read that clock).
- *   cold   -- supervisor.processes = 4, supervisor.start_jitter = 9, restart =
- *             on-failure, script always exits 1. restart = never is
- *             deliberately NOT used here: shared->terminal (the "stop
- *             restarting this pool" flag apply_policy sets) is pool-wide, not
- *             per-copy, so the instant the fastest of the 4 copies finished
- *             its one-and-only run, the other 3 -- some of them possibly
- *             still waiting out their own start_jitter delay -- would see
- *             shared->terminal already set and park without ever running
- *             their script at all (see fpm_pool_supervisor_child_main()'s
- *             top-of-loop check). restart = on-failure with an always-failing
- *             script keeps every copy retrying instead, so terminal is never
- *             set pool-wide and all 4 copies get to run. restart_delay is
- *             600 so that, once the first copy fails, no copy starts a SECOND
- *             time inside the test: last_start is one pool-wide stamp, and the
- *             distinct values it takes while the 4 copies cold-start are the
- *             4 first-run seconds, polled fast enough (every 25 ms of real
- *             time, against a one-second resolution) not to miss one.
- *             Checks: all 4 copies eventually start, each one's start falls
- *             inside [0, start_jitter] of ref's plus generous slack, and they
- *             do not all land on the same second (the regression this test
- *             exists for: a rand()/srand() implementation would give every
- *             child forked from the same master the identical "random" delay
- *             -- see fpm_pool_supervisor_jitter()'s comment).
+ *   cold   -- supervisor.processes = 4, supervisor.start_jitter = 0, restart =
+ *             on-failure, script always exits 1 at once. Checks: all 4 copies
+ *             make their first start, each within [0, slack] of ref's (issue
+ *             #734). With no start_jitter, a copy runs its script as soon as
+ *             it reaches its loop, so the first copy's failure comes early.
+ *             A copy that reaches its loop after that failure used to wait out
+ *             the pool-wide 600 s backoff before its first start, and its
+ *             stamp lands near 600 -- far outside the bound. This is the pool
+ *             that catches the bug: with no start_jitter, the first failure
+ *             comes early, so the window in which the bug can happen stays open.
+ *             restart = never is deliberately NOT used here: shared->terminal
+ *             (the "stop restarting this pool" flag apply_policy sets) is
+ *             pool-wide, not per-copy, so the instant the fastest copy finished
+ *             its one-and-only run, the other 3 would see shared->terminal
+ *             already set and park without ever running their script at all
+ *             (see fpm_pool_supervisor_child_main()'s top-of-loop check).
+ *             restart = on-failure with an always-failing script keeps every
+ *             copy retrying instead, so terminal is never set pool-wide.
+ *             restart_delay is 600 so that, once the first copy fails, no copy
+ *             starts a SECOND time inside the test: last_start is one pool-wide
+ *             stamp, and the distinct values it takes while the 4 copies
+ *             cold-start are the first-run seconds, polled fast enough (every
+ *             25 ms of real time, against a one-second resolution) not to miss
+ *             one.
+ *   spread -- supervisor.processes = 4, supervisor.start_jitter = 9, same
+ *             script shape. Checks: each start falls inside [0, start_jitter +
+ *             slack] of ref's, and the copies do not all land on the same
+ *             second (the regression this check exists for: a rand()/srand()
+ *             implementation would give every child forked from the same master
+ *             the identical "random" delay -- see fpm_pool_supervisor_jitter()'s
+ *             comment). The jitter delays the first failure, so this pool
+ *             rarely hits the issue #734 window; the cold pool covers that.
  *   rjsec  -- supervisor.restart_jitter = 6 (plain seconds), restart_delay =
  *             restart_delay_max = 2 (fixed, no exponential growth to
  *             untangle), restart = always, script always fails. Checks: the
@@ -80,30 +90,30 @@ $work = sys_get_temp_dir() . '/fpmng-sup-jitter-' . getmypid();
 @mkdir($work, 0700, true);
 
 $coldLog = "$work/cold-runs.log";
+$spreadLog = "$work/spread-runs.log";
 @unlink($coldLog);
+@unlink($spreadLog);
 
-/* The cold pool only needs to say "I started": one APPENDED pid line per run,
- * LOCK_EX so four concurrent copies never interleave a partial line. It is
- * how the test knows all 4 first starts have happened, and carries no time.
+/* The cold and spread pools only need to say "I started": one APPENDED pid line
+ * per run, LOCK_EX so four concurrent copies never interleave a partial line.
+ * It is how the test knows all 4 first starts have happened, and carries no
+ * time.
  *
- * Each copy then WAITS until all 4 lines are there before it exits 1. Without
- * that, a copy that drew a start delay of 0 could run and fail while a sibling
- * had not yet reached the top of its loop; the failure sets the pool-wide
- * next_allowed_start (restart_delay = 600 below), and that sibling would then
- * wait out the 600 seconds instead of its start_jitter draw -- seen as one run
- * in four on the test box. The 30 s wait is real time and only ever a bound on
- * a hang. */
+ * Each copy exits 1 at once, like any failing script. A failure sets the
+ * pool-wide backoff (restart_delay = 600 below). A copy whose first start came
+ * after a sibling's failure waited out those 600 seconds before its own first
+ * start (issue #734). The cold pool has no start_jitter, so its copies reach
+ * their first run at once, and this window is what the cold pool checks. */
 file_put_contents("$work/cold.php", <<<PHP
 <?php
 error_reporting(0);
 @file_put_contents('{$coldLog}', getmypid() . "\\n", FILE_APPEND | LOCK_EX);
-for (\$i = 0; \$i < 600; \$i++) {
-    \$lines = @file('{$coldLog}', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    if (\$lines !== false && count(\$lines) >= 4) {
-        break;
-    }
-    usleep(50000);
-}
+exit(1);
+PHP);
+file_put_contents("$work/spread.php", <<<PHP
+<?php
+error_reporting(0);
+@file_put_contents('{$spreadLog}', getmypid() . "\\n", FILE_APPEND | LOCK_EX);
 exit(1);
 PHP);
 file_put_contents("$work/ref.php", "<?php\nexit(0);\n");
@@ -141,9 +151,20 @@ supervisor.processes = 4
 supervisor.restart = on-failure
 supervisor.restart_delay = 600
 supervisor.restart_delay_max = 600
-supervisor.start_jitter = $startJitter
+supervisor.start_jitter = 0
 operator.status_listen = {{ADDR[operator]}}
 operator.status_path = /cold-status
+
+[spread]
+pool.type = supervisor
+supervisor.script = $work/spread.php
+supervisor.processes = 4
+supervisor.restart = on-failure
+supervisor.restart_delay = 600
+supervisor.restart_delay_max = 600
+supervisor.start_jitter = $startJitter
+operator.status_listen = {{ADDR[operator]}}
+operator.status_path = /spread-status
 
 [rjsec]
 pool.type = supervisor
@@ -176,7 +197,7 @@ function poolStatus(string $operator, string $pool): array
     return $json['pools'][0];
 }
 
-function coldRunCount(string $log): int
+function runCount(string $log): int
 {
     return is_file($log) ? count(file($log, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES)) : 0;
 }
@@ -216,15 +237,18 @@ try {
     $refStart = 0;
     $coldStarts = [];
     $coldDone = false;
+    $spreadStarts = [];
+    $spreadDone = false;
     $rjSecStarts = [];
     $rjSecFailures = null;
     $rjPctStarts = [];
     $deadline = time() + 80;
     do {
-        /* Read the marker BEFORE the status: a copy writes shared->last_start
+        /* Read the markers BEFORE the statuses: a copy writes shared->last_start
          * before its script runs, so once the marker shows 4 runs, the status
          * read just below already includes all 4 stamps. */
-        $coldComplete = coldRunCount($coldLog) >= 4;
+        $coldComplete = runCount($coldLog) >= 4;
+        $spreadComplete = runCount($spreadLog) >= 4;
         if ($refStart === 0) {
             $refStart = poolStatus($operator, 'ref')['last_start'] ?? 0;
         }
@@ -235,6 +259,13 @@ try {
             }
             $coldDone = $coldComplete;
         }
+        if (!$spreadDone) {
+            $start = poolStatus($operator, 'spread')['last_start'] ?? 0;
+            if (is_int($start) && $start > 0 && !in_array($start, $spreadStarts, true)) {
+                $spreadStarts[] = $start;
+            }
+            $spreadDone = $spreadComplete;
+        }
         if (count($rjSecStarts) < 7) {
             $status = poolStatus($operator, 'rjsec');
             if (recordStart($rjSecStarts, $status['last_start'] ?? 0) && count($rjSecStarts) === 7) {
@@ -244,37 +275,54 @@ try {
         if (count($rjPctStarts) < 4) {
             recordStart($rjPctStarts, poolStatus($operator, 'rjpct')['last_start'] ?? 0);
         }
-        if ($refStart > 0 && $coldDone && count($rjSecStarts) >= 7 && count($rjPctStarts) >= 4) {
+        if ($refStart > 0 && $coldDone && $spreadDone && count($rjSecStarts) >= 7 && count($rjPctStarts) >= 4) {
             break;
         }
         usleep(25000);
     } while (time() < $deadline);
 
-    /* --- cold: supervisor.start_jitter --- */
+    /* --- cold: no start_jitter (issue #734) --- */
     if (!$coldDone || $refStart === 0) {
-        echo "FAIL: cold pool only produced " . coldRunCount($coldLog) . "/4 cold starts (ref start $refStart)\n";
+        echo "FAIL: cold pool only produced " . runCount($coldLog) . "/4 cold starts (ref start $refStart)\n";
         $tester->close(true);
         exit(1);
     }
-    $offsets = array_map(static fn ($t) => $t - $refStart, $coldStarts);
+    $coldOffsets = array_map(static fn ($t) => $t - $refStart, $coldStarts);
     /* -1: ref and the cold copies are forked a few ms apart, which can straddle
-     * a second boundary of the whole-second stamp. */
-    if (min($offsets) < -1 || max($offsets) > $startJitter + $slack) {
-        echo "FAIL: cold start offset(s) outside [-1, start_jitter + slack]: " . implode(',', $offsets) . "\n";
+     * a second boundary of the whole-second stamp. A copy whose first start was
+     * held back by the restart_delay backoff set by a sibling's failure (issue
+     * #734) shows up here as an offset near 600, because the copies are polled
+     * until all 4 have run. */
+    if (min($coldOffsets) < -1 || max($coldOffsets) > $slack) {
+        echo "FAIL: cold start offset(s) outside [-1, slack]: " . implode(',', $coldOffsets) . "\n";
         $tester->close(true);
         exit(1);
     }
-    if (count($coldStarts) < 2) {
+    echo "cold start bounded: ok\n";
+
+    /* --- spread: supervisor.start_jitter = 9 --- */
+    if (!$spreadDone) {
+        echo "FAIL: spread pool only produced " . runCount($spreadLog) . "/4 starts\n";
+        $tester->close(true);
+        exit(1);
+    }
+    $spreadOffsets = array_map(static fn ($t) => $t - $refStart, $spreadStarts);
+    if (min($spreadOffsets) < -1 || max($spreadOffsets) > $startJitter + $slack) {
+        echo "FAIL: spread start offset(s) outside [-1, start_jitter + slack]: " . implode(',', $spreadOffsets) . "\n";
+        $tester->close(true);
+        exit(1);
+    }
+    if (count($spreadStarts) < 2) {
         /* The regression this guards: a rand()/srand()-based implementation
          * seeds once, in whichever process (often the master) calls it
          * first, and every child forked afterwards inherits that exact
          * sequence position -- all 4 copies would then start in the same
          * second regardless of start_jitter. */
-        echo "FAIL: cold starts did not spread out (all in second " . $coldStarts[0] . ")\n";
+        echo "FAIL: spread starts did not spread out (all in second " . $spreadStarts[0] . ")\n";
         $tester->close(true);
         exit(1);
     }
-    echo "cold start bounded and spread: ok\n";
+    echo "start_jitter spread bounded and varying: ok\n";
 
     /* --- rjsec: supervisor.restart_jitter = 6 (seconds) ---
      * 7 runs (6 gaps), not 4 (3 gaps): with an integer jitter drawn from 7
@@ -340,14 +388,17 @@ try {
     $tester->terminate();
     $tester->close();
     @unlink($coldLog);
+    @unlink($spreadLog);
     @unlink("$work/cold.php");
+    @unlink("$work/spread.php");
     @unlink("$work/ref.php");
     @unlink("$work/fail.php");
     @rmdir($work);
 }
 ?>
 --EXPECT--
-cold start bounded and spread: ok
+cold start bounded: ok
+start_jitter spread bounded and varying: ok
 restart_jitter (seconds) bounded and varying: ok
 restart_max/backoff accounting unaffected: ok
 restart_jitter (percentage) bounded: ok

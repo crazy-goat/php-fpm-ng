@@ -27,6 +27,21 @@ start_pre() {
 reload() {
 	# SIGUSR2 is FPM's reload: the master re-reads the configuration and
 	# replaces its children.
+	#
+	# The -t first is the configuration test the master itself runs anyway
+	# (issue #640): it refuses a SIGUSR2 reload whose configuration does not
+	# load and keeps the pools that are running. Without this check `rc-service
+	# php-fpm-ng reload` would report success on a configuration the master
+	# silently declined to load, and the reason would be only in the master's
+	# log. The test's own diagnostics go to stderr, which is where the operator
+	# running rc-service is looking (measured: exit 78). $command_args is
+	# deliberately unquoted: it is this script's own word list, and OpenRC hands
+	# it to start-stop-daemon the same way.
+	# shellcheck disable=SC2086
+	if ! "$command" $command_args -t ; then
+		eend 1
+		return 1
+	fi
 	ebegin "Reloading $name"
 	supervise-daemon "$name" --signal USR2
 	eend $?

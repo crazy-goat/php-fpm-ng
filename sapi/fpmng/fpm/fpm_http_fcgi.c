@@ -12,7 +12,6 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -58,6 +57,7 @@
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_children_extra.h"
 #include "fpm_pool_type.h"
 #include "fpm_tls_http.h"
@@ -517,12 +517,17 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	have_authority = fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) > 0;
 	saw_host = 0;
 
-	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES> */
+	/* "Content-Type: x" -> CONTENT_TYPE, anything else -> HTTP_<UPPER_WITH_UNDERSCORES>.
+	 * The skip rules, the length bound and the upper-casing live in
+	 * fpm_http_header_cgi_key() (fpm_http_header_cgi.h), shared with
+	 * fpm_http_direct_build_env(); the gateway maps Content-Type inline, so
+	 * content_type_skip is 0 here. */
 	TAILQ_FOREACH(header, evhttp_request_get_input_headers(req), next)
 	{
-		smart_str name = { 0 };
+		char key[FPM_HTTP_HEADER_CGI_KEY_LEN];
 		const char *k = header->key;
 		const char *value = header->value;
+		int rc;
 
 		if (strcasecmp(k, "Host") == 0) {
 			saw_host = 1;
@@ -530,73 +535,32 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 				value = authority;
 			}
 		}
-
-		/* Content-Length is already above under its CGI name; "Proxy" has no
-		 * CGI meaning at all and HTTP_PROXY is read as an outbound proxy by
-		 * several client libraries (httpoxy, CVE-2016-5385), which is why
-		 * fpm_http_direct_build_env() refuses it too. Core deletes the key
-		 * from $_SERVER again -- or, when the process itself has an HTTP_PROXY
-		 * environment variable, overwrites it with that value
-		 * (check_http_proxy(), main/php_variables.c:861-874 in php-8.5.9) --
-		 * so the gateway was not exploitable through $_SERVER before this
-		 * line: measured on 192.168.8.50, 2026-09-09, `Proxy: attacker`
-		 * produced no HTTP_PROXY on either pool type. It still reached the
-		 * worker as a FastCGI parameter though, and getallheaders() reads
-		 * those directly, not $_SERVER (sapi/fpm/fpm_main.c
-		 * PHP_FUNCTION(apache_request_headers) -> fcgi_loadenv): same box, a
-		 * gateway built without this exclusion answered
-		 * {"proxy":"attacker", ...} with $_SERVER['HTTP_PROXY'] absent. The
-		 * exclusion is here so that a header this transport's sibling refuses
-		 * by name does not arrive because someone else's mitigation happens to
-		 * cover one of the ways to read it. Issue #115. */
-		if (strcasecmp(k, "Content-Length") == 0 || strcasecmp(k, "Proxy") == 0) {
+		/* Issue #642: with http.request_id on, the client's X-Request-Id is
+		 * never forwarded. The gateway's own id replaces it, below. */
+		if (c->gw->request_id_mode != FPM_HTTP_REQUEST_ID_OFF && strcasecmp(k, "X-Request-Id") == 0) {
 			continue;
 		}
-		/* A name with "_" would collide with its "-" spelling: the mapping below
-		 * turns "-" into "_", so "X_Real_IP" and "X-Real-IP" both become
-		 * HTTP_X_REAL_IP, and the last pair on the wire wins in $_SERVER
-		 * (fcgi_hash_set replaces an existing key). A client could then
-		 * override a header the reverse proxy in front set. nginx (default
-		 * underscores_in_headers off) and Apache 2.4 drop such headers when
-		 * they build the CGI environment; the gateway is the front server for
-		 * this hop, so it does the same. Same rule in
-		 * fpm_http_direct_build_env(). Issue #595. */
-		if (strchr(k, '_') != NULL) {
+
+		rc = fpm_http_header_cgi_key(k, false, key, sizeof(key));
+		if (rc < 0) {
+			return HTTP_BADREQUEST; /* unreachable: the pre-scan above bounds every name */
+		}
+		if (rc > 0) {
 			continue;
 		}
-		if (strcasecmp(k, "Content-Type") != 0) {
-			smart_str_appendl(&name, "HTTP_", sizeof("HTTP_") - 1);
-		}
-		/* Explicit range, not toupper(): the CGI key a header lands under is a
-		 * security boundary -- the Content-Length exclusion above is enforced by
-		 * name -- so the mapping must not depend on LC_CTYPE. Measured on
-		 * 192.168.8.50, glibc 2.43, 2026-09-09: in tr_TR.UTF-8 and az_AZ.UTF-8
-		 * toupper('i') returns 'i' (the Turkish capital of 'i' is U+0130, which
-		 * does not fit the single-byte table), so "If-Modified-Since" would
-		 * become HTTP_IF_MODiFiED_SiNCE; de_DE.ISO-8859-1 remaps 30 bytes above
-		 * 0x7F. Nothing calls setlocale() in the gateway process today -- it
-		 * translates HTTP to FastCGI and never executes application PHP -- but
-		 * that is an argument about when this code runs, not about what it
-		 * computes. Same mapping as fpm_http_direct_build_env(), issue #109;
-		 * #105 replaced the identical construct there. */
-		for (; *k; k++) {
-			unsigned char ch = (unsigned char) *k; /* not `c`: that is this connection */
-
-			if (ch >= 'a' && ch <= 'z') {
-				smart_str_appendc(&name, (char) (ch - ('a' - 'A')));
-			} else {
-				smart_str_appendc(&name, ch == '-' ? '_' : (char) ch);
-			}
-		}
-		smart_str_0(&name);
-		fpm_http_param(c, ZSTR_VAL(name.s), value);
-		smart_str_free(&name);
+		fpm_http_param(c, key, value);
 	}
 
 	/* No Host header at all: the authority still defines the host (RFC 9112
 	 * 3.2.2), same as the Host line the http transport sends. */
 	if (have_authority && !saw_host) {
 		fpm_http_param(c, "HTTP_HOST", authority);
+	}
+
+	/* Issue #642: the request id, as HTTP_X_REQUEST_ID (the name a CGI
+	 * environment gives X-Request-Id). Empty when the id could not be made. */
+	if (c->client && c->client->request_id[0]) {
+		fpm_http_param(c, "HTTP_X_REQUEST_ID", c->client->request_id);
 	}
 
 	if (c->params_oversize) {
@@ -645,6 +609,19 @@ void fpm_http_conn_free(fpm_http_conn *c)
 		event_free(c->wait_timer);
 		c->wait_timer = NULL;
 	}
+	/* Issue #705: the minimum-rate check is per response; every path that
+	 * frees the request frees it here. fpm_http_response_resume() has already
+	 * stopped it on the paths that call it; event_free() also removes a timer
+	 * that is still pending. */
+	if (c->minrate_timer) {
+		event_free(c->minrate_timer);
+		c->minrate_timer = NULL;
+	}
+	/* Issue #706: the paused-responses gauge is taken back here as well as in
+	 * fpm_http_response_resume(), because fpm_http_finish_truncated() frees a
+	 * request without resuming it. This does not re-arm the upstream: the
+	 * callers that free a request this way drop the upstream themselves. */
+	fpm_http_response_unpause(c);
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);
@@ -652,56 +629,6 @@ void fpm_http_conn_free(fpm_http_conn *c)
 	 * request. NULL for every routed request. */
 	free(c->upstream_uri_owned);
 	free(c);
-}
-
-/* Issue #594: a CGI "Status:" value is "NNN" or "NNN reason", exactly three
- * digits, and only a final status (200..599, fpm_http_direct_status_final())
- * may become the status line. atoi() turned "abc" into 0, "99999" into itself
- * and overflowed on a longer number; a 1xx went out as the *final* answer, its
- * body dropped by libevent, and the client waited for a response that never
- * came (the shape of #451). *reason points into `value`, "" when absent.
- *
- * Issue #605: the reason goes out on the wire verbatim
- * (evhttp_send_reply_start() frames whatever it is given), so it must not
- * carry control bytes: an interior CR would split the status line, and
- * anything below 0x20 or DEL has no business in a reason phrase. A bad
- * reason is rejected (502, like a bad code) rather than stripped: stripping
- * would silently rewrite what the upstream said, while the invalid_status
- * path already logs the offending value, maps to 502 in the access log and
- * drops the rest of the untrusted reply. The scan runs over all vlen bytes
- * because `value` is strndup()ed: an embedded NUL would hide the tail from a
- * strlen()-bounded loop while truncating the strdup() below, and '\n' cannot
- * arrive at all (the caller splits lines on it), but '\r' (only the trailing
- * one is stripped), NUL and the other controls can, from any non-PHP
- * FastCGI upstream -- PHP's own header() already refuses CR, LF and NUL.
- * The WARNING below names only the first 64 bytes up to any NUL; that
- * truncation is accepted because the 502 decision does not depend on the
- * logged text. */
-static bool fpm_http_parse_cgi_status(const char *value, size_t vlen, int *code, const char **reason)
-{
-	size_t i;
-
-	if (vlen < 3 || !isdigit((unsigned char) value[0]) || !isdigit((unsigned char) value[1]) ||
-			!isdigit((unsigned char) value[2])) {
-		return false;
-	}
-	if (vlen == 3) {
-		*reason = "";
-	} else {
-		if (value[3] != ' ') {
-			return false;
-		}
-		for (i = 4; i < vlen; i++) {
-			unsigned char ch = (unsigned char) value[i];
-
-			if (ch < 0x20 || ch == 0x7f) {
-				return false;
-			}
-		}
-		*reason = value + 4;
-	}
-	*code = (value[0] - '0') * 100 + (value[1] - '0') * 10 + (value[2] - '0');
-	return fpm_http_direct_status_final(*code);
 }
 
 /* The CGI header block is complete: "Status:" becomes the status line, the rest is copied. */
@@ -733,6 +660,17 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			key = strndup(line, klen);
 			value = strndup(v, vlen);
 			if (strcasecmp(key, "Status") == 0) {
+				/* Issue #605: a bad value is rejected with 502 through
+				 * invalid_status below, which keeps the rest of the untrusted
+				 * reply from being forwarded. The value is strndup()ed, so an
+				 * embedded NUL would truncate the strdup() of the reason;
+				 * fpm_http_parse_cgi_status() scans all vlen bytes for that
+				 * reason. '\n' cannot reach the parser (lines are split on it),
+				 * but '\r' (only the trailing one is stripped), NUL and other
+				 * controls can, from any non-PHP FastCGI upstream. The WARNING
+				 * names only the first 64 bytes up to any NUL; that truncation
+				 * is accepted because the 502 decision does not depend on the
+				 * logged text. */
 				const char *parsed_reason;
 
 				free(reason);
@@ -745,6 +683,10 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 							c->gw->pool, value);
 					invalid_status = true;
 				}
+			} else if (c->client && c->client->request_id[0] && strcasecmp(key, "X-Request-Id") == 0) {
+				/* Issue #642: the gateway's own id is already on this response
+				 * (fpm_http_client_request_id_assign()). A second copy from the
+				 * target would be a second, conflicting id. */
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -765,6 +707,9 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 
 		evhttp_clear_headers(out);
 		evhttp_add_header(out, "Content-Type", "text/plain");
+		if (c->client && c->client->request_id[0]) { /* issue #642: the clear above dropped it */
+			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
+		}
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		evbuffer_add_printf(msg, "Bad Gateway\n");
 		c->bytes_out += evbuffer_get_length(msg);
@@ -849,6 +794,33 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
 	struct bufferevent *bev = evcon ? evhttp_connection_get_bufferevent(evcon) : NULL;
 	evutil_socket_t fd = bev ? bufferevent_getfd(bev) : -1;
 
+	/* Issue #635: the shutdown() below discards whatever is still in the
+	 * client's output buffer, but bytes_out counts every body byte handed to
+	 * libevent, so the access log used to claim bytes the client never got.
+	 * The buffer is a FIFO and the body is appended after the status line and
+	 * headers, so a pending tail of at most bytes_out is all body: the body
+	 * actually handed to the kernel is bytes_out - pending, clamped at zero
+	 * (pending >= bytes_out means nothing but the head of the reply, headers
+	 * and all, is still queued). A chunked reply carries its per-chunk framing
+	 * in the same buffer, so its count can be low by the framing of the chunks
+	 * still pending; a Content-Length or close-delimited reply is exact.
+	 *
+	 * A TLS client's ciphertext already handed to the SSL filter but not yet
+	 * written to the socket sits in the bufferevent below this one and is not
+	 * subtracted, so a TLS line can still overcount by that amount (not
+	 * measured).
+	 *
+	 * Delivering the buffer instead of dropping it (the issue's other
+	 * direction) needs a drain that outlives this request and a deferred
+	 * access-log line; the drop-and-correct path was chosen because it keeps
+	 * the connection's close callback and this function's synchronous
+	 * accounting as they are. docs/gateway.md says the buffered bytes are
+	 * dropped. */
+	if (bev) {
+		size_t pending = evbuffer_get_length(bufferevent_get_output(bev));
+
+		c->bytes_out -= MIN(c->bytes_out, pending);
+	}
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool);
@@ -871,8 +843,42 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	if (c->headers_sent) {
 		evhttp_send_reply_end(c->req);
 	} else if (c->cgi_headers.s) {
-		fpm_http_start_reply(c, 0, 0); /* partial header block, ship what we have */
-		evhttp_send_reply_end(c->req);
+		/* Issue #636: the upstream ended before the blank line that closes the
+		 * CGI header block, so what it said is not a reply yet -- the block is
+		 * unterminated, its last line may be half a header, and there is no
+		 * telling where the head stops and the body starts. The old code shipped
+		 * the buffer with fpm_http_start_reply(c, 0, 0): a head length of zero
+		 * walks no header line at all (the loop runs from `line` to
+		 * `line + head_len`), so code stayed at its HTTP_OK initial value and
+		 * the whole buffer fell through to the body branch at the end of that
+		 * function. The client got a complete 200 whose body was the unfinished
+		 * header block, and evhttp_send_reply_end() closed it off. #533 in the
+		 * body case, one step earlier.
+		 *
+		 * The answer is the 502 an upstream with no answer at all gets below,
+		 * with the partial block dropped: not the connection abort of
+		 * fpm_http_finish_truncated(), which exists because
+		 * evhttp_send_reply_end() would put the terminating chunk on the wire and
+		 * make a truncated body look complete -- there is no reply here to
+		 * complete, not one byte of it is on the wire yet, and a client that gets
+		 * 502 can retry where a reseted connection teaches it nothing.
+		 * The HTTP transport already answers the same failure the same way: an
+		 * unfinished head leaves c->cgi_headers empty (it is filled only once a
+		 * head is complete, fpm_http_client.c), so it falls into the branch
+		 * below, and fpm_http_http_readcb() logs the truncation on the way.
+		 *
+		 * The `if (!explained)` guard of the branch below is deliberately not
+		 * used here. A partial block means `reply_seen` is set, so `mute` is 0
+		 * and `explained` is `clean_eof` (fpm_http.c:630,662): 1 for a clean EOF
+		 * or an `END_REQUEST` (fpm_http_request_done() passes a bare 1,
+		 * fpm_http.c:674), where nothing has been logged and this line is the
+		 * only record; 0 when fpm_http_upstream_fail() has already named the
+		 * errno, and the line is written then too because it names the decision,
+		 * not the error. */
+		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' ended its reply after %zu bytes of an unterminated CGI header block; answering 502",
+				c->gw->pool, c->target->listen_address, ZSTR_LEN(c->cgi_headers.s));
+		c->status = FPM_HTTP_BAD_GATEWAY;
+		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	} else {
 		if (!explained) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);

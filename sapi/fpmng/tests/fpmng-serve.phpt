@@ -141,15 +141,27 @@ try {
     check($s === 200 && $b === 'index:/no/such/path?x=1', "default front controller fallback: $s " . var_export($b, true));
     $log = file_get_contents("$tmp/default.err");
     check(strpos($log, 'GET /second.php') !== false, 'default: no access log line on stderr: ' . var_export($log, true));
-    /* the reload recipe of docs/guides/dev-server.md: the pid from the start message, SIGUSR2, still serving */
+    /* the reload recipe of docs/guides/dev-server.md: the pid from the start message, SIGUSR2, still serving.
+     *
+     * Issue #640 made a SIGUSR2 fork a configuration test first (fpm_reload_config_check.c): the
+     * master exec'd a second time with the same argv plus -t, inheriting FPMNG_SERVE_DIR. That child
+     * is not the master and must not remove the temporary directory on its way out, or the reload
+     * leaves a running server with no serve.conf and no socket. Asserting the directory still
+     * holds its three files after the reload is what pins fpm_serve_arm_cleanup()'s owner check
+     * (fpm_serve.c) to FPMNG_SERVE_OWNER rather than getpid(). */
     check(preg_match('/master pid (\d+), pid file (\S+)/', $log, $m) === 1, 'default: no pid in the start message: ' . var_export($log, true));
     check(trim((string) @file_get_contents($m[2])) === $m[1], "default: pid file $m[2] does not hold {$m[1]}");
+    $serveDir = dirname($m[2]);
     $kill = proc_open(['kill', '-USR2', $m[1]], [], $pipes);
     check(proc_close($kill) === 0, 'default: kill -USR2 failed');
     usleep(500000);
     waitUp($port, $proc, 'default after reload');
     [$s, , $b] = get($port, '/second.php');
     check($s === 200 && $b === 'second', "default after SIGUSR2: $s " . var_export($b, true));
+    foreach (['serve.conf', 'serve.pid', 'php.sock'] as $name) {
+        check(file_exists("$serveDir/$name"), "default after SIGUSR2: $serveDir/$name is gone -- the configuration test removed it");
+    }
+    check(trim((string) @file_get_contents($m[2])) === $m[1], "default after SIGUSR2: the master pid changed");
     echo "default: ok\n";
 } finally {
     stop($proc, $tmp, 'default');

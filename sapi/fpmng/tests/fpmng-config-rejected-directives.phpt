@@ -68,6 +68,24 @@ expectConfigFailure(
     ["'pm.max_children' is not supported by pool.type = cron"]
 );
 
+/* Issue #727: pm.max_consecutive_failures belongs to fastcgi and http-direct
+ * only. The "pm." reject prefix refuses it on the other pm-less types. */
+expectConfigFailure(
+    'supervisor-max-consecutive-failures',
+    str_replace('[pool]', '[sup]', $base) . "\npool.type = supervisor\nsupervisor.script = {{FILE:*src.php}}\nsupervisor.processes = 1\npm.max_consecutive_failures = 3",
+    ["'pm.max_consecutive_failures' is not supported by pool.type = supervisor"]
+);
+expectConfigFailure(
+    'cron-max-consecutive-failures',
+    str_replace('[pool]', '[job]', $base) . "\npool.type = cron\ncron.schedule = * * * * *\ncron.script = {{FILE:*src.php}}\npm.max_consecutive_failures = 3",
+    ["'pm.max_consecutive_failures' is not supported by pool.type = cron"]
+);
+expectConfigFailure(
+    'fastcgi-max-consecutive-failures-negative',
+    $base . "\npm.max_consecutive_failures = -1",
+    ["pm.max_consecutive_failures must be 0 or a positive value"]
+);
+
 expectConfigFailure(
     'supervisor-executor',
     str_replace('[pool]', '[sup2]', $base) . "\npool.type = supervisor\npool.executor = fiber\nsupervisor.script = {{FILE:*src.php}}\nsupervisor.processes = 1",
@@ -266,6 +284,11 @@ expectConfigFailure(
     ["'pm.max_children' is not supported by pool.type = gateway"]
 );
 expectConfigFailure(
+    'gateway-max-consecutive-failures',
+    gatewayConfig("pm.max_consecutive_failures = 3\n"),
+    ["'pm.max_consecutive_failures' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
     'gateway-php-admin-value',
     gatewayConfig("php_admin_value[memory_limit] = 256M\n"),
     ["'php_admin_value' is not supported by pool.type = gateway"]
@@ -317,18 +340,23 @@ expectConfigFailure(
     ['pool.type = gateway with no http.route[] serves nothing']
 );
 
-/* Issue #593: the gateway has no connection cap, and http.max_connections* are
- * read only by http-direct, so a gateway config naming them must fail instead
- * of leaving the public port believed to be limited. */
+/* Issue #686: the gateway accepts http.max_connections and
+ * http.max_connections_per_client (fpmng-http-gateway-connection-limits.phpt), so
+ * the pairing and bounds rules are what a gateway config can get wrong. */
 expectConfigFailure(
-    'gateway-max-connections',
-    gatewayConfig("http.max_connections = 10\n"),
-    ["'http.max_connections' is not supported by pool.type = gateway"]
+    'gateway-per-client-without-total',
+    gatewayConfig("http.max_connections_per_client = 2\n"),
+    ['http.max_connections_per_client requires http.max_connections']
 );
 expectConfigFailure(
-    'gateway-max-connections-per-client',
-    gatewayConfig("http.max_connections_per_client = 2\n"),
-    ["'http.max_connections_per_client' is not supported by pool.type = gateway"]
+    'gateway-per-client-above-total',
+    gatewayConfig("http.max_connections = 2\nhttp.max_connections_per_client = 3\n"),
+    ['http.max_connections_per_client (3) is above http.max_connections (2)']
+);
+expectConfigFailure(
+    'gateway-max-connections-range',
+    gatewayConfig("http.max_connections = 1000001\n"),
+    ['between 0 (unlimited) and 1000000']
 );
 /* ... and the gateway-only client limits are refused on http-direct. */
 expectConfigFailure(
@@ -347,6 +375,82 @@ expectConfigFailure(
     $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_buffer = 1M",
     ["'http.response_buffer' is not supported by pool.type = http-direct"]
 );
+/* Issue #705: the minimum-progress rule that composes with it. */
+expectConfigFailure(
+    'direct-response-min-rate',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.response_min_rate = 1024",
+    ["'http.response_min_rate' is not supported by pool.type = http-direct"]
+);
+/* Issue #716: the gateway's own upstream deadlines. A direct pool has no upstream
+ * connection to bound -- it is the thing serving the request. */
+expectConfigFailure(
+    'direct-upstream-connect-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.upstream_connect_timeout = 5000",
+    ["'http.upstream_connect_timeout' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'direct-upstream-read-timeout',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.upstream_read_timeout = 60000",
+    ["'http.upstream_read_timeout' is not supported by pool.type = http-direct"]
+);
+/* Issue #642: the gateway's correlation id. A direct pool writes no id. */
+expectConfigFailure(
+    'direct-request-id',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.request_id = generate",
+    ["'http.request_id' is not supported by pool.type = http-direct"]
+);
+/* Issue #642: the access log layout is the gateway's too, and an unknown
+ * value is refused by name, as http.request_id refuses one. */
+expectConfigFailure(
+    'direct-access-format',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.access_format = json",
+    ["'http.access_format' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'gateway-access-format-unknown',
+    gatewayConfig("http.access_format = xml\n"),
+    ["invalid http.access_format (combined or json)"]
+);
+
+/* Issue #646: the readiness path is a gateway option. A FastCGI pool and a
+ * direct pool refuse it by name, and the gateway checks the path like ping.path. */
+expectConfigFailure(
+    'fastcgi-ready-path',
+    $base . "\nhttp.ready_path = /ready",
+    ["'http.ready_path' is not supported by pool.type = fastcgi"]
+);
+expectConfigFailure(
+    'direct-ready-path',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.ready_path = /ready",
+    ["'http.ready_path' is not supported by pool.type = http-direct"]
+);
+expectConfigFailure(
+    'gateway-ready-path-no-slash',
+    gatewayConfig("http.ready_path = ready\n"),
+    ["the ready path 'ready' must start with a '/'"]
+);
+expectConfigFailure(
+    'gateway-ready-path-charset',
+    gatewayConfig("http.ready_path = /ready?x\n"),
+    ["the ready path '/ready?x' must contain only the following characters"]
+);
+expectConfigFailure(
+    'gateway-ready-path-same-as-ping',
+    gatewayConfig("ping.path = /ping\nhttp.ready_path = /ping\n"),
+    ["http.ready_path and ping.path are both '/ping'"]
+);
+/* Issue #646: the require-target switch needs a readiness path, and a FastCGI
+ * pool refuses it by name. */
+expectConfigFailure(
+    'gateway-ready-require-target-no-path',
+    gatewayConfig("http.ready_require_target = yes\n"),
+    ["http.ready_require_target needs http.ready_path"]
+);
+expectConfigFailure(
+    'fastcgi-ready-require-target',
+    $base . "\nhttp.ready_require_target = yes",
+    ["'http.ready_require_target' is not supported by pool.type = fastcgi"]
+);
 
 ?>
 Done
@@ -354,6 +458,9 @@ Done
 fastcgi-http-directive: rejected
 supervisor-listen: rejected
 cron-pm: rejected
+supervisor-max-consecutive-failures: rejected
+cron-max-consecutive-failures: rejected
+fastcgi-max-consecutive-failures-negative: rejected
 supervisor-executor: rejected
 default-fastcgi-executor: rejected
 retired-fastcgi-ng: rejected
@@ -373,6 +480,7 @@ direct-user-ini-filename-separator: rejected
 direct-http-route: rejected
 retired-http-type: rejected
 gateway-pm: rejected
+gateway-max-consecutive-failures: rejected
 gateway-php-admin-value: rejected
 gateway-php-value: rejected
 gateway-environment: rejected
@@ -381,11 +489,25 @@ gateway-clear-env: rejected
 gateway-chroot: rejected
 gateway-http-listen-redundant: rejected
 gateway-no-routes: rejected
-gateway-max-connections: rejected
-gateway-max-connections-per-client: rejected
+gateway-per-client-without-total: rejected
+gateway-per-client-above-total: rejected
+gateway-max-connections-range: rejected
 direct-keepalive-timeout: rejected
 direct-write-timeout: rejected
 direct-response-buffer: rejected
+direct-response-min-rate: rejected
+direct-upstream-connect-timeout: rejected
+direct-upstream-read-timeout: rejected
+direct-request-id: rejected
+direct-access-format: rejected
+gateway-access-format-unknown: rejected
+fastcgi-ready-path: rejected
+direct-ready-path: rejected
+gateway-ready-path-no-slash: rejected
+gateway-ready-path-charset: rejected
+gateway-ready-path-same-as-ping: rejected
+gateway-ready-require-target-no-path: rejected
+fastcgi-ready-require-target: rejected
 Done
 --CLEAN--
 <?php

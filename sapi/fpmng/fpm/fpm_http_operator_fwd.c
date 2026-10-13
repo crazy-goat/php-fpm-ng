@@ -280,6 +280,9 @@ int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	 * operator target is not in gw->targets and never appears in that page, so
 	 * this only keeps the shared-struct field meaningful, it is not rendered. */
 	fpm_http_counter_incr(c->target->requests_total);
+	if (client) {
+		client->duration_row = c->target->slot_index; /* #652: the same row, "operator" */
+	}
 
 	fpm_http_dispatch(gw, c, -1);
 	return 1;

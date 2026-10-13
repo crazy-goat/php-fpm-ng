@@ -38,7 +38,9 @@ measure. The tree is "-" for the one assembled from third_party/php-src/
 (build/phpt-tree.sh), or a directory with run-tests.php and sapi/fpmng/tests
 (build/prepare.sh makes one). TEST_FPM_EXTENSION_DIR and TEST_FPM_RUN_AS_ROOT are passed
 through when set. The results directory is created if necessary and should be
-dedicated to this run.
+dedicated to this run. FPMNG_PHPT_PORT_BASE is refused: the reserved port lane
+belongs to build/run-fpmng-phpt.sh, which serialises the run for it, and this
+runner does not.
 EOF
     exit 2
 }
@@ -272,6 +274,14 @@ preflight_fail() {
     write_not_measured "$1"
     exit 1
 }
+
+# Issue #625: the reserved lane is build/run-fpmng-phpt.sh's, and it is the only
+# one that knows the lane's layout. tester.inc would honour a base set in the
+# environment here too (its portBase() reads FPMNG_PHPT_PORT_BASE whatever
+# started it), and this runner does not serialise, so under -j the workers would
+# want one 200-port block each and walk out of the lane. Refused rather than
+# half-honoured.
+[ -z "${FPMNG_PHPT_PORT_BASE-}" ] || preflight_fail "FPMNG_PHPT_PORT_BASE belongs to build/run-fpmng-phpt.sh, which lays the lane out; this runner does not use it (unset it)"
 
 [ -n "$CLI_BIN_INPUT" ] || preflight_fail 'TEST_PHP_EXECUTABLE was not supplied'
 [ -n "$FPM_BIN_INPUT" ] || preflight_fail 'TEST_PHP_FPM_EXECUTABLE was not supplied'

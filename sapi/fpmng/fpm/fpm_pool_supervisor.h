@@ -16,7 +16,30 @@
 #ifndef FPM_POOL_SUPERVISOR_H
 #define FPM_POOL_SUPERVISOR_H 1
 
+#include <time.h>
+
 struct fpm_worker_pool_s;
+
+/* Issue #329: how long a reload survivor (see fpm_pool_supervisor_reload_spare_child())
+ * is allowed to sit unsignalled, waiting for this generation's
+ * replacement to confirm it started, before this pool retires it
+ * unconditionally. Not tied to process_control_timeout -- that directive
+ * defaults to 0 ("escalate the reload's own kill fan-out immediately"), which
+ * would retire the survivor before its replacement ever got a chance, the
+ * opposite of what it exists for. A fixed constant instead: generous enough to
+ * cover fork + exec + PHP bootstrap + a configured supervisor.start_jitter of
+ * ordinary size, bounded enough that a broken new generation (bad script,
+ * crash loop) does not leave the survivor running indefinitely. A pool whose
+ * supervisor.start_jitter is configured well past this is a documented edge
+ * case (docs/supervisor.md) rather than something this reacts to dynamically.
+ * Issue #692: the metrics slot reservation of a replaced pool lasts this long
+ * plus the pool's supervisor.stop_timeout (fpm_pool_supervisor_slot_reserve_until()). */
+#define FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S 30
+
+/* Issue #692: the latest time the metrics slot range of `wp` must stay
+ * reserved, when the reload that replaces `wp` execs at `exec_at`. See the
+ * implementation in fpm_pool_supervisor.c for the bound. */
+time_t fpm_pool_supervisor_slot_reserve_until(const struct fpm_worker_pool_s *wp, time_t exec_at);
 
 /* Directives rejected for pool.type = supervisor. NULL-terminated, used as
  * .rejects in fpm_pool_types[]. */

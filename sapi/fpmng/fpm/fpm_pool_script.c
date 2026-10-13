@@ -8,6 +8,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <string.h>
 #include <unistd.h>
 
 #include "php.h"
@@ -75,11 +76,32 @@ static char *fpm_pool_script_read_cookies(void) /* {{{ */
 }
 /* }}} */
 
+/* The script being run, for fpm_pool_script_register_server_variables(). Set by
+ * fpm_pool_script_run() for the duration of one run: the callback takes no
+ * context, and a script-running process runs one script at a time. */
+static const char *fpm_pool_script_current_path = NULL;
+
 static void fpm_pool_script_register_server_variables(zval *track_vars_array) /* {{{ */
 {
-	/* No HTTP request, so no PHP_SELF or other CGI variables — only the
-	 * environment, as in CLI. */
 	php_import_environment_variables(track_vars_array);
+
+	/* The five variables the CLI SAPI defines for a script
+	 * (sapi_cli_register_variables() in sapi/cli/php_cli.c): four are the script
+	 * path as given, DOCUMENT_ROOT is empty (it replaces an inherited
+	 * DOCUMENT_ROOT environment variable, as in CLI). PHP_SELF is read by
+	 * symfony/console (issue #738). The
+	 * environment above comes first so that an inherited variable of the same
+	 * name does not win over the script's own. argv and argc come from
+	 * SG(request_info) in fpm_pool_script_run(). */
+	if (fpm_pool_script_current_path) {
+		size_t len = strlen(fpm_pool_script_current_path);
+
+		php_register_variable_safe("PHP_SELF", fpm_pool_script_current_path, len, track_vars_array);
+		php_register_variable_safe("SCRIPT_NAME", fpm_pool_script_current_path, len, track_vars_array);
+		php_register_variable_safe("SCRIPT_FILENAME", fpm_pool_script_current_path, len, track_vars_array);
+		php_register_variable_safe("PATH_TRANSLATED", fpm_pool_script_current_path, len, track_vars_array);
+		php_register_variable_safe("DOCUMENT_ROOT", "", 0, track_vars_array);
+	}
 }
 /* }}} */
 
@@ -127,6 +149,7 @@ static void fpm_pool_script_register_acme_builtins(const char *pool_name)
 int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop_signal) /* {{{ */
 {
 	zend_file_handle file_handle;
+	char *script_argv[2];
 	int exit_code;
 	struct sigaction term_before;
 	struct sigaction stop_before;
@@ -173,6 +196,18 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 
 	SG(server_context) = NULL;
 	SG(request_info).path_translated = estrdup(script_path);
+	/* CLI-style argv (issue #738): argv[0] is the script, as in "php script.php".
+	 * main/php_variables.c (php-8.5.4) registers $argv/$argc and
+	 * $_SERVER['argv'/'argc'] whenever SG(request_info).argc is non-zero, with
+	 * no register_argc_argv check (that setting only gates the query-string
+	 * branch), so a php.ini that turns it off does not hide them, as in CLI.
+	 * Measured: fpmng-script-pools-cli-variables.phpt runs a pool with
+	 * register_argc_argv = 0. */
+	script_argv[0] = (char *) script_path;
+	script_argv[1] = NULL;
+	SG(request_info).argc = 1;
+	SG(request_info).argv = script_argv;
+	fpm_pool_script_current_path = script_path;
 	SG(request_info).request_method = NULL;
 	SG(request_info).query_string = NULL;
 	SG(request_info).request_uri = NULL;
@@ -188,6 +223,9 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 		zlog(ZLOG_ERROR, "[pool %s] cannot start request for script '%s'", pool_name, script_path);
 		efree(SG(request_info).path_translated);
 		SG(request_info).path_translated = NULL;
+		SG(request_info).argc = 0;
+		SG(request_info).argv = NULL;
+		fpm_pool_script_current_path = NULL;
 		sigaction(SIGTERM, &term_before, NULL);
 		if (stop_is_extra) {
 			sigaction(stop_signal, &stop_before, NULL);
@@ -283,6 +321,10 @@ int fpm_pool_script_run(const char *pool_name, const char *script_path, int stop
 	SG(request_info).path_translated = NULL;
 
 	php_request_shutdown((void *) 0);
+	/* script_argv is on this stack frame; nothing may keep pointing at it. */
+	SG(request_info).argc = 0;
+	SG(request_info).argv = NULL;
+	fpm_pool_script_current_path = NULL;
 	/* php_request_shutdown() may replace SIGTERM's (and stop_signal's, when it
 	 * is one of the other signals Zend touches) disposition just like
 	 * php_request_startup() (see the comment next to term_before) — restore it

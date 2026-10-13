@@ -109,6 +109,7 @@
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_conn.h"
+#include "fpm_http_accept_backoff.h"
 #include "fpm_http_acl.h"
 #include "fpm_std_streams.h"
 #include "fpm_php.h"
@@ -131,6 +132,14 @@
  * on its own stop timeout at this point, and losing the reply is no worse than
  * the silent close this whole path exists to prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
+/* How long fpm_worker_finish_output() keeps driving the base, after it has
+ * stopped the listener, so that a request already on the wire over a
+ * keep-alive connection is read and answered 503 by fpm_worker_accept() instead
+ * of meeting the silent close evhttp_free() gives it (issue #668). Bounded for
+ * the reason FPM_WORKER_FLUSH_BUDGET is, and short because it covers requests
+ * already sent, not new connections: the listener is gone, so nothing new can
+ * arrive by that road. Every worker exit lasts this long, which is the price. */
+#define FPM_WORKER_GRACE_MS 100
 /* worker.request_timeout's sweep runs more often than the timeout itself so
  * that an expired request is caught within one sweep interval of its
  * deadline, not one whole timeout period late. Floored so a short timeout
@@ -517,6 +526,14 @@ static void fpm_worker_conn_closed(struct evhttp_connection *connection, void *a
 	}
 }
 
+/* The accept backoff asks this at the end of a pause: the listener stays
+ * closed while the accept_threshold gate has it closed. */
+static int fpm_worker_backoff_may_resume(void *arg)
+{
+	(void) arg;
+	return !fw.accept_closed;
+}
+
 /* THE ACCEPT CEILING (issue #338)
  *
  * Every child of an http-direct pool accepts from the one listening socket the
@@ -567,7 +584,11 @@ static void fpm_worker_accept_enable(bool on)
 		return;
 	}
 	if (on) {
-		evconnlistener_enable(l);
+		/* Not while the accept backoff (issue #729) is paused: its timer
+		 * re-opens the listener, through fpm_worker_backoff_may_resume(). */
+		if (!fpm_http_accept_backoff_paused(fw.listener)) {
+			evconnlistener_enable(l);
+		}
 	} else {
 		evconnlistener_disable(l);
 	}
@@ -655,6 +676,15 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 	 * http.max_connections_per_client, which this executor rejects. */
 	(void) fpm_http_direct_conns_request(fw.conns,
 		evhttp_connection_get_bufferevent(evhttp_request_get_connection(http)), NULL, NULL);
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
+	 * reduce the request-target to the one path every consumer below matches
+	 * on, so nothing can be answered on one path and served on another
+	 * (issue #681). This executor has no access log of its own
+	 * (access.log is refused below), so the order matches the gateway and
+	 * the classic executor for one reason only: one ingress order to reason
+	 * about. Normalizing cannot fail, so an excluded client still gets its
+	 * 403 from the ACL. */
+	fpm_http_direct_normalize_target(http);
 	/* Before the saturation check below: a client that may not be here learns
 	 * nothing about how busy the worker is. */
 	if (fw.acl) {
@@ -667,6 +697,14 @@ static void fpm_worker_accept(struct evhttp_request *http, void *arg)
 			fpm_worker_send_error(http, 403, "Forbidden");
 			return;
 		}
+	}
+	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
+	 * could not carry is a bad request, charged to the counter
+	 * fpm_http_direct_request_acceptable() answers for below. */
+	if (!fpm_http_direct_authority_acceptable(http)) {
+		fpm_http_direct_ops_worker_refused(fw.ops, FPM_WORKER_REFUSED_BAD_REQUEST);
+		fpm_worker_send_error(http, 400, "Bad request");
+		return;
 	}
 	if (fpm_worker_stopping || fw.ready_count >= fw.ready_max ||
 		zend_hash_num_elements(&fw.pending) >= fw.ready_max) {
@@ -765,6 +803,40 @@ static void fpm_worker_flush_deadline(evutil_socket_t fd, short events, void *ar
 	event_base_loopbreak(fw.base);
 }
 
+static bool fpm_worker_grace_expired;
+
+static void fpm_worker_grace_deadline(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	(void) arg;
+	fpm_worker_grace_expired = true;
+	event_base_loopbreak(fw.base);
+}
+
+/* issue #668: the grace drain. Called by fpm_worker_finish_output() once the
+ * listener is gone and stopping is set. A request already on the wire over a
+ * keep-alive connection is read here: evhttp hands it to fpm_worker_accept(),
+ * which answers 503 because stopping is set. Without this drain the request is
+ * not read at all, and evhttp_free() closes its connection without a reply.
+ * The loop runs for the whole window even when no connection has anything to
+ * say, so a worker exit takes FPM_WORKER_GRACE_MS longer. */
+static void fpm_worker_grace_drain(void)
+{
+	struct event *deadline;
+	struct timeval grace = { 0, FPM_WORKER_GRACE_MS * 1000 };
+
+	fpm_worker_grace_expired = false;
+	deadline = evtimer_new(fw.base, fpm_worker_grace_deadline, NULL);
+	if (deadline && evtimer_add(deadline, &grace) == 0) {
+		while (!fpm_worker_grace_expired && event_base_loop(fw.base, EVLOOP_ONCE) == 0) {
+		}
+	}
+	if (deadline) {
+		event_free(deadline);
+	}
+}
+
 /* The last thing child_main() does with the transport, and the only place that
  * enforces the invariant every client is owed: an accepted connection is never
  * closed without a response that actually reached the socket. Two distinct
@@ -803,6 +875,7 @@ static void fpm_worker_finish_output(void)
 	 * arriving on an already-open keep-alive connection still can, and
 	 * fpm_worker_accept() answers it 503 itself now that stopping is set. */
 	if (fw.listener) {
+		fpm_http_accept_backoff_remove(fw.listener);
 		evhttp_del_accept_socket(fw.http, fw.listener);
 		fw.listener = NULL;
 	}
@@ -867,6 +940,11 @@ static void fpm_worker_finish_output(void)
 			"clients can reconnect (issue #342)",
 			fw.wp->config->name, streams_ended);
 	}
+	/* After the pending walk: the walk has answered every entry, so the timers
+	 * the drain runs (the request-timeout sweep) find nothing to answer with a
+	 * 504. Before the early return below, so a 503 the drain queues is flushed
+	 * by the code that flushes every other reply here. */
+	fpm_worker_grace_drain();
 	if (!fw.unflushed && !fw.ws_unflushed) {
 		return;
 	}
@@ -2782,6 +2860,11 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 	fw.listener = evhttp_accept_socket_with_handle(fw.http, wp->listening_socket);
 	if (!fw.listener) {
 		exit(FPM_EXIT_SOFTWARE);
+	}
+	/* Issue #729: same as the classic executor, one backoff per child on the
+	 * shared listening socket. */
+	if (fpm_http_accept_backoff_install(fw.base, fw.listener, wp->config->name, "http-direct", fpm_worker_backoff_may_resume, NULL) != 0) {
+		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the http-direct listener; running out of file descriptors will make it spin", wp->config->name);
 	}
 	zend_hash_init(&fw.pending, 16, NULL, fpm_worker_pending_dtor, 1);
 	zend_hash_init(&fw.watchers, 16, NULL, fpm_worker_watcher_dtor, 1);

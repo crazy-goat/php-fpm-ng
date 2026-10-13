@@ -124,6 +124,7 @@ cmp -s "$WORK/tester.once" "$P/sapi/fpmng/tests/tester.inc" && cmp -s "$WORK/run
   || fail "a second phpt-parallel.sh run changed the tree"
 grep -q 'TEST_PHP_WORKER' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores TEST_PHP_WORKER"
 grep -q 'FPMNG_PHPT_PORT_SHIFT' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_SHIFT"
+grep -q 'FPMNG_PHPT_PORT_BASE' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_BASE"
 grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pass TEST_PHP_WORKER to the tests"
 [ ! -e "$P/sapi/fpmng/tests/CONFLICTS" ] || fail "the dir-wide CONFLICTS file is still there"
 grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"
@@ -132,6 +133,9 @@ if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then f
 # the pattern is single-quoted on purpose: the $ is a literal in the PHP source being grepped.
 # shellcheck disable=SC2016
 grep -q '9000 + PHP_INT_SIZE - 1 + \$worker \* 200' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc port base is not 9000 + PHP_INT_SIZE - 1 + 200 * worker"
+# and a lane base replaces that origin rather than shifting it (issue #625).
+# shellcheck disable=SC2016
+grep -q '(int) \$lane + \$worker \* 200' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc does not put a whole run inside one FPMNG_PHPT_PORT_BASE lane"
 # Issue #567: signalling pid 0 would take the whole process group, runner included.
 grep -q 'refusing to send SIG' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc still signals a pid below 2"
 # The bundle itself is untouched.

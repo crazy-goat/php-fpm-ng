@@ -90,18 +90,22 @@ try {
      * fpmng-http-direct-worker-buffered-streams.phpt: a self-signed cert of
      * its own (deliberately a DIFFERENT keypair from the pool's serving cert,
      * so any accidental reuse of state between the two roles would be
-     * detectable), bound on port 0, echoing back whatever it is sent. */
+     * detectable), bound on a port of the run's own, echoing back whatever it
+     * is sent. */
     $originCert = "$root/origin.crt";
     $originKey = "$root/origin.key";
     run('openssl req -x509 -newkey rsa:2048 -nodes '
         . '-keyout ' . escapeshellarg($originKey) . ' -out ' . escapeshellarg($originCert)
         . ' -days 1 -subj "/CN=origin.test"');
 
+    /* The port comes from argv: asking the kernel for one (port 0) would put
+     * this TLS listener outside the run's reserved port lane (issue #625),
+     * and the lane is what keeps two suites on one box apart. */
     file_put_contents("$root/origin.php", <<<'PHP'
 <?php
-[$cert, $key] = [$argv[1], $argv[2]];
+[$cert, $key, $port] = [$argv[1], $argv[2], (int) $argv[3]];
 $ctx = stream_context_create(['ssl' => ['local_cert' => $cert, 'local_pk' => $key]]);
-$server = @stream_socket_server('tls://127.0.0.1:0', $errno, $errstr,
+$server = @stream_socket_server("tls://127.0.0.1:$port", $errno, $errstr,
     STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx);
 if (!$server) {
     fwrite(STDERR, "origin: bind failed: $errstr\n");
@@ -126,10 +130,57 @@ while (true) {
 }
 PHP);
 
+    $port = (int) (getenv('FPMNG_DIRECT_WORKER_TLS_AND_CLIENT_TLS_PORT') ?: 28108 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
+    $config = <<<CFG
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+[work]
+listen = 127.0.0.1:$port
+pool.type = http-direct
+pool.executor = worker
+pm = static
+pm.max_children = 1
+chdir = $root
+http.front_controller = /worker.php
+http.tls_cert = $certFile
+http.tls_key = $keyFile
+http.read_timeout = 10000
+catch_workers_output = yes
+php_admin_value[max_execution_time] = 0
+php_admin_value[display_errors] = 0
+CFG;
+
+    function fetchTls(int $port, string $path): array
+    {
+        $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
+        $fp = stream_socket_client("tls://127.0.0.1:$port", $errno, $error, 10,
+            STREAM_CLIENT_CONNECT, $ctx);
+        if (!$fp) throw new RuntimeException("connect tls :$port: $error");
+        stream_set_timeout($fp, 10);
+        fwrite($fp, "GET $path HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+        $response = stream_get_contents($fp);
+        fclose($fp);
+        if (!preg_match('#^HTTP/1\.\d (\d+) #', $response, $m)) {
+            throw new RuntimeException('bad status line: ' . var_export($response, true));
+        }
+        $split = strpos($response, "\r\n\r\n");
+        $body = $split === false ? '' : substr($response, $split + 4);
+        return [(int) $m[1], $body];
+    }
+
+    $tester = new FPM\Tester($config, '<?php');
+
+    /* The origin binds a port of the run's own (issue #625), which is why the
+     * Tester is created before it is started: allocating an address writes
+     * nothing and starts no master. */
+    $originAddr = $tester->getAddr('ipv4', '[origin]');
+
     /* Array form, not a shell string: see fpmng-http-direct-worker-buffered-streams.phpt
      * (issue #89) for why a shell-string command leaks the origin process on
      * boxes where /bin/sh is dash. */
-    $origin = proc_open([PHP_BINARY, '-n', "$root/origin.php", $originCert, $originKey],
+    $origin = proc_open([PHP_BINARY, '-n', "$root/origin.php", $originCert, $originKey,
+        (string) (int) substr($originAddr, strrpos($originAddr, ':') + 1)],
         $descriptors, $originPipes);
     check(is_resource($origin), 'could not start the TLS origin');
     $addr = trim((string) fgets($originPipes[1]));
@@ -197,46 +248,6 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-    $port = (int) (getenv('FPMNG_DIRECT_WORKER_TLS_AND_CLIENT_TLS_PORT') ?: 28108 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
-    $config = <<<CFG
-[global]
-error_log = {{FILE:LOG}}
-pid = {{FILE:PID}}
-[work]
-listen = 127.0.0.1:$port
-pool.type = http-direct
-pool.executor = worker
-pm = static
-pm.max_children = 1
-chdir = $root
-http.front_controller = /worker.php
-http.tls_cert = $certFile
-http.tls_key = $keyFile
-http.read_timeout = 10000
-catch_workers_output = yes
-php_admin_value[max_execution_time] = 0
-php_admin_value[display_errors] = 0
-CFG;
-
-    function fetchTls(int $port, string $path): array
-    {
-        $ctx = stream_context_create(['ssl' => ['verify_peer' => false, 'verify_peer_name' => false]]);
-        $fp = stream_socket_client("tls://127.0.0.1:$port", $errno, $error, 10,
-            STREAM_CLIENT_CONNECT, $ctx);
-        if (!$fp) throw new RuntimeException("connect tls :$port: $error");
-        stream_set_timeout($fp, 10);
-        fwrite($fp, "GET $path HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
-        $response = stream_get_contents($fp);
-        fclose($fp);
-        if (!preg_match('#^HTTP/1\.\d (\d+) #', $response, $m)) {
-            throw new RuntimeException('bad status line: ' . var_export($response, true));
-        }
-        $split = strpos($response, "\r\n\r\n");
-        $body = $split === false ? '' : substr($response, $split + 4);
-        return [(int) $m[1], $body];
-    }
-
-    $tester = new FPM\Tester($config, '<?php');
     $tester->start();
     $tester->expectLogStartNotices();
 

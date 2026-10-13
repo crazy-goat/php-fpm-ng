@@ -107,11 +107,6 @@ listen = 127.0.0.1:$http_port
 ; the same public/ directory as the application pool.
 chdir = $ROOT/public
 http.front_controller = /index.php
-; One gateway process, on purpose: with 2 processes a queued request is re-pumped only when an
-; upstream is freed in the same process, so part of a burst of 8 parallel requests waited for
-; http.pool_full_wait_ms and then got 503 although the 8 fastcgi workers were idle (3 of 10
-; runs failed). A single process is deterministic.
-http.gateways = 1
 http.pool_full_policy = wait
 http.pool_full_queue_max = 32
 http.pool_full_wait_ms = 5000

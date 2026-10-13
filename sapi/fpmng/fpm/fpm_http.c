@@ -151,6 +151,10 @@ struct {								\
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_request_id.h"
+#include "fpm_clock.h"
+#include "fpm_scoreboard.h"
+#include "fpm_request.h"
 /* For FPM_HTTP_HEADER_NAME_MAX and FPM_HTTP_HEADERS_MAX: the bound on a
  * request header name (issue #115) and on the whole request header block
  * (issue #117) is the same on both transports, so each has one definition. */
@@ -175,8 +179,26 @@ struct {								\
 #define FPM_HTTP_IDLE_MS         500		/* http.idle_timeout default (ms); release a pinned worker after this much idle time */
 #define FPM_HTTP_KEEPALIVE_TIMEOUT_MS 60000	/* http.keepalive_timeout default (ms); how long an idle keep-alive client connection may wait for its next request */
 #define FPM_HTTP_RESPONSE_BUFFER (1024 * 1024)	/* http.response_buffer default (bytes), issue #596 */
+#define FPM_HTTP_RESPONSE_MIN_RATE 256		/* http.response_min_rate default (bytes/s), issue #705 */
 #define FPM_HTTP_WRITE_TIMEOUT_MS 30000		/* http.write_timeout default (ms); how long a client may make no progress on a pending response write */
 #define FPM_HTTP_READ_TIMEOUT_MS 5000		/* http.read_timeout default (ms); one budget for reading the whole request (headers + body) */
+/* Issue #716: the two upstream-side defaults. Both are judgement calls and both are
+ * documented in docs/gateway.md next to the directives:
+ *
+ *   - connect: 5000 ms, the same number as http.read_timeout above, and for the same
+ *     reason. The target is on this host in every configuration this project ships --
+ *     a Unix socket, or a loopback address, which is the only address a route may even
+ *     name for an http-direct target (fpm_http_route.c) -- so a TCP connect that has not
+ *     completed within the time it takes to read a whole request is not a slow peer, it
+ *     is a SYN nobody will answer. 0 keeps today's behaviour: wait forever.
+ *   - read: 60000 ms, which is nginx's proxy_read_timeout default and the same minute
+ *     http.keepalive_timeout above already uses. It bounds TIME WITHOUT PROGRESS, not
+ *     total request time, so a slow script that keeps producing output is not cut; a
+ *     script that computes for a minute before its first byte is, and the answer is
+ *     then the same 504 it would have got from the proxy an operator is replacing.
+ *     Raise it, or set 0 (unlimited, today's behaviour) for anything longer. */
+#define FPM_HTTP_UPSTREAM_CONNECT_TIMEOUT_MS 5000	/* http.upstream_connect_timeout default (ms), issue #716 */
+#define FPM_HTTP_UPSTREAM_READ_TIMEOUT_MS 60000	/* http.upstream_read_timeout default (ms), issue #716 */
 #define FPM_HTTP_MAX_BODY        (32 * 1024 * 1024)	/* http.max_body default; the gateway buffers a whole request body in memory (task 031) */
 /* Largest content length we put in a FastCGI record. The protocol allows
  * 0xffff, but every record we emit is padded to an 8-byte boundary
@@ -200,6 +222,7 @@ typedef struct _fpm_http_upstream fpm_http_upstream;
  * there when the HTTP/1.1 client transport arrived; the definitions moved
  * verbatim, comments included. */
 #include "fpm_http_internal.h"
+#include "fpm_http_direct_conn.h"
 
 struct fpm_http_gateway_s *gateways = NULL;
 
@@ -209,8 +232,8 @@ void fpm_http_pump(struct fpm_http_gateway_s *gw);
 static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
 /* Issue #390 review: the budget helpers below also maintain this process's own
  * upstreams_held gauge, defined with the other counter helpers further down. */
-static void fpm_http_counter_decr(atomic_t *counter);
 static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
+static void fpm_http_tick_arm(struct fpm_http_gateway_s *gw);
 
 /* Claims one of the TARGET pool's workers for a persistent connection, or
  * fails when they are all taken. Per target since issue #340: two prefixes
@@ -270,11 +293,25 @@ void fpm_http_counter_incr(atomic_t *counter)
 	} while (!atomic_cmp_set(counter, value, value + 1));
 }
 
+/* Issue #652: the same loop as fpm_http_counter_incr(), by an amount -- the
+ * duration sum of the request-duration histogram, in microseconds. */
+static void fpm_http_counter_add(atomic_t *counter, unsigned long amount)
+{
+	unsigned long value;
+
+	if (!counter) {
+		return;
+	}
+	do {
+		value = *counter;
+	} while (!atomic_cmp_set(counter, value, value + amount));
+}
+
 /* Issue #390: the decrementing half, for the one gauge (connections_open). A
  * gauge, unlike the counters above, can go down; guarded at zero so a close
  * that races a missing increment cannot underflow the unsigned atomic. No
  * locking, same cmp-set loop as its siblings. */
-static void fpm_http_counter_decr(atomic_t *counter)
+void fpm_http_counter_decr(atomic_t *counter)
 {
 	unsigned long value;
 
@@ -315,12 +352,12 @@ static void fpm_http_counter_sub(atomic_t *counter, unsigned long amount)
 /* Issue #390: the counters segment's two variable-length regions. The segment
  * is ONE flat atomic_t array because C lets a struct have only one flexible
  * array; these two accessors are the only place the layout arithmetic lives.
- * FPM_HTTP_COUNTERS_SLOT_CELLS is the slot stride (the three cells of
- * fpm_http_counters_slot), and the process blocks follow the slots, each
+ * FPM_HTTP_COUNTERS_SLOT_CELLS (fpm_http_internal.h) is the slot stride: the
+ * four cells of fpm_http_counters_slot and the request-duration histogram of
+ * the row (issue #652), and the process blocks follow the slots, each
  * (1 + nslots) cells: [connections_open, upstreams_held[0 .. nslots)]. */
-#define FPM_HTTP_COUNTERS_SLOT_CELLS 3u
 
-/* First cell of target row i: [requests_total, rejected_total, shared budget]. */
+/* First cell of target row i: [requests_total, rejected_total, shared budget, reclaim generation, duration buckets, duration sum]. */
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i)
 {
 	return &c->cells[(size_t) i * FPM_HTTP_COUNTERS_SLOT_CELLS];
@@ -330,14 +367,14 @@ atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p)
 {
 	return &c->cells[(size_t) c->nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
-		+ (size_t) p * (1u + c->nslots)];
+		+ (size_t) p * FPM_HTTP_GAUGE_BLOCK_CELLS(c->nslots)];
 }
 
 size_t fpm_http_counters_size_of(unsigned nslots, unsigned nproc)
 {
 	return sizeof(struct fpm_http_counters_s)
 		+ ((size_t) nslots * FPM_HTTP_COUNTERS_SLOT_CELLS
-			+ (size_t) nproc * (1u + nslots)) * sizeof(atomic_t);
+			+ (size_t) nproc * FPM_HTTP_GAUGE_BLOCK_CELLS(nslots)) * sizeof(atomic_t);
 }
 
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c)
@@ -368,6 +405,54 @@ static void fpm_http_count_ping(struct fpm_http_gateway_s *gw)
 	}
 }
 
+/* Issue #652: the Prometheus client default buckets, in seconds, as `le`
+ * labels and in microseconds. An observation goes into the first bucket whose
+ * bound it does not exceed (inclusive, the Prometheus rule). */
+const struct fpm_http_duration_bound_s fpm_http_duration_bounds[FPM_HTTP_DURATION_BUCKETS] = {
+	{ "0.005", 5000UL },
+	{ "0.01", 10000UL },
+	{ "0.025", 25000UL },
+	{ "0.05", 50000UL },
+	{ "0.1", 100000UL },
+	{ "0.25", 250000UL },
+	{ "0.5", 500000UL },
+	{ "1", 1000000UL },
+	{ "2.5", 2500000UL },
+	{ "5", 5000000UL },
+	{ "10", 10000000UL },
+};
+
+/* Issue #652: one finished response into the request-duration histogram of
+ * the row the request was counted in (cl->duration_row). The duration is the
+ * time from the end of the request read (cl->request_started, stamped in
+ * fpm_http_client_request_begin()) to `now`, so it includes the wait for a
+ * target. Two cmp-set loops (one bucket, the sum), no lock: the same cost
+ * class as the requests_total increment every request already pays. A request
+ * is observed once: the second call for the same request returns at once, so
+ * requests_total and _count agree whichever path answered it. */
+static void fpm_http_duration_observe(struct fpm_http_gateway_s *gw, struct fpm_http_client_s *cl,
+		const struct timeval *now)
+{
+	struct timeval spent;
+	unsigned long us;
+	unsigned row, b = 0;
+	atomic_t *slot;
+
+	if (!gw->counters || cl->duration_observed) {
+		return;
+	}
+	cl->duration_observed = 1;
+	row = cl->duration_row == FPM_HTTP_DURATION_ROW_LOCAL ? gw->counters->nslots - 1 : cl->duration_row;
+	evutil_timersub(now, &cl->request_started, &spent);
+	us = spent.tv_sec < 0 ? 0 : (unsigned long) spent.tv_sec * 1000000UL + (unsigned long) spent.tv_usec;
+	while (b < FPM_HTTP_DURATION_BUCKETS && us > fpm_http_duration_bounds[b].us) {
+		b++;
+	}
+	slot = fpm_http_counters_slot_cells(gw->counters, row);
+	fpm_http_counter_incr(&slot[FPM_HTTP_SLOT_BUCKET_CELL + b]);
+	fpm_http_counter_add(&slot[FPM_HTTP_SLOT_SUM_CELL], us);
+}
+
 /* Issue #390 review: this process's own upstreams_held cell for target t, or
  * NULL before the process has claimed its gauge block (a request cannot reach
  * here before fpm_http_gateway_run() sets gw->gauges, so this is defensive).
@@ -378,25 +463,32 @@ static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t)
 	if (!t->gw || !t->gw->gauges) {
 		return NULL;
 	}
-	return &t->gw->gauges[1 + t->slot_index];
+	return &t->gw->gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + t->slot_index];
 }
 
-/* Issue #390: the pool-wide connections_open the renderer reports: the sum of
- * every gateway process's own cell. A process that died with connections open
- * has had its block zeroed by the master, so its connections left the sum with
- * it -- the whole reason the gauge is per-process (see fpm_http_counters_s). */
-unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
+/* Issue #706: the pool-wide value of one per-process gauge cell (an
+ * FPM_HTTP_GAUGE_* index): the sum of every gateway process's own cell. A
+ * process that died has had its block zeroed by the master, so its share left
+ * the sum with it -- the whole reason the gauges are per-process (see
+ * fpm_http_counters_s). */
+unsigned long fpm_http_gauge_sum(struct fpm_http_gateway_s *gw, unsigned cell)
 {
 	unsigned p;
-	unsigned long open = 0;
+	unsigned long sum = 0;
 
 	if (!gw || !gw->counters) {
 		return 0;
 	}
 	for (p = 0; p < gw->counters->nproc; p++) {
-		open += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[0];
+		sum += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[cell];
 	}
-	return open;
+	return sum;
+}
+
+/* Issue #390: the pool-wide connections_open the renderer reports. */
+unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
+{
+	return fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_CONNECTIONS_OPEN);
 }
 
 /* Issue #390 review: a gateway process is gone (SIGKILL, OOM, crash), and the
@@ -406,7 +498,9 @@ unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw)
  * slot, to make the renderer's sums drop with the process and to give its
  * upstream reservations back to the shared budget:
  *
- *   - connections_open: zeroing the cell is enough, the renderer sums cells.
+ *   - connections_open and responses_paused (issue #706): zeroing the cell is
+ *     enough, the renderer sums cells. A paused response dies with its process,
+ *     so the paused count does not leak either.
  *   - upstreams_held[row]: return each to that row's shared upstreams_budget,
  *     so a crash does not shrink the pool's admission budget for the life of
  *     the segment; then zero the cell so the rendered gauge follows.
@@ -424,14 +518,15 @@ void fpm_http_counters_process_gone(struct fpm_http_gateway_s *gw, unsigned inde
 		return;
 	}
 	gauges = fpm_http_counters_gauges(gw->counters, index);
-	gauges[0] = 0;
+	gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN] = 0;
+	gauges[FPM_HTTP_GAUGE_RESPONSES_PAUSED] = 0;
 	for (i = 0; i < gw->counters->nslots; i++) {
-		unsigned long held = (unsigned long) gauges[1 + i];
+		unsigned long held = (unsigned long) gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i];
 		atomic_t *budget = &fpm_http_counters_slot_cells(gw->counters, i)[2];
 
 		if (held) {
 			fpm_http_counter_sub(budget, held);
-			gauges[1 + i] = 0;
+			gauges[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i] = 0;
 		}
 	}
 }
@@ -503,6 +598,18 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
 	return 0;
 }
 
+static struct fpm_http_client_s *fpm_http_client_index_find(struct fpm_http_client_index_s *index, const struct evhttp_connection *evcon);
+
+/* Issue #642: whole milliseconds from `from` to `to`, the unit of every timing
+ * field in the access log. */
+static long fpm_http_elapsed_ms(const struct timeval *from, const struct timeval *to)
+{
+	struct timeval spent;
+
+	evutil_timersub(to, from, &spent);
+	return (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+}
+
 /* Single choke point for the access log: pulls method/URI/protocol/Referer/User-Agent
  * straight from the evhttp_request, callers only supply what they already know
  * (effective remote_addr, remote_user if any, final status, body bytes sent).
@@ -523,11 +630,45 @@ static int fpm_http_log_suppressed(struct fpm_http_gateway_s *gw, struct evhttp_
 void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request *req,
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target)
 {
+	/* Issue #642: the timing and id fields, all "not known" unless the request
+	 * is still on a tracked connection. The client node is found by evcon, so
+	 * every call site keeps passing only what it passed before. */
+	struct fpm_http_access_log_extra_s extra = { -1, -1, -1, NULL };
+	struct fpm_http_client_s *cl;
+	struct evhttp_connection *evcon;
+	struct timeval now = { 0, 0 };
+	int timed;
+
+	evcon = evhttp_request_get_connection(req);
+	cl = evcon ? fpm_http_client_index_find(&gw->client_index, evcon) : NULL;
+	/* Issue #652: the duration histogram is fed before the access log's own
+	 * checks, so a gateway without http.access_log, or a path that
+	 * access.suppress_path[] hides, still counts the response. One clock read
+	 * serves both the histogram and the access log's duration_ms. */
+	timed = cl && cl->request_started.tv_sec;
+	if (timed) {
+		fpm_clock_get(&now);
+		fpm_http_duration_observe(gw, cl, &now);
+	}
 	if (!gw->access_log) {
 		return;
 	}
 	if (fpm_http_log_suppressed(gw, req)) {
 		return;
+	}
+	if (timed) {
+		extra.duration_ms = fpm_http_elapsed_ms(&cl->request_started, &now);
+		if (cl->request_id[0]) {
+			extra.request_id = cl->request_id;
+		}
+		/* cl->c is the request in flight: set once it was handed to a
+		 * target (fpm_http_dispatch), cleared by fpm_http_conn_free(). */
+		if (cl->c && cl->c->upstream_started) {
+			extra.upstream_ms = fpm_http_elapsed_ms(&cl->c->upstream_since, &now);
+		}
+		if (cl->c) {
+			extra.queue_ms = cl->c->queue_wait_ms;
+		}
 	}
 	fpm_http_access_log_write(gw->access_log, remote_addr, remote_user,
 		fpm_http_method_name(evhttp_request_get_command(req)), evhttp_request_get_uri(req),
@@ -539,7 +680,8 @@ void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request 
 		 * target field is non-NULL and the field prints. The has_routes gate
 		 * keeps a gateway that never opted into routing (and therefore has no
 		 * target field to print) byte-for-byte what it was before #341. */
-		(gw->has_routes || target) ? target : NULL);
+		(gw->has_routes || target) ? target : NULL,
+		&extra);
 }
 
 /* ---------------------------------------------------------------- upstream connections */
@@ -567,6 +709,10 @@ static void fpm_http_upstream_detach(fpm_http_upstream *up)
 	if (up->ev_write) {
 		event_del(up->ev_write);
 	}
+	/* Issue #716: the upstream deadline is stopped on this path too, so it can
+	 * never fire into a connection that is being torn down (the gateway's
+	 * SIGSEGV history: issues #90 and #443). */
+	fpm_http_upstream_deadline_stop(up);
 	close(up->fd);
 	up->fd = -1;
 	smart_str_free(&up->pending);
@@ -581,6 +727,10 @@ void fpm_http_upstream_free(fpm_http_upstream *up)
 	if (up->ev_write) {
 		event_free(up->ev_write);
 	}
+	/* Issue #716: freed last, and only here. fpm_http_upstream_deadline_stop()
+	 * has already removed it from the loop on every path that reaches this
+	 * function, so event_free() never runs from inside its own callback. */
+	fpm_http_upstream_deadline_free(up);
 	free(up);
 }
 
@@ -677,9 +827,13 @@ void fpm_http_request_done(fpm_http_upstream *up)
 	up->req_written = up->reply_seen = 0;
 	memset(up->rec_hdr, 0, sizeof(up->rec_hdr));
 	up->rec_hdr_len = up->rec_type = up->rec_len = up->rec_pad = 0;
+	/* Issue #716: no request in flight, so no read deadline -- the connection is
+	 * idle again, which is http.idle_timeout's business right below. */
+	fpm_http_upstream_deadline_arm(up);
 	if (up->gw->idle_ms > 0) {
 		event_add(up->ev_read, &up->gw->idle_timeout);
 	}
+	fpm_http_tick_arm(up->gw);	/* issue #735: this connection is now idle; a sibling may need its worker */
 	fpm_http_pump(up->gw);
 }
 
@@ -766,6 +920,12 @@ static void fpm_http_upstream_readcb(evutil_socket_t fd, short what, void *arg)
 	} while (n < 0 && errno == EINTR);
 
 	if (n > 0) {
+		/* Issue #716: http.upstream_read_timeout measures time without progress,
+		 * so bytes arriving are what re-arm it. Armed here, before the parser
+		 * runs, because the parser can end the request (fpm_http_request_done()
+		 * stops the timer for an idle connection) and an arm after it would then
+		 * be a no-op -- correct, but for the wrong reason. */
+		fpm_http_upstream_deadline_arm(up);
 		fpm_http_upstream_data(up, buf, n);
 	} else if (n == 0 || !fpm_http_would_block(errno)) {
 		fpm_http_upstream_fail(up, n == 0);
@@ -846,6 +1006,10 @@ static void fpm_http_upstream_writecb(evutil_socket_t fd, short what, void *arg)
 		}
 		up->connecting = 0;
 		event_add(up->ev_read, NULL);
+		/* Issue #716: the connect is spent, the request is already in flight
+		 * (fpm_http_pump_target() dispatches before the first flush), so what is
+		 * armed from here is the read deadline. */
+		fpm_http_upstream_deadline_arm(up);
 	}
 	fpm_http_upstream_flush(up);
 }
@@ -908,12 +1072,16 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 	}
 	up->ev_read = event_new(gw->base, up->fd, EV_READ | EV_PERSIST, t->ops->on_readable, up);
 	up->ev_write = event_new(gw->base, up->fd, EV_WRITE, fpm_http_upstream_writecb, up);
+	/* Issue #716: the read deadline's own timer. Created here rather than lazily
+	 * so every connection has it before the connect below can be in progress. */
+	fpm_http_upstream_deadline_new(up);
 
 	if (connect(up->fd, (struct sockaddr*)&t->upstream_addr, t->upstream_len) != 0) {
 		if (errno != EINPROGRESS) {
 			t->connect_errno = fpm_http_connect_errno_unreachable(errno) ? errno : 0;
 			event_free(up->ev_read);
 			event_free(up->ev_write);
+			fpm_http_upstream_deadline_free(up);	/* issue #716, same three as the struct */
 			close(up->fd);
 			free(up);
 			fpm_http_budget_give_back(t);
@@ -921,6 +1089,12 @@ fpm_http_upstream *fpm_http_transport_connect(struct fpm_http_target_s *t)
 		}
 		up->connecting = 1;
 		event_add(up->ev_write, NULL);
+		/* Issue #716: the connect itself is now unbounded until this arm -- the
+		 * pool_full_wait bound below covers the queue, not this connection, which
+		 * already holds a budget slot. arm() picks the connect timeout because
+		 * up->connecting is set, whether or not a request has been dispatched onto
+		 * this connection yet. */
+		fpm_http_upstream_deadline_arm(up);
 	} else {
 		event_add(up->ev_read, NULL);
 	}
@@ -1006,6 +1180,18 @@ static void fpm_http_wait_expired(evutil_socket_t fd, short what, void *arg)
 	(void) what;
 	TAILQ_REMOVE(&c->target->waiting, c, link);
 	c->queued = 0;
+	/* Issue #642: a request that waited out its bound logs the whole wait as
+	 * queue_ms, as a dispatched one does. The header is not sent for a 503, so
+	 * this only reaches the access log. Only the wait policy has a wait to
+	 * report: the default policy's reclaim grace (issue #735) also lands here,
+	 * and c->wait_since is never set on that path, so the elapsed time would be
+	 * the wall clock minus zero. Same guard as fpm_http_pump(). */
+	if (c->gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
+		struct timeval now;
+
+		evutil_gettimeofday(&now, NULL);
+		c->queue_wait_ms = fpm_http_elapsed_ms(&c->wait_since, &now);
+	}
 	fpm_http_reject_queued(c);
 }
 
@@ -1026,6 +1212,101 @@ static unsigned fpm_http_waiting_len(struct fpm_http_target_s *t)
 		n++;
 	}
 	return n;
+}
+
+/* Issue #735: the gateway processes of one pool share one admission budget but
+ * not their connections. A persistent upstream connection that sits idle in
+ * process A pins a worker, and process B cannot see it, let alone close it: B's
+ * request found the budget full, and was either queued until its own wait timer
+ * ran out (wait policy: 6 of 8 parallel requests answered 503 with 8 idle
+ * workers, measured by the #602 reviewer) or answered 503 at once (default
+ * policy: a pool of one worker answered 503 to sequential requests, measured in
+ * #728 on 18 of 25 runs). Process B now bumps the target's shared reclaim
+ * generation; every process runs a short timer while it has connections or
+ * queued requests (fpm_http_tick()), drops its IDLE connections to a target
+ * whose generation moved, and retries its own queue. Polling a counter in
+ * shared memory, not a wake-up signal: a dead process cannot leave a stale
+ * "somebody is waiting" state behind, and the worst a spurious bump costs is
+ * one reconnect. With http.gateways = 1 none of this runs. */
+#define FPM_HTTP_TICK_MS 10
+/* How long the default policy (reject) lets a request wait for a sibling to give
+ * a connection back before it answers 503. Two ticks are enough for the round
+ * trip (B bumps, A drops on its tick, B retries on its tick); the rest is
+ * margin for a loaded machine. Only requests that find the budget held by a
+ * sibling wait; a pool full of this process's own connections still answers 503
+ * at once. The wait policy has its own, longer bound. */
+#define FPM_HTTP_RECLAIM_GRACE_MS 100
+
+static int fpm_http_has_siblings(struct fpm_http_gateway_s *gw)
+{
+	return gw->counters && gw->counters->nproc > 1;
+}
+
+/* Does another gateway process hold part of this target's budget? */
+static int fpm_http_siblings_hold(struct fpm_http_target_s *t)
+{
+	atomic_t *mine = fpm_http_target_held(t);
+
+	return fpm_http_has_siblings(t->gw) && *t->upstreams_used > (mine ? *mine : 0);
+}
+
+static void fpm_http_tick(evutil_socket_t fd, short what, void *arg);
+
+static void fpm_http_tick_arm(struct fpm_http_gateway_s *gw)
+{
+	struct timeval tv = {0, FPM_HTTP_TICK_MS * 1000};
+
+	if (!fpm_http_has_siblings(gw)) {
+		return;
+	}
+	if (!gw->tick) {
+		gw->tick = evtimer_new(gw->base, fpm_http_tick, gw);
+		if (!gw->tick) {
+			return;
+		}
+	}
+	if (!evtimer_pending(gw->tick, NULL)) {
+		evtimer_add(gw->tick, &tv);
+	}
+}
+
+/* Returns 1 while the target still has something the next tick must look at. */
+static int fpm_http_tick_target(struct fpm_http_target_s *t)
+{
+	if (*t->reclaim != t->reclaim_seen) {
+		fpm_http_upstream *up, *next;
+
+		t->reclaim_seen = *t->reclaim;
+		for (up = TAILQ_FIRST(&t->upstreams); up; up = next) {
+			next = TAILQ_NEXT(up, link);
+			if (!up->busy && !up->connecting && !up->active) {
+				t->ops->drop(up);
+			}
+		}
+	}
+	return t->nupstreams > 0 || !TAILQ_EMPTY(&t->waiting);
+}
+
+static void fpm_http_tick(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	unsigned i;
+	int again = 0;
+
+	(void) fd;
+	(void) what;
+	for (i = 0; i < gw->ntargets; i++) {
+		again |= fpm_http_tick_target(&gw->targets[i]);
+	}
+	for (i = 0; i < gw->noperator_targets; i++) {
+		again |= fpm_http_tick_target(&gw->operator_targets[i]);
+	}
+	/* The drops above may have freed budget this process' own queue is waiting
+	 * for, and a sibling's drop since the last tick may have done the same. */
+	fpm_http_pump(gw);
+	if (again) {
+		fpm_http_tick_arm(gw);
+	}
 }
 
 /* One dispatch round for ONE target (issue #340). Split out of
@@ -1110,6 +1391,43 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			 * fpm_http_pump()), which is what eventually empties it. Nothing
 			 * else about the queue cap changes: it was already applied when
 			 * the request was enqueued, not here. */
+			/* Issue #735: when the budget is held by sibling processes, ask them
+			 * to give idle connections back and retry on the next tick. */
+			if (fpm_http_siblings_hold(t)) {
+				fpm_http_counter_incr(t->reclaim);
+				fpm_http_tick_arm(gw);
+				if (gw->wait_policy != FPM_HTTP_POOL_FULL_WAIT) {
+					/* Default policy: a short grace instead of the wait
+					 * timer's bound, at most one queued request per worker
+					 * the target can have; the rest answer 503 below. */
+					fpm_http_conn *last = NULL;
+					unsigned kept = 0;
+					struct timeval grace = {0, FPM_HTTP_RECLAIM_GRACE_MS * 1000};
+
+					TAILQ_FOREACH(c, &t->waiting, link) {
+						if (kept >= t->max_upstreams) {
+							break;
+						}
+						if (!c->wait_timer) {
+							c->wait_timer = evtimer_new(gw->base, fpm_http_wait_expired, c);
+							if (!c->wait_timer) {
+								break;
+							}
+							evtimer_add(c->wait_timer, &grace);
+						}
+						last = c;
+						kept++;
+					}
+					if (last) {
+						while ((c = TAILQ_NEXT(last, link))) {
+							TAILQ_REMOVE(&t->waiting, c, link);
+							c->queued = 0;
+							fpm_http_reject_queued(c);
+						}
+						return;
+					}
+				}
+			}
 			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
 				return;
 			}
@@ -1136,12 +1454,25 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			c->wait_timer = NULL;
 			evutil_gettimeofday(&now, NULL);
 			evutil_timersub(&now, &c->wait_since, &spent);
-			c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+			/* The default policy's reclaim grace (issue #735) also owns a
+			 * timer; only the wait policy reports a wait. */
+			if (gw->wait_policy == FPM_HTTP_POOL_FULL_WAIT) {
+				c->queue_wait_ms = (long) spent.tv_sec * 1000 + spent.tv_usec / 1000;
+			}
 		}
+		/* Issue #642: the start of upstream_ms in the access log. */
+		fpm_clock_get(&c->upstream_since);
+		c->upstream_started = 1;
 		c->upstream = idle;
 		idle->busy = 1;
 		idle->req_written = idle->reply_seen = 0;
 		idle->current = c;
+		/* Issue #716: the request is now this connection's, so arm what it is
+		 * waiting on -- http.upstream_read_timeout, or the connect timeout still
+		 * if this connection has not finished connecting (nothing of the request
+		 * has reached the target yet, and the pump dispatches before the first
+		 * flush). */
+		fpm_http_upstream_deadline_arm(idle);
 		if (gw->idle_ms > 0 && !idle->connecting) {
 			event_add(idle->ev_read, NULL);		/* drop the idle deadline for the duration of the request */
 		}
@@ -1347,7 +1678,7 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
 		return NULL;
 	}
 	if (gw->gauges) {
-		fpm_http_counter_incr(&gw->gauges[0]);
+		fpm_http_counter_incr(&gw->gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN]);
 	}
 	evhttp_connection_set_closecb(evcon, fpm_http_client_closed, cl);
 	return cl;
@@ -1397,7 +1728,7 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	 * cleanup can re-enter, and must not find this connection still indexed. */
 	fpm_http_client_index_remove(&gw->client_index, cl);
 	if (gw->gauges) {
-		fpm_http_counter_decr(&gw->gauges[0]);
+		fpm_http_counter_decr(&gw->gauges[FPM_HTTP_GAUGE_CONNECTIONS_OPEN]);
 	}
 	if (c) {
 		fpm_http_conn_free(c);
@@ -1495,6 +1826,50 @@ static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
 	}
 }
 
+/* Issue #642: picks the id of the request starting on cl. With propagate, the
+ * client's own X-Request-Id is kept only when the DIRECT peer is in
+ * http.trusted_proxies -- the same rule that gates X-Forwarded-*
+ * (fpm_http_forwarded.h). Any other id is one the client made up. A value
+ * that fpm_http_request_id_valid() refuses is replaced, never truncated.
+ * Returns false when the caller has to generate one. */
+static bool fpm_http_client_request_id_inbound(struct fpm_http_gateway_s *gw,
+		struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	const char *inbound;
+	char *peer = NULL;
+	ev_uint16_t port = 0;
+
+	if (gw->request_id_mode != FPM_HTTP_REQUEST_ID_PROPAGATE || !gw->trusted_proxies_acl || !cl->evcon) {
+		return false;
+	}
+	evhttp_connection_get_peer(cl->evcon, &peer, &port);
+	inbound = evhttp_find_header(evhttp_request_get_input_headers(req), "X-Request-Id");
+	if (!peer || !inbound || !fpm_http_acl_check(gw->trusted_proxies_acl, peer) || !fpm_http_request_id_valid(inbound)) {
+		return false;
+	}
+	snprintf(cl->request_id, sizeof(cl->request_id), "%s", inbound);
+	return true;
+}
+
+/* Issue #642: the request's id, if http.request_id is on, and the start time
+ * for duration_ms. The id is also the X-Request-Id response header; the
+ * header is removed again by any evhttp_send_error() reply, which clears the
+ * output headers (see fpm_http_start_reply() for the replies that keep it). */
+static void fpm_http_client_request_id_assign(struct fpm_http_gateway_s *gw,
+		struct fpm_http_client_s *cl, struct evhttp_request *req)
+{
+	cl->request_id[0] = '\0';
+	if (gw->request_id_mode == FPM_HTTP_REQUEST_ID_OFF) {
+		return;
+	}
+	if (!fpm_http_client_request_id_inbound(gw, cl, req)) {
+		(void) fpm_http_request_id_generate(cl->request_id);
+	}
+	if (cl->request_id[0]) {
+		evhttp_add_header(evhttp_request_get_output_headers(req), "X-Request-Id", cl->request_id);
+	}
+}
+
 /* Called first thing for every request dispatched on a connection, from both
  * listeners. A request reaching a gencb has been read completely, so the
  * keep-alive clock (and the first-byte watcher) are spent; the completion hook
@@ -1511,6 +1886,11 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	if (!gw || !cl) {
 		return;
 	}
+	fpm_clock_get(&cl->request_started);
+	/* Issue #652: until the request is routed, it is the gateway's own answer. */
+	cl->duration_row = FPM_HTTP_DURATION_ROW_LOCAL;
+	cl->duration_observed = 0;
+	fpm_http_client_request_id_assign(gw, cl, req);
 	if (cl->ka_timer) {
 		event_del(cl->ka_timer);
 	}
@@ -1523,6 +1903,46 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	}
 }
 
+/* Issue #641: one step of the graceful drain. A connection is idle when no
+ * request is in flight on it AND nothing of a finished response is still
+ * waiting to be flushed -- fpm_http_conn_free() clears cl->c the moment
+ * evhttp_send_reply_end() queues the last byte, so the output buffer is the
+ * only witness that the client has not received it yet. Idle connections are
+ * closed by shrinking their own bufferevent timeouts, exactly as
+ * fpm_http_client_idle_fire() does: evhttp owns the connection and
+ * bufferevent_free() underneath it is a use-after-free (issue #90). The close
+ * callback then removes the node from the index; the index is not touched
+ * here, so iterating it is safe.
+ *
+ * Returns the number of connections that are still doing work. The drain tick
+ * exits the loop when it is zero, and the deadline cuts it otherwise. */
+unsigned fpm_http_gateway_drain_step(struct fpm_http_gateway_s *gw)
+{
+	static const struct timeval now = {0, 1};
+	unsigned busy = 0, i;
+
+	for (i = 0; i < gw->client_index.bucket_count; i++) {
+		struct fpm_http_client_s *cl;
+
+		for (cl = gw->client_index.buckets[i]; cl; cl = cl->hash_next) {
+			struct bufferevent *bev = cl->evcon ? evhttp_connection_get_bufferevent(cl->evcon) : NULL;
+			int idle = 1;
+
+			if (cl->c) {
+				idle = 0;	/* a request is in flight */
+			} else if (bev && evbuffer_get_length(bufferevent_get_output(bev)) > 0) {
+				idle = 0;	/* response not fully written to the client */
+			}
+			if (!idle) {
+				busy++;
+			} else if (bev) {
+				bufferevent_set_timeouts(bev, &now, &now);
+			}
+		}
+	}
+	return busy;
+}
+
 /* ------------------------------------------------------------------------ *
  * Responses the gateway provides ITSELF, without occupying a worker.
  *
@@ -1533,20 +1953,19 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
  * root, and respond without FastCGI.
  * ------------------------------------------------------------------------ */
 
-/* Resolved document root, once per gateway process. */
-static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
+/* Resolved document root for the one-time front controller check, into the
+ * caller's buffer. Static lookups do not use this: they hand gw->docroot to
+ * fpm_http_static_serve(), which resolves it per request (issue #638). It used
+ * to be cached in a function-level static, so a `current -> releases/N`
+ * symlink swap (Deployer, Envoyer, Capistrano) left static files coming from
+ * release N-1 while PHP ran release N. */
+static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw, char resolved[MAXPATHLEN])
 {
-	static char resolved[MAXPATHLEN];
-	static int done = 0;
-
-	if (!done) {
-		done = 1;
-		if (!realpath(gw->docroot, resolved)) {
-			resolved[0] = '\0';
-		}
+	if (!gw->docroot || !realpath(gw->docroot, resolved)) {
+		return NULL;
 	}
 
-	return resolved[0] ? resolved : NULL;
+	return resolved;
 }
 
 /* Validates http.front_controller once, in the master, before the first gateway
@@ -1569,14 +1988,19 @@ static const char *fpm_http_docroot_real(struct fpm_http_gateway_s *gw)
  * calls this right after fpm_http_gateway_settings()); the master and every
  * gateway child share the same filesystem view for this pool (no chroot/chdir
  * happens between here and fpm_http_gateway_run()), so resolving the document
- * root here is exactly as valid as resolving it later in the child. */
+ * root here is exactly as valid as resolving it later in the child. That holds
+ * only for this one-time check: static lookups re-resolve the root per request,
+ * after their cheap early rejects,
+ * (issue #638), so after a symlink deploy front_controller_ok stays pinned to
+ * the release that was live at startup. */
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw)
 {
 	const char *fc = gw->front_controller;
 
 	gw->front_controller_ok = 0;
 	if (fc && *fc) {
-		const char *root = fpm_http_docroot_real(gw);
+		char root_buf[MAXPATHLEN];
+		const char *root = fpm_http_docroot_real(gw, root_buf);
 		char candidate[MAXPATHLEN], resolved[MAXPATHLEN];
 
 		if (!root) {
@@ -1625,7 +2049,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 
 	memset(&st, 0, sizeof(st));
 	st.pool = gw->pool;
-	st.root = fpm_http_docroot_real(gw);	/* NULL when it does not resolve: nothing is served */
+	st.root_unresolved = gw->docroot;	/* resolved per request, after the cheap rejects; NULL or unresolvable serves nothing */
 	st.log = fpm_http_static_log_response;
 	st.log_ctx = &ctx;
 
@@ -1772,6 +2196,144 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 	return 1;
 }
 
+/* Issue #646: how many children of one routed target can serve requests, read
+ * from the target pool's scoreboard. A slot counts when used is set, its pid is
+ * positive (the test fpm_http_direct_ops_slot_pid() makes), and the child has
+ * left FPM_REQUEST_CREATING, that is it reached its accept loop. A child that
+ * dies before that, such as one that fails its chdir(), never counts, even
+ * while the master keeps forking it again. A NULL scoreboard counts as zero. */
+static unsigned fpm_http_target_accepting(const struct fpm_http_target_s *t)
+{
+	unsigned i, accepting = 0;
+
+	if (!t->scoreboard) {
+		return 0;
+	}
+	for (i = 0; i < t->scoreboard->nprocs; i++) {
+		const volatile struct fpm_scoreboard_proc_s *p = &t->scoreboard->procs[i];
+
+		if (p->used && p->pid > 0 && p->request_stage != FPM_REQUEST_CREATING) {
+			accepting++;
+		}
+	}
+	return accepting;
+}
+
+/* Issue #646: the readiness state, as the probe reports it. Order matters:
+ *
+ * - draining (503) from the first moment of a stop or reload, while the soft
+ *   window runs (gw->soft_draining) and after the hard drain began (gw->stopping);
+ * - starting (503) until at least one target can serve, that is it has a child
+ *   that accepts requests. A target that never serves (a chdir that fails, say)
+ *   does not hold the probe at 503 while another target serves. An ondemand
+ *   target counts as able to serve: it starts its children on demand, so having
+ *   none is its normal idle state. Once the gateway has seen a target serve, the
+ *   state is latched (gw->ready_seen), so a later gap does not turn the probe
+ *   back into "starting";
+ * - no live target (503), only with http.ready_require_target: no target can
+ *   serve, no child of any target accepts requests. An ondemand target is never
+ *   dead;
+ * - ready (200) otherwise.
+ *
+ * The probe only reads. The latch is this process's own memory. */
+static void fpm_http_ready_state(struct fpm_http_gateway_s *gw, const char **text, int *code, const char **reason)
+{
+	unsigned t;
+	int any_serving = 0;
+
+	if (gw->stopping || gw->soft_draining) {
+		*text = "draining";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	for (t = 0; t < gw->ntargets; t++) {
+		const struct fpm_http_target_s *target = &gw->targets[t];
+
+		if (target->ondemand || fpm_http_target_accepting(target) > 0) {
+			any_serving = 1;
+		}
+	}
+
+	if (!gw->ready_seen) {
+		if (!any_serving) {
+			*text = "starting";
+			*reason = "Service Unavailable";
+			*code = HTTP_SERVUNAVAIL;
+			return;
+		}
+		gw->ready_seen = 1;
+	}
+
+	if (gw->ready_require_target && !any_serving) {
+		*text = "no live target";
+		*reason = "Service Unavailable";
+		*code = HTTP_SERVUNAVAIL;
+		return;
+	}
+
+	*text = "ready";
+	*reason = "OK";
+	*code = HTTP_OK;
+}
+
+/* http.ready_path, answered directly by the gateway process -- issue #646.
+ * 200 "ready" while the gateway serves. 503 "starting" until at least one target
+ * can serve, "draining" from the start of a stop or reload (the soft window, see
+ * fpm_http_drain_soft_start()) and after the hard drain began, and (opt-in,
+ * http.ready_require_target) "no live target" when no target has a live child.
+ * Same matching as ping.path in fpm_http_serve_ping(): origin-form path, query
+ * string cut off, whole path compared, no percent-decoding. Called from
+ * fpm_http_request() right after the ping check and before the operator
+ * namespace, so no child, queue slot or pool counter is touched: the probe
+ * reads the target scoreboards and nothing else.
+ *
+ * During the drain the gateway keeps its listeners, so a new connection is
+ * answered (503 for this path), not refused. The hard drain (fpm_http_drain.c)
+ * stops accepting when the window ends. fpmng-http-gateway-ready-states.phpt
+ * and fpmng-http-gateway-ready-drain.phpt cover the states. */
+static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_request *req, const char *remote_addr)
+{
+	char path[512];
+	struct evkeyvalq *out;
+	struct evbuffer *body;
+	const char *text;
+	const char *reason;
+	int code;
+	size_t bytes;
+
+	if (!gw->ready_path || !fpm_http_raw_path(req, path, sizeof(path))) {
+		return 0;
+	}
+	if (strcmp(path, gw->ready_path) != 0) {
+		return 0;
+	}
+
+	fpm_http_ready_state(gw, &text, &code, &reason);
+
+	body = evbuffer_new();
+	if (!body || evbuffer_add_printf(body, "%s", text) < 0) {
+		if (body) {
+			evbuffer_free(body);
+		}
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		return 1;
+	}
+
+	out = evhttp_request_get_output_headers(req);
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	/* Same no-cache headers as ping.path: a cached readiness answer is a lie. */
+	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
+	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+	bytes = evbuffer_get_length(body);
+	fpm_http_log_response(gw, req, remote_addr, NULL, code, bytes, NULL);
+	evhttp_send_reply(req, code, reason, body);
+	evbuffer_free(body);
+	return 1;
+}
+
 /* Returns 1 when the gateway answered on its own; 0 to hand the request to a
  * worker. *script_missing carries fpm_http_serve_static()'s realpath() result
  * out (see the comment there) so fpm_http_build_request() can reuse it. */
@@ -1841,7 +2403,20 @@ static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
 	return answered;
 }
 
-void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+/* Issue #686: the per-client half of http.max_connections_per_client, judged
+ * for one request. A connection is judged once, on its first request or when
+ * the accept-time pickup gets to it, whichever is first (fpm_http_direct_conn.c).
+ * Nonzero means the connection is over the cap: the caller answers 503, and
+ * evhttp_send_error() closes the connection because it sends Connection: close. */
+static int fpm_http_gateway_request_capped(struct fpm_http_gateway_s *gw, struct evhttp_connection *evcon)
+{
+	if (!gw || !gw->conns || !evcon) {
+		return 0;
+	}
+	return fpm_http_direct_conns_request(gw->conns, evhttp_connection_get_bufferevent(evcon), NULL, NULL) < 0;
+}
+
+static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 {
 	struct fpm_http_gateway_s *gw = arg;
 	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
@@ -1853,6 +2428,7 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	char authority[FPM_HTTP_AUTHORITY_MAX];
 	smart_str target = {0};
 	size_t len;
+	int over_client_cap;
 
 	fpm_http_normalize_target(req);
 	/* Issue #390 review: this listener bypassed all of the gateway's own
@@ -1871,7 +2447,14 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	if (gw && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
+	over_client_cap = fpm_http_gateway_request_capped(gw, evcon);
 	fpm_http_count_local(gw);
+	if (over_client_cap) {
+		/* Issue #686: over http.max_connections_per_client. Answered before the
+		 * HTTP-01 challenge and the redirect, as on the public listener. */
+		evhttp_send_error(req, 503, "Too many connections");
+		return;
+	}
 
 	/* HTTP-01 before anything else, including the redirect: the CA speaks
 	 * plain HTTP on purpose and must not be sent to :443 for a certificate
@@ -1956,6 +2539,32 @@ void fpm_http_plain_request(struct evhttp_request *req, void *arg)
 	free(location);
 	free(redirect_host);
 	smart_str_free(&target);
+}
+
+/* Issue #652: every answer of the plain listener is local, so it is observed
+ * in the "-" row, the row its requests_total was counted in. Most answers do
+ * not reach fpm_http_log_response(), so they are timed here, after the answer.
+ * The ACME answer does reach it, and it is observed there first; the flag in
+ * fpm_http_duration_observe() makes this second call a no-op. The client node
+ * is looked up after the answer because a close callback can run inside a
+ * send and free it. */
+void fpm_http_plain_request(struct evhttp_request *req, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	struct fpm_http_client_s *cl;
+	struct timeval now;
+
+	fpm_http_plain_answer(req, arg);
+	if (!gw || !gw->counters || !evcon) {
+		return;
+	}
+	cl = fpm_http_client_index_find(&gw->client_index, evcon);
+	if (!cl || !cl->request_started.tv_sec) {
+		return;
+	}
+	fpm_clock_get(&now);
+	fpm_http_duration_observe(gw, cl, &now);
 }
 
 /* ------------------------------------------------------------------- routing */
@@ -2100,6 +2709,7 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	const char *effective_addr;
 	struct fpm_http_client_s *client;
 	fpm_http_conn *c;
+	int over_client_cap;
 
 	fpm_http_normalize_target(req);
 	if (evcon) {
@@ -2125,6 +2735,9 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	if (gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_disarm(gw, evcon ? evhttp_connection_get_bufferevent(evcon) : NULL);
 	}
+	/* Issue #686: judged before the ACL, as on http-direct, so the ACL decides
+	 * which answer an excluded client gets and not whether it gets one. */
+	over_client_cap = fpm_http_gateway_request_capped(gw, evcon);
 
 	if (gw->acl && !fpm_http_acl_check(gw->acl, peer_addr)) {
 		/* ACL is about the direct network peer, so it (and its log entry) is
@@ -2132,6 +2745,12 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * here is exactly the one that made the TCP connection. */
 		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, NULL);
 		evhttp_send_error(req, 403, "Forbidden");
+		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
+		return;
+	}
+	if (over_client_cap) {
+		fpm_http_log_response(gw, req, peer_addr, NULL, 503, 0, NULL);
+		evhttp_send_error(req, 503, "Too many connections");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
 	}
@@ -2175,6 +2794,13 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	 * operator base. */
 	if (fpm_http_serve_ping(gw, req, effective_addr)) {
 		fpm_http_count_ping(gw);	/* #390: local answer, and its own ping count */
+		return;
+	}
+
+	/* http.ready_path (issue #646): the readiness probe, next to ping and
+	 * before the operator namespace. It answers 503 while the gateway drains. */
+	if (fpm_http_serve_ready(gw, req, effective_addr)) {
+		fpm_http_count_local(gw);	/* #390: a local answer, no ping_total */
 		return;
 	}
 
@@ -2237,6 +2863,9 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * below). What upstreams_used/_max describe is pressure on the target;
 		 * this is the traffic that pressure is a rate OF. */
 		fpm_http_counter_incr(c->target->requests_total);
+		if (client) {
+			client->duration_row = c->target->slot_index; /* Issue #652: the same row */
+		}
 		fpm_http_dispatch(gw, c, script_missing);
 	}
 }

@@ -21,10 +21,16 @@
 
 struct fpm_http_static {
 	const char *pool; /* for zlog() only */
-	/* Already resolved with realpath(), by whoever owns it: the gateway does
-	 * it once per process, a direct pool gets it from
-	 * fpm_http_direct_resolve_script(). NULL disables serving entirely. */
+	/* Already resolved with realpath(), by whoever owns it: a direct pool
+	 * gets it from fpm_http_direct_resolve_script(); the gateway sets
+	 * root_unresolved instead. NULL disables serving entirely. */
 	const char *root;
+	/* Alternative to `root`, for an owner whose root can move under it (the
+	 * gateway, with a `current -> releases/N` symlink, issue #638): a path that
+	 * fpm_http_static_serve() resolves with realpath() itself, on every call,
+	 * only after its cheap early rejects. The containment check then compares
+	 * against the root resolved for that same call. Ignored when `root` is set. */
+	const char *root_unresolved;
 	/* When set, only the extensions this module has a MIME type for are served
 	 * and anything else falls through to PHP -- the "allowed file classes"
 	 * rule issue #58 asks a direct pool to state explicitly. The gateway

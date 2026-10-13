@@ -51,15 +51,17 @@ $x509 = openssl_csr_sign($csr, null, $privkey, 2);
 openssl_x509_export_to_file($x509, $certFile);
 openssl_pkey_export_to_file($privkey, $keyFile);
 
-/* Binds on port 0 and prints the address it got, so a shared box cannot make
- * this test flaky. Every accepted connection gets the whole payload in one
- * write and is then held open: closing it would put an EOF on the client's
- * descriptor and hide exactly the stranding under test. */
+/* Takes the port to bind from argv, and prints the address it got. Issue #625:
+ * asking the kernel for one (port 0) would put this TLS listener outside the
+ * run's reserved port lane, and the lane is exactly what keeps two suites on one
+ * box apart. Every accepted connection gets the whole payload in one write and
+ * is then held open: closing it would put an EOF on the client's descriptor and
+ * hide exactly the stranding under test. */
 file_put_contents("$root/origin.php", <<<'PHP'
 <?php
-[$cert, $key, $size] = [$argv[1], $argv[2], (int) $argv[3]];
+[$cert, $key, $size, $port] = [$argv[1], $argv[2], (int) $argv[3], (int) $argv[4]];
 $ctx = stream_context_create(['ssl' => ['local_cert' => $cert, 'local_pk' => $key]]);
-$server = @stream_socket_server('tls://127.0.0.1:0', $errno, $errstr,
+$server = @stream_socket_server("tls://127.0.0.1:$port", $errno, $errstr,
     STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx);
 if (!$server) {
     fwrite(STDERR, "origin: bind failed: $errstr\n");
@@ -242,29 +244,6 @@ while (!fpmng_worker_may_exit()) {
 }
 PHP);
 
-/* The array form runs the binary directly. With a command string PHP goes
- * through `/bin/sh -c`, and on a box where /bin/sh is dash the shell does not
- * exec its argument: proc_terminate() then signals the shell and leaves the
- * origin orphaned. Measured 2026-09-09 on 192.168.8.50 (dash 0.5.12): the
- * string form left the CLI running with ppid 1 after proc_terminate() plus
- * proc_close(), the array form left nothing — which is one leaked TLS
- * listener per suite run (issue #89). */
-$origin = proc_open(
-    [PHP_BINARY, '-n', "$root/origin.php", $certFile, $keyFile, (string) PAYLOAD],
-    $descriptors, $originPipes);
-check(is_resource($origin), 'could not start the TLS origin');
-$addr = trim((string) fgets($originPipes[1]));
-if (!preg_match('/^127\.0\.0\.1:\d+$/', $addr)) {
-    /* Read the diagnostics only on failure, and only after making the pipe
-     * non-blocking: the origin never exits on its own, so a blocking
-     * stream_get_contents() here hangs the whole test instead of reporting
-     * why the address was missing. */
-    stream_set_blocking($originPipes[2], false);
-    throw new RuntimeException('origin did not report an address: ' . var_export($addr, true) .
-        ' / ' . stream_get_contents($originPipes[2]));
-}
-file_put_contents("$root/tls.addr", $addr);
-
 $port = (int) (getenv('FPMNG_DIRECT_WORKER_BUFFERED_PORT') ?: 28079 + 200 * (int) getenv('TEST_PHP_WORKER') + (int) getenv('FPMNG_PHPT_PORT_SHIFT'));
 $cfg = <<<CFG
 [global]
@@ -286,6 +265,35 @@ php_admin_value[display_errors] = 0
 CFG;
 
 $tester = new FPM\Tester($cfg, '<?php');
+/* The origin binds a port of the run's own (issue #625), which is why the
+ * Tester is created before it is started: allocating an address does not start
+ * a master, so this reorders nothing that runs. */
+$originAddr = $tester->getAddr('ipv4', '[origin]');
+
+/* The array form runs the binary directly. With a command string PHP goes
+ * through `/bin/sh -c`, and on a box where /bin/sh is dash the shell does not
+ * exec its argument: proc_terminate() then signals the shell and leaves the
+ * origin orphaned. Measured 2026-09-09 on 192.168.8.50 (dash 0.5.12): the
+ * string form left the CLI running with ppid 1 after proc_terminate() plus
+ * proc_close(), the array form left nothing — which is one leaked TLS
+ * listener per suite run (issue #89). */
+$origin = proc_open(
+    [PHP_BINARY, '-n', "$root/origin.php", $certFile, $keyFile, (string) PAYLOAD,
+        (string) (int) substr($originAddr, strrpos($originAddr, ':') + 1)],
+    $descriptors, $originPipes);
+check(is_resource($origin), 'could not start the TLS origin');
+$addr = trim((string) fgets($originPipes[1]));
+if (!preg_match('/^127\.0\.0\.1:\d+$/', $addr)) {
+    /* Read the diagnostics only on failure, and only after making the pipe
+     * non-blocking: the origin never exits on its own, so a blocking
+     * stream_get_contents() here hangs the whole test instead of reporting
+     * why the address was missing. */
+    stream_set_blocking($originPipes[2], false);
+    throw new RuntimeException('origin did not report an address: ' . var_export($addr, true) .
+        ' / ' . stream_get_contents($originPipes[2]));
+}
+file_put_contents("$root/tls.addr", $addr);
+
     $tester->start();
     $tester->expectLogStartNotices();
 

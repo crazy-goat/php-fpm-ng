@@ -70,6 +70,7 @@
 #include "zlog.h"
 
 #include "fpm_http_internal.h"
+#include "fpm_http_handoff.h"
 
 static int cleanup_registered = 0;
 
@@ -367,6 +368,17 @@ static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 	}
 }
 
+/* Issue #646: hands the readiness probe the target pool's scoreboard and its
+ * process manager, and records the pool itself for the master's stop order.
+ * The scoreboard is shared memory the master made before it forked this
+ * gateway, so the gateway reads the live slots. */
+static void fpm_http_target_watch(struct fpm_http_target_s *t, const struct fpm_worker_pool_s *pool)
+{
+	t->scoreboard = pool->scoreboard;
+	t->ondemand = pool->config->pm == PM_STYLE_ONDEMAND;
+	t->worker_pool = pool;
+}
+
 /* Fills one target in and points it at its row in the pool's counters segment.
  * own_capacity is the gateway's own connection budget, which differs from the
  * pool's child count for a multi-request executor (see fpm_http_init_pool_ex());
@@ -408,6 +420,7 @@ static int fpm_http_target_init(struct fpm_http_target_s *t, struct fpm_http_gat
 	t->upstreams_used = &slot[2];
 	t->requests_total = &slot[0];
 	t->rejected_total = &slot[1];
+	t->reclaim = &slot[3];
 	return 0;
 }
 
@@ -504,6 +517,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 					FPM_HTTP_TARGET_FASTCGI, own_capacity) != 0) {
 			return -1;
 		}
+		fpm_http_target_watch(&gw->targets[0], wp);
 		gw->routes[0].prefix = strdup("/");
 		if (!gw->routes[0].prefix) {
 			zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
@@ -529,6 +543,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 					target->config->listen_address, transport, capacity) != 0) {
 			return -1;
 		}
+		fpm_http_target_watch(&gw->targets[ti], target);
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
 			gw->routes[ri].prefix = strndup(prefix, prefix_len);
 			if (!gw->routes[ri].prefix) {
@@ -841,7 +856,17 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	gw->write_timeout.tv_sec = wp->config->http_write_timeout / 1000;
 	gw->write_timeout.tv_usec = (wp->config->http_write_timeout % 1000) * 1000;
 	gw->response_buffer = wp->config->http_response_buffer;
+	gw->response_min_rate = wp->config->http_response_min_rate;
+	gw->upstream_connect_timeout_ms = wp->config->http_upstream_connect_timeout;
+	gw->upstream_connect_timeout.tv_sec = wp->config->http_upstream_connect_timeout / 1000;
+	gw->upstream_connect_timeout.tv_usec = (wp->config->http_upstream_connect_timeout % 1000) * 1000;
+	gw->upstream_read_timeout_ms = wp->config->http_upstream_read_timeout;
+	gw->upstream_read_timeout.tv_sec = wp->config->http_upstream_read_timeout / 1000;
+	gw->upstream_read_timeout.tv_usec = (wp->config->http_upstream_read_timeout % 1000) * 1000;
 	gw->max_body = wp->config->http_max_body;
+	/* Issue #686: copied as they are; validation refuses a value that cannot apply. */
+	gw->max_connections = wp->config->http_max_connections;
+	gw->max_per_client = wp->config->http_max_connections_per_client;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
 	gw->wait_queue_max = wp->config->http_pool_full_queue_max;
@@ -879,6 +904,8 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
 		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
 	}
+	gw->request_id_mode = wp->config->http_request_id; /* issue #642 */
+	gw->access_format = wp->config->http_access_format; /* issue #642 */
 
 	if (wp->config->http_access_log && *wp->config->http_access_log) {
 		gw->access_log_path = strdup(wp->config->http_access_log);
@@ -891,6 +918,12 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 		gw->ping_path = strdup(wp->config->ping_path);
 		gw->ping_response = strdup(wp->config->ping_response ? wp->config->ping_response : "pong");
 	}
+
+	/* http.ready_path -- issue #646. fpm_conf.c has already validated it. */
+	if (wp->config->http_ready_path && *wp->config->http_ready_path) {
+		gw->ready_path = strdup(wp->config->http_ready_path);
+	}
+	gw->ready_require_target = wp->config->http_ready_require_target ? 1 : 0;
 
 	/* access.suppress_path[], copied the same way http-direct's access log
 	 * does (fpm_http_direct_access_log.c) -- see fpm_http_log_suppressed(). */
@@ -1004,6 +1037,41 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 }
 /* }}} */
 
+/* Issue #736: a gateway pool that routes to FastCGI builds SCRIPT_FILENAME as
+ * docroot + decoded path (fpm_http_build_request(), nginx-style
+ * fastcgi_split_path_info), and the docroot is the pool's chdir -- or the
+ * master's working directory when chdir is unset (see the gw->docroot
+ * assignment in fpm_http_init_pool_ex()). With neither chdir nor
+ * http.front_controller set by the admin, every request names a script that
+ * does not exist and the upstream answers "Primary script unknown", with
+ * nothing pointing at the gateway's configuration. Said once here, in the
+ * master, after the routing table is built (so the presence of a FastCGI
+ * target is known): a WARNING, not a refusal, because the master's working
+ * directory could in principle be the application directory. The was-set
+ * checks are deliberate: http.front_controller defaults to "/index.php"
+ * (fpm_conf.c), so reading the value could not tell "the admin set nothing"
+ * from "the defaults cover it". */
+static void fpm_http_warn_missing_docroot(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw)
+{
+	unsigned i;
+
+	if (!gw->proxy_only) {
+		return;
+	}
+	if (fpm_conf_directive_was_set(wp->config, "chdir") || fpm_conf_directive_was_set(wp->config, "http.front_controller")) {
+		return;
+	}
+	for (i = 0; i < gw->ntargets; i++) {
+		if (gw->targets[i].transport == FPM_HTTP_TARGET_FASTCGI) {
+			zlog(ZLOG_WARNING, "[pool %s] http: no chdir and no http.front_controller with a FastCGI target; "
+							   "SCRIPT_FILENAME is built under the master's working directory and the upstream "
+							   "answers 'Primary script unknown' for every request",
+					wp->config->name);
+			return;
+		}
+	}
+}
+
 /* Called once per gateway pool by the master, before any child forks.
  * capacity_override is needed by multi-request executors: a classic worker
  * holds one connection, while a Fiber holds many. 0 preserves the child-count
@@ -1036,6 +1104,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		gw->plain_listen_fd = -1;
 		gw->pool = strdup(wp->config->name);
 		gw->listen_address = strdup(wp->config->listen_address);
+		fpm_http_handoff_tls_fp(wp, gw->listen_tls_fp);
 		gw->docroot = strdup(wp->config->chdir && *wp->config->chdir ? wp->config->chdir : cwd);
 		gw->backlog = wp->config->listen_backlog;
 		fpm_http_gateway_settings(wp, gw, &nproc_wanted, &reuseport);
@@ -1161,15 +1230,15 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				reuseport = 0;
 				gw->reuseport = 0;
 			} else {
-				gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->listen_address,
-						gw->backlog, reuseport, !gw->tls_wait_for_cert);
+				gw->listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->listen_address,
+						gw->backlog, reuseport, !gw->tls_wait_for_cert, gw->listen_tls_fp);
 				/* No master-owned socket for this pool: make the unused slot
 				 * explicit so nothing -- the child's listener-socket close
 				 * loop in particular -- treats fd 0 as this pool's listener. */
 				wp->listening_socket = -1;
 			}
 		} else {
-			gw->listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert);
+			gw->listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->http_listen_override, gw->backlog, reuseport, !gw->tls_wait_for_cert, gw->listen_tls_fp);
 		}
 		if (gw->listen_fd < 0) {
 			fpm_http_operator_free(gw); /* issue #389 */
@@ -1188,7 +1257,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			return 0;
 		}
 		if (gw->plain_listen_address) {
-			gw->plain_listen_fd = fpm_http_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1);
+			gw->plain_listen_fd = fpm_http_handoff_listen(gw->pool, gw->listen_address, gw->plain_listen_address, gw->backlog, reuseport, 1, gw->listen_tls_fp);
 			if (gw->plain_listen_fd < 0) {
 				close(gw->listen_fd);
 				fpm_http_operator_free(gw); /* issue #389 */
@@ -1236,6 +1305,9 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw);
 			return -1;
 		}
+		/* Issue #736: docroot warning, once in the master, after the routing
+		 * table is built so the presence of a FastCGI target is known. */
+		fpm_http_warn_missing_docroot(wp, gw);
 		/* Issue #389: the http.operator forwarding map, built once here in the
 		 * master from every pool's operator routes and inherited by every
 		 * gateway process through fork(). A reload rebuilds it like every
@@ -1436,6 +1508,45 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	if (wp->config->http_write_timeout < 0) {
 		zlog(ZLOG_ERROR, "[pool %s] http.write_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_response_min_rate < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.response_min_rate must not be negative", wp->config->name);
+		return -1;
+	}
+	/* Issue #716: the two upstream deadlines. 0 is a documented value (never cut
+	 * a connect, never cut a silent target) rather than an error, so only a
+	 * negative one is refused -- same as http.write_timeout above. */
+	if (wp->config->http_upstream_connect_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upstream_connect_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_upstream_read_timeout < 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upstream_read_timeout must not be negative", wp->config->name);
+		return -1;
+	}
+	/* Issue #686: the same bounds and the same pairing rule as http-direct
+	 * (fpm_http_direct_request.c). Both limits are per gateway process. */
+	if (wp->config->http_max_connections < 0 || wp->config->http_max_connections > 1000000 ||
+			wp->config->http_max_connections_per_client < 0 ||
+			wp->config->http_max_connections_per_client > 1000000) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections and http.max_connections_per_client must be "
+						 "between 0 (unlimited) and 1000000",
+				wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_max_connections_per_client > 0 && wp->config->http_max_connections <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections_per_client requires http.max_connections, "
+						 "which is the cap the per-client count is taken against",
+				wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_max_connections > 0 &&
+			wp->config->http_max_connections_per_client > wp->config->http_max_connections) {
+		zlog(ZLOG_ERROR, "[pool %s] http.max_connections_per_client (%d) is above http.max_connections (%d), "
+						 "so it can never apply",
+				wp->config->name, wp->config->http_max_connections_per_client,
+				wp->config->http_max_connections);
 		return -1;
 	}
 	/* issue #340. Deliberately here and not in fpm_http_routes_build(): the
@@ -1786,7 +1897,7 @@ static void fpm_http_counters_row(struct fpm_http_gateway_s *gw, unsigned i,
 	 * block was zeroed by the master) are no longer in the number. */
 	out->upstreams_used = 0;
 	for (p = 0; p < gw->counters->nproc; p++) {
-		out->upstreams_used += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[1 + i];
+		out->upstreams_used += (unsigned long) fpm_http_counters_gauges(gw->counters, p)[FPM_HTTP_GAUGE_UPSTREAMS_HELD + i];
 	}
 	out->max_upstreams = i < gw->ntargets ? gw->targets[i].max_upstreams
 										  : (i == gw->ntargets ? FPM_HTTP_OPERATOR_UPSTREAMS : 0);
@@ -1857,6 +1968,38 @@ unsigned long fpm_http_gateway_baseline_requests(struct fpm_worker_pool_s *wp) /
 }
 /* }}} */
 
+/* Issue #652: the request-duration histogram of every row, in the Prometheus
+ * histogram shape: one _bucket line per `le` (cumulative, the last one is
+ * +Inf), then _sum in seconds and _count. The sum is kept in microseconds and
+ * printed as seconds with six decimals, so no float arithmetic is involved.
+ * _count is the +Inf bucket by construction, so the two always agree within one
+ * scrape. */
+static void fpm_http_render_duration(struct fpm_http_gateway_s *gw, struct fpm_operator_buf_s *b) /* {{{ */
+{
+	unsigned i, k;
+
+	for (i = 0; i < gw->counters->nslots; i++) {
+		const atomic_t *slot = fpm_http_counters_slot_cells(gw->counters, i);
+		const char *target = fpm_http_counters_slot_label(gw, i);
+		unsigned long cumulative = 0, sum = (unsigned long) slot[FPM_HTTP_SLOT_SUM_CELL];
+
+		for (k = 0; k <= FPM_HTTP_DURATION_BUCKETS; k++) {
+			cumulative += (unsigned long) slot[FPM_HTTP_SLOT_BUCKET_CELL + k];
+			fpm_operator_buf_appendf(b,
+					"fpmng_gateway_request_duration_seconds_bucket{pool=\"%s\",target=\"%s\",le=\"%s\"} %lu\n",
+					gw->pool, target,
+					k < FPM_HTTP_DURATION_BUCKETS ? fpm_http_duration_bounds[k].le : "+Inf",
+					cumulative);
+		}
+		fpm_operator_buf_appendf(b,
+				"fpmng_gateway_request_duration_seconds_sum{pool=\"%s\",target=\"%s\"} %lu.%06lu\n"
+				"fpmng_gateway_request_duration_seconds_count{pool=\"%s\",target=\"%s\"} %lu\n",
+				gw->pool, target, sum / 1000000UL, sum % 1000000UL,
+				gw->pool, target, cumulative);
+	}
+}
+/* }}} */
+
 /* Issue #341, fpm_pool_type_s.render_metrics_prometheus for pool.type = gateway.
  * Runs in the operator endpoint's OWN child (see fpm_http.h) and reads the one
  * segment fpm_http_routes_build() allocated before any child forked. */
@@ -1881,13 +2024,23 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 			"# HELP fpmng_gateway_connections_open Client connections currently open to the gateway.\n"
 			"# TYPE fpmng_gateway_connections_open gauge\n"
 			"# HELP fpmng_gateway_ping_total ping.path answers, served by the gateway itself.\n"
-			"# TYPE fpmng_gateway_ping_total counter\n");
+			"# TYPE fpmng_gateway_ping_total counter\n"
+			"# HELP fpmng_gateway_responses_paused Client responses whose upstream is paused right now because the client has not read them (http.response_buffer).\n"
+			"# TYPE fpmng_gateway_responses_paused gauge\n"
+			"# HELP fpmng_gateway_responses_paused_total Times a response paused its upstream because the client had not read it, since the pool started.\n"
+			"# TYPE fpmng_gateway_responses_paused_total counter\n"
+			"# HELP fpmng_gateway_request_duration_seconds Time from the whole request being read to its response being complete, queue wait included, per target.\n"
+			"# TYPE fpmng_gateway_request_duration_seconds histogram\n");
 
 	fpm_operator_buf_appendf(b,
 			"fpmng_gateway_connections_open{pool=\"%s\"} %lu\n"
-			"fpmng_gateway_ping_total{pool=\"%s\"} %lu\n",
+			"fpmng_gateway_ping_total{pool=\"%s\"} %lu\n"
+			"fpmng_gateway_responses_paused{pool=\"%s\"} %lu\n"
+			"fpmng_gateway_responses_paused_total{pool=\"%s\"} %lu\n",
 			gw->pool, fpm_http_connections_open(gw),
-			gw->pool, (unsigned long) gw->counters->ping_total);
+			gw->pool, (unsigned long) gw->counters->ping_total,
+			gw->pool, fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_RESPONSES_PAUSED),
+			gw->pool, (unsigned long) gw->counters->responses_paused_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {
 		struct fpm_http_gateway_row_s row;
@@ -1904,6 +2057,7 @@ void fpm_http_render_metrics_prometheus(struct fpm_worker_pool_s *wp, struct fpm
 				gw->pool, row.target, row.rejected);
 	}
 
+	fpm_http_render_duration(gw, b);
 	fpm_http_render_exposed_pools(gw, b);
 }
 /* }}} */
@@ -1933,10 +2087,13 @@ void fpm_http_gateway_operator_status(struct fpm_worker_pool_s *wp, const char *
 
 	fpm_operator_buf_appendf(&reply->body,
 			"{\"pools\":[{\"name\":\"%s\",\"type\":\"gateway\",\"serves_requests\":false,"
-			"\"requests\":%lu,\"connections_open\":%lu,\"ping_total\":%lu}",
+			"\"requests\":%lu,\"connections_open\":%lu,\"ping_total\":%lu,"
+			"\"responses_paused\":%lu,\"responses_paused_total\":%lu}",
 			gw->pool, (unsigned long) gw->counters->requests_total,
 			fpm_http_connections_open(gw),
-			(unsigned long) gw->counters->ping_total);
+			(unsigned long) gw->counters->ping_total,
+			fpm_http_gauge_sum(gw, FPM_HTTP_GAUGE_RESPONSES_PAUSED),
+			(unsigned long) gw->counters->responses_paused_total);
 
 	for (i = 0; i < gw->counters->nslots; i++) {
 		struct fpm_http_gateway_row_s row;

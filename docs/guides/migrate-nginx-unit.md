@@ -109,7 +109,7 @@ and everything else to `[web]`; the pool names are the keys of `http.route`.
 | `environment` | `env[NAME] = value` | |
 | `options.admin`, `options.user` | `php_admin_value[...]`, `php_value[...]` | `options.file` is `php_ini` loading, not a pool directive |
 | TLS `certificate` bundle | `http.tls_cert`, `http.tls_key` | **beta**, `php-fpm-ng-tls` package only ([`tls.md`](../tls.md)) |
-| `PUT /config` | edit the file, `systemctl reload php-fpm-ng` | not atomic: run `php-fpm-ng -t` first |
+| `PUT /config` | edit the file, `systemctl reload php-fpm-ng` | not atomic, but a configuration that does not load is refused and the running pools keep serving ([`reload.md`](../reload.md#safe-reload-the-configuration-is-checked-before-anything-is-stopped-issue-640)) |
 
 ## What has no equivalent
 

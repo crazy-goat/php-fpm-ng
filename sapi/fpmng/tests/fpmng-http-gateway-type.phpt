@@ -56,15 +56,26 @@ echo "serves: gateway-ok\n";
 
 /* The process table is the only place "no PHP child for gw" can be observed.
  * ps args shows the setproctitle line fpm_http_gateway_run() installs
- * ("http gateway <pool> [<i>]"), and $pool in an upstream worker's title. */
-$ps = (string) shell_exec('ps -eo args 2>/dev/null');
+ * ("http gateway <pool> [<i>]"), and $pool in an upstream worker's title.
+ *
+ * Only THIS master's children are counted, by ppid (its pid is in the pid
+ * file). A bare args match finds every php-fpm-ng on the host that happens to
+ * have a pool named gw, which is what the two gateway-counters tests already
+ * avoid: on 2026-10-06, two owned suites in one lane pair on one host, this
+ * one counted the other lane's two gateways and failed with "expected exactly
+ * 2 gateway processes for gw, found 3". */
+$ps = (string) shell_exec('ps -eo pid,ppid,args 2>/dev/null');
+$masterPid = $tester->getPid();
 $gateways = 0;
 $ownWorkers = 0;
 foreach (explode("\n", $ps) as $line) {
-    if (str_contains($line, 'http gateway gw')) {
+    if (!preg_match('/^\s*(\d+)\s+(\d+)\s+(.*)$/', $line, $m) || (int) $m[2] !== $masterPid) {
+        continue;
+    }
+    if (str_contains($m[3], 'http gateway gw')) {
         $gateways++;
     }
-    if (str_contains($line, 'pool gw')) {
+    if (str_contains($m[3], 'pool gw')) {
         $ownWorkers++;
     }
 }

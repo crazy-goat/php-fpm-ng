@@ -317,6 +317,19 @@ held requests per worker, or needs them to survive the ceiling, that is a
 design change: it has to come with a bound of its own, and it belongs to #68
 and its follow-ups, not to this limit.
 
+#### Requests that arrive while the worker stops (issue #668)
+
+Every stop of the worker runs the same drain. The stop comes from `worker.max_pending` saturation, `pm.max_requests`, `worker.max_memory`, `worker.max_lifetime`, `SIGQUIT` (the master sends it on a reload) or `SIGUSR1` (retires one child).
+
+The drain stops the listener and answers every held request `503`. Then it runs the event loop for 100 ms (`FPM_WORKER_GRACE_MS` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). No directive sets this window.
+
+During the window:
+
+- A request on an open connection that reaches the worker gets `503 Worker unavailable`.
+- The worker does not accept a new connection. The shared listening socket is left to the sibling workers.
+
+After the window, the worker closes its open connections without a reply. A request on an open connection that arrives after the window gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. Every worker exit takes 100 ms longer because of the window.
+
 #### `worker.max_pending` (issue #331)
 
 - **Default:** `256` (`FPM_WORKER_PENDING_MAX`).
@@ -966,8 +979,9 @@ its normal shutdown.
 Behind a gateway pool the budget is also spent while the gateway holds the
 response back from a slow end client (`http.response_buffer`, issue #596): the
 worker is blocked in its write for that time. Size it for the slowest download
-you want to serve, or set `http.response_buffer = 0` on the gateway. See
-[gateway.md](gateway.md).
+you want to serve, or set `http.response_buffer = 0` on the gateway. A client
+that trickles instead of stopping is cut by the gateway's `http.response_min_rate`
+(issue #705), which releases the worker; see [gateway.md](gateway.md).
 
 **Over TLS too, since issue #195.** The combination used to be refused at
 startup: writing from inside a running request means not re-entering the event
@@ -1217,6 +1231,70 @@ the dot-segment rule and the conditional handling are the parts that have to be
 right, and a second copy of them is a second place to get them wrong. The
 gateway gained `Last-Modified` and `If-Modified-Since` from the same change.
 
+## Absolute-form request targets (issue #681)
+
+RFC 9112 3.2.2 obliges a server to accept `GET http://host/path HTTP/1.1`, and
+3.2.1 makes a target that starts with `/` origin-form whatever follows it. A
+direct pool reduces such a target to its origin-form path once, at the top of
+the request callback, exactly as the gateway does
+([`docs/gateway.md`](gateway.md#absolute-form-request-targets)):
+
+| Target sent | Path everything matches on | `REQUEST_URI` | `HTTP_HOST` |
+|---|---|---|---|
+| `/x?a=1` | `/x` | `/x?a=1` | the `Host` header |
+| `http://h/x?a=1` | `/x` | `/x?a=1` | the authority (`h`) |
+| `http://h` | `/` | `/` | the authority (`h`) |
+| `http:/x?a=1` | `/x` | `/x?a=1` | the `Host` header (no authority) |
+| `//h/x?a=1` | `//h/x` | `//h/x?a=1` | the `Host` header |
+
+An authority longer than 261 bytes is answered `400`, as on the gateway. A
+target with no path to reduce it to — asterisk-form, `OPTIONS *` — stays
+refused with `400`, which is what it always was.
+
+So `ping.path`, the static lookup, `PATH_INFO`, `REQUEST_URI` and
+`access.suppress_path[]` all see one path, whatever the client wrote, and none
+of them can be answered on one path and served on another: `GET
+http://host/assets/app.css` serves that file, `GET //host/assets/app.css` does
+not (its path is `//host/assets/app.css`, under the document root, and the
+static lookup finds nothing there), and both reach PHP with a `REQUEST_URI` and
+a `PATH_INFO` that agree. `access.suppress_path[]` is compared against that
+path for **every** response, whichever of the three endings wrote the line — a
+suppressed `ping.path` and a suppressed static file stay out of `access.log`
+whatever the client wrote, as on the gateway. Before this the pool answered
+`400` to every absolute-form target, read a network-path reference as a host
+plus a path for the static lookup while reporting the whole target as
+`REQUEST_URI`, and matched `access.suppress_path[]` against the raw
+request-target on the two endings that never reached PHP.
+
+`%r` in `access.format` is deliberately **not** that path: it is the
+request-target as the client wrote it (the absolute-form spelling survives),
+with the query string cut off -- `%Q%q` carries it instead, exactly once. The
+gateway differs here: its request-line `%r` keeps the query, so the two logs
+agree only on query-less targets (the gateway logs `GET /x?a=1 HTTP/1.0`).
+
+### What is not covered: the operator listener
+
+`operator.status_path` and `operator.metrics_path` are **not** covered by the
+table above, and the Definition of done for #681 asked for them. Since #275
+they are answered on `operator.status_listen`, by the operator endpoint's own
+server (`fpm_operator_http.c`), which parses the request line itself instead of
+using libevent, so it answers `404` to an absolute-form target — on the
+gateway's operator listener exactly as on this one, measured before and after
+this change:
+
+| Target sent to an operator listener | Answered |
+|---|---|
+| `/metrics/fcgi` | `200` |
+| `http://h/metrics/fcgi` | `404` |
+| `//h/metrics/fcgi` | `404` |
+
+So this is a shared gap in one server rather than a difference between the two
+pool types, it is fail-closed (`404`, nothing served), and it is left for a
+separate change: the reduction needs a second parse of its own, which is the
+drift this tree is built to avoid. It is a known gap, not an oversight — if a
+scraper behind a proxy sends absolute-form, it gets `404` from every pool type
+until that change lands.
+
 ## Operating a direct pool
 
 Since issue #59 a direct pool answers the pool-level operator directives an
@@ -1239,6 +1317,16 @@ access.suppress_path[] = /ping
 listen.allowed_clients = 10.0.0.4,10.0.0.5
 chroot = /srv/jail
 ```
+
+### Crash backoff (issue #727)
+
+The master waits longer before it starts a new child that fails fast. A child
+that exits within 10 seconds, with no request served, is a fast failure. This
+applies to both executors. The directive `pm.max_consecutive_failures` sets how
+many fast failures in a row the pool allows. The default is `6`, and `0` means
+that the pool never gives up. The rules are in [`crash-backoff.md`](crash-backoff.md),
+and the operator endpoint shows the state as described in
+[Crash backoff](operator-endpoint.md#crash-backoff-issue-727).
 
 ### `ping.path` and `operator.status_path`
 
@@ -1272,6 +1360,7 @@ documented spelling.
 | `pool`, `process manager`, `start time`, `start since` | the pool's scoreboard |
 | `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
 | `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
+| `listen queue`, `max listen queue`, `listen queue length` | the pool's scoreboard, sampled from TCP_INFO; only on a TCP listener in a Linux build (issue #644) |
 | `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
 | `non-php requests` | static files and pings: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
@@ -1285,6 +1374,11 @@ documented spelling.
 | `timed out connections` | connections dropped by the first-request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
+
+The `listen queue` lines follow the rules in
+[Saturation (issue #644)](operator-endpoint.md#saturation-issue-644). A classic
+pool uses `pm = static`, so its `max children reached` line reads `0`. That `0`
+means the count does not apply to a static pool.
 
 `refused requests` is the sum of `refused acl` and `refused capacity`, kept
 under its old name and its old meaning so a tool written against the fastcgi
@@ -1514,16 +1608,22 @@ What differs from a fastcgi pool:
 - `%e{VAR}` reads the CGI environment this pool built for the request, and `%R`
   is the direct peer address (never an `X-Forwarded-For`: a direct pool has no
   trusted-proxy list).
-- `%r` is the request path. On a fastcgi pool it is `SCRIPT_NAME`, which for a
-  front-controller application is always `/index.php`; here the path is what
-  the client asked for, and `%Q%q` still carries the query string exactly once.
+- `%{HTTP_X_REQUEST_ID}e` prints the request id. This pool makes no id of its own.
+  A gateway in front of it sends the id with `http.request_id` (issue #642). The
+  pool does not check the header, so a client that reaches the pool directly sends
+  its own value. Prints `-` when there is no header. See
+  [`docs/gateway.md`](gateway.md#access-log-fields-and-request-id-issue-642).
+- `%r` is the request-target as the client wrote it (the absolute-form spelling
+  survives), with the query string cut off -- `%Q%q` carries it instead, exactly
+  once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller
+  application is always `/index.php`; here it is what the client asked for.
 - Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
   are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
   left at zero or `-` rather than carried over from whatever this child served
   last. Scrapes of `operator.status_path` are not among them: since issue #275 they
   never reach this pool.
 
-- `access.suppress_path[]` matches the same request path.
+- `access.suppress_path[]` matches the origin-form request path.
 
 Under `pool.executor = worker`, `operator.status_path`/`operator.status` and
 `access.*` are **rejected**, for the same reason `request_terminate_timeout` is:
@@ -1828,16 +1928,30 @@ which turned out to already be there, one of which is new, and one of which
 is not supported and, on the libevent this project links, cannot be added
 without a much larger change.
 
-### Custom response status codes: already unrestricted
+### Custom response status codes: 200–599
 
-`fpm_http_direct_status_final()` accepts any status 200–599 the application
-sets, via `http_response_code()` or a raw `header('Status: ...')` line — a
-non-standard code (e.g. `Status: 299`) reaches the wire exactly as PHP built
-it, unmodified. The only statuses this SAPI refuses are outside 200–599:
-1xx (see [`fpm_send_early_hints()`](#fpm_send_early_hintsarray-headers-bool)
-below for why), and anything above 599, which is not a valid status line at
-all. No code change was needed for this — it is existing behavior,
-documented here because issue #63 asked for it explicitly.
+`fpm_http_direct_status_final()` accepts every application status from 200
+through 599, including non-standard codes such as 299. This range applies to
+`http_response_code()` and a CGI `header('Status: ...')` line.
+
+The CGI `Status:` value must contain exactly three digits, optionally
+followed by a space and a reason phrase. The buffered classic executor and
+the gateway use the same parser, `fpm_http_parse_cgi_status()` (issues #604
+and #594). A malformed value or a code outside 200–599 produces
+`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value.
+The classic executor discards the script's headers and body, counts one
+rejected response, and records 502 in `access.log`. The first rejection
+cause determines the error status and diagnostic. These checks include
+`fpmng_respond()`, which uses the same buffered finalizer. See
+`sapi/fpmng/tests/fpmng-http-direct-upstream-status.phpt` for the regression
+cases.
+
+A non-final code set through `http_response_code()` still produces 500 on
+the buffered classic executor. Other response errors, such as a malformed
+header name, also retain 500. The worker executor keeps its existing
+argument validation; it does not use the CGI `Status:` parser. For an
+interim 103 response, use
+[`fpm_send_early_hints()`](#fpm_send_early_hintsarray-headers-bool) below.
 
 ### `fpm_send_early_hints(array $headers): bool`
 

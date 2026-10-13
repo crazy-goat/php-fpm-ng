@@ -48,7 +48,17 @@ struct fpm_worker_pool_s;
  * refusal -- can be logged by filling in only what it actually knows. */
 struct fpm_http_direct_access_entry {
 	const char *method;
-	const char *uri; /* path only, without the query string */
+	/* What %r prints: the request-target as the client wrote it, with the
+	 * query string cut off (%Q%q carry that). The gateway's request line is
+	 * the same string (fpm_http.c:534), so one access.format means the same
+	 * thing on both transports. */
+	const char *uri;
+	/* What access.suppress_path[] is compared against: the origin-form path
+	 * (fpm_http_raw_path(), #681), which is NOT `uri` -- an absolute-form or
+	 * network-path target is written one way and matched another. Every ending
+	 * fills it, so a response no matter which of the three wrote its line is
+	 * suppressed by the path it was matched on. NULL when there was no path. */
+	const char *match_path;
 	const char *query_string; /* without the '?' */
 	const char *script_filename;
 	const char *remote_addr;

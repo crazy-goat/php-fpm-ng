@@ -41,6 +41,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     exit;
 }
 echo getenv('FPMNG_ROUTE_POOL') ?: json_encode([
+    'x_custom' => getallheaders()['X_Custom'] ?? null,
     'remote_addr' => $_SERVER['REMOTE_ADDR'] ?? null,
     'xff' => $_SERVER['HTTP_X_FORWARDED_FOR'] ?? null,
     'xfp' => $_SERVER['HTTP_X_FORWARDED_PROTO'] ?? null,
@@ -95,7 +96,9 @@ function fetchAll(string $url, ?string $body = null): array
         'ignore_errors' => true,
         'method' => $body === null ? 'GET' : 'POST',
         'content' => $body ?? '',
-        'header' => $body === null ? [] : "Content-Type: application/octet-stream\r\n",
+        'header' => $body === null
+            ? "X_Custom: should-not-forward\r\n"
+            : "Content-Type: application/octet-stream\r\nX_Custom: should-not-forward\r\n",
     ]]);
     $raw = @file_get_contents($url, false, $ctx);
     return [$raw, $http_response_header ?? []];
@@ -138,6 +141,8 @@ try {
      * loopback test both addresses read 127.0.0.1 -- what is asserted is
      * that the headers exist and are well-formed, not which address. */
     $seen = json_decode($body, true, 2, JSON_THROW_ON_ERROR);
+    check(($seen['x_custom'] ?? null) === null, 'underscore header reached the HTTP route target: ' . var_export($seen['x_custom'] ?? null, true));
+    echo "underscore-header-dropped: ok\n";
     check(($seen['xfp'] ?? '') === 'http', 'X-Forwarded-Proto: ' . var_export($seen['xfp'] ?? null, true));
     check(str_contains((string) ($seen['xff'] ?? ''), '127.0.0.1'),
         'X-Forwarded-For does not name the client the gateway saw: ' . var_export($seen['xff'] ?? null, true));
@@ -188,6 +193,7 @@ echo "Done\n";
 ?>
 --EXPECT--
 fastcgi-route-unchanged: ok
+underscore-header-dropped: ok
 http-direct-route: ok
 post-body-intact: ok
 empty-body-completes: ok

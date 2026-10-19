@@ -15,6 +15,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- Docs: `docs/reload.md` and the header of `sapi/fpmng/fpm/fpm_http_handoff.h` name the two inherited sockets that the new master leaves open, and the WARNING it logs for a listening socket not bound to the address in its record (issue #960). No code change.
 - Reload: a selective reload closes an inherited metrics descriptor that fails the size check, so no worker inherits it. The scoreboard descriptor of a spared pool is no longer kept twice. A failed `FD_CLOEXEC` change on a spared pool's scoreboard or metrics region is logged with the pool name (issue #842).
 - Docs: the "Symlink deploys" section of `docs/gateway.md` states the exact conditions for the per-request `realpath()` of the document root (issue #828). The #638 entry says GET and HEAD of a non-`.php`, non-directory path. The code calls `realpath()` for a directory requested without a trailing slash, and it does not call `realpath()` for a path with a segment that starts with a dot. No code change.
 - The HELP text of `fpmng_pool_respawn_delay_ms` now says what the value is: the wait the master chose for the next child, `0` when no child is pending or once it is forked. Before, it said "Delay the next respawn waits for" (issue #920). Only the `# HELP` line changed; the value and its type did not.

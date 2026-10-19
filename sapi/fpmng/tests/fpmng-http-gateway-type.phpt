@@ -54,6 +54,48 @@ if ($body !== 'gateway-ok') {
 }
 echo "serves: gateway-ok\n";
 
+/* A second php-fpm-ng on this host with a pool named gw, running while the
+ * count below is taken (issue #749). Its two gateways are visible to a bare
+ * args match, so the count is exact only if the ppid filter excludes them.
+ * Each Tester numbers its ports from 9008 on its own, so the decoy first
+ * takes two numbers: $tester owns the two above. The Tester gives a gateway
+ * pool that names no operator.*_listen a default listener, and $tester holds
+ * it, so the decoy names its own two. */
+$decoyCfg = <<<EOT
+[global]
+error_log = {{FILE:LOG}}
+pid = {{FILE:PID}}
+[gw]
+pool.type = gateway
+listen = {{ADDR[http]}}
+chdir = $docroot
+http.gateways = 2
+http.route[app] = /
+operator.status_listen = {{ADDR[dstatus]}}
+operator.metrics_listen = {{ADDR[dmetrics]}}
+[app]
+pool.type = fastcgi
+listen = {{ADDR}}
+pm = static
+pm.max_children = 1
+chdir = $docroot
+EOT;
+/* The decoy takes its own file prefix: with the default one its pid and
+ * error_log would be $tester's {{FILE:PID}} and {{FILE:LOG}}, and getPid()
+ * would return the decoy master. clean() does not know this prefix, so the
+ * files are removed at the end of the test. */
+$decoy = new FPM\Tester($decoyCfg, '<?php echo "unused";', [], $docroot . '/decoy.');
+$decoy->getAddr('ipv4', 'skip-a');
+$decoy->getAddr('ipv4', 'skip-b');
+$decoy->start();
+$decoy->expectLogStartNotices();
+$decoyHttp = $decoy->getAddr('ipv4', '[http]');
+$decoyBody = @file_get_contents("http://$decoyHttp/index.php");
+if ($decoyBody !== 'gateway-ok') {
+    echo "FAIL: decoy gateway body=" . var_export($decoyBody, true) . "\n";
+    exit(1);
+}
+
 /* The process table is the only place "no PHP child for gw" can be observed.
  * ps args shows the setproctitle line fpm_http_gateway_run() installs
  * ("http gateway <pool> [<i>]"), and $pool in an upstream worker's title.
@@ -90,6 +132,23 @@ if ($ownWorkers !== 0) {
     exit(1);
 }
 echo "own-php-children: none\n";
+
+/* Without this, a decoy that never came up would make the count above
+ * pass for the wrong reason. Both masters' gateways must be in ps. */
+$machineGateways = 0;
+foreach (explode("\n", $ps) as $line) {
+    if (str_contains($line, 'http gateway gw')) {
+        $machineGateways++;
+    }
+}
+if ($machineGateways < 4) {
+    echo "FAIL: decoy gateways not visible in ps (machine-wide $machineGateways, expected at least 4)\n$ps\n";
+    exit(1);
+}
+
+$decoy->terminate();
+$decoy->expectLogTerminatingNotices();
+$decoy->close();
 
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
@@ -134,6 +193,9 @@ $testerR->terminate();
 $testerR->expectLogTerminatingNotices();
 $testerR->close();
 
+foreach (glob($docroot . '/decoy.*') as $decoyFile) {
+    @unlink($decoyFile);
+}
 @unlink($docroot . '/index.php');
 @rmdir($docroot);
 

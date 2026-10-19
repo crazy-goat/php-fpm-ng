@@ -96,7 +96,7 @@ foreach (['abc' => 'abc', 'big' => '99999', 'neg' => '-5', 'huge' => '9999999999
  * like 0x01 and 0x7f arrive; a non-PHP FastCGI upstream can also send CR
  * and NUL, which the same C check rejects by scanning the whole value
  * ('\n' never arrives: the header block is split on it). */
-foreach (['ctrl-soh' => "404 B\x01ad", 'ctrl-del' => "404 B\x7fad"] as $name => $v) {
+foreach (['ctrl-soh' => "404 B\x01ad", 'ctrl-del' => "404 B\x7fad", 'ctrl-esc' => "404 B\x1b[31mad"] as $name => $v) {
     $line = status_line($http, '/s.php?v=' . rawurlencode($v) . "&n=$name");
     check($line === 'HTTP/1.1 502 Bad Gateway', "reason '$name': " . var_export($line, true));
     echo "$name: 502\n";
@@ -122,11 +122,16 @@ echo "control-bare: ok\n";
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/invalid Status .99999999999./');
 check(preg_match("/WARNING: \[pool gw\] http: upstream sent invalid Status 'abc'/", $errors) === 1, 'no WARNING for abc');
 check(preg_match("/invalid Status '103'/", $errors) === 1, 'no WARNING for 103');
-check(preg_match("/invalid Status '404 B\x01ad'/", $errors) === 1, 'no WARNING for control reason');
+/* Issue #838: the WARNING shows control bytes as \xNN (fpm_http_log_escape()),
+ * so the raw bytes never reach error_log. */
+check(preg_match("/invalid Status '404\\\\x20B\\\\x01ad'/", $errors) === 1, 'no escaped WARNING for control reason');
+check(preg_match("/invalid Status '404\\\\x20B\\\\x7fad'/", $errors) === 1, 'no escaped WARNING for DEL reason');
+check(preg_match("/invalid Status '404\\\\x20B\\\\x1b\\[31mad'/", $errors) === 1, 'no escaped WARNING for ESC reason');
+check(preg_match('/invalid Status [^\n]*[\x00-\x09\x0b-\x1f\x7f]/', $errors) === 0, "raw control byte in WARNING\n$errors");
 echo "warning: ok\n";
 
 $acc = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC), '/n=ctl2/');
-foreach (['abc', 'big', 'neg', 'huge', 'info', 'ctrl-soh', 'ctrl-del'] as $name) {
+foreach (['abc', 'big', 'neg', 'huge', 'info', 'ctrl-soh', 'ctrl-del', 'ctrl-esc'] as $name) {
     check(preg_match('/n=' . $name . '[^\n]* 502 /', $acc) === 1, "access log: no 502 for $name");
 }
 echo "access-log: ok\n";
@@ -152,6 +157,7 @@ high: 502
 empty: 502
 ctrl-soh: 502
 ctrl-del: 502
+ctrl-esc: 502
 control-reason: ok
 control-utf8: ok
 control-bare: ok

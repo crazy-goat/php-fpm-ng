@@ -678,8 +678,12 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			if (!fpm_http_parse_cgi_status(value, h->header_len - (size_t) (value - h->header), &r->status,
 					&reason) &&
 				!r->rejected) {
-				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%.64s', answering 502",
-					r->pool, value);
+				/* Escaped, not %.64s: the reason phrase can carry ESC or other
+				 * controls, which would reach error_log as raw bytes (issue #838). */
+				char escaped[4 * 64 + 1];
+
+				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%s', answering 502",
+					r->pool, fpm_http_log_escape(value, 64, escaped, sizeof(escaped)));
 				r->rejected = "invalid response Status";
 				r->rejected_status = 502;
 			}
@@ -706,7 +710,7 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 					 * not include the name, so only this log identifies it. */
 					zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
 						"an HTTP token, answering 500: '%s'", r->pool,
-						fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
+						fpm_http_log_escape(name, strlen(name), escaped, sizeof(escaped)));
 					r->rejected = "malformed response header name";
 				}
 			} else if (!fpm_http_direct_header_charge(&total, name, strlen(value))) {

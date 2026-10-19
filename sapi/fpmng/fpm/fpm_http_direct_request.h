@@ -132,10 +132,12 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 		fpm_http_direct_env_cb emit, void *ctx);
 bool fpm_http_direct_header_dropped(const char *name);
 bool fpm_http_direct_header_name_ok(const char *name);
-/* Writes `name` into `out` (size bytes, always NUL-terminated) with every byte
- * outside printable US-ASCII escaped as \xNN, truncating rather than growing.
- * Returns `out`, so it can be used inline in a log call. */
-const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size);
+/* Writes at most `max` bytes of `in`, stopping at NUL, into `out` (size bytes,
+ * always NUL-terminated) with every byte outside printable US-ASCII and every
+ * backslash escaped as \xNN. Truncates rather than growing, and returns `out`,
+ * so it can be used inline in a log call. A `size` of 4 * max + 1 keeps all of
+ * `max` bytes even when each one is escaped. */
+const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size);
 /* Charges one emitted response header line against FPM_HTTP_HEADERS_MAX
  * and returns false when it does not fit, leaving *total unchanged. */
 bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len);

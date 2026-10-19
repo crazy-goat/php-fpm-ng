@@ -1396,12 +1396,14 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 	}
 
 	/* Register cleanup once, when the first http pool is initialized.
-	 * PARENT_EXEC too, because reload calls execvp() and without this the
-	 * gateways would remain orphaned while holding the port on which the new
-	 * master wants to bind. */
+	 * FPM_CLEANUP_PARENT covers EXEC too, because reload calls execvp() and
+	 * without it the gateways would remain orphaned while holding the port on
+	 * which the new master wants to bind. Do not add a second entry for
+	 * EXEC: fpm_cleanups_run(EXEC) runs every entry whose type intersects the
+	 * argument, so it would call fpm_http_cleanup() twice on reload (issue
+	 * #870). */
 	if (!cleanup_registered) {
-		if (0 > fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_http_cleanup, 0) ||
-				0 > fpm_cleanup_add(FPM_CLEANUP_PARENT_EXEC, fpm_http_cleanup, 0)) {
+		if (0 > fpm_cleanup_add(FPM_CLEANUP_PARENT, fpm_http_cleanup, 0)) {
 			return -1;
 		}
 		cleanup_registered = 1;

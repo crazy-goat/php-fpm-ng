@@ -78,7 +78,7 @@ expectConfigFailure(
 expectConfigFailure(
     'wait-with-negative-wait-ms',
     $base . "\nhttp.pool_full_policy = wait\nhttp.pool_full_queue_max = 32\nhttp.pool_full_wait_ms = -1",
-    'http.pool_full_policy = wait requires http.pool_full_wait_ms > 0'
+    'is not a valid number (greater or equal than zero)'
 );
 
 expectConfigFailure(

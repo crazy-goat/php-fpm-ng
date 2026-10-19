@@ -354,7 +354,7 @@ void fpm_operator_page_render_prometheus(struct fpm_operator_buf_s *b, struct fp
 		"# TYPE fpmng_pool_consecutive_crashes gauge\n"
 		"# HELP fpmng_pool_crash_gave_up 1 once the pool gave up respawning (pm.max_consecutive_failures), pm children with crash backoff only.\n"
 		"# TYPE fpmng_pool_crash_gave_up gauge\n"
-		"# HELP fpmng_pool_respawn_delay_ms Delay the next respawn waits for, in milliseconds, pm children with crash backoff only.\n"
+		"# HELP fpmng_pool_respawn_delay_ms Wait the master chose for the next child, in milliseconds; 0 when no child is pending or once it is forked, pm children with crash backoff only.\n"
 		"# TYPE fpmng_pool_respawn_delay_ms gauge\n"
 		"# HELP fpmng_pool_runs_total Scheduled runs started since start, cron only.\n"
 		"# TYPE fpmng_pool_runs_total counter\n"

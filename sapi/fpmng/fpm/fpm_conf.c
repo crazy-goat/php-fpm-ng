@@ -54,6 +54,8 @@
 
 static int fpm_conf_load_ini_file(char *filename);
 static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_signed_int(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_backlog(zval *value, void **config, intptr_t offset);
 #if 0 /* not used for now */
 static char *fpm_conf_set_long(zval *value, void **config, intptr_t offset);
 #endif
@@ -115,7 +117,7 @@ static const struct ini_value_parser_s ini_fpm_global_options[] = {
 	{ "emergency_restart_interval",  &fpm_conf_set_time,            GO(emergency_restart_interval) },
 	{ "process_control_timeout",     &fpm_conf_set_time,            GO(process_control_timeout) },
 	{ "process.max",                 &fpm_conf_set_integer,         GO(process_max) },
-	{ "process.priority",            &fpm_conf_set_integer,         GO(process_priority) },
+	{ "process.priority",            &fpm_conf_set_signed_int,      GO(process_priority) },
 	{ "daemonize",                   &fpm_conf_set_boolean,         GO(daemonize) },
 	{ "rlimit_files",                &fpm_conf_set_integer,         GO(rlimit_files) },
 	{ "rlimit_core",                 &fpm_conf_set_rlimit_core,     GO(rlimit_core) },
@@ -138,7 +140,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "user",                      &fpm_conf_set_string,      WPO(user) },
 	{ "group",                     &fpm_conf_set_string,      WPO(group) },
 	{ "listen",                    &fpm_conf_set_string,      WPO(listen_address) },
-	{ "listen.backlog",            &fpm_conf_set_integer,     WPO(listen_backlog) },
+	{ "listen.backlog",            &fpm_conf_set_backlog,     WPO(listen_backlog) },
 #ifdef HAVE_FPM_ACL
 	{ "listen.acl_users",          &fpm_conf_set_string,      WPO(listen_acl_users) },
 	{ "listen.acl_groups",         &fpm_conf_set_string,      WPO(listen_acl_groups) },
@@ -148,9 +150,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "listen.mode",               &fpm_conf_set_string,      WPO(listen_mode) },
 	{ "listen.allowed_clients",    &fpm_conf_set_string,      WPO(listen_allowed_clients) },
 #ifdef SO_SETFIB
-	{ "listen.setfib",             &fpm_conf_set_integer,     WPO(listen_setfib) },
+	{ "listen.setfib",             &fpm_conf_set_signed_int,  WPO(listen_setfib) },
 #endif
-	{ "process.priority",          &fpm_conf_set_integer,     WPO(process_priority) },
+	{ "process.priority",          &fpm_conf_set_signed_int,  WPO(process_priority) },
 	{ "process.dumpable",          &fpm_conf_set_boolean,     WPO(process_dumpable) },
 	{ "pm",                        &fpm_conf_set_pm,          WPO(pm) },
 	{ "pm.max_children",           &fpm_conf_set_integer,     WPO(pm_max_children) },
@@ -387,20 +389,48 @@ static char *fpm_conf_set_renamed_operator_directive(zval *value, void **config,
 }
 /* }}} */
 
-static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset) /* {{{ */
+/* Issue #862: a leading '-' used to pass here and reach atoi(). Only the
+ * directives whose domain is signed use fpm_conf_set_signed_int(); every
+ * other integer refuses the sign. listen.backlog takes its own setter for
+ * -1 alone (see fpm_conf_set_backlog()). */
+static char *fpm_conf_set_integer_value(zval *value, void **config, intptr_t offset, int allow_negative) /* {{{ */
 {
 	char *val = Z_STRVAL_P(value);
 	char *p;
 
-	/* we don't use strtol because we don't want to allow negative values */
+	/* No strtol(): it takes a sign, and only the signed caller may take one. */
 	for (p = val; *p; p++) {
-		if (p == val && *p == '-') continue;
+		if (p == val && *p == '-' && allow_negative) continue;
 		if (*p < '0' || *p > '9') {
 			return "is not a valid number (greater or equal than zero)";
 		}
 	}
 	* (int *) ((char *) *config + offset) = atoi(val);
 	return NULL;
+}
+/* }}} */
+
+static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	return fpm_conf_set_integer_value(value, config, offset, 0);
+}
+/* }}} */
+
+static char *fpm_conf_set_signed_int(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	return fpm_conf_set_integer_value(value, config, offset, 1);
+}
+/* }}} */
+
+/* Issue #862: -1 is FPM_BACKLOG_DEFAULT on Linux, the BSDs and macOS and
+ * means the kernel maximum (SOMAXCONN), so it stays valid. Every other
+ * negative value is refused. */
+static char *fpm_conf_set_backlog(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	if (strcmp(Z_STRVAL_P(value), "-1") == 0) {
+		return fpm_conf_set_signed_int(value, config, offset);
+	}
+	return fpm_conf_set_integer(value, config, offset);
 }
 /* }}} */
 
@@ -698,7 +728,7 @@ static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offse
 		void *subconf = &int_value;
 		char *error;
 
-		error = fpm_conf_set_integer(value, &subconf, 0);
+		error = fpm_conf_set_signed_int(value, &subconf, 0);
 
 		if (error) {
 			return error;

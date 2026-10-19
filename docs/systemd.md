@@ -12,9 +12,18 @@ With this unit:
 
 ## The messages
 
-Only the master sends messages. The children do not send them, because the unit
-sets `NotifyAccess=main`. Each message is one datagram to the socket that
-`NOTIFY_SOCKET` names.
+Only the master sends messages. The master does not unset `NOTIFY_SOCKET` (see Reload),
+so each PHP child inherits it at fork.
+
+The PHP code of a pool sees the variable only when the pool sets `clear_env = no`. The
+default is `clear_env = yes` (`sapi/fpmng/fpm/fpm_conf.c:1061`). Then the child calls
+`clearenv()` before PHP starts (`third_party/php-src/sapi/fpm/fpm/fpm_env.c:146-147`),
+so `getenv('NOTIFY_SOCKET')` returns false.
+
+The children do not send. The send function returns before it writes when
+`fpm_globals.is_child` is set (`sapi/fpmng/fpm/fpm_sd_notify.c:83`). The unit sets
+`NotifyAccess=main`, so systemd also drops a datagram from a child.
+Each message is one datagram to the socket that `NOTIFY_SOCKET` names.
 
 | Message | Sent when | Meaning |
 |---|---|---|

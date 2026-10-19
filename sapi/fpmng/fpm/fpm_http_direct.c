@@ -198,7 +198,7 @@ struct fpm_direct_request {
 	/* The request-target as the client wrote it, copied while `http` is still
 	 * alive. access.log's %r is that string (issue #681), not the origin-form
 	 * REQUEST_URI, because the gateway logs the raw request line too
-	 * (fpm_http.c:534) and one access.format has to mean the same thing on
+	 * (fpm_http.c:673-674) and one access.format has to mean the same thing on
 	 * both. The streaming ending clears `http` before it logs, so the value
 	 * cannot be read back from libevent then. Sized like the local ending's
 	 * own buffer and truncated the same way, so a target longer than this
@@ -1591,7 +1591,7 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	memset(&e, 0, sizeof(e));
 	e.method = snapshot.request_method;
 	/* %r is the request-target as the client wrote it, the spelling the
-	 * gateway logs (fpm_http.c:534), copied into r while libevent's request
+	 * gateway logs (fpm_http.c:673-674), copied into r while libevent's request
 	 * object was still alive. The origin-form path is
 	 * match_path below instead, and it is what access.suppress_path[] compares
 	 * against -- one rule for both fields, for every ending (#681).
@@ -1600,7 +1600,7 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	 * our own copy: neither the request nor the scoreboard slot is touched.
 	 * The query is libevent's parse, which is what the application sees. That
 	 * cut is also where the gateway differs: its request line keeps the query
-	 * (fpm_http.c:534), so the two logs agree only on query-less targets. */
+	 * (fpm_http.c:673-674), so the two logs agree only on query-less targets. */
 	query = strchr(r->request_target, '?');
 	if (query) {
 		*query = '\0';

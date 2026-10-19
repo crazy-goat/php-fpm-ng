@@ -50,7 +50,7 @@ struct fpm_http_direct_access_entry {
 	const char *method;
 	/* What %r prints: the request-target as the client wrote it, with the
 	 * query string cut off (%Q%q carry that). The gateway's request line is
-	 * the same string (fpm_http.c:534), so one access.format means the same
+	 * the same string (fpm_http.c:673-674), so one access.format means the same
 	 * thing on both transports. */
 	const char *uri;
 	/* What access.suppress_path[] is compared against: the origin-form path

@@ -881,9 +881,9 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		 *
 		 * The `if (!explained)` guard of the branch below is deliberately not
 		 * used here. A partial block means `reply_seen` is set, so `mute` is 0
-		 * and `explained` is `clean_eof` (fpm_http.c:630,662): 1 for a clean EOF
+		 * and `explained` is `clean_eof` (fpm_http.c:811, fpm_http_upstream_fail()): 1 for a clean EOF
 		 * or an `END_REQUEST` (fpm_http_request_done() passes a bare 1,
-		 * fpm_http.c:674), where nothing has been logged and this line is the
+		 * fpm_http.c:823), where nothing has been logged and this line is the
 		 * only record; 0 when fpm_http_upstream_fail() has already named the
 		 * errno, and the line is written then too because it names the decision,
 		 * not the error. */

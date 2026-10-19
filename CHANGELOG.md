@@ -13,8 +13,13 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Changed
+
+- `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.
+
 ### Fixed
 
+- `pool.type = gateway`: the gateway process, first spawn and respawn, closes the scoreboard and metrics memfd descriptors right after fork, as the pm children already did (issue #691). A compromised gateway no longer has fd-level read, write and resize access to those regions. The mappings stay, so the gateway serves as before (issue #841). The watchdog child needed no change: it forks only from pm children that already closed the descriptors.
 - Reload: a selective reload closes an inherited metrics descriptor that fails the size check, so no worker inherits it. The scoreboard descriptor of a spared pool is no longer kept twice. A failed `FD_CLOEXEC` change on a spared pool's scoreboard or metrics region is logged with the pool name (issue #842).
 - Docs: the "Symlink deploys" section of `docs/gateway.md` states the exact conditions for the per-request `realpath()` of the document root (issue #828). The #638 entry says GET and HEAD of a non-`.php`, non-directory path. The code calls `realpath()` for a directory requested without a trailing slash, and it does not call `realpath()` for a path with a segment that starts with a dot. No code change.
 - The HELP text of `fpmng_pool_respawn_delay_ms` now says what the value is: the wait the master chose for the next child, `0` when no child is pending or once it is forked. Before, it said "Delay the next respawn waits for" (issue #920). Only the `# HELP` line changed; the value and its type did not.

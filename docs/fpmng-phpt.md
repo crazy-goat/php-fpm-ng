@@ -118,6 +118,13 @@ not deleted, and no `failed-artifacts/` appears at all — which is the form
 `work/prepared/sapi/fpmng/tests/`, and that is where `release.yml` reads it from (artifact
 `phpt-failure-<cell>`, issue #669).
 
+`test-records/` holds the `.record` files that a test writes next to itself. The runner
+copies them out of the tree on every exit, pass or fail. A test can keep there a fact that a
+passing run would otherwise discard. The runner creates `test-records/` in the `-` form only,
+as it does for `failed-artifacts/`. A record never appears in `failed-artifacts/`, so that
+directory keeps only failure evidence. `fpmng-reload-survivor-back-to-back.phpt` uses it to
+name the carry branch it took (issue #893).
+
 ## Parallel runs
 
 The suite runs with `run-tests.php -j<N>` (issue #394). `TEST_FPM_JOBS` sets the

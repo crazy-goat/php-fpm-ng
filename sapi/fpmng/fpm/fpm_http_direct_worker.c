@@ -132,14 +132,21 @@
  * on its own stop timeout at this point, and losing the reply is no worse than
  * the silent close this whole path exists to prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
-/* How long fpm_worker_finish_output() keeps driving the base, after it has
- * stopped the listener, so that a request already on the wire over a
- * keep-alive connection is read and answered 503 by fpm_worker_accept() instead
- * of meeting the silent close evhttp_free() gives it (issue #668). Bounded for
- * the reason FPM_WORKER_FLUSH_BUDGET is, and short because it covers requests
- * already sent, not new connections: the listener is gone, so nothing new can
- * arrive by that road. Every worker exit lasts this long, which is the price. */
-#define FPM_WORKER_GRACE_MS 100
+/* Limits of fpm_worker_grace_drain(), which runs after
+ * fpm_worker_finish_output() has stopped the listener. A request already on the
+ * wire over a keep-alive connection is read and answered 503 by
+ * fpm_worker_accept() instead of meeting the silent close evhttp_free() gives
+ * it (issue #668).
+ *
+ * The drain runs event_base_loop(EVLOOP_NONBLOCK) passes. One such call keeps
+ * dispatching until nothing is active, so it returns at once on an idle base
+ * (issue #905). A pass that queues no reply ends the drain. The passes bound
+ * the case where replies keep coming. The time cap bounds the case where the
+ * base stays busy, for example a peer that keeps sending on a WebSocket that
+ * userland still holds. The cap is the window of #668: it
+ * matters only while the base stays busy. */
+#define FPM_WORKER_DRAIN_PASSES 4
+#define FPM_WORKER_DRAIN_CAP_MS 100
 /* worker.request_timeout's sweep runs more often than the timeout itself so
  * that an expired request is caught within one sweep interval of its
  * deadline, not one whole timeout period late. Floored so a short timeout
@@ -417,6 +424,11 @@ static void fpm_worker_reply_aborted(struct evhttp_connection *connection, void 
 	fpm_worker_reply_settled(connection);
 }
 
+/* Never decremented, unlike fw.unflushed: fpm_worker_grace_drain() compares it
+ * across a pass, and a reply that settles in the same pass must not hide the
+ * one it queued (issue #905). */
+static unsigned long fpm_worker_replies_queued;
+
 /* The connection's closecb slot is free for exactly the window this counter
  * covers: every caller clears it immediately before handing the reply over
  * (see fpmng_worker_respond()), and libevent does not associate the next
@@ -427,6 +439,7 @@ static void fpm_worker_count_reply(struct evhttp_request *http)
 	evhttp_request_set_on_complete_cb(http, fpm_worker_reply_done, NULL);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_worker_reply_aborted, NULL);
 	fw.unflushed++;
+	fpm_worker_replies_queued++;
 }
 
 void fpm_worker_send_error(struct evhttp_request *http, int status, const char *reason)
@@ -819,22 +832,30 @@ static void fpm_worker_grace_deadline(evutil_socket_t fd, short events, void *ar
  * keep-alive connection is read here: evhttp hands it to fpm_worker_accept(),
  * which answers 503 because stopping is set. Without this drain the request is
  * not read at all, and evhttp_free() closes its connection without a reply.
- * The loop runs for the whole window even when no connection has anything to
- * say, so a worker exit takes FPM_WORKER_GRACE_MS longer. */
+ * The limits are FPM_WORKER_DRAIN_PASSES and FPM_WORKER_DRAIN_CAP_MS above. */
 static void fpm_worker_grace_drain(void)
 {
 	struct event *deadline;
-	struct timeval grace = { 0, FPM_WORKER_GRACE_MS * 1000 };
+	struct timeval cap = { 0, FPM_WORKER_DRAIN_CAP_MS * 1000 };
+	unsigned pass;
 
 	fpm_worker_grace_expired = false;
 	deadline = evtimer_new(fw.base, fpm_worker_grace_deadline, NULL);
-	if (deadline && evtimer_add(deadline, &grace) == 0) {
-		while (!fpm_worker_grace_expired && event_base_loop(fw.base, EVLOOP_ONCE) == 0) {
+	if (!deadline || evtimer_add(deadline, &cap) != 0) {
+		if (deadline) {
+			event_free(deadline);
+		}
+		return;
+	}
+	for (pass = 0; pass < FPM_WORKER_DRAIN_PASSES && !fpm_worker_grace_expired; pass++) {
+		unsigned long replies = fpm_worker_replies_queued;
+
+		event_base_loop(fw.base, EVLOOP_NONBLOCK);
+		if (fpm_worker_replies_queued == replies) {
+			break;
 		}
 	}
-	if (deadline) {
-		event_free(deadline);
-	}
+	event_free(deadline);
 }
 
 /* The last thing child_main() does with the transport, and the only place that

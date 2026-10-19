@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Changed
+
+- `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.
+
 ### Fixed
 
 - Docs: the "Symlink deploys" section of `docs/gateway.md` states the exact conditions for the per-request `realpath()` of the document root (issue #828). The #638 entry says GET and HEAD of a non-`.php`, non-directory path. The code calls `realpath()` for a directory requested without a trailing slash, and it does not call `realpath()` for a path with a segment that starts with a dot. No code change.

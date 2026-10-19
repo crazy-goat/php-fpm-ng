@@ -18,6 +18,14 @@ function check(bool $condition, string $message): void
     }
 }
 
+/* The WARNING shows the value as fpm_http_log_escape() writes it: the first
+ * 64 bytes, every byte outside printable US-ASCII (and the backslash) as \xNN. */
+function log_form(string $value): string
+{
+    return preg_replace_callback('/[^\x21-\x7e]|\\\\/',
+        static fn(array $m): string => sprintf('\\x%02x', ord($m[0])), substr($value, 0, 64));
+}
+
 /* The PHP HTTP wrapper can hide an invalid status line. Read one framed
  * response at a time so the same connection also detects a stray body. */
 function fetch_raw($fp, string $path): array
@@ -117,7 +125,9 @@ $invalid = [
     'abc' => 'abc', 'big' => '99999', 'neg' => '-5', 'huge' => '99999999999',
     'info' => '103', 'cont' => '100', 'low' => '199', 'high' => '600',
     'empty' => '', 'short' => '40', 'suffix' => '404Oops', 'tab' => "404\tGone",
-    'long' => str_repeat('9', 80),
+    'long' => str_repeat('9', 80), 'esc' => "404 \x1b[31mX",
+    /* Every byte expands to four characters; the logged form must stay bounded. */
+    'flood' => '404 ' . str_repeat("\x01", 80),
 ];
 $expectedAccess = [];
 $tester = new FPM\Tester($cfg, '<?php');
@@ -197,9 +207,10 @@ try {
         "/response header name is not an HTTP token, answering 500: 'X\\\\x20Bad'/", 2);
     foreach ($invalid as $value) {
         $pattern = "/WARNING: \[pool status\] http-direct: upstream sent invalid Status '"
-            . preg_quote(substr($value, 0, 64), '/') . "', answering 502/";
+            . preg_quote(log_form($value), '/') . "', answering 502/";
         check(preg_match($pattern, $errors) === 1, 'missing WARNING for ' . var_export($value, true));
     }
+    check(preg_match('/invalid Status [^\n]*[\x00-\x09\x0b-\x1f\x7f]/', $errors) === 0, "raw control byte in WARNING\n$errors");
     check(preg_match_all('/upstream sent invalid Status /', $errors) === count($invalid) + 3,
         "unexpected Status WARNING count\n$errors");
     check(preg_match_all('/response header name is not an HTTP token, answering 500/', $errors) === 2,
@@ -213,7 +224,7 @@ try {
     }
     echo "access-log: ok\n";
     $count = rejected($ops);
-    check($count === count($invalid) + 6, "rejected responses: expected 19, got $count");
+    check($count === count($invalid) + 6, "rejected responses: expected 21, got $count");
     echo "rejected-responses: $count\n";
 } finally {
     if (isset($fp) && is_resource($fp)) {
@@ -244,6 +255,8 @@ short: HTTP/1.1 502 Bad Gateway
 suffix: HTTP/1.1 502 Bad Gateway
 tab: HTTP/1.1 502 Bad Gateway
 long: HTTP/1.1 502 Bad Gateway
+esc: HTTP/1.1 502 Bad Gateway
+flood: HTTP/1.1 502 Bad Gateway
 respond: 502
 duplicate: 502
 code: 500
@@ -253,6 +266,6 @@ name-first: 500
 connection-after-rejection: 404
 warnings-and-truncation: ok
 access-log: ok
-rejected-responses: 19
+rejected-responses: 21
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

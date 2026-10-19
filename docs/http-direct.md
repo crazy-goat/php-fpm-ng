@@ -1938,7 +1938,9 @@ The CGI `Status:` value must contain exactly three digits, optionally
 followed by a space and a reason phrase. The buffered classic executor and
 the gateway use the same parser, `fpm_http_parse_cgi_status()` (issues #604
 and #594). A malformed value or a code outside 200–599 produces
-`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value.
+`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value. In the
+`WARNING`, every byte outside `0x21`–`0x7e` (so a space, a control byte or a
+byte of 0x80 or more) and the backslash appear as `\xNN`.
 The classic executor discards the script's headers and body, counts one
 rejected response, and records 502 in `access.log`. The first rejection
 cause determines the error status and diagnostic. These checks include

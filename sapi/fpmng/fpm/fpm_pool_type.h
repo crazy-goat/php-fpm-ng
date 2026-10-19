@@ -504,6 +504,19 @@ struct fpm_pool_type_s {
 	 * process's heap. Returns how many of the up to FPM_POOL_LIVE_GAUGES_MAX
 	 * slots in out[] it filled. */
 	int (*live_gauges)(struct fpm_worker_pool_s *wp, struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
+
+	/* Issue #775: the master holds open a file for each pool of this type
+	 * (cron.log, for example). On SIGUSR1, which logrotate sends from its
+	 * postrotate, the master must open the path again. Called in the master by
+	 * fpm_pool_type_reopen_master_logs(), once per pool of this type. NULL = the
+	 * type holds no such file. */
+	void (*reopen_master_logs)(struct fpm_worker_pool_s *wp);
+
+	/* Issue #775: fork() gives every child a copy of the descriptors the master
+	 * holds. Called in a child by fpm_pool_type_close_master_logs_in_child()
+	 * for each pool except the child's own, so that a root-owned file does not
+	 * reach a child of another pool. NULL = the type holds no such file. */
+	void (*close_master_logs_in_child)(struct fpm_worker_pool_s *wp);
 };
 
 /* Type with this name, or NULL. An empty name gives the default (fastcgi) type
@@ -548,5 +561,14 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 
 /* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
+
+/* Issue #775: SIGUSR1 in the master. Calls .reopen_master_logs for every pool
+ * whose type sets it. Generic code calls this, never a type's own function. */
+void fpm_pool_type_reopen_master_logs(void);
+
+/* Issue #775: in a forked child, calls .close_master_logs_in_child for every
+ * pool except own. own is the child's pool, or NULL for a process that is no
+ * pool child (an http gateway), which closes every pool's descriptors. */
+void fpm_pool_type_close_master_logs_in_child(struct fpm_worker_pool_s *own);
 
 #endif

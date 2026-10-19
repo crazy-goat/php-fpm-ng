@@ -12,9 +12,11 @@ FPMNG_DEBUG_CLOCK_RATE=60
 TEST_TIMEOUT=180
 --FILE--
 <?php
-/* /dev/full opens successfully but fails writes with ENOSPC, so together with
- * a path below a nonexistent directory it drives both failure branches in
- * fpm_pool_cron_log_run() without permissions, disk pressure, or shared state.
+/* A path below a nonexistent directory fails the open once, in the master at
+ * startup (fpm_pool_cron_open_log()); the openfail pool then logs "not open,
+ * run not recorded" after each run. /dev/full opens successfully but fails the
+ * per-run write with ENOSPC (fpm_pool_cron_log_run()). Neither needs
+ * permissions, disk pressure, or shared state.
  * Both cron jobs use every-minute schedules. The debug clock only speeds up a
  * binary built with it; the shipped package runs at real speed, so the deadline
  * below is in real seconds and covers up to a full minute for the first tick. */
@@ -61,7 +63,8 @@ do {
     $log = (string) @file_get_contents($errorLog);
     $openLogged = preg_match('/\[pool openfail\] cron\.log: cannot open/', $log);
     $writeLogged = preg_match('/\[pool writefail\] cron\.log: write to/', $log);
-    if ($openLogged && $writeLogged) {
+    $notRecorded = preg_match('/\[pool openfail\] cron\.log: not open, run not recorded/', $log);
+    if ($openLogged && $writeLogged && $notRecorded) {
         break;
     }
     usleep(100000);
@@ -81,8 +84,16 @@ if (!str_contains($log, "[pool writefail] cron.log: write to '/dev/full' failed 
     $cleanup();
     exit(1);
 }
+if (!$notRecorded) {
+    echo "FAIL: a run of the pool with no open cron.log was not reported\n";
+    echo $log;
+    $tester->close(true);
+    $cleanup();
+    exit(1);
+}
 echo "open-failure-pool-prefix: ok\n";
 echo "write-failure-pool-prefix: ok\n";
+echo "not-recorded-per-run: ok\n";
 
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
@@ -92,6 +103,7 @@ $cleanup();
 --EXPECT--
 open-failure-pool-prefix: ok
 write-failure-pool-prefix: ok
+not-recorded-per-run: ok
 --CLEAN--
 <?php
 require_once "tester.inc";

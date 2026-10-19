@@ -178,6 +178,19 @@ same as any other log file this project writes. Failures are also logged at
 warning level regardless of `cron.log`, which is loud enough to notice on a
 single-instance deployment.
 
+The master opens `cron.log` at startup, at each reload, and on `SIGUSR1`, as
+the master's own user (root in the packaged layout). A run writes to the file
+the master opened, so the pool user does not need write access to the file or
+its directory (issue #775). If the open fails, each run logs a warning and
+appends no line, until a start, a reload or `SIGUSR1` opens the file.
+
+To rotate `cron.log`, use `copytruncate`. Or rename the file and send
+`SIGUSR1` to the master, as the `postrotate` step of logrotate does. On
+`SIGUSR1` the master opens the path again, so the next run appends to the new
+file. A run that started before the signal still writes its line to the
+renamed file. Without the signal, the renamed file keeps receiving lines,
+because the master holds it open.
+
 ## Script output: `STDOUT`, `STDERR` and `STDIN`
 
 The script runs with the three standard stream constants defined, exactly as

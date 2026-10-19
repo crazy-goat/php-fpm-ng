@@ -356,11 +356,15 @@ A JSON line never contains a raw control byte.
 With `chdir = /srv/app/current` and `current -> releases/N` swapped atomically
 (`ln -sfn` into a temporary name, then `mv -T`), the gateway resolves the
 document root with `realpath()` on every request that reaches the static-file
-lookup (#638): GET and HEAD for a path that is not `.php` and not a directory.
-Other requests, such as POST or `.php`, do not pay for it. The next
-request after the swap is served from the new release; no reload is needed.
-The containment check compares against the root resolved for that same
-request, so a symlink that leaves the release is still refused.
+lookup (#638). The lookup runs for GET and HEAD only, and only for a path that
+does not end in `/`, does not end in `.php` (in any letter case) and does not
+contain `.php/`. A path with a segment that starts with a dot, such as `/.env`,
+is answered with 404 before `realpath()` is called. A directory requested
+without a trailing slash, such as `/assets`, does call `realpath()`. Other
+requests, such as POST or `.php`, do not pay for it. The next request after the
+swap is served from the new release; no reload is needed. The containment check
+compares against the root resolved for that same request, so a symlink that
+leaves the release is still refused.
 
 `DOCUMENT_ROOT` and `SCRIPT_FILENAME` sent to FastCGI keep the unresolved
 `chdir` path (`/srv/app/current/...`). PHP and OPcache resolve and cache that

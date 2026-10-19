@@ -1,9 +1,11 @@
-/* Internal surface shared between fpm_http.c (the gateway and its FastCGI
- * transport) and fpm_http_client.c (the HTTP/1.1 client transport, issue
- * #344). Everything here is private to the gateway implementation -- nothing
- * outside these two files includes this header. The struct definitions and
- * the TAILQ compatibility block moved out of fpm_http.c verbatim when the
- * second transport arrived; the comments below are theirs. */
+/* Internal surface of the gateway implementation: fpm_http.c (the gateway
+ * and its FastCGI transport), fpm_http_client.c (the HTTP/1.1 client
+ * transport, issue #344) and the gateway files split out of them later.
+ * Everything here is private to the gateway. Only gateway code includes
+ * this header; http-direct must not, see fpm_http_target.h. The struct
+ * definitions and the TAILQ compatibility block moved out of fpm_http.c
+ * verbatim when the second transport arrived; the comments below are
+ * theirs. */
 #ifndef FPM_HTTP_INTERNAL_H
 #define FPM_HTTP_INTERNAL_H
 

@@ -1,13 +1,13 @@
 # HTTP gateway pool-full policy: opt-in "wait" (issue #309)
 
-When a gateway's shared upstream budget (`gw->upstreams_used` vs.
-`gw->max_upstreams`) is exhausted, `fpm_http_pump_once()` answers a queued
+When a target's shared upstream budget (`target->upstreams_used` vs.
+`target->max_upstreams`) is exhausted, `fpm_http_pump_once()` answers a queued
 request `503` + `Retry-After: 1` immediately (`FPM_HTTP_SERVICE_UNAVAIL`,
 `sapi/fpmng/fpm/fpm_http.c`), or after up to 100 ms when `http.gateways > 1`
 and a sibling process holds the workers (see "Several gateway processes"
 below). That remains the default for every pool. This
 document covers the opt-in alternative: instead of rejecting the instant the
-budget is full, hold the request on `gw->waiting` for a bounded time and
+budget is full, hold the request on `target->waiting` for a bounded time and
 dispatch it if an upstream frees up in time.
 
 ## Directives
@@ -21,11 +21,11 @@ http.pool_full_wait_ms = 500      ; only read when policy = wait
 - `http.pool_full_policy` — `reject` (default) is the unchanged status quo.
   `wait` opts this pool into queueing.
 - `http.pool_full_queue_max` — hard cap on how many requests may sit on
-  `gw->waiting` at once. A request that arrives when the queue is already at
+  `target->waiting` at once. A request that arrives when the queue is already at
   this cap gets the ordinary immediate 503, it does not wait first. Default
   **32**.
 - `http.pool_full_wait_ms` — hard cap on how long one request may sit on
-  `gw->waiting`. A request still queued when this expires is rejected (503),
+  `target->waiting`. A request still queued when this expires is rejected (503),
   the same as a full queue. Default **500**.
 
 Both bounds are mandatory whenever `http.pool_full_policy = wait` is set;
@@ -138,7 +138,7 @@ seeing:
 
 ## Observability
 
-A response that spent time on `gw->waiting` under the `wait` policy carries
+A response that spent time on `target->waiting` under the `wait` policy carries
 an `X-Fpmng-Queue-Wait: <ms>` response header reporting how long it actually
 waited (measured from enqueue to the moment it was handed to an upstream, not
 including the request's own runtime). The header is absent from responses

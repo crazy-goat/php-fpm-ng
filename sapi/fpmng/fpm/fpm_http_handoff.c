@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <netdb.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,6 +134,53 @@ static int is_listening_tcp(int fd) /* {{{ */
 }
 /* }}} */
 
+/* True when the listening socket fd is bound to the address that key names. The
+ * key is split by fpm_http_split_bind(), the same split fpm_http_listen() uses
+ * to bind it. The record names a descriptor number only, so is_listening_tcp()
+ * alone lets a socket of another address (some other pool's, say) be adopted as
+ * this gateway's listener. */
+static int is_bound_to(int fd, const char *key) /* {{{ */
+{
+	struct sockaddr_storage ss;
+	socklen_t len = sizeof(ss);
+	char *dup = strdup(key), *host, *port;
+	struct addrinfo hints, *res, *p;
+	int found = 0;
+
+	if (!dup || getsockname(fd, (struct sockaddr *) &ss, &len) != 0) {
+		free(dup);
+		return 0;
+	}
+	fpm_http_split_bind(dup, &host, &port);
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+	if (getaddrinfo(host, port, &hints, &res) == 0) {
+		for (p = res; p && !found; p = p->ai_next) {
+			if (p->ai_family != ss.ss_family) {
+				continue;
+			}
+			if (ss.ss_family == AF_INET) {
+				const struct sockaddr_in *a = (const struct sockaddr_in *) &ss;
+				const struct sockaddr_in *b = (const struct sockaddr_in *) p->ai_addr;
+
+				found = a->sin_port == b->sin_port && a->sin_addr.s_addr == b->sin_addr.s_addr;
+			} else {
+				const struct sockaddr_in6 *a = (const struct sockaddr_in6 *) &ss;
+				const struct sockaddr_in6 *b = (const struct sockaddr_in6 *) p->ai_addr;
+
+				found = a->sin6_port == b->sin6_port && memcmp(&a->sin6_addr, &b->sin6_addr, sizeof(a->sin6_addr)) == 0;
+			}
+		}
+		freeaddrinfo(res);
+	}
+	free(dup);
+	return found;
+}
+/* }}} */
+
 int fpm_http_handoff_begin(void) /* {{{ */
 {
 	const char *env = getenv(FPM_HTTP_HANDOFF_ENV);
@@ -164,6 +212,13 @@ int fpm_http_handoff_begin(void) /* {{{ */
 		tls[16] = '\0';
 
 		key = strdup(colon + 18);
+		/* The socket must be bound to the address the record names. Another one is
+		 * left open, as the non-listening ones are: it may be some other pool's. */
+		if (key && !is_bound_to((int) fd, key)) {
+			zlog(ZLOG_WARNING, "http: not taking over descriptor %d for %s of the previous generation: it is not bound to that address", (int) fd, key);
+			free(key);
+			continue;
+		}
 		if (!key || handed_add((int) fd, key, tls) != 0) {
 			free(key);
 			close((int) fd);

@@ -35,9 +35,13 @@ struct fpm_worker_pool_s;
  * pm.*-counted bookkeeping (so the ordinary signal fan-out that follows never
  * reaches them -- the caller does not add this pool to that loop at all, see
  * its own comment) and records each pid in FPM_RELOAD_SELECTIVE_ENV for the
- * next generation to adopt. Does not signal, close, or free anything: an
- * unchanged pool's children are not being asked to do anything at all. */
-void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp);
+ * next generation to adopt. On success it does not signal, close, or free
+ * anything: an unchanged pool's children are not being asked to do anything.
+ * Returns 1 when the pool is handled. Returns 0 when nothing was detached
+ * (the pool name cannot be carried, or a buffer could not be allocated) or
+ * when only the setenv() failed after the detach (issue #830); the caller then
+ * takes the ordinary reload path for the pool, which signals what is left. */
+int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp);
 
 /* Called from fpm_children_create_initial() (fpm_children.c), once per pool,
  * before that pool's normal cold-start fork loop runs. Consumes wp's entry

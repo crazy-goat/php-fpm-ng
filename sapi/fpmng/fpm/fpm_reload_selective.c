@@ -36,12 +36,44 @@ static int fpm_reload_selective_name_ok(const char *name) /* {{{ */
 }
 /* }}} */
 
-void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
+/* Sends SIGTERM to every pid of a "pid,pid" list and returns how many
+ * signals were sent. Used for children that the handoff cannot carry (issue
+ * #830): they are detached, so no master would ever adopt or signal them. */
+static int fpm_reload_selective_sigterm_list(const char *list) /* {{{ */
+{
+	const char *p = list;
+	int killed = 0;
+
+	while (*p) {
+		char *end;
+		long pid = strtol(p, &end, 10);
+
+		/* pid <= 1 is never a spared worker, and kill(2) reads 0 and -1 as
+		 * "a whole process group" and "everything" (issue #567). */
+		if (pid > 1 && kill((pid_t) pid, SIGTERM) == 0) {
+			killed++;
+		}
+
+		/* Skip what is left of this entry, so that the loop always advances. */
+		p = end;
+		while (*p && *p != ',') {
+			p++;
+		}
+		if (*p == ',') {
+			p++;
+		}
+	}
+
+	return killed;
+}
+/* }}} */
+
+int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	const char *name = wp->config->name;
 	const char *existing;
-	char *pids = NULL;
-	size_t pids_len = 0, pids_cap = 0;
+	char *pids, *env_next;
+	size_t pids_len = 0, env_cap;
 	struct fpm_child_s *child;
 	int n = 0;
 
@@ -50,45 +82,42 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 						   "cannot carry this pool's children across a selective reload -- "
 						   "reloading it normally instead",
 				name);
-		return;
+		return 0;
 	}
 
 	if (wp->running_children == 0) {
-		return; /* nothing to spare */
+		return 1; /* nothing to spare */
 	}
+
+	/* Issue #830: both buffers are allocated and sized before the first detach.
+	 * After a detach nothing may fail except setenv(): a detached child that
+	 * cannot be listed has no master that would adopt or signal it. A pid
+	 * takes at most 11 bytes ("-2147483648") and one ',' more. */
+	existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
+	env_cap = (existing ? strlen(existing) : 0) + strlen(name) + (size_t) wp->running_children * 12 + 3;
+	pids = malloc((size_t) wp->running_children * 12 + 1);
+	env_next = malloc(env_cap);
+	if (!pids || !env_next) {
+		/* Nothing is detached, so these children are still this master's.
+		 * Returning 0 sends the pool down the ordinary reload path, which
+		 * signals them. */
+		free(pids);
+		free(env_next);
+		return 0;
+	}
+	pids[0] = '\0';
 
 	/* Build "pid,pid,pid" by repeatedly detaching the oldest remaining child
 	 * (fpm_children_detach_oldest() already exists for #329 and does exactly
 	 * the unlink-without-signalling this needs; calling it in a loop until
 	 * wp->children is empty is the whole of "detach every child" -- no new
-	 * detach-all primitive needed). */
+	 * detach-all primitive needed). The list holds running_children entries
+	 * (fpm_child_unlink() decrements both), so pids is large enough. */
 	while ((child = fpm_children_detach_oldest(wp)) != NULL) {
 		char one[32];
 		int one_len;
-		size_t needed;
 
 		one_len = snprintf(one, sizeof(one), "%s%d", n ? "," : "", (int) child->pid);
-		needed = pids_len + (size_t) one_len + 1;
-
-		if (needed > pids_cap) {
-			size_t new_cap = pids_cap ? pids_cap * 2 : 128;
-			char *next;
-
-			while (new_cap < needed) {
-				new_cap *= 2;
-			}
-			next = realloc(pids, new_cap);
-			if (!next) {
-				/* Best effort, same as #329's env var helpers: this child is
-				 * dropped from the handoff and simply is not adopted after
-				 * execvp() -- the new generation's ordinary fork loop covers
-				 * the gap for it, same as a crashed child would. */
-				free(child);
-				continue;
-			}
-			pids = next;
-			pids_cap = new_cap;
-		}
 		memcpy(pids + pids_len, one, (size_t) one_len);
 		pids_len += (size_t) one_len;
 		pids[pids_len] = '\0';
@@ -110,34 +139,41 @@ void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	if (n == 0) {
 		free(pids);
-		return;
+		free(env_next);
+		return 1;
 	}
+
+	if (existing && *existing) {
+		snprintf(env_next, env_cap, "%s;%s:%s", existing, name, pids);
+	} else {
+		snprintf(env_next, env_cap, "%s:%s", name, pids);
+	}
+
+	if (setenv(FPM_RELOAD_SELECTIVE_ENV, env_next, 1) != 0) {
+		/* The children are detached and the next generation cannot adopt
+		 * them either. Signal them, as for a child that could not be listed
+		 * (issue #830). No shm record is written either, so the next
+		 * generation starts this pool with a fresh scoreboard. Returning 0
+		 * makes the caller's ordinary path see no child of this pool. */
+		fpm_reload_selective_sigterm_list(pids);
+		free(pids);
+		free(env_next);
+		return 0;
+	}
+	free(env_next);
 
 	/* Issue #537: the spared workers keep writing to this generation's
-	 * scoreboard and metrics region; hand both to the next generation. */
+	 * scoreboard and metrics region; hand both to the next generation. Only
+	 * after the handoff succeeded: a scoreboard record without its workers
+	 * would fill the next generation's scoreboard with dead slots (issue #830). */
 	fpm_reload_shm_spare_pool(wp);
-
-	existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
-	{
-		size_t len = (existing ? strlen(existing) : 0) + strlen(name) + pids_len + 3;
-		char *next = malloc(len);
-
-		if (next) {
-			if (existing && *existing) {
-				snprintf(next, len, "%s;%s:%s", existing, name, pids);
-			} else {
-				snprintf(next, len, "%s:%s", name, pids);
-			}
-			setenv(FPM_RELOAD_SELECTIVE_ENV, next, 1);
-			free(next);
-		}
-	}
 	free(pids);
 
 	zlog(ZLOG_NOTICE, "[pool %s] issue #330: config unchanged -- sparing all %d running "
 					  "child(ren) from this reload; the next generation will adopt them instead of "
 					  "restarting the pool",
 			name, n);
+	return 1;
 }
 /* }}} */
 
@@ -310,7 +346,6 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 		char *semi = strchr(rest, ';');
 		char *group = rest;
 		char *colon;
-		char *pid_list;
 
 		if (semi) {
 			*semi = '\0';
@@ -324,28 +359,16 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 			continue;
 		}
 
-		for (pid_list = colon + 1; *pid_list;) {
-			char *comma = strchr(pid_list, ',');
-			pid_t pid;
-
-			if (comma) {
-				*comma = '\0';
-			}
-			pid = (pid_t) strtol(pid_list, NULL, 10);
-			pid_list = comma ? comma + 1 : pid_list + strlen(pid_list);
-
-			/* pid <= 1 is never a spared worker, and kill(2) reads 0 and -1
-			 * as "a whole process group" and "everything" (issue #567). */
-			if (pid > 1 && kill(pid, SIGTERM) == 0) {
-				killed++;
-			}
-		}
+		killed += fpm_reload_selective_sigterm_list(colon + 1);
 	}
 
+	/* Also called from fpm_run() after the initial fork loop, where this
+	 * master keeps running. The message says only what is true in both
+	 * places: this master did not adopt them (issue #830). */
 	if (killed > 0) {
-		zlog(ZLOG_WARNING, "issue #690: this master is going down before it adopted %d child(ren) "
+		zlog(ZLOG_WARNING, "issue #690: this master did not adopt %d child(ren) "
 						   "that a selective reload carried over; sent them SIGTERM so they do not "
-						   "outlive it holding their listening sockets",
+						   "keep running with their listening sockets",
 				killed);
 	}
 	free(copy);

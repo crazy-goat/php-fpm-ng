@@ -59,9 +59,10 @@ error_log = {{FILE:LOG}}
 pool.type = gateway
 listen = {{ADDR[gw]}}
 chdir = $www
-; One gateway process: the target is pm.max_children = 1, so a second gateway
-; would race for its single upstream connection and answer 503. The gateway
-; count is not what this test asserts.
+; One gateway process instead of the default 2: this test checks the routing of
+; each path, not the gateway count. Since #735 a second gateway would not answer
+; 503: it would ask the first one to close its idle connection to the single
+; worker and open its own.
 http.gateways = 1
 http.route[main] = /
 [main]

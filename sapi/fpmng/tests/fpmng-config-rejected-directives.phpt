@@ -83,7 +83,7 @@ expectConfigFailure(
 expectConfigFailure(
     'fastcgi-max-consecutive-failures-negative',
     $base . "\npm.max_consecutive_failures = -1",
-    ["pm.max_consecutive_failures must be 0 or a positive value"]
+    ["is not a valid number (greater or equal than zero)"]
 );
 
 expectConfigFailure(

@@ -679,8 +679,11 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 					reason = strdup(parsed_reason);
 					invalid_status = false;
 				} else {
-					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%.64s', answering 502",
-							c->gw->pool, value);
+					/* Escaped, not %.64s: see fpm_http_direct.c (issue #838). */
+					char escaped[4 * 64 + 1];
+
+					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%s', answering 502",
+							c->gw->pool, fpm_http_log_escape(value, 64, escaped, sizeof(escaped)));
 					invalid_status = true;
 				}
 			} else if (c->client && c->client->request_id[0] && strcasecmp(key, "X-Request-Id") == 0) {

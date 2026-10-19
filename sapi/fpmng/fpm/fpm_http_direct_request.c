@@ -362,7 +362,7 @@ void fpm_http_direct_normalize_target(struct evhttp_request *http)
  * dropped: fpm_http_direct_build_env() would otherwise have to choose between
  * an HTTP_HOST that contradicts the Host header it kept and one it invented
  * from a truncated authority, and the gateway answers 400 for the same target
- * (fpm_http.c:2287). After the ACL on purpose: a client
+ * (fpm_http.c:2764). After the ACL on purpose: a client
  * listen.allowed_clients excludes has to get its 403 whatever else is true of
  * the request it sent. */
 bool fpm_http_direct_authority_acceptable(struct evhttp_request *http)

@@ -34,11 +34,12 @@
  * Current limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
- * per-request scoreboard accounting (fpm_request_accepting_ex(false) once at
- * :2580). TLS is NOT a limit here: this executor terminates it like the
- * classic one since issue #55, see the fpm_http_direct_tls_child_attach()
- * call at :2474. Streaming is no longer one either: fpmng_worker_respond()
- * still takes one complete body, but fpmng_worker_respond_start()/_chunk()/
+ * per-request scoreboard accounting (fpm_request_accepting_ex(false) once for
+ * the life of the child, in child_main()). TLS is NOT a limit here: this
+ * executor terminates it like the classic one since issue #55, see the
+ * fpm_http_direct_tls_child_attach() call in child_main(). Streaming is no
+ * longer one either: fpmng_worker_respond() still takes one complete body, but
+ * fpmng_worker_respond_start()/_chunk()/
  * _end() (issue #332) push bytes as the handler produces them, with
  * worker.send_buffer_limit for backpressure.
  */
@@ -128,9 +129,11 @@
 #define FPM_WORKER_TIMEOUT_MAX 31536000.0
 /* How long child_main() keeps driving the base to get the final 503s of
  * fpm_worker_finish_output() onto the wire. Bounded because a client that
- * stopped reading must not keep the child alive: the master is already waiting
- * on its own stop timeout at this point, and losing the reply is no worse than
- * the silent close this whole path exists to prevent. */
+ * stopped reading must not keep the child alive past the master's stop
+ * timeout, which is already running at this point. The cost: a connection
+ * whose 503 is still unwritten when the budget runs out is closed without a
+ * reply, the case the reply rule of fpm_worker_finish_output() exists to
+ * prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
 /* Limits of fpm_worker_grace_drain(), which runs after
  * fpm_worker_finish_output() has stopped the listener. A request already on the
@@ -859,9 +862,17 @@ static void fpm_worker_grace_drain(void)
 }
 
 /* The last thing child_main() does with the transport, and the only place that
- * enforces the invariant every client is owed: an accepted connection is never
- * closed without a response that actually reached the socket. Two distinct
- * ways to break it meet here.
+ * enforces the reply rule: an accepted connection is closed without a response
+ * that actually reached the socket only in two cases. The first is the stop
+ * window of #668: fpm_worker_grace_drain() (at most 4 passes and 100 ms)
+ * answers a request already on an open keep-alive connection when the drain
+ * runs with 503. After the drain the worker closes its open connections without
+ * a reply, so a request that arrives later gets a silent close.
+ * docs/http-direct.md, "Requests that arrive while the worker stops (issue
+ * #668)", states the same rule. The second is a reply still unwritten when
+ * FPM_WORKER_FLUSH_BUDGET runs out; the flush loop below gives up on it.
+ *
+ * Two distinct ways to break the rule meet here.
  *
  * One is a request nobody answered — a bridge that concluded it had drained
  * from its own in-flight counter while the SAPI still had a queued request
@@ -2986,12 +2997,12 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	/* issue #65 retires one child with SIGUSR1. Here it is the same handler as
-	 * SIGQUIT, and deliberately so: this executor tracks no connections (no
-	 * limits, no gauge -- see limits.track_live at the bottom of this file), so
-	 * it has nothing with which to tell "drain the connections I hold" from
-	 * "drain the requests I hold". What the shared handler does buy is that the
-	 * signal an operator sends to retire a child of any direct pool is never
-	 * the SIG_DFL that would kill this one outright. */
+	 * SIGQUIT, and deliberately so: this executor tracks no connection past its
+	 * first request (no limits, no gauge -- see the limits setup in
+	 * child_main()), so it has nothing with which to tell "drain the connections
+	 * I hold" from "drain the requests I hold". What the shared handler does
+	 * buy is that the signal an operator sends to retire a child of any direct
+	 * pool is never the SIG_DFL that would kill this one outright. */
 	if (sigaction(SIGUSR1, &action, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}

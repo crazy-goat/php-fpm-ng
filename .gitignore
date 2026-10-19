@@ -4,6 +4,9 @@ build-dir/
 # dirty after every build and let a `git add -A` commit object files (#847).
 /out/
 *.log
+# A test writes its own record next to itself when it runs from the repository
+# (issue #893); the runner copies it out of a tree it assembled.
+*.record
 php-fpm
 php-fpm-*
 # The packaged configuration and service files are sources, not build output;

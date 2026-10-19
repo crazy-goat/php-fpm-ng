@@ -561,6 +561,34 @@ does this. The next master tracks the survivor again and retires it at the same
 deadline. Before issue #692, the second reload neither signalled the survivor
 nor wrote it back, so no master tracked the survivor.
 
+**A carried pid is checked before it is used (issue #891).** A pid in
+`FPMNG_RELOAD_SURVIVORS` or `FPMNG_SELECTIVE_RELOAD_SURVIVORS` can be stale. The
+old master can reap a spared child. The kernel can then give the same pid to an
+unrelated process. `kill(pid, 0)` cannot tell the two apart.
+
+Each carried entry also holds the start time of its process. On Linux, the
+master reads this time from field 22 of `/proc/<pid>/stat`
+(`fpm_pid_start_time()` in `fpm_pid_child.c`). The master uses the pid only when
+the start time still matches (`fpm_pid_is_same()`).
+
+The check does not use parentage. Under `daemonize = yes`, the exec'd image
+forks again (`third_party/php-src/sapi/fpm/fpm/fpm_unix.c:618`), so the new
+master is not the parent of the carried children.
+
+The check covers the supervisor survivor at the exec and in `init_main()`, its
+retirement signal, the selective survivor list when it is adopted, and that list
+when it is signalled after a failed handoff. A refused pid is not signalled.
+Refusals at the exec and at adoption log one NOTICE each, with the pool name and
+the pid. The failed-handoff list logs no line per pid.
+
+Without `/proc`, no start time is recorded, and the start time is 0. The check
+then falls back to `kill(pid, 0)`, as before #891. An entry that an older binary
+wrote has no start time and takes the same fallback. Not measured on macOS.
+
+Two gaps remain. The kernel can reuse the pid between the check and the signal.
+Under `daemonize = yes`, no master sees the exit of a survivor that is not its
+child, so the check narrows the window but does not close it. Not measured.
+
 **A slot reservation has an expiry.** At its `execvp()`, the old master writes
 one `X:<pool>:<base>:<count>:<until>` record for the slot range of each pool it
 runs. This includes a changed pool that lost a child to a #329 survivor. The

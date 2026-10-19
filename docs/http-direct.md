@@ -321,14 +321,14 @@ and its follow-ups, not to this limit.
 
 Every stop of the worker runs the same drain. The stop comes from `worker.max_pending` saturation, `pm.max_requests`, `worker.max_memory`, `worker.max_lifetime`, `SIGQUIT` (the master sends it on a reload) or `SIGUSR1` (retires one child).
 
-The drain stops the listener and answers every held request `503`. Then it runs the event loop for 100 ms (`FPM_WORKER_GRACE_MS` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). No directive sets this window.
+The drain stops the listener and answers every held request `503`. Then it runs the event loop without blocking, for at most 4 passes and at most 100 ms (`fpm_worker_grace_drain()` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). A pass that queues no reply ends the drain. On an idle worker the drain ends at once. No directive sets these limits.
 
-During the window:
+During the drain:
 
-- A request on an open connection that reaches the worker gets `503 Worker unavailable`.
+- A request on an open connection whose bytes are already in the socket buffer when the drain runs gets `503 Worker unavailable`. This holds for a request that needs several reads, within the 100 ms limit.
 - The worker does not accept a new connection. The shared listening socket is left to the sibling workers.
 
-After the window, the worker closes its open connections without a reply. A request on an open connection that arrives after the window gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. Every worker exit takes 100 ms longer because of the window.
+After the drain, the worker closes its open connections without a reply. A request that reaches the worker after the drain gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. A request that was sent but has not yet reached the worker when the drain ends meets the same silent close. This is the normal keep-alive close race (RFC 9112 section 9.3.1). The drain adds no wait for an idle worker.
 
 #### `worker.max_pending` (issue #331)
 

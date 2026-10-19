@@ -18,6 +18,7 @@
 #include "fpm_events.h"
 #include "fpm_sockets.h"
 #include "fpm_stdio.h"
+#include "fpm_pool_type.h"
 #include "fpm_child_log.h"
 #include "fpm_error_log_follow.h"
 #include "zlog.h"
@@ -397,6 +398,14 @@ void fpm_stdio_child_use_pipes(struct fpm_child_s *child) /* {{{ */
 int fpm_stdio_open_error_log(int reopen) /* {{{ */
 {
 	int fd;
+
+	/* fpm-ng: the master-held logs (cron.log) are reopened on the same
+	 * SIGUSR1. It is done here, before the syslog branch below, because that
+	 * branch returns early and an error_log = syslog configuration would skip
+	 * it (issue #775). */
+	if (reopen) {
+		fpm_pool_type_reopen_master_logs();
+	}
 
 #ifdef HAVE_SYSLOG_H
 	if (!strcasecmp(fpm_global_config.error_log, "syslog")) {

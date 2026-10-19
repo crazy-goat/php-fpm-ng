@@ -52,4 +52,12 @@ struct fpm_pool_status_s;
  * docs/NOTES.md 3u. */
 void fpm_pool_cron_status(struct fpm_worker_pool_s *wp, struct fpm_pool_status_s *out);
 
+/* fpm_pool_type_s.reopen_master_logs (issue #775): reopens wp's cron.log by
+ * path onto the descriptor the master already holds. */
+void fpm_pool_cron_reopen_log(struct fpm_worker_pool_s *wp);
+
+/* fpm_pool_type_s.close_master_logs_in_child (issue #775): closes wp's cron.log
+ * descriptor in a child of another pool. */
+void fpm_pool_cron_close_log_in_child(struct fpm_worker_pool_s *wp);
+
 #endif

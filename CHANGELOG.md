@@ -15,6 +15,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
+- Reload: a selective reload closes an inherited metrics descriptor that fails the size check, so no worker inherits it. The scoreboard descriptor of a spared pool is no longer kept twice. A failed `FD_CLOEXEC` change on a spared pool's scoreboard or metrics region is logged with the pool name (issue #842).
 - Docs: the "Symlink deploys" section of `docs/gateway.md` states the exact conditions for the per-request `realpath()` of the document root (issue #828). The #638 entry says GET and HEAD of a non-`.php`, non-directory path. The code calls `realpath()` for a directory requested without a trailing slash, and it does not call `realpath()` for a path with a segment that starts with a dot. No code change.
 
 ## [0.17.0] - 2026-10-09

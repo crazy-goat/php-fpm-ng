@@ -226,8 +226,12 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 		 * (fpm_signal_sent != 0) never reach here for this pool: it was
 		 * never added to the running-children-being-escalated set to begin
 		 * with, since its children were detached, not signalled. */
-		if (selective_pass && fpm_conf_diff_pool_unchanged(wp->config->name)) {
-			fpm_reload_selective_spare_pool(wp);
+		/* Issue #830: a pool that could not be spared (see the header) is not
+		 * skipped. Skipped, its children would miss the first, graceful signal,
+		 * and the reload would wait for the escalation after
+		 * process_control_timeout. */
+		if (selective_pass && fpm_conf_diff_pool_unchanged(wp->config->name) &&
+				fpm_reload_selective_spare_pool(wp)) {
 			continue;
 		}
 

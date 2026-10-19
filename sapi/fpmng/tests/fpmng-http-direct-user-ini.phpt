@@ -41,7 +41,18 @@ function rawReport(string $addr, string $rawPath)
     return json_decode($body, true) ?? ('BAD: ' . $raw);
 }
 
-$base = sys_get_temp_dir() . '/fpmng-user-ini';
+/* A pid in the name keeps two runs of this test apart. The removal runs in
+ * this process, not in --CLEAN--: CLEAN is a separate process that cannot know
+ * this pid, and a glob of the shared prefix would delete another run's tree. */
+$base = sys_get_temp_dir() . '/fpmng-user-ini-' . getmypid();
+$remove = function (string $dir) use (&$remove): void {
+    foreach (glob("$dir/{,.}*", GLOB_BRACE) ?: [] as $entry) {
+        if (basename($entry) === '.' || basename($entry) === '..') continue;
+        is_dir($entry) ? $remove($entry) : @unlink($entry);
+    }
+    @rmdir($dir);
+};
+register_shutdown_function(static fn() => $remove($base));
 @mkdir("$base/app/public", 0700, true);
 @mkdir("$base/elsewhere", 0700, true);
 @mkdir("$base/control", 0700, true);
@@ -195,15 +206,3 @@ poisoned request saw: 3
 next request saw: 9
 ttl before=7 after=13
 same child: true
---CLEAN--
-<?php
-$base = sys_get_temp_dir() . '/fpmng-user-ini';
-$walk = function (string $dir) use (&$walk): void {
-    foreach (glob("$dir/{,.}*", GLOB_BRACE) ?: [] as $entry) {
-        if (basename($entry) === '.' || basename($entry) === '..') continue;
-        is_dir($entry) ? $walk($entry) : @unlink($entry);
-    }
-    @rmdir($dir);
-};
-if (is_dir($base)) $walk($base);
-?>

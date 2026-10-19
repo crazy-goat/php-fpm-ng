@@ -173,6 +173,12 @@ cleanup() {
             mkdir -p "$RESULTS_DIR/failed-artifacts"
             find "$TREE_DIR/sapi/fpmng/tests" -maxdepth 1 \( -name '*.diff' -o -name '*.out' -o -name '*.exp' -o -name '*.log' \) \
                 -exec cp {} "$RESULTS_DIR/failed-artifacts/" \; 2>/dev/null || true
+            # A test's own record of what it did (*.record, issue #893). It is
+            # kept on every exit, pass or fail, so it stays out of
+            # failed-artifacts/, which means failure evidence only.
+            mkdir -p "$RESULTS_DIR/test-records"
+            find "$TREE_DIR/sapi/fpmng/tests" -maxdepth 1 -name '*.record' \
+                -exec cp {} "$RESULTS_DIR/test-records/" \; 2>/dev/null || true
         fi
         rm -rf "$TREE_DIR"
     fi

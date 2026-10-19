@@ -1038,6 +1038,7 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint);
 /* fpm_http_gw_proc.c */
 void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
 void fpm_http_cleanup(int which, void *arg);
+void fpm_http_split_bind(char *bind, char **host, char **port);
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 

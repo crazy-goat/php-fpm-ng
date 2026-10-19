@@ -105,14 +105,17 @@ void *fpm_reload_shm_alloc(size_t size, int *fd_out) /* {{{ */
 }
 /* }}} */
 
-static void fpm_reload_shm_set_cloexec(int fd, int on) /* {{{ */
+/* Returns 0, or -1 with errno set. A spared pool depends on the cleared flag:
+ * if it stays set, the descriptor dies at exec and the next generation starts
+ * with empty regions, so the callers log the failure (issue #842). */
+static int fpm_reload_shm_set_cloexec(int fd, int on) /* {{{ */
 {
 	int flags = fcntl(fd, F_GETFD);
 
 	if (flags < 0) {
-		return;
+		return -1;
 	}
-	fcntl(fd, F_SETFD, on ? (flags | FD_CLOEXEC) : (flags & ~FD_CLOEXEC));
+	return fcntl(fd, F_SETFD, on ? (flags | FD_CLOEXEC) : (flags & ~FD_CLOEXEC)) < 0 ? -1 : 0;
 }
 /* }}} */
 
@@ -239,6 +242,9 @@ int fpm_reload_shm_scoreboards(void) /* {{{ */
 			if (mem != MAP_FAILED && ((struct fpm_scoreboard_s *) mem)->nprocs == (unsigned) wp->config->pm_max_children && strncmp(((struct fpm_scoreboard_s *) mem)->pool, name, sizeof(((struct fpm_scoreboard_s *) mem)->pool) - 1) == 0) {
 				fd = rec->fd;
 				rec->claimed = 1;
+				/* own_sb owns the descriptor from here on; a second copy here
+				 * would be closed twice by a later user (issue #842). */
+				rec->fd = -1;
 				fpm_reload_shm_set_cloexec(fd, 1);
 				fpm_shm_free(fresh, size);
 				wp->scoreboard = mem;
@@ -291,7 +297,16 @@ int fpm_reload_shm_inherited_metrics(int *fd, size_t *size, uint32_t *slots, uin
 
 	fpm_reload_shm_load();
 	r = fpm_reload_shm_find('M', NULL);
-	if (!r || !fpm_reload_shm_fd_size_ok(r->fd, r->size)) {
+	if (!r) {
+		return 0;
+	}
+	if (!fpm_reload_shm_fd_size_ok(r->fd, r->size)) {
+		/* Not in own_mx_fd, so fpm_reload_shm_child_init() never closes it:
+		 * close it here, or every worker inherits it (issue #842). */
+		if (r->fd >= 0) {
+			close(r->fd);
+			r->fd = -1;
+		}
 		return 0;
 	}
 	*fd = r->fd;
@@ -472,7 +487,11 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	for (s = own_sb; s; s = s->next) {
 		if (strcmp(s->name, name) == 0) {
-			fpm_reload_shm_set_cloexec(s->fd, 0);
+			if (fpm_reload_shm_set_cloexec(s->fd, 0) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] issue #537: clearing FD_CLOEXEC on the scoreboard failed (%s); "
+								   "the next generation starts this pool's status empty",
+						name, strerror(errno));
+			}
 			snprintf(rec, sizeof(rec), "S:%s:%d:%zu", name, s->fd, s->size);
 			fpm_reload_shm_append_env(rec);
 			break;
@@ -482,7 +501,11 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (own_mx_fd >= 0 && fpm_metrics_pool_range(wp, &base, &count)) {
 		if (!mx_recorded) {
 			mx_recorded = 1;
-			fpm_reload_shm_set_cloexec(own_mx_fd, 0);
+			if (fpm_reload_shm_set_cloexec(own_mx_fd, 0) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] issue #537: clearing FD_CLOEXEC on the metrics region failed (%s); "
+								   "the next generation starts this pool's metrics empty",
+						name, strerror(errno));
+			}
 			snprintf(rec, sizeof(rec), "M:%d:%zu:%u:%u", own_mx_fd, own_mx_size, own_mx_slots, own_mx_limit);
 			fpm_reload_shm_append_env(rec);
 		}

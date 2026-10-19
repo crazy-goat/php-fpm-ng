@@ -7,6 +7,7 @@
 #include "fpm.h"
 #include "fpm_http.h"
 #include "fpm_http_handoff.h"
+#include "fpm_pool_type.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -63,7 +64,6 @@
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
-#include "fpm_pool_type.h"
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
@@ -980,6 +980,28 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 }
 /* }}} */
 
+/* A text without a colon is a port alone. Its host stays NULL, which
+ * getaddrinfo() takes as the wildcard address. The handoff matcher relies
+ * on this too, so both callers must split the same way. */
+void fpm_http_split_bind(char *bind, char **host, char **port) /* {{{ */
+{
+	char *colon = strrchr(bind, ':');
+
+	*host = NULL;
+	if (!colon) {
+		*port = bind;
+		return;
+	}
+	*colon = '\0';
+	*host = bind;
+	if ((*host)[0] == '[' && (*host)[strlen(*host) - 1] == ']') {
+		(*host)[strlen(*host) - 1] = '\0';
+		(*host)++;
+	}
+	*port = colon + 1;
+}
+/* }}} */
+
 /* Listens on http_address when given, otherwise on the FastCGI address with the port bumped by
  * one. Returns -1 when that is not possible.
  *
@@ -1002,21 +1024,12 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
  * checks its late listen() and reports EADDRINUSE rather than assuming it. */
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen) /* {{{ */
 {
-	char *dup_address = strdup(http_address ? http_address : listen_address), *host = NULL, *port_str = strrchr(dup_address, ':');
+	char *dup_address = strdup(http_address ? http_address : listen_address), *host, *port_str;
 	char port[sizeof("65535")];
 	struct addrinfo hints, *res, *p;
 	int fd = -1, port_no, on = 1;
 
-	if (port_str) {
-		*port_str++ = '\0';
-		host = dup_address;
-		if (host[0] == '[' && host[strlen(host) - 1] == ']') {
-			host[strlen(host) - 1] = '\0';
-			host++;
-		}
-	} else {
-		port_str = dup_address;
-	}
+	fpm_http_split_bind(dup_address, &host, &port_str);
 	port_no = atoi(port_str) + (http_address ? 0 : 1);
 	if (port_no < 1 || port_no > 65535) {
 		zlog(ZLOG_WARNING, "[pool %s] no HTTP listener: no port left above '%s'", pool, listen_address);
@@ -1077,6 +1090,8 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 		fpm_error_log_follow_free(slot->log_follow);
 		slot->log_follow = NULL;
 	} else if (gw->pids[index] == 0) {
+		/* Not a pool child, so it keeps none of the master-held log descriptors (issue #775). */
+		fpm_pool_type_close_master_logs_in_child(NULL);
 		fpm_http_gateway_run(gw, index);
 		/* not reached */
 	} else {

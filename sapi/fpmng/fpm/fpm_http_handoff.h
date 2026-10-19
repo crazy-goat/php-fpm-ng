@@ -14,8 +14,10 @@
  * The next master takes a socket over only when the bind text and the TLS
  * fingerprint (fpm_http_handoff_tls_fp()) both match the gateway that asks for
  * the listener, and only when that gateway listens at once (not
- * http.tls_wait_for_cert's NO_CERT state). Any other inherited socket is
- * closed, and the listener is bound as before. The bind text is compared as
+ * http.tls_wait_for_cert's NO_CERT state). The socket must also be bound to
+ * the bind text: a record that names another listening socket is ignored, and
+ * that socket stays open. Any other inherited socket is closed, and the
+ * listener is bound as before. The bind text is compared as
  * written: "0.0.0.0:8080" and "*:8080" do not match, so they rebind.
  *
  * Not covered, on purpose:

@@ -117,7 +117,7 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command);
 /* The two ingress steps, in this order, first thing in both request callbacks
  * (#681). Together they reduce the request-target to the origin-form path every
  * consumer below matches on; they are two because the gateway's are two
- * (fpm_http.c:2246 normalizes, fpm_http.c:2287 bounds the authority after the
+ * (fpm_http.c:2714 normalizes, fpm_http.c:2764 bounds the authority after the
  * ACL), and the split is what keeps an excluded client's 403 free of any
  * statement about its target.
  *

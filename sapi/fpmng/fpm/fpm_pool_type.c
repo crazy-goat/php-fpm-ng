@@ -502,6 +502,10 @@ static const struct fpm_pool_type_s fpm_pool_types[] = {
 		 * instead of hardcoding SIGTERM for this type the way it still does for
 		 * every other non-request-serving type. */
 		.stop_signal             = fpm_pool_cron_stop_signal,
+		/* Issue #775: cron.log is opened by the master, so the master reopens it
+		 * on SIGUSR1 and every other pool's child closes its descriptor. */
+		.reopen_master_logs      = fpm_pool_cron_reopen_log,
+		.close_master_logs_in_child = fpm_pool_cron_close_log_in_child,
 	},
 	{
 		/* Not configurable: created by fpm_operator_endpoint.c, one per distinct
@@ -852,6 +856,37 @@ const struct fpm_pool_type_s *fpm_pool_type_of(struct fpm_worker_pool_s *wp)
 	const struct fpm_pool_type_s *type = fpm_pool_type_resolve(wp);
 
 	return type ? type : FPM_POOL_TYPE_DEFAULT;
+}
+
+/* Issue #775: the master calls this on SIGUSR1, from fpm_stdio_open_error_log(1).
+ * The walk lives here so that no generic file names a type. */
+void fpm_pool_type_reopen_master_logs(void)
+{
+	struct fpm_worker_pool_s *wp;
+
+	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+		if (type->reopen_master_logs) {
+			type->reopen_master_logs(wp);
+		}
+	}
+}
+
+/* Issue #775: fork() copies every descriptor the master holds into each child.
+ * A child keeps its own pool's descriptors and closes the others', so a file
+ * that another pool could not open itself does not reach it. */
+void fpm_pool_type_close_master_logs_in_child(struct fpm_worker_pool_s *own)
+{
+	struct fpm_worker_pool_s *wp;
+
+	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
+		const struct fpm_pool_type_s *type = fpm_pool_type_of(wp);
+
+		if (wp != own && type->close_master_logs_in_child) {
+			type->close_master_logs_in_child(wp);
+		}
+	}
 }
 
 /* TCP_NODELAY for a type that declares it, on the socket the master owns. Why

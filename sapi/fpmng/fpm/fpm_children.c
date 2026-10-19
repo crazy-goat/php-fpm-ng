@@ -288,6 +288,10 @@ static void fpm_child_init(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * across the fork and not yet closed. */
 	fpm_child_php_log_init_child(wp);
 
+	/* fpm-ng: the other pools' master-held log descriptors must not survive into
+	 * this child (issue #775). */
+	fpm_pool_type_close_master_logs_in_child(wp);
+
 	if (0 > fpm_stdio_init_child(wp)  ||
 	    0 > fpm_log_init_child(wp)    ||
 	    0 > fpm_status_init_child(wp) ||

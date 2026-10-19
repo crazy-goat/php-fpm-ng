@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Changed
+
+- `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.
+
 ### Fixed
 
 - Reload: a selective reload closes an inherited metrics descriptor that fails the size check, so no worker inherits it. The scoreboard descriptor of a spared pool is no longer kept twice. A failed `FD_CLOEXEC` change on a spared pool's scoreboard or metrics region is logged with the pool name (issue #842).

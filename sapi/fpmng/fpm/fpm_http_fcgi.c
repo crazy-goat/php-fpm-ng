@@ -678,6 +678,13 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				if (fpm_http_parse_cgi_status(value, vlen, &code, &parsed_reason)) {
 					reason = strdup(parsed_reason);
 					invalid_status = false;
+					if (!reason) {
+						/* Issue #809: a NULL strdup() must not reach the client as
+						 * a reply with no reason. It takes the 502 path below. */
+						zlog(ZLOG_WARNING, "[pool %s] http: cannot copy the upstream Status reason (out of memory), answering 502",
+								c->gw->pool);
+						invalid_status = true;
+					}
 				} else {
 					/* Escaped, not %.64s: see fpm_http_direct.c (issue #838). */
 					char escaped[4 * 64 + 1];

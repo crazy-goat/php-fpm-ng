@@ -25,6 +25,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 - A gateway no longer takes over a listening socket that is bound to another address when a `FPMNG_HTTP_LISTENERS` record names it (issue #927). The record is ignored and the socket stays open, and the master logs one WARNING. Before, the gateway listened on the wrong socket, and its own address refused connections.
 - Selective reload (`reload.selective = yes`): the WARNING after the initial fork loop no longer says that the master is going down. It now says that this master did not adopt the children that a reload carried over (issue #830).
 - Selective reload: a pool whose workers the old master could not hand to the new one no longer leaves them alive with the pool's listening socket and no master (issue #830). An allocation failure before any worker is detached now reloads the pool normally. A `setenv()` failure after the detach sends `SIGTERM` to those workers, and the NOTICE no longer reports a spare that did not happen. A pool whose name cannot be carried (`:`, `,` or `;`) now gets the ordinary reload signal at once. Before, its workers missed the first signal and got `SIGTERM` only when the reload escalated after `process_control_timeout`.
+- `pool.type = gateway`: when the copy of a valid upstream `Status:` reason phrase fails for lack of memory, the gateway no longer sends the reply with no reason phrase. It answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply, as for an invalid `Status:` (#809).
 
 ## [0.17.0] - 2026-10-09
 

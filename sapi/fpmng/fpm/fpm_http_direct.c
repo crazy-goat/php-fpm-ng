@@ -2318,7 +2318,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
-	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2714):
 	 * reduce the request-target to the one path every consumer below matches
 	 * on, so nothing can be answered on one path and served on another
 	 * (issue #681). Ahead of the ACL so that even a request the ACL refuses
@@ -2338,7 +2338,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_send_error(http, 403, "Forbidden");
 		return;
 	}
-	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
+	/* Ingress step two, after the ACL (fpm_http.c:2764): an authority HTTP_HOST
 	 * could not carry is a malformed request, and a client
 	 * listen.allowed_clients excludes must not be able to tell that from
 	 * anything else about the request it sent. */

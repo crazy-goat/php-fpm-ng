@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Added
+
+- Test builds: a failure-injection seam, `FPMNG_FAULT_INJECT=1` for `build/libphp-build.sh` (`--enable-fpmng-fault-inject` for the from-source flow), on the pattern of `FPMNG_DEBUG_CLOCK` (issue #832). The environment variable `FPMNG_FAULT=<point>[:ifenv=<VAR>]` makes a named call site fail. The first point is `pool_type_init_main`. It is off by default, the code is not in a default build, and the package scripts refuse a binary that has `fpm_fault_inject_hit`. CI builds with it. New test `fpmng-reload-selective-failed-init-main.phpt` covers the #690 discard in `fpm_pctl_exit()` after a new master fails `init_main()`. The test skips on a binary without the seam. Documented in `docs/fpmng-phpt.md`.
+
 ### Changed
 
 - `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.

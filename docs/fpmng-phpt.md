@@ -517,6 +517,43 @@ wall-clock time, which must stay real. That path is not scaled at all -- both
 sides of every comparison in it are real -- so a test of it cannot be
 accelerated, but neither can it be made inconsistent.
 
+## Failure injection
+
+Some error paths cannot be reached with any configuration. The #690 discard in
+`fpm_pctl_exit()` runs when `type->init_main()` fails after `fpm_init()`
+returned OK. Every `init_main()` failure is a resource failure (`fpm_shm_alloc()`,
+`calloc()`, `fpm_event_add()`, `fcntl()`), and the validation of the
+configuration refuses a bad pool earlier. Issue #832.
+
+A binary built with `FPMNG_FAULT_INJECT=1` (`build/libphp-build.sh`;
+`--enable-fpmng-fault-inject` for the from-source flow) makes a named call
+site fail when the environment variable `FPMNG_FAULT` selects it:
+
+```
+FPMNG_FAULT=<point>[:ifenv=<VAR>][,<point>...]
+```
+
+`ifenv=VAR` arms the point only in a process whose environment has `VAR` set.
+The exec'd master of a reload inherits the environment of the old one, so the
+variable alone cannot tell the first master from the new one. A selective
+reload sets `FPMNG_SELECTIVE_RELOAD_SURVIVORS` only in the master it starts,
+so `pool_type_init_main:ifenv=FPMNG_SELECTIVE_RELOAD_SURVIVORS` fails the new
+master and not the first. An injected failure logs a WARNING that starts with
+`fault injection:`. Point names are listed in
+`sapi/fpmng/fpm/fpm_fault_inject.h`, with the rationale.
+
+- **Off by default and never in a shipped package.** With the flag off the code
+  is not in the binary, and `FPM_FAULT_POINT()` is the constant 0.
+  `build/libphp-build.sh` checks the symbol `fpm_fault_inject_hit` in both
+  directions, and `build/package-deb.sh` and `build/package-apk.sh` refuse a
+  binary that has it. `build/ci-package-gate.sh` does not pass the toggle.
+- **A test that needs it must SKIP without it.** The package gate runs this
+  suite against package binaries. The test calls
+  `fpmng_skip_if_no_fault_inject()` (`fpmng-skipif.inc`), which looks for the
+  literal `FPMNG_FAULT` in the binary. The rows for these tests are in
+  `build/package-gate-expected.txt`. The CI jobs of `build-matrix.yml` set the
+  toggle.
+
 ## Excluding a test from the runner
 
 `sapi/fpmng/tests/not-run-in-ci.list` holds, one per line, a test file name

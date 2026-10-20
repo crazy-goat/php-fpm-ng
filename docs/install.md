@@ -346,6 +346,12 @@ real time, so that tests waiting on a one-minute cron schedule or on a
 supervisor timeout do not have to wait in real seconds. No shipped package is
 built with it. See [`fpmng-phpt.md`](fpmng-phpt.md#the-virtual-clock).
 
+`FPMNG_FAULT_INJECT=1` is **for running the test suite, not for a server**
+either. It makes the master honour `FPMNG_FAULT` and fail a named call on
+purpose, so that tests can reach error paths no configuration reaches. No
+shipped package is built with it. See
+[`fpmng-phpt.md`](fpmng-phpt.md#failure-injection).
+
 HTTP/2 and QUIC do not exist in this tree; their names were reserved
 (#186/#187, #188) and #188 in particular may return "no".
 

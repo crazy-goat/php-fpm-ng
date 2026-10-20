@@ -55,8 +55,8 @@ needs=$(awk '/^  ci-ok:/ { inj = 1 } inj && /^    needs:/ { gsub(/.*\[|\].*|,/, 
 passed=$(sed -n '/^  ci-ok:/,$p' "$workflow" | grep -o 'needs\.[a-z-]*\.result' | sed 's/needs\.//; s/\.result//' | sort)
 # The label in front of each result is the job it names: a swapped pair would
 # mislabel the verdict (issue #781 review, R2).
-# shellcheck disable=SC2016
 # the pattern is a literal GitHub expression, not a shell expansion
+# shellcheck disable=SC2016
 labels=$(sed -n '/^  ci-ok:/,$p' "$workflow" | grep -o '[a-z-]*=\${{ needs\.[a-z-]*\.result }}' |
     sed -E 's/^([a-z-]*)=.*needs\.([a-z-]*)\.result.*/\1 \2/' | awk '$1 == $2 { print $1 }' | sort)
 if [ -z "$needs" ] || [ "$needs" != "$passed" ] || [ "$needs" != "$labels" ]; then

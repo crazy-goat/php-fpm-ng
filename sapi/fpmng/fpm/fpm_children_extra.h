@@ -82,4 +82,8 @@ struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp);
  * the ordinary fork loop that runs right after cover the shortfall. */
 struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, struct timeval started);
 
+/* Issue #792: retires an adopted child whose process is gone, as
+ * fpm_children_bury() retires one it reaped; see fpm_adopted_sweep.c. */
+void fpm_children_adopted_exited(struct fpm_child_s *child);
+
 #endif

@@ -24,7 +24,8 @@
 #define FPM_RELOAD_EXEC_FALLBACK_H 1
 
 /* Returns only when the exec failed too (or the platform has no
- * /proc/self/exe). errno is the failure of that last attempt. */
+ * /proc/self/exe). errno is the failure of that last attempt, ENOSYS where
+ * there is no attempt, so the caller's log never shows a stale errno. */
 void fpm_reload_exec_fallback(char *const *argv);
 
 #endif

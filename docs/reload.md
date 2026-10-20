@@ -508,7 +508,9 @@ So `fpm_reload_selective_discard_unadopted()`
 (`sapi/fpmng/fpm/fpm_reload_selective.c`) runs on these paths:
 `fpm_init()` failing, `fpm_pctl_exit()`, a failed `execvp()` in
 `fpm_pctl_exec()` whose retry through `/proc/self/exe` fails too (issue #925;
-`fpmng-reload-selective-exec-fallback-fails.phpt` forces that with a binary that has lost its execute bit), and once after the initial fork loop in `fpm_run()`. The last
+`fpmng-reload-selective-exec-fallback-fails.phpt` forces that with a binary
+that has lost its execute bit), and once after the initial fork loop in
+`fpm_run()`. The last
 call removes entries that no pool of the new generation adopted (a pool that
 disappeared from the config), so a stale pid never stays in the environment.
 It sends `SIGTERM` to each pid still listed in
@@ -522,8 +524,8 @@ Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
 run this code, and its spared workers stay orphaned. Workers do not poll their
 parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (a new master
 that cannot bind — a failure `-t` cannot see) and
-`fpmng-reload-selective-exec-after-check.phpt` (failed `execvp()`, now retried
-through `/proc/self/exe`).
+`fpmng-reload-selective-exec-fallback-fails.phpt` (failed `execvp()` whose
+retry through `/proc/self/exe` fails too).
 
 ### Relationship to issue #329's rolling restart
 

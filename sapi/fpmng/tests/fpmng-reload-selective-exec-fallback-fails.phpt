@@ -13,9 +13,9 @@ if (!is_executable('/bin/bash')) {
 require_once "tester.inc";
 
 /* Issue #690: the old master has detached the unchanged pool's workers and listed
- * them in FPMNG_SELECTIVE_RELOAD_SURVIVORS when fpm_pctl_exec() calls execvp(). If
- * that execvp() fails, the master logs "failed to reload: execvp() failed" and
- * exits, and no master adopts the workers. fpm_pctl_exec() discards them first.
+ * them in FPMNG_SELECTIVE_RELOAD_SURVIVORS when fpm_pctl_exec() calls execvp(). Until
+ * #925, a failed execvp() made the master log "failed to reload: execvp() failed"
+ * and exit, and no master adopted the workers. fpm_pctl_exec() discards them first.
  *
  * Issue #661 refuses a reload whose check cannot exec the binary, so the #690
  * path is reached only when the binary disappears between the check and the exec.
@@ -26,12 +26,12 @@ require_once "tester.inc";
  * Issue #925: fpm_pctl_exec() retries through /proc/self/exe after that failure.
  * This test makes the retry fail as well: the binary is a private copy, started
  * with its execute bit and then chmod'ed to 0644, so execv() fails with EACCES
- * (not for root, which the suite never runs as). Only then the master exits and
- * discards the spared worker, as before #925.
+ * (also for root: execve needs an execute bit). Only then the master exits and
+ * discards the spared worker, as it did for any failed execvp() before #925.
  *
  * The master is started through bash, which sets argv[0] to the script with
  * "exec -a". The binary is a private copy, so no other test sees its mode. */
-$root = sys_get_temp_dir() . '/fpmng-reload-sel-execafter-' . getmypid();
+$root = sys_get_temp_dir() . '/fpmng-reload-sel-fallbackfails-' . getmypid();
 @mkdir($root, 0700, true);
 $pidFile = "$root/worker.pid";
 $log = "$root/error.log";
@@ -158,8 +158,11 @@ try {
     if (str_contains($logText, 'reload refused')) {
         fail("the check refused the reload, so the exec was never reached\n$logText");
     }
-    if (!str_contains($logText, 'failed to reload: exec of /proc/self/exe failed')) {
+    if (!str_contains($logText, 'failed to reload: execvp() failed')) {
         fail("the reload did not reach a failed execvp()\n$logText");
+    }
+    if (!str_contains($logText, 'failed to reload: exec of /proc/self/exe failed')) {
+        fail("the retry through /proc/self/exe did not fail\n$logText");
     }
     echo "master exited after failed execvp: ok\n";
 

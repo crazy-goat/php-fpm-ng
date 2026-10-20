@@ -47,6 +47,7 @@ apk       SKIP  fpmng-http-tls-alpn-sni                                 the defa
 apk       SKIP  fpmng-http-tls-chain                                    the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 apk       SKIP  fpmng-tier-build-flags                                  the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 apk,apk-tls SKIP  fpmng-gateway-listener-stale-record                     the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
+apk,apk-tls SKIP  fpmng-reload-gateway-exec-after-check                the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-reload-selective-exec-after-check                 the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-reload-selective-exec-fallback-fails            the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-http-direct-session-status                        the Alpine -n CLI/pool has no session extension loaded (measured by the old gate, #424)

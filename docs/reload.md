@@ -127,7 +127,9 @@ serve again. It tries `execv("/proc/self/exe")` instead
 master, with the same arguments and the same configuration. It takes over the
 listeners as in a normal reload. The master keeps its pid.
 `fpmng-reload-selective-exec-after-check.phpt` tests it: the master keeps its
-pid, and the next generation adopts the spared worker. If that exec fails too,
+pid, and the next generation adopts the spared worker.
+`fpmng-reload-gateway-exec-after-check.phpt` tests the gateway listener: the
+next generation takes it over, and the port keeps answering. If that exec fails too,
 or the platform has no `/proc/self/exe`, the master exits as before. The next
 master keeps the missing path as `argv[0]`, so the next `SIGUSR2` is refused by
 the check until the binary is back.

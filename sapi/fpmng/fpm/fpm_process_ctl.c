@@ -24,6 +24,7 @@
 #include "fpm_conf.h"
 #include "fpm_conf_diff.h"
 #include "fpm_reload_config_check.h"
+#include "fpm_reload_exec_fallback.h"
 #include "fpm_reload_selective.h"
 #include "fpm_reload_shm.h"
 #include "fpm_sd_notify.h"
@@ -128,6 +129,11 @@ static void fpm_pctl_exec(void)
 
 	execvp(saved_argv[0], saved_argv);
 	zlog(ZLOG_SYSERROR, "failed to reload: execvp() failed");
+	/* Issue #925: the pools are gone, so serving on is only possible through
+	 * a next master. Try the running image (fpm_reload_exec_fallback.h). */
+	zlog(ZLOG_WARNING, "reload: retrying the exec through /proc/self/exe, the next generation runs the binary of this one");
+	fpm_reload_exec_fallback(saved_argv);
+	zlog(ZLOG_SYSERROR, "failed to reload: exec of /proc/self/exe failed");
 	/* Issue #690: the spared workers were detached and listed for a next
 	 * master that will never exist. */
 	fpm_reload_selective_discard_unadopted();

@@ -328,7 +328,7 @@ Every required CI path (lint, build, the fpmng phpt suite, integration,
 gateway privileges) and the release path build against the same prebuilt SDK
 with `build/libphp-build.sh`; none downloads php-src or compiles an engine.
 
-## TLS, ACME and the debug clock
+## TLS, ACME, the debug clock and failure injection
 
 TLS termination and the ACME client are build toggles of
 `build/libphp-build.sh`, not `configure` flags: `FPMNG_TLS=1` and

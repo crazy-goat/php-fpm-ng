@@ -538,8 +538,12 @@ The exec'd master of a reload inherits the environment of the old one, so the
 variable alone cannot tell the first master from the new one. A selective
 reload sets `FPMNG_SELECTIVE_RELOAD_SURVIVORS` only in the master it starts,
 so `pool_type_init_main:ifenv=FPMNG_SELECTIVE_RELOAD_SURVIVORS` fails the new
-master and not the first. An injected failure logs a WARNING that starts with
-`fault injection:`. Point names are listed in
+master and not the first. The variable and every `ifenv=` are read once, before
+`main()`, into a fixed table; `fpm_fault_inject_hit()` only reads that table and
+is async-signal-safe, so a call site in a signal handler (the #890 watchdog
+`fork()`) can use it. An injected failure writes one line that starts with
+`fault injection:` to standard error, which is the error log in the tests; it
+does not use `zlog()`, which is not safe in a handler. Point names are listed in
 `sapi/fpmng/fpm/fpm_fault_inject.h`, with the rationale.
 
 - **Off by default and never in a shipped package.** With the flag off the code

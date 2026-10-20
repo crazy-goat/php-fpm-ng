@@ -8,7 +8,9 @@
    has no test, and a regression in it is a stray worker holding a port.
    #890 (a failing fork() in the survivor watchdog) and #962 (a failing
    malloc()/setenv() in fpm_reload_selective_spare_pool()) are the same kind
-   of path and use the same mechanism.
+   of path and use the same mechanism. The #890 site runs inside a signal
+   handler (fpm_pool_supervisor_sigterm() calls fpm_pool_watchdog_arm(),
+   fpm_pool_watchdog.c:59), so the hit path must be async-signal-safe.
 
    HOW. A call site asks FPM_FAULT_POINT("name"); it is true when the
    environment variable FPMNG_FAULT selects that point:
@@ -19,7 +21,10 @@
    It is what lets one test fail the NEW master and not the first one: the
    exec'd master inherits the environment of the old one, so the variable
    alone cannot tell the two apart, but FPMNG_SELECTIVE_RELOAD_SURVIVORS is
-   set only in a master that a selective reload started. A point that is hit
+   set only in a master that a selective reload started. The variable and every
+   `ifenv=` are read once, by a constructor before main(), into a fixed table
+   (16 points, names under 64 characters; an entry that does not fit is
+   dropped). Later changes of the environment have no effect. A point that is hit
    fires every time; the call sites so far sit at most once per pool in the
    master, and the first failure ends the process.
 
@@ -44,9 +49,13 @@
 
 #ifdef HAVE_FPMNG_FAULT_INJECT
 
-/* Returns 1 when the call site `point` must fail now, 0 otherwise. Logs a
- * WARNING when it returns 1, so a log shows that a failure was injected and
- * was not real. */
+/* Returns 1 when the call site `point` must fail now, 0 otherwise.
+ *
+ * ASYNC-SIGNAL-SAFE: it only reads the static table and calls strcmp(),
+ * memcpy(), strlen() and write(2). It does not allocate, call getenv() or take
+ * a lock, so a signal handler may call it (the #890 site is one). On a hit it
+ * writes one line to stderr, so a log shows that a failure was injected and was
+ * not real; it does not use zlog(), which is not safe in a handler. */
 int fpm_fault_inject_hit(const char *point);
 
 #define FPM_FAULT_POINT(point) fpm_fault_inject_hit(point)

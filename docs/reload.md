@@ -507,8 +507,8 @@ fork, which `-t` never does.
 So `fpm_reload_selective_discard_unadopted()`
 (`sapi/fpmng/fpm/fpm_reload_selective.c`) runs on these paths:
 `fpm_init()` failing, `fpm_pctl_exit()`, a failed `execvp()` in
-`fpm_pctl_exec()` whose retry through `/proc/self/exe` fails too (issue #925; no
-test forces that), and once after the initial fork loop in `fpm_run()`. The last
+`fpm_pctl_exec()` whose retry through `/proc/self/exe` fails too (issue #925;
+`fpmng-reload-selective-exec-fallback-fails.phpt` forces that with a binary that has lost its execute bit), and once after the initial fork loop in `fpm_run()`. The last
 call removes entries that no pool of the new generation adopted (a pool that
 disappeared from the config), so a stale pid never stays in the environment.
 It sends `SIGTERM` to each pid still listed in

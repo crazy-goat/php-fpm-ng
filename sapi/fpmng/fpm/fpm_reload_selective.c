@@ -14,6 +14,7 @@
 #include "fpm_children.h"
 #include "fpm_children_extra.h"
 #include "fpm_pid_child.h"
+#include "fpm_adopted_sweep.h"
 #include "fpm_clock.h"
 #include "zlog.h"
 
@@ -311,6 +312,7 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	for (i = 0; i < n; i++) {
 		struct timeval started;
+		struct fpm_child_s *child;
 
 		/* A child that exited in the window between being spared and this
 		 * call must not be adopted: fpm_children_adopt() would link a corpse,
@@ -336,8 +338,12 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 		/* Issue #537: the worker writes to the scoreboard slot its previous
 		 * master gave it; make adoption take that one. */
 		fpm_reload_shm_prepare_adopt(wp, pids[i].pid);
-		if (fpm_children_adopt(wp, pids[i].pid, started)) {
+		child = fpm_children_adopt(wp, pids[i].pid, started);
+		if (child) {
 			adopted++;
+			/* Issue #792: under daemonize = yes this master never gets the
+			 * SIGCHLD of the carried child. Poll for its exit. */
+			fpm_adopted_sweep_register(child, pids[i].start ? pids[i].start : fpm_pid_start_time(pids[i].pid));
 		}
 	}
 

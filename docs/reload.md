@@ -609,6 +609,17 @@ Two gaps remain. The kernel can reuse the pid between the check and the signal.
 Under `daemonize = yes`, no master sees the exit of a survivor that is not its
 child, so the check narrows the window but does not close it. Not measured.
 
+A worker that a selective reload carried over is in the same position under
+`daemonize = yes`: the new master is not its parent and gets no `SIGCHLD`.
+The master checks each adopted worker that is not its own child once per second
+(`fpm_adopted_sweep.c`, issue #792). A worker that is gone, is a zombie that
+its new parent has not reaped, or has another start time, is retired as after a
+normal exit: its slot is freed and the pool
+forks a replacement. In a stop, this lets `running_children` reach 0, so the
+master exits. A stop can take up to one second longer than with a worker that
+the master forked. The carried supervisor survivor (#329) is not covered; it
+has its own path (issue #981).
+
 **A slot reservation has an expiry.** At its `execvp()`, the old master writes
 one `X:<pool>:<base>:<count>:<until>` record for the slot range of each pool it
 runs. This includes a changed pool that lost a child to a #329 survivor. The

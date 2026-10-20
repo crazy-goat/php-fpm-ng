@@ -53,11 +53,26 @@ expect red "an argument that is not job=result" false changes=success docs=succe
 # Drift guard: the jobs the workflow gives the script are exactly the jobs ci-ok needs.
 needs=$(awk '/^  ci-ok:/ { inj = 1 } inj && /^    needs:/ { gsub(/.*\[|\].*|,/, " "); print; exit }' "$workflow" | tr -s ' ' '\n' | sed '/^$/d' | sort)
 passed=$(sed -n '/^  ci-ok:/,$p' "$workflow" | grep -o 'needs\.[a-z-]*\.result' | sed 's/needs\.//; s/\.result//' | sort)
-if [ -z "$needs" ] || [ "$needs" != "$passed" ]; then
-    echo "FAIL: ci-ok needs [${needs//$'\n'/ }] but passes the result of [${passed//$'\n'/ }]" >&2
+# The label in front of each result is the job it names: a swapped pair would
+# mislabel the verdict (issue #781 review, R2).
+# shellcheck disable=SC2016
+# the pattern is a literal GitHub expression, not a shell expansion
+labels=$(sed -n '/^  ci-ok:/,$p' "$workflow" | grep -o '[a-z-]*=\${{ needs\.[a-z-]*\.result }}' |
+    sed -E 's/^([a-z-]*)=.*needs\.([a-z-]*)\.result.*/\1 \2/' | awk '$1 == $2 { print $1 }' | sort)
+if [ -z "$needs" ] || [ "$needs" != "$passed" ] || [ "$needs" != "$labels" ]; then
+    echo "FAIL: ci-ok needs [${needs//$'\n'/ }], passes the result of [${passed//$'\n'/ }], correctly labelled [${labels//$'\n'/ }]" >&2
     failed=1
 else
-    echo "PASS: ci-ok passes the result of every job it needs"
+    echo "PASS: ci-ok passes the result of every job it needs, each under its own name"
+fi
+
+# The verdict is only reached when ci-ok runs after a cancelled or failed need. A
+# skipped ci-ok reports success and does not block a merge (issue #781).
+if sed -n '/^  ci-ok:/,$p' "$workflow" | awk 'NR > 1 && /^  [a-z]/ { exit } /^    if: always\(\)$/ { found = 1 } END { exit !found }'; then
+    echo "PASS: ci-ok runs with if: always()"
+else
+    echo "FAIL: the ci-ok job lost 'if: always()': it would be skipped, and a skipped job reports success (issue #781)" >&2
+    failed=1
 fi
 
 exit "$failed"

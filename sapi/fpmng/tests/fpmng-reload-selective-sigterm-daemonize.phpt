@@ -100,6 +100,13 @@ function childrenOf(int $ppid): array
     return $pids;
 }
 
+/* Not posix_kill(): the harness runs tests under `php -n`, where ext/posix
+ * (a shared module on Ubuntu) is not loaded. */
+function killHard(int $pid): void
+{
+    exec('kill -KILL ' . $pid . ' 2>/dev/null');
+}
+
 $tester = new FPM\Tester($config, '<?php');
 $master = 0;
 $workers = [];
@@ -125,6 +132,26 @@ try {
     );
     check(childrenOf($master) === [], 'the new master is the parent of the workers, the test does not reproduce #792');
 
+    /* While the master runs: an adopted worker that exits on its own must
+     * be retired and replaced (a pm = static pool refills). The master gets
+     * no SIGCHLD for it. */
+    $victim = $workers[0];
+    killHard($victim);
+    check(
+        waitForLog($logFile, "/adopted child $victim is gone/", 15),
+        "the sweep did not retire adopted worker $victim"
+    );
+    $deadline = time() + 15;
+    while (time() < $deadline && count($fresh = childrenOf($master)) < 1) {
+        usleep(100000);
+    }
+    check(count($fresh) === 1, 'the pool did not fork a replacement for the retired worker');
+    check(
+        waitForLog($logFile, '/child ' . $fresh[0] . ' started/', 5),
+        'the replacement is not logged as started'
+    );
+    $workers = array_merge($workers, $fresh);
+
     $tester->signal('TERM', $master);
 
     $deadline = time() + 15;
@@ -136,6 +163,11 @@ try {
         check(isGone($pid), "worker $pid still runs after the master exited");
     }
 
+    /* Nothing may keep the pool's address after the stop. */
+    $fp = @stream_socket_client('tcp://' . $tester->getAddr('ipv4', 'a'), $errno, $errstr, 2);
+    check($fp === false, 'the pool address still accepts connections after the stop');
+
+    echo "replacement after an adopted exit: ok\n";
     echo "master exited after SIGTERM: ok\n";
     echo "Done\n";
 } finally {
@@ -143,13 +175,14 @@ try {
     $filePid = (int) trim((string) @file_get_contents($tester->getPrefixedFile('pid')));
     foreach (array_merge([$master, $filePid], $workers) as $pid) {
         if ($pid > 1 && !isGone($pid)) {
-            posix_kill($pid, SIGKILL);
+            killHard($pid);
         }
     }
     $tester->close();
 }
 ?>
 --EXPECT--
+replacement after an adopted exit: ok
 master exited after SIGTERM: ok
 Done
 --CLEAN--

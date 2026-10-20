@@ -77,6 +77,44 @@ unsigned long long fpm_pid_start_time(pid_t pid) /* {{{ */
 }
 /* }}} */
 
+int fpm_pid_proc_state(pid_t pid, char *state, pid_t *ppid) /* {{{ */
+{
+#ifdef __linux__
+	char path[64], buf[1024], *p;
+	int fd;
+	ssize_t n;
+
+	snprintf(path, sizeof(path), "/proc/%ld/stat", (long) pid);
+	fd = open(path, O_RDONLY);
+	if (fd < 0) {
+		return 0;
+	}
+	n = read(fd, buf, sizeof(buf) - 1);
+	close(fd);
+	if (n <= 0) {
+		return 0;
+	}
+	buf[n] = '\0';
+
+	/* Counted after the last ')', as in fpm_pid_start_time(): field 3 is the
+	 * state, field 4 the parent. */
+	p = strrchr(buf, ')');
+	if (!p || p[1] != ' ' || !p[2] || p[3] != ' ') {
+		return 0;
+	}
+	*state = p[2];
+	*ppid = (pid_t) strtol(p + 4, NULL, 10);
+
+	return 1;
+#else
+	(void) pid;
+	(void) state;
+	(void) ppid;
+	return 0;
+#endif
+}
+/* }}} */
+
 int fpm_pid_is_same(pid_t pid, unsigned long long start) /* {{{ */
 {
 	if (start == 0) {

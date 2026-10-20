@@ -611,9 +611,10 @@ child, so the check narrows the window but does not close it. Not measured.
 
 A worker that a selective reload carried over is in the same position under
 `daemonize = yes`: the new master is not its parent and gets no `SIGCHLD`.
-The master checks each adopted worker once per second
-(`fpm_adopted_sweep.c`, issue #792). A worker whose start time no longer
-matches is retired as after a normal exit: its slot is freed and the pool
+The master checks each adopted worker that is not its own child once per second
+(`fpm_adopted_sweep.c`, issue #792). A worker that is gone, is a zombie that
+its new parent has not reaped, or has another start time, is retired as after a
+normal exit: its slot is freed and the pool
 forks a replacement. In a stop, this lets `running_children` reach 0, so the
 master exits. A stop can take up to one second longer than with a worker that
 the master forked. The carried supervisor survivor (#329) is not covered; it

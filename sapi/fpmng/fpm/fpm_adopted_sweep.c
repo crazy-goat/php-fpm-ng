@@ -54,7 +54,17 @@ void fpm_adopted_sweep_register(struct fpm_child_s *child, unsigned long long st
 {
 	struct sweep_entry_s *e;
 
+	char state;
+	pid_t ppid;
+
 	if (!child) {
+		return;
+	}
+
+	/* A child of this master (no daemonize) gets its SIGCHLD, and
+	 * fpm_children_bury() is its only owner: a sweep that retired its zombie
+	 * first would make bury log "unknown child" and skip the crash backoff. */
+	if (fpm_pid_proc_state(child->pid, &state, &ppid) && ppid == getpid()) {
 		return;
 	}
 
@@ -78,6 +88,24 @@ void fpm_adopted_sweep_register(struct fpm_child_s *child, unsigned long long st
 }
 /* }}} */
 
+/* A process that exited stays a zombie until its parent reaps it, and a
+ * zombie still has its /proc entry, its start time and answers kill(pid, 0).
+ * After the daemonize fork the parent is init, or whatever is PID 1 in a
+ * container, and a PID 1 that does not reap (the CI job's `tail -f /dev/null`)
+ * leaves the corpse for good: fpm_pid_is_same() alone would call it alive and
+ * a SIGTERM would never complete. Z and X are therefore gone. */
+static int fpm_adopted_sweep_alive(pid_t pid, unsigned long long start)
+{
+	char state;
+	pid_t ppid;
+
+	if (fpm_pid_proc_state(pid, &state, &ppid) && (state == 'Z' || state == 'X')) {
+		return 0;
+	}
+
+	return fpm_pid_is_same(pid, start);
+}
+
 /* Detaches and returns the first entry whose process is gone, dropping the
  * entries whose child fpm_children_bury() already retired. */
 static struct fpm_child_s *fpm_adopted_sweep_take_gone(void)
@@ -89,7 +117,7 @@ static struct fpm_child_s *fpm_adopted_sweep_take_gone(void)
 		struct fpm_child_s *current = fpm_child_find(e->pid);
 		int tracked = current == e->child && timercmp(&current->started, &e->started, ==);
 
-		if (tracked && fpm_pid_is_same(e->pid, e->start)) {
+		if (tracked && fpm_adopted_sweep_alive(e->pid, e->start)) {
 			link = &e->next;
 			continue;
 		}

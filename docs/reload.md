@@ -522,6 +522,13 @@ unknown there, and a request in flight on a spared worker is cut. Adoption
 removes a pool's entry as it takes it, so after a successful start nothing is
 left to discard.
 
+The call in `fpm_pctl_exit()` also runs when `type->init_main()` of a pool
+fails after `fpm_init()` returned OK. No configuration reaches that failure,
+because every cause is a resource failure. `fpmng-reload-selective-failed-init-main.phpt`
+makes it fail with the failure-injection seam (`FPMNG_FAULT_INJECT=1`, see
+[`fpmng-phpt.md`](fpmng-phpt.md#failure-injection)). It checks the WARNING, the
+spared worker and the port. The test skips on a binary built without the seam.
+
 Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
 run this code, and its spared workers stay orphaned. Workers do not poll their
 parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (a new master

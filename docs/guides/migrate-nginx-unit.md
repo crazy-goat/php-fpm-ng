@@ -119,7 +119,7 @@ and everything else to `[web]`; the pool names are the keys of `http.route`.
 - `match` on host, headers, arguments, cookies or source address (a gateway
   matches path prefixes; `http.allowed_clients` is a per-gateway ACL);
 - `rewrite`, `response_headers` and proxying to an arbitrary upstream;
-- HTTP/2 ([`install.md`](../install.md#tls-acme-and-the-debug-clock)).
+- HTTP/2 ([`install.md`](../install.md#tls-acme-the-debug-clock-and-failure-injection)).
 
 If your Unit configuration uses any of these, migrate the PHP part and keep
 a small nginx or Caddy for the rest.

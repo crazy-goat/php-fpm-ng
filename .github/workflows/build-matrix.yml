@@ -88,6 +88,12 @@ env:
   FPMNG_ACME: "1"
   FPMNG_DEBUG_CLOCK: "1"
 
+  # FPMNG_FAULT_INJECT: the failure-injection seam (issue #832). Tests of an
+  # error path no configuration can reach make a call fail through the
+  # FPMNG_FAULT environment variable; without it they SKIP. Deliberately NOT in
+  # the packages, which assert its absence.
+  FPMNG_FAULT_INJECT: "1"
+
 defaults:
   run:
     # See "NOT ROOT" above. HOME is set here because runuser -u does not.
@@ -115,7 +121,8 @@ jobs:
   #
   # clang-tidy needs the compile flags of a real libphp-build.sh run
   # (commands.log), with the same toggles as the `build` job, so the files behind
-  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK are linted with their macros defined.
+  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK/FPMNG_FAULT_INJECT are linted with
+  # their macros defined.
   # This build is only for its flags; `build` is the one whose binary is tested.
   # The caveat of the former `checks` step stays: clang-tidy is whatever version
   # Ubuntu 26.04 ships, so a new check can turn this job red without a change to

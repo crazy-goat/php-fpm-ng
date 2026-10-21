@@ -31,6 +31,8 @@
 #   FPMNG_ACME         1 to build ACME issuance in; default 0, needs FPMNG_TLS=1 (issue #281)
 #   FPMNG_DEBUG_CLOCK  1 to build the test-suite clock in; default 0, NEVER for a
 #                      shipped binary (issue #396; the packages assert it is off)
+#   FPMNG_FAULT_INJECT 1 to build the failure-injection seam in; default 0, NEVER for
+#                      a shipped binary (issue #832; the packages assert it is off)
 #   CC, EXTRA_CFLAGS   compiler and extra flags
 set -eu
 
@@ -115,9 +117,11 @@ toggle() {
 FPMNG_TLS=${FPMNG_TLS:-0}
 FPMNG_ACME=${FPMNG_ACME:-0}
 FPMNG_DEBUG_CLOCK=${FPMNG_DEBUG_CLOCK:-0}
+FPMNG_FAULT_INJECT=${FPMNG_FAULT_INJECT:-0}
 toggle FPMNG_TLS "$FPMNG_TLS"
 toggle FPMNG_ACME "$FPMNG_ACME"
 toggle FPMNG_DEBUG_CLOCK "$FPMNG_DEBUG_CLOCK"
+toggle FPMNG_FAULT_INJECT "$FPMNG_FAULT_INJECT"
 # ACME needs TLS for the reason config.m4 gives -- a certificate this binary
 # could not serve -- and asking for one without the other is refused here
 # exactly as `configure` refuses it.
@@ -212,6 +216,11 @@ if [ "$FPMNG_DEBUG_CLOCK" = 1 ]; then
 -DHAVE_FPMNG_DEBUG_CLOCK=1"
   echo "libphp-build.sh: FPMNG_DEBUG_CLOCK=1: this binary's clock can be made to run faster than real time by an environment variable. It is for the test suite, never for a server or a package."
 fi
+if [ "$FPMNG_FAULT_INJECT" = 1 ]; then
+  SUPPLIED="$SUPPLIED
+-DHAVE_FPMNG_FAULT_INJECT=1"
+  echo "libphp-build.sh: FPMNG_FAULT_INJECT=1: this binary can be made to fail chosen calls by an environment variable. It is for the test suite, never for a server or a package."
+fi
 
 # Deliberately off, with the reason. These are not oversights, and anyone
 # tempted to add one should read the reason first.
@@ -233,6 +242,7 @@ off_reason() {
   HAVE_FPM_HTTP_TLS)            echo "TLS termination is opt-in (FPMNG_TLS=1 here, --enable-fpmng-tls in configure); issue #280" ;;
   HAVE_FPMNG_ACME)              echo "ACME issuance is opt-in (FPMNG_ACME=1 here, --enable-fpmng-acme in configure); issue #281" ;;
   HAVE_FPMNG_DEBUG_CLOCK)       echo "a clock an environment variable can make run faster than real time; FPMNG_DEBUG_CLOCK=1 is for the test suite only and the packages assert it is off (issue #396)" ;;
+  HAVE_FPMNG_FAULT_INJECT)      echo "calls an environment variable can make fail on purpose; FPMNG_FAULT_INJECT=1 is for the test suite only and the packages assert it is off (issue #832)" ;;
   USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
   PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
   FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
@@ -352,7 +362,7 @@ sources() {
 {
   echo "# $(uname -srm); $($CC --version | head -n 1)"
   echo "# $PHP_CONFIG -> PHP $PHP_VER, $INC_DIR"
-  echo "# FPMNG_TLS=$FPMNG_TLS FPMNG_ACME=$FPMNG_ACME FPMNG_DEBUG_CLOCK=$FPMNG_DEBUG_CLOCK EXTRA_CFLAGS=${EXTRA_CFLAGS:-}"
+  echo "# FPMNG_TLS=$FPMNG_TLS FPMNG_ACME=$FPMNG_ACME FPMNG_DEBUG_CLOCK=$FPMNG_DEBUG_CLOCK FPMNG_FAULT_INJECT=$FPMNG_FAULT_INJECT EXTRA_CFLAGS=${EXTRA_CFLAGS:-}"
 } > "$OUT/commands.log"
 : > "$OUT/compile.log"
 OBJS=""
@@ -505,6 +515,16 @@ if [ "$FPMNG_DEBUG_CLOCK" = 1 ]; then
   assert_symbol fpm_debug_clock_now "FPMNG_DEBUG_CLOCK=1 was asked for, but fpm_debug_clock.c compiled to nothing"
 else
   refute_symbol fpm_debug_clock_now "the test-suite clock is in a build that did not ask for it (issue #396)"
+fi
+
+# The failure-injection seam, both directions, for the same reason: the
+# packages assert its absence on this symbol, and a toggle that did not reach
+# the sources would make the tests that need it skip or pass for the wrong
+# reason (issue #832).
+if [ "$FPMNG_FAULT_INJECT" = 1 ]; then
+  assert_symbol fpm_fault_inject_hit "FPMNG_FAULT_INJECT=1 was asked for, but fpm_fault_inject.c compiled to nothing"
+else
+  refute_symbol fpm_fault_inject_hit "the failure-injection seam is in a build that did not ask for it (issue #832)"
 fi
 
 # --- assert what is accepted, and that the retired name is refused -------------

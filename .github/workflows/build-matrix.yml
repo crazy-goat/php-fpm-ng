@@ -88,6 +88,12 @@ env:
   FPMNG_ACME: "1"
   FPMNG_DEBUG_CLOCK: "1"
 
+  # FPMNG_FAULT_INJECT: the failure-injection seam (issue #832). Tests of an
+  # error path no configuration can reach make a call fail through the
+  # FPMNG_FAULT environment variable; without it they SKIP. Deliberately NOT in
+  # the packages, which assert its absence.
+  FPMNG_FAULT_INJECT: "1"
+
 defaults:
   run:
     # See "NOT ROOT" above. HOME is set here because runuser -u does not.
@@ -115,7 +121,8 @@ jobs:
   #
   # clang-tidy needs the compile flags of a real libphp-build.sh run
   # (commands.log), with the same toggles as the `build` job, so the files behind
-  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK are linted with their macros defined.
+  # FPMNG_TLS/FPMNG_ACME/FPMNG_DEBUG_CLOCK/FPMNG_FAULT_INJECT are linted with
+  # their macros defined.
   # This build is only for its flags; `build` is the one whose binary is tested.
   # The caveat of the former `checks` step stays: clang-tidy is whatever version
   # Ubuntu 26.04 ships, so a new check can turn this job red without a change to
@@ -292,6 +299,12 @@ jobs:
       # `git add -A`. Hermetic: git only, no build, no binary.
       - name: the build output directory stays out of git (issue #847)
         run: ./build/test-no-tracked-build-output.sh
+
+      # Issue #781: the verdict of the required `ci-ok` check fails closed -- a
+      # cancelled or empty `changes` is red, a docs-only change with the heavy
+      # jobs skipped is green. Hermetic: no network, no build, no YAML parser.
+      - name: ci-ok fails closed (issue #781)
+        run: ./build/test-ci-ok-check.sh
 
       # Task 013: clang-tidy over our C sources runs in the `lint` job, through
       # bin/lint.sh. See docs/c-style.md for the enabled/disabled check contract.
@@ -753,7 +766,11 @@ jobs:
         run: ./build/ci-cancel-run.sh
 
   # The one required check. Docs-only changes skip the heavy jobs, which report
-  # "skipped"; a code change needs every job green.
+  # "skipped"; a code change needs every job green. The verdict is
+  # build/ci-ok-check.sh, which fails closed: `changes` and `docs` must be
+  # success and `code` must be true or false, so a cancelled or never-started
+  # `changes` is red (issue #781, run 37365615843). A job added to `needs` goes
+  # into the call too: build/test-ci-ok-check.sh compares the two.
   ci-ok:
     name: ci-ok
     needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples, frameworks, doc-configs]
@@ -763,19 +780,20 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@v7
       - name: Check results
         env:
           CODE: ${{ needs.changes.outputs.code }}
-          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "Code changes: $CODE"
-          echo "Results: $RESULTS"
-          for r in $RESULTS; do
-            case "$r" in failure|cancelled) exit 1 ;; esac
-          done
-          # Documentation-only changes skip the heavy jobs; code changes need all of them.
-          if [ "$CODE" = "true" ]; then
-            for r in $RESULTS; do
-              [ "$r" = "success" ] || exit 1
-            done
-          fi
+          ./build/ci-ok-check.sh "$CODE" \
+            changes=${{ needs.changes.result }} \
+            docs=${{ needs.docs.result }} \
+            lint=${{ needs.lint.result }} \
+            checks=${{ needs.checks.result }} \
+            build=${{ needs.build.result }} \
+            fpmng-phpt=${{ needs.fpmng-phpt.result }} \
+            integration=${{ needs.integration.result }} \
+            gateway-privileges=${{ needs.gateway-privileges.result }} \
+            examples=${{ needs.examples.result }} \
+            frameworks=${{ needs.frameworks.result }} \
+            doc-configs=${{ needs.doc-configs.result }}

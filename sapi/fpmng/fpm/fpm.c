@@ -29,6 +29,7 @@
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
+#include "fpm_fault_inject.h"
 #include "fpm_sd_notify.h"
 #include "fpm_crash_backoff.h"
 #include "fpm_http_handoff.h"
@@ -181,7 +182,9 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 
-		if (type->init_main && 0 > type->init_main(wp)) {
+		/* The fault point is the only way to reach this failure with a valid
+		 * configuration, see fpm_fault_inject.h (issue #832). */
+		if (type->init_main && (FPM_FAULT_POINT("pool_type_init_main") || 0 > type->init_main(wp))) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to initialize pool type '%s'",
 				wp->config->name, type->name);
 			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);

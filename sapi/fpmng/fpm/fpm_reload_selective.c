@@ -13,6 +13,8 @@
 #include "fpm_worker_pool.h"
 #include "fpm_children.h"
 #include "fpm_children_extra.h"
+#include "fpm_pid_child.h"
+#include "fpm_adopted_sweep.h"
 #include "fpm_clock.h"
 #include "zlog.h"
 
@@ -30,13 +32,23 @@
  * one exercises exactly that. */
 #define FPM_RELOAD_SELECTIVE_ENV "FPMNG_SELECTIVE_RELOAD_SURVIVORS"
 
+/* Issue #891: each pid is carried as "pid/start", start being its start time
+ * (fpm_pid_start_time()), so the next generation can tell the same process
+ * from a recycled pid. Under daemonize = yes the next generation is not the
+ * parent of these children, so parentage cannot make that distinction. A
+ * start of 0 means the time was not recorded (no /proc); see fpm_pid_child.c. */
+struct fpm_reload_selective_carried_s {
+	pid_t pid;
+	unsigned long long start;
+};
+
 static int fpm_reload_selective_name_ok(const char *name) /* {{{ */
 {
 	return !strpbrk(name, ":,;");
 }
 /* }}} */
 
-/* Sends SIGTERM to every pid of a "pid,pid" list and returns how many
+/* Sends SIGTERM to every "pid/start" entry of a list and returns how many
  * signals were sent. Used for children that the handoff cannot carry (issue
  * #830): they are detached, so no master would ever adopt or signal them. */
 static int fpm_reload_selective_sigterm_list(const char *list) /* {{{ */
@@ -47,10 +59,17 @@ static int fpm_reload_selective_sigterm_list(const char *list) /* {{{ */
 	while (*p) {
 		char *end;
 		long pid = strtol(p, &end, 10);
+		unsigned long long start = 0;
+
+		if (*end == '/') {
+			start = strtoull(end + 1, &end, 10);
+		}
 
 		/* pid <= 1 is never a spared worker, and kill(2) reads 0 and -1 as
 		 * "a whole process group" and "everything" (issue #567). */
-		if (pid > 1 && kill((pid_t) pid, SIGTERM) == 0) {
+		/* Issue #891: only the process that was spared. A pid that was reaped
+		 * earlier may belong to another process by now. */
+		if (pid > 1 && fpm_pid_is_same((pid_t) pid, start) && kill((pid_t) pid, SIGTERM) == 0) {
 			killed++;
 		}
 
@@ -91,11 +110,12 @@ int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	/* Issue #830: both buffers are allocated and sized before the first detach.
 	 * After a detach nothing may fail except setenv(): a detached child that
-	 * cannot be listed has no master that would adopt or signal it. A pid
-	 * takes at most 11 bytes ("-2147483648") and one ',' more. */
+	 * cannot be listed has no master that would adopt or signal it. An entry
+	 * takes at most 11 bytes for the pid ("-2147483648"), one '/', 20 bytes for
+	 * the start time (unsigned long long) and one ',' more: 33. */
 	existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
-	env_cap = (existing ? strlen(existing) : 0) + strlen(name) + (size_t) wp->running_children * 12 + 3;
-	pids = malloc((size_t) wp->running_children * 12 + 1);
+	env_cap = (existing ? strlen(existing) : 0) + strlen(name) + (size_t) wp->running_children * 33 + 3;
+	pids = malloc((size_t) wp->running_children * 33 + 1);
 	env_next = malloc(env_cap);
 	if (!pids || !env_next) {
 		/* Nothing is detached, so these children are still this master's.
@@ -114,10 +134,11 @@ int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * detach-all primitive needed). The list holds running_children entries
 	 * (fpm_child_unlink() decrements both), so pids is large enough. */
 	while ((child = fpm_children_detach_oldest(wp)) != NULL) {
-		char one[32];
+		char one[48];
 		int one_len;
 
-		one_len = snprintf(one, sizeof(one), "%s%d", n ? "," : "", (int) child->pid);
+		one_len = snprintf(one, sizeof(one), "%s%d/%llu", n ? "," : "", (int) child->pid,
+				fpm_pid_start_time(child->pid));
 		memcpy(pids + pids_len, one, (size_t) one_len);
 		pids_len += (size_t) one_len;
 		pids[pids_len] = '\0';
@@ -177,16 +198,16 @@ int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
-/* Finds and removes `name`'s "name:pid,pid,..." group from
- * FPM_RELOAD_SELECTIVE_ENV, splitting the pid list into `out_pids` (caller
- * frees). Returns the number of pids, 0 if `name` had no entry. */
-static int fpm_reload_selective_env_take(const char *name, pid_t **out_pids) /* {{{ */
+/* Finds and removes `name`'s "name:pid/start,pid/start,..." group from
+ * FPM_RELOAD_SELECTIVE_ENV, splitting the list into `out_pids` (caller
+ * frees). Returns the number of entries, 0 if `name` had no entry. */
+static int fpm_reload_selective_env_take(const char *name, struct fpm_reload_selective_carried_s **out_pids) /* {{{ */
 {
 	const char *existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
 	size_t name_len = strlen(name);
 	char *copy, *rest, *kept;
 	char *found_pids = NULL;
-	pid_t *pids = NULL;
+	struct fpm_reload_selective_carried_s *pids = NULL;
 	int n = 0;
 
 	*out_pids = NULL;
@@ -248,18 +269,21 @@ static int fpm_reload_selective_env_take(const char *name, pid_t **out_pids) /* 
 		 * caller a non-NULL array alongside a zero count would leak it in
 		 * fpm_reload_selective_adopt(), which returns on n == 0. */
 		if (n > 0) {
-			pids = malloc(sizeof(pid_t) * (size_t) n);
+			pids = malloc(sizeof(*pids) * (size_t) n);
 		}
 		if (pids) {
 			int i = 0;
 
 			for (rest = found_pids; *rest && i < n; i++) {
 				char *comma = strchr(rest, ',');
+				char *slash;
 
 				if (comma) {
 					*comma = '\0';
 				}
-				pids[i] = (pid_t) strtol(rest, NULL, 10);
+				pids[i].pid = (pid_t) strtol(rest, &slash, 10);
+				/* No '/' means an entry from a binary that predates #891: start 0. */
+				pids[i].start = (*slash == '/') ? strtoull(slash + 1, NULL, 10) : 0;
 				rest = comma ? comma + 1 : rest + strlen(rest);
 			}
 			*out_pids = pids;
@@ -277,7 +301,7 @@ static int fpm_reload_selective_env_take(const char *name, pid_t **out_pids) /* 
 
 void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 {
-	pid_t *pids = NULL;
+	struct fpm_reload_selective_carried_s *pids = NULL;
 	int n = fpm_reload_selective_env_take(wp->config->name, &pids);
 	int adopted = 0;
 	int i;
@@ -288,29 +312,38 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	for (i = 0; i < n; i++) {
 		struct timeval started;
+		struct fpm_child_s *child;
 
-		/* A dead-on-arrival pid (exited in the window between being spared
-		 * and this call) must not be adopted: fpm_children_adopt() has no way
-		 * to learn it is already gone other than a future SIGCHLD, and
-		 * fpm_children_bury() will still reap and correctly account for it
-		 * AS LONG AS it was never linked in the first place -- adopting a
-		 * corpse would double-count it (linked once here, then unlinked again
-		 * on reap) and, worse, would make the ordinary fork loop right after
-		 * this function returns think this slot is already covered. Signal 0
-		 * is the standard existence probe and disturbs nothing if it is. */
-		if (kill(pids[i], 0) != 0) {
+		/* A child that exited in the window between being spared and this
+		 * call must not be adopted: fpm_children_adopt() would link a corpse,
+		 * and the ordinary fork loop right after this function returns would
+		 * count the slot as covered. The check does not reap it. Under
+		 * fpm_children_bury(), which calls waitpid(-1), a dead child of this
+		 * master is still reaped there even though it was never adopted.
+		 * Issue #891: kill(pid, 0) is not enough. A pid reaped in the window
+		 * may now belong to an unrelated process, and adopting it would later
+		 * signal that process. fpm_pid_is_same() checks the start time. */
+		if (!fpm_pid_is_same(pids[i].pid, pids[i].start)) {
+			zlog(ZLOG_NOTICE, "[pool %s] issue #891: selective reload carried pid %d is not the "
+							  "process it was when spared (it exited, or its pid was reused); "
+							  "not adopting it",
+					wp->config->name, (int) pids[i].pid);
 			/* Its scoreboard slot is still marked used in the inherited
 			 * scoreboard (issue #537) and nothing else would free it. */
-			fpm_reload_shm_drop_slot(wp, pids[i]);
+			fpm_reload_shm_drop_slot(wp, pids[i].pid);
 			continue;
 		}
 
 		fpm_clock_get(&started);
 		/* Issue #537: the worker writes to the scoreboard slot its previous
 		 * master gave it; make adoption take that one. */
-		fpm_reload_shm_prepare_adopt(wp, pids[i]);
-		if (fpm_children_adopt(wp, pids[i], started)) {
+		fpm_reload_shm_prepare_adopt(wp, pids[i].pid);
+		child = fpm_children_adopt(wp, pids[i].pid, started);
+		if (child) {
 			adopted++;
+			/* Issue #792: under daemonize = yes this master never gets the
+			 * SIGCHLD of the carried child. Poll for its exit. */
+			fpm_adopted_sweep_register(child, pids[i].start ? pids[i].start : fpm_pid_start_time(pids[i].pid));
 		}
 	}
 

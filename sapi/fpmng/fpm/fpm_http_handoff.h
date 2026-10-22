@@ -26,9 +26,10 @@
  *  - http.reuseport = on: each gateway child binds its own SO_REUSEPORT socket,
  *    and the master socket is closed during the exec as before.
  *  - a unix public listener: it is not recorded.
- *  - an execvp() that fails after fpm_reload_config_check() passed. The old
- *    generation is already drained, and the master exits. A failure at the
- *    check is different: the reload is refused (fpm_reload_config_check.h).
+ *  - an execvp() that fails after fpm_reload_config_check() passed, when the
+ *    retry through /proc/self/exe fails too (issue #925, fpm_reload_exec_fallback.h).
+ *    The old generation is already drained, and the master exits. A failure at
+ *    the check is different: the reload is refused (fpm_reload_config_check.h).
  */
 
 #ifndef FPM_HTTP_HANDOFF_H

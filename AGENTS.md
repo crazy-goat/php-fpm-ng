@@ -98,8 +98,8 @@ The build needs Linux and the PHP 8.5 NTS SDK of the distribution (Ubuntu 26.04 
 No php-src checkout is needed.
 
 ```bash
-# Build (Linux). Toggles: FPMNG_TLS, FPMNG_ACME, FPMNG_DEBUG_CLOCK (CI sets all three to 1).
-FPMNG_TLS=1 FPMNG_ACME=1 FPMNG_DEBUG_CLOCK=1 ./build/libphp-build.sh "$PWD/out"
+# Build (Linux). Toggles: FPMNG_TLS, FPMNG_ACME, FPMNG_DEBUG_CLOCK, FPMNG_FAULT_INJECT (CI sets all four to 1).
+FPMNG_TLS=1 FPMNG_ACME=1 FPMNG_DEBUG_CLOCK=1 FPMNG_FAULT_INJECT=1 ./build/libphp-build.sh "$PWD/out"
 
 # Lint: clang-tidy (build/lint-c.sh) + clang-format + shellcheck + hadolint.
 # Check only, runs every step; --fix applies clang-format first. A missing tool fails the run.

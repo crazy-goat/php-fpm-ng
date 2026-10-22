@@ -108,7 +108,7 @@ around it:
   (run one gateway per listen address if the sites can have their own address);
 - `rewrite`, `return`, `add_header`, response compression, response caching,
   rate limiting (`limit_req`), `proxy_pass` to a non-PHP upstream;
-- HTTP/2 and HTTP/3: not in this tree ([`install.md`](../install.md#tls-acme-and-the-debug-clock));
+- HTTP/2 and HTTP/3: not in this tree ([`install.md`](../install.md#tls-acme-the-debug-clock-and-failure-injection));
 
 ## Verify
 

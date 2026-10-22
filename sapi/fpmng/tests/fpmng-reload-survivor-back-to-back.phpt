@@ -211,6 +211,13 @@ try {
     $trackedAgain = strpos($log, $track, strpos($log, $track) + 1);
     $retired = strpos($log, "retiring reload survivor pid {$m[1]} ");
     $retiredBeforeB = $retired !== false && ($trackedAgain === false || $retired < $trackedAgain);
+    /* The start jitter picks the branch at random. The runner copies *.record
+     * files from the test directory into test-records/ on every exit, pass or
+     * fail (build/run-fpmng-phpt.sh cleanup), so this file names the branch in
+     * the kept results even when the test passes. It is written before the
+     * checks below, which can throw. */
+    @file_put_contents(__DIR__ . '/fpmng-reload-survivor-back-to-back.record',
+        $retiredBeforeB ? "skipped: survivor retired before reload B\n" : "ran: survivor carried into reload B\n");
     check($retiredBeforeB || $trackedAgain !== false,
         'reload B: the survivor of reload A was not carried into the next generation');
 

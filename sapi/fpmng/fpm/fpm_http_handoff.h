@@ -16,9 +16,11 @@
  * the listener, and only when that gateway listens at once (not
  * http.tls_wait_for_cert's NO_CERT state). The socket must also be bound to
  * the bind text: a record that names another listening socket is ignored, and
- * that socket stays open. Any other inherited socket is closed, and the
- * listener is bound as before. The bind text is compared as
- * written: "0.0.0.0:8080" and "*:8080" do not match, so they rebind.
+ * that socket stays open. A record whose descriptor is not a listening TCP
+ * socket is ignored too, and that descriptor stays open. Any other inherited
+ * socket is closed, and the listener is bound as before. The bind text is
+ * compared as written: "0.0.0.0:8080" and "*:8080" do not match, so they
+ * rebind.
  *
  * Not covered, on purpose:
  *  - http.reuseport = on: each gateway child binds its own SO_REUSEPORT socket,

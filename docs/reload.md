@@ -254,9 +254,14 @@ The handoff runs in these steps:
    its TLS fingerprint match. It takes a socket over only when it listens at
    once. A gateway in the NO_CERT state of `http.tls_wait_for_cert` does not,
    because it does not listen at once.
-5. Any inherited socket that no gateway takes over is closed. The gateway
-   binds its address as before. A record whose descriptor is not a listening
-   TCP socket is ignored, and the descriptor is left open.
+5. The new master closes each inherited socket that no gateway takes over.
+   The gateway binds its address as before. The new master does not close two
+   kinds of socket. It leaves them open:
+   - A record whose descriptor is not a listening TCP socket. The record is
+     ignored.
+   - A record whose descriptor is a listening socket that is not bound to the
+     address in the record. The record is ignored. The new master logs a
+     WARNING (see the list below).
 
 The bind text must match as written. `0.0.0.0:8080` and `*:8080` are different
 texts, so the gateway binds a new socket. The TLS fingerprint is a hash of the
@@ -271,6 +276,7 @@ The new master logs these lines:
 - NOTICE `[pool NAME] http: took over the listener on ADDR from the previous generation`, when a gateway takes a socket over.
 - NOTICE `http: closing the listener on ADDR of the previous generation: no gateway uses that address now`, when the new configuration has no gateway on that address.
 - WARNING `http: closing the listener on ADDR of the previous generation: no gateway took it over`, when a socket is still not taken over after start-up.
+- WARNING `http: not taking over descriptor FD for ADDR of the previous generation: it is not bound to that address`, when a record names a listening socket that is not bound to the address in the record. The new master leaves that socket open. `FD` and `ADDR` are placeholders for the descriptor number and the bind text.
 
 Not covered by the handoff:
 

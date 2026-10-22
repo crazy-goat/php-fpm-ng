@@ -2319,11 +2319,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
-	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2714):
-	 * reduce the request-target to the one path every consumer below matches
-	 * on, so nothing can be answered on one path and served on another
-	 * (issue #681). Ahead of the ACL so that even a request the ACL refuses
-	 * writes an access-log line matched on the same path. */
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2714,
+	 * fpm_http_request()): reduce the request-target to the one path every
+	 * consumer below matches on, so nothing can be answered on one path and
+	 * served on another (issue #681). Ahead of the ACL so that even a request
+	 * the ACL refuses writes an access-log line matched on the same path. */
 	fpm_http_direct_normalize_target(http);
 
 	/* listen.allowed_clients, issue #59. Before anything else this function
@@ -2339,10 +2339,10 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_send_error(http, 403, "Forbidden");
 		return;
 	}
-	/* Ingress step two, after the ACL (fpm_http.c:2764): an authority HTTP_HOST
-	 * could not carry is a malformed request, and a client
-	 * listen.allowed_clients excludes must not be able to tell that from
-	 * anything else about the request it sent. */
+	/* Ingress step two, after the ACL (fpm_http.c:2764, fpm_http_request()):
+	 * an authority HTTP_HOST could not carry is a malformed request, and a
+	 * client listen.allowed_clients excludes must not be able to tell that
+	 * from anything else about the request it sent. */
 	if (!fpm_http_direct_authority_acceptable(http)) {
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
 		evhttp_send_error(http, 400, "Bad request");

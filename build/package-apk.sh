@@ -61,6 +61,12 @@ HAS_ACME=0; has_symbol fpm_acme_challenge_init_main && HAS_ACME=1
 has_symbol fpm_debug_clock_now &&
   fail "this binary was built with FPMNG_DEBUG_CLOCK=1 (it has fpm_debug_clock_now), which is for the test suite only and is never packaged (issue #396)"
 
+# The failure-injection seam (issue #832): an environment variable can make a
+# chosen call fail, so it must never ship either. Built only with
+# FPMNG_FAULT_INJECT=1, a CI switch.
+has_symbol fpm_fault_inject_hit &&
+  fail "this binary was built with FPMNG_FAULT_INJECT=1 (it has fpm_fault_inject_hit), which is for the test suite only and is never packaged (issue #832)"
+
 case "$HAS_TLS$HAS_ACME" in
 00) PKGNAME=php-fpm-ng
     PKGDESC="FPM process manager with HTTP-direct pools, on the distribution PHP; no TLS, no ACME" ;;

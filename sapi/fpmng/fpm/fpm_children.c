@@ -222,6 +222,33 @@ struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, 
 }
 /* }}} */
 
+/* Issue #792: the exit path of fpm_children_bury() for a child whose exit no
+ * SIGCHLD reports -- an adopted child that is not a child of this master
+ * (fpm_adopted_sweep.c). It is never a crash, so no backoff; a replacement is
+ * forked as for any exit that is not an idle kill. */
+void fpm_children_adopted_exited(struct fpm_child_s *child) /* {{{ */
+{
+	struct fpm_worker_pool_s *wp = child->wp;
+	pid_t pid = child->pid;
+	bool restart = !child->idle_kill;
+
+	fpm_scale_down_drain_forget(pid);
+	fpm_child_unlink(child);
+	fpm_scoreboard_proc_free(child);
+
+	zlog(ZLOG_NOTICE, "[pool %s] adopted child %d is gone (no SIGCHLD reaches a master that is "
+					  "not its parent); retiring it", wp->config->name, (int) pid);
+
+	fpm_child_close(child, 1 /* in event_loop */);
+
+	fpm_pctl_child_exited();
+
+	if (restart) {
+		fpm_children_make(wp, 1 /* in event loop */, 1, 0);
+	}
+}
+/* }}} */
+
 struct fpm_child_s *fpm_child_find(pid_t pid) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;

@@ -47,10 +47,16 @@ apk       SKIP  fpmng-http-tls-alpn-sni                                 the defa
 apk       SKIP  fpmng-http-tls-chain                                    the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 apk       SKIP  fpmng-tier-build-flags                                  the default apk is built without TLS: http.tls_cert is refused with 'built with TLS support'; the TLS package runs it
 apk,apk-tls SKIP  fpmng-gateway-listener-stale-record                     the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
+apk,apk-tls SKIP  fpmng-reload-gateway-exec-after-check                the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-reload-selective-exec-after-check                 the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
+apk,apk-tls SKIP  fpmng-reload-selective-exec-fallback-fails            the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-http-direct-session-status                        the Alpine -n CLI/pool has no session extension loaded (measured by the old gate, #424)
 apk,apk-tls SKIP  fpmng-http-direct-worker-buffered-streams               the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
 apk-tls   SKIP  fpmng-acme-issue                                        the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
 apk-tls   SKIP  fpmng-acme-renew-failure                                the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
 apk,apk-tls SKIP  fpmng-http-direct-worker-tls-and-client-tls             the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
 apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the gate does not set TEST_FPM_EXTENSION_DIR, so ctype.so is not found (#424)
+# DERIVED, not run in a package gate: a package binary is built without FPMNG_FAULT_INJECT
+# (build/package-deb.sh and build/package-apk.sh refuse it), so this test skips in every cell.
+# ci-package-gate.sh passes no FPMNG_FAULT_INJECT to the build; see its SKIPIF (#832).
+deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-failed-init-main     package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#832)

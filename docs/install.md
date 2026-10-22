@@ -328,7 +328,7 @@ Every required CI path (lint, build, the fpmng phpt suite, integration,
 gateway privileges) and the release path build against the same prebuilt SDK
 with `build/libphp-build.sh`; none downloads php-src or compiles an engine.
 
-## TLS, ACME and the debug clock
+## TLS, ACME, the debug clock and failure injection
 
 TLS termination and the ACME client are build toggles of
 `build/libphp-build.sh`, not `configure` flags: `FPMNG_TLS=1` and
@@ -345,6 +345,12 @@ makes the master honour `FPMNG_DEBUG_CLOCK_RATE` and run its clocks faster than
 real time, so that tests waiting on a one-minute cron schedule or on a
 supervisor timeout do not have to wait in real seconds. No shipped package is
 built with it. See [`fpmng-phpt.md`](fpmng-phpt.md#the-virtual-clock).
+
+`FPMNG_FAULT_INJECT=1` is **for running the test suite, not for a server**
+either. It makes the master honour `FPMNG_FAULT` and fail a named call on
+purpose, so that tests can reach error paths no configuration reaches. No
+shipped package is built with it. See
+[`fpmng-phpt.md`](fpmng-phpt.md#failure-injection).
 
 HTTP/2 and QUIC do not exist in this tree; their names were reserved
 (#186/#187, #188) and #188 in particular may return "no".

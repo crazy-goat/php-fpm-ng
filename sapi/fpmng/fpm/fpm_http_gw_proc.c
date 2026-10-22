@@ -52,6 +52,7 @@
 #include "fpm_signals.h"
 #include "fpm_env.h"
 #include "fpm_shm.h"
+#include "fpm_reload_shm.h"
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
 #include "fpm_clock.h"
@@ -1092,6 +1093,10 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 	} else if (gw->pids[index] == 0) {
 		/* Not a pool child, so it keeps none of the master-held log descriptors (issue #775). */
 		fpm_pool_type_close_master_logs_in_child(NULL);
+		/* Issue #841: the gateway forks from the master, not from run_child(),
+		 * so it must close the scoreboard and metrics memfds itself (issue #691
+		 * covered the pm children only). */
+		fpm_reload_shm_child_init();
 		fpm_http_gateway_run(gw, index);
 		/* not reached */
 	} else {

@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: a selective reload whose execvp() fails after the configuration check passed leaves no spared worker behind (issues #661, #690)
+fpm-ng: a selective reload whose execvp() fails after the configuration check passed retries through /proc/self/exe and keeps serving (issues #661, #690, #925)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -13,9 +13,12 @@ if (!is_executable('/bin/bash')) {
 require_once "tester.inc";
 
 /* Issue #690: the old master has detached the unchanged pool's workers and listed
- * them in FPMNG_SELECTIVE_RELOAD_SURVIVORS when fpm_pctl_exec() calls execvp(). If
- * that execvp() fails, the master logs "failed to reload: execvp() failed" and
- * exits, and no master adopts the workers. fpm_pctl_exec() discards them first.
+ * them in FPMNG_SELECTIVE_RELOAD_SURVIVORS when fpm_pctl_exec() calls execvp().
+ * Until #925 a failed execvp() ended the master, and fpm_pctl_exec() discarded
+ * the workers first. Since #925 fpm_pctl_exec() retries through /proc/self/exe
+ * (fpm_reload_exec_fallback.h): the master keeps its pid, the next generation
+ * adopts the spared worker and the listener stays held. The discard of #690 is
+ * reached only when that retry fails too, which no test can force.
  *
  * Issue #661 refuses a reload whose check cannot exec the binary, so the #690
  * path is reached only when the binary disappears between the check and the exec.
@@ -143,29 +146,41 @@ try {
 
     exec("kill -USR2 $masterPid");
 
-    if (!wait_gone($masterPid, 30)) {
-        fail("master $masterPid did not exit after the failed execvp()\n" . (string) @file_get_contents($log));
-    }
-    $logText = (string) @file_get_contents($log);
+    $deadline = time() + 30;
+    do {
+        $logText = (string) @file_get_contents($log);
+        if (str_contains($logText, 'adopted 1 child(ren) carried over by a selective reload')) {
+            break;
+        }
+        usleep(100000);
+    } while (time() < $deadline);
     if (str_contains($logText, 'reload refused')) {
         fail("the check refused the reload, so the exec was never reached\n$logText");
     }
     if (!str_contains($logText, 'failed to reload: execvp() failed')) {
         fail("the reload did not reach a failed execvp()\n$logText");
     }
-    echo "master exited after failed execvp: ok\n";
-
-    if (!wait_gone($workerPid, 10)) {
-        fail("spared worker $workerPid outlived the master whose execvp() failed");
+    if (!str_contains($logText, 'adopted 1 child(ren)')) {
+        fail("the next generation did not start\n$logText");
     }
-    echo "spared worker gone: ok\n";
+    echo "execvp failed, next generation started: ok\n";
+
+    if (!pid_alive($masterPid)) {
+        fail("master $masterPid exited after the failed execvp()\n$logText");
+    }
+    echo "same master pid: ok\n";
+
+    if (!request($keep) || (int) @file_get_contents($pidFile) !== $workerPid) {
+        fail("the spared worker $workerPid did not answer after the failed execvp()\n$logText");
+    }
+    echo "spared worker adopted: ok\n";
 
     $probe = @stream_socket_server("tcp://$keep", $errno, $error);
-    if (!$probe) {
-        fail("the listening address $keep is still held: $error");
+    if ($probe) {
+        fclose($probe);
+        fail("the listening address $keep is not held after the failed execvp()");
     }
-    fclose($probe);
-    echo "port free: ok\n";
+    echo "port held: ok\n";
 
     echo "Done\n";
 } finally {
@@ -186,9 +201,10 @@ try {
 ?>
 --EXPECT--
 worker running: ok
-master exited after failed execvp: ok
-spared worker gone: ok
-port free: ok
+execvp failed, next generation started: ok
+same master pid: ok
+spared worker adopted: ok
+port held: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

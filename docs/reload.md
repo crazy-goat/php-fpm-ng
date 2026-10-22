@@ -120,6 +120,20 @@ when the binary is removed between the check and the exec.
 `fpmng-reload-selective-failed-exec.phpt` tests the refusal. It checks that
 the master, its worker and its listener keep running.
 
+When the exec fails in that window, the master does not exit (issue #925). All
+children are gone and the pools are freed by then, so the old master cannot
+serve again. It tries `execv("/proc/self/exe")` instead
+(`fpm_reload_exec_fallback.c`). The next generation runs the binary of the old
+master, with the same arguments and the same configuration. It takes over the
+listeners as in a normal reload. The master keeps its pid.
+`fpmng-reload-selective-exec-after-check.phpt` tests it: the master keeps its
+pid, and the next generation adopts the spared worker.
+`fpmng-reload-gateway-exec-after-check.phpt` tests the gateway listener: the
+next generation takes it over, and the port keeps answering. If the retry fails too,
+or the platform has no `/proc/self/exe`, the master exits as before. The next
+master keeps the missing path as `argv[0]`, so the next `SIGUSR2` is refused by
+the check until the binary is back.
+
 ### What `-t` does catch
 
 Everything `fpm_conf_init_main()` does with `test_conf` set, which is a lot
@@ -204,8 +218,9 @@ Verified against this tree, not assumed:
 6. **Whether the generation that is being replaced can be replaced at all.**
    The gate says the configuration loads. After that the old master still stops
    every child and re-execs. An OOM at that moment, a `SIGTERM` between the
-   check and the exec, or an `execvp()` that fails still ends the generation.
-   Then the master exits, and the gateway listeners it handed on close with it.
+   check and the exec still ends the generation. An `execvp()` that fails is
+   retried through `/proc/self/exe` (issue #925). Only when that fails too, the
+   master exits, and the gateway listeners it handed on close with it.
 
 So the gate's failure mode is "the service keeps running the configuration it
 already has", never "the service is down because of the check" — except through
@@ -263,8 +278,9 @@ Not covered by the handoff:
   master socket closes before the exec, as before. A client can still get
   `ECONNREFUSED` during a reload with reuseport.
 - A unix socket as the public listener. It is not passed on.
-- An `execvp()` that fails after the check passed. See item 6 in "What `-t`
-  does not catch".
+- An `execvp()` that fails after the check passed, when `/proc/self/exe` fails
+  too. See item 6 in "What `-t` does not catch". The first failure is retried
+  and the listeners are handed on (issue #925).
 - Overlapping generations, where two masters hold the same socket at once. This
   case is out of scope.
 
@@ -493,7 +509,10 @@ fork, which `-t` never does.
 So `fpm_reload_selective_discard_unadopted()`
 (`sapi/fpmng/fpm/fpm_reload_selective.c`) runs on these paths:
 `fpm_init()` failing, `fpm_pctl_exit()`, a failed `execvp()` in
-`fpm_pctl_exec()`, and once after the initial fork loop in `fpm_run()`. The last
+`fpm_pctl_exec()` whose retry through `/proc/self/exe` fails too (issue #925;
+`fpmng-reload-selective-exec-fallback-fails.phpt` forces that with a binary
+that has lost its execute bit), and once after the initial fork loop in
+`fpm_run()`. The last
 call removes entries that no pool of the new generation adopted (a pool that
 disappeared from the config), so a stale pid never stays in the environment.
 It sends `SIGTERM` to each pid still listed in
@@ -503,11 +522,19 @@ unknown there, and a request in flight on a spared worker is cut. Adoption
 removes a pool's entry as it takes it, so after a successful start nothing is
 left to discard.
 
+The call in `fpm_pctl_exit()` also runs when `type->init_main()` of a pool
+fails after `fpm_init()` returned OK. No configuration reaches that failure,
+because every cause is a resource failure. `fpmng-reload-selective-failed-init-main.phpt`
+makes it fail with the failure-injection seam (`FPMNG_FAULT_INJECT=1`, see
+[`fpmng-phpt.md`](fpmng-phpt.md#failure-injection)). It checks the WARNING, the
+spared worker and the port. The test skips on a binary built without the seam.
+
 Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
 run this code, and its spared workers stay orphaned. Workers do not poll their
 parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (a new master
 that cannot bind — a failure `-t` cannot see) and
-`fpmng-reload-selective-failed-exec.phpt` (failed `execvp()`).
+`fpmng-reload-selective-exec-fallback-fails.phpt` (failed `execvp()` whose
+retry through `/proc/self/exe` fails too).
 
 ### Relationship to issue #329's rolling restart
 
@@ -560,6 +587,45 @@ child that it spares in this reload, with the deadline set at this exec. The
 does this. The next master tracks the survivor again and retires it at the same
 deadline. Before issue #692, the second reload neither signalled the survivor
 nor wrote it back, so no master tracked the survivor.
+
+**A carried pid is checked before it is used (issue #891).** A pid in
+`FPMNG_RELOAD_SURVIVORS` or `FPMNG_SELECTIVE_RELOAD_SURVIVORS` can be stale. The
+old master can reap a spared child. The kernel can then give the same pid to an
+unrelated process. `kill(pid, 0)` cannot tell the two apart.
+
+Each carried entry also holds the start time of its process. On Linux, the
+master reads this time from field 22 of `/proc/<pid>/stat`
+(`fpm_pid_start_time()` in `fpm_pid_child.c`). The master uses the pid only when
+the start time still matches (`fpm_pid_is_same()`).
+
+The check does not use parentage. Under `daemonize = yes`, the exec'd image
+forks again (`third_party/php-src/sapi/fpm/fpm/fpm_unix.c:618`), so the new
+master is not the parent of the carried children.
+
+The check covers the supervisor survivor at the exec and in `init_main()`, its
+retirement signal, the selective survivor list when it is adopted, and that list
+when it is signalled after a failed handoff. A refused pid is not signalled.
+Refusals at the exec and at adoption log one NOTICE each, with the pool name and
+the pid. The failed-handoff list logs no line per pid.
+
+Without `/proc`, no start time is recorded, and the start time is 0. The check
+then falls back to `kill(pid, 0)`, as before #891. An entry that an older binary
+wrote has no start time and takes the same fallback. Not measured on macOS.
+
+Two gaps remain. The kernel can reuse the pid between the check and the signal.
+Under `daemonize = yes`, no master sees the exit of a survivor that is not its
+child, so the check narrows the window but does not close it. Not measured.
+
+A worker that a selective reload carried over is in the same position under
+`daemonize = yes`: the new master is not its parent and gets no `SIGCHLD`.
+The master checks each adopted worker that is not its own child once per second
+(`fpm_adopted_sweep.c`, issue #792). A worker that is gone, is a zombie that
+its new parent has not reaped, or has another start time, is retired as after a
+normal exit: its slot is freed and the pool
+forks a replacement. In a stop, this lets `running_children` reach 0, so the
+master exits. A stop can take up to one second longer than with a worker that
+the master forked. The carried supervisor survivor (#329) is not covered; it
+has its own path (issue #981).
 
 **A slot reservation has an expiry.** At its `execvp()`, the old master writes
 one `X:<pool>:<base>:<count>:<until>` record for the slot range of each pool it

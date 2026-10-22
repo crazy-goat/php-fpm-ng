@@ -71,9 +71,10 @@ struct fpm_http_direct_conns {
 	int said_refused;
 };
 
-/* The same helper fpm_http.c:467 has, duplicated rather than exported: two
- * lines of preprocessor are cheaper than a shared header for one inline, and
- * "EAGAIN || EWOULDBLOCK" written out is a -Wlogical-op warning on Linux. */
+/* The same helper fpm_http_would_block() has in fpm_http_internal.h:934,
+ * duplicated rather than exported: two lines of preprocessor are cheaper than
+ * a shared header for one inline, and "EAGAIN || EWOULDBLOCK" written out is
+ * a -Wlogical-op warning on Linux. */
 static inline int fpm_direct_conn_would_block(int err)
 {
 	if (err == EAGAIN) {

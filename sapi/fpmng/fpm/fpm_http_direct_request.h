@@ -118,8 +118,8 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command);
  * (#681). Together they reduce the request-target to the origin-form path every
  * consumer below matches on; they are two because the gateway's are two
  * (fpm_http.c:2714 normalizes, fpm_http.c:2764 bounds the authority after the
- * ACL), and the split is what keeps an excluded client's 403 free of any
- * statement about its target.
+ * ACL, both in fpm_http_request()), and the split is what keeps an excluded
+ * client's 403 free of any statement about its target.
  *
  * Normalizing first is not only the gateway's order, it is what makes every
  * response's access-log suppress match exact: a request refused by the ACL

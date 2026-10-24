@@ -1,15 +1,18 @@
 #!/bin/sh
 # Build the libFuzzer harnesses in tests/fuzz/ and run each one (issue #995).
 #
-#   build/fuzz.sh [-t seconds] [-o outdir] [-r] [-q] [harness ...]
+#   build/fuzz.sh [-t seconds] [-s seed] [-o outdir] [-r] [-q] [harness ...]
 #
-#   -t seconds  time for each harness (default 10; 0 = build only)
+#   -t seconds  time for each harness, a whole number (default 10; 0 = build only)
+#   -s seed     libFuzzer seed, a whole number (default 0: libFuzzer picks one).
+#               A seeded run starts with an empty corpus, as the CI job does, so
+#               it repeats a CI run: use the seed and -t from a failure line
 #   -o outdir   build, corpus and crash output (default $REPO/out-fuzz, or
 #               $FUZZ_OUT); keep it out of git
 #   -r          run only: skip the build, use the binaries already in outdir
 #   -q          quiet, for CI: the harness output goes to outdir/logs/<name>.log
-#               and is not printed. A failed run prints only its name, its exit
-#               code and the local reproduce command.
+#               and is not printed. A failed run prints its name, its exit code,
+#               the libFuzzer seed and the local reproduce command.
 #   harness     names without the fuzz_ prefix, for example http_client
 #               (default: every tests/fuzz/fuzz_*.c)
 #
@@ -25,17 +28,40 @@ set -eu
 
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 SECONDS_PER_HARNESS=10
+SEED=0
+SEED_SET=0
 OUT=${FUZZ_OUT:-$REPO/out-fuzz}
 BUILD=1
 QUIET=0
 
-while getopts "t:o:rq" opt; do
+usage() {
+	echo "usage: build/fuzz.sh [-t seconds] [-s seed] [-o outdir] [-r] [-q] [harness ...]" >&2
+	exit 2
+}
+
+# Exits with a usage error. $1 is the option letter, $2 the value it got.
+bad_value() {
+	echo "fuzz.sh: -$1 needs a whole number, got '$2'" >&2
+	usage
+}
+
+# Succeeds for a decimal number from 0 to 4294967295 (the range of a libFuzzer
+# seed). The length check keeps the value inside what `[` can compare.
+whole_number() {
+	case "$1" in
+	'' | *[!0-9]*) return 1 ;;
+	esac
+	[ "${#1}" -le 10 ] && [ "$1" -le 4294967295 ]
+}
+
+while getopts "t:s:o:rq" opt; do
 	case "$opt" in
-	t) SECONDS_PER_HARNESS=$OPTARG ;;
+	t) whole_number "$OPTARG" || bad_value t "$OPTARG"; SECONDS_PER_HARNESS=$OPTARG ;;
+	s) whole_number "$OPTARG" || bad_value s "$OPTARG"; SEED=$OPTARG; SEED_SET=1 ;;
 	o) OUT=$OPTARG ;;
 	r) BUILD=0 ;;
 	q) QUIET=1 ;;
-	*) echo "usage: build/fuzz.sh [-t seconds] [-o outdir] [-r] [-q] [harness ...]" >&2; exit 2 ;;
+	*) usage ;;
 	esac
 done
 shift $((OPTIND - 1))
@@ -120,22 +146,30 @@ for name in $NAMES; do
 	[ -x "$bin" ] || fail "no binary $bin; run without -r first"
 	corpus=$OUT/corpus/$name
 	artifacts=$OUT/artifacts/$name/
+	if [ "$SEED_SET" = 1 ]; then
+		# A seeded run repeats a CI run, which starts from the committed seeds only.
+		rm -rf "$corpus"
+	fi
 	mkdir -p "$corpus" "$artifacts"
 	echo "fuzz.sh: running fuzz_$name for ${SECONDS_PER_HARNESS}s"
 	if [ "$QUIET" = 1 ]; then
 		# The output can hold sanitizer reports and crash inputs. It goes to a
 		# file that no CI step uploads; only the verdict is printed.
 		mkdir -p "$OUT/logs"
+		log=$OUT/logs/$name.log
 		rc=0
 		UBSAN_OPTIONS=print_stacktrace=1 "$bin" "$corpus" "$REPO/tests/fuzz/seeds/$name" \
-			-max_total_time="$SECONDS_PER_HARNESS" -print_final_stats=1 -timeout=10 \
-			-artifact_prefix="$artifacts" >"$OUT/logs/$name.log" 2>&1 || rc=$?
+			-seed="$SEED" -max_total_time="$SECONDS_PER_HARNESS" -print_final_stats=1 -timeout=10 \
+			-artifact_prefix="$artifacts" >"$log" 2>&1 || rc=$?
 		if [ "$rc" -ne 0 ]; then
-			echo "fuzz_$name exit $rc: crash found, reproduce locally with build/fuzz.sh $name"
+			# The seed line holds no input bytes, so it is safe in a public log.
+			seed=$(sed -n 's/^INFO: Seed: \([0-9][0-9]*\)$/\1/p' "$log" | head -n 1)
+			echo "fuzz_$name exit $rc: crash found, reproduce locally with build/fuzz.sh -s ${seed:-N} -t $SECONDS_PER_HARNESS $name"
+			echo "INFO: Seed: ${seed:-unknown}"
 			status=1
 		fi
 	elif ! UBSAN_OPTIONS=print_stacktrace=1 "$bin" "$corpus" "$REPO/tests/fuzz/seeds/$name" \
-		-max_total_time="$SECONDS_PER_HARNESS" -print_final_stats=1 -timeout=10 \
+		-seed="$SEED" -max_total_time="$SECONDS_PER_HARNESS" -print_final_stats=1 -timeout=10 \
 		-artifact_prefix="$artifacts"; then
 		echo "fuzz.sh: fuzz_$name failed; reproducers in $artifacts" >&2
 		status=1

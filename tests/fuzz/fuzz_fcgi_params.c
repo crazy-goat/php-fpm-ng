@@ -32,7 +32,7 @@ static int read_len(const unsigned char *p, size_t n, size_t *i, uint64_t *v)
 		return 0;
 	}
 	*v = ((uint64_t) (p[*i] & 0x7f) << 24) | ((uint64_t) p[*i + 1] << 16) |
-		((uint64_t) p[*i + 2] << 8) | p[*i + 3];
+		 ((uint64_t) p[*i + 2] << 8) | p[*i + 3];
 	*i += 4;
 	return 1;
 }

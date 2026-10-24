@@ -16,7 +16,11 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#define FUZZ_STUB(name) __attribute__((weak)) int name() { return 0; }
+#define FUZZ_STUB(name)              \
+	__attribute__((weak)) int name() \
+	{                                \
+		return 0;                    \
+	}
 
 /* fpm_http_fcgi.c, fpm_http_client.c and fpm_http_upstream_timeout.c */
 FUZZ_STUB(fpm_http_finish)

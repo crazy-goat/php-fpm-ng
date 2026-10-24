@@ -766,15 +766,17 @@ jobs:
         run: ./build/ci-cancel-run.sh
 
   # Issue #995: libFuzzer harnesses for the HTTP, FastCGI and WebSocket parsers
-  # (tests/fuzz/, build/fuzz.sh). Each harness runs for 60 seconds, and only when
-  # the change touches what the harnesses compile. The check is per pull request,
-  # not nightly, because a parser regression should fail the pull request that
-  # caused it. A change outside those paths reports success with its steps
-  # skipped, so this job never costs a run that cannot affect it.
+  # (tests/fuzz/, build/fuzz.sh). Each harness runs for 60 seconds, on a pull
+  # request or a push to main, and only when the change touches what the harnesses
+  # compile. The check runs per change, not nightly, because a parser regression
+  # should fail the change that caused it. A change outside those paths reports
+  # success with its steps skipped, so this job never costs a run that cannot
+  # affect it.
   #
   # The job log is public for this repository, so the job prints no harness
   # output: fuzz.sh -q writes it to a file that no step uploads. On a crash the
-  # log shows only the harness name, the exit code and the local reproduce command.
+  # log shows the harness name, the exit code, the libFuzzer seed and the local
+  # reproduce command.
   fuzz:
     name: fuzz
     needs: changes

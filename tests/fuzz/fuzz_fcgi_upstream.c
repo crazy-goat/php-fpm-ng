@@ -110,7 +110,7 @@ static void run_stream(const uint8_t *data, size_t len, uint32_t split_seed, int
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-	struct run_result whole = {0}, split = {0};
+	struct run_result whole = { 0 }, split = { 0 };
 	uint32_t split_seed;
 
 	if (size < 2) {
@@ -121,12 +121,12 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	run_stream(data + 1, size - 1, split_seed, 1, &split);
 	if (whole.out_len != split.out_len || (whole.out_len && memcmp(whole.out, split.out, whole.out_len) != 0)) {
 		fprintf(stderr, "fuzz_fcgi_upstream: CGI bytes depend on the read split (%zu vs %zu)\n",
-			whole.out_len, split.out_len);
+				whole.out_len, split.out_len);
 		abort();
 	}
 	if (whole.finished != split.finished) {
 		fprintf(stderr, "fuzz_fcgi_upstream: finish count depends on the read split (%u vs %u)\n",
-			whole.finished, split.finished);
+				whole.finished, split.finished);
 		abort();
 	}
 	free(whole.out);

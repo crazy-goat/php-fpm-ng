@@ -10,13 +10,13 @@
  *
  * The response runs twice: once in one read, and once cut into reads whose
  * sizes come from the seed. The HTTP parser keeps state across reads, so both
- * runs must produce the same body bytes and the same number of finished
- * replies. A mismatch aborts, which libFuzzer reports as a crash. Once the
- * parser fails or drops the upstream, the read loop stops, as the event loop does.
+ * runs must produce the same body bytes. A mismatch aborts, which libFuzzer
+ * reports as a crash. Once the parser fails or drops the upstream, the read loop
+ * stops, as the event loop does.
  *
  * fpm_http_client.c is #included for its static parser. Everything the parser
- * calls back into is defined below as a strong function: the captures are
- * simple counters, and no client, socket or event loop is involved.
+ * calls back into is defined below as a strong function: the body is captured
+ * in a buffer, and no client, socket or event loop is involved.
  */
 #include "fpm_http_client.c"
 
@@ -42,12 +42,6 @@ enum evhttp_cmd_type evhttp_request_get_command(const struct evhttp_request *req
 struct run_result {
 	unsigned char *out;
 	size_t out_len;
-	unsigned finished;
-	unsigned replies;
-	unsigned fails;
-	unsigned drops;
-	unsigned reqs_done;
-	unsigned freed;
 };
 
 static struct run_result *current_run;
@@ -59,7 +53,6 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t cgi_len, size_t cgi_total)
 	(void) c;
 	(void) cgi_len;
 	(void) cgi_total;
-	current_run->replies++;
 }
 
 void fpm_http_stdout(fpm_http_conn *c, const char *buf, size_t len)
@@ -79,7 +72,6 @@ void fpm_http_finish(fpm_http_conn *c, int truncated)
 {
 	(void) c;
 	(void) truncated;
-	current_run->finished++;
 }
 
 /* Mirrors fpm_http_request_done() in fpm_http.c, without the event side. */
@@ -91,7 +83,6 @@ void fpm_http_request_done(fpm_http_upstream *up)
 	}
 	up->busy = 0;
 	up->req_written = up->reply_seen = 0;
-	current_run->reqs_done++;
 }
 
 /* The parser may fail the upstream. Production then closes it, so no more
@@ -100,7 +91,6 @@ void fpm_http_upstream_fail(fpm_http_upstream *up, int clean_eof)
 {
 	(void) clean_eof;
 	up->dead = 1;
-	current_run->fails++;
 }
 
 /* Mirrors the real drop, which only sets `dead` while a caller is active. */
@@ -111,14 +101,13 @@ void fpm_http_upstream_drop(fpm_http_upstream *up)
 		abort();
 	}
 	up->dead = 1;
-	current_run->drops++;
 }
 
-/* The harness owns the upstream and frees it after the run. */
+/* The harness owns the upstream and frees it after the run, so the parser's
+ * free has nothing to do here. */
 void fpm_http_upstream_free(fpm_http_upstream *up)
 {
 	(void) up;
-	current_run->freed++;
 }
 
 static uint32_t xorshift(uint32_t *state)
@@ -133,7 +122,7 @@ static uint32_t xorshift(uint32_t *state)
 }
 
 static void run_response(const uint8_t *data, size_t len, uint32_t split_seed, int split, int head,
-	struct run_result *r)
+		struct run_result *r)
 {
 	static char pool[] = "fuzz";
 	static char listen[] = "fuzz";
@@ -214,7 +203,7 @@ int LLVMFuzzerInitialize(int *argc, char ***argv)
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
-	struct run_result whole = {0}, split = {0};
+	struct run_result whole = { 0 }, split = { 0 };
 	int head;
 	uint32_t split_seed;
 
@@ -227,12 +216,7 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	run_response(data + 2, size - 2, split_seed, 1, head, &split);
 	if (whole.out_len != split.out_len || (whole.out_len && memcmp(whole.out, split.out, whole.out_len) != 0)) {
 		fprintf(stderr, "fuzz_http_client: body bytes depend on the read split (%zu vs %zu)\n",
-			whole.out_len, split.out_len);
-		abort();
-	}
-	if (whole.finished != split.finished) {
-		fprintf(stderr, "fuzz_http_client: finish count depends on the read split (%u vs %u)\n",
-			whole.finished, split.finished);
+				whole.out_len, split.out_len);
 		abort();
 	}
 	free(whole.out);

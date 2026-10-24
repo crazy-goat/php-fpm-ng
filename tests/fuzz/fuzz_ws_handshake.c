@@ -90,7 +90,8 @@ static int ref_has_token(struct evkeyvalq *headers, const char *name, const char
 	struct evkeyval *kv;
 	size_t tlen = strlen(token);
 
-	TAILQ_FOREACH(kv, headers, next) {
+	TAILQ_FOREACH(kv, headers, next)
+	{
 		const char *p;
 
 		if (strcasecmp(kv->key, name) != 0) {

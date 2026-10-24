@@ -259,10 +259,10 @@ At runtime the binary checks again, and the two cases differ:
   (patch-level difference, supported)
   ```
 
-  The notice compares only the version numbers. It does not check the struct
-  layouts. The php-src diff from 8.5.4 to 8.5.12 changes
-  `struct _zend_executor_globals`, so this notice can print for a binary that
-  does not match. See [Engine security fixes](#engine-security-fixes).
+  The notice names the two version numbers. It prints only when the struct sizes
+  of the loaded libphp match the binary. A size difference stops the start, as
+  described below. The size check does not see a layout change that keeps both
+  sizes. See [Engine security fixes](#engine-security-fixes).
 
   The notice exists so that the version pair is already in the log when a bug
   report arrives.
@@ -276,6 +276,21 @@ At runtime the binary checks again, and the two cases differ:
 
   The binary carries the struct layouts of the version it was built against, so
   continuing would corrupt memory rather than fail cleanly.
+
+* **A difference in the struct sizes is fatal**, before the first request. The
+  version numbers can be equal. A distribution can change the struct sizes and
+  keep the version number. See [Engine security fixes](#engine-security-fixes).
+
+  ```
+  php-fpm-ng: FATAL: this binary was built against PHP 8.5.4 headers, with
+  executor_globals of 2008 bytes and compiler_globals of 616 bytes, but the
+  libphp it loaded (PHP 8.5.4) has 1984 and 616 bytes.
+  ```
+
+  To fix this, do one of these steps:
+
+  1. Rebuild php-fpm-ng against the headers of the installed libphp.
+  2. Install the libphp that the binary was built against.
 
 ## Engine security fixes
 
@@ -312,8 +327,11 @@ The measurements on 2026-10-24 used the php-fpm-ng v0.17.0 `.deb` on Ubuntu
 * A request that ends in a PHP fatal error kills its worker with `SIGSEGV`. The
   client gets a 500 or 502 response.
 * Plain requests return 200, so the pool can look healthy.
-* The start-up ABI check compares only the PHP version. It does not detect this
-  change.
+* The start-up ABI check of v0.17.0 compares only the PHP version. It does not
+  detect this change. A build that includes the fix for issue
+  [#994](https://github.com/crazy-goat/php-fpm-ng/issues/994) also compares the
+  struct sizes, and it refuses to start with a FATAL message. See
+  [Version skew](#version-skew).
 * The previous pin, v0.13.0, prints the same loader warning and the same `-v`
   segfault. This page does not measure the fatal-error path of v0.13.0.
 
@@ -337,8 +355,9 @@ release with such a build. Issue
 Until a host runs such a build, neither state is safe:
 
 * The unpatched libphp has the two remote code execution vulnerabilities.
-* The patched libphp with a php-fpm-ng build made against the earlier headers
-  crashes, as described above.
+* The patched libphp with a v0.17.0 build made against the earlier headers
+  crashes, as described above. A build that includes the fix for issue #994
+  refuses to start instead.
 
 For a host that cannot run either state, see the PHP-level measures in the
 advisory.
@@ -349,7 +368,9 @@ Run `php-fpm-ng -v`. If the output has a line with `has different size in
 shared object`, the binary does not match the installed libphp. The loader
 prints that line before the banner. The banner starts with `PHP ` and shows the
 PHP version of the loaded libphp. On the Ubuntu revision, the notice from
-[Version skew](#version-skew) does not print, because the versions are equal.
+[Version skew](#version-skew) does not print, because the versions are equal. A
+build that includes the fix for issue #994 stops with a FATAL line and prints no
+banner.
 
 A running master keeps the libphp that it loaded at its start. Restart the
 service after each update.

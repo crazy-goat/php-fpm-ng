@@ -245,7 +245,7 @@ off_reason() {
   HAVE_FPMNG_FAULT_INJECT)      echo "calls an environment variable can make fail on purpose; FPMNG_FAULT_INJECT=1 is for the test suite only and the packages assert it is off (issue #832)" ;;
   USE_LOCKING)                  echo "fastcgi.c's accept() lock for platforms without a thread-safe accept(); never on Linux" ;;
   PHP_FPM_ZLOG_TRACE)           echo "scoreboard debug tracing, a developer switch upstream never enables" ;;
-  FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
+  FPMNG_BUILT_PHP_VERSION|FPMNG_BUILT_PHP_VERSION_ID|FPMNG_BUILT_EXECUTOR_GLOBALS_SIZE|FPMNG_BUILT_COMPILER_GLOBALS_SIZE) echo "test seam of build/libphp/libphp_abi_check.c, set only through EXTRA_CFLAGS" ;;
   *) return 1 ;;
   esac
 }

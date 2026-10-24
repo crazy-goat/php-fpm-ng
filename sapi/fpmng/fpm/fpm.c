@@ -19,6 +19,7 @@
 #include "fpm_process_ctl.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_scoreboard.h"
 #include "fpm_stdio.h"
 #include "fpm_log.h"
@@ -228,6 +229,11 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * into a kill of an unrelated process at shutdown. Only the master gets
 	 * here: a forked child jumped to run_child above. */
 	fpm_reload_selective_discard_unadopted();
+
+	/* Issue #889: a #329 survivor whose pool this configuration does not run has
+	 * no init_main() to claim its entry, so no pool type can dispatch it. The
+	 * master arms those entries itself. */
+	fpm_pool_supervisor_reload_orphans_arm();
 
 	/* Issue #643: READY=1 once every pool has bound its listening socket and
 	 * the initial children are forked. It says nothing about a gateway

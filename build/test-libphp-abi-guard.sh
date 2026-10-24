@@ -182,6 +182,8 @@ EOF
 }
 stand "$WORK/linked" "$EXEC_SIZE"
 stand "$WORK/loaded" "$EXEC_FAKE"
+# php-config --includes prints several -I flags, and they must split into words.
+# shellcheck disable=SC2046
 "$CC" -D_GNU_SOURCE -O2 -Wno-deprecated-declarations $("$PHP_CONFIG" --includes) \
   -c "$REPO/build/libphp/libphp_abi_check.c" -o "$WORK/copy.o"
 "$CC" "$WORK/main.o" "$WORK/copy.o" -L"$WORK/linked" -lphp -o "$WORK/copy"

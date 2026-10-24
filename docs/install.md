@@ -250,7 +250,7 @@ built against 8.5's headers: it would load, and then misbehave. Naming the
 minor moves that failure to the package manager, where it is a refusal to
 install.
 
-At runtime the binary checks again, and the two cases differ:
+At runtime the binary checks again, and the three cases differ:
 
 * **The master logs a patch-level difference once**, before any child exists:
 

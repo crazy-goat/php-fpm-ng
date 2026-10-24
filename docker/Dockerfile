@@ -17,9 +17,11 @@ ARG PHP_FPM_NG_VERSION=0.17.0
 ARG PHP_FPM_NG_SHA256=83088d383acc9c0373a7e5579e93fdb2a362db71a9ece362f6fb5208656d6e86
 ENV DEBIAN_FRONTEND=noninteractive
 # An example image; it follows the Ubuntu package repository, so versions are not pinned.
-# The engine security fixes arrive with libphp8.5-embed, so a rebuild needs
-# `docker build --pull --no-cache`: Docker otherwise reuses the cached apt layer.
-# See docs/install.md#engine-security-fixes.
+# On Ubuntu 26.04 the distribution's libphp8.5-embed has the engine security fix,
+# which changes the layout php-fpm-ng v0.17.0 was built against, so the binary
+# crashes (issue #994). Rebuilding with `docker build --pull --no-cache` picks up
+# the patched libphp but does not change the binary. See
+# docs/install.md#engine-security-fixes.
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

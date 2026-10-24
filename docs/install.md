@@ -252,16 +252,20 @@ install.
 
 At runtime the binary checks again, and the two cases differ:
 
-* **A patch-level difference is fine and is logged once**, in the master,
-  before any child exists:
+* **The master logs a patch-level difference once**, before any child exists:
 
   ```
   php-fpm-ng: notice: built against PHP 8.5.4, running on libphp 8.5.10
   (patch-level difference, supported)
   ```
 
-  PHP keeps the ABI stable across patch releases of one minor. This exists so
-  that the version pair is already in the log when a bug report arrives.
+  The notice compares only the version numbers. It does not check the struct
+  layouts. The php-src diff from 8.5.4 to 8.5.12 changes
+  `struct _zend_executor_globals`, so this notice can print for a binary that
+  does not match. See [Engine security fixes](#engine-security-fixes).
+
+  The notice exists so that the version pair is already in the log when a bug
+  report arrives.
 
 * **A minor or major difference is fatal**, before the first request:
 
@@ -275,37 +279,136 @@ At runtime the binary checks again, and the two cases differ:
 
 ## Engine security fixes
 
-The engine is not in the php-fpm-ng package. The binary runs on the distribution's `libphp`, which the package installs as a dependency. A fix for the engine therefore reaches a host through an update of that distribution package, not through a new php-fpm-ng release.
+The engine is not in the php-fpm-ng package. The binary loads the
+distribution's `libphp` at run time, and the package installs that library as a
+dependency. A fix for the engine therefore reaches a host through an update of
+the distribution package, not through a php-fpm-ng release.
 
-PHP 8.5.12 fixes two critical remote code execution vulnerabilities, CVE-2026-109618 and CVE-2026-109619. The PHP project published the advisory on 2026-10-21 at <https://www.php.net/archive/2026.php>. The advisory also lists PHP-level measures for systems that cannot update at once. This page does not repeat them.
+PHP 8.5.12 fixes two critical remote code execution vulnerabilities,
+CVE-2026-109618 and CVE-2026-109619. The PHP project published the advisory on
+2026-10-21 at <https://www.php.net/archive/2026.php>. The advisory also lists
+PHP-level measures for systems that cannot update at once. This page does not
+repeat them.
 
-The PHP project states that Linux distributions received the patches in advance. Whether a distribution package has the fix is a question for that distribution. A distribution can backport a fix and keep the upstream version number, so the PHP version alone does not show that the fix is installed. Read the security notice of your distribution. Check that it names both CVE IDs for your package version.
+The PHP project states that Linux distributions received the patches in
+advance. A distribution can backport a fix and keep the upstream version number,
+so the PHP version alone does not show whether the host has the fix. Read the
+security notice of your distribution, and check that it names both CVE IDs for
+your package version.
+
+### What the Ubuntu update changes
+
+The measurements on 2026-10-24 used the php-fpm-ng v0.17.0 `.deb` on Ubuntu
+26.04, with `libphp8.5-embed 8.5.4-0ubuntu1.5` installed. They found:
+
+* The Ubuntu revision keeps the version number 8.5.4. It changes the size of the
+  `executor_globals` structure. The Ubuntu package changelog names the patch for
+  both CVE IDs.
+* The v0.17.0 binary expects the older layout.
+* Each start prints this line on stderr: ``Symbol `executor_globals' has
+  different size in shared object, consider re-linking``.
+* `php-fpm-ng -v` prints the version on stdout. The process then ends with a
+  segmentation fault.
+* A request that ends in a PHP fatal error kills its worker with `SIGSEGV`. The
+  client gets a 500 or 502 response.
+* Plain requests return 200, so the pool can look healthy.
+* The start-up ABI check compares only the PHP version. It does not detect this
+  change.
+* The previous pin, v0.13.0, prints the same loader warning and the same `-v`
+  segfault. This page does not measure the fatal-error path of v0.13.0.
+
+The layout change comes from the fix itself. The php-src diff from PHP 8.5.4 to
+8.5.12 adds a field to `struct _zend_executor_globals` in `Zend/zend_globals.h`.
+This is a source fact, not a measurement. This page did not measure a build from
+the PHP project or from another distribution.
+
+### What an operator needs
+
+The binary and the installed libphp must have the same layout. A libphp with
+the security fix needs both of these:
+
+* The patched `libphp8.5-embed`, from the distribution.
+* A php-fpm-ng build made against the patched headers.
+
+Updating libphp alone is not enough. On 2026-10-24, there is no php-fpm-ng
+release with such a build. Issue
+[#994](https://github.com/crazy-goat/php-fpm-ng/issues/994) tracks it.
+
+Until a host runs such a build, neither state is safe:
+
+* The unpatched libphp has the two remote code execution vulnerabilities.
+* The patched libphp with a php-fpm-ng build made against the earlier headers
+  crashes, as described above.
+
+For a host that cannot run either state, see the PHP-level measures in the
+advisory.
+
+### Check a host
+
+Run `php-fpm-ng -v`. If the output has a line with `has different size in
+shared object`, the binary does not match the installed libphp. The loader
+prints that line before the banner. The banner starts with `PHP ` and shows the
+PHP version of the loaded libphp. On the Ubuntu revision, the notice from
+[Version skew](#version-skew) does not print, because the versions are equal.
+
+A running master keeps the libphp that it loaded at its start. Restart the
+service after each update.
 
 ### Debian and Ubuntu
 
+Use these steps when a php-fpm-ng build made against the patched headers is
+available. Replace `<version>` with the version of that build.
+
 1. Run `sudo apt update`.
-2. Run `sudo apt install --only-upgrade libphp8.5-embed`. If apt reports that the package is already the newest version, the package index of the distribution has no newer version yet.
+2. Run the following command. It installs both packages at once:
+
+   ```sh
+   sudo apt install -y ./php-fpm-ng_<version>_php8.5_amd64.deb libphp8.5-embed
+   ```
+
 3. Run `sudo systemctl restart php-fpm-ng`.
-4. Run `php-fpm-ng -v`. Read the PHP version on the first line.
+4. Run `php-fpm-ng -v`, and check the output as described above.
 
 ### Alpine
 
-1. Run `apk update`.
-2. Run `apk upgrade php85-embed`.
-3. Run `rc-service php-fpm-ng restart`.
-4. Run `php-fpm-ng -v`. Read the PHP version on the first line.
+The same rule applies: the binary and the installed `php85-embed` must have the
+same layout. A PHP 8.5.12 build has the struct change above. This page did not
+measure Alpine.
 
-`php-fpm-ng -v` prints the PHP version of the libphp that the command loads at that moment. A running master keeps the library that it loaded at its start, so restart the service after each update. If the loaded PHP patch version differs from the version the binary was built against, the master logs one notice at start. That notice is expected after an update; see [Version skew](#version-skew).
+Use these steps when a php-fpm-ng build made against the patched headers is
+available. Replace `<version>` with the version of that build.
+
+1. Run `apk update`.
+2. Run the following command. It installs both packages at once:
+
+   ```sh
+   apk add --allow-untrusted ./php-fpm-ng-<version>-php8.5-x86_64.apk php85-embed
+   ```
+
+3. Run `rc-service php-fpm-ng restart`.
+4. Run `php-fpm-ng -v`, and check the output as described above.
 
 ### Docker image
 
-The image in `docker/` installs the distribution's `libphp` while it builds. A running container keeps the image that it started from.
+The image in `docker/` installs the distribution's libphp while it builds. A
+running container keeps the image that it started from.
+
+On 2026-10-24, `docker build --pull --no-cache` installed
+`libphp8.5-embed 8.5.4-0ubuntu1.5` with php-fpm-ng v0.17.0. The image therefore
+has the crash described above. Rebuilding picks up the patched libphp, but it
+does not change the php-fpm-ng binary. Do not treat the image as fixed until its
+pin names a php-fpm-ng build made against the patched headers
+([issue #994](https://github.com/crazy-goat/php-fpm-ng/issues/994)).
+
+When the pin names such a build, run these steps:
 
 1. Run `docker build --pull --no-cache -t fpmng docker/`.
 2. Stop the running container.
 3. Start a new container from the new image, with the same options as before.
 
-`--pull` updates the `ubuntu:26.04` base image. `--no-cache` makes the build install the current `libphp8.5-embed`, because Docker otherwise reuses the cached apt layer.
+`--pull` updates the `ubuntu:26.04` base image. `--no-cache` makes the build
+install the current `libphp8.5-embed`, because Docker otherwise reuses the
+cached apt layer.
 
 ## Building the package binary yourself
 

@@ -48,8 +48,10 @@
  * pool.type = supervisor does for its stop_timeout).
  *
  * Returns the watchdog's PID (>0) on success, or -1 on fork() failure — the
- * caller proceeds either way, this is a best-effort safety net, not a
- * correctness requirement.
+ * caller proceeds either way. Nothing is retried. A reload survivor (issue #329)
+ * has a master backstop that signals it when this fails (issue #890, see
+ * fpm_pool_supervisor.c); cron and supervisor.max_runtime have none, so for them
+ * a failed fork() leaves the process without a bound.
  */
 pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds, int signo);
 

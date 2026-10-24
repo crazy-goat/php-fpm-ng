@@ -486,7 +486,7 @@ Details worth knowing:
   free of new ranges, because a #329 survivor of that pool may still write to
   its old slot. The reservation lasts until the survivor can no longer write.
   The expiry is set at the exec of the reload that spares the survivor. It adds
-  30 seconds, the `supervisor.stop_timeout` of the pool, and 2 seconds of slack.
+  30 seconds, the `supervisor.stop_timeout` of the pool, and 3 seconds of slack.
   A later reload carries that expiry as a `Y` record and does not extend it (see
   "Back-to-back selective reloads" below). The new pool's slots are cleared by
   punching a hole in the memfd, which frees the memory instead of faulting it in.
@@ -581,8 +581,13 @@ stop signal, it starts a watchdog process. A later stop signal does not start a
 second watchdog. The watchdog sends `SIGKILL` after the
 `supervisor.stop_timeout` of the pool, if the survivor still runs. The survivor
 therefore exits no later than the deadline, plus one poll of 200 milliseconds,
-plus `supervisor.stop_timeout`. If `fork()` fails, no watchdog starts (see
-limit 1 below).
+plus `supervisor.stop_timeout`.
+
+If `fork()` fails, no watchdog starts. The master then sends `SIGKILL` itself,
+`supervisor.stop_timeout` plus one second after the stop signal, if the survivor
+still runs. This backstop logs one WARNING (issue #890). In this case the
+survivor exits no later than the deadline, plus one poll of 200 milliseconds,
+plus `supervisor.stop_timeout`, plus one second.
 
 **A master carries its survivor across a reload.** A master tracks at most one
 survivor for each pool. It does not spare another child of that pool while it
@@ -651,12 +656,18 @@ which writes to the slot range `R`. The master that spares `S` execs at time
 `E`, and the new generation replaces `p`. Before `E`, the old master still owns
 `R`, and no new pool uses it. So the wait before `E` does not change the bound.
 
-1. `S` has the deadline `E + 30`. It gets the stop signal no later than
-   `E + 30.2`. It exits no later than `E + 30.2 + stop_timeout`.
-2. The same exec writes the expiry `U = E + 30 + stop_timeout + 2` for `R`.
-   `U` is later than the exit time of `S`. The 2 seconds of slack cover the
-   whole-second rounding of `FPM_NOW()`, the poll, and the signal delivery. They
-   also cover the one-second difference between the two clock reads at the exec.
+1. `S` has the deadline `D = E + 30`, where `E` is the whole-second exec time.
+   It gets the stop signal no later than `D + 0.2`. Its watchdog sends `SIGKILL`
+   no later than `D + 0.2 + stop_timeout`. Without a watchdog, the master
+   backstop sends it no later than `D + 0.2 + stop_timeout + 1`. So `S` exits no
+   later than `E + 31.2 + stop_timeout`.
+2. The same exec writes the expiry `U = E' + 30 + stop_timeout + 3` for `R`,
+   where `E'` is the whole-second time of the expiry read. The two reads at the
+   exec differ by at most one second, so `E' >= E - 1` and
+   `U >= E + 32 + stop_timeout`. `U` is therefore at least 0.8 seconds later
+   than the exit time of `S`. The 3 seconds of slack cover the one-second
+   difference between the two reads. The 0.8 seconds cover the signal delivery
+   and the exit.
 3. The new master reserves `R` for its generation. `R` belongs to no pool in this
    generation. At the exec of a later reload, the old master writes `R` as a `Y`
    record with the same `<until>`, if `<until>` is later than the current time.
@@ -670,20 +681,24 @@ survivor then writes only to the old region, and no new pool can share it.
 
 **Remaining limits.**
 
-1. If the watchdog cannot start because `fork()` fails, the survivor has no
-   watchdog. Nothing ends it after the stop signal, and the master does not send
-   the signal again. Its slot can then be taken after the expiry while the
-   survivor still writes there. Issue #692 does not change this case.
+1. The master backstop (issue #890) ends a survivor whose watchdog did not
+   start. Two cases remain open. First, a reload that starts between the stop
+   signal and the backstop drops the timer. The next master retires the survivor
+   again and arms a new backstop, so the kill can come later than the bound. Second, a master that exits before the backstop fires leaves the
+   survivor with no bound. In both cases the slot can be taken after the expiry
+   while the survivor still writes there.
 2. A survivor of a pool that the new configuration removes has no master that
    tracks it. No master sends it the stop signal, so it ends only when its own
    script ends. Its slot range is reserved only until the expiry. After that, a
    new pool can take the slot while the survivor still writes there. Issue #692
    does not change this case. See `docs/supervisor.md`.
 3. The deadline and the expiry use the wall clock (`time(NULL)`) in whole
-   seconds. A forward clock step of more than 2 seconds after the stop signal
-   can move the expiry before the survivor exits. A step before the signal does
-   not break the bound, because the expiry is always 2 seconds plus
-   `supervisor.stop_timeout` after the deadline on the same clock.
+   seconds. A forward clock step after the stop signal can move the expiry before
+   the survivor exits. A step of more than 1.8 seconds breaks the bound with a
+   watchdog. A step of more than 0.8 seconds breaks it when the backstop ends the
+   survivor. A step before the signal does not break the bound, because the
+   expiry is at least 2 seconds plus `supervisor.stop_timeout` after the deadline
+   on the same clock.
 4. In a test build with `FPMNG_DEBUG_CLOCK_RATE` above 1, each process uses its
    own debug clock. The carried times are then approximate. The packages do not
    allow this clock.
@@ -695,6 +710,10 @@ with a survivor that writes into the slot of its pool. A pool added by the
 second reload must not show the survivor's counter. The carry check depends on
 the start jitter. If a copy of the new generation starts first, the survivor is
 retired before reload B. Then the test checks only the slot.
+
+The test `fpmng-reload-survivor-watchdog-fork-fails.phpt` makes the survivor's
+watchdog `fork()` fail with `FPMNG_FAULT=pool_watchdog_fork`. It checks that the
+master backstop SIGKILLs the survivor and logs one WARNING.
 
 ### Accepted degradations of an adopted child
 

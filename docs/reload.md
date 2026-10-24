@@ -564,8 +564,9 @@ have one mechanism misparse the other's env var contents.
 This section covers a #329 survivor that still runs when a second selective
 reload starts. It states why no two live writers can share a metrics slot
 across back-to-back reloads. It also lists the limits that remain. The proof
-covers the survivors of pools that the new configuration keeps. Limit 2
-below covers the others.
+covers the survivors of pools that the new configuration keeps. The survivors
+of pools that the new configuration removes are covered by a separate paragraph
+(issue #889). Limit 2 below lists what remains open for them.
 
 **The deadline starts at the exec.** A master writes the deadline of a spared
 child at its `execvp()`, not at the spare. The entry is `pool-name:pid:deadline`,
@@ -588,6 +589,14 @@ If `fork()` fails, no watchdog starts. The master then sends `SIGKILL` itself,
 still runs. This backstop logs one WARNING (issue #890). In this case the
 survivor exits no later than the deadline, plus one poll of 200 milliseconds,
 plus `supervisor.stop_timeout`, plus one second.
+
+**A survivor of a removed pool gets SIGTERM at its deadline (issue #889).** The
+new master tracks each survivor that no pool of the new configuration claims. It
+sends `SIGTERM` at the deadline, not the `supervisor.stop_signal` of the pool,
+because the pool is gone from the configuration. If the survivor's own watchdog
+starts, the survivor exits no later than the deadline, plus one poll of 200
+milliseconds, plus `supervisor.stop_timeout`. There is no master backstop for
+this case. Limit 2 describes the cases that remain open.
 
 **A master carries its survivor across a reload.** A master tracks at most one
 survivor for each pool. It does not spare another child of that pool while it
@@ -688,11 +697,15 @@ survivor then writes only to the old region, and no new pool can share it.
    Second, a master that exits before the backstop fires leaves the survivor
    with no bound. In both cases the slot can be taken after the expiry while the
    survivor still writes there.
-2. A survivor of a pool that the new configuration removes has no master that
-   tracks it. No master sends it the stop signal, so it ends only when its own
-   script ends. Its slot range is reserved only until the expiry. After that, a
-   new pool can take the slot while the survivor still writes there. Issue #692
-   does not change this case. See `docs/supervisor.md`.
+2. A survivor of a removed pool has no master backstop. If its watchdog cannot
+   start, for example because `fork()` fails, no process sends `SIGKILL`, and the
+   survivor has no bound. A master that exits before the deadline also leaves the
+   survivor with no bound. A reload before the deadline does not lose the
+   survivor: the next master arms it again with the same deadline. The new master
+   cannot add a backstop with the right delay, because it does not know the
+   `supervisor.stop_timeout` of the removed pool. The slot range stays reserved
+   until the expiry, as for a kept pool. The expiry comes after the exit of the
+   survivor only when its watchdog runs. See `docs/supervisor.md`.
 3. The deadline and the expiry use the wall clock (`time(NULL)`) in whole
    seconds. A forward clock step after the stop signal can move the expiry before
    the survivor exits. A step of more than 1.8 seconds breaks the bound with a
@@ -718,6 +731,13 @@ master backstop SIGKILLs the survivor and logs one WARNING. The log stamps have
 whole seconds, so the test checks that the WARNING comes 3 or 4 seconds after
 the retirement line. The test sets `supervisor.stop_timeout` to 2, so the gap is
 `stop_timeout + 1` or `stop_timeout + 2`.
+
+The test `fpmng-reload-survivor-removed-pool.phpt` removes pool `[s]` with a
+reload. It checks that the new master logs the survivor, that the survivor still
+runs 5 seconds after the reload, and that the master sends `SIGTERM` about 30
+seconds after the reload. The log stamps have whole seconds, so the test checks
+that the gap between the two log lines is 29 to 31 seconds. The test then checks
+that the survivor ends after its watchdog.
 
 ### Accepted degradations of an adopted child
 

@@ -460,22 +460,14 @@ forever.
   (`fpm_stdio.c`), and the old master is gone. `supervisor.output_log`
   (issue #328) is unaffected, since that file descriptor belongs to the
   child process itself, not to the master's pipe.
-- **A pool renamed or removed in the very same reload that spared one of its
-  children** leaves that pid's entry in the environment variable with no pool
-  left to claim it on the next startup — `fpm_pool_supervisor_reload_survivor_env_take()`
-  is only ever called with the name of a pool that still exists in the new
-  config, so a stale entry for a name nobody asks for is never read, never
-  tracked, and therefore never reaches the 30-second unconditional-retirement
-  path either: that path only starts once `fpm_pool_supervisor_reload_survivor_track()`
-  has registered the poll timer for it. The leftover process keeps running the
-  old generation's script until something external notices and kills it — a
-  real, known gap, not one this issue closes. It needs the rename/removal and
-  a reload to land in the exact same config change, which is narrow enough
-  that a follow-up (a startup-time sweep that kills any env-var entry no pool
-  claimed) was left for a separate issue rather than built speculatively here
-  (see `findings.md`). A pool removed by a later reload is the same case: its
-  survivor is carried once more and then no generation tracks it. The limits
-  are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)".
+- **A pool renamed or removed in the same reload that spared one of its
+  children, or removed by a later reload.** No pool of the new configuration
+  claims the survivor's entry in the environment variable. The new master
+  tracks the survivor and sends `SIGTERM` at the deadline (issue #889). It does
+  not send the pool's `supervisor.stop_signal`, because the pool is gone from
+  the configuration. The survivor's own watchdog ends it after the old
+  `supervisor.stop_timeout`. There is no master backstop for this case. The
+  limits are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)".
 - **Selective reload** — skipping *unrelated* pools entirely on a reload that
   only changed one of them — is issue #330's scope, not this one's. This
   issue is useful on its own even without it, per the original request: it

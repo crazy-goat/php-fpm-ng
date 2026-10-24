@@ -1032,6 +1032,175 @@ static void fpm_pool_supervisor_reload_survivor_carry(int which, void *arg) /* {
 }
 /* }}} */
 
+/* Issue #889: a #329 survivor whose pool the new configuration does not run.
+ * No init_main() claims its entry in FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV, so no
+ * generation tracks it, and nothing signalled it: it ran until its own script
+ * ended. The entry stays in the env var, which the next exec inherits, so a
+ * later reload arms the survivor again with the same deadline and no carry
+ * hook is needed. At the deadline the master sends SIGTERM. Every supervisor
+ * copy handles SIGTERM (fpm_pool_supervisor_child_main()), and the copy's own
+ * watchdog ends it after the supervisor.stop_timeout it was started with. The
+ * stop signal of a pool that is gone is not known here, so SIGTERM is used.
+ * There is no master SIGKILL backstop: that stop_timeout is not known either
+ * (docs/reload.md, limit 2). */
+struct fpm_supervisor_orphan_s {
+	struct fpm_event_s ev;
+	char *name;
+	pid_t pid;
+	unsigned long long start;			/* issue #891: start time of the pid, 0 = not recorded */
+	time_t deadline;
+};
+
+static void fpm_pool_supervisor_orphan_poll(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
+{
+	struct fpm_supervisor_orphan_s *orphan = arg;
+	char state = 0;
+	pid_t ppid = 0;
+	time_t deadline = 0;
+	unsigned long long start = 0;
+
+	(void) ev;
+	if (which != FPM_EV_TIMEOUT) {
+		return;
+	}
+
+	/* The event loop unlinks a one-shot timer before it fires it, so the
+	 * callback may add the same timer again (fpm_events.c). */
+	if (FPM_NOW() < orphan->deadline) {
+		fpm_event_add(&orphan->ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS);
+		return;
+	}
+
+	if (!fpm_pid_is_same(orphan->pid, orphan->start)) {
+		zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d is gone at its deadline",
+			orphan->name, (int) orphan->pid);
+	} else if (fpm_pid_proc_state(orphan->pid, &state, &ppid) && (state == 'Z' || state == 'X')) {
+		zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d has exited at its deadline",
+			orphan->name, (int) orphan->pid);
+	} else {
+		zlog(ZLOG_NOTICE, "[pool %s] supervisor: reload survivor pid %d is still running at its deadline "
+			"and no pool of this configuration runs it; sending SIGTERM (issue #889)",
+			orphan->name, (int) orphan->pid);
+		kill(orphan->pid, SIGTERM);
+	}
+
+	/* Consumed here, so the next exec does not carry the entry again. At most
+	 * one entry per pool name is ever in the variable, so the first match is
+	 * this survivor's entry. */
+	fpm_pool_supervisor_reload_survivor_env_take(orphan->name, &deadline, &start);
+	free(orphan->name);
+	free(orphan);
+}
+/* }}} */
+
+static void fpm_pool_supervisor_orphan_arm(const char *name, size_t name_len, pid_t pid, time_t deadline,
+		unsigned long long start) /* {{{ */
+{
+	struct fpm_supervisor_orphan_s *orphan;
+	char *copy = malloc(name_len + 1);
+	time_t taken_deadline = 0;
+	unsigned long long taken_start = 0;
+
+	if (!copy) {
+		zlog(ZLOG_WARNING, "supervisor: cannot track reload survivor pid %d of a pool that is not in this "
+			"configuration; it gets no stop signal (issue #889)", (int) pid);
+		return;
+	}
+	memcpy(copy, name, name_len);
+	copy[name_len] = '\0';
+
+	if (pid <= 1 || !fpm_pid_is_same(pid, start)) {
+		/* Issue #891: the same check as in init_main(). A pid that was reaped
+		 * before the exec may now belong to an unrelated process, so the entry is
+		 * dropped here and nothing is signalled. */
+		if (pid > 1) {
+			zlog(ZLOG_NOTICE, "[pool %s] supervisor: reload survivor pid %d of a pool that this configuration "
+				"does not run is not the process it was when spared; not signalling it (issue #891)",
+				copy, (int) pid);
+		}
+		fpm_pool_supervisor_reload_survivor_env_take(copy, &taken_deadline, &taken_start);
+		free(copy);
+		return;
+	}
+
+	orphan = calloc(1, sizeof(*orphan));
+	if (!orphan) {
+		zlog(ZLOG_WARNING, "[pool %s] supervisor: cannot track reload survivor pid %d of a pool that this "
+			"configuration does not run; it gets no stop signal (issue #889)", copy, (int) pid);
+		free(copy);
+		return;
+	}
+
+	orphan->name = copy;
+	orphan->pid = pid;
+	orphan->start = start;
+	/* An entry without a deadline comes from an older binary (see env_take()). */
+	orphan->deadline = deadline > 0 ? deadline : FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S;
+
+	zlog(ZLOG_NOTICE, "[pool %s] supervisor: reload survivor pid %d belongs to no pool of this configuration; "
+		"it gets SIGTERM at its deadline (issue #889)", copy, (int) pid);
+
+	fpm_event_set_timer(&orphan->ev, 0, fpm_pool_supervisor_orphan_poll, orphan);
+	fpm_event_add(&orphan->ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS);
+}
+/* }}} */
+
+/* Issue #889: called by fpm_run() in the master, after every pool has run its
+ * init_main() and the initial children are forked. An entry that is still in
+ * FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV was not taken by a pool of this generation,
+ * so it belongs to a pool that this configuration does not run. The entries
+ * are only read here: each one is removed when its orphan poll fires. */
+void fpm_pool_supervisor_reload_orphans_arm(void) /* {{{ */
+{
+	const char *existing = getenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+	char *copy, *rest;
+
+	if (!existing || !*existing) {
+		return;
+	}
+
+	copy = strdup(existing);
+	if (!copy) {
+		return;
+	}
+
+	rest = copy;
+	while (rest && *rest) {
+		char *comma = strchr(rest, ',');
+		char *pair = rest;
+		char *colon, *end = NULL;
+		pid_t pid;
+		time_t deadline = 0;
+		unsigned long long start = 0;
+
+		if (comma) {
+			*comma = '\0';
+			rest = comma + 1;
+		} else {
+			rest = NULL;
+		}
+
+		colon = strchr(pair, ':');
+		if (!colon || colon == pair) {
+			continue;
+		}
+
+		pid = (pid_t) strtol(colon + 1, &end, 10);
+		if (end && *end == ':') {
+			char *dend = NULL;
+
+			deadline = (time_t) strtoll(end + 1, &dend, 10);
+			if (dend && *dend == ':') {
+				start = strtoull(dend + 1, NULL, 10);
+			}
+		}
+		fpm_pool_supervisor_orphan_arm(pair, (size_t) (colon - pair), pid, deadline, start);
+	}
+
+	free(copy);
+}
+/* }}} */
+
 static void fpm_pool_supervisor_exit_main(int which, void *arg) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *e;

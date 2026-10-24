@@ -559,6 +559,32 @@ delimiter schemes specifically so that a config with both an unchanged
 pool and a separately-changed `supervisor` pool in the same reload cannot
 have one mechanism misparse the other's env var contents.
 
+**A new master that fails before a pool takes a #329 survivor (issue #831).**
+Until a pool takes the survivor, `FPMNG_RELOAD_SURVIVORS` lists it, and no
+master tracks it. If the new master gives up before that, the survivor has no
+bound. `fpm_pool_supervisor_reload_survivors_discard_unadopted()`
+(`sapi/fpmng/fpm/fpm_pool_supervisor.c`) sends `SIGTERM` to each listed
+survivor. It runs on these paths: `fpm_init()` failing, `fpm_pctl_exit()`, and a
+failed `execvp()` whose retry through `/proc/self/exe` fails too (issue #925).
+The survivor's own watchdog then ends it after the pool's
+`supervisor.stop_timeout`.
+
+The call does not run on the success path. There, `fpm_pool_supervisor_reload_orphans_arm()`
+arms the entries that no pool takes, at their deadline (issue #889). The `-t`
+child of the configuration check inherits the variable. Its `fpm_init()` skips
+the call (`!test_conf`), so the check does not signal the survivors of the
+running master.
+
+A normal stop has a side effect. `fpm_pctl_exit()` also sends `SIGTERM` to a
+survivor of a removed pool (issue #889) that waits for its deadline. Before
+issue #831, that survivor ran until the deadline.
+
+The window of issue #690 remains open for a #329 survivor. A `SIGTERM` or
+`SIGQUIT` to the old master between the spare and the `execvp()` leaves the
+spared copy without a master, because the carry hook writes the variable only
+at the `execvp()`. A new master that is killed outright (`SIGKILL` or a crash)
+cannot run this code (issue #829).
+
 ### Back-to-back selective reloads (issue #692)
 
 This section covers a #329 survivor that still runs when a second selective
@@ -699,8 +725,10 @@ survivor then writes only to the old region, and no new pool can share it.
    survivor still writes there.
 2. A survivor of a removed pool has no master backstop. If its watchdog cannot
    start, for example because `fork()` fails, no process sends `SIGKILL`, and the
-   survivor has no bound. A master that exits before the deadline also leaves the
-   survivor with no bound. A reload before the deadline does not lose the
+   survivor has no bound. A master that is killed (`SIGKILL` or a crash) before the
+   deadline also leaves the survivor with no bound. A master that stops or fails
+   through its own exit path sends `SIGTERM` instead (issue #831). A reload before
+   the deadline does not lose the
    survivor: the next master arms it again with the same deadline. The new master
    cannot add a backstop with the right delay, because it does not know the
    `supervisor.stop_timeout` of the removed pool. The slot range stays reserved
@@ -738,6 +766,12 @@ runs 5 seconds after the reload, and that the master sends `SIGTERM` about 30
 seconds after the reload. The log stamps have whole seconds, so the test checks
 that the gap between the two log lines is 29 to 31 seconds. The test then checks
 that the survivor ends after its watchdog.
+
+The test `fpmng-reload-survivor-init-fails.phpt` runs a supervisor pool with two
+copies. The reload moves an http-direct pool to an address that the test holds,
+so the new master fails in `fpm_sockets_init_main()`, before any pool takes the
+survivor. The test checks that the spared copy ends after the master exits, and
+that the master logs a WARNING that names issue #831.
 
 ### Accepted degradations of an adopted child
 

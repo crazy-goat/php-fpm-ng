@@ -60,3 +60,4 @@ apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the ga
 # (build/package-deb.sh and build/package-apk.sh refuse it), so this test skips in every cell.
 # ci-package-gate.sh passes no FPMNG_FAULT_INJECT to the build; see its SKIPIF (#832).
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-failed-init-main     package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#832)
+deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-survivor-watchdog-fork-fails   package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#890)

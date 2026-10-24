@@ -87,6 +87,7 @@ that this section and the links to it stay in place.
 | `docker/`, `.github/docker/` | Dockerfiles (minimal package image, package-gate images) |
 | `packaging/` | `.deb` and `.apk` configuration and service files |
 | `examples/` | Runnable examples (each has its own Dockerfile or compose file) |
+| `tests/fuzz/` | libFuzzer harnesses (`fuzz_*.c`), seed corpora (`seeds/`) and stubs; run by `build/fuzz.sh` |
 | `tests/frameworks/` | Slim 4 smoke test on `gateway`+`fastcgi` and `http-direct` classic (fiber probes: `async/tests/frameworks/` on branch `async`) |
 | `docs/` | Design notes, spike reports, process docs |
 | `docs/guides/` | User-facing guides (getting started, migrations, framework recipes); their `ini verify` blocks are checked by `build/test-doc-configs.sh` |
@@ -133,7 +134,24 @@ FPMNG="$PWD/out/php-fpm-ng" PHP="$(php-config8.5 --php-binary)" tests/frameworks
 
 # Shell scenarios against the built binary (see .github/workflows/build-matrix.yml)
 ./build/test-http-tls-reload.sh "$PWD/out/php-fpm-ng"
+
+# Fuzz: libFuzzer harnesses for the HTTP, FastCGI and WebSocket parsers (tests/fuzz/).
+# Builds every harness with clang -fsanitize=fuzzer,address,undefined and runs each for N seconds.
+# -t 0 builds only. Needs clang and libclang-rt-dev, and the SDK of ci-install-deps.sh test.
+# Build files, corpus and crash reproducers go to -o, or $FUZZ_OUT, or ./out-fuzz (not in git).
+./build/fuzz.sh                       # every harness, 10 s each
+./build/fuzz.sh -t 600 http_client    # one harness, 10 minutes
+./build/fuzz.sh -r -t 60              # run only, with the binaries already built
+./build/fuzz.sh -q -t 60              # CI mode: output to outdir/logs, only failures printed
 ```
+
+CI job `fuzz` runs every harness for 60 seconds on a pull request that touches the fuzzed
+code (`sapi/fpmng/`, `ext/fpmng_metrics/`, `third_party/php-src/main/fastcgi.*`, `tests/fuzz/`,
+`build/fuzz.sh`, `build/standalone-tree.sh`). The job runs `fuzz.sh -q`: it prints no harness
+output, so a crash shows only the harness name and the exit code. A crash writes a reproducer
+under `out-fuzz/artifacts/<name>/`; reproduce it locally with `./build/fuzz.sh <name>`. Triage it
+before anything is public: the reproducer and the stack stay out of commits, PRs, issues, the
+CHANGELOG and CI logs.
 
 On macOS use the retained from-source flow (`build/prepare.sh`), or run the Linux commands in
 an `ubuntu:26.04` container after `build/ci-install-deps.sh build` (needs root). php-fpm

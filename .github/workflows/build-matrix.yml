@@ -765,6 +765,66 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./build/ci-cancel-run.sh
 
+  # Issue #995: libFuzzer harnesses for the HTTP, FastCGI and WebSocket parsers
+  # (tests/fuzz/, build/fuzz.sh). Each harness runs for 60 seconds, and only when
+  # the change touches what the harnesses compile. The check is per pull request,
+  # not nightly, because a parser regression should fail the pull request that
+  # caused it. A change outside those paths reports success with its steps
+  # skipped, so this job never costs a run that cannot affect it.
+  #
+  # The job log is public for this repository, so the job prints no harness
+  # output: fuzz.sh -q writes it to a file that no step uploads. On a crash the
+  # log shows only the harness name, the exit code and the local reproduce command.
+  fuzz:
+    name: fuzz
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:26.04
+    permissions:
+      contents: read
+      actions: write
+    steps:
+      - name: git for actions/checkout
+        shell: bash
+        run: apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v7
+      - name: do the changed files reach the fuzzed code? (issue #995)
+        id: scope
+        shell: bash
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # The paths the harnesses compile or build: the parsers in the FastCGI
+          # SAPI, the FastCGI record parser, the harnesses, and their build script.
+          fuzzed='tests/fuzz build/fuzz.sh build/standalone-tree.sh sapi/fpmng ext/fpmng_metrics third_party/php-src/main/fastcgi.c third_party/php-src/main/fastcgi.h'
+          touched=true
+          # An unknown base (a new branch, or a base commit that is gone) runs the fuzzers.
+          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null; then
+            # shellcheck disable=SC2086
+            if git diff --quiet "$BASE" HEAD -- $fuzzed; then
+              touched=false
+            fi
+          fi
+          echo "touched=$touched" >> "$GITHUB_OUTPUT"
+          echo "fuzzers run: $touched"
+      - name: install the PHP 8.5 SDK and the toolchain (issue #995)
+        if: steps.scope.outputs.touched == 'true'
+        shell: bash
+        env:
+          FPMNG_CI_EXTRA_PACKAGES: clang libclang-rt-dev
+        run: ./build/ci-install-deps.sh test
+      - name: build and run every harness for 60 seconds (issue #995)
+        if: steps.scope.outputs.touched == 'true'
+        run: ./build/fuzz.sh -q -t 60 -o /tmp/fpmng-fuzz
+      - name: fail fast -- cancel the rest of the run (issue #209)
+        if: failure() && steps.scope.outputs.touched == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./build/ci-cancel-run.sh
+
   # The one required check. Docs-only changes skip the heavy jobs, which report
   # "skipped"; a code change needs every job green. The verdict is
   # build/ci-ok-check.sh, which fails closed: `changes` and `docs` must be
@@ -773,7 +833,7 @@ jobs:
   # into the call too: build/test-ci-ok-check.sh compares the two.
   ci-ok:
     name: ci-ok
-    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples, frameworks, doc-configs]
+    needs: [changes, docs, lint, checks, build, fpmng-phpt, integration, gateway-privileges, examples, frameworks, doc-configs, fuzz]
     if: always()
     runs-on: ubuntu-latest
     defaults:
@@ -796,4 +856,5 @@ jobs:
             gateway-privileges=${{ needs.gateway-privileges.result }} \
             examples=${{ needs.examples.result }} \
             frameworks=${{ needs.frameworks.result }} \
-            doc-configs=${{ needs.doc-configs.result }}
+            doc-configs=${{ needs.doc-configs.result }} \
+            fuzz=${{ needs.fuzz.result }}

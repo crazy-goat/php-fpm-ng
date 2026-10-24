@@ -466,8 +466,10 @@ forever.
   tracks the survivor and sends `SIGTERM` at the deadline (issue #889). It does
   not send the pool's `supervisor.stop_signal`, because the pool is gone from
   the configuration. The survivor's own watchdog ends it after the old
-  `supervisor.stop_timeout`. There is no master backstop for this case. The
-  limits are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)".
+  `supervisor.stop_timeout`. There is no master backstop for this case. A new
+  master that fails before a pool takes the survivor sends `SIGTERM` at once, not
+  at the deadline (issue #831). The limits are in `docs/reload.md`, "Back-to-back
+  selective reloads (issue #692)".
 - **Selective reload** — skipping *unrelated* pools entirely on a reload that
   only changed one of them — is issue #330's scope, not this one's. This
   issue is useful on its own even without it, per the original request: it

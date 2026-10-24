@@ -83,4 +83,10 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp);
  * fpm_pool_supervisor.c. */
 void fpm_pool_supervisor_reload_orphans_arm(void);
 
+/* Issue #831: called by the master on its failure paths (fpm_init(), the
+ * master's exit, a failed execvp()). SIGTERMs each reload survivor that no
+ * pool has taken yet, and unsets the variable. See the function's comment in
+ * fpm_pool_supervisor.c. */
+void fpm_pool_supervisor_reload_survivors_discard_unadopted(void);
+
 #endif

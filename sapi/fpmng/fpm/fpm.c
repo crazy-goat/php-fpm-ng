@@ -102,6 +102,12 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 		} else {
 			zlog(ZLOG_ERROR, "FPM initialization failed");
 			fpm_reload_selective_discard_unadopted();
+			/* Issue #831: a `-t` child (fpm_reload_config_check.c) inherits the
+			 * environment of the running master, and its entries may belong to
+			 * that master's orphans (#889). Only the new master may drain them. */
+			if (!test_conf) {
+				fpm_pool_supervisor_reload_survivors_discard_unadopted();
+			}
 			return FPM_INIT_ERROR;
 		}
 	}
@@ -109,6 +115,7 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	if (0 > fpm_conf_write_pid()) {
 		zlog(ZLOG_ERROR, "FPM initialization failed");
 		fpm_reload_selective_discard_unadopted();
+		fpm_pool_supervisor_reload_survivors_discard_unadopted();
 		return FPM_INIT_ERROR;
 	}
 

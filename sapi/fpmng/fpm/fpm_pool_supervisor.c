@@ -1201,6 +1201,76 @@ void fpm_pool_supervisor_reload_orphans_arm(void) /* {{{ */
 }
 /* }}} */
 
+/* Issue #831: the #329 counterpart of fpm_reload_selective_discard_unadopted()
+ * (issue #690). Called on the master's failure paths: fpm_init() failing, the
+ * master's exit (fpm_pctl_exit()) and a failed execvp(). Until a pool's
+ * init_main() takes an entry, no generation tracks it, so a master that gives
+ * up there left the survivor running with no bound. An entry that a pool took
+ * is no longer in the variable and is not touched here. SIGTERM, as in #690 and
+ * #889: the survivor's own watchdog then ends it after the supervisor.stop_timeout
+ * it was started with. On the reload's success path this is not called:
+ * fpm_pool_supervisor_reload_orphans_arm() arms the leftover entries instead, at
+ * their deadline. The pid > 1 guard is issue #567, the start time is #891. */
+void fpm_pool_supervisor_reload_survivors_discard_unadopted(void) /* {{{ */
+{
+	const char *existing = getenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+	char *copy, *rest;
+
+	if (!existing || !*existing) {
+		return;
+	}
+
+	copy = strdup(existing);
+	/* Drop the variable first, as the selective discard does: no later code in
+	 * this process may read these pids again. */
+	unsetenv(FPM_SUPERVISOR_RELOAD_SURVIVOR_ENV);
+	if (!copy) {
+		return;
+	}
+
+	rest = copy;
+	while (rest && *rest) {
+		char *comma = strchr(rest, ',');
+		char *pair = rest;
+		char *colon, *end = NULL;
+		pid_t pid;
+		unsigned long long start = 0;
+
+		if (comma) {
+			*comma = '\0';
+			rest = comma + 1;
+		} else {
+			rest = NULL;
+		}
+
+		colon = strchr(pair, ':');
+		if (!colon || colon == pair) {
+			continue;
+		}
+		*colon = '\0';
+
+		pid = (pid_t) strtol(colon + 1, &end, 10);
+		if (end && *end == ':') {
+			char *dend = NULL;
+
+			(void) strtoll(end + 1, &dend, 10);
+			if (dend && *dend == ':') {
+				start = strtoull(dend + 1, NULL, 10);
+			}
+		}
+
+		if (pid > 1 && fpm_pid_is_same(pid, start)) {
+			zlog(ZLOG_WARNING, "[pool %s] supervisor: this master gives up before a pool adopts reload "
+				"survivor pid %d; sending it SIGTERM so it does not outlive the master (issue #831)",
+				pair, (int) pid);
+			kill(pid, SIGTERM);
+		}
+	}
+
+	free(copy);
+}
+/* }}} */
+
 static void fpm_pool_supervisor_exit_main(int which, void *arg) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *e;

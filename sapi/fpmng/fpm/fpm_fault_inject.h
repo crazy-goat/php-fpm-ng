@@ -25,8 +25,12 @@
    `ifenv=` are read once, by a constructor before main(), into a fixed table
    (16 points, names under 64 characters; an entry that does not fit is
    dropped). Later changes of the environment have no effect. A point that is hit
-   fires every time; the call sites so far sit at most once per pool in the
-   master, and the first failure ends the process.
+   fires every time, and the call sites differ in how often they run.
+   pool_type_init_main runs at most once per pool, in the master, and its first
+   failure ends the process. pool_watchdog_fork runs in a child process (the
+   stop-signal handler of each supervisor copy, and the cron and
+   supervisor.max_runtime watchdogs). It can hit many times, and the process
+   does not end: the failed watchdog only loses its own bound.
 
    Point names used so far:
      pool_type_init_main   fpm_run(): type->init_main() of a pool fails

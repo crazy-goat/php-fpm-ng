@@ -684,9 +684,10 @@ survivor then writes only to the old region, and no new pool can share it.
 1. The master backstop (issue #890) ends a survivor whose watchdog did not
    start. Two cases remain open. First, a reload that starts between the stop
    signal and the backstop drops the timer. The next master retires the survivor
-   again and arms a new backstop, so the kill can come later than the bound. Second, a master that exits before the backstop fires leaves the
-   survivor with no bound. In both cases the slot can be taken after the expiry
-   while the survivor still writes there.
+   again and arms a new backstop, so the kill can come later than the bound.
+   Second, a master that exits before the backstop fires leaves the survivor
+   with no bound. In both cases the slot can be taken after the expiry while the
+   survivor still writes there.
 2. A survivor of a pool that the new configuration removes has no master that
    tracks it. No master sends it the stop signal, so it ends only when its own
    script ends. Its slot range is reserved only until the expiry. After that, a
@@ -713,7 +714,10 @@ retired before reload B. Then the test checks only the slot.
 
 The test `fpmng-reload-survivor-watchdog-fork-fails.phpt` makes the survivor's
 watchdog `fork()` fail with `FPMNG_FAULT=pool_watchdog_fork`. It checks that the
-master backstop SIGKILLs the survivor and logs one WARNING.
+master backstop SIGKILLs the survivor and logs one WARNING. The log stamps have
+whole seconds, so the test checks that the WARNING comes 3 or 4 seconds after
+the retirement line. The test sets `supervisor.stop_timeout` to 2, so the gap is
+`stop_timeout + 1` or `stop_timeout + 2`.
 
 ### Accepted degradations of an adopted child
 

@@ -980,7 +980,9 @@ static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *
 
 	fpm_event_set_timer(&surv->poll_ev, FPM_EV_PERSIST, fpm_pool_supervisor_reload_survivor_poll, surv);
 	fpm_event_add(&surv->poll_ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS);
-	/* Set here, added by retire(): the exit callback deletes it either way. */
+	/* Initialised here. retire() queues it. It stays queued until it fires,
+	 * even if the survivor exits first, because the exit callback must not
+	 * delete it (issue #890): the backstop frees a reaped survivor. */
 	fpm_event_set_timer(&surv->kill_ev, 0, fpm_pool_supervisor_reload_survivor_backstop, surv);
 
 	zlog(ZLOG_NOTICE, "[pool %s] supervisor: reload survivor pid %d is still running the previous "

@@ -19,7 +19,8 @@ require_once "tester.inc";
  *
  * The master backstop (fpm_pool_supervisor_reload_survivor_backstop()) must
  * SIGKILL the survivor stop_timeout + 1 s after the stop signal, and log one
- * WARNING that says so. The test checks that WARNING, and that the pid is gone.
+ * WARNING that says so. The test checks that WARNING, the time from the
+ * retirement line to the WARNING, and that the pid is gone.
  *
  * FPMNG_FAULT is set for the whole run, not for one master. The survivor was
  * forked by the first master, so its environment has no
@@ -29,7 +30,10 @@ require_once "tester.inc";
  *
  * Mutation: delete the fpm_event_add() of the backstop in
  * fpm_pool_supervisor_reload_survivor_retire(). The survivor then lives on, and
- * the WARNING is never logged. */
+ * the WARNING is never logged. A backstop with the wrong delay (for example
+ * GRACE alone, without stop_timeout) fires too early or too late, and the gap
+ * check fails. */
+$stopTimeout = 2;
 $root = sys_get_temp_dir() . '/fpmng-surv-wdfork-' . getmypid();
 @mkdir($root, 0700, true);
 $alive = "$root/alive.log";
@@ -57,10 +61,12 @@ for (;;) {
 }
 PHP);
 
-/* supervisor.stop_timeout = 1 is the minimum: the backstop fires 2 s after the
- * stop signal, and the test waits for that. process_control_timeout = 2 lets
+/* supervisor.stop_timeout = 2: the backstop fires 3 s after the stop signal, and
+ * the test waits for that. With 1, the expected gap (2 s) and a backstop armed
+ * without stop_timeout (1 s) would both fit the whole-second log stamps, so the
+ * gap check could not reliably tell them apart. process_control_timeout = 2 lets
  * the master SIGKILL the copies at shutdown, because their watchdogs fail too. */
-$config = function (int $processes) use ($root) {
+$config = function (int $processes) use ($root, $stopTimeout) {
     return <<<EOT
 [global]
 error_log = {{FILE:LOG}}
@@ -74,7 +80,7 @@ supervisor.script = $root/s.php
 supervisor.processes = $processes
 supervisor.restart = always
 supervisor.restart_delay = 1
-supervisor.stop_timeout = 1
+supervisor.stop_timeout = {$stopTimeout}
 EOT;
 };
 
@@ -95,6 +101,16 @@ function waitForLog(string $file, string $needle, int $seconds): bool
         usleep(100000);
     }
     return false;
+}
+
+/* At notice level zlog prints "[dd-Mon-yyyy hh:mm:ss] LEVEL: message", with
+ * whole seconds. Returns the stamp of the first line that contains $needle. */
+function logTime(string $log, string $needle): int
+{
+    $pattern = '/^\[(\d\d-[A-Za-z]{3}-\d{4} \d\d:\d\d:\d\d)\] [A-Z]+: [^\n]*'
+        . preg_quote($needle, '/') . '/m';
+    check(preg_match($pattern, $log, $m) === 1, "the log has no line with: $needle");
+    return DateTimeImmutable::createFromFormat('d-M-Y H:i:s', $m[1])->getTimestamp();
 }
 
 /* A zombie counts as gone: the survivor is a child of the test's master, and
@@ -125,8 +141,10 @@ $tester = new FPM\Tester($config(3), '<?php');
 $survivor = 0;
 try {
     @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
+    /* The gap check needs the real clock, so the debug clock rate is pinned to 1. */
     $tester->start([], false, false, [], [], array_merge(getenv(), [
         'FPMNG_FAULT' => 'pool_watchdog_fork',
+        'FPMNG_DEBUG_CLOCK_RATE' => '1',
     ]));
     $tester->switchLogSource('{{FILE:LOG}}');
     $tester->expectLogStartNotices();
@@ -157,16 +175,27 @@ try {
     echo "survivor retired: ok\n";
 
     /* The survivor's watchdog never started, so only the backstop can end it. */
-    check(waitForLog($logFile, "reload survivor pid $survivor is still running 2 s after its stop signal; "
-        . "its watchdog did not end it, so sending SIGKILL (issue #890)", 20),
+    $warning = "reload survivor pid $survivor is still running "
+        . ($stopTimeout + 1) . " s after its stop signal; "
+        . "its watchdog did not end it, so sending SIGKILL (issue #890)";
+    check(waitForLog($logFile, $warning, 20),
         'the master did not SIGKILL the survivor after stop_timeout + 1 s');
     check(wait_gone($survivor, 10), "the survivor $survivor is still alive after the master's SIGKILL");
     echo "survivor SIGKILLed by the master: ok\n";
 
     $log = (string) @file_get_contents($logFile);
-    check(substr_count($log, "reload survivor pid $survivor is still running 2 s") === 1,
-        'the backstop WARNING is not logged exactly once');
+    check(substr_count($log, $warning) === 1, 'the backstop WARNING is not logged exactly once');
     echo "warning logged once: ok\n";
+
+    /* The stamps have whole seconds. The backstop fires stop_timeout + 1 s after
+     * the retirement, so the stamps differ by stop_timeout + 1 or stop_timeout + 2.
+     * An early backstop gives a smaller difference, and a late one a larger. */
+    $retiredAt = logTime($log, "retiring reload survivor pid $survivor "
+        . "(replacement confirmed running)");
+    $gap = logTime($log, $warning) - $retiredAt;
+    check($gap >= $stopTimeout + 1 && $gap <= $stopTimeout + 2,
+        "the backstop fired $gap s after the retirement, not stop_timeout + 1 s");
+    echo "backstop timing: ok\n";
 
     echo "Done\n";
 } finally {
@@ -185,6 +214,7 @@ try {
 survivor retired: ok
 survivor SIGKILLed by the master: ok
 warning logged once: ok
+backstop timing: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

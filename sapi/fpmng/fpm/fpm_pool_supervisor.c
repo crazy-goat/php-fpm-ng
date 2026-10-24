@@ -318,6 +318,8 @@ struct fpm_supervisor_reload_survivor_s {
 	struct fpm_supervisor_shared_s *new_shared;	/* this generation's shared struct */
 	struct fpm_event_s poll_ev;
 	struct fpm_event_s kill_ev;			/* issue #890: one-shot backstop, armed by retire() */
+	int kill_armed;					/* issue #890: kill_ev is queued */
+	int reaped;					/* issue #890: exited while kill_ev was queued; the backstop frees surv */
 	time_t deadline;				/* epoch; retire unconditionally past this */
 	unsigned long long start;			/* issue #891: start time of the pid, 0 = not recorded */
 };
@@ -773,7 +775,7 @@ void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp) /* {{{
 }
 /* }}} */
 
-static void fpm_pool_supervisor_reload_survivor_free(struct fpm_supervisor_reload_survivor_s *surv) /* {{{ */
+static void fpm_pool_supervisor_reload_survivor_unregister(struct fpm_supervisor_reload_survivor_s *surv) /* {{{ */
 {
 	struct fpm_supervisor_registry_s *e;
 
@@ -783,7 +785,11 @@ static void fpm_pool_supervisor_reload_survivor_free(struct fpm_supervisor_reloa
 			break;
 		}
 	}
+}
+/* }}} */
 
+static void fpm_pool_supervisor_reload_survivor_free(struct fpm_supervisor_reload_survivor_s *surv) /* {{{ */
+{
 	surv->child->next = NULL;
 	fpm_children_free(surv->child);
 	free(surv);
@@ -796,18 +802,27 @@ static void fpm_pool_supervisor_reload_survivor_free(struct fpm_supervisor_reloa
  * recycling it, restart=never/on-failure parking it -- all of which apply to
  * it completely normally: it is an ordinary already-running supervisor child
  * that simply has not been signalled by THIS reload yet). Either way the pid
- * is gone and must not be signalled again -- fpm_event_del() first,
+ * is gone and must not be signalled again -- fpm_event_del(&poll_ev) first,
  * unconditionally, so a timer tick already queued cannot fire kill() against
- * a pid the OS may since have reused for something unrelated. */
+ * a pid the OS may since have reused for something unrelated. The backstop
+ * checks `reaped` before it signals (issue #890). */
 static void fpm_pool_supervisor_reload_survivor_exited(void *arg, pid_t pid, int status) /* {{{ */
 {
 	struct fpm_supervisor_reload_survivor_s *surv = arg;
 
 	(void) status;
 	fpm_event_del(&surv->poll_ev);
-	fpm_event_del(&surv->kill_ev);
 	zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d reaped",
 		surv->wp->config->name, (int) pid);
+	fpm_pool_supervisor_reload_survivor_unregister(surv);
+	if (surv->kill_armed) {
+		/* Issue #890: kill_ev is still queued. Deleting it here would free the
+		 * queue entry that fpm_event_loop() saved as its next element before it
+		 * ran this callback (a use-after-free, SIGBUS in fpm_event_loop()). The
+		 * backstop frees surv when it fires instead. */
+		surv->reaped = 1;
+		return;
+	}
 	fpm_pool_supervisor_reload_survivor_free(surv);
 }
 /* }}} */
@@ -829,13 +844,15 @@ static void fpm_pool_supervisor_reload_survivor_retire(struct fpm_supervisor_rel
 	kill(surv->child->pid, surv->wp->config->supervisor_stop_signal);
 	/* Issue #890: the survivor's watchdog is armed by its own signal handler,
 	 * and that fork() can fail. This timer is the bound that does not depend on
-	 * it. It is one-shot, and fpm_pool_supervisor_reload_survivor_exited()
-	 * removes it when the survivor is reaped first. */
+	 * it. It is one-shot. It is not deleted when the survivor is reaped first:
+	 * the backstop frees surv then (see the backstop below). */
 	fpm_event_add(&surv->kill_ev, (unsigned long) (surv->wp->config->supervisor_stop_timeout * 1000 +
 												   FPM_SUPERVISOR_RELOAD_SURVIVOR_BACKSTOP_GRACE_MS));
+	surv->kill_armed = 1;
 	/* Do not free surv/surv->child here -- the process has only been ASKED to
 	 * exit. fpm_children_bury() reaps the real exit later and calls
-	 * fpm_pool_supervisor_reload_survivor_exited() above, which frees it. */
+	 * fpm_pool_supervisor_reload_survivor_exited() above, which frees it, or
+	 * hands the free to the backstop while kill_ev is still queued. */
 }
 /* }}} */
 
@@ -844,7 +861,8 @@ static void fpm_pool_supervisor_reload_survivor_retire(struct fpm_supervisor_rel
  * stop signal, which means its watchdog did not end it. The pid is checked
  * with its start time, and a zombie is not signalled: under daemonize = yes
  * this master does not get SIGCHLD for the survivor, so a zombie can wait here
- * until its parent reaps it. */
+ * until its parent reaps it. A survivor that was already reaped is not
+ * signalled; this timer frees it, because the exit callback left that to it. */
 static void fpm_pool_supervisor_reload_survivor_backstop(struct fpm_event_s *ev, short which, void *arg) /* {{{ */
 {
 	struct fpm_supervisor_reload_survivor_s *surv = arg;
@@ -853,6 +871,12 @@ static void fpm_pool_supervisor_reload_survivor_backstop(struct fpm_event_s *ev,
 
 	(void) ev;
 	if (which != FPM_EV_TIMEOUT) {
+		return;
+	}
+
+	surv->kill_armed = 0;
+	if (surv->reaped) {
+		fpm_pool_supervisor_reload_survivor_free(surv);
 		return;
 	}
 

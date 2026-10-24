@@ -33,7 +33,7 @@ done
 want=$(awk -F '\t' '$1 ~ /^sapi\/fpm\/tests\/.*\.phpt$/' "$REPO/third_party/php-src/MANIFEST" | wc -l | tr -d ' ')
 got=$(cd "$T/sapi/fpmng/tests" && find . -maxdepth 1 -name '*.phpt' ! -name 'fpmng-*' | grep -c . || true)
 [ "$want" = "$got" ] || fail "tree has $got upstream .phpt files, the manifest lists $want"
-grep -qx 'upstream_tag=php-8.5.9' "$T/FIXTURES" || fail "FIXTURES does not name the pinned tag"
+grep -qx 'upstream_tag=php-8.5.12' "$T/FIXTURES" || fail "FIXTURES does not name the pinned tag"
 # What a prepared tree would hold and this one must not: any php-src source.
 for f in main Zend sapi/fpm TSRM configure.ac; do
   [ ! -e "$T/$f" ] || fail "assembled tree contains $f"
@@ -106,7 +106,7 @@ for runner in run-fpmng-phpt.sh run-fpm-phpt.sh; do
     || fail "$runner: metadata.txt does not record what the harness resolved: $(cat "$WORK/res/metadata.txt")"
   # the || branch is a failure report; fail does not run on the success path of grep.
   # shellcheck disable=SC2015
-  grep -q '^fixtures_begin$' "$WORK/res/metadata.txt" && grep -q '^upstream_tag=php-8.5.9$' "$WORK/res/metadata.txt" \
+  grep -q '^fixtures_begin$' "$WORK/res/metadata.txt" && grep -q '^upstream_tag=php-8.5.12$' "$WORK/res/metadata.txt" \
     || fail "$runner: metadata.txt does not record the fixture provenance"
   echo "ok: $runner refuses a harness that would start another FPM and records the resolved binary"
 done

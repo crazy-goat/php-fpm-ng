@@ -26,8 +26,8 @@ other php-src `main/` header can reach the compiler this way, so every
 | | |
 |---|---|
 | Upstream | https://github.com/php/php-src |
-| Tag | `php-8.5.9` |
-| Commit | `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36` |
+| Tag | `php-8.5.12` |
+| Commit | `136e049ac10b032c83018e65b63b6df858943750` |
 | Files | 207 (see `MANIFEST`): 57 for the build, 150 test fixtures |
 
 `MANIFEST` lists every file, one per line, with three tab-separated columns:
@@ -49,9 +49,9 @@ One file is stored under a different name, with its content unchanged:
 
 The pin is independent of the SDK version, and that is deliberate. The
 vendored FPM files compile against the SDK's headers, and PHP keeps the
-engine API stable within a minor. Measured on 2026-10-01: these 8.5.9 files
-built against the Ubuntu 26.04 SDK (8.5.4) and the Alpine edge SDK (8.5.10).
-The pin moves when a patch release changes one of these files, not with every
+engine API stable within a minor. Measured on 2026-10-24: these 8.5.12 files
+built against the Ubuntu 26.04 SDK (8.5.4). The Alpine edge SDK was not
+measured for 8.5.12. The pin moves when a patch release changes one of these files, not with every
 release.
 
 ## Licenses

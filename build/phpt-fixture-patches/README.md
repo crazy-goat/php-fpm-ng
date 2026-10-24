@@ -17,5 +17,6 @@ on a tree from `build/prepare.sh`.
 
 The patches are written against the layout of the assembled tree (`a/sapi/fpmng/tests/tester.inc`, `a/run-tests.php`) and applied with `patch -p1`.
 
-The patches are made against `php-8.5.9`. A new pin that changes the patched
-lines makes `build/phpt-parallel.sh` fail loudly; rebase the patch then.
+The patches were made against `php-8.5.9`. They apply to `php-8.5.12` with line
+offsets only. A new pin that changes the patched lines makes
+`build/phpt-parallel.sh` fail loudly; rebase the patch then.

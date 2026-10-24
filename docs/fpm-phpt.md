@@ -17,7 +17,7 @@ see [Deliberate deviations](#deliberate-deviations).
 
 Issue #423. The runner needs `run-tests.php`, upstream's FPM test harness and
 the retained upstream `.phpt` files, and `third_party/php-src/` holds exactly
-those at the pinned tag (`php-8.5.9`, listed with hashes and licenses in its
+those at the pinned tag (`php-8.5.12`, listed with hashes and licenses in its
 `MANIFEST` and `README.md`). Give `-` in place of the source tree and the
 runner assembles the tree it runs in from this repository
 (`build/phpt-tree.sh`):

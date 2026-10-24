@@ -19,10 +19,12 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Changed
 
+- `docker/Dockerfile` pins php-fpm-ng v0.17.0 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.13.0 (issue #992; the other example Dockerfiles are still pinned, see #719).
 - `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.
 
 ### Fixed
 
+- Docs: `docs/install.md` has a section on engine security fixes (issue #992). They come from the distribution's `libphp8.5-embed` (or `php85-embed`), not from a php-fpm-ng release, so the section gives the update steps for Debian and Ubuntu, Alpine and the Docker image, and names the advisory for PHP 8.5.12 (CVE-2026-109618, CVE-2026-109619). `README.md` points to it. `php-fpm-ng -v` already prints the PHP version of the loaded libphp, so it needed no change. No code change.
 - Docs: the `fpm_http.c:N` citations in the http-direct comments, the `access.log` test comment and `fpm_http_fcgi.c` now point at the current lines, with the function name next to each line number (issue #964). No code change.
 - Docs: `docs/reload.md` and the header of `sapi/fpmng/fpm/fpm_http_handoff.h` name the two inherited sockets that the new master leaves open, and the WARNING it logs for a listening socket not bound to the address in its record (issue #960). No code change.
 - CI: `ci-ok`, the one required check, fails closed (issue #781). In run 37365615843 the `changes` and `docs` jobs were cancelled in the queue, every heavy job was skipped, `code` was empty, and `ci-ok` still went green on a pull request nothing had built. The verdict is now `build/ci-ok-check.sh`: `changes` and `docs` must be `success`, `code` must be `true` or `false`, every result must be `success` or `skipped`, and `skipped` is accepted only on a docs-only change. `build/test-ci-ok-check.sh` (in the `checks` job) covers the cases and checks that the script gets the result of every job `ci-ok` needs.

@@ -115,6 +115,8 @@ inside `libphp` any more (issue #388 retired the last one, `pool.type = http`),
 so the packages run everything this tree ships. Commands, the supported matrix
 and what happens on a version mismatch: [`docs/install.md`](docs/install.md).
 
+An engine security fix reaches a host through an update of the distribution's `libphp8.5-embed` (or `php85-embed`), followed by a restart of php-fpm-ng. A php-fpm-ng release does not contain that fix. See [Engine security fixes](docs/install.md#engine-security-fixes).
+
 Each release carries **two** of each (#294): `php-fpm-ng`, which terminates no
 TLS, and `php-fpm-ng-tls`, the same commit built with `--enable-fpmng-tls
 --enable-fpmng-acme`. Both of those are beta by the table above, which is why

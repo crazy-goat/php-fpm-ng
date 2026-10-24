@@ -273,6 +273,40 @@ At runtime the binary checks again, and the two cases differ:
   The binary carries the struct layouts of the version it was built against, so
   continuing would corrupt memory rather than fail cleanly.
 
+## Engine security fixes
+
+The engine is not in the php-fpm-ng package. The binary runs on the distribution's `libphp`, which the package installs as a dependency. A fix for the engine therefore reaches a host through an update of that distribution package, not through a new php-fpm-ng release.
+
+PHP 8.5.12 fixes two critical remote code execution vulnerabilities, CVE-2026-109618 and CVE-2026-109619. The PHP project published the advisory on 2026-10-21 at <https://www.php.net/archive/2026.php>. The advisory also lists PHP-level measures for systems that cannot update at once. This page does not repeat them.
+
+The PHP project states that Linux distributions received the patches in advance. Whether a distribution package has the fix is a question for that distribution. A distribution can backport a fix and keep the upstream version number, so the PHP version alone does not show that the fix is installed. Read the security notice of your distribution. Check that it names both CVE IDs for your package version.
+
+### Debian and Ubuntu
+
+1. Run `sudo apt update`.
+2. Run `sudo apt install --only-upgrade libphp8.5-embed`. If apt reports that the package is already the newest version, the package index of the distribution has no newer version yet.
+3. Run `sudo systemctl restart php-fpm-ng`.
+4. Run `php-fpm-ng -v`. Read the PHP version on the first line.
+
+### Alpine
+
+1. Run `apk update`.
+2. Run `apk upgrade php85-embed`.
+3. Run `rc-service php-fpm-ng restart`.
+4. Run `php-fpm-ng -v`. Read the PHP version on the first line.
+
+`php-fpm-ng -v` prints the PHP version of the libphp that the command loads at that moment. A running master keeps the library that it loaded at its start, so restart the service after each update. If the loaded PHP patch version differs from the version the binary was built against, the master logs one notice at start. That notice is expected after an update; see [Version skew](#version-skew).
+
+### Docker image
+
+The image in `docker/` installs the distribution's `libphp` while it builds. A running container keeps the image that it started from.
+
+1. Run `docker build --pull --no-cache -t fpmng docker/`.
+2. Stop the running container.
+3. Start a new container from the new image, with the same options as before.
+
+`--pull` updates the `ubuntu:26.04` base image. `--no-cache` makes the build install the current `libphp8.5-embed`, because Docker otherwise reuses the cached apt layer.
+
 ## Building the package binary yourself
 
 The packages are built by `build/libphp-build.sh`. It needs this repository

@@ -148,10 +148,12 @@ FPMNG="$PWD/out/php-fpm-ng" PHP="$(php-config8.5 --php-binary)" tests/frameworks
 
 CI job `fuzz` runs every harness for 60 seconds on a pull request or a push to main that touches
 the fuzzed code (`sapi/fpmng/`, `ext/fpmng_metrics/`, `third_party/php-src/main/fastcgi.*`,
-`tests/fuzz/`, `build/fuzz.sh`, `build/standalone-tree.sh`). The job runs `fuzz.sh -q`: it prints
-no harness output. A failed harness prints its name, its exit code, the libFuzzer seed
-(`INFO: Seed: N`) and a hint to try a longer local run. The job keeps no reproducer: its container
-is discarded, and no step uploads the crash input. A CI crash may not repeat locally. The seed is a
+`third_party/php-src/sapi/fpm/fpm/`, `tests/fuzz/`, `build/fuzz.sh`, `build/standalone-tree.sh`).
+If the scope step cannot read git, it runs the harnesses and prints `fuzz scope: git failed, running
+the fuzzers`. The job runs `fuzz.sh -q`: it prints no harness output. A failed harness prints its
+name, its exit code, a kind (`crash`, `leak`, `timeout` or `oom`) when the log shows one, and the
+libFuzzer seed (`INFO: Seed: N`). A kind also gets a hint to try a longer local run. The job keeps
+no reproducer: its container is discarded, and no step uploads the crash input. A CI crash may not repeat locally. The seed is a
 hint only, so the remedy is a longer local run of that harness, for example
 `./build/fuzz.sh -t 600 <name>`, optionally with `-s N`. A seeded run uses its own corpus
 directory, `corpus/<name>-seed-N`, and starts from the committed seeds only, as the CI run did. The

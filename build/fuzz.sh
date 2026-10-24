@@ -4,7 +4,7 @@
 #   build/fuzz.sh [-t seconds] [-s seed] [-o outdir] [-r] [-q] [harness ...]
 #
 #   -t seconds  time for each harness, a whole number (default 10; 0 = build only)
-#   -s seed     libFuzzer seed, a whole number (default 0: libFuzzer picks one).
+#   -s seed     libFuzzer seed, 1 to 4294967295 (default: libFuzzer picks one).
 #               A hint only: a seeded run uses its own corpus, corpus/<name>-seed-N,
 #               and the same seed does not always give the same inputs
 #   -o outdir   build, corpus and crash output (default $REPO/out-fuzz, or
@@ -12,7 +12,8 @@
 #   -r          run only: skip the build, use the binaries already in outdir
 #   -q          quiet, for CI: the harness output goes to outdir/logs/<name>.log
 #               and is not printed. A failed run prints its name, its exit code,
-#               the libFuzzer seed, and a hint to try a longer local run.
+#               a kind (crash, leak, timeout or oom) when the log shows one, and
+#               the libFuzzer seed. A kind also gets a hint to try a longer run.
 #   harness     names without the fuzz_ prefix, for example http_client
 #               (default: every tests/fuzz/fuzz_*.c)
 #
@@ -45,6 +46,13 @@ bad_value() {
 	usage
 }
 
+# Exits with a usage error for a seed outside 1 to 4294967295. Zero is refused:
+# libFuzzer reads -seed=0 as "pick a random seed", so the run would not be seeded.
+bad_seed() {
+	echo "fuzz.sh: -s needs a seed from 1 to 4294967295, got '$1'" >&2
+	usage
+}
+
 # Succeeds for a decimal number from 0 to 4294967295 (the range of a libFuzzer
 # seed). The length check keeps the value inside what `[` can compare.
 whole_number() {
@@ -57,7 +65,7 @@ whole_number() {
 while getopts "t:s:o:rq" opt; do
 	case "$opt" in
 	t) whole_number "$OPTARG" || bad_value t "$OPTARG"; SECONDS_PER_HARNESS=$OPTARG ;;
-	s) whole_number "$OPTARG" || bad_value s "$OPTARG"; SEED=$OPTARG; SEED_SET=1 ;;
+	s) whole_number "$OPTARG" && [ "$OPTARG" -gt 0 ] || bad_seed "$OPTARG"; SEED=$OPTARG; SEED_SET=1 ;;
 	o) OUT=$OPTARG ;;
 	r) BUILD=0 ;;
 	q) QUIET=1 ;;
@@ -165,9 +173,24 @@ for name in $NAMES; do
 			-seed="$SEED" -max_total_time="$SECONDS_PER_HARNESS" -print_final_stats=1 -timeout=10 \
 			-artifact_prefix="$artifacts" >"$log" 2>&1 || rc=$?
 		if [ "$rc" -ne 0 ]; then
+			# The kind is one fixed word, chosen from the log. The log text is not printed.
+			kind=
+			if grep -q -E 'deadly signal|ERROR: AddressSanitizer|runtime error:' "$log"; then
+				kind=crash
+			elif grep -q 'LeakSanitizer' "$log"; then
+				kind=leak
+			elif grep -q 'libFuzzer: timeout after' "$log"; then
+				kind=timeout
+			elif grep -q 'libFuzzer: out-of-memory' "$log"; then
+				kind=oom
+			fi
 			# The seed line holds no input bytes, so it is safe in a public log.
 			seed=$(sed -n 's/^INFO: Seed: \([0-9][0-9]*\)$/\1/p' "$log" | head -n 1)
-			echo "fuzz_$name exit $rc: crash found. A local run may not repeat it: try build/fuzz.sh -t 600 $name, optionally with -s ${seed:-N}"
+			if [ -n "$kind" ]; then
+				echo "fuzz_$name exit $rc: $kind found. A local run may not repeat it: try build/fuzz.sh -t 600 $name, optionally with -s ${seed:-N}"
+			else
+				echo "fuzz_$name exit $rc: failed"
+			fi
 			echo "INFO: Seed: ${seed:-unknown}"
 			status=1
 		fi

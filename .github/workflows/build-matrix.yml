@@ -770,14 +770,14 @@ jobs:
   # request or a push to main, and only when the change touches what the harnesses
   # compile. The check runs per change, not nightly, because a parser regression
   # should fail the change that caused it. A change outside those paths reports
-  # success with its steps skipped, so this job never costs a run that cannot
-  # affect it.
+  # success with its steps skipped. If the scope step cannot read git, it runs the
+  # fuzzers and prints a line that says so.
   #
   # The job log is public for this repository, so the job prints no harness
-  # output: fuzz.sh -q writes it to a file that no step uploads. On a crash the
-  # log shows the harness name, the exit code, the libFuzzer seed and a hint to
-  # try a longer local run. A CI crash may not repeat locally: the seed is a hint
-  # only.
+  # output: fuzz.sh -q writes it to a file that no step uploads. On a failure the
+  # log shows the harness name, the exit code, a kind (crash, leak, timeout or oom)
+  # when the log names one, and the libFuzzer seed. A CI crash may not repeat
+  # locally: the seed is a hint only, so a longer local run is the remedy.
   fuzz:
     name: fuzz
     needs: changes
@@ -800,15 +800,28 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: |
           # The paths the harnesses compile or build: the parsers in the FastCGI
-          # SAPI, the FastCGI record parser, the harnesses, and their build script.
-          fuzzed='tests/fuzz build/fuzz.sh build/standalone-tree.sh sapi/fpmng ext/fpmng_metrics third_party/php-src/main/fastcgi.c third_party/php-src/main/fastcgi.h'
+          # SAPI, the php-src FastCGI and FPM sources, the harnesses, and their build
+          # scripts.
+          fuzzed='tests/fuzz build/fuzz.sh build/standalone-tree.sh sapi/fpmng ext/fpmng_metrics third_party/php-src/main/fastcgi.c third_party/php-src/main/fastcgi.h third_party/php-src/sapi/fpm/fpm'
+          # The job runs git as root in a container, and the checkout belongs to
+          # another uid, so git needs this entry before it reads the repository.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
           touched=true
-          # An unknown base (a new branch, or a base commit that is gone) runs the fuzzers.
-          if [ -n "$BASE" ] && git fetch --no-tags --depth=1 origin "$BASE" 2>/dev/null; then
+          # An unknown base (no base commit, a new branch, or a base commit that is
+          # gone) runs the fuzzers. A git error runs them too, and the log says so.
+          if [ -z "$BASE" ]; then
+            echo "fuzz scope: no base commit, running the fuzzers"
+          elif ! git fetch --no-tags --depth=1 origin "$BASE"; then
+            echo "fuzz scope: git failed, running the fuzzers"
+          else
+            rc=0
             # shellcheck disable=SC2086
-            if git diff --quiet "$BASE" HEAD -- $fuzzed; then
-              touched=false
-            fi
+            git diff --quiet "$BASE" HEAD -- $fuzzed || rc=$?
+            case "$rc" in
+            0) touched=false ;;
+            1) ;;
+            *) echo "fuzz scope: git failed, running the fuzzers" ;;
+            esac
           fi
           echo "touched=$touched" >> "$GITHUB_OUTPUT"
           echo "fuzzers run: $touched"

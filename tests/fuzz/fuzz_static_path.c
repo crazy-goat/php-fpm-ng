@@ -51,7 +51,9 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	memcpy(raw, data, size);
 	raw[size] = '\0';
 
-	fuzz_uri = evhttp_uri_parse(raw);
+	/* libevent parses the request line with EVHTTP_URI_NONCONFORMANT (http.c),
+	 * so the harness parses the same way. */
+	fuzz_uri = evhttp_uri_parse_with_flags(raw, EVHTTP_URI_NONCONFORMANT);
 	path = fpm_http_static_decode_path(NULL, &len);
 	if (path) {
 		if (len != strlen(path)) {

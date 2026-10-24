@@ -775,8 +775,9 @@ jobs:
   #
   # The job log is public for this repository, so the job prints no harness
   # output: fuzz.sh -q writes it to a file that no step uploads. On a crash the
-  # log shows the harness name, the exit code, the libFuzzer seed and the local
-  # reproduce command.
+  # log shows the harness name, the exit code, the libFuzzer seed and a hint to
+  # try a longer local run. A CI crash may not repeat locally: the seed is a hint
+  # only.
   fuzz:
     name: fuzz
     needs: changes

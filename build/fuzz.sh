@@ -5,14 +5,14 @@
 #
 #   -t seconds  time for each harness, a whole number (default 10; 0 = build only)
 #   -s seed     libFuzzer seed, a whole number (default 0: libFuzzer picks one).
-#               A seeded run starts with an empty corpus, as the CI job does, so
-#               it repeats a CI run: use the seed and -t from a failure line
+#               A hint only: a seeded run uses its own corpus, corpus/<name>-seed-N,
+#               and the same seed does not always give the same inputs
 #   -o outdir   build, corpus and crash output (default $REPO/out-fuzz, or
 #               $FUZZ_OUT); keep it out of git
 #   -r          run only: skip the build, use the binaries already in outdir
 #   -q          quiet, for CI: the harness output goes to outdir/logs/<name>.log
 #               and is not printed. A failed run prints its name, its exit code,
-#               the libFuzzer seed and the local reproduce command.
+#               the libFuzzer seed, and a hint to try a longer local run.
 #   harness     names without the fuzz_ prefix, for example http_client
 #               (default: every tests/fuzz/fuzz_*.c)
 #
@@ -147,7 +147,10 @@ for name in $NAMES; do
 	corpus=$OUT/corpus/$name
 	artifacts=$OUT/artifacts/$name/
 	if [ "$SEED_SET" = 1 ]; then
-		# A seeded run repeats a CI run, which starts from the committed seeds only.
+		# A seeded run gets a corpus of its own, so the main corpus is never
+		# deleted. That directory is reset on each seeded run, and the run starts
+		# from the committed seeds only, as a CI run does.
+		corpus=$OUT/corpus/$name-seed-$SEED
 		rm -rf "$corpus"
 	fi
 	mkdir -p "$corpus" "$artifacts"
@@ -164,7 +167,7 @@ for name in $NAMES; do
 		if [ "$rc" -ne 0 ]; then
 			# The seed line holds no input bytes, so it is safe in a public log.
 			seed=$(sed -n 's/^INFO: Seed: \([0-9][0-9]*\)$/\1/p' "$log" | head -n 1)
-			echo "fuzz_$name exit $rc: crash found, reproduce locally with build/fuzz.sh -s ${seed:-N} -t $SECONDS_PER_HARNESS $name"
+			echo "fuzz_$name exit $rc: crash found. A local run may not repeat it: try build/fuzz.sh -t 600 $name, optionally with -s ${seed:-N}"
 			echo "INFO: Seed: ${seed:-unknown}"
 			status=1
 		fi

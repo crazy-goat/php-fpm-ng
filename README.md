@@ -115,6 +115,13 @@ inside `libphp` any more (issue #388 retired the last one, `pool.type = http`),
 so the packages run everything this tree ships. Commands, the supported matrix
 and what happens on a version mismatch: [`docs/install.md`](docs/install.md).
 
+The engine is not in the php-fpm-ng package. A fix for the engine comes from the
+distribution's `libphp8.5-embed` (or `php85-embed`). On Ubuntu 26.04,
+php-fpm-ng builds made against the earlier headers crash on the patched libphp
+([issue #994](https://github.com/crazy-goat/php-fpm-ng/issues/994)). Read
+[Engine security fixes](docs/install.md#engine-security-fixes) before you update
+libphp.
+
 Each release carries **two** of each (#294): `php-fpm-ng`, which terminates no
 TLS, and `php-fpm-ng-tls`, the same commit built with `--enable-fpmng-tls
 --enable-fpmng-acme`. Both of those are beta by the table above, which is why

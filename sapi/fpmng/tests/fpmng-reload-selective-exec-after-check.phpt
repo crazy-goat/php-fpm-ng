@@ -67,6 +67,34 @@ function wait_gone(int $pid, int $seconds): bool
     return false;
 }
 
+/* The state letter from /proc/<pid>/stat (R, S, T, Z, ...), or '' when there is no entry. */
+function proc_state(int $pid): string
+{
+    $stat = @file_get_contents("/proc/$pid/stat");
+    if ($stat === false) {
+        return '';
+    }
+    return $stat[strrpos($stat, ')') + 2] ?? '';
+}
+
+/* Pids whose parent is $ppid, read from /proc. Zombies are left out. */
+function children_of(int $ppid): array
+{
+    $pids = [];
+    foreach (glob('/proc/[0-9]*/stat') as $file) {
+        $stat = @file_get_contents($file);
+        if ($stat === false) {
+            continue;
+        }
+        $fields = explode(' ', substr($stat, strrpos($stat, ')') + 2));
+        if ((int) $fields[1] === $ppid && $fields[0] !== 'Z') {
+            $pids[] = (int) explode('/', $file)[2];
+        }
+    }
+    sort($pids);
+    return $pids;
+}
+
 function request(string $address): bool
 {
     $fp = @stream_socket_client("tcp://$address", $errno, $error, 2);
@@ -184,7 +212,21 @@ try {
 
     echo "Done\n";
 } finally {
-    foreach ([$workerPid ?? 0, $masterPid ?? 0] as $pid) {
+    /* The master is stopped first, so that it cannot start a worker in place of
+     * one that is killed (the pool keeps max_children workers). Its children are
+     * read while it is stopped. Then the master and every child are killed by pid,
+     * the master first. */
+    $master = $masterPid ?? 0;
+    $children = [];
+    if (pid_alive($master)) {
+        exec("kill -STOP $master 2>/dev/null");
+        $deadline = microtime(true) + 5;
+        while (proc_state($master) !== 'T' && microtime(true) < $deadline) {
+            usleep(20000);
+        }
+        $children = children_of($master);
+    }
+    foreach (array_merge([$master, $workerPid ?? 0], $children) as $pid) {
         if ($pid > 1 && pid_alive($pid)) {
             exec("kill -9 $pid 2>/dev/null");
         }

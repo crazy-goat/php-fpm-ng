@@ -4,6 +4,7 @@ fpm-ng: a new master killed before it adopts the spared workers leaves none behi
 <?php
 include "fpmng-skipif.inc";
 fpmng_skip_if_no_fault_inject();
+fpmng_skip_if_pool_type_unsupported('gateway');
 if (!is_readable('/proc/self/stat')) {
     die('skip the workers are observed through /proc (Linux only)');
 }
@@ -25,13 +26,22 @@ require_once "tester.inc";
  * when every holder of the write end is gone, the guard SIGTERMs the carried pids.
  *
  * The test holds the new master before it adopts (the point
- * selective_adopt_hold, fpm_fault_inject.h), then kills it with SIGKILL. [change]
- * comes first in the config: its workers are forked in its own init, before the
- * hold of [keep], so the new master has a child of its own that was not carried.
- * The guard does not cover that child; the test kills it at the end.
+ * selective_adopt_hold, fpm_fault_inject.h), then kills it with SIGKILL. [gw]
+ * and [change] come first in the config: their processes are forked in their
+ * own init, before the hold of [keep], so the new master has a gateway and a
+ * child of its own that were not carried. The guard does not cover them; the
+ * test kills them at the end.
+ *
+ * The gateway matters for the write end of the pipe. A gateway forked by the
+ * new master before the release inherits it, and it does not die with its
+ * master. Unless fpm_reload_selective_guard_child_init() closes that copy in
+ * the gateway (fpm_http_gw_proc.c), the guard waits for it and never fires. So
+ * the test checks that the gateway exists before the kill.
  *
  * Mutation: delete the fpm_reload_selective_guard_arm() call in fpm_pctl_exec()
- * and the spared worker of [keep] outlives the killed master. */
+ * and the spared worker of [keep] outlives the killed master. Delete the
+ * fpm_reload_selective_guard_child_init() call in fpm_http_gw_proc.c and the
+ * same happens, through the gateway. */
 $root = sys_get_temp_dir() . '/fpmng-reload-sel-guard-kill-' . getmypid();
 @mkdir($root, 0700, true);
 $pidFile = "$root/worker.pid";
@@ -50,6 +60,12 @@ error_log = {{FILE:LOG}}
 pid = {{FILE:PID}}
 log_level = notice
 reload.selective = yes
+[gw]
+pool.type = gateway
+listen = {{ADDR[gw]}}
+chdir = $changeChdir
+http.gateways = 1
+http.route[change] = /
 [change]
 listen = {{ADDR[change]}}
 pm = static
@@ -141,6 +157,13 @@ function guard_pid(int $master): int
     return 0;
 }
 
+/* A gateway process of pool [gw]: its title is set in fpm_http_gateway_run(). */
+function is_gateway(int $pid): bool
+{
+    $cmd = @file_get_contents("/proc/$pid/cmdline");
+    return $cmd !== false && str_contains($cmd, 'http gateway gw');
+}
+
 /* Not posix_kill(): the harness runs tests under `php -n`, where ext/posix
  * (a shared module on Ubuntu) is not loaded. */
 function killHard(int $pid): void
@@ -171,6 +194,7 @@ $keep = $tester->getAddr('ipv4', '[keep]');
 $masterPid = 0;
 $workerPid = 0;
 $changePid = 0;
+$gatewayPid = 0;
 $guardPid = 0;
 
 try {
@@ -201,6 +225,12 @@ try {
 
     check(pid_alive($workerPid), "spared worker $workerPid is gone before the master was killed");
     $others = array_values(array_diff(children_of($masterPid), [$workerPid]));
+    $gateways = array_values(array_filter($others, 'is_gateway'));
+    check(count($gateways) === 1, 'expected one gateway of [gw] in the new master during the hold, found ' . count($gateways));
+    $gatewayPid = $gateways[0];
+    echo "gateway forked before the hold: ok\n";
+
+    $others = array_values(array_diff($others, [$gatewayPid]));
     check(count($others) === 1, 'the changed pool [change] has no child of the new master during the hold');
     $changePid = $others[0];
     echo "changed pool child: ok\n";
@@ -233,7 +263,7 @@ try {
     echo "Done\n";
 } finally {
     /* By pid and only these: the test must not leave a stray behind when it fails. */
-    foreach ([$workerPid, $changePid, $guardPid, $masterPid] as $pid) {
+    foreach ([$workerPid, $changePid, $gatewayPid, $guardPid, $masterPid] as $pid) {
         if ($pid > 1 && pid_alive($pid)) {
             killHard($pid);
         }
@@ -249,6 +279,7 @@ try {
 --EXPECT--
 worker running: ok
 held before adopt: ok
+gateway forked before the hold: ok
 changed pool child: ok
 spared worker gone: ok
 guard running: ok

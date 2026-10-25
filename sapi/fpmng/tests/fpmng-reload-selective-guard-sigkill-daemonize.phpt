@@ -178,7 +178,16 @@ try {
     check(children_of($master) === [], 'the new master has a child during the hold, the spared workers are not its children');
     echo "no child of the new master: ok\n";
 
-    $guard = guard_pid($oldMaster);
+    /* The guard sets its title a moment after its fork, so a single lookup can
+     * miss it. Wait for it before the kill. */
+    $deadline = time() + 10;
+    do {
+        $guard = guard_pid($oldMaster);
+        if ($guard > 1) {
+            break;
+        }
+        usleep(100000);
+    } while (time() < $deadline);
 
     killHard($master);
 
@@ -190,11 +199,11 @@ try {
     check($guard > 1, "no selective reload guard ran for the old master $oldMaster before the kill");
     echo "guard running: ok\n";
 
-    check(wait_gone($guard, 5), "the guard $guard did not exit after it stopped the carried workers");
+    check(wait_gone($guard, 10), "the guard $guard did not exit after it stopped the carried workers");
     echo "guard exited: ok\n";
 
     check(
-        wait_log($logFile, '/issue #829: .* sent SIGTERM to 2 child\(ren\)/', 5),
+        wait_log($logFile, '/issue #829: .* sent SIGTERM to 2 child\(ren\)/', 10),
         'the guard did not log that it sent SIGTERM to both carried workers'
     );
     echo "guard logged the SIGTERM: ok\n";

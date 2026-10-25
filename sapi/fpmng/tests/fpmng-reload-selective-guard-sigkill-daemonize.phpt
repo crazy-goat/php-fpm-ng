@@ -16,8 +16,9 @@ require_once "tester.inc";
 /* Issue #829, the daemonize = yes case of fpmng-reload-selective-guard-sigkill.phpt.
  * Under daemonize = yes the exec'd master forks again (fpm_unix.c:618), so the
  * new master is another pid than the old one. The old master armed the guard
- * before the exec, so the guard is a child of the OLD pid: the test finds it by
- * that pid.
+ * before the exec. The guard is not a child of either master: its intermediate
+ * process exits at once, so init or a subreaper is its parent. Its title names
+ * the OLD pid, and the test finds the guard by that title.
  *
  * Pool [a] is byte-identical in both configs, so the reload spares both workers.
  * The new master is held before it adopts them (selective_adopt_hold). It has no

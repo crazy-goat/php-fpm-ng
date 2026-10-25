@@ -214,6 +214,12 @@ void fpm_reload_selective_guard_arm(void) /* {{{ */
 		return;
 	}
 
+	/* While a guard lives, the failure path below is not reached. The intermediate
+	 * exits 0 unless its own fork() failed, and then no guard exists. waitpid() does
+	 * not fail with ECHILD here: no other code of this process reaps children in
+	 * this window, and sig_handler() does not reap (SIGCHLD is blocked by
+	 * fpm_pctl_exec() anyway). The code does not handle one route: a signal that
+	 * kills the intermediate after it forked the guard. */
 	do {
 		waited = waitpid(pid, &status, 0);
 	} while (waited < 0 && errno == EINTR);
@@ -254,7 +260,8 @@ void fpm_reload_selective_guard_release(void) /* {{{ */
 	do {
 		written = write(fd, &byte, 1);
 	} while (written < 0 && errno == EINTR);
-	/* EPIPE: the guard is gone already. SIGPIPE is ignored by the master, so it does not kill us. */
+	/* EPIPE: the guard is gone already. The master ignores SIGPIPE
+	 * (third_party/php-src/sapi/fpm/fpm/fpm_main.c:1586, in main()), so the write does not kill it. */
 	close(fd);
 }
 /* }}} */

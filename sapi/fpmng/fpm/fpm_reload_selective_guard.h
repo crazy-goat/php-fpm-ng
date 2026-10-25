@@ -30,7 +30,10 @@
  *   is a grandchild, so the intermediate process reaps the guard's fork.
  *
  * Known gaps, follow-ups and not part of this design: a new master that hangs
- * instead of dying; a master killed after the release (the guard is gone, and
+ * instead of dying; a new master that is killed: the children that it forked
+ * itself (the gateway and the children of changed pools) keep running with ppid 1
+ * and keep their listening ports, since the guard covers only the carried pids;
+ * a master killed after the release (the guard is gone, and
  * its adopted children are orphans as they were before); the #329 survivors of
  * a master that is killed while running; a binary that predates this guard
  * (the guard then waits until that generation is gone, and only signals pids

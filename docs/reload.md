@@ -573,6 +573,10 @@ one WARNING that starts with `issue #829`.
 The guard does not cover these cases:
 
 - A new master that hangs and does not exit.
+- A new master that is killed (`SIGKILL`, a crash). The processes that it forked
+  itself keep running, with process 1 as their parent. These are its gateway
+  processes and the children of changed pools. They keep their listening ports.
+  The guard covers only the carried workers.
 - A master that is killed after the release. Its adopted workers stay orphaned,
   as before.
 - The #329 survivors (see the next section).

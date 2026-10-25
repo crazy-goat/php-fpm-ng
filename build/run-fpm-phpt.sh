@@ -13,7 +13,11 @@
 #
 # tester.inc derives the FPM path from TEST_PHP_FPM_EXECUTABLE and expects the
 # upstream build layout. The temporary compatibility links are kept below the
-# results directory, so an external build tree is never modified.
+# results directory. The runner also changes the test copies in the tree it is
+# given, through build/phpt-parallel.sh, as build/run-fpmng-phpt.sh does: it
+# applies the fixture patches (build/phpt-fixture-patches/README.md), adds
+# --CONFLICTS-- sections to the gateway tests and removes the directory-wide
+# CONFLICTS file. The pinned bundle under third_party/php-src/ is never touched.
 #
 # Upstream's tests only: build/prepare.sh copies our own fpmng-*.phpt into the
 # same directory, and until issue #95 this runner swept the whole directory and
@@ -133,6 +137,11 @@ fi
 [ -f "$PHPSRC_INPUT/$TEST_DIR/tester.inc" ] || fail "tester.inc not found below: $PHPSRC_INPUT/$TEST_DIR"
 
 PHPSRC=$(resolve_path "$PHPSRC_INPUT") || fail "cannot resolve PHP source directory: $PHPSRC_INPUT"
+# Issue #991: the fixture patches (build/phpt-fixture-patches/) change this tree
+# as they change the owned suite's, through the same script, so a test that
+# checks a libphp fix skips on an older libphp here as well. The script also
+# prepares the tree for -j, which this serial run does not use.
+"$REPO/build/phpt-parallel.sh" "$PHPSRC" >&2 || fail "cannot apply the fixture patches to the test tree"
 mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
 

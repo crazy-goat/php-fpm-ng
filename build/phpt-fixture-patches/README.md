@@ -5,7 +5,7 @@ unedited (`third_party/php-src/README.md`: nothing there is edited by hand, and
 `build/vendor-php-src.sh check` refuses an edit). They are applied to the
 throwaway test tree by `build/phpt-parallel.sh`, never to the bundle, so the
 manifest hashes stay those of the pinned upstream tag and the same patch works
-on a tree from `build/prepare.sh`.
+on a tree from `build/prepare.sh`. Both `build/run-fpmng-phpt.sh` and `build/run-fpm-phpt.sh` apply them through that script.
 
 | Patch | Issue | What it prevents |
 |---|---|---|
@@ -14,8 +14,11 @@ on a tree from `build/prepare.sh`.
 | `0003-run-tests-no-retry-on-port-collision.patch` | #562 | `run-tests.php` retries a failed test once when its output says "address already in use" (glibc; musl says "Address in use" and never matched) (and for any test that calls usleep/sleep/microtime/hrtime). A port collision under `-j` therefore showed as "WARN passed on retry", which `build/ci-package-gate.sh` counts as a pass (#301). The collision retry is gone, the timing retry stays: the gate has recorded `fpmng-http-direct-worker-saturation-refuses-new.phpt` passing only on retry on a loaded runner. |
 | `0004-tester-refuse-signal-to-pid-below-2.patch` | #567 | `FPM\Tester::signal()` ran `kill -SIG <pid>` for whatever pid a test handed it. A test that read a pid from a status page or a response body and got 0 (an empty body, a slot whose child is not forked yet) ran `kill -USR1 0`, which signals the caller's whole process group: the `run-tests.php` runner died with `User defined signal 1` (exit 138) and the fail-fast step cancelled the rest. A pid below 2 now throws, so one test fails with a message instead of the run. |
 | `0005-tester-port-shift-and-lane-base.patch` | #674, #625 | The worker blocks always started at 9008, so any other php-fpm on a shared host that held one of those ports (9201, 9208, ...) failed dozens of tests with "Address already in use". The base moves either by `FPMNG_PHPT_PORT_SHIFT`, which `build/run-fpmng-phpt.sh` picks per run from a range nothing listens on (unset or 0 moves nothing), or by `FPMNG_PHPT_PORT_BASE`, which replaces the 9000 origin outright so the whole run lands inside one reserved 1000-port lane; a base wins over a shift. Both come out of the new `portBase()`, which the same patch adds. The patch also gives every gateway pool that names no `operator.*_listen` one of the run's own (a gateway otherwise binds the host-global `127.0.0.1:9253`). |
+| `0006-gh23288-skip-below-libphp-8511.patch` | #991 | `gh23288-opcache-interned-strings-buffer-pool.phpt` checks an opcache fix (GH-23288) that is in libphp (`ext/opcache`, first in php-8.5.11), not in the SAPI. A libphp older than 8.5.11 fails it. The patch extends the test's `--SKIPIF--` with a skip below `PHP_VERSION_ID` 80511, reason "needs libphp >= 8.5.11". That is a skip, not a deviation: a deviation names upstream behaviour that php-fpm-ng does not have. The check reads the CLI version. In CI, the CLI and libphp come from the same php8.5 packages (`build/ci-install-deps.sh`). The vendored file stays unchanged; only the copy in the test tree changes. |
 
 The patches are written against the layout of the assembled tree (`a/sapi/fpmng/tests/tester.inc`, `a/run-tests.php`) and applied with `patch -p1`.
+Patch 0006 is applied only when the tree holds its test, which a php-src checkout up to php-8.5.10 does not.
 
-The patches are made against `php-8.5.9`. A new pin that changes the patched
-lines makes `build/phpt-parallel.sh` fail loudly; rebase the patch then.
+Patches 0001 to 0005 were made against `php-8.5.9`. They apply to `php-8.5.12` with line
+offsets only. Patch 0006 was made against `php-8.5.12`, the tag of the vendored test. A new pin that changes the patched lines makes
+`build/phpt-parallel.sh` fail loudly; rebase the patch then.

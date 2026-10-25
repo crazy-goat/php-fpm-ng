@@ -33,7 +33,7 @@ done
 want=$(awk -F '\t' '$1 ~ /^sapi\/fpm\/tests\/.*\.phpt$/' "$REPO/third_party/php-src/MANIFEST" | wc -l | tr -d ' ')
 got=$(cd "$T/sapi/fpmng/tests" && find . -maxdepth 1 -name '*.phpt' ! -name 'fpmng-*' | grep -c . || true)
 [ "$want" = "$got" ] || fail "tree has $got upstream .phpt files, the manifest lists $want"
-grep -qx 'upstream_tag=php-8.5.9' "$T/FIXTURES" || fail "FIXTURES does not name the pinned tag"
+grep -qx 'upstream_tag=php-8.5.12' "$T/FIXTURES" || fail "FIXTURES does not name the pinned tag"
 # What a prepared tree would hold and this one must not: any php-src source.
 for f in main Zend sapi/fpm TSRM configure.ac; do
   [ ! -e "$T/$f" ] || fail "assembled tree contains $f"
@@ -106,7 +106,7 @@ for runner in run-fpmng-phpt.sh run-fpm-phpt.sh; do
     || fail "$runner: metadata.txt does not record what the harness resolved: $(cat "$WORK/res/metadata.txt")"
   # the || branch is a failure report; fail does not run on the success path of grep.
   # shellcheck disable=SC2015
-  grep -q '^fixtures_begin$' "$WORK/res/metadata.txt" && grep -q '^upstream_tag=php-8.5.9$' "$WORK/res/metadata.txt" \
+  grep -q '^fixtures_begin$' "$WORK/res/metadata.txt" && grep -q '^upstream_tag=php-8.5.12$' "$WORK/res/metadata.txt" \
     || fail "$runner: metadata.txt does not record the fixture provenance"
   echo "ok: $runner refuses a harness that would start another FPM and records the resolved binary"
 done
@@ -126,6 +126,9 @@ grep -q 'TEST_PHP_WORKER' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc i
 grep -q 'FPMNG_PHPT_PORT_SHIFT' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_SHIFT"
 grep -q 'FPMNG_PHPT_PORT_BASE' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_BASE"
 grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pass TEST_PHP_WORKER to the tests"
+grep -q 'Issue #991 (php-fpm-ng)' "$P/sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt" || fail "the gh23288 test got no libphp version skip"
+# The fix is in php-8.5.11 (upstream commit bfbae397), so the skip starts there.
+grep -q 'PHP_VERSION_ID < 80511' "$P/sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt" || fail "the gh23288 skip is not below libphp 8.5.11"
 [ ! -e "$P/sapi/fpmng/tests/CONFLICTS" ] || fail "the dir-wide CONFLICTS file is still there"
 grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"
 if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then fail "a non-gateway test got a conflict key"; fi
@@ -141,3 +144,17 @@ grep -q 'refusing to send SIG' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.
 # The bundle itself is untouched.
 (cd "$REPO" && ./build/vendor-php-src.sh check >/dev/null) || fail "the pinned bundle was modified"
 echo "ok: phpt-parallel.sh is idempotent, adds worker port blocks and conflict keys, leaves the bundle alone"
+
+# --- 5. a php-src tree from php-8.5.10 or older has no gh23288 test (issue #991) -
+# docs/fpm-phpt.md accepts any checkout of the supported minor. php-8.5.10 and
+# older have no gh23288 test, so patch 0006 has nothing to change there, and
+# phpt-parallel.sh must not refuse the tree.
+O=$WORK/old-tree
+"$REPO/build/phpt-tree.sh" "$O" >/dev/null
+GH23288=$O/sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt
+[ -f "$GH23288" ] || fail "assembled tree lacks the gh23288 test"
+rm "$GH23288"
+"$REPO/build/phpt-parallel.sh" "$O" || fail "phpt-parallel.sh refuses a tree without the gh23288 test"
+grep -q 'Issue #394 (php-fpm-ng)' "$O/sapi/fpmng/tests/tester.inc" || fail "a tree without the gh23288 test is not patched"
+[ ! -e "$GH23288" ] || fail "phpt-parallel.sh created the gh23288 test"
+echo "ok: a tree without the gh23288 test is patched without patch 0006"

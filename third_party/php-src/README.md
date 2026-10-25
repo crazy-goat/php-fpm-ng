@@ -26,9 +26,9 @@ other php-src `main/` header can reach the compiler this way, so every
 | | |
 |---|---|
 | Upstream | https://github.com/php/php-src |
-| Tag | `php-8.5.9` |
-| Commit | `dd6e76cce27aaa0ed9f7520648ed1081dfb6af36` |
-| Files | 207 (see `MANIFEST`): 57 for the build, 150 test fixtures |
+| Tag | `php-8.5.12` |
+| Commit | `136e049ac10b032c83018e65b63b6df858943750` |
+| Files | 212 (see `MANIFEST`): 57 for the build, 155 test fixtures |
 
 `MANIFEST` lists every file, one per line, with three tab-separated columns:
 
@@ -49,10 +49,10 @@ One file is stored under a different name, with its content unchanged:
 
 The pin is independent of the SDK version, and that is deliberate. The
 vendored FPM files compile against the SDK's headers, and PHP keeps the
-engine API stable within a minor. Measured on 2026-10-01: these 8.5.9 files
-built against the Ubuntu 26.04 SDK (8.5.4) and the Alpine edge SDK (8.5.10).
-The pin moves when a patch release changes one of these files, not with every
-release.
+engine API stable within a minor. Measured on 2026-10-24: these 8.5.12 files
+built against the Ubuntu 26.04 SDK (8.5.4). The Alpine edge SDK was not
+measured for 8.5.12. The pin moves when a patch release changes one of these files, not with every
+release. An upstream test that covers a libphp fix can skip on an older libphp. The copy of `gh23288-opcache-interned-strings-buffer-pool.phpt` does so below php-8.5.11, through a patch applied to the test tree; the vendored file is unchanged (see `build/phpt-fixture-patches/README.md`).
 
 ## Licenses
 
@@ -109,7 +109,7 @@ place of the tree to do that themselves.
 |---|---|
 | `run-tests.php` | The test runner. Both runners drive the candidate through it. |
 | `sapi/fpm/tests/tester.inc`, `fcgi.inc`, `logreader.inc`, `logtool.inc`, `response.inc`, `skipif.inc`, `status.inc` | The FPM test harness. Our own `fpmng-*.phpt` use it as well (`require_once "tester.inc"`, `include "skipif.inc"`), so it is part of the owned suite's dependency closure, not only upstream's. |
-| `sapi/fpm/tests/*.phpt`, 141 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
+| `sapi/fpm/tests/*.phpt`, 146 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
 | `sapi/fpm/tests/CONFLICTS` | Read by `run-tests.php` when it runs in parallel (`-j`, issue #394); inert for a serial run, kept because it belongs to the directory. |
 | `ext/standard/tests/misc/browscap.ini` (not vendored) | `gh12621.phpt` sets `browscap` to `__DIR__/../../../ext/standard/tests/misc/browscap.ini`, so the test needs a file at that relative path. `build/phpt-tree.sh` writes this repository's own `sapi/fpmng/fixtures/browscap.ini` there (issue #559); see below. |
 

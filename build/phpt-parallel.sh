@@ -56,13 +56,20 @@ apply_patch 0002-run-tests-worker-env-for-tests.patch run-tests.php 'Issue #394 
 apply_patch 0003-run-tests-no-retry-on-port-collision.patch run-tests.php 'Issue #562 (php-fpm-ng)'
 apply_patch 0004-tester-refuse-signal-to-pid-below-2.patch sapi/fpmng/tests/tester.inc 'Issue #567 (php-fpm-ng)'
 apply_patch 0005-tester-port-shift-and-lane-base.patch sapi/fpmng/tests/tester.inc 'Issue #674 (php-fpm-ng)'
-apply_patch 0006-gh23288-skip-below-libphp-8512.patch sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt 'Issue #991 (php-fpm-ng)'
+# The gh23288 test first appears in php-8.5.11. A checkout from php-8.5.10 or
+# older has no such test, so patch 0006 has nothing to change there (issue #991).
+GH23288=$TESTS/gh23288-opcache-interned-strings-buffer-pool.phpt
+if [ -f "$GH23288" ]; then
+    apply_patch 0006-gh23288-skip-below-libphp-8512.patch sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt 'Issue #991 (php-fpm-ng)'
+fi
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"
 grep -q 'Issue #567 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc still signals pid 0 (the whole process group) after patching"
 grep -q 'Issue #674 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_SHIFT after patching"
 grep -q 'Issue #625 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_BASE after patching"
-grep -q 'Issue #991 (php-fpm-ng)' "$TESTS/gh23288-opcache-interned-strings-buffer-pool.phpt" || fail "gh23288 test has no libphp version skip after patching"
+if [ -f "$GH23288" ]; then
+    grep -q 'Issue #991 (php-fpm-ng)' "$GH23288" || fail "gh23288 test has no libphp version skip after patching"
+fi
 grep -q 'Issue #562 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php still retries a test on 'address already in use' after patching"
 
 rm -f "$TESTS/CONFLICTS"

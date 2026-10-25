@@ -13,7 +13,11 @@
 #
 # tester.inc derives the FPM path from TEST_PHP_FPM_EXECUTABLE and expects the
 # upstream build layout. The temporary compatibility links are kept below the
-# results directory, so an external build tree is never modified.
+# results directory. The runner also changes the test copies in the tree it is
+# given, through build/phpt-parallel.sh, as build/run-fpmng-phpt.sh does: it
+# applies the fixture patches (build/phpt-fixture-patches/README.md), adds
+# --CONFLICTS-- sections to the gateway tests and removes the directory-wide
+# CONFLICTS file. The pinned bundle under third_party/php-src/ is never touched.
 #
 # Upstream's tests only: build/prepare.sh copies our own fpmng-*.phpt into the
 # same directory, and until issue #95 this runner swept the whole directory and

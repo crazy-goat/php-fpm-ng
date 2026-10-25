@@ -77,4 +77,16 @@ void fpm_pool_supervisor_status(struct fpm_worker_pool_s *wp, struct fpm_pool_st
  * and fpm_pool_supervisor.c for the handoff-across-execvp() mechanism. */
 void fpm_pool_supervisor_reload_spare_child(struct fpm_worker_pool_s *wp);
 
+/* Issue #889: called by fpm_run() in the master, once the pools have run their
+ * init_main(). Arms the reload survivors whose pool this configuration does not
+ * run: each one gets SIGTERM at its deadline. See the function's comment in
+ * fpm_pool_supervisor.c. */
+void fpm_pool_supervisor_reload_orphans_arm(void);
+
+/* Issue #831: called by the master on its failure paths (fpm_init(), the
+ * master's exit, a failed execvp()). SIGTERMs each reload survivor that no
+ * pool has taken yet, and unsets the variable. See the function's comment in
+ * fpm_pool_supervisor.c. */
+void fpm_pool_supervisor_reload_survivors_discard_unadopted(void);
+
 #endif

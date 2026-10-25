@@ -22,10 +22,11 @@ need() {
     command -v "$1" >/dev/null 2>&1 || { echo "$1 not found in PATH" >&2; return 1; }
 }
 
-# Our own C sources that clang-format checks: everything tracked under sapi/fpmng and
-# ext/fpmng_metrics except the paths listed in build/clang-format-exclude.txt.
+# Our own C sources that clang-format checks: everything tracked under sapi/fpmng,
+# ext/fpmng_metrics and tests/fuzz except the paths listed in build/clang-format-exclude.txt.
 format_files() {
     git ls-files -z -- 'sapi/fpmng/*.c' 'sapi/fpmng/*.h' 'ext/fpmng_metrics/*.c' 'ext/fpmng_metrics/*.h' \
+        'tests/fuzz/*.c' 'tests/fuzz/*.h' \
         | grep -zvxFf <(grep -v '^#' build/clang-format-exclude.txt | grep -v '^$')
 }
 

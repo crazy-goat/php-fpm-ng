@@ -1,18 +1,25 @@
 #!/bin/sh
 # Exercise the libphp version guard (build/libphp/libphp_abi_check.c, issue
-# #220) in all three of its outcomes (issue #422).
+# #220) in all of its outcomes (issue #422) and the struct-size check (issue
+# #994).
 #
 # No pair of packages that exists can reach the two interesting branches. An
 # 8.5 binary cannot be built against 8.4 headers, and no distribution ships two
 # patch releases of one minor side by side. So this compiles the real guard
-# against the installed SDK, links it with an empty main() and the real
-# libphp, and moves only the compiled-against side through the test seam
-# (FPMNG_BUILT_PHP_VERSION_ID). The loaded side is always the real
-# php_version_id() of the libphp the dynamic loader picked.
+# against the installed SDK, links it with a main() that references the same
+# globals the server does and the real libphp, and moves only the compiled-
+# against side through the test seams (FPMNG_BUILT_PHP_VERSION_ID,
+# FPMNG_BUILT_EXECUTOR_GLOBALS_SIZE, FPMNG_BUILT_COMPILER_GLOBALS_SIZE). The
+# loaded side is always the real php_version_id() and the real symbol sizes of
+# the libphp the dynamic loader picked.
 #
-#   another minor        -> FATAL on stderr, exit 1, main() never runs
-#   another patch level  -> one notice on stderr, main() runs
-#   the same version     -> silent, main() runs
+#   another minor                 -> FATAL on stderr, exit 1, main() never runs
+#   another patch level           -> one notice on stderr, main() runs
+#   the same version              -> silent, main() runs
+#   another executor_globals size -> FATAL on stderr, exit 1, main() never runs
+#   another compiler_globals size -> FATAL on stderr, exit 1, main() never runs
+#   a loaded libphp that is larger than the executable's copy of executor_globals
+#                                 -> FATAL on stderr, exit 1, main() never runs
 #
 # Needs a PHP 8.5 SDK (php8.5-dev and libphp8.5-embed, or php85-dev and
 # php85-embed) and a C compiler.
@@ -54,10 +61,39 @@ OTHER_MINOR_ID=$((MAJOR * 10000 + (MINOR - 1) * 100 + PATCH))
 if [ "$PATCH" = 0 ]; then OTHER_PATCH=1; else OTHER_PATCH=$((PATCH - 1)); fi
 OTHER_PATCH_ID=$((MAJOR * 10000 + MINOR * 100 + OTHER_PATCH))
 
+# The real struct sizes of this SDK, to build the fake ones from.
+cat > "$WORK/sizes.c" <<'EOF'
+#include "php.h"
+#include "zend_globals.h"
+#include <stdio.h>
+int main(void) { printf("%zu %zu\n", sizeof(zend_executor_globals), sizeof(zend_compiler_globals)); return 0; }
+EOF
+# shellcheck disable=SC2046
+"$CC" -D_GNU_SOURCE $("$PHP_CONFIG" --includes) "$WORK/sizes.c" -o "$WORK/sizes"
+SIZES=$("$WORK/sizes")
+EXEC_SIZE=${SIZES% *}
+COMP_SIZE=${SIZES#* }
+
 # The banner line stands in for `php-fpm-ng -v`, which build/check-libphp-skew.sh
 # insists on seeing before it believes that nothing was printed (issue #557).
-printf '#include <stdio.h>\nint main(void) { puts("PHP 0.0.0 (stub)"); return 42; }\n' > "$WORK/main.c"
-"$CC" -c "$WORK/main.c" -o "$WORK/main.o"
+# The stub takes the addresses of both globals, as the server does, so the
+# executable gets the same copy relocations: the guard must read the libphp
+# file and not the executable's own copy (issue #994).
+cat > "$WORK/main.c" <<'EOF'
+#include "php.h"
+#include "zend_globals.h"
+#include <stdio.h>
+int main(void)
+{
+	void *volatile refs[2];
+	refs[0] = &executor_globals;
+	refs[1] = &compiler_globals;
+	puts("PHP 0.0.0 (stub)");
+	return 42;
+}
+EOF
+# shellcheck disable=SC2046
+"$CC" -D_GNU_SOURCE -O2 -c "$WORK/main.c" $("$PHP_CONFIG" --includes) -o "$WORK/main.o"
 
 # build <name> [-D...]: the guard object plus main, linked like the server is.
 build() {
@@ -78,7 +114,7 @@ run() {
   ERR=$(cat "$WORK/$1.err")
 }
 
-echo "test-libphp-abi-guard.sh: SDK $VER ($PHP_CONFIG), libphp $LIBPHP"
+echo "test-libphp-abi-guard.sh: SDK $VER ($PHP_CONFIG), libphp $LIBPHP, executor_globals $EXEC_SIZE bytes, compiler_globals $COMP_SIZE bytes"
 
 build minor "-DFPMNG_BUILT_PHP_VERSION_ID=$OTHER_MINOR_ID" "-DFPMNG_BUILT_PHP_VERSION=\"$MAJOR.$((MINOR - 1)).$PATCH\""
 run minor
@@ -107,6 +143,56 @@ build same
 run same
 [ "$RC" = 42 ] || fail "built for the same version: exit $RC, expected main()'s 42 (stderr: $ERR)"
 [ -z "$ERR" ] || fail "built for the same version: expected silence, got: $ERR"
-echo "ok: the same version ($REAL_ID) runs silently"
+echo "ok: the same version ($REAL_ID) and the same struct sizes run silently"
 "$REPO/build/check-libphp-skew.sh" "$WORK/same" > /dev/null || fail "check-libphp-skew.sh refused a binary with no skew"
 echo "ok: check-libphp-skew.sh accepts it"
+
+# Same version, a struct size that differs: the Ubuntu case of issue #994, where
+# the patch keeps 8.5.4 and adds 24 bytes to executor_globals. Each struct has its
+# own case, so a check that looks at only one of them fails here.
+EXEC_FAKE=$((EXEC_SIZE + 24))
+build exec "-DFPMNG_BUILT_EXECUTOR_GLOBALS_SIZE=$EXEC_FAKE"
+run exec
+[ "$RC" = 1 ] || fail "built with another executor_globals size: exit $RC, expected 1 before main() (stderr: $ERR)"
+echo "$ERR" | grep -q "php-fpm-ng: FATAL: this binary was built against PHP $VER headers, with executor_globals of $EXEC_FAKE bytes and compiler_globals of $COMP_SIZE bytes, but the libphp it loaded (PHP $VER) has $EXEC_SIZE and $COMP_SIZE bytes" ||
+  fail "built with another executor_globals size: no FATAL naming both sizes (stderr: $ERR)"
+echo "ok: another executor_globals size is refused before main() (exit 1, FATAL names $EXEC_FAKE and $EXEC_SIZE)"
+
+COMP_FAKE=$((COMP_SIZE + 8))
+build comp "-DFPMNG_BUILT_COMPILER_GLOBALS_SIZE=$COMP_FAKE"
+run comp
+[ "$RC" = 1 ] || fail "built with another compiler_globals size: exit $RC, expected 1 before main() (stderr: $ERR)"
+echo "$ERR" | grep -q "FATAL: this binary was built against PHP $VER headers, with executor_globals of $EXEC_SIZE bytes and compiler_globals of $COMP_FAKE bytes, but the libphp it loaded (PHP $VER) has $EXEC_SIZE and $COMP_SIZE bytes" ||
+  fail "built with another compiler_globals size: no FATAL naming both sizes (stderr: $ERR)"
+echo "ok: another compiler_globals size is refused before main() (exit 1, FATAL names $COMP_FAKE and $COMP_SIZE)"
+
+# The executable keeps its own copy of executor_globals (a copy relocation). Link
+# against a stand-in libphp of the real size, then run it against a stand-in that
+# is 24 bytes larger. A guard that reads the copy sees the real size and passes.
+# Only a guard that reads the loaded file refuses this.
+stand() {
+  mkdir "$1"
+  cat > "$1/libphp.c" <<EOF
+const char *php_version(void) { return "$VER"; }
+unsigned int php_version_id(void) { return $REAL_ID; }
+char executor_globals[$2] __attribute__((aligned(8)));
+char compiler_globals[$COMP_SIZE] __attribute__((aligned(8)));
+EOF
+  "$CC" -shared -fPIC -Wl,-soname,libphp.so "$1/libphp.c" -o "$1/libphp.so"
+}
+stand "$WORK/linked" "$EXEC_SIZE"
+stand "$WORK/loaded" "$EXEC_FAKE"
+# php-config --includes prints several -I flags, and they must split into words.
+# shellcheck disable=SC2046
+"$CC" -D_GNU_SOURCE -O2 -Wno-deprecated-declarations $("$PHP_CONFIG" --includes) \
+  -c "$REPO/build/libphp/libphp_abi_check.c" -o "$WORK/copy.o"
+"$CC" "$WORK/main.o" "$WORK/copy.o" -L"$WORK/linked" -lphp -o "$WORK/copy"
+set +e
+LD_LIBRARY_PATH="$WORK/loaded" "$WORK/copy" > /dev/null 2> "$WORK/copy.err"
+RC=$?
+set -e
+ERR=$(cat "$WORK/copy.err")
+[ "$RC" = 1 ] || fail "loaded libphp with another executor_globals size: exit $RC, expected 1 before main() (stderr: $ERR)"
+echo "$ERR" | grep -q "FATAL: this binary was built against PHP $VER headers, with executor_globals of $EXEC_SIZE bytes and compiler_globals of $COMP_SIZE bytes, but the libphp it loaded (PHP $VER) has $EXEC_FAKE and $COMP_SIZE bytes" ||
+  fail "loaded libphp with another executor_globals size: no FATAL naming both sizes (stderr: $ERR)"
+echo "ok: a libphp loaded with another executor_globals size is refused although the executable has its own copy (FATAL names $EXEC_SIZE and $EXEC_FAKE)"

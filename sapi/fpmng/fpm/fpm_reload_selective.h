@@ -69,7 +69,9 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp);
  * on such a worker is cut. A no-op when the variable is unset. Issue #829: it
  * also releases the guard of the selective reload (fpm_reload_selective_guard.h),
  * last, after the SIGTERMs. A master that is killed outright (SIGKILL, crash)
- * cannot call it: the guard signals the entries that are left in that case. */
+ * cannot call it. The guard of issue #829 signals instead: every carried worker
+ * that still runs, adopted or not, when every holder of its pipe dies before
+ * the release. */
 void fpm_reload_selective_discard_unadopted(void);
 
 /* Issue #829: 1 when FPM_RELOAD_SELECTIVE_ENV names at least one carried pid.

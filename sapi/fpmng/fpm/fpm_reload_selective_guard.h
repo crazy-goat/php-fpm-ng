@@ -51,8 +51,8 @@ void fpm_reload_selective_guard_arm(void);
 void fpm_reload_selective_guard_init_main(void);
 
 /* Called from fpm_reload_selective_discard_unadopted() in the new master, after
- * the SIGTERMs for the carried entries that are left. Writes one byte to the
- * pipe and closes the write end. A no-op when no guard was armed. */
+ * the SIGTERMs for the carried entries that no pool adopted. Writes one byte to
+ * the pipe and closes the write end. A no-op when no guard was armed. */
 void fpm_reload_selective_guard_release(void);
 
 /* Called in every child the master forks (fpm.c, fpm_http_gw_proc.c), right

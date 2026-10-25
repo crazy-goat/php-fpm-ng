@@ -548,14 +548,19 @@ A guard process covers this case for the selective survivors
 `execvp()`. The guard holds the read end of a pipe. The write end crosses the
 `execvp()` and the daemonize fork.
 
+Each child that the new master forks closes its copy of the write end. This
+includes a gateway process. A gateway that kept the copy would keep the guard
+waiting after its master died.
+
 The new master writes one byte and closes the write end after its initial fork
 loop. This is the release. On a normal reload, the guard reads the byte and
 exits.
 
-If every holder of the write end dies first, the guard reads end of file. It
-sends `SIGTERM` to each spared worker that the new master did not adopt. Before
-the signal, it checks the start time of each pid. It logs one WARNING that
-starts with `issue #829`.
+If every holder of the write end dies first, the guard reads end of file. The
+guard has its own copy of the carried list. The copy is made before the
+`execvp()`. The guard sends `SIGTERM` to every carried worker that still runs,
+adopted or not. Before each signal, it checks the start time of the pid. It logs
+one WARNING that starts with `issue #829`.
 
 The guard does not cover these cases:
 

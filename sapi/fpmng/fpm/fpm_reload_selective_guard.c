@@ -124,7 +124,7 @@ static void fpm_reload_selective_guard_main(int rfd, int wfd, pid_t master) /* {
 	killed = fpm_reload_selective_sigterm_carried();
 	if (killed > 0) {
 		zlog(ZLOG_WARNING, "issue #829: the master that a selective reload started exited before it "
-						   "adopted the spared workers; sent SIGTERM to %d child(ren) so they do not "
+						   "finished adopting the spared workers; sent SIGTERM to %d child(ren) so they do not "
 						   "keep their listening sockets",
 				killed);
 	}

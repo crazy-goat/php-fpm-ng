@@ -19,6 +19,7 @@
 #include "fpm_process_ctl.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_scoreboard.h"
 #include "fpm_stdio.h"
 #include "fpm_log.h"
@@ -101,6 +102,12 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 		} else {
 			zlog(ZLOG_ERROR, "FPM initialization failed");
 			fpm_reload_selective_discard_unadopted();
+			/* Issue #831: a `-t` child (fpm_reload_config_check.c) inherits the
+			 * environment of the running master, and its entries may belong to
+			 * that master's orphans (#889). Only the new master may drain them. */
+			if (!test_conf) {
+				fpm_pool_supervisor_reload_survivors_discard_unadopted();
+			}
 			return FPM_INIT_ERROR;
 		}
 	}
@@ -108,6 +115,7 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	if (0 > fpm_conf_write_pid()) {
 		zlog(ZLOG_ERROR, "FPM initialization failed");
 		fpm_reload_selective_discard_unadopted();
+		fpm_pool_supervisor_reload_survivors_discard_unadopted();
 		return FPM_INIT_ERROR;
 	}
 
@@ -228,6 +236,11 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * into a kill of an unrelated process at shutdown. Only the master gets
 	 * here: a forked child jumped to run_child above. */
 	fpm_reload_selective_discard_unadopted();
+
+	/* Issue #889: a #329 survivor whose pool this configuration does not run has
+	 * no init_main() to claim its entry, so no pool type can dispatch it. The
+	 * master arms those entries itself. */
+	fpm_pool_supervisor_reload_orphans_arm();
 
 	/* Issue #643: READY=1 once every pool has bound its listening socket and
 	 * the initial children are forked. It says nothing about a gateway

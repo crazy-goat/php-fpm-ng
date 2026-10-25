@@ -26,6 +26,7 @@
 #include "fpm_reload_config_check.h"
 #include "fpm_reload_exec_fallback.h"
 #include "fpm_reload_selective.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_reload_shm.h"
 #include "fpm_sd_notify.h"
 #ifdef HAVE_FPM_HTTP
@@ -89,6 +90,8 @@ static void fpm_pctl_exit(void)
 
 	fpm_conf_unlink_pid();
 	fpm_reload_selective_discard_unadopted();
+	/* Issue #831: before the cleanups, whose supervisor hook can _exit(). */
+	fpm_pool_supervisor_reload_survivors_discard_unadopted();
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXIT_MAIN);
 	exit(FPM_EXIT_OK);
 }
@@ -137,6 +140,7 @@ static void fpm_pctl_exec(void)
 	/* Issue #690: the spared workers were detached and listed for a next
 	 * master that will never exist. */
 	fpm_reload_selective_discard_unadopted();
+	fpm_pool_supervisor_reload_survivors_discard_unadopted();
 	exit(FPM_EXIT_SOFTWARE);
 }
 

@@ -127,6 +127,8 @@ grep -q 'FPMNG_PHPT_PORT_SHIFT' "$P/sapi/fpmng/tests/tester.inc" || fail "tester
 grep -q 'FPMNG_PHPT_PORT_BASE' "$P/sapi/fpmng/tests/tester.inc" || fail "tester.inc ignores FPMNG_PHPT_PORT_BASE"
 grep -q 'TEST_PHP_WORKER' "$P/run-tests.php" || fail "run-tests.php does not pass TEST_PHP_WORKER to the tests"
 grep -q 'Issue #991 (php-fpm-ng)' "$P/sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt" || fail "the gh23288 test got no libphp version skip"
+# The fix is in php-8.5.11 (upstream commit bfbae397), so the skip starts there.
+grep -q 'PHP_VERSION_ID < 80511' "$P/sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt" || fail "the gh23288 skip is not below libphp 8.5.11"
 [ ! -e "$P/sapi/fpmng/tests/CONFLICTS" ] || fail "the dir-wide CONFLICTS file is still there"
 grep -qx 'operator-default-listener' "$P/sapi/fpmng/tests/fpmng-http-gateway.phpt" || fail "a gateway test has no conflict key"
 if grep -q '^--CONFLICTS--' "$P/sapi/fpmng/tests/fpmng-http-direct.phpt"; then fail "a non-gateway test got a conflict key"; fi

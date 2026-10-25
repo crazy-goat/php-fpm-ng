@@ -9,12 +9,12 @@
 +include "skipif.inc";
 +/* Issue #991 (php-fpm-ng): the opcache fix this test checks (GH-23288,
 + * accel_startup_ok in OnUpdateInternedStringsBuffer) is in libphp, not in the
-+ * SAPI. A libphp older than php-8.5.12 fails it, so it is a skip there, not a
++ * SAPI. A libphp older than php-8.5.11 fails it, so it is a skip there, not a
 + * deviation. PHP_VERSION_ID is the version of the CLI that runs the test; in
 + * CI build/ci-install-deps.sh takes the CLI and libphp from the same php8.5
 + * distribution packages, so it is the libphp that php-fpm-ng links. */
-+if (PHP_VERSION_ID < 80512) {
-+    die("skip needs libphp >= 8.5.12 (opcache interned_strings_buffer fix)");
++if (PHP_VERSION_ID < 80511) {
++    die("skip needs libphp >= 8.5.11 (opcache interned_strings_buffer fix)");
 +}
 +?>
  --FILE--

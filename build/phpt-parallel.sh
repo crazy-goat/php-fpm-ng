@@ -18,7 +18,7 @@
 #      build/run-fpmng-phpt.sh picks so a run does not meet a pool that
 #      already listens on the host (#674), or by FPMNG_PHPT_PORT_BASE, the
 #      1000-port lane a shared host reserves for the run (#625), and the
-#      gh23288 test skips on a libphp older than php-8.5.12 (#991).
+#      gh23288 test skips on a libphp older than php-8.5.11 (#991).
 #   2. sapi/fpmng/tests/CONFLICTS is removed. Upstream ships it with the single
 #      word "all" (spurious failures on Azure), and run-tests.php then pulls
 #      every test of that directory out of the parallel pool and runs them one
@@ -60,7 +60,7 @@ apply_patch 0005-tester-port-shift-and-lane-base.patch sapi/fpmng/tests/tester.i
 # older has no such test, so patch 0006 has nothing to change there (issue #991).
 GH23288=$TESTS/gh23288-opcache-interned-strings-buffer-pool.phpt
 if [ -f "$GH23288" ]; then
-    apply_patch 0006-gh23288-skip-below-libphp-8512.patch sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt 'Issue #991 (php-fpm-ng)'
+    apply_patch 0006-gh23288-skip-below-libphp-8511.patch sapi/fpmng/tests/gh23288-opcache-interned-strings-buffer-pool.phpt 'Issue #991 (php-fpm-ng)'
 fi
 grep -q 'Issue #394 (php-fpm-ng)' "$TESTS/tester.inc" || fail "tester.inc has no TEST_PHP_WORKER after patching"
 grep -q 'Issue #394 (php-fpm-ng)' "$TREE/run-tests.php" || fail "run-tests.php does not hand TEST_PHP_WORKER to the tests after patching"

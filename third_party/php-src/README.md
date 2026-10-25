@@ -28,7 +28,7 @@ other php-src `main/` header can reach the compiler this way, so every
 | Upstream | https://github.com/php/php-src |
 | Tag | `php-8.5.12` |
 | Commit | `136e049ac10b032c83018e65b63b6df858943750` |
-| Files | 207 (see `MANIFEST`): 57 for the build, 150 test fixtures |
+| Files | 212 (see `MANIFEST`): 57 for the build, 155 test fixtures |
 
 `MANIFEST` lists every file, one per line, with three tab-separated columns:
 
@@ -109,7 +109,7 @@ place of the tree to do that themselves.
 |---|---|
 | `run-tests.php` | The test runner. Both runners drive the candidate through it. |
 | `sapi/fpm/tests/tester.inc`, `fcgi.inc`, `logreader.inc`, `logtool.inc`, `response.inc`, `skipif.inc`, `status.inc` | The FPM test harness. Our own `fpmng-*.phpt` use it as well (`require_once "tester.inc"`, `include "skipif.inc"`), so it is part of the owned suite's dependency closure, not only upstream's. |
-| `sapi/fpm/tests/*.phpt`, 141 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
+| `sapi/fpm/tests/*.phpt`, 146 files | The retained upstream FPM compatibility suite that `build/run-fpm-phpt.sh` runs. All of them are kept: `sapi/fpmng/tests/upstream-deviations.list` names the ones that are expected to fail, and none is dropped to make a run green. |
 | `sapi/fpm/tests/CONFLICTS` | Read by `run-tests.php` when it runs in parallel (`-j`, issue #394); inert for a serial run, kept because it belongs to the directory. |
 | `ext/standard/tests/misc/browscap.ini` (not vendored) | `gh12621.phpt` sets `browscap` to `__DIR__/../../../ext/standard/tests/misc/browscap.ini`, so the test needs a file at that relative path. `build/phpt-tree.sh` writes this repository's own `sapi/fpmng/fixtures/browscap.ini` there (issue #559); see below. |
 

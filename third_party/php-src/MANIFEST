@@ -133,7 +133,9 @@ sapi/fpm/tests/gh15395-php-auth-shutdown.phpt	sapi/fpm/tests/gh15395-php-auth-sh
 sapi/fpm/tests/gh16432-status-high-nprocs.phpt	sapi/fpm/tests/gh16432-status-high-nprocs.phpt	ae66bc83c5dab9deafa8aa84b5a8039d819abcf30dc548f7a7654f9b420df54c
 sapi/fpm/tests/gh16628.phpt	sapi/fpm/tests/gh16628.phpt	04314d3a1d886d328fb3991554deca5d103423cd5166d54e767d59f2d272ccb6
 sapi/fpm/tests/gh16932-scoreboard-reset.phpt	sapi/fpm/tests/gh16932-scoreboard-reset.phpt	d0e7c7d2ca35ede4e461b75e2b2a9f66e4a1b7e46547ac64f89f1888b6961825
+sapi/fpm/tests/gh19320-id-overflow.phpt	sapi/fpm/tests/gh19320-id-overflow.phpt	6000a999b9541c357edb79df5b8615b436cac98adce095014bf0e0936e896c29
 sapi/fpm/tests/gh19989-access-log-fcgi-stderr.phpt	sapi/fpm/tests/gh19989-access-log-fcgi-stderr.phpt	ae1a9176f6109616a6df2b57d885289199d3f8046fa6d424a8e2a42924f9ec3b
+sapi/fpm/tests/gh23288-opcache-interned-strings-buffer-pool.phpt	sapi/fpm/tests/gh23288-opcache-interned-strings-buffer-pool.phpt	26211cce9ac47bfc2f5c3eba9d890d25f3d3f8d6a7dc3a7f9237e95749c609eb
 sapi/fpm/tests/gh8157-user-ini-post.phpt	sapi/fpm/tests/gh8157-user-ini-post.phpt	6fff6194531e9a8436b70429b46b35445376309ada69c0adbbb79af2a58493f4
 sapi/fpm/tests/gh8646.phpt	sapi/fpm/tests/gh8646.phpt	5675ba72fecf0240d7a2c9fce065e23fc211cdf115440ac079507d5f04eb8411
 sapi/fpm/tests/gh8885-stderr-fd-reload-usr1.phpt	sapi/fpm/tests/gh8885-stderr-fd-reload-usr1.phpt	6c642baadcdacb18b1c1c9f2d0271296f045ee650627147b68dd56e987974080
@@ -144,6 +146,8 @@ sapi/fpm/tests/gh9981-fastcgi-error-header-reset.phpt	sapi/fpm/tests/gh9981-fast
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-custom.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-custom.phpt	4c942896364734d04bccb0ba40f45ed107133af2bc56b7a0ac88ad13c8783c32
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt	a3ac0b57e648b3a34555b78cc11e8d7d3f4ffe8cbee28bc0cce70e8895157f95
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-file-uploads.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-file-uploads.phpt	79a43c582553cad22eb29a7056af35fe569afe061df082adb2e6ea18948749b7
+sapi/fpm/tests/ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt	sapi/fpm/tests/ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt	1d5a042f21ab30eaf6c350403d21627170cdddfa380f73513d7638ed44433fca
+sapi/fpm/tests/ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt	sapi/fpm/tests/ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt	832bc81cc807027c9924b5567d461317a531e0e0f1b4468e65969cc4247dd951
 sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt	sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt	3a2f1cc10068c9212f647b8ff93028c7c0c32089066dc9f50b76d13ce7ff5b0f
 sapi/fpm/tests/log-access-extended-limit.phpt	sapi/fpm/tests/log-access-extended-limit.phpt	4ace720f08bd3ac1adfaa9b54e9c9b6d356a67e6f58884d505902830702cf6a8
 sapi/fpm/tests/log-bm-in-shutdown-fn.phpt	sapi/fpm/tests/log-bm-in-shutdown-fn.phpt	b974048fedbeb51e31c8a7cb744c2f6e58f153a40f3bcd70c51182f76f10c34e
@@ -187,6 +191,7 @@ sapi/fpm/tests/proc-user-ignored.phpt	sapi/fpm/tests/proc-user-ignored.phpt	31c2
 sapi/fpm/tests/proc-user-not-set-when-root.phpt	sapi/fpm/tests/proc-user-not-set-when-root.phpt	e429b3c4ebaf7b1c56b3c1033ea3518dfa805319258835771ac5b819ebe7d2ee
 sapi/fpm/tests/reload-uses-sigkill-as-last-measure.phpt	sapi/fpm/tests/reload-uses-sigkill-as-last-measure.phpt	593ba59391750b971d0c1018fa6bfb3d2a4b68826eed67d8a006ab6fcabb67a8
 sapi/fpm/tests/request_parse_body_multipart.phpt	sapi/fpm/tests/request_parse_body_multipart.phpt	c64b5ef37b5dfcb4dfbeee235d64f68587b057415619adaee204b15e13b8e716
+sapi/fpm/tests/request_parse_body_multipart_options_post_max_size.phpt	sapi/fpm/tests/request_parse_body_multipart_options_post_max_size.phpt	26a0c20a3f19989c291af7fbc47cfd6f02817e2e9bb3dffa0d057fcfb6c279a1
 sapi/fpm/tests/request_parse_body_urlencoded.phpt	sapi/fpm/tests/request_parse_body_urlencoded.phpt	2e06aecb51426acc66ffc41ea4777e0e69f0c79b9d9ee279c58a39231a089f46
 sapi/fpm/tests/response.inc	sapi/fpm/tests/response.inc	11263731e4773f3e385c985d494ea2f97f60660399d9723f07693a8b43c4d966
 sapi/fpm/tests/setsofib.phpt	sapi/fpm/tests/setsofib.phpt	ff365f27cff246a2b1810e9639139acdb0b0104a600adcfa2925188bec17251f

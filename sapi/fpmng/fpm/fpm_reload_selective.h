@@ -66,8 +66,20 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp);
  * for entries no pool of this generation took.
  * Never on the reload's successful execvp(), where the variable is the handoff.
  * SIGTERM, not SIGQUIT: the pool type is unknown here and an in-flight request
- * on such a worker is cut. A no-op when the variable is unset. A master that is
- * killed outright (SIGKILL, crash) cannot call it; that case is not covered. */
+ * on such a worker is cut. A no-op when the variable is unset. Issue #829: it
+ * also releases the guard of the selective reload (fpm_reload_selective_guard.h),
+ * last, after the SIGTERMs. A master that is killed outright (SIGKILL, crash)
+ * cannot call it: the guard signals the entries that are left in that case. */
 void fpm_reload_selective_discard_unadopted(void);
+
+/* Issue #829: 1 when FPM_RELOAD_SELECTIVE_ENV names at least one carried pid.
+ * fpm_reload_selective_guard_arm() starts the guard only then. */
+int fpm_reload_selective_has_carried(void);
+
+/* Issue #829: sends SIGTERM to every carried pid that still matches its start
+ * time, unsets the variable and returns how many signals were sent. Used by
+ * fpm_reload_selective_discard_unadopted() in the master, and by the guard
+ * process after the master has died. */
+int fpm_reload_selective_sigterm_carried(void);
 
 #endif

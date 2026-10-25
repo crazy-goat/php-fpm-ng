@@ -20,3 +20,4 @@ __pycache__/
 /findings.md
 /review.md
 /.env.worktree
+/out-fuzz/

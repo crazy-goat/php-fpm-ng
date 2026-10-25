@@ -15,6 +15,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Added
 
+- Testing: libFuzzer harnesses for the HTTP/1.1 response parser, the FastCGI record parser, the static path checks, the WebSocket handshake checks and the header and log helpers (`tests/fuzz/`, `build/fuzz.sh`, CI job `fuzz` on pull requests and pushes to main that touch the fuzzed code; issue #995). No change to the shipped binary.
 - Test builds: a failure-injection seam, `FPMNG_FAULT_INJECT=1` for `build/libphp-build.sh` (`--enable-fpmng-fault-inject` for the from-source flow), on the pattern of `FPMNG_DEBUG_CLOCK` (issue #832). The environment variable `FPMNG_FAULT=<point>[:ifenv=<VAR>]` makes a named call site fail. The first point is `pool_type_init_main`. The hit path is async-signal-safe (a fixed table read once before `main()`, no allocation, no `zlog()`), so a call site in a signal handler can use it. It is off by default, the code is not in a default build, and the package scripts refuse a binary that has `fpm_fault_inject_hit`. CI builds with it. New test `fpmng-reload-selective-failed-init-main.phpt` covers the #690 discard in `fpm_pctl_exit()` after a new master fails `init_main()`. The test skips on a binary without the seam. Documented in `docs/fpmng-phpt.md`.
 
 ### Changed

@@ -437,11 +437,11 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 				killed);
 	}
 
-	/* Issue #829: the guard is released last, after the SIGTERMs above. A
-	 * master that stops inside this function still leaves the guard armed, and
-	 * the guard then signals the same pids again, which the start-time check
-	 * makes harmless. Also reached when nothing was carried: the release must
-	 * not depend on the list. */
+	/* Issue #829: the guard is released last, after the SIGTERMs above. Until
+	 * the release, a master killed in this function leaves the guard armed. The
+	 * guard then sends the same SIGTERMs again and logs its WARNING: the
+	 * start-time check passes for a worker that still runs or is a zombie. Also
+	 * reached when nothing was carried: the release must not depend on the list. */
 	fpm_reload_selective_guard_release();
 }
 /* }}} */

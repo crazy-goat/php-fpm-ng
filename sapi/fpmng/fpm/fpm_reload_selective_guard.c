@@ -226,7 +226,12 @@ void fpm_reload_selective_guard_arm(void) /* {{{ */
 	}
 
 	/* The write end stays open here, and crosses execvp() and the daemonize
-	 * fork. The new master releases it: fpm_reload_selective_guard_release(). */
+	 * fork. The new master releases it: fpm_reload_selective_guard_release().
+	 * It is kept in the statics too: if both exec attempts fail, this master
+	 * releases it before it exits, so the guard does not signal the workers
+	 * that this master has just signalled. */
+	fpm_reload_selective_guard_fd = pipefd[1];
+	fpm_reload_selective_guard_ino = (unsigned long) st.st_ino;
 }
 /* }}} */
 

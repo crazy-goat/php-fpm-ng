@@ -70,6 +70,19 @@ function wait_gone(int $pid, int $seconds): bool
     return false;
 }
 
+/* Issue #829: true while the guard of this master runs. Its title is set in
+ * fpm_reload_selective_guard_main(). */
+function guard_alive(int $master): bool
+{
+    foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+        $cmd = @file_get_contents($file);
+        if ($cmd !== false && str_contains($cmd, "selective reload guard of master $master")) {
+            return true;
+        }
+    }
+    return false;
+}
+
 function request(string $address): bool
 {
     $fp = @stream_socket_client("tcp://$address", $errno, $error, 2);
@@ -171,6 +184,18 @@ try {
     }
     echo "spared worker gone: ok\n";
 
+    /* Issue #829: the old master releases the guard before it exits, so the
+     * guard reads the byte and logs nothing. Wait for it to end, then check. */
+    $deadline = microtime(true) + 10;
+    while (guard_alive($masterPid) && microtime(true) < $deadline) {
+        usleep(50000);
+    }
+    $logText = (string) @file_get_contents($log);
+    if (str_contains($logText, 'issue #829')) {
+        fail("the guard logged after the master had released it\n$logText");
+    }
+    echo "no guard warning: ok\n";
+
     $probe = @stream_socket_server("tcp://$keep", $errno, $error);
     if (!$probe) {
         fail("the listening address $keep is still held: $error");
@@ -199,6 +224,7 @@ try {
 worker running: ok
 master exited after failed execvp: ok
 spared worker gone: ok
+no guard warning: ok
 port free: ok
 Done
 --CLEAN--

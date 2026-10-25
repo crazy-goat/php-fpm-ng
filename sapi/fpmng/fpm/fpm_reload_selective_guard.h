@@ -11,7 +11,8 @@
  * write end is held by the master generation: it has no close-on-exec, so it
  * survives execvp() and the daemonize fork. The new master writes one byte and
  * closes its end when it releases the guard (fpm_reload_selective_discard_unadopted(),
- * which runs after the initial fork loop). The guard reads that byte and exits.
+ * which runs after the initial fork loop). The old master does the same when
+ * both exec attempts fail. The guard reads that byte and exits.
  * A child the new master forks before the release closes its copy at once
  * (fpm_reload_selective_guard_child_init()). If every holder dies first, the
  * guard reads end of file and sends SIGTERM to the carried workers, checking
@@ -51,8 +52,9 @@ void fpm_reload_selective_guard_arm(void);
 void fpm_reload_selective_guard_init_main(void);
 
 /* Called from fpm_reload_selective_discard_unadopted() in the new master, after
- * the SIGTERMs for the carried entries that no pool adopted. Writes one byte to
- * the pipe and closes the write end. A no-op when no guard was armed. */
+ * the SIGTERMs for the carried entries that no pool adopted, and in the old
+ * master when both exec attempts fail, before it exits. Writes one byte to the
+ * pipe and closes the write end. A no-op when no guard was armed. */
 void fpm_reload_selective_guard_release(void);
 
 /* Called in every child the master forks (fpm.c, fpm_http_gw_proc.c), right

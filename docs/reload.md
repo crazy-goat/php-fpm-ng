@@ -535,7 +535,7 @@ makes it fail with the failure-injection seam (`FPMNG_FAULT_INJECT=1`, see
 [`fpmng-phpt.md`](fpmng-phpt.md#failure-injection)). It checks the WARNING, the
 spared worker and the port. The test skips on a binary built without the seam.
 
-The tests of the #690 discard are these:
+These tests also cover the #690 discard:
 
 - `fpmng-reload-selective-failed-init.phpt`: a new master that cannot bind (a
   failure `-t` cannot see).

@@ -26,6 +26,7 @@
 #include "fpm_reload_config_check.h"
 #include "fpm_reload_exec_fallback.h"
 #include "fpm_reload_selective.h"
+#include "fpm_reload_selective_guard.h"
 #include "fpm_pool_supervisor.h"
 #include "fpm_reload_shm.h"
 #include "fpm_sd_notify.h"
@@ -125,6 +126,11 @@ static void fpm_pctl_exec(void)
 	/* Issue #692: before the cleanups, which free the pool list (the worker
 	 * pool cleanup). The expiry records need the pools. */
 	fpm_reload_shm_exec_records();
+
+	/* Issue #829: the guard for the workers this reload spares. Armed here, after
+	 * every spared worker is listed in the environment and before the exec. A
+	 * no-op when nothing is spared. The write end it keeps crosses the exec. */
+	fpm_reload_selective_guard_arm();
 
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXEC);
 

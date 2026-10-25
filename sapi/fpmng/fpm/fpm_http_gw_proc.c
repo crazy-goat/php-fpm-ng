@@ -52,6 +52,7 @@
 #include "fpm_signals.h"
 #include "fpm_env.h"
 #include "fpm_shm.h"
+#include "fpm_reload_selective_guard.h"
 #include "fpm_reload_shm.h"
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
@@ -1097,6 +1098,9 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 		 * so it must close the scoreboard and metrics memfds itself (issue #691
 		 * covered the pm children only). */
 		fpm_reload_shm_child_init();
+		/* Issue #829: the gateway is forked by the master too, so it closes its
+		 * copy of the selective reload guard's pipe the same way (fpm.c). */
+		fpm_reload_selective_guard_child_init();
 		fpm_http_gateway_run(gw, index);
 		/* not reached */
 	} else {

@@ -546,6 +546,10 @@ is async-signal-safe, so a call site in a signal handler (the #890 watchdog
 does not use `zlog()`, which is not safe in a handler. Point names are listed in
 `sapi/fpmng/fpm/fpm_fault_inject.h`, with the rationale.
 
+The point `selective_adopt_hold` does not fail the call. It sleeps 30 seconds
+before the adoption of a selective reload (issue #829), so a test can kill the
+new master in that window. Its hit line still reads `fails now`.
+
 - **Off by default and never in a shipped package.** With the flag off the code
   is not in the binary, and `FPM_FAULT_POINT()` is the constant 0.
   `build/libphp-build.sh` checks the symbol `fpm_fault_inject_hit` in both

@@ -35,6 +35,11 @@
    Point names used so far:
      pool_type_init_main   fpm_run(): type->init_main() of a pool fails
      pool_watchdog_fork    fpm_pool_watchdog_arm(): fork() of a watchdog fails (issue #890)
+     selective_adopt_hold  fpm_reload_selective_adopt(): HOLDS the master for up to 30 s
+                           before it adopts the spared children (issue #829). The point
+                           does not fail: the hit line says "fails now", but the call
+                           sleeps and returns. Runs once per pool with spared children,
+                           in the new master only, before the children are adopted.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

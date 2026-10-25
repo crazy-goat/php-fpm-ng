@@ -10,7 +10,7 @@
    malloc()/setenv() in fpm_reload_selective_spare_pool()) are the same kind
    of path and use the same mechanism. The #890 site runs inside a signal
    handler (fpm_pool_supervisor_sigterm() calls fpm_pool_watchdog_arm(),
-   fpm_pool_watchdog.c:59), so the hit path must be async-signal-safe.
+   fpm_pool_watchdog.c:67), so the hit path must be async-signal-safe.
 
    HOW. A call site asks FPM_FAULT_POINT("name"); it is true when the
    environment variable FPMNG_FAULT selects that point:
@@ -25,11 +25,16 @@
    `ifenv=` are read once, by a constructor before main(), into a fixed table
    (16 points, names under 64 characters; an entry that does not fit is
    dropped). Later changes of the environment have no effect. A point that is hit
-   fires every time; the call sites so far sit at most once per pool in the
-   master, and the first failure ends the process.
+   fires every time, and the call sites differ in how often they run.
+   pool_type_init_main runs at most once per pool, in the master, and its first
+   failure ends the process. pool_watchdog_fork runs in a child process (the
+   stop-signal handler of each supervisor copy, and the cron and
+   supervisor.max_runtime watchdogs). It can hit many times, and the process
+   does not end: the failed watchdog only loses its own bound.
 
    Point names used so far:
      pool_type_init_main   fpm_run(): type->init_main() of a pool fails
+     pool_watchdog_fork    fpm_pool_watchdog_arm(): fork() of a watchdog fails (issue #890)
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

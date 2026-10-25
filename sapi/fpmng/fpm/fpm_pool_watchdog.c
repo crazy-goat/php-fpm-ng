@@ -23,6 +23,7 @@
 #endif
 
 #include "fpm_pool_watchdog.h"
+#include "fpm_fault_inject.h"
 
 static int fpm_pool_watchdog_pidfd_open(pid_t pid) /* {{{ */
 {
@@ -51,6 +52,13 @@ pid_t fpm_pool_watchdog_arm(pid_t target_pid, unsigned timeout_seconds, int sign
 {
 	int pidfd;
 	pid_t watchdog;
+
+	/* Issue #890: the point makes fork() fail, and the caller gets the -1 a real
+	 * failure returns. It is checked before the pidfd is opened, so there is
+	 * nothing to close. */
+	if (FPM_FAULT_POINT("pool_watchdog_fork")) {
+		return -1;
+	}
 
 	/* Open the pidfd for the target BEFORE forking — see fpm_pool_watchdog.h and
 	 * NOTES.md 3o for the full rationale (including why this is safe even when

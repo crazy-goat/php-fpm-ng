@@ -768,10 +768,10 @@ jobs:
   # Issue #995: libFuzzer harnesses for the HTTP, FastCGI and WebSocket parsers
   # (tests/fuzz/, build/fuzz.sh). Each harness runs for 60 seconds, on a pull
   # request or a push to main, and only when the change touches what the harnesses
-  # compile. The check runs per change, not nightly, because a parser regression
-  # should fail the change that caused it. A change outside those paths reports
-  # success with its steps skipped. If the scope step cannot read git, it runs the
-  # fuzzers and prints a line that says so.
+  # compile or the files that run them. The check runs per change, not nightly,
+  # because a parser regression should fail the change that caused it. A change
+  # outside those paths reports success with its steps skipped. If the scope step
+  # cannot read git, it runs the fuzzers and prints a line that says so.
   #
   # The job log is public for this repository, so the job prints no harness
   # output: fuzz.sh -q writes it to a file that no step uploads. On a failure the
@@ -801,8 +801,9 @@ jobs:
         run: |
           # The paths the harnesses compile or build: the parsers in the FastCGI
           # SAPI, the php-src FastCGI and FPM sources, the harnesses, and their build
-          # scripts.
-          fuzzed='tests/fuzz build/fuzz.sh build/standalone-tree.sh sapi/fpmng ext/fpmng_metrics third_party/php-src/main/fastcgi.c third_party/php-src/main/fastcgi.h third_party/php-src/sapi/fpm/fpm'
+          # scripts. The workflow file and the dependency script run this job, so a
+          # change to either one runs the harnesses too.
+          fuzzed='tests/fuzz build/fuzz.sh build/standalone-tree.sh build/ci-install-deps.sh .github/workflows/build-matrix.yml sapi/fpmng ext/fpmng_metrics third_party/php-src/main/fastcgi.c third_party/php-src/main/fastcgi.h third_party/php-src/sapi/fpm/fpm'
           # The job runs git as root in a container, and the checkout belongs to
           # another uid, so git needs this entry before it reads the repository.
           git config --global --add safe.directory "$GITHUB_WORKSPACE"

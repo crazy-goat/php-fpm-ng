@@ -133,6 +133,11 @@ fi
 [ -f "$PHPSRC_INPUT/$TEST_DIR/tester.inc" ] || fail "tester.inc not found below: $PHPSRC_INPUT/$TEST_DIR"
 
 PHPSRC=$(resolve_path "$PHPSRC_INPUT") || fail "cannot resolve PHP source directory: $PHPSRC_INPUT"
+# Issue #991: the fixture patches (build/phpt-fixture-patches/) change this tree
+# as they change the owned suite's, through the same script, so a test that
+# checks a libphp fix skips on an older libphp here as well. The script also
+# prepares the tree for -j, which this serial run does not use.
+"$REPO/build/phpt-parallel.sh" "$PHPSRC" >&2 || fail "cannot apply the fixture patches to the test tree"
 mkdir -p "$RESULTS_INPUT" || fail "cannot create results directory: $RESULTS_INPUT"
 RESULTS_DIR=$(resolve_path "$RESULTS_INPUT") || fail "cannot resolve results directory: $RESULTS_INPUT"
 

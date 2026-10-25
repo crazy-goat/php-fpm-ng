@@ -52,7 +52,7 @@ vendored FPM files compile against the SDK's headers, and PHP keeps the
 engine API stable within a minor. Measured on 2026-10-24: these 8.5.12 files
 built against the Ubuntu 26.04 SDK (8.5.4). The Alpine edge SDK was not
 measured for 8.5.12. The pin moves when a patch release changes one of these files, not with every
-release.
+release. Vendored upstream tests that cover a libphp fix skip on an older SDK, as `gh23288-opcache-interned-strings-buffer-pool.phpt` does below php-8.5.12 (see `build/phpt-fixture-patches/README.md`).
 
 ## Licenses
 

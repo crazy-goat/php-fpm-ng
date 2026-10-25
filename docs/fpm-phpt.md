@@ -13,6 +13,8 @@ A few upstream tests cover behaviour `php-fpm-ng` removed on purpose, so they
 can only fail. They are named in `sapi/fpmng/tests/upstream-deviations.list`;
 see [Deliberate deviations](#deliberate-deviations).
 
+Both runners apply the fixture patches in `build/phpt-fixture-patches/` through `build/phpt-parallel.sh`. The patches change the copy of the tests that the runner runs, not `third_party/php-src/`. Patch 0006 makes `gh23288-opcache-interned-strings-buffer-pool.phpt` skip on a libphp older than php-8.5.12. That test checks a libphp fix, so the skip is not a deviation.
+
 ## Without a php-src checkout
 
 Issue #423. The runner needs `run-tests.php`, upstream's FPM test harness and

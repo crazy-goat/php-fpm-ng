@@ -262,9 +262,10 @@ int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	target_uri = malloc(local_len + query_len + 1);
 	if (!target_uri) {
 		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
-		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
 		fpm_http_conn_free(c);
 		fpm_http_count_local(gw);
+		/* Sent last: the send may end the request (see fpm_http_finish()). */
+		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
 		return 1;
 	}
 	memcpy(target_uri, hit->local_uri, local_len);

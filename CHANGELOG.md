@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Fixed
+
+- `pool.type = gateway`: a gateway process could crash when a reply completed inside the call that sends it.
+
 ## [0.17.1] - 2026-10-25
 
 ### Added

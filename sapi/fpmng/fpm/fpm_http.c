@@ -1123,6 +1123,10 @@ const struct fpm_http_transport_s fpm_http_target_fastcgi_ops = {
  * the other one. */
 static void fpm_http_reject_queued(fpm_http_conn *c)
 {
+	struct evhttp_request *req = c->req;
+	struct evbuffer *body = NULL;
+	int answer = c->evcon != NULL;
+
 	c->status = FPM_HTTP_SERVICE_UNAVAIL;
 	/* Issue #341: this is the ONE place every rejection funnels through --
 	 * a full queue drained here, the queue-cap check at enqueue time, and
@@ -1132,23 +1136,27 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 	zlog(ZLOG_WARNING, "[pool %s] http: pool full, rejecting a queued request target=%s",
 		c->gw->pool, c->target->pool);
 	fpm_http_counter_incr(c->target->rejected_total);
-	if (c->evcon) {
-		struct evbuffer *body = evbuffer_new();
+	if (answer) {
+		body = evbuffer_new();
 
-		evhttp_add_header(evhttp_request_get_output_headers(c->req), "Retry-After", FPM_HTTP_RETRY_AFTER);
+		evhttp_add_header(evhttp_request_get_output_headers(req), "Retry-After", FPM_HTTP_RETRY_AFTER);
 		if (body) {
 			evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
 				"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
-			evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", body);
-			evbuffer_free(body);
-		} else {
-			evhttp_send_reply(c->req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", NULL);
 		}
 	}
-	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 		c->remote_user, c->status, c->bytes_out,
 		c->log_target ? c->log_target : c->target->pool);	/* #389 */
 	fpm_http_conn_free(c);
+	/* Sent last, on the local `req`, like the other gateway replies (see
+	 * fpm_http_finish()). With c->evcon set, the send only queues the reply. */
+	if (answer) {
+		evhttp_send_reply(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable", body);
+		if (body) {
+			evbuffer_free(body);
+		}
+	}
 }
 
 /* Answers one queued request 502 because the connection to its target could
@@ -1378,10 +1386,10 @@ static void fpm_http_pump_target(struct fpm_http_target_s *t)
 			 * wrong about the flag.
 			 *
 			 * Unlinking first is also the safer order under re-entry:
-			 * evhttp_send_reply() below can drive the connection close
-			 * callback, and fpm_http_client_closed() -> fpm_http_conn_free()
-			 * would otherwise remove and free an entry this loop still holds
-			 * a pointer to.
+			 * fpm_http_reject_queued() frees the entry before it sends, and
+			 * with c->evcon set the send only queues the reply, so a close
+			 * callback cannot reach an entry this loop still holds a pointer
+			 * to.
 			 *
 			 * http.pool_full_policy = wait (issue #309): the one branch that
 			 * makes this gateway a fast-fail, and "wait" is this branch not
@@ -1905,14 +1913,14 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 
 /* Issue #641: one step of the graceful drain. A connection is idle when no
  * request is in flight on it AND nothing of a finished response is still
- * waiting to be flushed -- fpm_http_conn_free() clears cl->c the moment
- * evhttp_send_reply_end() queues the last byte, so the output buffer is the
- * only witness that the client has not received it yet. Idle connections are
- * closed by shrinking their own bufferevent timeouts, exactly as
- * fpm_http_client_idle_fire() does: evhttp owns the connection and
- * bufferevent_free() underneath it is a use-after-free (issue #90). The close
- * callback then removes the node from the index; the index is not touched
- * here, so iterating it is safe.
+ * waiting to be flushed -- fpm_http_conn_free() clears cl->c just before the
+ * send that ends a gateway reply (see fpm_http_finish()), so from then on the
+ * output buffer is the only witness that the client has not received the last
+ * bytes yet. Idle connections are closed by shrinking their own bufferevent
+ * timeouts, exactly as fpm_http_client_idle_fire() does: evhttp owns the
+ * connection and bufferevent_free() underneath it is a use-after-free (issue
+ * #90). The close callback then removes the node from the index; the index is
+ * not touched here, so iterating it is safe.
  *
  * Returns the number of connections that are still doing work. The drain tick
  * exits the loop when it is zero, and the deadline cuts it otherwise. */
@@ -2656,11 +2664,14 @@ void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int scri
 	int error = c->target->ops->write_request(c, script_missing);
 
 	if (error) {
-		fpm_http_log_response(gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+		struct evhttp_request *req = c->req;
+
+		fpm_http_log_response(gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, error, 0, target);
-		evhttp_send_error(c->req, error, NULL);
 		c->evcon = NULL;
 		fpm_http_conn_free(c);
+		/* Sent last, on the local `req`: see fpm_http_finish(). */
+		evhttp_send_error(req, error, NULL);
 		return;
 	}
 
@@ -2851,10 +2862,11 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * for a request this gateway answered itself. */
 		if (!c->target) {
 			fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND, 0, NULL);
-			evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
 			fpm_http_count_local(gw);	/* #390: no route covers this path */
 			c->evcon = NULL;
 			fpm_http_conn_free(c);
+			/* Sent last: the send may end the request (see fpm_http_finish()). */
+			evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
 			return;
 		}
 		/* Issue #341: fpmng_gateway_requests_total{target=...} -- every request

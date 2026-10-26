@@ -68,13 +68,17 @@
  * so no header has been sent and no body has been promised. */
 static void fpm_http_upstream_timeout_reply(fpm_http_conn *c)
 {
+	struct evhttp_request *req = c->req;
+
 	c->status = FPM_HTTP_GATEWAY_TIMEOUT;
-	evhttp_send_error(c->req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
-	fpm_http_log_response(c->gw, c->req,
+	fpm_http_log_response(c->gw, req,
 			c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool);
 	fpm_http_conn_free(c);
+	/* Sent last, on the local `req`: the send may end the request, so nothing
+	 * after it may read c (see fpm_http_finish()). */
+	evhttp_send_error(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
 }
 
 static void fpm_http_upstream_deadline_fire(evutil_socket_t fd, short what, void *arg)

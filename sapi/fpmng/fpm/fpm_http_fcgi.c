@@ -848,12 +848,15 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
  * name (issue #118) -- so only the unexplained loss is reported from here. */
 void fpm_http_finish(fpm_http_conn *c, int explained)
 {
+	struct evhttp_request *req = c->req;
+	int bad_gateway = 0;
+
 	/* Issue #596: the last piece of a read can pause the upstream and the
 	 * END_REQUEST behind it finish the request in the same read; nothing would
 	 * re-arm the read event of an upstream that has no idle timeout. */
 	fpm_http_response_resume(c);
 	if (c->headers_sent) {
-		evhttp_send_reply_end(c->req);
+		/* The reply is under way and is ended below, once c is gone. */
 	} else if (c->cgi_headers.s) {
 		/* Issue #636: the upstream ended before the blank line that closes the
 		 * CGI header block, so what it said is not a reply yet -- the block is
@@ -889,19 +892,30 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		 * written then too because it names the decision, not the error. */
 		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' ended its reply after %zu bytes of an unterminated CGI header block; answering 502",
 				c->gw->pool, c->target->listen_address, ZSTR_LEN(c->cgi_headers.s));
-		c->status = FPM_HTTP_BAD_GATEWAY;
-		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		bad_gateway = 1;
 	} else {
 		if (!explained) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);
 		}
-		c->status = FPM_HTTP_BAD_GATEWAY;
-		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		bad_gateway = 1;
 	}
-	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+	if (bad_gateway) {
+		c->status = FPM_HTTP_BAD_GATEWAY;
+	}
+	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool); /* #389: "operator" for an operator-forwarded request */
 	fpm_http_conn_free(c);
+	/* The reply is sent last, on the local copy `req`, because c is freed by
+	 * now. evhttp_send_reply_end() ends the request on this stack when the reply
+	 * is not chunked and the connection's output is already empty: that frees
+	 * the request and, for a closing connection, the connection, and the close
+	 * callback runs on the way. Nothing after this line reads c. */
+	if (bad_gateway) {
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+	} else {
+		evhttp_send_reply_end(req);
+	}
 }
 
 #endif /* HAVE_FPM_HTTP */

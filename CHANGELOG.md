@@ -13,9 +13,11 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
-### Fixed
+## [0.17.2] - 2026-10-26
 
-- `pool.type = gateway`: a gateway process could crash when a reply completed inside the call that sends it.
+### Security
+
+- `pool.type = gateway`: a reply that libevent completed inside the send call caused a use-after-free and a double free in the gateway process (GHSA-jw3f-79v7-7q5h). A non-chunked reply (HTTP/1.0, or a reply with `Content-Length`) whose output buffer was already empty when the request ended made libevent end the request at once. On a closing connection the close callback then freed the connection state, and `fpm_http_finish()` read it again and freed it a second time. A client needed no authentication; a script that flushes its output and then ends was enough. The gateway now writes the access log line and frees its state before the last send. The same order is used at the other gateway reply sites. New test `fpmng-http-gateway-flush-then-end.phpt`.
 
 ## [0.17.1] - 2026-10-25
 
@@ -405,7 +407,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.1...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.2...HEAD
+[0.17.2]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...v0.16.0

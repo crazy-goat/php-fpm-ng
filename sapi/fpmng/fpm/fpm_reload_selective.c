@@ -7,8 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fpm_reload_selective.h"
+#include "fpm_reload_selective_guard.h"
 #include "fpm_reload_shm.h"
 #include "fpm_worker_pool.h"
 #include "fpm_children.h"
@@ -16,6 +18,7 @@
 #include "fpm_pid_child.h"
 #include "fpm_adopted_sweep.h"
 #include "fpm_clock.h"
+#include "fpm_fault_inject.h"
 #include "zlog.h"
 
 /* One env var for every pool, "name:pid,pid,pid" groups separated by ';' --
@@ -310,6 +313,18 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 		return;
 	}
 
+	/* Issue #829: a test point that holds this master here. The entries have
+	 * left the environment and no child is adopted yet, so this is the window
+	 * the guard covers: a master killed now leaves the workers to the guard.
+	 * The hold is bounded (30 seconds), so a test cannot leave a master stuck. */
+	if (FPM_FAULT_POINT("selective_adopt_hold")) {
+		int s;
+
+		for (s = 0; s < 30; s++) {
+			sleep(1);
+		}
+	}
+
 	for (i = 0; i < n; i++) {
 		struct timeval started;
 		struct fpm_child_s *child;
@@ -357,14 +372,22 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
-void fpm_reload_selective_discard_unadopted(void) /* {{{ */
+int fpm_reload_selective_has_carried(void) /* {{{ */
+{
+	const char *existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
+
+	return existing && *existing;
+}
+/* }}} */
+
+int fpm_reload_selective_sigterm_carried(void) /* {{{ */
 {
 	const char *existing = getenv(FPM_RELOAD_SELECTIVE_ENV);
 	char *copy, *rest;
 	int killed = 0;
 
 	if (!existing || !*existing) {
-		return;
+		return 0;
 	}
 
 	copy = strdup(existing);
@@ -372,7 +395,7 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 	 * this process may find these pids again and treat them as its own. */
 	unsetenv(FPM_RELOAD_SELECTIVE_ENV);
 	if (!copy) {
-		return;
+		return 0;
 	}
 
 	for (rest = copy; rest && *rest;) {
@@ -395,6 +418,15 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 		killed += fpm_reload_selective_sigterm_list(colon + 1);
 	}
 
+	free(copy);
+	return killed;
+}
+/* }}} */
+
+void fpm_reload_selective_discard_unadopted(void) /* {{{ */
+{
+	int killed = fpm_reload_selective_sigterm_carried();
+
 	/* Also called from fpm_run() after the initial fork loop, where this
 	 * master keeps running. The message says only what is true in both
 	 * places: this master did not adopt them (issue #830). */
@@ -404,6 +436,12 @@ void fpm_reload_selective_discard_unadopted(void) /* {{{ */
 						   "keep running with their listening sockets",
 				killed);
 	}
-	free(copy);
+
+	/* Issue #829: the guard is released last, after the SIGTERMs above. Until
+	 * the release, a master killed in this function leaves the guard armed. The
+	 * guard then sends the same SIGTERMs again and logs its WARNING: the
+	 * start-time check passes for a worker that still runs or is a zombie. Also
+	 * reached when nothing was carried: the release must not depend on the list. */
+	fpm_reload_selective_guard_release();
 }
 /* }}} */

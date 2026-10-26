@@ -129,6 +129,24 @@ $keepSparred = (bool) preg_match(
     $logText
 );
 
+/* Issue #829: the new master releases the selective reload guard once it has
+ * adopted the spared worker. After the window above no guard runs for this
+ * master, the spared worker is still alive and the log has no guard line. The
+ * /proc checks need Linux; elsewhere they are left out. */
+$guardOf = function (int $master): int {
+    foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+        $cmd = @file_get_contents($file);
+        if ($cmd !== false && preg_match('/selective reload guard of master (\d+)/', $cmd, $m) === 1 && (int) $m[1] === $master) {
+            return (int) explode('/', $file)[2];
+        }
+    }
+    return 0;
+};
+$procReadable = is_readable('/proc/self/stat');
+$masterPid = (int) $tester->getPid();
+$guardPid = $procReadable ? $guardOf($masterPid) : 0;
+$keepAlive = !$procReadable || is_dir("/proc/$keepPidBefore");
+
 $failed = false;
 if ($changePidAfter === $changePidBefore) {
     echo "FAIL: [change] pool did not restart across the reload (pid stayed $changePidBefore)\n";
@@ -140,6 +158,15 @@ if ($changePidAfter === $changePidBefore) {
     $failed = true;
 } elseif (!$keepSparred) {
     echo "FAIL: the master never logged that it spared [keep] (issue #405)\n";
+    $failed = true;
+} elseif (!$keepAlive) {
+    echo "FAIL: the spared [keep] worker $keepPidBefore is gone after the reload (issue #829)\n";
+    $failed = true;
+} elseif ($guardPid > 0) {
+    printf("FAIL: a selective reload guard (pid %d) still runs after the new master adopted the workers (issue #829)\n", $guardPid);
+    $failed = true;
+} elseif (str_contains($logText, 'issue #829')) {
+    echo "FAIL: the guard signalled a worker although the reload completed (issue #829)\n";
     $failed = true;
 } else {
     echo "reload-selective-on: ok\n";

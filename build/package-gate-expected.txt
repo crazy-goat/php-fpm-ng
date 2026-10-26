@@ -50,6 +50,8 @@ apk,apk-tls SKIP  fpmng-gateway-listener-stale-record                     the Al
 apk,apk-tls SKIP  fpmng-reload-gateway-exec-after-check                the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-reload-selective-exec-after-check                 the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-reload-selective-exec-fallback-fails            the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
+apk,apk-tls SKIP  fpmng-gateway-listener-foreign-socket                 the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
+apk,apk-tls SKIP  fpmng-gateway-listener-port-only                      the Alpine test image has no /bin/bash (stage 2 does not install it), see its SKIPIF
 apk,apk-tls SKIP  fpmng-http-direct-session-status                        the Alpine -n CLI/pool has no session extension loaded (measured by the old gate, #424)
 apk,apk-tls SKIP  fpmng-http-direct-worker-buffered-streams               the Alpine -n CLI has no openssl (shared ext loaded via ini), see its SKIPIF (#424)
 apk-tls   SKIP  fpmng-acme-issue                                        the ACME renewer runs inside the pool and the Alpine pool child has no openssl (#500)
@@ -61,3 +63,5 @@ apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the ga
 # ci-package-gate.sh passes no FPMNG_FAULT_INJECT to the build; see its SKIPIF (#832).
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-failed-init-main     package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#832)
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-survivor-watchdog-fork-fails   package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#890)
+deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-guard-sigkill        package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#829)
+deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-guard-sigkill-daemonize package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#829)

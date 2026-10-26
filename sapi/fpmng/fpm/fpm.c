@@ -26,6 +26,7 @@
 #include "fpm_request.h"
 #include "fpm_metrics.h"
 #include "fpm_reload_selective.h"
+#include "fpm_reload_selective_guard.h"
 #include "fpm_reload_shm.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
@@ -75,6 +76,11 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	 * FPMNG_DEBUG_CLOCK_RATE is set to something above 1 -- which is what keeps
 	 * the rest of the test suite unaffected. */
 	fpm_debug_clock_init();
+
+	/* Issue #829: takes the selective reload guard's pipe out of the environment
+	 * before any child is forked. A child clears the environment (clear_env)
+	 * before the child hook below runs, so the hook reads the copy kept here. */
+	fpm_reload_selective_guard_init_main();
 
 	/* Before anything forks: a module registered here is inherited by every
 	 * child, and its INI entries exist before fpm_conf_init_main() parses the
@@ -285,6 +291,9 @@ run_child: /* only workers reach this point */
 		 * thing this process runs may be a PHP script, which must not see
 		 * them through /proc/self/fd. */
 		fpm_reload_shm_child_init();
+		/* Issue #829: this child's copy of the selective reload guard's pipe
+		 * goes now, so that the guard sees EOF only when the master is gone. */
+		fpm_reload_selective_guard_child_init();
 
 		if (type && type->child_main) {
 			/* This type takes over the entire process permanently — it does not

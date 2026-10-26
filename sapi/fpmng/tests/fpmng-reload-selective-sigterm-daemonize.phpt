@@ -100,6 +100,19 @@ function childrenOf(int $ppid): array
     return $pids;
 }
 
+/* The pid of the selective reload guard that master $master armed (issue #829),
+ * found by the title fpm_reload_selective_guard_main() sets. 0 when none runs. */
+function guardPid(int $master): int
+{
+    foreach (glob('/proc/[0-9]*/cmdline') ?: [] as $file) {
+        $cmd = @file_get_contents($file);
+        if ($cmd !== false && preg_match('/selective reload guard of master (\d+)/', $cmd, $m) === 1 && (int) $m[1] === $master) {
+            return (int) explode('/', $file)[2];
+        }
+    }
+    return 0;
+}
+
 /* Not posix_kill(): the harness runs tests under `php -n`, where ext/posix
  * (a shared module on Ubuntu) is not loaded. */
 function killHard(int $pid): void
@@ -131,6 +144,21 @@ try {
         'the new master did not adopt the two spared workers'
     );
     check(childrenOf($master) === [], 'the new master is the parent of the workers, the test does not reproduce #792');
+
+    /* Issue #829: the guard of the old master exits once the new master has
+     * adopted the workers. Nothing may still run for that master, and the
+     * guard must not have signalled a worker. The /proc checks need Linux. */
+    if (is_readable('/proc/self/stat')) {
+        $deadline = time() + 5;
+        while (time() < $deadline && guardPid($oldMaster) > 0) {
+            usleep(100000);
+        }
+        check(guardPid($oldMaster) === 0, "the selective reload guard of master $oldMaster still runs after the adopt");
+        check(
+            preg_match('/issue #829/', (string) @file_get_contents($logFile)) !== 1,
+            'the guard signalled a worker although the reload completed'
+        );
+    }
 
     /* While the master runs: an adopted worker that exits on its own must
      * be retired and replaced (a pm = static pool refills). The master gets

@@ -13,8 +13,15 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Fixed
+
+- `pool.type = gateway`: a gateway process could crash when a reply completed inside the call that sends it.
+
+## [0.17.1] - 2026-10-25
+
 ### Added
 
+- Testing: libFuzzer harnesses for the HTTP/1.1 response parser, the FastCGI record parser, the static path checks, the WebSocket handshake checks and the header and log helpers (`tests/fuzz/`, `build/fuzz.sh`, CI job `fuzz` on pull requests and pushes to main that touch the fuzzed code; issue #995). No change to the shipped binary.
 - Test builds: a failure-injection seam, `FPMNG_FAULT_INJECT=1` for `build/libphp-build.sh` (`--enable-fpmng-fault-inject` for the from-source flow), on the pattern of `FPMNG_DEBUG_CLOCK` (issue #832). The environment variable `FPMNG_FAULT=<point>[:ifenv=<VAR>]` makes a named call site fail. The first point is `pool_type_init_main`. The hit path is async-signal-safe (a fixed table read once before `main()`, no allocation, no `zlog()`), so a call site in a signal handler can use it. It is off by default, the code is not in a default build, and the package scripts refuse a binary that has `fpm_fault_inject_hit`. CI builds with it. New test `fpmng-reload-selective-failed-init-main.phpt` covers the #690 discard in `fpm_pctl_exit()` after a new master fails `init_main()`. The test skips on a binary without the seam. Documented in `docs/fpmng-phpt.md`.
 
 ### Changed
@@ -24,7 +31,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
-- `pool.type = gateway`: a gateway process could crash when a reply completed inside the call that sends it.
+- Selective reload (`reload.selective = yes`): the workers that a reload spares are no longer orphaned when the new master is killed outright (`SIGKILL`, a crash) before it adopts them (issue #829). Before, nothing signalled them, and they kept their listening sockets with no master. A guard process holds a pipe from the old master until the new master adopts or discards the workers. If every holder of the pipe dies first, the guard sends `SIGTERM` to every carried worker that still runs, adopted or not, after it checks the start time of each pid, and logs one WARNING. The guard covers only the selective survivors (`FPMNG_SELECTIVE_RELOAD_SURVIVORS`). A new master that is killed leaves the children it forked itself (the gateway and the children of changed pools) running, with their listening ports; the guard covers only the carried workers. The #329 survivors and a master killed after the release are not covered (see `docs/reload.md`). New tests `fpmng-reload-selective-guard-sigkill.phpt` and `fpmng-reload-selective-guard-sigkill-daemonize.phpt`; both need the failure-injection seam.
 - Reload: a `supervisor` copy that a reload spared (issue #329) is no longer left running when the new master fails before a pool takes it. The new master sends `SIGTERM` to such a copy on its failure paths. The copy's own watchdog then ends it after the pool's `supervisor.stop_timeout`. Before, nothing bounded the copy, and the script ran on with no master. A normal stop of the master sends `SIGTERM` to a survivor of a removed pool that waits for its deadline (issue #889). Covered by `fpmng-reload-survivor-init-fails.phpt`.
 - Reload: a `supervisor` survivor of a pool that the new configuration removes, or that a reload renames, gets a stop signal (issue #889). Before, the new master did not track it, so no process signalled it, and it ran until its own script ended. The new master now sends `SIGTERM` to it at its deadline, about 30 seconds after the reload. The survivor's own watchdog then ends it after the old `supervisor.stop_timeout`. The master has no backstop for this case, see `docs/reload.md`. New test `fpmng-reload-survivor-removed-pool.phpt`.
 - The start-up ABI check refuses to start when the struct sizes of the loaded libphp differ from the sizes the binary was built with. It compares `executor_globals` and `compiler_globals`, and it prints `FATAL` and exits with status 1 before `main()` (issue #994). Before, the check compared only the PHP version. A distribution can change a struct and keep the version number, so such a binary started, printed the loader warning, and segfaulted on `-v` and on a request that ends in a PHP fatal error. The check does not see a layout change that keeps both sizes. The version messages are unchanged. `build/test-libphp-abi-guard.sh` covers both struct sizes and a libphp whose `executor_globals` differs from the copy in the executable.
@@ -50,6 +57,11 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 - `pool.type = gateway`: an invalid upstream `Status:` line now gives a 502 whatever the other `Status:` lines of the same CGI header block say. Before, a valid `Status:` line after an invalid one (for example `Status: abc` then `Status: 404 Valid`) cleared the rejection: the client got `404 Valid` with the upstream headers and body, while the WARNING still said `answering 502` (issue #837).
 - `cron.log` is opened by the master at startup and at each reload, not by the pool user at each run (issue #775). Before, a log directory that the pool user cannot write, such as the root-owned `/var/log/php-fpm-ng/`, lost the line of every run, with `cannot open ... (Permission denied)` in the error log. Rotation by rename needs `SIGUSR1` (the master reopens `cron.log` on it, as it reopens the error log), a reload, or `copytruncate`; see `docs/cron.md`. Other pools' children no longer inherit the `cron.log` descriptor. New tests `fpmng-cron-log-opened-by-master.phpt`, `fpmng-cron-log-reopen-sigusr1.phpt` and `fpmng-cron-log-not-inherited.phpt`.
 - Reload: a pid that a reload carries over (`FPMNG_RELOAD_SURVIVORS`, `FPMNG_SELECTIVE_RELOAD_SURVIVORS`) is used only when its process still has the start time it had when spared. On Linux the check reads `/proc/<pid>/stat`. It does not depend on parentage, so it also works under `daemonize = yes`. Without `/proc` it falls back to `kill(pid, 0)`. A refused supervisor or selective pid logs one NOTICE with the pool name and the pid, except on the failed-handoff path, which logs no line per pid. Before, the master signalled such a pid with `kill(pid, 0)`, and it could stop an unrelated process (issue #891).
+
+### Security
+
+- `listen.allowed_clients` on an IPv6 listener compared only the first 96 bits of an allowed address in the FastCGI layer (`main/fastcgi.c`, `fcgi_is_allowed()`). A client that matched an allowed IPv6 address only in those bits was accepted: `::1` passed `listen.allowed_clients = ::dead:beef`. The IPv4-mapped form had the same bug: `::ffff:203.0.113.1` admitted the IPv4 client `127.0.0.1`. The vendored php-src moves from php-8.5.9 to php-8.5.12, which compares all 128 bits (issue #991). Tests: upstream `ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt` and `ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt`. The gateway ACL (`http.allowed_clients`) already compared all 16 bytes and is not affected.
+- The same php-src release (GH-19320) refuses a numeric pool `user`, `group`, `listen.owner` or `listen.group` of `4294967295` or more at configuration time, with `user ID '<value>' is out of range` (or `group ID`). `4294967295` is the `-1` that `chown()` reads as "no change". Before, the value was cut to 32 bits: `4294967296` became `0`.
 
 ## [0.17.0] - 2026-10-09
 
@@ -393,7 +405,8 @@ Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.
 ### Added
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
-[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.0...HEAD
+[Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.1...HEAD
+[0.17.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...v0.16.0
 [0.15.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...v0.15.0

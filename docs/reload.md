@@ -535,12 +535,57 @@ makes it fail with the failure-injection seam (`FPMNG_FAULT_INJECT=1`, see
 [`fpmng-phpt.md`](fpmng-phpt.md#failure-injection)). It checks the WARNING, the
 spared worker and the port. The test skips on a binary built without the seam.
 
-Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
-run this code, and its spared workers stay orphaned. Workers do not poll their
-parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (a new master
-that cannot bind — a failure `-t` cannot see) and
-`fpmng-reload-selective-exec-fallback-fails.phpt` (failed `execvp()` whose
-retry through `/proc/self/exe` fails too).
+These tests also cover the #690 discard:
+
+- `fpmng-reload-selective-failed-init.phpt`: a new master that cannot bind (a
+  failure `-t` cannot see).
+- `fpmng-reload-selective-exec-fallback-fails.phpt`: a failed `execvp()` whose
+  retry through `/proc/self/exe` fails too.
+
+The second test also checks that the guard of issue #829 logs nothing. When both
+exec attempts fail, the old master releases the guard before it exits.
+
+A new master that is killed outright (`SIGKILL`, a crash) cannot run this code.
+The guard of issue #829 covers its selective survivors. Its description follows
+below. Workers do not poll their parent pid.
+
+**A new master that is killed before it adopts the spared workers (issue #829).**
+A guard process covers this case for the selective survivors
+(`FPMNG_SELECTIVE_RELOAD_SURVIVORS`). The old master starts the guard before its
+`execvp()`. The guard holds the read end of a pipe. The write end crosses the
+`execvp()` and the daemonize fork.
+
+Each child that the new master forks closes its copy of the write end. This
+includes a gateway process. A gateway that kept the copy would keep the guard
+waiting after its master died.
+
+The new master writes one byte and closes the write end after its initial fork
+loop. This is the release. On a normal reload, the guard reads the byte and
+exits. When both exec attempts fail, the old master writes the same byte before
+it exits.
+
+If every holder of the write end dies first, the guard reads end of file. The
+guard has its own copy of the carried list. The copy is made before the
+`execvp()`. The guard sends `SIGTERM` to every carried worker that still runs,
+adopted or not. Before each signal, it checks the start time of the pid. It logs
+one WARNING that starts with `issue #829`.
+
+The guard does not cover these cases:
+
+- A new master that hangs and does not exit.
+- A new master that is killed (`SIGKILL`, a crash). The processes that it forked
+  itself keep running, with process 1 as their parent. These are its gateway
+  processes and the children of changed pools. They keep their listening ports.
+  The guard covers only the carried workers.
+- A master that is killed after the release. Its adopted workers stay orphaned,
+  as before.
+- The #329 survivors (see the next section).
+
+The design, with the rejected alternatives, is in
+`sapi/fpmng/fpm/fpm_reload_selective_guard.h`. The tests
+`fpmng-reload-selective-guard-sigkill.phpt` (`-F`) and
+`fpmng-reload-selective-guard-sigkill-daemonize.phpt` (`daemonize = yes`) cover
+this case. They need the failure-injection seam and skip without it.
 
 ### Relationship to issue #329's rolling restart
 
@@ -583,7 +628,8 @@ The window of issue #690 remains open for a #329 survivor. A `SIGTERM` or
 `SIGQUIT` to the old master between the spare and the `execvp()` leaves the
 spared copy without a master, because the carry hook writes the variable only
 at the `execvp()`. A new master that is killed outright (`SIGKILL` or a crash)
-cannot run this code (issue #829).
+cannot run this code. The guard of issue #829 covers only the selective
+survivors (`FPMNG_SELECTIVE_RELOAD_SURVIVORS`), not these.
 
 ### Back-to-back selective reloads (issue #692)
 

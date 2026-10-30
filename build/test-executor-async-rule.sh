@@ -15,6 +15,9 @@ cd "$REPO"
 # - sapi/fpmng/config.m4 (reserved configure flag help string)
 # - sapi/fpmng/tests/fpmng-http-direct-config.phpt (test asserting refusal)
 # - build/test-executor-async-rule.sh (this test script)
+# - branch async only: sapi/fpmng/tests/fpmng-config-rejected-directives.phpt
+#   and async/tests/frameworks/symfony/run.sh, two more tests asserting the
+#   refusal ("unknown pool.executor 'async'")
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     hits=$(git grep -nE 'executor[[:space:]]*=[[:space:]]*async' -- \
@@ -23,7 +26,9 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         ':(exclude)docs/NOTES.md' \
         ':(exclude)sapi/fpmng/config.m4' \
         ':(exclude)sapi/fpmng/tests/fpmng-http-direct-config.phpt' \
-        ':(exclude)build/test-executor-async-rule.sh' || true)
+        ':(exclude)build/test-executor-async-rule.sh' \
+        ':(exclude)sapi/fpmng/tests/fpmng-config-rejected-directives.phpt' \
+        ':(exclude)async/tests/frameworks/symfony/run.sh' || true)
 else
     hits=$(grep -rnE 'executor[[:space:]]*=[[:space:]]*async' . \
         --exclude-dir='.git' \
@@ -32,7 +37,9 @@ else
         --exclude='NOTES.md' \
         --exclude='config.m4' \
         --exclude='fpmng-http-direct-config.phpt' \
-        --exclude='test-executor-async-rule.sh' || true)
+        --exclude='test-executor-async-rule.sh' \
+        --exclude='fpmng-config-rejected-directives.phpt' |
+        grep -v '^\./async/tests/frameworks/symfony/run\.sh:' || true)
 fi
 
 if [ -n "$hits" ]; then

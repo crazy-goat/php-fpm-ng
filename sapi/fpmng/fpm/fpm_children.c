@@ -28,15 +28,34 @@
 #include "fpm_pool_type.h"
 #include "fpm_status.h"
 #include "fpm_children_extra.h"
+#include "fpm_crash_backoff.h"
 #include "fpm_reload_selective.h"
 #include "fpm_scale_down_drain.h"
 #include "fpm_child_php_log.h"
 #include "fpm_log.h"
+#ifdef HAVE_FPM_HTTP
+#include "fpm_pctl_window.h"
+#endif
 
 #include "zlog.h"
 
 static time_t *last_faults;
 static int fault;
+
+/* Issue #646: 1 when the master may fork a child of wp. Outside NORMAL state
+ * that is the ondemand pool of a gateway whose window is open (see
+ * fpm_pctl_may_fork_in_window()). */
+static int fpm_children_may_fork(const struct fpm_worker_pool_s *wp)
+{
+	if (fpm_pctl_can_spawn_children()) {
+		return 1;
+	}
+#ifdef HAVE_FPM_HTTP
+	return fpm_pctl_may_fork_in_window(wp);
+#else
+	return 0;
+#endif
+}
 
 static void fpm_children_cleanup(int which, void *arg) /* {{{ */
 {
@@ -203,6 +222,33 @@ struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, 
 }
 /* }}} */
 
+/* Issue #792: the exit path of fpm_children_bury() for a child whose exit no
+ * SIGCHLD reports -- an adopted child that is not a child of this master
+ * (fpm_adopted_sweep.c). It is never a crash, so no backoff; a replacement is
+ * forked as for any exit that is not an idle kill. */
+void fpm_children_adopted_exited(struct fpm_child_s *child) /* {{{ */
+{
+	struct fpm_worker_pool_s *wp = child->wp;
+	pid_t pid = child->pid;
+	bool restart = !child->idle_kill;
+
+	fpm_scale_down_drain_forget(pid);
+	fpm_child_unlink(child);
+	fpm_scoreboard_proc_free(child);
+
+	zlog(ZLOG_NOTICE, "[pool %s] adopted child %d is gone (no SIGCHLD reaches a master that is "
+					  "not its parent); retiring it", wp->config->name, (int) pid);
+
+	fpm_child_close(child, 1 /* in event_loop */);
+
+	fpm_pctl_child_exited();
+
+	if (restart) {
+		fpm_children_make(wp, 1 /* in event loop */, 1, 0);
+	}
+}
+/* }}} */
+
 struct fpm_child_s *fpm_child_find(pid_t pid) /* {{{ */
 {
 	struct fpm_worker_pool_s *wp;
@@ -268,6 +314,10 @@ static void fpm_child_init(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * reportable: zlog() still writes to the master's error_log fd, inherited
 	 * across the fork and not yet closed. */
 	fpm_child_php_log_init_child(wp);
+
+	/* fpm-ng: the other pools' master-held log descriptors must not survive into
+	 * this child (issue #775). */
+	fpm_pool_type_close_master_logs_in_child(wp);
 
 	if (0 > fpm_stdio_init_child(wp)  ||
 	    0 > fpm_log_init_child(wp)    ||
@@ -380,6 +430,13 @@ void fpm_children_bury(void)
 			struct timeval tv1, tv2;
 
 			fpm_child_unlink(child);
+
+			/* Issue #727: classify the exit before the scoreboard slot is freed,
+			 * because the slot holds the request count that says whether the child
+			 * served anything. */
+			if (restart_child) {
+				fpm_crash_backoff_child_exited(child);
+			}
 
 			fpm_scoreboard_proc_free(child);
 
@@ -551,12 +608,19 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 
 	/*
 	 * fork children while:
-	 *   - fpm_pctl_can_spawn_children : FPM is running in a NORMAL state (aka not restart, stop or reload)
+	 *   - fpm_children_may_fork       : FPM is running in a NORMAL state (aka not restart, stop or reload),
+	 *                                   or an ondemand pool forks for a gateway's open window (issue #646)
 	 *   - wp->running_children < max  : there is less than the max process for the current pool
 	 *   - (fpm_global_config.process_max < 1 || fpm_globals.running_children < fpm_global_config.process_max):
 	 *     if fpm_global_config.process_max is set, FPM has not fork this number of processes (globally)
 	 */
-	while (fpm_pctl_can_spawn_children() && wp->running_children < max && (fpm_global_config.process_max < 1 || fpm_globals.running_children < fpm_global_config.process_max)) {
+	while (fpm_children_may_fork(wp) && wp->running_children < max && (fpm_global_config.process_max < 1 || fpm_globals.running_children < fpm_global_config.process_max)) {
+
+		/* Issue #727: a respawn after a fast failure waits out its backoff delay.
+		 * The gate arms a one-shot timer that calls this function again. */
+		if (!fpm_crash_backoff_may_spawn(wp)) {
+			break;
+		}
 
 		warned = 0;
 		child = fpm_resources_prepare(wp);
@@ -610,6 +674,7 @@ int fpm_children_make(struct fpm_worker_pool_s *wp, int in_event_loop, int nb_to
 					proc->pid = pid;
 				}
 				fpm_clock_get(&child->started);
+				fpm_crash_backoff_child_spawned(child);
 				fpm_parent_resources_use(child);
 
 				zlog(is_debug ? ZLOG_DEBUG : ZLOG_NOTICE, "[pool %s] child %d started", wp->config->name, (int) pid);

@@ -1,9 +1,11 @@
-/* Internal surface shared between fpm_http.c (the gateway and its FastCGI
- * transport) and fpm_http_client.c (the HTTP/1.1 client transport, issue
- * #344). Everything here is private to the gateway implementation -- nothing
- * outside these two files includes this header. The struct definitions and
- * the TAILQ compatibility block moved out of fpm_http.c verbatim when the
- * second transport arrived; the comments below are theirs. */
+/* Internal surface of the gateway implementation: fpm_http.c (the gateway
+ * and its FastCGI transport), fpm_http_client.c (the HTTP/1.1 client
+ * transport, issue #344) and the gateway files split out of them later.
+ * Everything here is private to the gateway. Only gateway code includes
+ * this header; http-direct must not, see fpm_http_target.h. The struct
+ * definitions and the TAILQ compatibility block moved out of fpm_http.c
+ * verbatim when the second transport arrived; the comments below are
+ * theirs. */
 #ifndef FPM_HTTP_INTERNAL_H
 #define FPM_HTTP_INTERNAL_H
 
@@ -98,6 +100,7 @@ struct {								\
 #include "fpm_http_forwarded.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_request_id.h"
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 /* The request-target contract both ingresses read, since #681 (fpm_http_target.h). */
@@ -172,15 +175,18 @@ struct fpm_http_target_s;
  * The segment has two kinds of data, and the difference matters:
  *
  *   - POOL-WIDE and MONOTONIC: the accepted-request total, the ping total and
- *     the per-target request/rejection counters. These live in the header and
- *     in one slot per target label, each written with a cmp-set loop and no
+ *     the per-target request/rejection counters and the per-target request
+ *     duration histogram (issue #652). These live in the header and in one
+ *     slot per target label, each written with a cmp-set loop and no
  *     locking, and they SURVIVE a gateway process respawn (that is what makes
- *     a counter a counter). Slots are nslots = #targets + 2: rows
+ *     a counter a counter). The paused-response total (issue #706) is in the
+ *     header too. Slots are nslots = #targets + 2: rows
  *     [0, ntargets) are the routed targets in gw->targets order, row
  *     [ntargets] is target="operator" (#389's forwarded operator requests),
  *     row [ntargets + 1] is target="-", the requests this gateway answered
  *     itself.
- *   - PER GATEWAY PROCESS GAUGES: connections_open and the
+ *   - PER GATEWAY PROCESS GAUGES: connections_open, responses_paused (issue
+ *     #706: responses whose upstream is paused right now) and the
  *     upstreams_held[target] that a process currently holds. These are the
  *     #333 live_gauges shape: each process writes only its own block, the
  *     renderer SUMS every block, and the master ZEROES a dead process's block
@@ -193,9 +199,13 @@ struct fpm_http_target_s;
  * The variable part is a flat array of atomic_t cells rather than a struct
  * with two flexible arrays (C allows only one). The layout and every access
  * are in fpm_http.c's fpm_http_counters_slot_cells()/fpm_http_counters_gauges():
- *   slots:  nslots x 4  [requests_total, rejected_total, upstreams_budget, reclaim_gen]
- *   gauges: nproc x (1 + nslots)
- *           [connections_open, upstreams_held[0 .. nslots)]
+ *   slots:  nslots x FPM_HTTP_COUNTERS_SLOT_CELLS
+ *           [requests_total, rejected_total, upstreams_budget, reclaim_gen,
+ *            duration buckets (FPM_HTTP_DURATION_BUCKETS + 1 cells, per bucket,
+ *            not cumulative), duration_sum (microseconds)]
+ *   gauges: nproc x (2 + nslots)
+ *           [connections_open, responses_paused, upstreams_held[0 .. nslots)]
+ *           -- the FPM_HTTP_GAUGE_* cell indexes below name them.
  *
  * upstreams_budget is the shared admission budget (issue #340): every gateway
  * process reserves against it atomically, and the master returns a dead
@@ -207,10 +217,11 @@ struct fpm_http_target_s;
  * http.gateways, which a reload rebuilds: an exec-reload reruns the master and
  * the allocation is MAP_ANONYMOUS, so the counters reset on reload the way
  * every other pool's do (see docs/gateway.md). */
-/* The logical shape of one target row: four cells. The backing storage is
- * four atomic_t cells per row in fpm_http_counters_s.cells (see the accessors
- * in fpm_http.c), not an array of this struct -- it is kept as the named shape
- * the layout comment above and fpm_http_target_s refer to. */
+/* The logical shape of the first four cells of one target row. The backing
+ * storage is atomic_t cells in fpm_http_counters_s.cells (see the accessors in
+ * fpm_http.c), not an array of this struct -- it is kept as the named shape
+ * the layout comment above and fpm_http_target_s refer to. The duration
+ * histogram cells follow these four (FPM_HTTP_SLOT_BUCKET_CELL). */
 struct fpm_http_counters_slot {
 	atomic_t requests_total;	/* requests for this target label */
 	atomic_t rejected_total;	/* of those, answer 503 because the target was full */
@@ -221,10 +232,46 @@ struct fpm_http_counters_slot {
 struct fpm_http_counters_s {
 	atomic_t requests_total;	/* every request the gateway accepted */
 	atomic_t ping_total;		/* ping.path answers */
+	atomic_t responses_paused_total;	/* issue #706: times a response paused its upstream, see fpm_http_backpressure.c */
 	unsigned nslots;		/* #targets + 2, see above */
 	unsigned nproc;			/* gateway processes (http.gateways) */
-	atomic_t cells[];		/* slots x 3, then nproc gauge blocks */
+	atomic_t cells[];		/* slots x FPM_HTTP_COUNTERS_SLOT_CELLS, then nproc gauge blocks */
 };
+
+/* Issue #706: the cells of one gateway process's gauge block, in this order.
+ * The per-target upstreams_held cells come last, so a fixed gauge added later
+ * goes before them and only these macros move. Every index into a block is
+ * spelled with one of them. */
+#define FPM_HTTP_GAUGE_CONNECTIONS_OPEN	0u
+#define FPM_HTTP_GAUGE_RESPONSES_PAUSED	1u
+#define FPM_HTTP_GAUGE_UPSTREAMS_HELD	2u	/* + target row index, nslots cells */
+#define FPM_HTTP_GAUGE_BLOCK_CELLS(nslots) (FPM_HTTP_GAUGE_UPSTREAMS_HELD + (nslots))
+
+/* Issue #390, #652: the slot stride. The first four cells are the counters
+ * named in fpm_http_counters_slot; then the request-duration histogram of the
+ * row, FPM_HTTP_DURATION_BUCKETS finite buckets and one +Inf bucket, and the
+ * sum of the observed durations in microseconds. A bucket cell counts the
+ * observations that fell into that bucket only; the renderer makes them
+ * cumulative, so no cell is ever rewritten by more than one increment. */
+#define FPM_HTTP_SLOT_COUNTER_CELLS 4u
+#define FPM_HTTP_DURATION_BUCKETS 11u /* finite upper bounds, see fpm_http_duration_bounds[] */
+#define FPM_HTTP_SLOT_BUCKET_CELL FPM_HTTP_SLOT_COUNTER_CELLS
+#define FPM_HTTP_SLOT_SUM_CELL (FPM_HTTP_SLOT_BUCKET_CELL + FPM_HTTP_DURATION_BUCKETS + 1u)
+#define FPM_HTTP_COUNTERS_SLOT_CELLS (FPM_HTTP_SLOT_SUM_CELL + 1u)
+
+/* Issue #652: one finite bucket bound, as the Prometheus `le` label prints it
+ * and in microseconds, the unit the duration is measured in. The table is the
+ * Prometheus client default (0.005 s to 10 s), so a request longer than 10 s
+ * lands in the +Inf bucket only. Defined in fpm_http.c. */
+struct fpm_http_duration_bound_s {
+	const char *le;
+	unsigned long us;
+};
+extern const struct fpm_http_duration_bound_s fpm_http_duration_bounds[FPM_HTTP_DURATION_BUCKETS];
+
+/* Issue #652: the value of fpm_http_client_s.duration_row for a request the
+ * gateway answers itself. It is the "-" row, the last one. */
+#define FPM_HTTP_DURATION_ROW_LOCAL ((unsigned) -1)
 
 /* Which wire protocol the gateway speaks to a target. Only FastCGI is
  * implemented here; HTTP/1.1 towards a pool.type = http-direct target is #344,
@@ -261,6 +308,9 @@ struct fpm_http_transport_s {
 	void (*drop)(fpm_http_upstream *up);
 };
 
+struct fpm_scoreboard_s;
+struct fpm_worker_pool_s;
+
 /* One backend pool this gateway may send requests to. */
 struct fpm_http_target_s {
 	struct fpm_http_gateway_s *gw;
@@ -268,6 +318,18 @@ struct fpm_http_target_s {
 	char *listen_address;			/* where that pool takes requests */
 	enum fpm_http_transport_e transport;
 	const struct fpm_http_transport_s *ops;
+	/* Issue #646: the target pool's scoreboard and process manager, read by the
+	 * readiness probe to tell whether the target has a child that accepts
+	 * requests (starting), and whether it has no live child at all (dead). An
+	 * ondemand pool starts its children on demand, so an empty scoreboard is
+	 * not a dead target there. NULL = not watched; the probe counts it as dead. */
+	const struct fpm_scoreboard_s *scoreboard;
+	int ondemand;
+	/* Issue #646: the target's own worker pool, the identity the master uses to
+	 * hold its children back while the window of a gateway with http.ready_path
+	 * runs (fpm_http_pool_held_for_window()). The gateway's own pool for an own
+	 * target. */
+	const struct fpm_worker_pool_s *worker_pool;
 
 	/* how many persistent connections all the gateways of this pool may hold
 	 * to THIS target together; sized from the target pool's own
@@ -356,6 +418,25 @@ struct fpm_http_client_s {
 	struct fpm_http_gateway_s *gw;
 	struct evhttp_connection *evcon;
 	fpm_http_conn *c;
+	/* Issue #642: stamped in fpm_http_client_request_begin() for the request
+	 * in flight on this connection -- the start of the access log's
+	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves
+	 * one request at a time, so one stamp per node is enough. */
+	struct timeval request_started;
+	/* Issue #652: the counters row the duration of the request in flight is
+	 * observed under -- the row its requests_total was counted in: the routed
+	 * target, "operator" for a forwarded operator page, or
+	 * FPM_HTTP_DURATION_ROW_LOCAL for an answer the gateway gave itself. Reset
+	 * by fpm_http_client_request_begin(), set where the request is routed. */
+	unsigned duration_row;
+	/* Issue #652: 1 once the request in flight is in the histogram. A plain
+	 * listener's ACME answer reaches fpm_http_log_response() and then the
+	 * plain wrapper's timing, so the second call must not observe again.
+	 * Reset by fpm_http_client_request_begin(). */
+	unsigned duration_observed;
+	/* Issue #642: the id of the request in flight, "" when http.request_id is
+	 * off or no id could be made. Sent to the target and logged. */
+	char request_id[FPM_HTTP_REQUEST_ID_SIZE];
 	/* issue #490: exact links inside the process-local hash bucket. The close
 	 * callback already carries this node, so removal does not search by evcon
 	 * and there is no second list that could diverge from the index. */
@@ -402,6 +483,7 @@ struct fpm_http_gateway_s {
 	int plain_listen_fd;
 	int backlog;
 	int reuseport;					/* every gateway binds its own SO_REUSEPORT socket (http.reuseport) */
+	char listen_tls_fp[17];		/* fpm_http_handoff_tls_fp() of this gateway; see fpm_http_handoff.h */
 	unsigned nproc;
 	pid_t *pids;
 	struct fpm_http_gw_slot_s **slots;		/* one per pids[i], see fpm_http_gw_slot_s */
@@ -436,13 +518,20 @@ struct fpm_http_gateway_s {
 	int wait_ms;
 	struct timeval wait_bound;			/* wait_ms split into {sec, usec} for evtimer_add() */
 	size_t max_body;					/* http.max_body, bytes; evhttp buffers a whole body in memory before dispatch (task 031) */
+	/* Issue #686: http.max_connections and http.max_connections_per_client, per
+	 * gateway process; 0 = unlimited. Both count the public and the plain
+	 * listener together. See fpm_http_gw_proc.c for the accept gate. */
+	int max_connections;
+	int max_per_client;
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
 	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
+	int request_id_mode; /* http.request_id: FPM_HTTP_REQUEST_ID_OFF/_GENERATE/_PROPAGATE, see fpm_http_request_id.h (#642) */
 	char *access_log_path;				/* http.access_log; NULL = disabled */
+	int access_format;				/* http.access_format: FPM_HTTP_ACCESS_FORMAT_COMBINED or _JSON, see fpm_http_access_log.h (#642) */
 	struct fpm_http_access_log_s *access_log;	/* gateway process only, NULL in the master */
 	char *front_controller;			/* http.front_controller; empty = fallback disabled (today's behavior) */
 	int front_controller_ok;			/* validated once by the master, before the first fork -- see fpm_http_front_controller_validate() */
@@ -454,6 +543,10 @@ struct fpm_http_gateway_s {
 	 * process depends on nothing beyond its own fork()ed memory. */
 	char *ping_path;
 	char *ping_response;
+
+	/* http.ready_path, answered locally -- issue #646. NULL = the directive is
+	 * unset. Copied the same way as ping_path; fpm_conf.c has validated it. */
+	char *ready_path;
 
 	/* access.suppress_path[], copied the same way -- fpm_http_log_response()
 	 * checks every entry before writing a line. First real consumer of the
@@ -598,8 +691,21 @@ struct fpm_http_gateway_s {
 	struct event *drain_tick;
 	volatile sig_atomic_t stopping;
 	struct timeval drain_deadline;
+	/* Issue #646: the soft drain. Only a gateway with http.ready_path gets
+	 * SIGUSR1 from the master at the start of a stop or reload. It keeps its
+	 * listeners and answers the probe 503 until drain_deadline, then starts
+	 * the hard drain above by itself (soft_timer), with a deadline of its own.
+	 * SIGQUIT from the master is ignored in the window, so the master's cleanup
+	 * cannot cut it short. ready_seen latches once at least one target could
+	 * serve; ready_require_target is http.ready_require_target. */
+	struct event *sigusr1;
+	struct event *soft_timer;
+	volatile sig_atomic_t soft_draining;
+	int ready_seen;
+	int ready_require_target;
 	/* Issue #390: this process's own gauge block in gw->counters --
-	 * [connections_open, upstreams_held[0 .. nslots)]. Set in
+	 * [connections_open, responses_paused, upstreams_held[0 .. nslots)] (issue
+	 * #706 added the second cell). Set in
 	 * fpm_http_gateway_run() from this process's slot index before the event
 	 * loop starts; NULL only if the counters segment failed to allocate (in
 	 * which case the gateway refused to start). The renderer sums every
@@ -629,6 +735,11 @@ struct fpm_http_gateway_s {
 	 * first needed and only ever used when http.gateways > 1. */
 	struct event *tick;
 	struct fpm_http_read_deadline_s *deadlines;	/* armed read deadlines, one per connection still reading its first request */
+	/* Issue #686: the connection cap of this process. conns is NULL unless
+	 * http.max_connections is set; cap_tick sweeps it and applies the accept
+	 * gate every 10 ms, and exists only alongside conns. */
+	struct fpm_http_direct_conns *conns;
+	struct event *cap_tick;
 };
 
 /* One armed read deadline per accepted connection (task 031). Bounds the total
@@ -750,6 +861,11 @@ struct _fpm_http_conn {
 	struct timeval wait_since;
 	struct event *wait_timer;
 	long queue_wait_ms;
+	/* Issue #642: set when the request is handed to an upstream (the pump),
+	 * the start of the access log's upstream_ms. upstream_started is 0 for a
+	 * request no target ever received, which prints upstream_ms=-. */
+	struct timeval upstream_since;
+	int upstream_started;
 };
 
 /* One persistent FastCGI connection to the pool, serving one request at a time.
@@ -853,6 +969,11 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len);
 /* Reads the upstream again if fpm_http_response_chunk() stopped it. Safe to
  * call at any time, including when nothing is paused. */
 void fpm_http_response_resume(fpm_http_conn *c);
+/* Issue #706: clears the paused state without touching the upstream, and
+ * returns 1 if the response was paused. The paused-responses gauge is
+ * maintained here, so every path that ends a pause goes through it:
+ * fpm_http_response_resume() and fpm_http_conn_free(). */
+int fpm_http_response_unpause(fpm_http_conn *c);
 
 /* Issue #747: what fpm_http.c shares with the files it was split into. Each
  * group is named after the file that defines it. */
@@ -885,6 +1006,7 @@ extern struct fpm_http_gateway_s *gateways;
 extern const struct fpm_http_transport_s fpm_http_target_fastcgi_ops;
 atomic_t *fpm_http_counters_gauges(struct fpm_http_counters_s *c, unsigned p);
 unsigned long fpm_http_connections_open(struct fpm_http_gateway_s *gw);
+unsigned long fpm_http_gauge_sum(struct fpm_http_gateway_s *gw, unsigned cell);
 atomic_t *fpm_http_counters_slot_cells(struct fpm_http_counters_s *c, unsigned i);
 void fpm_http_front_controller_validate(struct fpm_http_gateway_s *gw);
 size_t fpm_http_counters_size(const struct fpm_http_counters_s *c);
@@ -896,6 +1018,7 @@ void fpm_http_log_response(struct fpm_http_gateway_s *gw, struct evhttp_request 
 		const char *remote_addr, const char *remote_user, int status, size_t bytes, const char *target);
 void fpm_http_count_local(struct fpm_http_gateway_s *gw);
 void fpm_http_counter_incr(atomic_t *counter);
+void fpm_http_counter_decr(atomic_t *counter);
 void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int script_missing);
 void fpm_http_local_addr(struct evhttp_connection *evcon, char *addr_buf, size_t addr_size,
 		char *port_buf, size_t port_size);
@@ -915,6 +1038,7 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint);
 /* fpm_http_gw_proc.c */
 void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index);
 void fpm_http_cleanup(int which, void *arg);
+void fpm_http_split_bind(char *bind, char **host, char **port);
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
 

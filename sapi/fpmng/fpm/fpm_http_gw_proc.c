@@ -6,6 +6,8 @@
 
 #include "fpm.h"
 #include "fpm_http.h"
+#include "fpm_http_handoff.h"
+#include "fpm_pool_type.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -35,6 +37,7 @@
 #include <event2/http_struct.h>
 #include <event2/buffer.h>
 #include <event2/bufferevent.h>
+#include <event2/listener.h>
 #include <event2/keyvalq_struct.h>
 #include <event2/util.h>
 
@@ -49,18 +52,20 @@
 #include "fpm_signals.h"
 #include "fpm_env.h"
 #include "fpm_shm.h"
+#include "fpm_reload_selective_guard.h"
+#include "fpm_reload_shm.h"
 #include "fpm_atomic.h"
 #include "fpm_process_ctl.h"
 #include "fpm_clock.h"
 #include "fpm_http_acl.h"
 #include "fpm_http_accept_backoff.h"
+#include "fpm_http_direct_conn.h"
 #include "fpm_http_forwarded.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
 #include "fpm_children_extra.h"
-#include "fpm_pool_type.h"
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
@@ -355,6 +360,102 @@ void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct buffere
 	}
 }
 
+/* Issue #686: the connection cap. A gateway process accepts on two listeners at
+ * most (the public one and http.plain_listen), and both feed one
+ * fpm_http_direct_conns object, so http.max_connections is one number per
+ * process. That object is the one http-direct uses (fpm_http_direct_conn.c). It
+ * holds one bufferevent reference per connection and counts every connection
+ * evhttp has not released yet.
+ *
+ * At the cap both listeners are disabled. The kernel then queues further
+ * connections in the listen backlog, and none is refused. The gate is applied
+ * in three places: after each accept, on the 10 ms tick, and in the accept
+ * backoff's resume check. It never touches a listener once the drain has
+ * started, because the drain has removed both of them. */
+static int fpm_http_gateway_accepting(struct fpm_http_gateway_s *gw)
+{
+	return !gw->stopping && fpm_http_direct_conns_may_accept(gw->conns);
+}
+
+static void fpm_http_gateway_listener_set(struct evhttp_bound_socket *bound, int on)
+{
+	struct evconnlistener *l = bound ? evhttp_bound_socket_get_listener(bound) : NULL;
+
+	if (!l) {
+		return;
+	}
+	if (!on) {
+		evconnlistener_disable(l);
+	} else if (!fpm_http_accept_backoff_paused(bound)) {
+		/* The backoff owns the listener until its pause ends (issue #729). */
+		evconnlistener_enable(l);
+	}
+}
+
+/* Applies the gate to both listeners. Does nothing without a cap. */
+static void fpm_http_gateway_gate(struct fpm_http_gateway_s *gw)
+{
+	int on;
+
+	if (!gw->conns || gw->stopping) {
+		return;
+	}
+	on = fpm_http_gateway_accepting(gw);
+	fpm_http_gateway_listener_set(gw->tls_bound, on);
+	fpm_http_gateway_listener_set(gw->plain_bound, on);
+}
+
+/* The accept backoff asks this at the end of a pause (fpm_http_accept_backoff.h). */
+static int fpm_http_gateway_may_resume(void *arg)
+{
+	return fpm_http_gateway_accepting((struct fpm_http_gateway_s *) arg);
+}
+
+/* Issue #686: called from both bevcbs, with the bufferevent they return. */
+static void fpm_http_gateway_accepted(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
+{
+	if (!gw->conns) {
+		return;
+	}
+	fpm_http_direct_conns_accepted(gw->conns, bev);
+	fpm_http_gateway_gate(gw);
+}
+
+static void fpm_http_gateway_cap_tick(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_http_gateway_s *gw = arg;
+
+	(void) fd;
+	(void) what;
+	fpm_http_direct_conns_sweep(gw->conns);
+	fpm_http_gateway_gate(gw);
+}
+
+/* Issue #686: creates the cap when http.max_connections is set. Runs before any
+ * listener is opened, so no connection is accepted without it. */
+static void fpm_http_gateway_cap_init(struct fpm_http_gateway_s *gw)
+{
+	struct fpm_http_direct_conns_limits limits = { 0 };
+	struct timeval interval = { 0, 10000 };
+
+	if (gw->max_connections <= 0) {
+		return;
+	}
+	limits.pool = gw->pool;
+	limits.max_connections = gw->max_connections;
+	limits.max_per_client = gw->max_per_client;
+	/* The total counts every connection this process holds, not only those
+	 * still waiting for their first request, so a node is kept for the whole
+	 * life of its connection and the tick is what releases it. */
+	limits.track_live = 1;
+	gw->conns = fpm_http_direct_conns_new(gw->base, &limits);
+	gw->cap_tick = gw->conns ? event_new(gw->base, -1, EV_PERSIST, fpm_http_gateway_cap_tick, gw) : NULL;
+	if (!gw->cap_tick || event_add(gw->cap_tick, &interval) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http: cannot set up http.max_connections: this gateway will not start", gw->pool);
+		exit(FPM_EXIT_SOFTWARE);
+	}
+}
+
 /* The gateway's bevcb: builds the bufferevent for a new client connection and
  * arms its read deadline. TLS connections get their SSL bufferevent from
  * fpm_tls_http_bevcb() with the pool's CURRENT SSL_CTX (gw->tls_ctx), so a
@@ -376,6 +477,7 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
+	fpm_http_gateway_accepted(gw, bev);
 	return bev;
 }
 
@@ -391,6 +493,7 @@ static struct bufferevent *fpm_http_plain_bevcb(struct event_base *base, void *a
 	if (bev && gw->read_timeout_ms > 0) {
 		fpm_http_read_deadline_arm(gw, bev);
 	}
+	fpm_http_gateway_accepted(gw, bev);
 	return bev;
 }
 
@@ -414,7 +517,7 @@ static void fpm_http_log_follow_readable(evutil_socket_t fd, short what, void *a
 	(void) what;
 
 	if (fpm_error_log_follow_child_adopt() > 0) {
-		gw->access_log = fpm_http_access_log_reopen(gw->access_log, gw->pool, gw->access_log_path);
+		gw->access_log = fpm_http_access_log_reopen(gw->access_log, gw->pool, gw->access_log_path, gw->access_format);
 	}
 }
 
@@ -477,9 +580,11 @@ static int fpm_http_gateway_open_tls_listener(struct fpm_http_gateway_s *gw) /* 
 	}
 	/* Issue #641: remembered so the graceful drain can stop accepting. */
 	gw->tls_bound = bound;
-	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", NULL, NULL) != 0) {
+	if (fpm_http_accept_backoff_install(gw->base, bound, gw->pool, "main", fpm_http_gateway_may_resume, gw) != 0) {
 		zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on the main listener; running out of file descriptors will make it spin", gw->pool);
 	}
+	/* Issue #686: a listener opened while the cap is full starts closed. */
+	fpm_http_gateway_gate(gw);
 	gw->tls_ready = 1;
 	return 0;
 }
@@ -516,9 +621,26 @@ static void fpm_http_gateway_tls_listener_hook(void *arg) /* {{{ */
  * so the drain is free to call evhttp -- nothing runs in signal context. */
 static void fpm_http_gateway_sigquit(evutil_socket_t fd, short what, void *arg)
 {
+	struct fpm_http_gateway_s *gw = arg;
+
 	(void) fd;
 	(void) what;
-	fpm_http_drain_start((struct fpm_http_gateway_s *) arg);
+	/* Issue #646: during the soft window the master's SIGQUIT (sent by its
+	 * cleanup once the children are gone) must not cut the window short. The
+	 * window ends at its own deadline, which then starts the hard drain. */
+	if (gw->soft_draining && !gw->stopping) {
+		return;
+	}
+	fpm_http_drain_start(gw);
+}
+
+/* Issue #646: SIGUSR1 from the master starts the soft drain. Only gateways
+ * with http.ready_path install this handler (fpm_http_gateway_run()). */
+static void fpm_http_gateway_sigusr1(evutil_socket_t fd, short what, void *arg)
+{
+	(void) fd;
+	(void) what;
+	fpm_http_drain_soft_start((struct fpm_http_gateway_s *) arg);
 }
 
 static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) /* {{{ */
@@ -547,7 +669,6 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	act.sa_handler = SIG_DFL;
 	sigaction(SIGTERM, &act, 0);
 	sigaction(SIGINT, &act, 0);
-	sigaction(SIGUSR1, &act, 0);
 	sigaction(SIGUSR2, &act, 0);
 	sigaction(SIGCHLD, &act, 0);
 	act.sa_handler = SIG_IGN;
@@ -571,6 +692,17 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * and a gateway is not one). */
 	sigemptyset(&quit_set);
 	sigaddset(&quit_set, SIGQUIT);
+	/* Issue #646: a gateway with http.ready_path also takes SIGUSR1 (the soft
+	 * drain). Same rule as SIGQUIT: held blocked, then ignored, until its
+	 * evsignal exists, so a SIGUSR1 sent during startup is not lost. The
+	 * disposition is set in one step, to SIG_IGN here and to SIG_DFL in the
+	 * other gateways, so SIGUSR1 never meets the wrong one in between. */
+	act.sa_handler = gw->ready_path ? SIG_IGN : SIG_DFL;
+	sigaction(SIGUSR1, &act, 0);
+	if (gw->ready_path) {
+		sigaddset(&quit_set, SIGUSR1);
+	}
+	act.sa_handler = SIG_IGN;
 	sigprocmask(SIG_BLOCK, &quit_set, NULL);
 	sigaction(SIGQUIT, &act, 0);
 
@@ -599,7 +731,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		unsigned g;
 
 		gw->gauges = fpm_http_counters_gauges(gw->counters, index);
-		for (g = 0; g < 1u + gw->counters->nslots; g++) {
+		for (g = 0; g < FPM_HTTP_GAUGE_BLOCK_CELLS(gw->counters->nslots); g++) {
 			gw->gauges[g] = 0;
 		}
 	}
@@ -647,7 +779,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * Opened after the drop so the file is created by the dropped-to identity,
 	 * which is also what lets this process reopen it after a logrotate on its
 	 * own (issue #137, fpm_http_log_follow_readable()). */
-	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path);
+	gw->access_log = fpm_http_access_log_open(gw->pool, gw->access_log_path, gw->access_format);
 
 	/* One resolve per target, in this gateway process, exactly where the one
 	 * resolve used to be (issue #340). A name that no longer resolves is still
@@ -701,6 +833,18 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		zlog(ZLOG_WARNING, "[pool %s] http: cannot watch SIGQUIT; this gateway will be killed "
 						   "without draining in-flight requests",
 				gw->pool);
+	}
+	if (gw->ready_path) {
+		gw->sigusr1 = evsignal_new(gw->base, SIGUSR1, fpm_http_gateway_sigusr1, gw);
+		if (!gw->sigusr1 || event_add(gw->sigusr1, NULL) != 0) {
+			if (gw->sigusr1) {
+				event_free(gw->sigusr1);
+				gw->sigusr1 = NULL;
+			}
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot watch SIGUSR1; the readiness probe will not "
+							   "answer 503 while this gateway stops or reloads",
+					gw->pool);
+		}
 	}
 	/* Issue #641: lift the SIGQUIT block only now, after the evsignal exists.
 	 * The block set at the top of this function held a stop/reload signal
@@ -771,6 +915,7 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	 * idle timer restarted on every received byte, so a slow-loris client
 	 * trickling one byte at a time would never trip it. See
 	 * struct fpm_http_read_deadline_s. */
+	fpm_http_gateway_cap_init(gw);
 	evhttp_set_bevcb(gw->http, fpm_http_bevcb, gw);
 	evhttp_set_allowed_methods(gw->http, EVHTTP_REQ_GET | EVHTTP_REQ_POST | EVHTTP_REQ_HEAD | EVHTTP_REQ_PUT |
 												 EVHTTP_REQ_DELETE | EVHTTP_REQ_OPTIONS | EVHTTP_REQ_PATCH);
@@ -825,13 +970,37 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 		/* Issue #641: remembered so the graceful drain can stop accepting. */
 		gw->plain_http = plain;
 		gw->plain_bound = plain_bound;
-		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", NULL, NULL) != 0) {
+		if (fpm_http_accept_backoff_install(gw->base, plain_bound, gw->pool, "http.plain_listen", fpm_http_gateway_may_resume, gw) != 0) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no accept backoff on http.plain_listen; running out of file descriptors will make it spin", gw->pool);
 		}
+		/* Issue #686: as for the main listener, a listener opened at the cap starts closed. */
+		fpm_http_gateway_gate(gw);
 	}
 
 	event_base_dispatch(gw->base);
 	exit(FPM_EXIT_OK);
+}
+/* }}} */
+
+/* A text without a colon is a port alone. Its host stays NULL, which
+ * getaddrinfo() takes as the wildcard address. The handoff matcher relies
+ * on this too, so both callers must split the same way. */
+void fpm_http_split_bind(char *bind, char **host, char **port) /* {{{ */
+{
+	char *colon = strrchr(bind, ':');
+
+	*host = NULL;
+	if (!colon) {
+		*port = bind;
+		return;
+	}
+	*colon = '\0';
+	*host = bind;
+	if ((*host)[0] == '[' && (*host)[strlen(*host) - 1] == ']') {
+		(*host)[strlen(*host) - 1] = '\0';
+		(*host)++;
+	}
+	*port = colon + 1;
 }
 /* }}} */
 
@@ -857,21 +1026,12 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
  * checks its late listen() and reports EADDRINUSE rather than assuming it. */
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen) /* {{{ */
 {
-	char *dup_address = strdup(http_address ? http_address : listen_address), *host = NULL, *port_str = strrchr(dup_address, ':');
+	char *dup_address = strdup(http_address ? http_address : listen_address), *host, *port_str;
 	char port[sizeof("65535")];
 	struct addrinfo hints, *res, *p;
 	int fd = -1, port_no, on = 1;
 
-	if (port_str) {
-		*port_str++ = '\0';
-		host = dup_address;
-		if (host[0] == '[' && host[strlen(host) - 1] == ']') {
-			host[strlen(host) - 1] = '\0';
-			host++;
-		}
-	} else {
-		port_str = dup_address;
-	}
+	fpm_http_split_bind(dup_address, &host, &port_str);
 	port_no = atoi(port_str) + (http_address ? 0 : 1);
 	if (port_no < 1 || port_no > 65535) {
 		zlog(ZLOG_WARNING, "[pool %s] no HTTP listener: no port left above '%s'", pool, listen_address);
@@ -932,6 +1092,15 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 		fpm_error_log_follow_free(slot->log_follow);
 		slot->log_follow = NULL;
 	} else if (gw->pids[index] == 0) {
+		/* Not a pool child, so it keeps none of the master-held log descriptors (issue #775). */
+		fpm_pool_type_close_master_logs_in_child(NULL);
+		/* Issue #841: the gateway forks from the master, not from run_child(),
+		 * so it must close the scoreboard and metrics memfds itself (issue #691
+		 * covered the pm children only). */
+		fpm_reload_shm_child_init();
+		/* Issue #829: the gateway is forked by the master too, so it closes its
+		 * copy of the selective reload guard's pipe the same way (fpm.c). */
+		fpm_reload_selective_guard_child_init();
 		fpm_http_gateway_run(gw, index);
 		/* not reached */
 	} else {
@@ -941,9 +1110,63 @@ void fpm_http_gateway_spawn(struct fpm_http_gateway_s *gw, unsigned index) /* {{
 }
 /* }}} */
 
+/* Issue #646: 1 while a gateway with http.ready_path has a live process. */
+int fpm_http_ready_gateways_alive(void)
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned i;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		if (!gw->ready_path) {
+			continue;
+		}
+		for (i = 0; i < gw->nproc; i++) {
+			if (gw->pids[i] > 0) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+/* Issue #646: 1 when a gateway with http.ready_path routes to wp. The pool's
+ * own gateway counts too: its own target is the gateway's own pool. */
+int fpm_http_pool_routed_by_ready_gateway(const struct fpm_worker_pool_s *wp)
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned t;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		if (!gw->ready_path) {
+			continue;
+		}
+		for (t = 0; t < gw->ntargets; t++) {
+			if (gw->targets[t].worker_pool == wp) {
+				return 1;
+			}
+		}
+	}
+	return 0;
+}
+
+/* Issue #646: 1 when the first signal of a stop or reload must wait for wp's
+ * children. That holds while the window of a gateway with http.ready_path is
+ * open (process_control_timeout > 0: with 0 the window is empty and nothing
+ * waits), such a gateway is still alive, and it routes to wp. The children
+ * serve the gateway's requests until the window is over. */
+int fpm_http_pool_held_for_window(const struct fpm_worker_pool_s *wp)
+{
+	if (fpm_global_config.process_control_timeout <= 0) {
+		return 0;
+	}
+	return fpm_http_ready_gateways_alive() && fpm_http_pool_routed_by_ready_gateway(wp);
+}
+
 /* Called by fpm_children_bury() (via fpm_children_extra_handle_exit()) when a
- * gateway process dies, however it dies — crash, OOM kill, whatever. Never
- * called for a deliberate shutdown: fpm_http_cleanup() forgets the pid first.
+ * gateway process dies, however it dies — crash, OOM kill, whatever. Not called
+ * for a shutdown that fpm_http_cleanup() starts: that forgets the pid first.
+ * A gateway that ends its own soft window during a stop does reach this
+ * function; it is reaped here and not respawned (see below).
  * "Master respawns it like any other child" (docs/NOTES.md) without teaching
  * fpm_children.c anything about gateways — see fpm_children_extra.h. */
 static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{{ */
@@ -965,6 +1188,36 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 	fpm_error_log_follow_free(slot->log_follow);
 	slot->log_follow = NULL;
 
+	/* Issue #646: the slot holds no pid once its process is reaped. Cleared
+	 * here, before the stop/reload branch below, so that
+	 * fpm_http_ready_gateways_alive() does not count this process. */
+	gw->pids[slot->index] = 0;
+
+	if (!fpm_pctl_can_spawn_children()) {
+		/* Issue #646: the master is stopping or reloading. A gateway that ends
+		 * its own soft window (fpm_http_drain_start()) lands here: it is not
+		 * respawned, and a clean exit is not a crash, so it is logged as a
+		 * NOTICE. A signal or a non-zero code is still a WARNING. */
+		if (WIFSIGNALED(status)) {
+			zlog(ZLOG_WARNING, "[pool %s] http gateway %u (pid %d) killed by signal %d during a stop or reload, not respawned",
+					gw->pool, slot->index, (int) old_pid, WTERMSIG(status));
+		} else if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+			zlog(ZLOG_NOTICE, "[pool %s] http gateway %u (pid %d) finished its drain during a stop or reload, not respawned",
+					gw->pool, slot->index, (int) old_pid);
+		} else {
+			zlog(ZLOG_WARNING, "[pool %s] http gateway %u (pid %d) exited with code %d during a stop or reload, not respawned",
+					gw->pool, slot->index, (int) old_pid, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+		}
+
+		/* Issue #646: when the last gateway with http.ready_path is gone, the
+		 * children that were held back for its window get their signal now.
+		 * Last, because it may end the master (fpm_pctl_action_last()). */
+		if (!fpm_http_ready_gateways_alive()) {
+			fpm_pctl_release_deferred();
+		}
+		return;
+	}
+
 	if (slot->respawn.gave_up) {
 		return; /* already logged once below, do not spam on every further death */
 	}
@@ -983,16 +1236,8 @@ static void fpm_http_gateway_on_exit(void *arg, pid_t old_pid, int status) /* {{
 				gw->pool, slot->index, (int) old_pid, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
 	}
 
-	if (!fpm_pctl_can_spawn_children()) {
-		/* master is stopping/reloading: fpm_http_cleanup() is about to run
-		 * (or already did) and will forget the survivors; nothing to spawn */
-		gw->pids[slot->index] = 0;
-		return;
-	}
-
 	if (slot->respawn.count > FPM_HTTP_RESPAWN_MAX_BURST) {
 		slot->respawn.gave_up = 1;
-		gw->pids[slot->index] = 0;
 		zlog(ZLOG_ALERT, "[pool %s] http gateway %u crashed %u times within %d seconds, giving up on it "
 						 "(reload to try again); the pool now has one fewer gateway",
 				gw->pool, slot->index, slot->respawn.count, FPM_HTTP_RESPAWN_WINDOW_SEC);
@@ -1037,6 +1282,29 @@ static unsigned fpm_http_gateways_reap(int block)
 		}
 	}
 	return alive;
+}
+
+/* Issue #646: the master's side of the soft drain. Called from fpm_pctl() at
+ * the start of a stop or reload, before any child is signalled, so the probe
+ * answers 503 "draining" from the first moment. Only gateways of a pool with
+ * http.ready_path are signalled; they keep serving until their window ends.
+ * Not forgotten (no fpm_children_extra_forget): a gateway that dies in the
+ * window is not respawned anyway, because the state is no longer NORMAL. */
+void fpm_http_gateways_soft_drain(void)
+{
+	struct fpm_http_gateway_s *gw;
+	unsigned i;
+
+	for (gw = gateways; gw; gw = gw->next) {
+		if (!gw->ready_path) {
+			continue;
+		}
+		for (i = 0; i < gw->nproc; i++) {
+			if (gw->pids[i] > 0) {
+				kill(gw->pids[i], SIGUSR1);
+			}
+		}
+	}
 }
 
 /* Issue #641: ask every gateway to drain (SIGQUIT), wait up to `timeout`
@@ -1101,6 +1369,13 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 	 * every reload and every stop. */
 	fpm_http_gateways_drain(fpm_global_config.process_control_timeout);
 
+	/* Issue #661: a reload execs, and the listeners stay open across the exec,
+	 * so a client that connects meanwhile waits in the accept queue instead of
+	 * getting ECONNREFUSED. A stop or a plain exit closes them, as before. */
+	if (which == FPM_CLEANUP_PARENT_EXEC) {
+		fpm_http_handoff_export();
+	}
+
 	for (gw = gateways; gw; gw = next) {
 		next = gw->next;
 		if (gw->listen_fd >= 0) {
@@ -1132,6 +1407,7 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->plain_listen_address);
 		free(gw->ping_path);
 		free(gw->ping_response);
+		free(gw->ready_path);
 		{
 			unsigned j;
 

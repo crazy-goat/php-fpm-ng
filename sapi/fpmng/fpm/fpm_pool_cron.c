@@ -180,6 +180,9 @@ struct fpm_cron_shared_s {
 struct fpm_cron_registry_s {
 	struct fpm_worker_pool_s *wp;
 	struct fpm_cron_shared_s *shared;
+	/* cron.log, opened by the master in fpm_pool_cron_open_log() (issue #775).
+	 * -1 when cron.log is unset or the open failed. */
+	int log_fd;
 	struct fpm_cron_registry_s *next;
 };
 
@@ -205,6 +208,32 @@ static struct fpm_cron_shared_s *fpm_pool_cron_shared_for(struct fpm_worker_pool
 		}
 	}
 	return NULL;
+}
+/* }}} */
+
+static struct fpm_cron_registry_s *fpm_pool_cron_registry_for(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_cron_registry_s *e;
+
+	for (e = cron_registry; e; e = e->next) {
+		if (e->wp == wp) {
+			return e;
+		}
+	}
+	return NULL;
+}
+/* }}} */
+
+static int fpm_pool_cron_log_fd_for(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_cron_registry_s *e;
+
+	for (e = cron_registry; e; e = e->next) {
+		if (e->wp == wp) {
+			return e->log_fd;
+		}
+	}
+	return -1;
 }
 /* }}} */
 
@@ -416,6 +445,93 @@ int fpm_pool_cron_validate(struct fpm_worker_pool_s *wp) /* {{{ */
 }
 /* }}} */
 
+/* cron.log is opened here, once, by the master, not per run by the child: the
+ * child has already dropped to the pool user (fpm_child_init()), and a log
+ * directory the pool user cannot write (the packaged /var/log/php-fpm-ng/ is
+ * root-owned) made every run's open() fail with EACCES, losing the run output
+ * (issue #775). O_CLOEXEC keeps the descriptor out of a script's own
+ * subprocesses and out of the reload execvp() (fpm_process_ctl.c:129), which
+ * opens the file again in the new master. A fork() still shares it with every
+ * child, so fpm_pool_cron_close_log_in_child() closes the descriptor in every
+ * child of another pool. */
+static int fpm_pool_cron_open_log(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	int fd;
+
+	if (!wp->config->cron_log || !*wp->config->cron_log) {
+		return -1;
+	}
+
+	fd = open(wp->config->cron_log, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot open '%s' (%s)", wp->config->name,
+			wp->config->cron_log, strerror(errno));
+	}
+	return fd;
+}
+/* }}} */
+
+/* SIGUSR1 (logrotate's postrotate) reopens cron.log with the other master logs,
+ * from fpm_stdio_open_error_log(1), through fpm_pool_type_reopen_master_logs().
+ * dup2() puts the new file on the descriptor number the registry already holds,
+ * so the next cron child, forked from this master, writes to the new file
+ * without any change in the child. A child that is already running keeps the
+ * old file for its one run, as error_log does (fpm_error_log_follow.h).
+ * dup2() clears FD_CLOEXEC on the target, so it is set again. */
+void fpm_pool_cron_reopen_log(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_cron_registry_s *e = fpm_pool_cron_registry_for(wp);
+	const char *path = wp->config->cron_log;
+	int fd;
+
+	if (!e || !path || !*path) {
+		return;
+	}
+
+	fd = open(path, O_CREAT | O_WRONLY | O_APPEND | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		/* Keep the old descriptor: runs go on to the previous file, which is
+		 * better than none. A pool that never opened the file keeps -1. */
+		zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot reopen '%s' (%s)", wp->config->name,
+			path, strerror(errno));
+		return;
+	}
+
+	if (e->log_fd < 0) {
+		e->log_fd = fd;
+	} else if (0 > dup2(fd, e->log_fd)) {
+		zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot switch to the reopened '%s' (%s)",
+			wp->config->name, path, strerror(errno));
+		close(fd);
+		return;
+	} else {
+		close(fd);
+		if (0 > fcntl(e->log_fd, F_SETFD, FD_CLOEXEC)) {
+			zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot set FD_CLOEXEC on '%s'",
+				wp->config->name, path);
+		}
+	}
+	zlog(ZLOG_NOTICE, "[pool %s] cron.log re-opened", wp->config->name);
+}
+/* }}} */
+
+/* fork() gives a child a copy of every descriptor the master holds. The child
+ * of another pool closes this one, so a root-owned file that this pool could
+ * not open itself does not reach it through an inherited descriptor. Upstream
+ * closes foreign per-pool log descriptors in each child for the same reason
+ * (third_party/php-src/sapi/fpm/fpm/fpm_log.c:97-101). Called by
+ * fpm_pool_type_close_master_logs_in_child(), which skips the child's own pool. */
+void fpm_pool_cron_close_log_in_child(struct fpm_worker_pool_s *wp) /* {{{ */
+{
+	struct fpm_cron_registry_s *e = fpm_pool_cron_registry_for(wp);
+
+	if (e && e->log_fd >= 0) {
+		close(e->log_fd);
+		e->log_fd = -1;
+	}
+}
+/* }}} */
+
 int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	struct fpm_cron_registry_s *entry;
@@ -446,6 +562,7 @@ int fpm_pool_cron_init_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 	entry->wp = wp;
 	entry->shared = shared;
+	entry->log_fd = fpm_pool_cron_open_log(wp);
 	entry->next = cron_registry;
 	cron_registry = entry;
 
@@ -555,20 +672,28 @@ static unsigned fpm_pool_cron_jitter_delay(const struct fpm_worker_pool_config_s
 }
 /* }}} */
 
-/* cron.log: appends one line per completed run. No rotation, no reopen on
- * reload — this is a plain append-only file, the operator's own job to
- * rotate (same expectation as any other file this project writes to), kept
- * deliberately this simple because the alternative (run count / "overdue"
- * detection on the status page, task 033c's other option) needs shared
- * state and a design of its own that nobody has asked for yet; see
- * docs/cron.md. Format is fixed and grep-able, not configurable: ISO 8601
- * UTC start time, exit code, duration in whole seconds. */
-static void fpm_pool_cron_log_run(const char *pool_name, const char *path, time_t started, time_t ended, int exit_code) /* {{{ */
+/* cron.log: appends one line per completed run. No rotation is built in, and
+ * the file is opened once by the master (fpm_pool_cron_open_log()), so a
+ * rename-based rotation keeps writing to the renamed file until a reload --
+ * the operator's own job to rotate (same expectation as any other file this
+ * project writes to), kept deliberately this simple because the alternative
+ * (run count / "overdue" detection on the status page, task 033c's other
+ * option) needs shared state and a design of its own that nobody has asked
+ * for yet; see docs/cron.md. Format is fixed and grep-able, not configurable:
+ * ISO 8601 UTC start time, exit code, duration in whole seconds. */
+static void fpm_pool_cron_log_run(const char *pool_name, int fd, const char *path, time_t started, time_t ended, int exit_code) /* {{{ */
 {
-	int fd;
 	struct tm tmv;
 	char line[160];
 	int len;
+
+	if (fd < 0) {
+		/* The master already logged the open failure at startup (or the path is
+		 * unset, which the caller checks first). Repeated per run so the gap in
+		 * the history is not silent. */
+		zlog(ZLOG_WARNING, "[pool %s] cron.log: not open, run not recorded", pool_name);
+		return;
+	}
 
 	gmtime_r(&started, &tmv);
 	len = snprintf(line, sizeof(line),
@@ -577,12 +702,6 @@ static void fpm_pool_cron_log_run(const char *pool_name, const char *path, time_
 		tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
 		exit_code, (long) (ended - started));
 	if (len <= 0 || (size_t) len >= sizeof(line)) {
-		return;
-	}
-
-	fd = open(path, O_CREAT | O_WRONLY | O_APPEND, 0644);
-	if (fd < 0) {
-		zlog(ZLOG_WARNING, "[pool %s] cron.log: cannot open '%s' (%s)", pool_name, path, strerror(errno));
 		return;
 	}
 
@@ -604,8 +723,6 @@ static void fpm_pool_cron_log_run(const char *pool_name, const char *path, time_
 			left -= (size_t) n;
 		}
 	}
-
-	close(fd);
 }
 /* }}} */
 
@@ -698,7 +815,7 @@ void fpm_pool_cron_child_main(struct fpm_worker_pool_s *wp) /* {{{ */
 	}
 
 	if (c->cron_log && *c->cron_log) {
-		fpm_pool_cron_log_run(c->name, c->cron_log, started, FPM_NOW(), exit_code);
+		fpm_pool_cron_log_run(c->name, fpm_pool_cron_log_fd_for(wp), c->cron_log, started, FPM_NOW(), exit_code);
 	}
 
 	/* exit_code != 0 must be visible at warning level, not debug — a single

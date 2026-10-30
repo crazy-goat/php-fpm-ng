@@ -14,6 +14,8 @@
 #include "fpm_reload_shm.h"
 #include "fpm_children.h"
 #include "fpm_conf.h"
+#include "fpm_debug_clock.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_scoreboard.h"
 #include "fpm_shm.h"
 #include "fpm_worker_pool.h"
@@ -24,10 +26,18 @@
  *   S:<pool>:<fd>:<size>                    scoreboard of a spared pool
  *   M:<fd>:<size>:<slots>:<limit>           the metrics region
  *   B:<pool>:<base>:<count>                 a spared pool's metrics slot range
- *   X:<pool>:<base>:<count>                 any pool's metrics slot range in the
+ *   X:<pool>:<base>:<count>:<until>         any pool's metrics slot range in the
  *                                           old generation (spared or not): the
- *                                           ones without a B record are reserved,
- *                                           a #329 survivor may still write there */
+ *                                           ones without a B record are reserved
+ *                                           until <until> (unix time), because a
+ *                                           #329 survivor may still write there
+ *                                           (issue #692). An X record without
+ *                                           <until> comes from an older binary
+ *   Y:<base>:<count>:<until>                a slot range the old generation held
+ *                                           reserved and that is still reserved
+ *                                           until <until> (unix time): the
+ *                                           survivor of an earlier reload may
+ *                                           still write there (issue #692) */
 #define FPM_RELOAD_SHM_ENV "FPMNG_SELECTIVE_RELOAD_SHM"
 
 struct fpm_reload_shm_inh_s {
@@ -37,8 +47,12 @@ struct fpm_reload_shm_inh_s {
 	int fd;
 	size_t size;
 	uint32_t a, b;
+	time_t until; /* 'Y' only */
 	int claimed;
 };
+
+/* Defined in fpm_metrics.c. */
+void fpm_metrics_foreach_reserved(void (*cb)(uint32_t base, uint32_t count, time_t until));
 
 static struct fpm_reload_shm_inh_s *inherited = NULL;
 static int inherited_loaded = 0;
@@ -91,18 +105,21 @@ void *fpm_reload_shm_alloc(size_t size, int *fd_out) /* {{{ */
 }
 /* }}} */
 
-static void fpm_reload_shm_set_cloexec(int fd, int on) /* {{{ */
+/* Returns 0, or -1 with errno set. A spared pool depends on the cleared flag:
+ * if it stays set, the descriptor dies at exec and the next generation starts
+ * with empty regions, so the callers log the failure (issue #842). */
+static int fpm_reload_shm_set_cloexec(int fd, int on) /* {{{ */
 {
 	int flags = fcntl(fd, F_GETFD);
 
 	if (flags < 0) {
-		return;
+		return -1;
 	}
-	fcntl(fd, F_SETFD, on ? (flags | FD_CLOEXEC) : (flags & ~FD_CLOEXEC));
+	return fcntl(fd, F_SETFD, on ? (flags | FD_CLOEXEC) : (flags & ~FD_CLOEXEC)) < 0 ? -1 : 0;
 }
 /* }}} */
 
-static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, size_t size, uint32_t a, uint32_t b) /* {{{ */
+static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, size_t size, uint32_t a, uint32_t b, time_t until) /* {{{ */
 {
 	struct fpm_reload_shm_inh_s *r = calloc(1, sizeof(*r));
 
@@ -115,6 +132,7 @@ static void fpm_reload_shm_add_inherited(char kind, const char *name, int fd, si
 	r->size = size;
 	r->a = a;
 	r->b = b;
+	r->until = until;
 	r->next = inherited;
 	inherited = r;
 }
@@ -144,18 +162,24 @@ static void fpm_reload_shm_load(void) /* {{{ */
 
 	for (rec = strtok_r(copy, ";", &save); rec; rec = strtok_r(NULL, ";", &save)) {
 		char name[256];
-		unsigned long long size;
+		unsigned long long size, until;
 		unsigned a, b;
 		int fd;
 
 		if (sscanf(rec, "S:%255[^:]:%d:%llu", name, &fd, &size) == 3) {
-			fpm_reload_shm_add_inherited('S', name, fd, (size_t) size, 0, 0);
+			fpm_reload_shm_add_inherited('S', name, fd, (size_t) size, 0, 0, 0);
 		} else if (sscanf(rec, "M:%d:%llu:%u:%u", &fd, &size, &a, &b) == 4) {
-			fpm_reload_shm_add_inherited('M', NULL, fd, (size_t) size, a, b);
+			fpm_reload_shm_add_inherited('M', NULL, fd, (size_t) size, a, b, 0);
 		} else if (sscanf(rec, "B:%255[^:]:%u:%u", name, &a, &b) == 3) {
-			fpm_reload_shm_add_inherited('B', name, -1, 0, a, b);
+			fpm_reload_shm_add_inherited('B', name, -1, 0, a, b, 0);
+		} else if (sscanf(rec, "X:%255[^:]:%u:%u:%llu", name, &a, &b, &until) == 4) {
+			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b, (time_t) until);
 		} else if (sscanf(rec, "X:%255[^:]:%u:%u", name, &a, &b) == 3) {
-			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b);
+			/* An older binary wrote no expiry: keep the range reserved for the
+			 * 30 seconds it always got (issue #692). */
+			fpm_reload_shm_add_inherited('X', name, -1, 0, a, b, FPM_NOW() + FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S);
+		} else if (sscanf(rec, "Y:%u:%u:%llu", &a, &b, &until) == 3) {
+			fpm_reload_shm_add_inherited('Y', NULL, -1, 0, a, b, (time_t) until);
 		}
 	}
 	free(copy);
@@ -218,6 +242,9 @@ int fpm_reload_shm_scoreboards(void) /* {{{ */
 			if (mem != MAP_FAILED && ((struct fpm_scoreboard_s *) mem)->nprocs == (unsigned) wp->config->pm_max_children && strncmp(((struct fpm_scoreboard_s *) mem)->pool, name, sizeof(((struct fpm_scoreboard_s *) mem)->pool) - 1) == 0) {
 				fd = rec->fd;
 				rec->claimed = 1;
+				/* own_sb owns the descriptor from here on; a second copy here
+				 * would be closed twice by a later user (issue #842). */
+				rec->fd = -1;
 				fpm_reload_shm_set_cloexec(fd, 1);
 				fpm_shm_free(fresh, size);
 				wp->scoreboard = mem;
@@ -270,7 +297,16 @@ int fpm_reload_shm_inherited_metrics(int *fd, size_t *size, uint32_t *slots, uin
 
 	fpm_reload_shm_load();
 	r = fpm_reload_shm_find('M', NULL);
-	if (!r || !fpm_reload_shm_fd_size_ok(r->fd, r->size)) {
+	if (!r) {
+		return 0;
+	}
+	if (!fpm_reload_shm_fd_size_ok(r->fd, r->size)) {
+		/* Not in own_mx_fd, so fpm_reload_shm_child_init() never closes it:
+		 * close it here, or every worker inherits it (issue #842). */
+		if (r->fd >= 0) {
+			close(r->fd);
+			r->fd = -1;
+		}
 		return 0;
 	}
 	*fd = r->fd;
@@ -296,14 +332,28 @@ int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *c
 }
 /* }}} */
 
-void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count)) /* {{{ */
+void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count, time_t until)) /* {{{ */
 {
 	struct fpm_reload_shm_inh_s *r;
 
 	fpm_reload_shm_load();
 	for (r = inherited; r; r = r->next) {
 		if (r->kind == 'X' && r->name && !fpm_reload_shm_find('B', r->name)) {
-			cb(r->a, r->b);
+			cb(r->a, r->b, r->until);
+		}
+	}
+}
+/* }}} */
+
+void fpm_reload_shm_foreach_carried_range(void (*cb)(uint32_t base, uint32_t count, time_t until)) /* {{{ */
+{
+	struct fpm_reload_shm_inh_s *r;
+	time_t now = FPM_NOW();
+
+	fpm_reload_shm_load();
+	for (r = inherited; r; r = r->next) {
+		if (r->kind == 'Y' && r->until > now) {
+			cb(r->a, r->b, r->until);
 		}
 	}
 }
@@ -381,17 +431,67 @@ static void fpm_reload_shm_append_env(const char *record) /* {{{ */
 /* Defined in fpm_metrics.c. */
 int fpm_metrics_pool_range(const struct fpm_worker_pool_s *wp, uint32_t *base, uint32_t *count);
 
+static void fpm_reload_shm_carry_range(uint32_t base, uint32_t count, time_t until) /* {{{ */
+{
+	char rec[128];
+
+	if (until <= FPM_NOW()) {
+		return;
+	}
+	snprintf(rec, sizeof(rec), "Y:%u:%u:%lld", base, count, (long long) until);
+	fpm_reload_shm_append_env(rec);
+}
+/* }}} */
+
+/* Issue #692: writes the expiry records, at the exec that starts the next
+ * generation. The expiries are relative to that exec, not to the spare: the
+ * old master waits for its other children between a spare and the exec, and a
+ * spared survivor's window starts at the exec too
+ * (fpm_pool_supervisor_reload_survivor_carry()). Called by fpm_pctl_exec()
+ * and not by a cleanup hook: the worker pool cleanup frees the pool list, and
+ * the cleanups run in reverse registration order, so a hook registered at init
+ * found no pools. */
+void fpm_reload_shm_exec_records(void) /* {{{ */
+{
+	struct fpm_worker_pool_s *o;
+	char rec[512];
+
+	if (!mx_recorded) {
+		return; /* no pool was spared with the metrics region: nothing to carry */
+	}
+
+	/* Every pool's old range, so the next master can keep new ranges
+	 * off the slots of pools that are about to be replaced. */
+	for (o = fpm_worker_all_pools; o; o = o->next) {
+		uint32_t ob, oc;
+
+		if (!strpbrk(o->config->name, ":;") && fpm_metrics_pool_range(o, &ob, &oc)) {
+			snprintf(rec, sizeof(rec), "X:%s:%u:%u:%lld", o->config->name, ob, oc,
+					(long long) fpm_pool_supervisor_slot_reserve_until(o, FPM_NOW()));
+			fpm_reload_shm_append_env(rec);
+		}
+	}
+	/* Reserved ranges that are still reserved (issue #692): the named ones above
+	 * are reserved by the next generation through X, these have no pool in this
+	 * generation to name them. */
+	fpm_metrics_foreach_reserved(fpm_reload_shm_carry_range);
+}
+/* }}} */
+
 void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 {
 	const char *name = wp->config->name;
 	struct fpm_reload_shm_sb_s *s;
-	struct fpm_worker_pool_s *o;
 	uint32_t base, count;
 	char rec[512];
 
 	for (s = own_sb; s; s = s->next) {
 		if (strcmp(s->name, name) == 0) {
-			fpm_reload_shm_set_cloexec(s->fd, 0);
+			if (fpm_reload_shm_set_cloexec(s->fd, 0) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] issue #537: clearing FD_CLOEXEC on the scoreboard failed (%s); "
+								   "the next generation starts this pool's status empty",
+						name, strerror(errno));
+			}
 			snprintf(rec, sizeof(rec), "S:%s:%d:%zu", name, s->fd, s->size);
 			fpm_reload_shm_append_env(rec);
 			break;
@@ -401,19 +501,13 @@ void fpm_reload_shm_spare_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	if (own_mx_fd >= 0 && fpm_metrics_pool_range(wp, &base, &count)) {
 		if (!mx_recorded) {
 			mx_recorded = 1;
-			fpm_reload_shm_set_cloexec(own_mx_fd, 0);
+			if (fpm_reload_shm_set_cloexec(own_mx_fd, 0) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] issue #537: clearing FD_CLOEXEC on the metrics region failed (%s); "
+								   "the next generation starts this pool's metrics empty",
+						name, strerror(errno));
+			}
 			snprintf(rec, sizeof(rec), "M:%d:%zu:%u:%u", own_mx_fd, own_mx_size, own_mx_slots, own_mx_limit);
 			fpm_reload_shm_append_env(rec);
-			/* Every pool's old range, so the next master can keep new ranges
-			 * off the slots of pools that are about to be replaced. */
-			for (o = fpm_worker_all_pools; o; o = o->next) {
-				uint32_t ob, oc;
-
-				if (!strpbrk(o->config->name, ":;") && fpm_metrics_pool_range(o, &ob, &oc)) {
-					snprintf(rec, sizeof(rec), "X:%s:%u:%u", o->config->name, ob, oc);
-					fpm_reload_shm_append_env(rec);
-				}
-			}
 		}
 		snprintf(rec, sizeof(rec), "B:%s:%u:%u", name, base, count);
 		fpm_reload_shm_append_env(rec);

@@ -24,12 +24,27 @@
 #include "fpm_conf.h"
 #include "fpm_conf_diff.h"
 #include "fpm_reload_config_check.h"
+#include "fpm_reload_exec_fallback.h"
 #include "fpm_reload_selective.h"
+#include "fpm_reload_selective_guard.h"
+#include "fpm_pool_supervisor.h"
+#include "fpm_reload_shm.h"
+#include "fpm_sd_notify.h"
+#ifdef HAVE_FPM_HTTP
+#include "fpm_http_drain.h"
+#include "fpm_pctl_window.h"
+#endif
+#include "fpm_crash_backoff.h"
 #include "zlog.h"
 
 
 static int fpm_state = FPM_PCTL_STATE_NORMAL;
 static int fpm_signal_sent = 0;
+#ifdef HAVE_FPM_HTTP
+/* Issue #646: whether the current fpm_pctl_kill_all() call is the release of
+ * the held pools (fpm_pctl_window.h keeps the hold itself). */
+static int fpm_deferred_release = 0;
+#endif
 
 
 static const char *fpm_state_names[] = {
@@ -76,6 +91,8 @@ static void fpm_pctl_exit(void)
 
 	fpm_conf_unlink_pid();
 	fpm_reload_selective_discard_unadopted();
+	/* Issue #831: before the cleanups, whose supervisor hook can _exit(). */
+	fpm_pool_supervisor_reload_survivors_discard_unadopted();
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXIT_MAIN);
 	exit(FPM_EXIT_OK);
 }
@@ -106,20 +123,45 @@ static void fpm_pctl_exec(void)
 		optional_arg(10)
 	);
 
+	/* Issue #692: before the cleanups, which free the pool list (the worker
+	 * pool cleanup). The expiry records need the pools. */
+	fpm_reload_shm_exec_records();
+
+	/* Issue #829: the guard for the workers this reload spares. Armed here, after
+	 * every spared worker is listed in the environment and before the exec. A
+	 * no-op when nothing is spared. The write end it keeps crosses the exec. */
+	fpm_reload_selective_guard_arm();
+
 	fpm_cleanups_run(FPM_CLEANUP_PARENT_EXEC);
 
 	fpm_stdio_restore_original_stderr(1);
 
 	execvp(saved_argv[0], saved_argv);
 	zlog(ZLOG_SYSERROR, "failed to reload: execvp() failed");
+	/* Issue #925: the pools are gone, so serving on is only possible through
+	 * a next master. Try the running image (fpm_reload_exec_fallback.h). */
+	zlog(ZLOG_WARNING, "reload: retrying the exec through /proc/self/exe, the next generation runs the binary of this one");
+	fpm_reload_exec_fallback(saved_argv);
+	zlog(ZLOG_SYSERROR, "failed to reload: exec of /proc/self/exe failed");
 	/* Issue #690: the spared workers were detached and listed for a next
 	 * master that will never exist. */
 	fpm_reload_selective_discard_unadopted();
+	fpm_pool_supervisor_reload_survivors_discard_unadopted();
 	exit(FPM_EXIT_SOFTWARE);
 }
 
 static void fpm_pctl_action_last(void)
 {
+#ifdef HAVE_FPM_HTTP
+	/* Issue #646: while a gateway's window is open the master does not finish.
+	 * The gateway still answers the probe, and the children held for it still
+	 * serve. The gateway's exit, or the escalation at process_control_timeout,
+	 * releases the held signal and then calls this again. */
+	if (fpm_pctl_window_open()) {
+		return;
+	}
+#endif
+
 	switch (fpm_state) {
 		case FPM_PCTL_STATE_RELOADING:
 			fpm_pctl_exec();
@@ -178,6 +220,13 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 		selective_pass = fpm_conf_diff_begin_reload_pass(fpm_globals.config);
 	}
 
+#ifdef HAVE_FPM_HTTP
+	/* Issue #646: a first pass decides the hold again from scratch. */
+	if (fpm_signal_sent == 0) {
+		fpm_pctl_window_reset();
+	}
+#endif
+
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
 		struct fpm_child_s *child;
 		const struct fpm_pool_type_s *wp_type = fpm_pool_type_of(wp);
@@ -193,8 +242,12 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 		 * (fpm_signal_sent != 0) never reach here for this pool: it was
 		 * never added to the running-children-being-escalated set to begin
 		 * with, since its children were detached, not signalled. */
-		if (selective_pass && fpm_conf_diff_pool_unchanged(wp->config->name)) {
-			fpm_reload_selective_spare_pool(wp);
+		/* Issue #830: a pool that could not be spared (see the header) is not
+		 * skipped. Skipped, its children would miss the first, graceful signal,
+		 * and the reload would wait for the escalation after
+		 * process_control_timeout. */
+		if (selective_pass && fpm_conf_diff_pool_unchanged(wp->config->name) &&
+				fpm_reload_selective_spare_pool(wp)) {
 			continue;
 		}
 
@@ -208,6 +261,22 @@ void fpm_pctl_kill_all(int signo) /* {{{ */
 				wp_type && wp_type->reload_spare_child) {
 			wp_type->reload_spare_child(wp);
 		}
+
+#ifdef HAVE_FPM_HTTP
+		/* Issue #646: the children of a pool that a gateway with http.ready_path
+		 * routes to keep serving while that gateway's window is open. The first
+		 * pass only holds them back (fpm_pctl_window.c); fpm_pctl_release_deferred()
+		 * sends the signal later, and only to these pools. Log rotation (NORMAL
+		 * state) is never held. */
+		if (fpm_deferred_release) {
+			if (!fpm_http_pool_routed_by_ready_gateway(wp)) {
+				continue;
+			}
+		} else if (fpm_pctl_window_hold_pool(wp, signo,
+				fpm_state != FPM_PCTL_STATE_NORMAL && fpm_signal_sent == 0)) {
+			continue;
+		}
+#endif
 
 		for (child = wp->children; child; child = child->next) {
 			int child_signo = signo;
@@ -286,6 +355,15 @@ static void fpm_pctl_action_next(void)
 		}
 		timeout = fpm_global_config.process_control_timeout;
 	} else {
+#ifdef HAVE_FPM_HTTP
+		/* Issue #646: the window outlived process_control_timeout while its
+		 * gateway is still alive. The held children get the first signal now,
+		 * with a full timeout of their own, before any escalation. */
+		if (fpm_pctl_window_held_signo()) {
+			fpm_pctl_release_deferred();
+			return;
+		}
+#endif
 		if (fpm_signal_sent == SIGQUIT) {
 			sig = SIGTERM;
 		} else {
@@ -298,6 +376,34 @@ static void fpm_pctl_action_next(void)
 	fpm_signal_sent = sig;
 	fpm_pctl_timeout_set(timeout);
 }
+
+#ifdef HAVE_FPM_HTTP
+/* Issue #646: sends the signal that the first pass held back, to the pools a
+ * gateway with http.ready_path routes to. Called when the last such gateway
+ * exits (fpm_http_gateway_on_exit()), or when the window outlives
+ * process_control_timeout (fpm_pctl_action_next()). The timer is re-armed from
+ * here: the children get process_control_timeout after the release, not what
+ * was left of the timer that started with the stop. */
+void fpm_pctl_release_deferred(void)
+{
+	int signo = fpm_pctl_window_take_held();
+
+	if (!signo) {
+		return;
+	}
+
+	fpm_deferred_release = 1;
+	fpm_pctl_kill_all(signo);
+	fpm_deferred_release = 0;
+
+	if (!fpm_globals.running_children) {
+		fpm_pctl_action_last();
+		return;
+	}
+	fpm_pctl_timeout_set(fpm_global_config.process_control_timeout);
+}
+
+#endif
 
 void fpm_pctl(int new_state, int action) /* {{{ */
 {
@@ -336,11 +442,39 @@ void fpm_pctl(int new_state, int action) /* {{{ */
 			 * and the next SIGUSR2 tries again (fpm_reload_config_check.h). */
 			if (new_state == FPM_PCTL_STATE_RELOADING &&
 					!fpm_reload_config_check(saved_argc, (const char *const *) saved_argv)) {
+				/* Issue #643: the unit's reload job waits for READY=1, and the
+				 * state did not change, so say RELOADING=1 and READY=1 to end
+				 * it. */
+				fpm_sd_notify_reload_refused();
 				return;
 			}
 
+			/* Issue #646: a stop or a reload that is already in progress is
+			 * overridden (SIGTERM after SIGQUIT, say). The new signal is not held
+			 * for the gateways' windows: the children get it at once. */
+#ifdef HAVE_FPM_HTTP
+			if (fpm_state != FPM_PCTL_STATE_NORMAL) {
+				fpm_pctl_window_escalate();
+			}
+#endif
+
 			fpm_signal_sent = 0;
 			fpm_state = new_state;
+
+			/* Issue #643: the service manager hears about the transition at the
+			 * same point the reload or the stop becomes real. */
+			if (new_state == FPM_PCTL_STATE_RELOADING) {
+				fpm_sd_notify_reloading();
+			} else if (new_state == FPM_PCTL_STATE_FINISHING || new_state == FPM_PCTL_STATE_TERMINATING) {
+				fpm_sd_notify_stopping();
+			}
+
+			/* Issue #646: the gateways with a readiness probe learn of the stop
+			 * or reload now, before any child is signalled, so the probe answers
+			 * 503 from the first moment and keeps serving until their window ends. */
+#ifdef HAVE_FPM_HTTP
+			fpm_http_gateways_soft_drain();
+#endif
 
 			zlog(ZLOG_DEBUG, "switching to '%s' state", fpm_state_names[fpm_state]);
 			ZEND_FALLTHROUGH;
@@ -609,6 +743,13 @@ static void fpm_pctl_perform_idle_server_maintenance(struct timeval *now) /* {{{
 		}
 
 		if (idle < wp->config->pm_min_spare_servers) {
+			/* Issue #727: a respawn that waits out a crash backoff is not a busy
+			 * pool. Keep the spawn rate at 1, so the child after the wait is one child. */
+			if (!fpm_crash_backoff_may_spawn(wp)) {
+				wp->idle_spawn_rate = 1;
+				continue;
+			}
+
 			if (wp->running_children >= wp->config->pm_max_children) {
 				if (!wp->warn_max_children) {
 					fpm_scoreboard_update(0, 0, 0, 0, 0, 1, 0, 0, FPM_SCOREBOARD_ACTION_INC, wp->scoreboard);

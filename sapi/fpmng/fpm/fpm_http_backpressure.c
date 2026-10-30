@@ -40,7 +40,13 @@
  *
  * Only the read of ONE upstream stops. With pinned upstreams one upstream
  * serves one request (fpm_http_upstream_s.current), so no other request is
- * delayed. */
+ * delayed.
+ *
+ * Issue #706: every pause is counted in the pool-wide responses_paused_total
+ * counter, and the pause itself is held in this process's responses_paused
+ * gauge until it ends. The gauge is per gateway process for the same reason
+ * connections_open is (see fpm_http_counters_s): a process killed while a
+ * response is paused must not leave the count up. */
 
 #include "fpm_config.h"
 #include "fpm_http.h"
@@ -119,6 +125,18 @@ static void fpm_http_response_minrate_fire(evutil_socket_t fd, short what, void 
 	event_add(c->minrate_timer, &fpm_http_minrate_window);
 }
 
+int fpm_http_response_unpause(fpm_http_conn *c)
+{
+	if (!c->read_paused) {
+		return 0;
+	}
+	c->read_paused = 0;
+	if (c->gw->gauges) {
+		fpm_http_counter_decr(&c->gw->gauges[FPM_HTTP_GAUGE_RESPONSES_PAUSED]);
+	}
+	return 1;
+}
+
 void fpm_http_response_resume(fpm_http_conn *c)
 {
 	fpm_http_upstream *up = c->upstream;
@@ -130,10 +148,9 @@ void fpm_http_response_resume(fpm_http_conn *c)
 	if (c->minrate_timer) {
 		event_del(c->minrate_timer);
 	}
-	if (!c->read_paused) {
+	if (!fpm_http_response_unpause(c)) {
 		return;
 	}
-	c->read_paused = 0;
 	/* No timeout: the upstream is busy, and the idle timer is re-armed by
 	 * fpm_http_request_done() when this request ends. */
 	if (up && !up->dead && up->fd >= 0) {
@@ -172,6 +189,14 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len)
 
 		if (bev && evbuffer_get_length(bufferevent_get_output(bev)) > c->gw->response_buffer) {
 			c->read_paused = 1;
+			/* Issue #706: the pause is counted here and its gauge cell taken
+			 * back by fpm_http_response_unpause(). */
+			if (c->gw->counters) {
+				fpm_http_counter_incr(&c->gw->counters->responses_paused_total);
+			}
+			if (c->gw->gauges) {
+				fpm_http_counter_incr(&c->gw->gauges[FPM_HTTP_GAUGE_RESPONSES_PAUSED]);
+			}
 			event_del(c->upstream->ev_read);
 			/* Issue #705: start the minimum-rate clock. The timer is
 			 * created lazily; on OOM the connection is still bounded by

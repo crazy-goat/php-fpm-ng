@@ -4,15 +4,25 @@ Documentation=https://github.com/crazy-goat/php-fpm-ng
 After=network.target
 
 [Service]
-; Type=exec, not Type=notify. Upstream FPM's sd_notify() support is behind
-; HAVE_SYSTEMD, and build/libphp-build.sh leaves it unset on purpose -- it
-; would add a libsystemd link to a package whose whole selling point is that it
-; needs nothing but the distribution's libphp. Type=notify against a binary
-; that never notifies hangs the unit until its timeout.
-Type=exec
+; Type=notify-reload (systemd 253 and later; ubuntu:26.04 ships 259): the master
+; sends READY=1 once every pool has bound its listening socket (issue #643), so
+; "active" does not come before the sockets exist. The notification is native
+; (fpm_sd_notify.c, one datagram to NOTIFY_SOCKET), so the package still needs
+; no libsystemd. NotifyAccess=main: only the master sends; the children never do.
+; The reload waits: systemd sends ReloadSignal= after the ExecReload= line
+; passes, then waits for the READY=1 of the new master, so `systemctl reload`
+; returns when the new generation listens. A reload the master refuses sends
+; RELOADING=1 and then READY=1, so the job ends (docs/systemd.md, Reload).
+; No WatchdogSec= here. The watchdog is off by default, because a master that
+; systemd restarts for a missed ping is a behaviour the operator must choose.
+; To enable it, add WatchdogSec= in a drop-in (systemctl edit php-fpm-ng).
+Type=notify-reload
+NotifyAccess=main
 ExecStart=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
 ; SIGUSR2 is FPM's reload: the master re-reads the configuration and replaces
 ; its children. SIGUSR1 reopens the log files, which is what logrotate wants.
+; systemd sends it itself (ReloadSignal=), after the ExecReload= line below.
+ReloadSignal=SIGUSR2
 ;
 ; The -t before the signal is the configuration test the master itself runs
 ; anyway (issue #640): the master refuses a SIGUSR2 reload whose configuration
@@ -20,12 +30,10 @@ ExecStart=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fp
 ; `systemctl reload` on a broken configuration is a successful no-op with the
 ; reason only in the master's log. With it the reason is on the journal, where
 ; the operator who asked for the reload is looking (measured: exit 78, the
-; diagnostics on stderr -- see docs/reload.md). Two ExecReload= lines run in
-; order and the operation stops at the first failure, which is the point
-; (systemd.service(5)); the arguments are ExecStart's, so the test loads
-; exactly what the reloaded master would load.
+; diagnostics on stderr -- see docs/reload.md). A failing ExecReload= line stops
+; the reload job before ReloadSignal= is sent (systemd.service(5)); the arguments
+; are ExecStart's, so the test loads exactly what the reloaded master would load.
 ExecReload=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf -t
-ExecReload=/bin/kill -USR2 $MAINPID
 ; SIGQUIT is FPM's graceful stop -- children finish the request they are on.
 ; The default SIGTERM cuts them off mid-request.
 KillSignal=SIGQUIT

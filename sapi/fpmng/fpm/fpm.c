@@ -19,16 +19,22 @@
 #include "fpm_process_ctl.h"
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
+#include "fpm_pool_supervisor.h"
 #include "fpm_scoreboard.h"
 #include "fpm_stdio.h"
 #include "fpm_log.h"
 #include "fpm_request.h"
 #include "fpm_metrics.h"
 #include "fpm_reload_selective.h"
+#include "fpm_reload_selective_guard.h"
 #include "fpm_reload_shm.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_libphp_compat.h"
 #include "fpm_debug_clock.h"
+#include "fpm_fault_inject.h"
+#include "fpm_sd_notify.h"
+#include "fpm_crash_backoff.h"
+#include "fpm_http_handoff.h"
 #include "zlog.h"
 
 struct fpm_globals_s fpm_globals = {
@@ -71,6 +77,11 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	 * the rest of the test suite unaffected. */
 	fpm_debug_clock_init();
 
+	/* Issue #829: takes the selective reload guard's pipe out of the environment
+	 * before any child is forked. A child clears the environment (clear_env)
+	 * before the child hook below runs, so the hook reads the copy kept here. */
+	fpm_reload_selective_guard_init_main();
+
 	/* Before anything forks: a module registered here is inherited by every
 	 * child, and its INI entries exist before fpm_conf_init_main() parses the
 	 * configuration. On the from-source build this is a no-op -- see
@@ -86,6 +97,8 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	    0 > fpm_env_init_main()           ||
 	    0 > fpm_signals_init_main()       ||
 	    0 > fpm_children_init_main()      ||
+	    /* Issue #661: before fpm_sockets_init_main() binds any pool, see fpm_http_handoff.h. */
+	    0 > fpm_http_handoff_begin()      ||
 	    0 > fpm_sockets_init_main()       ||
 	    0 > fpm_worker_pool_init_main()   ||
 	    0 > fpm_event_init_main()) {
@@ -95,6 +108,12 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 		} else {
 			zlog(ZLOG_ERROR, "FPM initialization failed");
 			fpm_reload_selective_discard_unadopted();
+			/* Issue #831: a `-t` child (fpm_reload_config_check.c) inherits the
+			 * environment of the running master, and its entries may belong to
+			 * that master's orphans (#889). Only the new master may drain them. */
+			if (!test_conf) {
+				fpm_pool_supervisor_reload_survivors_discard_unadopted();
+			}
 			return FPM_INIT_ERROR;
 		}
 	}
@@ -102,6 +121,7 @@ enum fpm_init_return_status fpm_init(int argc, char **argv, char *config, char *
 	if (0 > fpm_conf_write_pid()) {
 		zlog(ZLOG_ERROR, "FPM initialization failed");
 		fpm_reload_selective_discard_unadopted();
+		fpm_pool_supervisor_reload_survivors_discard_unadopted();
 		return FPM_INIT_ERROR;
 	}
 
@@ -176,13 +196,28 @@ int fpm_run(int *max_requests) /* {{{ */
 			fpm_event_loop(1);
 		}
 
-		if (type->init_main && 0 > type->init_main(wp)) {
+		/* The fault point is the only way to reach this failure with a valid
+		 * configuration, see fpm_fault_inject.h (issue #832). */
+		if (type->init_main && (FPM_FAULT_POINT("pool_type_init_main") || 0 > type->init_main(wp))) {
 			zlog(ZLOG_ERROR, "[pool %s] failed to initialize pool type '%s'",
 				wp->config->name, type->name);
 			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
 			fpm_event_loop(1);
 		}
+
+		/* Issue #727: the crash backoff state is read by the operator endpoint,
+		 * a process forked below, so it is allocated here, before any fork. */
+		if (0 > fpm_crash_backoff_init(wp)) {
+			fpm_pctl(FPM_PCTL_STATE_TERMINATING, FPM_PCTL_ACTION_SET);
+			fpm_event_loop(1);
+		}
 	}
+
+#ifdef HAVE_FPM_HTTP
+	/* Issue #661: closes the handed-over listeners no gateway took. Before the
+	 * first fork, so no child inherits one. */
+	fpm_http_handoff_finish();
+#endif
 
 	/* create initial children in all pools */
 	for (wp = fpm_worker_all_pools; wp; wp = wp->next) {
@@ -207,6 +242,18 @@ int fpm_run(int *max_requests) /* {{{ */
 	 * into a kill of an unrelated process at shutdown. Only the master gets
 	 * here: a forked child jumped to run_child above. */
 	fpm_reload_selective_discard_unadopted();
+
+	/* Issue #889: a #329 survivor whose pool this configuration does not run has
+	 * no init_main() to claim its entry, so no pool type can dispatch it. The
+	 * master arms those entries itself. */
+	fpm_pool_supervisor_reload_orphans_arm();
+
+	/* Issue #643: READY=1 once every pool has bound its listening socket and
+	 * the initial children are forked. It says nothing about a gateway
+	 * accepting connections, and the unit's "active" state means the same.
+	 * The watchdog starts here too, so its first WATCHDOG=1 comes with READY. */
+	fpm_sd_notify_watchdog_start();
+	fpm_sd_notify_ready();
 
 	/* run event loop forever */
 	fpm_event_loop(0);
@@ -244,6 +291,9 @@ run_child: /* only workers reach this point */
 		 * thing this process runs may be a PHP script, which must not see
 		 * them through /proc/self/fd. */
 		fpm_reload_shm_child_init();
+		/* Issue #829: this child's copy of the selective reload guard's pipe
+		 * goes now, so that the guard sees EOF only when the master is gone. */
+		fpm_reload_selective_guard_child_init();
 
 		if (type && type->child_main) {
 			/* This type takes over the entire process permanently — it does not

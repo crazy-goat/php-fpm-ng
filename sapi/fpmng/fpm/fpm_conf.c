@@ -28,6 +28,7 @@
 #include "fpm_stdio.h"
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
+#include "fpm_http_access_log.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
@@ -53,6 +54,8 @@
 
 static int fpm_conf_load_ini_file(char *filename);
 static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_signed_int(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_backlog(zval *value, void **config, intptr_t offset);
 #if 0 /* not used for now */
 static char *fpm_conf_set_long(zval *value, void **config, intptr_t offset);
 #endif
@@ -65,6 +68,8 @@ static char *fpm_conf_set_log_level(zval *value, void **config, intptr_t offset)
 static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pm(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_request_id(zval *value, void **config, intptr_t offset);
+static char *fpm_conf_set_access_format(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_cron_jitter_mode(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_restart_jitter(zval *value, void **config, intptr_t offset);
 static char *fpm_conf_set_supervisor_stop_signal(zval *value, void **config, intptr_t offset);
@@ -112,7 +117,7 @@ static const struct ini_value_parser_s ini_fpm_global_options[] = {
 	{ "emergency_restart_interval",  &fpm_conf_set_time,            GO(emergency_restart_interval) },
 	{ "process_control_timeout",     &fpm_conf_set_time,            GO(process_control_timeout) },
 	{ "process.max",                 &fpm_conf_set_integer,         GO(process_max) },
-	{ "process.priority",            &fpm_conf_set_integer,         GO(process_priority) },
+	{ "process.priority",            &fpm_conf_set_signed_int,      GO(process_priority) },
 	{ "daemonize",                   &fpm_conf_set_boolean,         GO(daemonize) },
 	{ "rlimit_files",                &fpm_conf_set_integer,         GO(rlimit_files) },
 	{ "rlimit_core",                 &fpm_conf_set_rlimit_core,     GO(rlimit_core) },
@@ -135,7 +140,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "user",                      &fpm_conf_set_string,      WPO(user) },
 	{ "group",                     &fpm_conf_set_string,      WPO(group) },
 	{ "listen",                    &fpm_conf_set_string,      WPO(listen_address) },
-	{ "listen.backlog",            &fpm_conf_set_integer,     WPO(listen_backlog) },
+	{ "listen.backlog",            &fpm_conf_set_backlog,     WPO(listen_backlog) },
 #ifdef HAVE_FPM_ACL
 	{ "listen.acl_users",          &fpm_conf_set_string,      WPO(listen_acl_users) },
 	{ "listen.acl_groups",         &fpm_conf_set_string,      WPO(listen_acl_groups) },
@@ -145,9 +150,9 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "listen.mode",               &fpm_conf_set_string,      WPO(listen_mode) },
 	{ "listen.allowed_clients",    &fpm_conf_set_string,      WPO(listen_allowed_clients) },
 #ifdef SO_SETFIB
-	{ "listen.setfib",             &fpm_conf_set_integer,     WPO(listen_setfib) },
+	{ "listen.setfib",             &fpm_conf_set_signed_int,  WPO(listen_setfib) },
 #endif
-	{ "process.priority",          &fpm_conf_set_integer,     WPO(process_priority) },
+	{ "process.priority",          &fpm_conf_set_signed_int,  WPO(process_priority) },
 	{ "process.dumpable",          &fpm_conf_set_boolean,     WPO(process_dumpable) },
 	{ "pm",                        &fpm_conf_set_pm,          WPO(pm) },
 	{ "pm.max_children",           &fpm_conf_set_integer,     WPO(pm_max_children) },
@@ -157,6 +162,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "pm.max_spawn_rate",         &fpm_conf_set_integer,     WPO(pm_max_spawn_rate) },
 	{ "pm.process_idle_timeout",   &fpm_conf_set_time,        WPO(pm_process_idle_timeout) },
 	{ "pm.max_requests",           &fpm_conf_set_integer,     WPO(pm_max_requests) },
+	{ "pm.max_consecutive_failures", &fpm_conf_set_integer,   WPO(pm_max_consecutive_failures) },
 	{ "pm.status_path",            &fpm_conf_set_string,      WPO(pm_status_path) },
 	/* Issue #386: the operator listener's directives left the "pm." namespace.
 	 * These three old names are still PARSED -- so a config that uses one is
@@ -242,8 +248,12 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.operator_allowed_clients", &fpm_conf_set_string,  WPO(http_operator_allowed_clients) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
+	{ "http.request_id",           &fpm_conf_set_request_id,  WPO(http_request_id) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
+	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
 	{ "http.front_controller",     &fpm_conf_set_string,      WPO(http_front_controller) },
+	{ "http.ready_path",           &fpm_conf_set_string,      WPO(http_ready_path) },
+	{ "http.ready_require_target", &fpm_conf_set_boolean,     WPO(http_ready_require_target) },
 	{ "http.tls_cert",             &fpm_conf_set_string,      WPO(http_tls_cert) },
 	{ "http.tls_key",              &fpm_conf_set_string,      WPO(http_tls_key) },
 	{ "http.tls_min_version",      &fpm_conf_set_string,      WPO(http_tls_min_version) },
@@ -388,20 +398,48 @@ static char *fpm_conf_set_renamed_operator_directive(zval *value, void **config,
 }
 /* }}} */
 
-static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset) /* {{{ */
+/* Issue #862: a leading '-' used to pass here and reach atoi(). Only the
+ * directives whose domain is signed use fpm_conf_set_signed_int(); every
+ * other integer refuses the sign. listen.backlog takes its own setter for
+ * -1 alone (see fpm_conf_set_backlog()). */
+static char *fpm_conf_set_integer_value(zval *value, void **config, intptr_t offset, int allow_negative) /* {{{ */
 {
 	char *val = Z_STRVAL_P(value);
 	char *p;
 
-	/* we don't use strtol because we don't want to allow negative values */
+	/* No strtol(): it takes a sign, and only the signed caller may take one. */
 	for (p = val; *p; p++) {
-		if (p == val && *p == '-') continue;
+		if (p == val && *p == '-' && allow_negative) continue;
 		if (*p < '0' || *p > '9') {
 			return "is not a valid number (greater or equal than zero)";
 		}
 	}
 	* (int *) ((char *) *config + offset) = atoi(val);
 	return NULL;
+}
+/* }}} */
+
+static char *fpm_conf_set_integer(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	return fpm_conf_set_integer_value(value, config, offset, 0);
+}
+/* }}} */
+
+static char *fpm_conf_set_signed_int(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	return fpm_conf_set_integer_value(value, config, offset, 1);
+}
+/* }}} */
+
+/* Issue #862: -1 is FPM_BACKLOG_DEFAULT on Linux, the BSDs and macOS and
+ * means the kernel maximum (SOMAXCONN), so it stays valid. Every other
+ * negative value is refused. */
+static char *fpm_conf_set_backlog(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	if (strcmp(Z_STRVAL_P(value), "-1") == 0) {
+		return fpm_conf_set_signed_int(value, config, offset);
+	}
+	return fpm_conf_set_integer(value, config, offset);
 }
 /* }}} */
 
@@ -699,7 +737,7 @@ static char *fpm_conf_set_rlimit_core(zval *value, void **config, intptr_t offse
 		void *subconf = &int_value;
 		char *error;
 
-		error = fpm_conf_set_integer(value, &subconf, 0);
+		error = fpm_conf_set_signed_int(value, &subconf, 0);
 
 		if (error) {
 			return error;
@@ -749,6 +787,46 @@ static char *fpm_conf_set_pool_full_policy(zval *value, void **config, intptr_t 
 		c->http_pool_full_policy = FPM_HTTP_POOL_FULL_WAIT;
 	} else {
 		return "invalid http.pool_full_policy (reject or wait)";
+	}
+	return NULL;
+}
+/* }}} */
+
+/* http.request_id (issue #642): off (default), generate, or propagate. Anything
+ * else is refused, the same way http.pool_full_policy refuses an unknown value
+ * instead of guessing. See fpm_http_request_id.h for what each value does. */
+static char *fpm_conf_set_request_id(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s  *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "off")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_OFF;
+	} else if (zend_string_equals_literal_ci(val, "generate")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_GENERATE;
+	} else if (zend_string_equals_literal_ci(val, "propagate")) {
+		c->http_request_id = FPM_HTTP_REQUEST_ID_PROPAGATE;
+	} else {
+		return "invalid http.request_id (off, generate or propagate)";
+	}
+	return NULL;
+}
+/* }}} */
+
+/* http.access_format (issue #642): combined (default) or json. Anything else
+ * is refused, as http.request_id refuses an unknown value. The two layouts are
+ * described in fpm_http_access_log.h. */
+static char *fpm_conf_set_access_format(zval *value, void **config, intptr_t offset) /* {{{ */
+{
+	zend_string *val = Z_STR_P(value);
+	struct fpm_worker_pool_config_s  *c = *config;
+
+	if (zend_string_equals_literal_ci(val, "combined")) {
+		c->http_access_format = FPM_HTTP_ACCESS_FORMAT_COMBINED;
+	} else if (zend_string_equals_literal_ci(val, "json")) {
+		c->http_access_format = FPM_HTTP_ACCESS_FORMAT_JSON;
+	} else {
+		return "invalid http.access_format (combined or json)";
 	}
 	return NULL;
 }
@@ -1016,6 +1094,7 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->listen_backlog = FPM_BACKLOG_DEFAULT;
 	wp->config->pm_max_spawn_rate = 32; /* 32 by default */
 	wp->config->pm_process_idle_timeout = 10; /* 10s by default */
+	wp->config->pm_max_consecutive_failures = 6; /* issue #727 */
 	wp->config->process_priority = 64; /* 64 means unset */
 	wp->config->process_dumpable = 0;
 	wp->config->clear_env = 1;
@@ -1038,6 +1117,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_upstream_connect_timeout = 5000;	/* fpm-ng: FPM_HTTP_UPSTREAM_CONNECT_TIMEOUT_MS in fpm_http.c (issue #716) */
 	wp->config->http_upstream_read_timeout = 60000;	/* fpm-ng: FPM_HTTP_UPSTREAM_READ_TIMEOUT_MS in fpm_http.c (issue #716) */
 	wp->config->http_pool_full_policy = FPM_HTTP_POOL_FULL_REJECT;	/* fpm-ng: issue #309, off by default for every pool */
+	wp->config->http_request_id = FPM_HTTP_REQUEST_ID_OFF;	/* fpm-ng: issue #642, off by default for every pool */
+	wp->config->http_access_format = FPM_HTTP_ACCESS_FORMAT_COMBINED;	/* fpm-ng: issue #642, the Combined line by default */
 	wp->config->cron_jitter_mode = FPM_CRON_JITTER_RANDOM;	/* fpm-ng: issue #322, matters only once cron.jitter > 0 */
 	wp->config->http_pool_full_queue_max = 32;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
 	wp->config->http_pool_full_wait_ms = 500;	/* fpm-ng: issue #309, see docs/http-gateway-pool-full.md for the reasoning */
@@ -1154,6 +1235,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_front_controller);
 	free(wpc->fiber_isolate_statics);
 	free(wpc->fiber_disable_interceptions);
+	free(wpc->http_ready_path);
 #ifdef HAVE_APPARMOR
 	free(wpc->apparmor_hat);
 #endif
@@ -1475,6 +1557,12 @@ static int fpm_conf_check_pool_pm(struct fpm_worker_pool_s *wp, const struct fpm
 		return -1;
 	}
 
+	/* pm.max_consecutive_failures (issue #727): 0 means never give up. */
+	if (wp->config->pm_max_consecutive_failures < 0) {
+		zlog(ZLOG_ALERT, "[pool %s] pm.max_consecutive_failures must be 0 or a positive value", wp->config->name);
+		return -1;
+	}
+
 	/* pm.start_servers, pm.min_spare_servers, pm.max_spare_servers, pm.max_spawn_rate */
 	if (wp->config->pm == PM_STYLE_DYNAMIC) {
 		struct fpm_worker_pool_config_s *config = wp->config;
@@ -1659,6 +1747,48 @@ static int fpm_conf_check_pool_ping_access_log(struct fpm_worker_pool_s *wp)
 		if (!wp->config->access_format) {
 			wp->config->access_format = strdup("%R - %u %t \"%m %r\" %s");
 		}
+	}
+
+	return 0;
+}
+
+/* http.ready_path (issue #646): the same path rules as ping.path. It must also
+ * differ from ping.path, because the gateway answers both before routing, so
+ * one of them would never be seen. http.ready_require_target only means
+ * something to that probe, so it needs the path. */
+static int fpm_conf_check_pool_ready_path(struct fpm_worker_pool_s *wp)
+{
+	char *ready = wp->config->http_ready_path;
+	size_t i;
+
+	if (!ready || !*ready) {
+		if (wp->config->http_ready_require_target) {
+			zlog(ZLOG_ERROR, "[pool %s] http.ready_require_target needs http.ready_path", wp->config->name);
+			return -1;
+		}
+		return 0;
+	}
+
+	if (*ready != '/') {
+		zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' must start with a '/'", wp->config->name, ready);
+		return -1;
+	}
+
+	if (strlen(ready) < 2) {
+		zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' is not long enough", wp->config->name, ready);
+		return -1;
+	}
+
+	for (i = 0; i < strlen(ready); i++) {
+		if (!isalnum((unsigned char)ready[i]) && ready[i] != '/' && ready[i] != '-' && ready[i] != '_' && ready[i] != '.' && ready[i] != '~') {
+			zlog(ZLOG_ERROR, "[pool %s] the ready path '%s' must contain only the following characters '[alphanum]/_-.~'", wp->config->name, ready);
+			return -1;
+		}
+	}
+
+	if (wp->config->ping_path && strcmp(ready, wp->config->ping_path) == 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.ready_path and ping.path are both '%s'; the gateway answers each of them itself, so they must differ", wp->config->name, ready);
+		return -1;
 	}
 
 	return 0;
@@ -1909,6 +2039,7 @@ static int fpm_conf_process_all_pools(void)
 
 		if (!type || 0 > fpm_conf_check_pool_basics(wp, type) || 0 > fpm_conf_check_pool_pm(wp, type)
 				|| 0 > fpm_conf_check_pool_operator(wp, type) || 0 > fpm_conf_check_pool_ping_access_log(wp)
+				|| 0 > fpm_conf_check_pool_ready_path(wp)
 				|| 0 > fpm_conf_check_pool_timeouts(wp) || 0 > fpm_conf_check_pool_paths(wp)
 				|| 0 > fpm_conf_prepare_pool_runtime(wp)) {
 			return -1;
@@ -2645,6 +2776,7 @@ static void fpm_conf_dump(void)
 		zlog(ZLOG_NOTICE, "\tpm.max_spawn_rate = %d",          wp->config->pm_max_spawn_rate);
 		zlog(ZLOG_NOTICE, "\tpm.process_idle_timeout = %d",    wp->config->pm_process_idle_timeout);
 		zlog(ZLOG_NOTICE, "\tpm.max_requests = %d",            wp->config->pm_max_requests);
+		zlog(ZLOG_NOTICE, "\tpm.max_consecutive_failures = %d", wp->config->pm_max_consecutive_failures);
 		zlog(ZLOG_NOTICE, "\tpm.status_path = %s",             STR2STR(wp->config->pm_status_path));
 		zlog(ZLOG_NOTICE, "\toperator.status_path = %s",       STR2STR(wp->config->operator_status_path));
 		zlog(ZLOG_NOTICE, "\toperator.status_listen = %s",     STR2STR(wp->config->operator_status_listen));

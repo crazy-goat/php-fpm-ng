@@ -9,9 +9,10 @@ struct fpm_worker_pool_s;
  * fpm_conf.c to seed wp->config->worker_max_pending before the pool's own
  * config is parsed. Bounds the memory a client burst can pin in
  * accepted-but-unanswered requests; beyond it the transport answers 503
- * itself, as the gateway does when its worker budget is exhausted
- * (fpm_http.c:153-155). Runtime checks in fpm_http_direct_worker.c use the
- * configured value, never this macro directly. */
+ * itself, as the gateway does when its pool is full
+ * (fpm_http.c:1357, fpm_http_pump_target()). Runtime checks in
+ * fpm_http_direct_worker.c use the configured value, never this macro
+ * directly. */
 #define FPM_WORKER_PENDING_MAX 256
 
 /* Compile-time default for worker.accept_threshold (issue #338): how many

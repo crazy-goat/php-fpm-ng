@@ -144,16 +144,18 @@ int fpm_reload_config_check(int argc, const char *const *argv) /* {{{ */
 	free(checked);
 
 	if (reported == (ssize_t) sizeof(exec_errno)) {
-		/* The check could not run at all. This is also what happens when the
-		 * binary this master was started from is gone: the reload's own
-		 * execvp() would fail the same way, and fpm_pctl_exec() logs that and
-		 * cleans up after itself (issue #690). Refusing here instead would keep
-		 * the running generation serving a binary the operator can no longer
-		 * reload, with nothing but a warning to explain it. */
-		zlog(ZLOG_WARNING, "reload: cannot run the configuration check: execvp(\"%s\") failed: %s; "
-						   "reloading without a check",
+		/* The check could not run, so the new configuration is unknown. Refuse,
+		 * as for a broken one. Going ahead would drain the running generation
+		 * first, and then the reload's own execvp() would fail the same way:
+		 * the service would be down until the binary came back (issue #661,
+		 * and #690 before it). Here the running generation keeps its listeners
+		 * and keeps serving; the operator restores the binary and sends SIGUSR2
+		 * again. */
+		zlog(ZLOG_ERROR, "reload refused: the configuration check cannot run: execvp(\"%s\") failed: %s; "
+						 "the pools that are running keep serving the configuration they were started with; "
+						 "restore the binary or its path and send SIGUSR2 again",
 				argv[0], strerror(exec_errno));
-		return 1;
+		return 0;
 	}
 
 	if (WIFSIGNALED(status)) {

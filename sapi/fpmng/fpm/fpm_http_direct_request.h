@@ -83,12 +83,14 @@ struct fpm_http_direct_labels {
  * limits (issue #593), http.response_buffer is the gateway's flow-control
  * knob (issue #596), http.response_min_rate is the minimum-progress rule
  * that composes with it (issue #705), and the two http.upstream_* timeouts are
- * the gateway's own upstream deadlines (issue #716); a direct pool reads none
- * of them, so they are refused. */
-#define FPM_HTTP_DIRECT_REJECTS_COMMON                                              \
-	"fiber.", "supervisor.", "cron.", "worker.",                                    \
-			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer", \
-			"http.response_min_rate", "http.upstream_connect_timeout", "http.upstream_read_timeout"
+ * the gateway's own upstream deadlines (issue #716), and http.request_id and
+ * http.access_format are the gateway's correlation id and access log layout
+ * (issue #642); a direct pool reads none of them, so they are refused. */
+#define FPM_HTTP_DIRECT_REJECTS_COMMON                                                               \
+	"fiber.", "supervisor.", "cron.", "worker.",                                                     \
+			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer",                  \
+			"http.response_min_rate", "http.upstream_connect_timeout", "http.upstream_read_timeout", \
+			"http.request_id", "http.access_format"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {
@@ -115,9 +117,9 @@ const char *fpm_http_direct_method(enum evhttp_cmd_type command);
 /* The two ingress steps, in this order, first thing in both request callbacks
  * (#681). Together they reduce the request-target to the origin-form path every
  * consumer below matches on; they are two because the gateway's are two
- * (fpm_http.c:2246 normalizes, fpm_http.c:2287 bounds the authority after the
- * ACL), and the split is what keeps an excluded client's 403 free of any
- * statement about its target.
+ * (fpm_http.c:2714 normalizes, fpm_http.c:2764 bounds the authority after the
+ * ACL, both in fpm_http_request()), and the split is what keeps an excluded
+ * client's 403 free of any statement about its target.
  *
  * Normalizing first is not only the gateway's order, it is what makes every
  * response's access-log suppress match exact: a request refused by the ACL
@@ -130,10 +132,12 @@ int fpm_http_direct_build_env(struct evhttp_request *http, const struct fpm_http
 		fpm_http_direct_env_cb emit, void *ctx);
 bool fpm_http_direct_header_dropped(const char *name);
 bool fpm_http_direct_header_name_ok(const char *name);
-/* Writes `name` into `out` (size bytes, always NUL-terminated) with every byte
- * outside printable US-ASCII escaped as \xNN, truncating rather than growing.
- * Returns `out`, so it can be used inline in a log call. */
-const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size);
+/* Writes at most `max` bytes of `in`, stopping at NUL, into `out` (size bytes,
+ * always NUL-terminated) with every byte outside printable US-ASCII and every
+ * backslash escaped as \xNN. Truncates rather than growing, and returns `out`,
+ * so it can be used inline in a log call. A `size` of 4 * max + 1 keeps all of
+ * `max` bytes even when each one is escaped. */
+const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size);
 /* Charges one emitted response header line against FPM_HTTP_HEADERS_MAX
  * and returns false when it does not fit, leaving *total unchanged. */
 bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value_len);

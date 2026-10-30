@@ -509,6 +509,32 @@ if test "$PHP_FPMNG" != "no"; then
     AC_MSG_WARN([--enable-fpmng-debug-clock: this binary's clock can be made to run faster than real time by an environment variable. It is for running the test suite, not for a server.])
   ])
 
+  dnl A failure-injection seam for the test suite (issue #832). Some error
+  dnl paths cannot be reached by any configuration (init_main() failing after
+  dnl fpm_init() returned OK, for one), so they have no test. With this flag the
+  dnl master honours FPMNG_FAULT=<point>[:ifenv=<VAR>] and makes the named call
+  dnl site fail on purpose.
+  dnl
+  dnl OFF by default and never enabled for a shipped package: with the flag off
+  dnl the code is not in the binary and FPM_FAULT_POINT() is the constant 0. The
+  dnl rationale and the syntax are in fpm/fpm_fault_inject.h.
+  dnl
+  dnl No source list of its own, for the reason the debug clock has none:
+  dnl fpm/fpm_fault_inject.c is compiled in every build and its whole body is
+  dnl inside the #ifdef.
+  PHP_ARG_ENABLE([fpmng-fault-inject],
+    [whether to build the test-suite failure-injection seam in fpm-ng],
+    [AS_HELP_STRING([--enable-fpmng-fault-inject],
+      [Build fpm-ng with FPMNG_FAULT, which makes chosen calls fail, for the test suite (TESTING ONLY, never for a shipped build)])],
+    [no],
+    [no])
+
+  AS_VAR_IF([PHP_FPMNG_FAULT_INJECT], [no],, [
+    AC_DEFINE([HAVE_FPMNG_FAULT_INJECT], [1],
+      [Define to 1 if fpm-ng honours FPMNG_FAULT (--enable-fpmng-fault-inject).])
+    AC_MSG_WARN([--enable-fpmng-fault-inject: this binary can be made to fail chosen calls by an environment variable. It is for running the test suite, not for a server.])
+  ])
+
   dnl HTTP/2 and HTTP/3/QUIC: the flag NAMES are reserved here, and nothing
   dnl else. Neither protocol exists in this tree -- issues #186 and #187 are
   dnl still deciding whether an nghttp2 session layer is worth what it costs,

@@ -317,6 +317,19 @@ held requests per worker, or needs them to survive the ceiling, that is a
 design change: it has to come with a bound of its own, and it belongs to #68
 and its follow-ups, not to this limit.
 
+#### Requests that arrive while the worker stops (issue #668)
+
+Every stop of the worker runs the same drain. The stop comes from `worker.max_pending` saturation, `pm.max_requests`, `worker.max_memory`, `worker.max_lifetime`, `SIGQUIT` (the master sends it on a reload) or `SIGUSR1` (retires one child).
+
+The drain stops the listener and answers every held request `503`. Then it runs the event loop without blocking, for at most 4 passes and at most 100 ms (`fpm_worker_grace_drain()` in `sapi/fpmng/fpm/fpm_http_direct_worker.c`). A pass that queues no reply ends the drain. On an idle worker the drain ends at once. No directive sets these limits.
+
+During the drain:
+
+- A request on an open connection whose bytes are already in the socket buffer when the drain runs gets `503 Worker unavailable`. This holds for a request that needs several reads, within the 100 ms limit.
+- The worker does not accept a new connection. The shared listening socket is left to the sibling workers.
+
+After the drain, the worker closes its open connections without a reply. A request that reaches the worker after the drain gets no reply, and the worker script does not run for it. The client must treat such a request as failed and send it again on a new connection. A request that was sent but has not yet reached the worker when the drain ends meets the same silent close. This is the normal keep-alive close race (RFC 9112 section 9.3.1). The drain adds no wait for an idle worker.
+
 #### `worker.max_pending` (issue #331)
 
 - **Default:** `256` (`FPM_WORKER_PENDING_MAX`).
@@ -1305,6 +1318,16 @@ listen.allowed_clients = 10.0.0.4,10.0.0.5
 chroot = /srv/jail
 ```
 
+### Crash backoff (issue #727)
+
+The master waits longer before it starts a new child that fails fast. A child
+that exits within 10 seconds, with no request served, is a fast failure. This
+applies to both executors. The directive `pm.max_consecutive_failures` sets how
+many fast failures in a row the pool allows. The default is `6`, and `0` means
+that the pool never gives up. The rules are in [`crash-backoff.md`](crash-backoff.md),
+and the operator endpoint shows the state as described in
+[Crash backoff](operator-endpoint.md#crash-backoff-issue-727).
+
 ### `ping.path` and `operator.status_path`
 
 **They are on two different sockets.**
@@ -1337,6 +1360,7 @@ documented spelling.
 | `pool`, `process manager`, `start time`, `start since` | the pool's scoreboard |
 | `idle processes`, `active processes`, `total processes`, `max active processes`, `max children reached` | the pool's scoreboard |
 | `requests`, `slow requests`, `memory peak` | the pool's scoreboard — PHP requests only |
+| `listen queue`, `max listen queue`, `listen queue length` | the pool's scoreboard, sampled from TCP_INFO; only on a TCP listener in a Linux build (issue #644) |
 | `accepted conn` | connections this pool's children accepted, counted in the one hook libevent runs per accepted connection |
 | `non-php requests` | static files and pings: answered without starting a PHP request |
 | `refused requests` | answered `403` by `listen.allowed_clients`, or `503` because the pool was stopping or saturated |
@@ -1350,6 +1374,11 @@ documented spelling.
 | `timed out connections` | connections dropped by the first-request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
+
+The `listen queue` lines follow the rules in
+[Saturation (issue #644)](operator-endpoint.md#saturation-issue-644). A classic
+pool uses `pm = static`, so its `max children reached` line reads `0`. That `0`
+means the count does not apply to a static pool.
 
 `refused requests` is the sum of `refused acl` and `refused capacity`, kept
 under its old name and its old meaning so a tool written against the fastcgi
@@ -1579,6 +1608,11 @@ What differs from a fastcgi pool:
 - `%e{VAR}` reads the CGI environment this pool built for the request, and `%R`
   is the direct peer address (never an `X-Forwarded-For`: a direct pool has no
   trusted-proxy list).
+- `%{HTTP_X_REQUEST_ID}e` prints the request id. This pool makes no id of its own.
+  A gateway in front of it sends the id with `http.request_id` (issue #642). The
+  pool does not check the header, so a client that reaches the pool directly sends
+  its own value. Prints `-` when there is no header. See
+  [`docs/gateway.md`](gateway.md#access-log-fields-and-request-id-issue-642).
 - `%r` is the request-target as the client wrote it (the absolute-form spelling
   survives), with the query string cut off -- `%Q%q` carries it instead, exactly
   once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller
@@ -1904,7 +1938,9 @@ The CGI `Status:` value must contain exactly three digits, optionally
 followed by a space and a reason phrase. The buffered classic executor and
 the gateway use the same parser, `fpm_http_parse_cgi_status()` (issues #604
 and #594). A malformed value or a code outside 200–599 produces
-`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value.
+`502 Bad Gateway` and a `WARNING` with the first 64 bytes of the value. In the
+`WARNING`, every byte outside `0x21`–`0x7e` (so a space, a control byte or a
+byte of 0x80 or more) and the backslash appear as `\xNN`.
 The classic executor discards the script's headers and body, counts one
 rejected response, and records 502 in `access.log`. The first rejection
 cause determines the error status and diagnostic. These checks include

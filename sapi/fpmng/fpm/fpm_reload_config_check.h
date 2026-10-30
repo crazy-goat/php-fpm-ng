@@ -53,17 +53,25 @@
  * (fpm_process_ctl.c's own copy, which is the one fpm_pctl_exec() re-execs --
  * NOT fpm_globals.argv, which fpm_env.c rewrites in place on Linux).
  *
- * A refusal (return 0) happens only when the check ran to completion and said
- * the configuration is not loadable: an ERROR naming the file, the exit status
- * and the reason is logged, the caller leaves its state untouched, so every
- * pool keeps serving the configuration it was started with and the next
- * SIGUSR2 tries again. Anything else -- a fork() that failed, an execvp() that
- * failed, a check killed by a signal -- logs a WARNING and returns 1: the gate
- * exists to keep a *broken configuration* from taking the service down, and
- * turning a transient fork/exec failure into "this master can never reload
- * again" would do more damage than the gate prevents. That also keeps
- * fpm_pctl_exec()'s own failed-execvp() path (#690) reachable, which is what
- * test fpmng-reload-selective-failed-exec.phpt exercises.
+ * A refusal (return 0) happens when the check did not pass. The caller leaves
+ * its state untouched, so every pool keeps serving the configuration it was
+ * started with, and the next SIGUSR2 tries again. An ERROR is logged in both
+ * refusal cases:
+ *   - the check ran to completion and said the configuration is not loadable:
+ *     the ERROR names the file, the exit status and the reason;
+ *   - the check could not exec the binary (execvp() failed, for example because
+ *     the binary was removed). Issue #661: a reload that goes ahead drains the
+ *     running generation before the next master's execvp() runs, so a failed
+ *     exec would leave the service down. The running generation keeps its
+ *     listeners and keeps serving. Before #661 this case logged a WARNING and
+ *     returned 1 (#690).
+ * Anything else -- a fork() or a pipe() that failed, a check killed by a
+ * signal -- logs a WARNING and returns 1: the gate exists to keep a *broken
+ * configuration* from taking the service down, and turning a transient fork
+ * failure into "this master can never reload again" would do more damage than
+ * the gate prevents. The failed-execvp() path of fpm_pctl_exec() (#690) is now
+ * reached only when the binary disappears between this check and the exec.
+ * test fpmng-reload-selective-failed-exec.phpt checks the refusal.
  *
  * Reached from two places, both through fpm_pctl(): the operator's SIGUSR2
  * (fpm_events.c) and the emergency restart after enough children died at once

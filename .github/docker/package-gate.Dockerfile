@@ -30,7 +30,7 @@
 #
 # DISTRIBUTION DRIFT. This cell is the only one in the matrix that links against
 # a PHP nobody in this repository pinned -- 8.5.4 from Ubuntu, 8.5.10 from Alpine
-# against our php-8.5.9 -- and that is what it is for. Freezing those into an
+# against our php-8.5.12 -- and that is what it is for. Freezing those into an
 # image would throw it away, so ci-image.yml rebuilds these nightly, and the
 # version line stage 1 prints ("libphp-build.sh: php-config8.5 -> PHP x.y.z") is
 # where a drift becomes visible in the job log.

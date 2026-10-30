@@ -181,8 +181,8 @@ try {
      * for any idle connection that might still be open. So the only window in
      * which fpm_worker_accept()'s fpm_worker_stopping disjunct can be
      * observed refusing an idle connection is before that last pending entry
-     * clears, exactly like fpmng-http-direct-worker-saturation-refuses-new.phpt
-     * does with its own held request. */
+     * clears. fpmng-http-direct-worker-saturation-refuses-new.phpt keeps its
+     * script's event loop alive after the stop for the same purpose. */
     [$statusIdle, , $closeIdle] = fetch($idleConn, '/', true);
     check($statusIdle === 503, "idle connection's request after SIGUSR1: $statusIdle");
     check($closeIdle, 'the refusal after SIGUSR1 did not add Connection: close');

@@ -115,16 +115,17 @@ try {
 
     /* access.suppress_path[] must match the same path ping.path does, for EVERY
      * ending -- a locally answered response is logged by the same code, and the
-     * gateway compares the parsed path there too (fpm_http.c:496). Six responses
-     * below are suppressed by path: two answered by PHP, two by the ping
-     * matcher, two by the static lookup, each in both spellings.
+     * gateway compares the parsed path there too (fpm_http.c:585-590,
+     * fpm_http_log_suppressed()). Six responses below are suppressed by path:
+     * two answered by PHP, two by the ping matcher, two by the static lookup,
+     * each in both spellings.
      *
      * The network-path reference is origin-form (RFC 9112 3.2.1), so its path is
      * "//h/quiet" and no entry matches it -- exactly as on the gateway.
      *
      * %r is the request-target as the client wrote it, so an absolute-form
      * request logs its authority; the gateway's request line does the same
-     * (fpm_http.c:534). */
+     * (fpm_http.c:673-674, fpm_http_log_response()). */
     $log = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
     foreach ([
         '/quiet', 'http://h/quiet',                     /* answered by PHP */

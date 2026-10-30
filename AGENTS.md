@@ -87,6 +87,7 @@ that this section and the links to it stay in place.
 | `docker/`, `.github/docker/` | Dockerfiles (minimal package image, package-gate images) |
 | `packaging/` | `.deb` and `.apk` configuration and service files |
 | `examples/` | Runnable examples (each has its own Dockerfile or compose file) |
+| `tests/fuzz/` | libFuzzer harnesses (`fuzz_*.c`), seed corpora (`seeds/`) and stubs; run by `build/fuzz.sh` |
 | `tests/frameworks/` | Slim 4 smoke test on `gateway`+`fastcgi` and `http-direct` classic (fiber probes: `async/tests/frameworks/` on branch `async`) |
 | `docs/` | Design notes, spike reports, process docs |
 | `docs/guides/` | User-facing guides (getting started, migrations, framework recipes); their `ini verify` blocks are checked by `build/test-doc-configs.sh` |
@@ -98,8 +99,8 @@ The build needs Linux and the PHP 8.5 NTS SDK of the distribution (Ubuntu 26.04 
 No php-src checkout is needed.
 
 ```bash
-# Build (Linux). Toggles: FPMNG_TLS, FPMNG_ACME, FPMNG_DEBUG_CLOCK (CI sets all three to 1).
-FPMNG_TLS=1 FPMNG_ACME=1 FPMNG_DEBUG_CLOCK=1 ./build/libphp-build.sh "$PWD/out"
+# Build (Linux). Toggles: FPMNG_TLS, FPMNG_ACME, FPMNG_DEBUG_CLOCK, FPMNG_FAULT_INJECT (CI sets all four to 1).
+FPMNG_TLS=1 FPMNG_ACME=1 FPMNG_DEBUG_CLOCK=1 FPMNG_FAULT_INJECT=1 ./build/libphp-build.sh "$PWD/out"
 
 # Lint: clang-tidy (build/lint-c.sh) + clang-format + shellcheck + hadolint.
 # Check only, runs every step; --fix applies clang-format first. A missing tool fails the run.
@@ -134,7 +135,32 @@ FPMNG="$PWD/out/php-fpm-ng" PHP="$(php-config8.5 --php-binary)" tests/frameworks
 
 # Shell scenarios against the built binary (see .github/workflows/build-matrix.yml)
 ./build/test-http-tls-reload.sh "$PWD/out/php-fpm-ng"
+
+# Fuzz: libFuzzer harnesses for the HTTP, FastCGI and WebSocket parsers (tests/fuzz/).
+# Builds every harness with clang -fsanitize=fuzzer,address,undefined and runs each for N seconds.
+# -t 0 builds only. Needs clang and libclang-rt-dev, and the SDK of ci-install-deps.sh test.
+# Build files, corpus and crash reproducers go to -o, or $FUZZ_OUT, or ./out-fuzz (not in git).
+./build/fuzz.sh                       # every harness, 10 s each
+./build/fuzz.sh -t 600 http_client    # one harness, 10 minutes; the remedy for a CI crash
+./build/fuzz.sh -r -t 60              # run only, with the binaries already built
+./build/fuzz.sh -q -t 60              # CI mode: output to outdir/logs; a failure prints name, exit code and seed
 ```
+
+CI job `fuzz` runs every harness for 60 seconds on a pull request or a push to main that touches the
+fuzzed code (`sapi/fpmng/`, `ext/fpmng_metrics/`, `third_party/php-src/main/fastcgi.*`,
+`third_party/php-src/sapi/fpm/fpm/`, `tests/fuzz/`, `build/fuzz.sh`, `build/standalone-tree.sh`,
+`build/ci-install-deps.sh`, `.github/workflows/build-matrix.yml`). If the scope step cannot read
+git, it runs the harnesses and prints `fuzz scope: git failed, running the fuzzers`. The job runs
+`fuzz.sh -q`: it prints no harness output. A failed harness prints its name, its exit code, a kind
+(`crash`, `leak`, `timeout` or `oom`) when the log shows one, and the libFuzzer seed
+(`INFO: Seed: N`). A kind also gets a hint to try a longer local run. The job keeps no reproducer:
+its container is discarded, and no step uploads the crash input. A CI crash may not repeat locally.
+The seed is a hint only, so the remedy is a longer local run of that harness, for example
+`./build/fuzz.sh -t 600 <name>`, optionally with `-s N`. A seeded run uses its own corpus directory,
+`corpus/<name>-seed-N`, and starts from the committed seeds only, as the CI run did. The time limit
+ends the run, so on a slower machine a crash that came late in CI may need a longer `-t`. A local
+run writes its reproducer under `out-fuzz/artifacts/<name>/`. Triage it before anything is public:
+the reproducer and the stack stay out of commits, PRs, issues, the CHANGELOG and CI logs.
 
 On macOS use the retained from-source flow (`build/prepare.sh`), or run the Linux commands in
 an `ubuntu:26.04` container after `build/ci-install-deps.sh build` (needs root). php-fpm

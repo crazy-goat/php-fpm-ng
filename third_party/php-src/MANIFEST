@@ -1,12 +1,12 @@
 # third_party/php-src/MANIFEST -- written by build/vendor-php-src.sh import.
 # Hand-edit only the file list (path and upstream path, '-' for the hash),
 # then run import. check compares the files against the last column.
-tag	php-8.5.9
-commit	dd6e76cce27aaa0ed9f7520648ed1081dfb6af36
-# vendored path	upstream path	sha256 (the file is the pristine php-8.5.9 one)
+tag	php-8.5.12
+commit	136e049ac10b032c83018e65b63b6df858943750
+# vendored path	upstream path	sha256 (the file is the pristine php-8.5.12 one)
 LICENSE	LICENSE	b42e4df5e50e6ecda1047d503d6d91d71032d09ed1027ba1ef29eed26f890c5a
 sapi/fpm/LICENSE	sapi/fpm/LICENSE	28b9b14401f49784efd2246b32f745c2cd998f4f425be677f29e02a33e68bfed
-main/fastcgi.c	main/fastcgi.c	ed34b13bb23d0d19789338833f77d926f3b0213ab0117f13f4c7ee9fbf0ddeca
+main/fastcgi.c	main/fastcgi.c	0de3c0b2d2dff549295ca82522556db7d0f7ad35878d6efce87f6f6b1e2ee0e4
 main/fastcgi.h	main/fastcgi.h	c7dca59c80b6069dd9b954448733a6916e6910142c8e40cf0a36e5d6c65d50b6
 sapi/fpm/fpm/events/epoll.c	sapi/fpm/fpm/events/epoll.c	7ce0cec8a63997cb5e9f5b71bae1030e6e17f7d5fba9ff447ae884ea4947ab46
 sapi/fpm/fpm/events/epoll.h	sapi/fpm/fpm/events/epoll.h	19c7c9741f2c467a961d6fdfe0901287ae6c7202dcdc5e746e4cd756fb3a8306
@@ -54,14 +54,14 @@ sapi/fpm/fpm/fpm_str.h	sapi/fpm/fpm/fpm_str.h	2f475e49f3316801160b0af67a1957a2eb
 sapi/fpm/fpm/fpm_trace_pread.c	sapi/fpm/fpm/fpm_trace_pread.c	c33ea24a4aea1d1e01408646406e134168db4ba4a217e763c1b52c79890ecce9
 sapi/fpm/fpm/fpm_trace.c	sapi/fpm/fpm/fpm_trace.c	f24afc965fbe9f212b53b281007988728616592135cfd65be4bc794ed9fe4c5e
 sapi/fpm/fpm/fpm_trace.h	sapi/fpm/fpm/fpm_trace.h	75cf2c5d5609970a6089a9ca983068548c66c6cbef15865fd7ee1e7fdb388f22
-sapi/fpm/fpm/fpm_unix.c	sapi/fpm/fpm/fpm_unix.c	433a2c36db10bf1061d87780e180f12700e1e294c15d5976e5dd29a6c0c16035
+sapi/fpm/fpm/fpm_unix.c	sapi/fpm/fpm/fpm_unix.c	f7bb14cc35ab34f2cdfd58ab6c5229a0b02f0b0bbbaecd3ff536fc93b499840f
 sapi/fpm/fpm/fpm_unix.h	sapi/fpm/fpm/fpm_unix.h	c9d3067922a29dce21dd004e296c6bf0be85071dba6751d6f0f8cf885f49775f
 sapi/fpm/fpm/fpm_worker_pool.c	sapi/fpm/fpm/fpm_worker_pool.c	bf814cc665fac77b92c65ac0366fe638e325511ea48bc101a8fd70ee4d83e2e1
-sapi/fpm/fpm/fpm_worker_pool.h	sapi/fpm/fpm/fpm_worker_pool.h	86c4f9dd553fdb5fe5c6d94aa0d3a9cfd16151f22917da83df06b3e8702c176c
+sapi/fpm/fpm/fpm_worker_pool.h	sapi/fpm/fpm/fpm_worker_pool.h	6eb4fc3a85745c49277c23066eb29a4c248fd18696adebd421ac9fc12263221b
 sapi/fpm/fpm/fpm.h	sapi/fpm/fpm/fpm.h	9d647a5fb0fa32fe1fccb5fa5ad33a3875c0b0a8f6c0377d23016c8b0f3b703f
 sapi/fpm/fpm/zlog_upstream.h	sapi/fpm/fpm/zlog.h	95ee3dd257279bf8496b107797ad20df953dbbf79c8314c914e313a7b61cafc6
 sapi/fpm/fpm/zlog.c	sapi/fpm/fpm/zlog.c	7550c8e7ced21beb3bb4fddd5bc5a0166a6d0fe058e98874a3cc74d3c32a6379
-run-tests.php	run-tests.php	381909991d541530aaf38c3760ef52954a01ba0ac8054ad28b57396b3393e119
+run-tests.php	run-tests.php	c1f4d3ebcdcc734daa7ef29bb191642a905700da4431c4e095ca9e17c0127161
 sapi/fpm/tests/CONFLICTS	sapi/fpm/tests/CONFLICTS	efb73d529f8cde4090f2d3c5404c47a0df572d9dc25424bf9d465611196d6613
 sapi/fpm/tests/bug64539-status-json-encoding.phpt	sapi/fpm/tests/bug64539-status-json-encoding.phpt	36ade39594bda24d68bab7333e805938050c29f684dcdfb3f6df077a701874be
 sapi/fpm/tests/bug68207-fastcgi-error-header-sent.phpt	sapi/fpm/tests/bug68207-fastcgi-error-header-sent.phpt	8e1a1db9230abbcbc0d51df1936638f82bed5826910eeca724c10f8ac0da457b
@@ -87,7 +87,7 @@ sapi/fpm/tests/bug75712-getenv-server-vars_001.phpt	sapi/fpm/tests/bug75712-gete
 sapi/fpm/tests/bug75712-getenv-server-vars_002.phpt	sapi/fpm/tests/bug75712-getenv-server-vars_002.phpt	cc888e90dbc2c18bab3455e7ab9862e72c39f755536114ca5676591dfff66bd8
 sapi/fpm/tests/bug76601-reload-child-signals.phpt	sapi/fpm/tests/bug76601-reload-child-signals.phpt	798206290a179d23dd1a682b42d75840b05993fa5b317d5a3ae4197786480560
 sapi/fpm/tests/bug76922-fcgi-get-value-conn.phpt	sapi/fpm/tests/bug76922-fcgi-get-value-conn.phpt	fe0a832305c89ab728f5df5867b90b681f3e4b8684bb7ce137b4966ef351b2f3
-sapi/fpm/tests/bug77023-pm-dynamic-blocking-sigquit.phpt	sapi/fpm/tests/bug77023-pm-dynamic-blocking-sigquit.phpt	b0a83835e23803b8ae6d3fbb193a1e5dae20e43b255cea42b8590fdc74c1cba2
+sapi/fpm/tests/bug77023-pm-dynamic-blocking-sigquit.phpt	sapi/fpm/tests/bug77023-pm-dynamic-blocking-sigquit.phpt	4e46129b7b2415f38f8e56d7cedcf9506321720525fcbe9482ad0e287910c7c7
 sapi/fpm/tests/bug77106-fcgi-missing-nl.phpt	sapi/fpm/tests/bug77106-fcgi-missing-nl.phpt	d443ac9d44dcf4bfb20633582cd321df5d6c9e70c6e83e4087bb6487386973c6
 sapi/fpm/tests/bug77780-header-sent-error.phpt	sapi/fpm/tests/bug77780-header-sent-error.phpt	9b61eb14e7b49e1ed672a532d5feedab9255e94f342cf028907d2682693e9677
 sapi/fpm/tests/bug77934-reload-process-control.phpt	sapi/fpm/tests/bug77934-reload-process-control.phpt	6dae844dfcda2b48abd0c669786b7e850c7899b8be90b068ad6560c9620a422f
@@ -133,7 +133,9 @@ sapi/fpm/tests/gh15395-php-auth-shutdown.phpt	sapi/fpm/tests/gh15395-php-auth-sh
 sapi/fpm/tests/gh16432-status-high-nprocs.phpt	sapi/fpm/tests/gh16432-status-high-nprocs.phpt	ae66bc83c5dab9deafa8aa84b5a8039d819abcf30dc548f7a7654f9b420df54c
 sapi/fpm/tests/gh16628.phpt	sapi/fpm/tests/gh16628.phpt	04314d3a1d886d328fb3991554deca5d103423cd5166d54e767d59f2d272ccb6
 sapi/fpm/tests/gh16932-scoreboard-reset.phpt	sapi/fpm/tests/gh16932-scoreboard-reset.phpt	d0e7c7d2ca35ede4e461b75e2b2a9f66e4a1b7e46547ac64f89f1888b6961825
+sapi/fpm/tests/gh19320-id-overflow.phpt	sapi/fpm/tests/gh19320-id-overflow.phpt	6000a999b9541c357edb79df5b8615b436cac98adce095014bf0e0936e896c29
 sapi/fpm/tests/gh19989-access-log-fcgi-stderr.phpt	sapi/fpm/tests/gh19989-access-log-fcgi-stderr.phpt	ae1a9176f6109616a6df2b57d885289199d3f8046fa6d424a8e2a42924f9ec3b
+sapi/fpm/tests/gh23288-opcache-interned-strings-buffer-pool.phpt	sapi/fpm/tests/gh23288-opcache-interned-strings-buffer-pool.phpt	26211cce9ac47bfc2f5c3eba9d890d25f3d3f8d6a7dc3a7f9237e95749c609eb
 sapi/fpm/tests/gh8157-user-ini-post.phpt	sapi/fpm/tests/gh8157-user-ini-post.phpt	6fff6194531e9a8436b70429b46b35445376309ada69c0adbbb79af2a58493f4
 sapi/fpm/tests/gh8646.phpt	sapi/fpm/tests/gh8646.phpt	5675ba72fecf0240d7a2c9fce065e23fc211cdf115440ac079507d5f04eb8411
 sapi/fpm/tests/gh8885-stderr-fd-reload-usr1.phpt	sapi/fpm/tests/gh8885-stderr-fd-reload-usr1.phpt	6c642baadcdacb18b1c1c9f2d0271296f045ee650627147b68dd56e987974080
@@ -144,6 +146,8 @@ sapi/fpm/tests/gh9981-fastcgi-error-header-reset.phpt	sapi/fpm/tests/gh9981-fast
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-custom.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-custom.phpt	4c942896364734d04bccb0ba40f45ed107133af2bc56b7a0ac88ad13c8783c32
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-body-parts-default.phpt	a3ac0b57e648b3a34555b78cc11e8d7d3f4ffe8cbee28bc0cce70e8895157f95
 sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-file-uploads.phpt	sapi/fpm/tests/ghsa-54hq-v5wp-fqgv-max-file-uploads.phpt	79a43c582553cad22eb29a7056af35fe569afe061df082adb2e6ea18948749b7
+sapi/fpm/tests/ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt	sapi/fpm/tests/ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt	1d5a042f21ab30eaf6c350403d21627170cdddfa380f73513d7638ed44433fca
+sapi/fpm/tests/ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt	sapi/fpm/tests/ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt	832bc81cc807027c9924b5567d461317a531e0e0f1b4468e65969cc4247dd951
 sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt	sapi/fpm/tests/ghsa-7qg2-v9fj-4mwv-status-xss.phpt	3a2f1cc10068c9212f647b8ff93028c7c0c32089066dc9f50b76d13ce7ff5b0f
 sapi/fpm/tests/log-access-extended-limit.phpt	sapi/fpm/tests/log-access-extended-limit.phpt	4ace720f08bd3ac1adfaa9b54e9c9b6d356a67e6f58884d505902830702cf6a8
 sapi/fpm/tests/log-bm-in-shutdown-fn.phpt	sapi/fpm/tests/log-bm-in-shutdown-fn.phpt	b974048fedbeb51e31c8a7cb744c2f6e58f153a40f3bcd70c51182f76f10c34e
@@ -187,6 +191,7 @@ sapi/fpm/tests/proc-user-ignored.phpt	sapi/fpm/tests/proc-user-ignored.phpt	31c2
 sapi/fpm/tests/proc-user-not-set-when-root.phpt	sapi/fpm/tests/proc-user-not-set-when-root.phpt	e429b3c4ebaf7b1c56b3c1033ea3518dfa805319258835771ac5b819ebe7d2ee
 sapi/fpm/tests/reload-uses-sigkill-as-last-measure.phpt	sapi/fpm/tests/reload-uses-sigkill-as-last-measure.phpt	593ba59391750b971d0c1018fa6bfb3d2a4b68826eed67d8a006ab6fcabb67a8
 sapi/fpm/tests/request_parse_body_multipart.phpt	sapi/fpm/tests/request_parse_body_multipart.phpt	c64b5ef37b5dfcb4dfbeee235d64f68587b057415619adaee204b15e13b8e716
+sapi/fpm/tests/request_parse_body_multipart_options_post_max_size.phpt	sapi/fpm/tests/request_parse_body_multipart_options_post_max_size.phpt	26a0c20a3f19989c291af7fbc47cfd6f02817e2e9bb3dffa0d057fcfb6c279a1
 sapi/fpm/tests/request_parse_body_urlencoded.phpt	sapi/fpm/tests/request_parse_body_urlencoded.phpt	2e06aecb51426acc66ffc41ea4777e0e69f0c79b9d9ee279c58a39231a089f46
 sapi/fpm/tests/response.inc	sapi/fpm/tests/response.inc	11263731e4773f3e385c985d494ea2f97f60660399d9723f07693a8b43c4d966
 sapi/fpm/tests/setsofib.phpt	sapi/fpm/tests/setsofib.phpt	ff365f27cff246a2b1810e9639139acdb0b0104a600adcfa2925188bec17251f

@@ -535,6 +535,11 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 				value = authority;
 			}
 		}
+		/* Issue #642: with http.request_id on, the client's X-Request-Id is
+		 * never forwarded. The gateway's own id replaces it, below. */
+		if (c->gw->request_id_mode != FPM_HTTP_REQUEST_ID_OFF && strcasecmp(k, "X-Request-Id") == 0) {
+			continue;
+		}
 
 		rc = fpm_http_header_cgi_key(k, false, key, sizeof(key));
 		if (rc < 0) {
@@ -550,6 +555,12 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	 * 3.2.2), same as the Host line the http transport sends. */
 	if (have_authority && !saw_host) {
 		fpm_http_param(c, "HTTP_HOST", authority);
+	}
+
+	/* Issue #642: the request id, as HTTP_X_REQUEST_ID (the name a CGI
+	 * environment gives X-Request-Id). Empty when the id could not be made. */
+	if (c->client && c->client->request_id[0]) {
+		fpm_http_param(c, "HTTP_X_REQUEST_ID", c->client->request_id);
 	}
 
 	if (c->params_oversize) {
@@ -606,6 +617,11 @@ void fpm_http_conn_free(fpm_http_conn *c)
 		event_free(c->minrate_timer);
 		c->minrate_timer = NULL;
 	}
+	/* Issue #706: the paused-responses gauge is taken back here as well as in
+	 * fpm_http_response_resume(), because fpm_http_finish_truncated() frees a
+	 * request without resuming it. This does not re-arm the upstream: the
+	 * callers that free a request this way drop the upstream themselves. */
+	fpm_http_response_unpause(c);
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);
@@ -660,13 +676,29 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				free(reason);
 				reason = NULL;
 				if (fpm_http_parse_cgi_status(value, vlen, &code, &parsed_reason)) {
+					/* Issue #837: a valid line never clears invalid_status. An
+					 * earlier invalid line already decided the 502, and the
+					 * upstream's headers and body are dropped for that reason. */
 					reason = strdup(parsed_reason);
-					invalid_status = false;
+					if (!reason) {
+						/* Issue #809: a NULL strdup() must not reach the client as
+						 * a reply with no reason. It takes the 502 path below. */
+						zlog(ZLOG_WARNING, "[pool %s] http: cannot copy the upstream Status reason (out of memory), answering 502",
+								c->gw->pool);
+						invalid_status = true;
+					}
 				} else {
-					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%.64s', answering 502",
-							c->gw->pool, value);
+					/* Escaped, not %.64s: see fpm_http_direct.c (issue #838). */
+					char escaped[4 * 64 + 1];
+
+					zlog(ZLOG_WARNING, "[pool %s] http: upstream sent invalid Status '%s', answering 502",
+							c->gw->pool, fpm_http_log_escape(value, 64, escaped, sizeof(escaped)));
 					invalid_status = true;
 				}
+			} else if (c->client && c->client->request_id[0] && strcasecmp(key, "X-Request-Id") == 0) {
+				/* Issue #642: the gateway's own id is already on this response
+				 * (fpm_http_client_request_id_assign()). A second copy from the
+				 * target would be a second, conflicting id. */
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -687,6 +719,9 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 
 		evhttp_clear_headers(out);
 		evhttp_add_header(out, "Content-Type", "text/plain");
+		if (c->client && c->client->request_id[0]) { /* issue #642: the clear above dropped it */
+			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
+		}
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		evbuffer_add_printf(msg, "Bad Gateway\n");
 		c->bytes_out += evbuffer_get_length(msg);
@@ -813,12 +848,15 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
  * name (issue #118) -- so only the unexplained loss is reported from here. */
 void fpm_http_finish(fpm_http_conn *c, int explained)
 {
+	struct evhttp_request *req = c->req;
+	int bad_gateway = 0;
+
 	/* Issue #596: the last piece of a read can pause the upstream and the
 	 * END_REQUEST behind it finish the request in the same read; nothing would
 	 * re-arm the read event of an upstream that has no idle timeout. */
 	fpm_http_response_resume(c);
 	if (c->headers_sent) {
-		evhttp_send_reply_end(c->req);
+		/* The reply is under way and is ended below, once c is gone. */
 	} else if (c->cgi_headers.s) {
 		/* Issue #636: the upstream ended before the blank line that closes the
 		 * CGI header block, so what it said is not a reply yet -- the block is
@@ -846,27 +884,38 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		 *
 		 * The `if (!explained)` guard of the branch below is deliberately not
 		 * used here. A partial block means `reply_seen` is set, so `mute` is 0
-		 * and `explained` is `clean_eof` (fpm_http.c:630,662): 1 for a clean EOF
-		 * or an `END_REQUEST` (fpm_http_request_done() passes a bare 1,
-		 * fpm_http.c:674), where nothing has been logged and this line is the
-		 * only record; 0 when fpm_http_upstream_fail() has already named the
-		 * errno, and the line is written then too because it names the decision,
-		 * not the error. */
+		 * and `explained` is `clean_eof` (fpm_http.c:811,
+		 * fpm_http_upstream_fail()): 1 for a clean EOF or an `END_REQUEST`
+		 * (fpm_http_request_done() passes a bare 1, fpm_http.c:823), where
+		 * nothing has been logged and this line is the only record; 0 when
+		 * fpm_http_upstream_fail() has already named the errno, and the line is
+		 * written then too because it names the decision, not the error. */
 		zlog(ZLOG_WARNING, "[pool %s] http: upstream '%s' ended its reply after %zu bytes of an unterminated CGI header block; answering 502",
 				c->gw->pool, c->target->listen_address, ZSTR_LEN(c->cgi_headers.s));
-		c->status = FPM_HTTP_BAD_GATEWAY;
-		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		bad_gateway = 1;
 	} else {
 		if (!explained) {
 			zlog(ZLOG_WARNING, "[pool %s] http: no answer from '%s'", c->gw->pool, c->gw->listen_address);
 		}
-		c->status = FPM_HTTP_BAD_GATEWAY;
-		evhttp_send_error(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		bad_gateway = 1;
 	}
-	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
+	if (bad_gateway) {
+		c->status = FPM_HTTP_BAD_GATEWAY;
+	}
+	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool); /* #389: "operator" for an operator-forwarded request */
 	fpm_http_conn_free(c);
+	/* The reply is sent last, on the local copy `req`, because c is freed by
+	 * now. evhttp_send_reply_end() ends the request on this stack when the reply
+	 * is not chunked and the connection's output is already empty: that frees
+	 * the request and, for a closing connection, the connection, and the close
+	 * callback runs on the way. Nothing after this line reads c. */
+	if (bad_gateway) {
+		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+	} else {
+		evhttp_send_reply_end(req);
+	}
 }
 
 #endif /* HAVE_FPM_HTTP */

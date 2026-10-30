@@ -34,11 +34,12 @@
  * Current limits, all documented rather than worked around: no per-request
  * isolation (one php_request_startup per worker), so `echo` belongs to the
  * worker (it goes to stderr) and a handler returns its body instead; no
- * per-request scoreboard accounting (fpm_request_accepting_ex(false) once at
- * :2580). TLS is NOT a limit here: this executor terminates it like the
- * classic one since issue #55, see the fpm_http_direct_tls_child_attach()
- * call at :2474. Streaming is no longer one either: fpmng_worker_respond()
- * still takes one complete body, but fpmng_worker_respond_start()/_chunk()/
+ * per-request scoreboard accounting (fpm_request_accepting_ex(false) once for
+ * the life of the child, in child_main()). TLS is NOT a limit here: this
+ * executor terminates it like the classic one since issue #55, see the
+ * fpm_http_direct_tls_child_attach() call in child_main(). Streaming is no
+ * longer one either: fpmng_worker_respond() still takes one complete body, but
+ * fpmng_worker_respond_start()/_chunk()/
  * _end() (issue #332) push bytes as the handler produces them, with
  * worker.send_buffer_limit for backpressure.
  */
@@ -128,10 +129,27 @@
 #define FPM_WORKER_TIMEOUT_MAX 31536000.0
 /* How long child_main() keeps driving the base to get the final 503s of
  * fpm_worker_finish_output() onto the wire. Bounded because a client that
- * stopped reading must not keep the child alive: the master is already waiting
- * on its own stop timeout at this point, and losing the reply is no worse than
- * the silent close this whole path exists to prevent. */
+ * stopped reading must not keep the child alive past the master's stop
+ * timeout, which is already running at this point. The cost: a connection
+ * whose 503 is still unwritten when the budget runs out is closed without a
+ * reply, the case the reply rule of fpm_worker_finish_output() exists to
+ * prevent. */
 #define FPM_WORKER_FLUSH_BUDGET 1
+/* Limits of fpm_worker_grace_drain(), which runs after
+ * fpm_worker_finish_output() has stopped the listener. A request already on the
+ * wire over a keep-alive connection is read and answered 503 by
+ * fpm_worker_accept() instead of meeting the silent close evhttp_free() gives
+ * it (issue #668).
+ *
+ * The drain runs event_base_loop(EVLOOP_NONBLOCK) passes. One such call keeps
+ * dispatching until nothing is active, so it returns at once on an idle base
+ * (issue #905). A pass that queues no reply ends the drain. The passes bound
+ * the case where replies keep coming. The time cap bounds the case where the
+ * base stays busy, for example a peer that keeps sending on a WebSocket that
+ * userland still holds. The cap is the window of #668: it
+ * matters only while the base stays busy. */
+#define FPM_WORKER_DRAIN_PASSES 4
+#define FPM_WORKER_DRAIN_CAP_MS 100
 /* worker.request_timeout's sweep runs more often than the timeout itself so
  * that an expired request is caught within one sweep interval of its
  * deadline, not one whole timeout period late. Floored so a short timeout
@@ -409,6 +427,11 @@ static void fpm_worker_reply_aborted(struct evhttp_connection *connection, void 
 	fpm_worker_reply_settled(connection);
 }
 
+/* Never decremented, unlike fw.unflushed: fpm_worker_grace_drain() compares it
+ * across a pass, and a reply that settles in the same pass must not hide the
+ * one it queued (issue #905). */
+static unsigned long fpm_worker_replies_queued;
+
 /* The connection's closecb slot is free for exactly the window this counter
  * covers: every caller clears it immediately before handing the reply over
  * (see fpmng_worker_respond()), and libevent does not associate the next
@@ -419,6 +442,7 @@ static void fpm_worker_count_reply(struct evhttp_request *http)
 	evhttp_request_set_on_complete_cb(http, fpm_worker_reply_done, NULL);
 	evhttp_connection_set_closecb(evhttp_request_get_connection(http), fpm_worker_reply_aborted, NULL);
 	fw.unflushed++;
+	fpm_worker_replies_queued++;
 }
 
 void fpm_worker_send_error(struct evhttp_request *http, int status, const char *reason)
@@ -795,10 +819,60 @@ static void fpm_worker_flush_deadline(evutil_socket_t fd, short events, void *ar
 	event_base_loopbreak(fw.base);
 }
 
+static bool fpm_worker_grace_expired;
+
+static void fpm_worker_grace_deadline(evutil_socket_t fd, short events, void *arg)
+{
+	(void) fd;
+	(void) events;
+	(void) arg;
+	fpm_worker_grace_expired = true;
+	event_base_loopbreak(fw.base);
+}
+
+/* issue #668: the grace drain. Called by fpm_worker_finish_output() once the
+ * listener is gone and stopping is set. A request already on the wire over a
+ * keep-alive connection is read here: evhttp hands it to fpm_worker_accept(),
+ * which answers 503 because stopping is set. Without this drain the request is
+ * not read at all, and evhttp_free() closes its connection without a reply.
+ * The limits are FPM_WORKER_DRAIN_PASSES and FPM_WORKER_DRAIN_CAP_MS above. */
+static void fpm_worker_grace_drain(void)
+{
+	struct event *deadline;
+	struct timeval cap = { 0, FPM_WORKER_DRAIN_CAP_MS * 1000 };
+	unsigned pass;
+
+	fpm_worker_grace_expired = false;
+	deadline = evtimer_new(fw.base, fpm_worker_grace_deadline, NULL);
+	if (!deadline || evtimer_add(deadline, &cap) != 0) {
+		if (deadline) {
+			event_free(deadline);
+		}
+		return;
+	}
+	for (pass = 0; pass < FPM_WORKER_DRAIN_PASSES && !fpm_worker_grace_expired; pass++) {
+		unsigned long replies = fpm_worker_replies_queued;
+
+		event_base_loop(fw.base, EVLOOP_NONBLOCK);
+		if (fpm_worker_replies_queued == replies) {
+			break;
+		}
+	}
+	event_free(deadline);
+}
+
 /* The last thing child_main() does with the transport, and the only place that
- * enforces the invariant every client is owed: an accepted connection is never
- * closed without a response that actually reached the socket. Two distinct
- * ways to break it meet here.
+ * enforces the reply rule: an accepted connection is closed without a response
+ * that actually reached the socket only in two cases. The first is the stop
+ * window of #668: fpm_worker_grace_drain() (at most 4 passes and 100 ms)
+ * answers a request already on an open keep-alive connection when the drain
+ * runs with 503. After the drain the worker closes its open connections without
+ * a reply, so a request that arrives later gets a silent close.
+ * docs/http-direct.md, "Requests that arrive while the worker stops (issue
+ * #668)", states the same rule. The second is a reply still unwritten when
+ * FPM_WORKER_FLUSH_BUDGET runs out; the flush loop below gives up on it.
+ *
+ * Two distinct ways to break the rule meet here.
  *
  * One is a request nobody answered — a bridge that concluded it had drained
  * from its own in-flight counter while the SAPI still had a queued request
@@ -898,6 +972,11 @@ static void fpm_worker_finish_output(void)
 			"clients can reconnect (issue #342)",
 			fw.wp->config->name, streams_ended);
 	}
+	/* After the pending walk: the walk has answered every entry, so the timers
+	 * the drain runs (the request-timeout sweep) find nothing to answer with a
+	 * 504. Before the early return below, so a 503 the drain queues is flushed
+	 * by the code that flushes every other reply here. */
+	fpm_worker_grace_drain();
 	if (!fw.unflushed && !fw.ws_unflushed) {
 		return;
 	}
@@ -2918,12 +2997,12 @@ void fpm_http_direct_worker_child_main(struct fpm_worker_pool_s *wp)
 		exit(FPM_EXIT_SOFTWARE);
 	}
 	/* issue #65 retires one child with SIGUSR1. Here it is the same handler as
-	 * SIGQUIT, and deliberately so: this executor tracks no connections (no
-	 * limits, no gauge -- see limits.track_live at the bottom of this file), so
-	 * it has nothing with which to tell "drain the connections I hold" from
-	 * "drain the requests I hold". What the shared handler does buy is that the
-	 * signal an operator sends to retire a child of any direct pool is never
-	 * the SIG_DFL that would kill this one outright. */
+	 * SIGQUIT, and deliberately so: this executor tracks no connection past its
+	 * first request (no limits, no gauge -- see the limits setup in
+	 * child_main()), so it has nothing with which to tell "drain the connections
+	 * I hold" from "drain the requests I hold". What the shared handler does
+	 * buy is that the signal an operator sends to retire a child of any direct
+	 * pool is never the SIG_DFL that would kill this one outright. */
 	if (sigaction(SIGUSR1, &action, NULL) < 0) {
 		exit(FPM_EXIT_SOFTWARE);
 	}

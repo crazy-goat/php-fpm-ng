@@ -198,11 +198,11 @@ struct fpm_direct_request {
 	/* The request-target as the client wrote it, copied while `http` is still
 	 * alive. access.log's %r is that string (issue #681), not the origin-form
 	 * REQUEST_URI, because the gateway logs the raw request line too
-	 * (fpm_http.c:534) and one access.format has to mean the same thing on
-	 * both. The streaming ending clears `http` before it logs, so the value
-	 * cannot be read back from libevent then. Sized like the local ending's
-	 * own buffer and truncated the same way, so a target longer than this
-	 * prints truncated here and there alike. */
+	 * (fpm_http.c:673-674, fpm_http_log_response()) and one access.format has
+	 * to mean the same thing on both. The streaming ending clears `http`
+	 * before it logs, so the value cannot be read back from libevent then.
+	 * Sized like the local ending's own buffer and truncated the same way, so
+	 * a target longer than this prints truncated here and there alike. */
 	char request_target[FPM_HTTP_DIRECT_TARGET_MAX];
 };
 
@@ -678,8 +678,12 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 			if (!fpm_http_parse_cgi_status(value, h->header_len - (size_t) (value - h->header), &r->status,
 					&reason) &&
 				!r->rejected) {
-				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%.64s', answering 502",
-					r->pool, value);
+				/* Escaped, not %.64s: the reason phrase can carry ESC or other
+				 * controls, which would reach error_log as raw bytes (issue #838). */
+				char escaped[4 * 64 + 1];
+
+				zlog(ZLOG_WARNING, "[pool %s] http-direct: upstream sent invalid Status '%s', answering 502",
+					r->pool, fpm_http_log_escape(value, 64, escaped, sizeof(escaped)));
 				r->rejected = "invalid response Status";
 				r->rejected_status = 502;
 			}
@@ -706,7 +710,7 @@ static int fpm_direct_send_headers(sapi_headers_struct *headers)
 					 * not include the name, so only this log identifies it. */
 					zlog(ZLOG_WARNING, "[pool %s] http-direct: response header name is not "
 						"an HTTP token, answering 500: '%s'", r->pool,
-						fpm_http_direct_header_name_escape(name, escaped, sizeof(escaped)));
+						fpm_http_log_escape(name, strlen(name), escaped, sizeof(escaped)));
 					r->rejected = "malformed response header name";
 				}
 			} else if (!fpm_http_direct_header_charge(&total, name, strlen(value))) {
@@ -1587,16 +1591,17 @@ static void fpm_direct_log_php(struct fpm_direct_request *r)
 	memset(&e, 0, sizeof(e));
 	e.method = snapshot.request_method;
 	/* %r is the request-target as the client wrote it, the spelling the
-	 * gateway logs (fpm_http.c:534), copied into r while libevent's request
-	 * object was still alive. The origin-form path is
-	 * match_path below instead, and it is what access.suppress_path[] compares
-	 * against -- one rule for both fields, for every ending (#681).
+	 * gateway logs (fpm_http.c:673-674, fpm_http_log_response()), copied into
+	 * r while libevent's request object was still alive. The origin-form path
+	 * is match_path below instead, and it is what access.suppress_path[]
+	 * compares against -- one rule for both fields, for every ending (#681).
 	 *
 	 * %r must not carry the query string, because %Q%q does, so it is cut on
 	 * our own copy: neither the request nor the scoreboard slot is touched.
 	 * The query is libevent's parse, which is what the application sees. That
 	 * cut is also where the gateway differs: its request line keeps the query
-	 * (fpm_http.c:534), so the two logs agree only on query-less targets. */
+	 * (fpm_http.c:673-674, fpm_http_log_response()), so the two logs agree
+	 * only on query-less targets. */
 	query = strchr(r->request_target, '?');
 	if (query) {
 		*query = '\0';
@@ -2314,11 +2319,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
 	}
 
-	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2246):
-	 * reduce the request-target to the one path every consumer below matches
-	 * on, so nothing can be answered on one path and served on another
-	 * (issue #681). Ahead of the ACL so that even a request the ACL refuses
-	 * writes an access-log line matched on the same path. */
+	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2714,
+	 * fpm_http_request()): reduce the request-target to the one path every
+	 * consumer below matches on, so nothing can be answered on one path and
+	 * served on another (issue #681). Ahead of the ACL so that even a request
+	 * the ACL refuses writes an access-log line matched on the same path. */
 	fpm_http_direct_normalize_target(http);
 
 	/* listen.allowed_clients, issue #59. Before anything else this function
@@ -2334,10 +2339,10 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		evhttp_send_error(http, 403, "Forbidden");
 		return;
 	}
-	/* Ingress step two, after the ACL (fpm_http.c:2287): an authority HTTP_HOST
-	 * could not carry is a malformed request, and a client
-	 * listen.allowed_clients excludes must not be able to tell that from
-	 * anything else about the request it sent. */
+	/* Ingress step two, after the ACL (fpm_http.c:2764, fpm_http_request()):
+	 * an authority HTTP_HOST could not carry is a malformed request, and a
+	 * client listen.allowed_clients excludes must not be able to tell that
+	 * from anything else about the request it sent. */
 	if (!fpm_http_direct_authority_acceptable(http)) {
 		fpm_direct_log_local(w, http, peer, &started, started_epoch, 400, 0);
 		evhttp_send_error(http, 400, "Bad request");

@@ -362,7 +362,7 @@ void fpm_http_direct_normalize_target(struct evhttp_request *http)
  * dropped: fpm_http_direct_build_env() would otherwise have to choose between
  * an HTTP_HOST that contradicts the Host header it kept and one it invented
  * from a truncated authority, and the gateway answers 400 for the same target
- * (fpm_http.c:2287). After the ACL on purpose: a client
+ * (fpm_http.c:2764, fpm_http_request()). After the ACL on purpose: a client
  * listen.allowed_clients excludes has to get its 403 whatever else is true of
  * the request it sent. */
 bool fpm_http_direct_authority_acceptable(struct evhttp_request *http)
@@ -662,16 +662,28 @@ bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value
  * can put terminal escapes into whatever reads the error log. Escaped, not
  * dropped: the operator still has to be able to recognise the name. SP is
  * escaped along with the control bytes on purpose — a leading or trailing
- * space is one of the reachable causes and is invisible inside the quotes. */
-const char *fpm_http_direct_header_name_escape(const char *name, char *out, size_t size)
+ * space is one of the reachable causes and is invisible inside the quotes.
+ *
+ * The same holds for a rejected Status value (issue #838): an upstream FastCGI
+ * reply or a script's header() can carry ESC or other controls in the reason
+ * phrase, and the WARNING used to print them as raw bytes under %.64s. The
+ * escape also bounds the line: a value of 64 bytes, each escaped to four
+ * characters, is at most 256 characters. */
+const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size)
 {
 	size_t o = 0;
 	const char *c;
 
-	for (c = name; *c && o + 5 < size; c++) {
+	for (c = in; *c && max > 0; c++, max--) {
 		if (*c >= 0x21 && *c <= 0x7e && *c != '\\') {
+			if (o + 1 >= size) {
+				break;
+			}
 			out[o++] = *c;
 		} else {
+			if (o + 4 >= size) {
+				break;
+			}
 			o += (size_t) snprintf(out + o, size - o, "\\x%02x", (unsigned char) *c);
 		}
 	}

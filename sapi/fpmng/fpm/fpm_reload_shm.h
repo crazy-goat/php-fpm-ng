@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
 
 struct fpm_worker_pool_s;
 
@@ -41,6 +42,11 @@ void *fpm_reload_shm_alloc(size_t size, int *fd_out);
  * carried-over scoreboard is unusable and cannot be replaced. */
 int fpm_reload_shm_scoreboards(void);
 
+/* Master, called by fpm_pctl_exec() right before the PARENT_EXEC cleanups run:
+ * writes the expiry records (issue #692) that the next generation reads. It
+ * must run before the worker pool cleanup, which frees the pool list. */
+void fpm_reload_shm_exec_records(void);
+
 /* What the previous generation carried over for the metrics region, if
  * anything. Returns 1 and fills the out-parameters when a usable descriptor
  * is present (the caller validates `limit` and the size against its own
@@ -54,8 +60,16 @@ int fpm_reload_shm_inherited_range(const char *name, uint32_t *base, uint32_t *c
 /* Calls `cb` for the slot range of every pool of the previous generation that
  * was NOT spared. A #329 survivor of such a pool may still write to its old
  * slot for a while, so the new generation must not hand those slots to
- * another writer. */
-void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count));
+ * another writer. `until` is the time after which the range may be reused:
+ * no survivor can write there any more (issue #692). */
+void fpm_reload_shm_foreach_unspared_range(void (*cb)(uint32_t base, uint32_t count, time_t until));
+
+/* Calls `cb` for every slot range that the previous generation itself kept
+ * reserved (a Y record, issue #692) and that is still reserved: `until` is the
+ * time the reservation expires, and expired ranges are not passed on. A #329
+ * survivor of an earlier reload may still write there after a later reload
+ * has dropped the pool that owned it. */
+void fpm_reload_shm_foreach_carried_range(void (*cb)(uint32_t base, uint32_t count, time_t until));
 
 /* Called by fpm_metrics_init_main() when it has finished with the inherited
  * descriptor, whether it kept it (`kept` != 0, the fd is then registered for

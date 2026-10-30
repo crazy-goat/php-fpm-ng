@@ -298,6 +298,28 @@ struct fpm_pool_type_s {
 	 * the name of a pool type. */
 	unsigned operator_endpoint:1;
 
+	/* Issue #644: this type's operator pages also carry the saturation numbers
+	 * upstream FPM keeps in the scoreboard -- the listen queue (current,
+	 * high-water mark, backlog length), max_children_reached and slow requests.
+	 * fpm_operator_saturation.c decides, per pool, which of them the page can
+	 * honestly report; this bit only says whether the type reports them at all.
+	 *
+	 * Set for fastcgi and for the classic executor of http-direct. Not set for
+	 * the worker executor: it has per-slot queue series of its own (issue #339)
+	 * and rejects request_slowlog_timeout, so it has no slow-request count to
+	 * report. Not set for the types without a listener of their own. */
+	unsigned reports_saturation:1;
+
+	/* Issue #727: a child that fails fast is respawned with exponential
+	 * backoff and jitter (capped at about 60 s), and after pm.max_consecutive_failures
+	 * such children the operator pages say the pool gave up. fpm_crash_backoff.c
+	 * does the work; this bit only says whether the type's pm children are
+	 * subject to it. Set for fastcgi and for both executors of http-direct.
+	 * Not set for the types without a process manager of their own (cron,
+	 * supervisor, gateway, the operator endpoint), which have their own restart
+	 * policies. */
+	unsigned respawn_backoff:1;
+
 	/* How this type renders its status page on the operator endpoint. NULL is
 	 * the common case and means the generic per-pool JSON that
 	 * fpm_operator_page_render_json() produces for every type.
@@ -483,6 +505,19 @@ struct fpm_pool_type_s {
 	 * slots in out[] it filled. */
 	int (*live_gauges)(struct fpm_worker_pool_s *wp, struct fpm_pool_live_gauge_s out[FPM_POOL_LIVE_GAUGES_MAX]);
 
+	/* Issue #775: the master holds open a file for each pool of this type
+	 * (cron.log, for example). On SIGUSR1, which logrotate sends from its
+	 * postrotate, the master must open the path again. Called in the master by
+	 * fpm_pool_type_reopen_master_logs(), once per pool of this type. NULL = the
+	 * type holds no such file. */
+	void (*reopen_master_logs)(struct fpm_worker_pool_s *wp);
+
+	/* Issue #775: fork() gives every child a copy of the descriptors the master
+	 * holds. Called in a child by fpm_pool_type_close_master_logs_in_child()
+	 * for each pool except the child's own, so that a root-owned file does not
+	 * reach a child of another pool. NULL = the type holds no such file. */
+	void (*close_master_logs_in_child)(struct fpm_worker_pool_s *wp);
+
 	/* Branch async: how many FastCGI connections one child of this type
 	 * serves at once, for a gateway sizing its upstream budget towards it
 	 * (fpm_http_routes_build(): pm.max_children times this). 0 means 1, a
@@ -534,5 +569,14 @@ struct fpm_worker_pool_s *fpm_pool_type_current_pool(void);
 
 /* Reject directives unsupported by this type. 0 or -1. */
 int fpm_pool_type_check_directives(struct fpm_worker_pool_s *wp, const struct fpm_pool_type_s *type);
+
+/* Issue #775: SIGUSR1 in the master. Calls .reopen_master_logs for every pool
+ * whose type sets it. Generic code calls this, never a type's own function. */
+void fpm_pool_type_reopen_master_logs(void);
+
+/* Issue #775: in a forked child, calls .close_master_logs_in_child for every
+ * pool except own. own is the child's pool, or NULL for a process that is no
+ * pool child (an http gateway), which closes every pool's descriptors. */
+void fpm_pool_type_close_master_logs_in_child(struct fpm_worker_pool_s *own);
 
 #endif

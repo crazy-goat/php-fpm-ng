@@ -96,3 +96,41 @@ function fpmng_skip_if_no_serve_wrap(): void
             . '(from-source build, FPMNG_SERVE_WRAP not set, see fpm_serve.c)');
     }
 }
+
+/**
+ * Skip the test unless the binary under test was built with the
+ * failure-injection seam (issue #832).
+ *
+ * Asked of the binary: it carries the literal of the variable name only when
+ * build/libphp-build.sh ran with FPMNG_FAULT_INJECT=1 (fpm_fault_inject.c holds
+ * it inside the #ifdef). The package gate runs the suite against package
+ * binaries, which are built without the seam, so a test that needs it skips
+ * there.
+ */
+function fpmng_skip_if_no_fault_inject(): void
+{
+    $binary = FPM\Tester::findExecutable();
+    $handle = @fopen($binary, 'rb');
+    if (!$handle) {
+        die('skip cannot read the binary under test');
+    }
+
+    /* Chunks that overlap by the length of the needle, so a literal on a
+     * chunk boundary is still found. */
+    $needle = 'FPMNG_FAULT' . "\0";
+    $tail = '';
+    while (!feof($handle)) {
+        $chunk = fread($handle, 1 << 20);
+        if ($chunk === false || $chunk === '') {
+            break;
+        }
+        if (str_contains($tail . $chunk, $needle)) {
+            fclose($handle);
+            return;
+        }
+        $tail = substr($chunk, -strlen($needle));
+    }
+    fclose($handle);
+    die('skip php-fpm-ng built without the failure-injection seam '
+        . '(build with FPMNG_FAULT_INJECT=1, issue #832)');
+}

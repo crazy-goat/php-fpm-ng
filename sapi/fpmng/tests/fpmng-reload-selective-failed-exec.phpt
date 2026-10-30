@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: a selective reload whose execvp() fails leaves no spared worker behind (issue #690)
+fpm-ng: a reload whose configuration check cannot exec the binary is refused and the service keeps running (issues #661, #690)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--
@@ -7,18 +7,17 @@ fpm-ng: a selective reload whose execvp() fails leaves no spared worker behind (
 
 require_once "tester.inc";
 
-/* Issue #690, the other exit: the old master has already detached the unchanged
- * pool's workers and listed them in FPMNG_SELECTIVE_RELOAD_SURVIVORS when
- * fpm_pctl_exec() calls execvp(). If that fails (the binary was removed by a
- * package upgrade, ENOMEM, E2BIG) the master logs "failed to reload: execvp()
- * failed" and exits, and no master ever adopts the workers. fpm_pctl_exec() now
- * discards them before that exit.
+/* Issue #690 made a failed execvp() of a reload clean up after itself, and the
+ * master exited. Issue #661 changes the outcome. The configuration check runs
+ * the same argv with -t before any gateway or worker is drained, and an exec
+ * failure there refuses the reload. The running master keeps its pool, its
+ * listening socket and its workers, and the next SIGUSR2 tries again.
  *
  * FPM\Tester always starts the binary it finds itself, which is shared with
  * other tests and cannot be removed, so this test starts a PRIVATE COPY of the
- * binary directly and unlinks the copy before the reload. A running process keeps
- * its unlinked image; execvp(saved_argv[0]) with the absolute path of the copy
- * then fails with ENOENT. The Tester is used only to hand out free addresses. */
+ * binary directly and unlinks the copy before the reload. execvp(saved_argv[0])
+ * with the absolute path of the copy then fails with ENOENT. The Tester is used
+ * only to hand out free addresses. */
 $root = sys_get_temp_dir() . '/fpmng-reload-sel-failexec-' . getmypid();
 @mkdir($root, 0700, true);
 $pidFile = "$root/worker.pid";
@@ -46,16 +45,21 @@ function pid_alive(int $pid): bool
     return $close === false || ($stat[$close + 2] ?? '') !== 'Z';
 }
 
-function wait_gone(int $pid, int $seconds): bool
+/* The pids of the direct children of $parent, read from /proc. */
+function child_pids(int $parent): array
 {
-    $deadline = microtime(true) + $seconds;
-    do {
-        if (!pid_alive($pid)) {
-            return true;
+    $pids = [];
+    foreach (glob('/proc/[0-9]*/stat') ?: [] as $stat) {
+        $text = @file_get_contents($stat);
+        if ($text === false) {
+            continue;
         }
-        usleep(50000);
-    } while (microtime(true) < $deadline);
-    return false;
+        $fields = explode(' ', substr($text, strrpos($text, ')') + 2));
+        if ((int) ($fields[1] ?? 0) === $parent) {
+            $pids[] = (int) basename(dirname($stat));
+        }
+    }
+    return $pids;
 }
 
 function request(string $address): bool
@@ -125,30 +129,52 @@ try {
     unlink($copy);
     exec("kill -USR2 $masterPid");
 
-    if (!wait_gone($masterPid, 30)) {
-        fail("master $masterPid did not exit after the failed execvp()");
+    $deadline = time() + 30;
+    while (!str_contains((string) @file_get_contents($log), 'reload refused: the configuration check cannot run')) {
+        if (time() > $deadline) {
+            fail("the reload was not refused\n" . (string) @file_get_contents($log));
+        }
+        usleep(100000);
     }
-    $logText = (string) @file_get_contents($log);
-    if (!str_contains($logText, 'failed to reload: execvp() failed')) {
-        fail("the reload did not reach a failed execvp()\n$logText");
-    }
-    echo "master exited after failed execvp: ok\n";
+    echo "reload refused: ok\n";
 
-    if (!wait_gone($workerPid, 10)) {
-        fail("spared worker $workerPid outlived the master whose execvp() failed");
+    if (!pid_alive($masterPid)) {
+        fail("master $masterPid exited after the refused reload");
     }
-    echo "spared worker gone: ok\n";
+    echo "master still running: ok\n";
+
+    if (!request($keep)) {
+        fail('the service stopped answering after the refused reload');
+    }
+    echo "service still answers: ok\n";
 
     $probe = @stream_socket_server("tcp://$keep", $errno, $error);
-    if (!$probe) {
-        fail("the listening address $keep is still held: $error");
+    if ($probe) {
+        fclose($probe);
+        fail("the listening address $keep was released by the refused reload");
     }
-    fclose($probe);
-    echo "port free: ok\n";
+    echo "listener still held: ok\n";
 
     echo "Done\n";
 } finally {
-    foreach ([$workerPid ?? 0, $masterPid ?? 0] as $pid) {
+    /* Stop the copy as a service is stopped: SIGTERM to the master, which stops
+     * its workers. Then SIGKILL whatever is still alive. A worker that never
+     * answered has no pid in $pidFile, so the children come from /proc. A worker
+     * left behind would keep the lane port and fail the next test. */
+    $victims = [];
+    if (isset($masterPid)) {
+        $victims = child_pids($masterPid);
+        exec("kill -TERM $masterPid 2>/dev/null");
+        $stop = microtime(true) + 10;
+        while (pid_alive($masterPid) && microtime(true) < $stop) {
+            usleep(50000);
+        }
+        $victims[] = $masterPid;
+    }
+    if (isset($workerPid)) {
+        $victims[] = $workerPid;
+    }
+    foreach ($victims as $pid) {
         if ($pid > 1 && pid_alive($pid)) {
             exec("kill -9 $pid 2>/dev/null");
         }
@@ -165,9 +191,10 @@ try {
 ?>
 --EXPECT--
 worker running: ok
-master exited after failed execvp: ok
-spared worker gone: ok
-port free: ok
+reload refused: ok
+master still running: ok
+service still answers: ok
+listener still held: ok
 Done
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

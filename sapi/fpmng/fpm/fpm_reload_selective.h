@@ -35,9 +35,13 @@ struct fpm_worker_pool_s;
  * pm.*-counted bookkeeping (so the ordinary signal fan-out that follows never
  * reaches them -- the caller does not add this pool to that loop at all, see
  * its own comment) and records each pid in FPM_RELOAD_SELECTIVE_ENV for the
- * next generation to adopt. Does not signal, close, or free anything: an
- * unchanged pool's children are not being asked to do anything at all. */
-void fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp);
+ * next generation to adopt. On success it does not signal, close, or free
+ * anything: an unchanged pool's children are not being asked to do anything.
+ * Returns 1 when the pool is handled. Returns 0 when nothing was detached
+ * (the pool name cannot be carried, or a buffer could not be allocated) or
+ * when only the setenv() failed after the detach (issue #830); the caller then
+ * takes the ordinary reload path for the pool, which signals what is left. */
+int fpm_reload_selective_spare_pool(struct fpm_worker_pool_s *wp);
 
 /* Called from fpm_children_create_initial() (fpm_children.c), once per pool,
  * before that pool's normal cold-start fork loop runs. Consumes wp's entry
@@ -57,12 +61,27 @@ void fpm_reload_selective_adopt(struct fpm_worker_pool_s *wp);
  * what is left is a worker nobody will ever adopt: it is detached from every
  * master's bookkeeping, holds the pool's listening sockets and nothing tells it
  * the master is gone. Called where that becomes true: fpm_init() failing,
- * fpm_pctl_exit(), a failed execvp() in fpm_pctl_exec(), and once after the
- * initial fork loop in fpm_run() for entries no pool of this generation took.
+ * fpm_pctl_exit(), a failed execvp() in fpm_pctl_exec() whose /proc/self/exe
+ * retry fails too (#925), and once after the initial fork loop in fpm_run()
+ * for entries no pool of this generation took.
  * Never on the reload's successful execvp(), where the variable is the handoff.
  * SIGTERM, not SIGQUIT: the pool type is unknown here and an in-flight request
- * on such a worker is cut. A no-op when the variable is unset. A master that is
- * killed outright (SIGKILL, crash) cannot call it; that case is not covered. */
+ * on such a worker is cut. A no-op when the variable is unset. Issue #829: it
+ * also releases the guard of the selective reload (fpm_reload_selective_guard.h),
+ * last, after the SIGTERMs. A master that is killed outright (SIGKILL, crash)
+ * cannot call it. The guard of issue #829 signals instead: every carried worker
+ * that still runs, adopted or not, when every holder of its pipe dies before
+ * the release. */
 void fpm_reload_selective_discard_unadopted(void);
+
+/* Issue #829: 1 when FPM_RELOAD_SELECTIVE_ENV names at least one carried pid.
+ * fpm_reload_selective_guard_arm() starts the guard only then. */
+int fpm_reload_selective_has_carried(void);
+
+/* Issue #829: sends SIGTERM to every carried pid that still matches its start
+ * time, unsets the variable and returns how many signals were sent. Used by
+ * fpm_reload_selective_discard_unadopted() in the master, and by the guard
+ * process after the master has died. */
+int fpm_reload_selective_sigterm_carried(void);
 
 #endif

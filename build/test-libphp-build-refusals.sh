@@ -126,6 +126,8 @@ expect "a toggle that is not 0 or 1" "FPMNG_TLS must be 0 or 1, not 'yes'" \
   "$L" "$OK_SDK" CC="$SPY" FPMNG_TLS=yes sh "$BUILD" "$WORK/out-toggle"
 expect "the debug clock toggle checked too" "FPMNG_DEBUG_CLOCK must be 0 or 1" \
   "$L" "$OK_SDK" CC="$SPY" FPMNG_DEBUG_CLOCK=on sh "$BUILD" "$WORK/out-clock"
+expect "the fault injection toggle checked too" "FPMNG_FAULT_INJECT must be 0 or 1" \
+  "$L" "$OK_SDK" CC="$SPY" FPMNG_FAULT_INJECT=on sh "$BUILD" "$WORK/out-fault"
 expect "ACME without TLS" "FPMNG_ACME=1 needs FPMNG_TLS=1" \
   "$L" "$OK_SDK" CC="$SPY" FPMNG_TLS=0 FPMNG_ACME=1 sh "$BUILD" "$WORK/out-acme"
 REFUSAL=

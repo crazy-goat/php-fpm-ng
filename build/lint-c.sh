@@ -14,7 +14,7 @@
 # compile line of every translation unit, and the -I/-D flags are taken from
 # there, so php.h and the supplied feature macros resolve the way the real
 # build resolves them. Build it with the same FPMNG_TLS/FPMNG_ACME/
-# FPMNG_DEBUG_CLOCK toggles as the binary under test, so the files behind
+# FPMNG_DEBUG_CLOCK/FPMNG_FAULT_INJECT toggles as the binary under test, so the files behind
 # those toggles are linted with their macros defined. Without a directory
 # clang-tidy still runs; expect missing-header noise -- useful only as a smoke
 # check of the config.

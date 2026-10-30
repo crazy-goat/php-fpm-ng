@@ -101,17 +101,38 @@ file is untouched, and the next `SIGUSR2` tries again from the top — measured
 by `fpmng-reload-broken-config.phpt`, which also asserts the worker pid that
 answers after the refusal is the one that answered before it.
 
-### When the check cannot be run, the reload goes ahead
+### When the check cannot run, the reload goes ahead or is refused
 
-Only a check that **ran and refused** cancels the reload. A `fork()` that
-failed, an `execvp()` that failed (the binary this master was started from was
-removed — a package upgrade in progress, say), or a check killed by a signal
-logs a **WARNING** and lets the reload proceed exactly as it did before #640.
-Refusing there would mean that a transient fork/exec failure leaves an operator
-with a service that can never reload again, and it would make the failed-`execvp()`
-path of `fpm_pctl_exec()` unreachable, which is the path issue #690's
-discard-the-spared-workers logic exists for
-(`fpmng-reload-selective-failed-exec.phpt`).
+Two kinds of failure stop the check from running. Each has its own outcome.
+
+- **The `execvp()` of the check fails.** The binary this master was started
+  from is missing, for example during a package upgrade. The reload is
+  **refused**, and one ERROR line says so. The pools that run keep serving,
+  and the next `SIGUSR2` tries again. Before issue #661 this case logged a
+  WARNING and the reload went ahead. The old generation had already drained
+  its gateways, so the service went down.
+- **A `fork()` or a `pipe()` fails, or the check is killed by a signal.** The
+  master logs a **WARNING** and the reload goes ahead, as it did before #640. A
+  transient fork failure must not leave the service unable to reload.
+
+The failed `execvp()` in `fpm_pctl_exec()` (issue #690) is now reached only
+when the binary is removed between the check and the exec.
+`fpmng-reload-selective-failed-exec.phpt` tests the refusal. It checks that
+the master, its worker and its listener keep running.
+
+When the exec fails in that window, the master does not exit (issue #925). All
+children are gone and the pools are freed by then, so the old master cannot
+serve again. It tries `execv("/proc/self/exe")` instead
+(`fpm_reload_exec_fallback.c`). The next generation runs the binary of the old
+master, with the same arguments and the same configuration. It takes over the
+listeners as in a normal reload. The master keeps its pid.
+`fpmng-reload-selective-exec-after-check.phpt` tests it: the master keeps its
+pid, and the next generation adopts the spared worker.
+`fpmng-reload-gateway-exec-after-check.phpt` tests the gateway listener: the
+next generation takes it over, and the port keeps answering. If the retry fails too,
+or the platform has no `/proc/self/exe`, the master exits as before. The next
+master keeps the missing path as `argv[0]`, so the next `SIGUSR2` is refused by
+the check until the binary is back.
 
 ### What `-t` does catch
 
@@ -173,7 +194,9 @@ Verified against this tree, not assumed:
    check: at reload time **the running generation still holds every one of its
    addresses**, so a check that bound anything would fail every reload on the
    host. A reload can still fail on a bind collision, which is what the #690
-   discard path is for.
+   discard path is for. A gateway listener that the next generation takes over
+   is not bound again, so a bind collision cannot happen there (see "Gateway
+   listeners across the reload" below).
 2. **A `pid` path that cannot be written.** `fpm_conf_write_pid()` is called
    after the point `-t` returns from (`fpm.c:102`).
 3. **A script or document root that is not there yet.** `chroot`/`chdir` must
@@ -194,13 +217,90 @@ Verified against this tree, not assumed:
    and out of scope here. The window is **documented here, not closed**.
 6. **Whether the generation that is being replaced can be replaced at all.**
    The gate says the configuration loads. After that the old master still stops
-   every child and re-execs, and an OOM at that moment, a `SIGTERM` between the
-   check and the exec, or an `execvp()` that fails still ends the generation.
+   every child and re-execs. An OOM at that moment, a `SIGTERM` between the
+   check and the exec still ends the generation. An `execvp()` that fails is
+   retried through `/proc/self/exe` (issue #925). Only when that fails too, the
+   master exits, and the gateway listeners it handed on close with it.
 
 So the gate's failure mode is "the service keeps running the configuration it
 already has", never "the service is down because of the check" — except through
-the last two items above, which are the reload's own pre-existing risks and are
-unchanged by it.
+the last two items above, which are the reload's own pre-existing risks. The
+listener handoff of issue #661 does not change them.
+
+### Gateway listeners across the reload (issue #661)
+
+Before issue #661, a reload closed each gateway listener before the
+`execvp()`, and the new master bound it again. A client that connected in
+that gap got `ECONNREFUSED`. Now the old master keeps the TCP listening socket
+open across the `execvp()`. The socket stays in the `LISTEN` state, so a
+connection made during the reload waits in the kernel accept queue. The new
+master accepts it.
+
+The handoff runs in these steps:
+
+1. The old master drains its gateways, as before.
+2. The old master clears `FD_CLOEXEC` on the listening socket of each TCP
+   gateway listener that does not use `http.reuseport` and is in the `LISTEN`
+   state. A gateway listener in the NO_CERT state of `http.tls_wait_for_cert`
+   is bound but not listening. It is not handed over, and it closes on the
+   `execvp()`. The old master writes one record per handed socket to
+   `FPMNG_HTTP_LISTENERS`. A record is `<fd>:<tls fingerprint>:<bind text>`,
+   and the records are comma-separated.
+3. The new master reads `FPMNG_HTTP_LISTENERS` and removes it, after the
+   configuration is read and before any pool binds its socket. A socket that no
+   gateway of the new configuration uses is closed at this point, so it cannot
+   block the bind of a fastcgi pool on the same address.
+4. A gateway of the new generation takes a socket over when its bind text and
+   its TLS fingerprint match. It takes a socket over only when it listens at
+   once. A gateway in the NO_CERT state of `http.tls_wait_for_cert` does not,
+   because it does not listen at once.
+5. The new master closes each inherited socket that no gateway takes over.
+   The gateway binds its address as before. The new master does not close two
+   kinds of socket. It leaves them open:
+   - A record whose descriptor is not a listening TCP socket. The record is
+     ignored.
+   - A record whose descriptor is a listening socket that is not bound to the
+     address in the record. The record is ignored. The new master logs a
+     WARNING (see the list below).
+
+The bind text must match as written. `0.0.0.0:8080` and `*:8080` are different
+texts, so the gateway binds a new socket. The TLS fingerprint is a hash of the
+values of `http.tls_cert`, `http.tls_key`, `http.tls_min_version`,
+`http.tls_sni_cert`, `http.tls_verify_client`, `http.tls_client_ca` and
+`http.tls_wait_for_cert`. It uses the configuration values, not the file
+contents. A gateway that moves to another address does not take the old socket
+over. The old socket closes, and the old address is free after the reload.
+
+The new master logs these lines:
+
+- NOTICE `[pool NAME] http: took over the listener on ADDR from the previous generation`, when a gateway takes a socket over.
+- NOTICE `http: closing the listener on ADDR of the previous generation: no gateway uses that address now`, when the new configuration has no gateway on that address.
+- WARNING `http: closing the listener on ADDR of the previous generation: no gateway took it over`, when a socket is still not taken over after start-up.
+- WARNING `http: not taking over descriptor FD for ADDR of the previous generation: it is not bound to that address`, when a record names a listening socket that is not bound to the address in the record. The new master leaves that socket open. `FD` and `ADDR` are placeholders for the descriptor number and the bind text.
+
+Not covered by the handoff:
+
+- `http.reuseport = on`. Each gateway child binds its own socket, and the
+  master socket closes before the exec, as before. A client can still get
+  `ECONNREFUSED` during a reload with reuseport.
+- A unix socket as the public listener. It is not passed on.
+- An `execvp()` that fails after the check passed, when `/proc/self/exe` fails
+  too. See item 6 in "What `-t` does not catch". The first failure is retried
+  and the listeners are handed on (issue #925).
+- Overlapping generations, where two masters hold the same socket at once. This
+  case is out of scope.
+
+Measured on the test box, with four clients that connect in a loop with
+`Connection: close`, and a reload at 10 s of a 20 s run: the reload refused
+140 connections in five runs without this change, and none in five runs with
+it. Resets and `502` responses are not zero yet. The numbers and the cause are
+in `docs/NOTES.md`, section 3ak.
+
+Under load, a reload still resets some in-flight requests, and some requests
+get `502`. The pool workers stop when the reload starts. The gateways still
+have requests in flight, and they wait `process_control_timeout` before they
+close those connections. Issue #661 does not change this order. A change of
+the order is a separate decision, and it is open.
 
 ### Reloading from a supervisor
 
@@ -208,20 +308,21 @@ Both packaged units run the test themselves, so an operator gets the reason on
 the spot instead of a silent no-op:
 
 - systemd — `/lib/systemd/system/php-fpm-ng.service`
-  (`packaging/deb/php-fpm-ng.service`), two `ExecReload=` lines, which
-  `systemd.service(5)` says run in order and stop at the first failure:
+  (`packaging/deb/php-fpm-ng.service`), one `ExecReload=` line, the
+  configuration test, and `ReloadSignal=SIGUSR2`. systemd sends the signal only
+  after the `ExecReload=` line exits with status 0:
 
   ```
   ExecReload=/usr/sbin/php-fpm-ng --nodaemonize --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf -t
-  ExecReload=/bin/kill -USR2 $MAINPID
+  ReloadSignal=SIGUSR2
   ```
 
   Measured on the container CI uses, with that exact command and `stderr` on a
   file instead of a tty (which is what a unit gives it): exit status **78** and
   the diagnostics on `stderr`, i.e. on the journal — plus the same lines in the
   `error_log` the configuration names, because a non-tty `stderr` makes `-t`
-  use the file too. *Not measured:* an actual `systemctl reload`, this
-  environment has no systemd; the ordering is `systemd.service(5)`, not a test.
+  use the file too. The `systemctl reload` behaviour is measured in
+  `docs/systemd.md` (Reload).
 
 - OpenRC — `/etc/init.d/php-fpm-ng` (`packaging/apk/php-fpm-ng.initd`), the
   same command before `supervise-daemon --signal USR2`, and `reload` returns
@@ -235,6 +336,14 @@ the spot instead of a silent no-op:
   docker exec <container> php-fpm-ng -t --fpm-config /etc/php-fpm-ng/php-fpm-ng.conf
   docker kill --signal USR2 <container>
   ```
+
+With the packaged systemd unit, the master also reports the reload to systemd.
+It sends `RELOADING=1` when a reload passes the configuration check. It sends
+`READY=1` when the pools of the new generation listen again. A refused reload
+sends `RELOADING=1` and then `READY=1`, because the master keeps its current
+generation. The `systemctl reload` command returns when the `READY=1` arrives.
+A script that runs `systemctl reload` then has the new generation listening, or
+the old one still serving after a refusal. See `docs/systemd.md`.
 
 ## `reload.selective` — restart only the pools that changed (issue #330)
 
@@ -375,8 +484,12 @@ Details worth knowing:
   in a per-generation table in `fpm_metrics.c`, not recomputed from pool
   order. The slots a replaced pool used in the previous generation are kept
   free of new ranges, because a #329 survivor of that pool may still write to
-  its old slot; the new pool's slots are cleared by punching a hole in the
-  memfd, which frees the memory instead of faulting it in.
+  its old slot. The reservation lasts until the survivor can no longer write.
+  The expiry is set at the exec of the reload that spares the survivor. It adds
+  30 seconds, the `supervisor.stop_timeout` of the pool, and 3 seconds of slack.
+  A later reload carries that expiry as a `Y` record and does not extend it (see
+  "Back-to-back selective reloads" below). The new pool's slots are cleared by
+  punching a hole in the memfd, which frees the memory instead of faulting it in.
 - If `fpmng_metrics.series_limit` changed, the slot tables differ in size,
   the old region cannot be reused, and the spared pools' application series
   restart from zero (a warning is logged). The scoreboard is not affected.
@@ -402,7 +515,10 @@ fork, which `-t` never does.
 So `fpm_reload_selective_discard_unadopted()`
 (`sapi/fpmng/fpm/fpm_reload_selective.c`) runs on these paths:
 `fpm_init()` failing, `fpm_pctl_exit()`, a failed `execvp()` in
-`fpm_pctl_exec()`, and once after the initial fork loop in `fpm_run()`. The last
+`fpm_pctl_exec()` whose retry through `/proc/self/exe` fails too (issue #925;
+`fpmng-reload-selective-exec-fallback-fails.phpt` forces that with a binary
+that has lost its execute bit), and once after the initial fork loop in
+`fpm_run()`. The last
 call removes entries that no pool of the new generation adopted (a pool that
 disappeared from the config), so a stale pid never stays in the environment.
 It sends `SIGTERM` to each pid still listed in
@@ -412,11 +528,64 @@ unknown there, and a request in flight on a spared worker is cut. Adoption
 removes a pool's entry as it takes it, so after a successful start nothing is
 left to discard.
 
-Not covered: a new master that is killed outright (`SIGKILL`, a crash) cannot
-run this code, and its spared workers stay orphaned. Workers do not poll their
-parent pid. Covered by `fpmng-reload-selective-failed-init.phpt` (a new master
-that cannot bind — a failure `-t` cannot see) and
-`fpmng-reload-selective-failed-exec.phpt` (failed `execvp()`).
+The call in `fpm_pctl_exit()` also runs when `type->init_main()` of a pool
+fails after `fpm_init()` returned OK. No configuration reaches that failure,
+because every cause is a resource failure. `fpmng-reload-selective-failed-init-main.phpt`
+makes it fail with the failure-injection seam (`FPMNG_FAULT_INJECT=1`, see
+[`fpmng-phpt.md`](fpmng-phpt.md#failure-injection)). It checks the WARNING, the
+spared worker and the port. The test skips on a binary built without the seam.
+
+These tests also cover the #690 discard:
+
+- `fpmng-reload-selective-failed-init.phpt`: a new master that cannot bind (a
+  failure `-t` cannot see).
+- `fpmng-reload-selective-exec-fallback-fails.phpt`: a failed `execvp()` whose
+  retry through `/proc/self/exe` fails too.
+
+The second test also checks that the guard of issue #829 logs nothing. When both
+exec attempts fail, the old master releases the guard before it exits.
+
+A new master that is killed outright (`SIGKILL`, a crash) cannot run this code.
+The guard of issue #829 covers its selective survivors. Its description follows
+below. Workers do not poll their parent pid.
+
+**A new master that is killed before it adopts the spared workers (issue #829).**
+A guard process covers this case for the selective survivors
+(`FPMNG_SELECTIVE_RELOAD_SURVIVORS`). The old master starts the guard before its
+`execvp()`. The guard holds the read end of a pipe. The write end crosses the
+`execvp()` and the daemonize fork.
+
+Each child that the new master forks closes its copy of the write end. This
+includes a gateway process. A gateway that kept the copy would keep the guard
+waiting after its master died.
+
+The new master writes one byte and closes the write end after its initial fork
+loop. This is the release. On a normal reload, the guard reads the byte and
+exits. When both exec attempts fail, the old master writes the same byte before
+it exits.
+
+If every holder of the write end dies first, the guard reads end of file. The
+guard has its own copy of the carried list. The copy is made before the
+`execvp()`. The guard sends `SIGTERM` to every carried worker that still runs,
+adopted or not. Before each signal, it checks the start time of the pid. It logs
+one WARNING that starts with `issue #829`.
+
+The guard does not cover these cases:
+
+- A new master that hangs and does not exit.
+- A new master that is killed (`SIGKILL`, a crash). The processes that it forked
+  itself keep running, with process 1 as their parent. These are its gateway
+  processes and the children of changed pools. They keep their listening ports.
+  The guard covers only the carried workers.
+- A master that is killed after the release. Its adopted workers stay orphaned,
+  as before.
+- The #329 survivors (see the next section).
+
+The design, with the rejected alternatives, is in
+`sapi/fpmng/fpm/fpm_reload_selective_guard.h`. The tests
+`fpmng-reload-selective-guard-sigkill.phpt` (`-F`) and
+`fpmng-reload-selective-guard-sigkill-daemonize.phpt` (`daemonize = yes`) cover
+this case. They need the failure-injection seam and skip without it.
 
 ### Relationship to issue #329's rolling restart
 
@@ -434,6 +603,221 @@ bridge. The two use distinct environment variables with distinct
 delimiter schemes specifically so that a config with both an unchanged
 pool and a separately-changed `supervisor` pool in the same reload cannot
 have one mechanism misparse the other's env var contents.
+
+**A new master that fails before a pool takes a #329 survivor (issue #831).**
+Until a pool takes the survivor, `FPMNG_RELOAD_SURVIVORS` lists it, and no
+master tracks it. If the new master gives up before that, the survivor has no
+bound. `fpm_pool_supervisor_reload_survivors_discard_unadopted()`
+(`sapi/fpmng/fpm/fpm_pool_supervisor.c`) sends `SIGTERM` to each listed
+survivor. It runs on these paths: `fpm_init()` failing, `fpm_pctl_exit()`, and a
+failed `execvp()` whose retry through `/proc/self/exe` fails too (issue #925).
+The survivor's own watchdog then ends it after the pool's
+`supervisor.stop_timeout`.
+
+The call does not run on the success path. There, `fpm_pool_supervisor_reload_orphans_arm()`
+arms the entries that no pool takes, at their deadline (issue #889). The `-t`
+child of the configuration check inherits the variable. Its `fpm_init()` skips
+the call (`!test_conf`), so the check does not signal the survivors of the
+running master.
+
+A normal stop has a side effect. `fpm_pctl_exit()` also sends `SIGTERM` to a
+survivor of a removed pool (issue #889) that waits for its deadline. Before
+issue #831, that survivor ran until the deadline.
+
+The window of issue #690 remains open for a #329 survivor. A `SIGTERM` or
+`SIGQUIT` to the old master between the spare and the `execvp()` leaves the
+spared copy without a master, because the carry hook writes the variable only
+at the `execvp()`. A new master that is killed outright (`SIGKILL` or a crash)
+cannot run this code. The guard of issue #829 covers only the selective
+survivors (`FPMNG_SELECTIVE_RELOAD_SURVIVORS`), not these.
+
+### Back-to-back selective reloads (issue #692)
+
+This section covers a #329 survivor that still runs when a second selective
+reload starts. It states why no two live writers can share a metrics slot
+across back-to-back reloads. It also lists the limits that remain. The proof
+covers the survivors of pools that the new configuration keeps. The survivors
+of pools that the new configuration removes are covered by a separate paragraph
+(issue #889). Limit 2 below lists what remains open for them.
+
+**The deadline starts at the exec.** A master writes the deadline of a spared
+child at its `execvp()`, not at the spare. The entry is `pool-name:pid:deadline`,
+written to `FPMNG_RELOAD_SURVIVORS`. The deadline is the exec time plus
+`FPM_SUPERVISOR_RELOAD_SURVIVOR_TIMEOUT_S`, which is 30 seconds. The old master
+waits for its other children after the spare, and this wait can take longer
+than 30 seconds. A deadline set at the spare could expire before the new
+generation starts. The new master tracks the survivor. It sends the stop signal
+at least once: at the deadline, or earlier when a replacement copy starts.
+
+**The survivor exits within a bounded time.** When the survivor gets its first
+stop signal, it starts a watchdog process. A later stop signal does not start a
+second watchdog. The watchdog sends `SIGKILL` after the
+`supervisor.stop_timeout` of the pool, if the survivor still runs. The survivor
+therefore exits no later than the deadline, plus one poll of 200 milliseconds,
+plus `supervisor.stop_timeout`.
+
+If `fork()` fails, no watchdog starts. The master then sends `SIGKILL` itself,
+`supervisor.stop_timeout` plus one second after the stop signal, if the survivor
+still runs. This backstop logs one WARNING (issue #890). In this case the
+survivor exits no later than the deadline, plus one poll of 200 milliseconds,
+plus `supervisor.stop_timeout`, plus one second.
+
+**A survivor of a removed pool gets SIGTERM at its deadline (issue #889).** The
+new master tracks each survivor that no pool of the new configuration claims. It
+sends `SIGTERM` at the deadline, not the `supervisor.stop_signal` of the pool,
+because the pool is gone from the configuration. If the survivor's own watchdog
+starts, the survivor exits no later than the deadline, plus one poll of 200
+milliseconds, plus `supervisor.stop_timeout`. There is no master backstop for
+this case. Limit 2 describes the cases that remain open.
+
+**A master carries its survivor across a reload.** A master tracks at most one
+survivor for each pool. It does not spare another child of that pool while it
+tracks one. At its `execvp()`, the master writes each survivor that it tracks
+back to `FPMNG_RELOAD_SURVIVORS`, with the same deadline. It also writes each
+child that it spares in this reload, with the deadline set at this exec. The
+`FPM_CLEANUP_PARENT_EXEC` cleanup `fpm_pool_supervisor_reload_survivor_carry()`
+does this. The next master tracks the survivor again and retires it at the same
+deadline. Before issue #692, the second reload neither signalled the survivor
+nor wrote it back, so no master tracked the survivor.
+
+**A carried pid is checked before it is used (issue #891).** A pid in
+`FPMNG_RELOAD_SURVIVORS` or `FPMNG_SELECTIVE_RELOAD_SURVIVORS` can be stale. The
+old master can reap a spared child. The kernel can then give the same pid to an
+unrelated process. `kill(pid, 0)` cannot tell the two apart.
+
+Each carried entry also holds the start time of its process. On Linux, the
+master reads this time from field 22 of `/proc/<pid>/stat`
+(`fpm_pid_start_time()` in `fpm_pid_child.c`). The master uses the pid only when
+the start time still matches (`fpm_pid_is_same()`).
+
+The check does not use parentage. Under `daemonize = yes`, the exec'd image
+forks again (`third_party/php-src/sapi/fpm/fpm/fpm_unix.c:618`), so the new
+master is not the parent of the carried children.
+
+The check covers the supervisor survivor at the exec and in `init_main()`, its
+retirement signal, the selective survivor list when it is adopted, and that list
+when it is signalled after a failed handoff. A refused pid is not signalled.
+Refusals at the exec and at adoption log one NOTICE each, with the pool name and
+the pid. The failed-handoff list logs no line per pid.
+
+Without `/proc`, no start time is recorded, and the start time is 0. The check
+then falls back to `kill(pid, 0)`, as before #891. An entry that an older binary
+wrote has no start time and takes the same fallback. Not measured on macOS.
+
+Two gaps remain. The kernel can reuse the pid between the check and the signal.
+Under `daemonize = yes`, no master sees the exit of a survivor that is not its
+child, so the check narrows the window but does not close it. Not measured.
+
+A worker that a selective reload carried over is in the same position under
+`daemonize = yes`: the new master is not its parent and gets no `SIGCHLD`.
+The master checks each adopted worker that is not its own child once per second
+(`fpm_adopted_sweep.c`, issue #792). A worker that is gone, is a zombie that
+its new parent has not reaped, or has another start time, is retired as after a
+normal exit: its slot is freed and the pool
+forks a replacement. In a stop, this lets `running_children` reach 0, so the
+master exits. A stop can take up to one second longer than with a worker that
+the master forked. The carried supervisor survivor (#329) is not covered; it
+has its own path (issue #981).
+
+**A slot reservation has an expiry.** At its `execvp()`, the old master writes
+one `X:<pool>:<base>:<count>:<until>` record for the slot range of each pool it
+runs. This includes a changed pool that lost a child to a #329 survivor. The
+`<until>` is the exec time plus 30 seconds, plus the `supervisor.stop_timeout`
+of that pool, plus 2 seconds of slack (`fpm_pool_supervisor_slot_reserve_until()`).
+The new master reserves the range of each pool that the reload does not spare
+(`fpm_metrics_reserve()`). A reserved range stays reserved for the whole
+generation. At the next reload, the old master writes each reserved range as a
+`Y:<base>:<count>:<until>` record, if its expiry is later than the current time.
+A `Y` record keeps its `<until>`. The new master does not extend it. An `X`
+record without `<until>` comes from an older binary. The new master then uses
+the load time plus 30 seconds.
+
+**Why no two live writers share a slot.** Consider a survivor `S` of pool `p`,
+which writes to the slot range `R`. The master that spares `S` execs at time
+`E`, and the new generation replaces `p`. Before `E`, the old master still owns
+`R`, and no new pool uses it. So the wait before `E` does not change the bound.
+
+1. `S` has the deadline `D = E + 30`, where `E` is the whole-second exec time.
+   It gets the stop signal no later than `D + 0.2`. Its watchdog sends `SIGKILL`
+   no later than `D + 0.2 + stop_timeout`. Without a watchdog, the master
+   backstop sends it no later than `D + 0.2 + stop_timeout + 1`. So `S` exits no
+   later than `E + 31.2 + stop_timeout`.
+2. The same exec writes the expiry `U = E' + 30 + stop_timeout + 3` for `R`,
+   where `E'` is the whole-second time of the expiry read. The two reads at the
+   exec differ by at most one second, so `E' >= E - 1` and
+   `U >= E + 32 + stop_timeout`. `U` is therefore at least 0.8 seconds later
+   than the exit time of `S`. The 3 seconds of slack cover the one-second
+   difference between the two reads. The 0.8 seconds cover the signal delivery
+   and the exit.
+3. The new master reserves `R` for its generation. `R` belongs to no pool in this
+   generation. At the exec of a later reload, the old master writes `R` as a `Y`
+   record with the same `<until>`, if `<until>` is later than the current time.
+   This applies whether the later reload keeps `p` or replaces it. If the later
+   reload keeps `p`, `p` keeps the range it has in the running generation. So `R`
+   stays reserved at least until `U`, and no later master extends `U`.
+4. No other pool takes a slot of `R` before `U`. At `U`, `S` has already exited.
+
+Without `reload.selective = yes`, the metrics region is not inherited. A
+survivor then writes only to the old region, and no new pool can share it.
+
+**Remaining limits.**
+
+1. The master backstop (issue #890) ends a survivor whose watchdog did not
+   start. Two cases remain open. First, a reload that starts between the stop
+   signal and the backstop drops the timer. The next master retires the survivor
+   again and arms a new backstop, so the kill can come later than the bound.
+   Second, a master that exits before the backstop fires leaves the survivor
+   with no bound. In both cases the slot can be taken after the expiry while the
+   survivor still writes there.
+2. A survivor of a removed pool has no master backstop. If its watchdog cannot
+   start, for example because `fork()` fails, no process sends `SIGKILL`, and the
+   survivor has no bound. A master that is killed (`SIGKILL` or a crash) before the
+   deadline also leaves the survivor with no bound. A master that stops or fails
+   through its own exit path sends `SIGTERM` instead (issue #831). A reload before
+   the deadline does not lose the
+   survivor: the next master arms it again with the same deadline. The new master
+   cannot add a backstop with the right delay, because it does not know the
+   `supervisor.stop_timeout` of the removed pool. The slot range stays reserved
+   until the expiry, as for a kept pool. The expiry comes after the exit of the
+   survivor only when its watchdog runs. See `docs/supervisor.md`.
+3. The deadline and the expiry use the wall clock (`time(NULL)`) in whole
+   seconds. A forward clock step after the stop signal can move the expiry before
+   the survivor exits. A step of more than 1.8 seconds breaks the bound with a
+   watchdog. A step of more than 0.8 seconds breaks it when the backstop ends the
+   survivor. A step before the signal does not break the bound, because the
+   expiry is at least 2 seconds plus `supervisor.stop_timeout` after the deadline
+   on the same clock.
+4. In a test build with `FPMNG_DEBUG_CLOCK_RATE` above 1, each process uses its
+   own debug clock. The carried times are then approximate. The packages do not
+   allow this clock.
+5. The bound assumes one `supervisor.stop_timeout` value for the survivor and
+   for its expiry. A change of this value between two reloads is not tested.
+
+The test `fpmng-reload-survivor-back-to-back.phpt` runs two selective reloads
+with a survivor that writes into the slot of its pool. A pool added by the
+second reload must not show the survivor's counter. The carry check depends on
+the start jitter. If a copy of the new generation starts first, the survivor is
+retired before reload B. Then the test checks only the slot.
+
+The test `fpmng-reload-survivor-watchdog-fork-fails.phpt` makes the survivor's
+watchdog `fork()` fail with `FPMNG_FAULT=pool_watchdog_fork`. It checks that the
+master backstop SIGKILLs the survivor and logs one WARNING. The log stamps have
+whole seconds, so the test checks that the WARNING comes 3 or 4 seconds after
+the retirement line. The test sets `supervisor.stop_timeout` to 2, so the gap is
+`stop_timeout + 1` or `stop_timeout + 2`.
+
+The test `fpmng-reload-survivor-removed-pool.phpt` removes pool `[s]` with a
+reload. It checks that the new master logs the survivor, that the survivor still
+runs 5 seconds after the reload, and that the master sends `SIGTERM` about 30
+seconds after the reload. The log stamps have whole seconds, so the test checks
+that the gap between the two log lines is 29 to 31 seconds. The test then checks
+that the survivor ends after its watchdog.
+
+The test `fpmng-reload-survivor-init-fails.phpt` runs a supervisor pool with two
+copies. The reload moves an http-direct pool to an address that the test holds,
+so the new master fails in `fpm_sockets_init_main()`, before any pool takes the
+survivor. The test checks that the spared copy ends after the master exits, and
+that the master logs a WARNING that names issue #831.
 
 ### Accepted degradations of an adopted child
 

@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: worker-mode HTTP-direct — an accepted request is never closed without a response (task 080)
+fpm-ng: worker-mode HTTP-direct — an accepted request the worker script never answered gets 503 when the worker stops (task 080)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--

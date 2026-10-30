@@ -79,7 +79,17 @@ struct fpm_child_s *fpm_children_detach_oldest(struct fpm_worker_pool_s *wp);
  *
  * Returns NULL, doing nothing, if scoreboard registration fails -- the
  * caller treats that exactly like "this pid could not be adopted" and lets
- * the ordinary fork loop that runs right after cover the shortfall. */
+ * the ordinary fork loop that runs right after cover the shortfall.
+ *
+ * Issue #792: the child is NOT necessarily this master's child. Under
+ * daemonize = yes the exec'd image forks again, so no SIGCHLD ever reports
+ * its exit and fpm_children_bury() never retires it. A caller that adopts a
+ * pid must also pass the result to fpm_adopted_sweep_register()
+ * (fpm_adopted_sweep.h), which polls for the exit instead. */
 struct fpm_child_s *fpm_children_adopt(struct fpm_worker_pool_s *wp, pid_t pid, struct timeval started);
+
+/* Issue #792: retires an adopted child whose process is gone, as
+ * fpm_children_bury() retires one it reaped; see fpm_adopted_sweep.c. */
+void fpm_children_adopted_exited(struct fpm_child_s *child);
 
 #endif

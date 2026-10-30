@@ -30,7 +30,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Fixed
 
-- `build/test-executor-async-rule.sh` (from main, #814) allows the two tests on branch `async` that assert the refusal of `pool.executor = async`: `fpmng-config-rejected-directives.phpt` and `async/tests/frameworks/symfony/run.sh` (issue #932).
+- `build/test-executor-async-rule.sh` (from main, #814) allows the two tests on branch `async` that assert that the deleted async executor is refused: `fpmng-config-rejected-directives.phpt` and `async/tests/frameworks/symfony/run.sh` (issue #932).
 
 - Stale text on branch `async`: the three Polish `coop-session` log messages are English (pool tag and structure unchanged); the `fpm_pool_fiber.h` "no patches" claim, the `xport` "not caught" `sleep()` entry, the `core_globals.precision` symbol (it is `EG(precision)`), the `two types`/`both types` wording (the async executor is gone since #623) and the `fpm_pool_type_fiber_validate()` name (it is `fpm_pool_type_coop_fiber_validate()` in `fpm_pool_type_coop.c`) are corrected; every `patches/0007`/`0008` reference now says `async/patches/`; patch 0007's header no longer claims the TCP connect suspends (connect plus DNS inside the original factory still block) and its ungated whitespace hunk is dropped, so without `HAVE_FPMNG_FIBER_TLS` the files are byte-for-byte upstream again; patch 0008's header points at `async/README.md` instead of the gone `tasks/` tree; `fiber_errors.md` names the real `zend_ini_deactivate()` mitigation and the real `spike-sleep-yield-report.md` path; the `fiber-risky-builtins.csv` `files_arb`, `patches/0006` and `xport.c:673` references are corrected (#624).
 

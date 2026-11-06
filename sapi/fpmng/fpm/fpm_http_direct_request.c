@@ -668,12 +668,19 @@ bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value
  * reply or a script's header() can carry ESC or other controls in the reason
  * phrase, and the WARNING used to print them as raw bytes under %.64s. The
  * escape also bounds the line: a value of 64 bytes, each escaped to four
- * characters, is at most 256 characters. */
+ * characters, is at most 256 characters.
+ *
+ * A zero-size buffer has no room for the NUL, so the function writes nothing
+ * and returns an empty literal. Returning `out` would hand the caller a
+ * pointer into a buffer that holds no valid string (issue #1032). */
 const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size)
 {
 	size_t o = 0;
 	const char *c;
 
+	if (size == 0) {
+		return "";
+	}
 	for (c = in; *c && max > 0; c++, max--) {
 		if (*c >= 0x21 && *c <= 0x7e && *c != '\\') {
 			if (o + 1 >= size) {

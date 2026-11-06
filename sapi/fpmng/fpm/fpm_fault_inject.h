@@ -20,6 +20,9 @@
    `times=N` arms the point for its first N hits only: the next hit does not
    fail, so one process can see a failure and then a normal call. It is what a
    test uses when the process must keep serving after the injected failure.
+   The count is per process. A forked child (a gateway, an http-direct child or
+   a respawned child) starts with the count its parent had, so N applies to each
+   process. A pool with two gateways refuses N connections per gateway.
    Its counter is a volatile sig_atomic_t, one per entry, that only the hit
    path decrements; the same entry is not combined with `ifenv=`.
    `ifenv=VAR` arms the point only in a process whose environment has VAR set.
@@ -70,6 +73,10 @@
                            `:times=N` by the fail-closed tests.
      tls_bev_new           fpm_tls_http_bevcb(): bufferevent_openssl_socket_new() fails
                            (issue #1001). Same outcome as tls_ssl_new.
+     tls_refuse_pair       fpm_tls_http_refused_bev(): bufferevent_pair_new() fails
+                           (issue #1001). The child cannot refuse the connection, so
+                           it logs an ERROR and exits with code 70. Use it with
+                           tls_ssl_new, which sends the connection to the refusal.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

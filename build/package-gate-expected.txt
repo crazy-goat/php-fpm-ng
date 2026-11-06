@@ -63,6 +63,7 @@ apk,apk-tls SKIP  fpmng-ini-bootstrap-extension                           the ga
 # ci-package-gate.sh passes no FPMNG_FAULT_INJECT to the build; see its SKIPIF (#832).
 deb,deb-tls,apk,apk-tls SKIP  fpmng-http-direct-tls-fail-closed             package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#1001)
 deb,deb-tls,apk,apk-tls SKIP  fpmng-http-gateway-tls-fail-closed            package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#1001)
+deb,deb-tls,apk,apk-tls SKIP  fpmng-http-gateway-tls-refuse-oom             package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#1001)
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-failed-init-main     package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#832)
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-survivor-watchdog-fork-fails   package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#890)
 deb,deb-tls,apk,apk-tls SKIP  fpmng-reload-selective-guard-sigkill        package binaries are built without FPMNG_FAULT_INJECT (DERIVED, not run), see its SKIPIF (#829)

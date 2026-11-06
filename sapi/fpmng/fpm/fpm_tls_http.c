@@ -1029,7 +1029,7 @@ static struct bufferevent *fpm_tls_http_refused_bev(struct event_base *base)
 {
 	struct bufferevent *pair[2];
 
-	if (bufferevent_pair_new(base, BEV_OPT_CLOSE_ON_FREE, pair) != 0) {
+	if (FPM_FAULT_POINT("tls_refuse_pair") || bufferevent_pair_new(base, BEV_OPT_CLOSE_ON_FREE, pair) != 0) {
 		/* Out of memory, and no bufferevent is left that can refuse the
 		 * connection. NULL would serve it in cleartext, so the child exits
 		 * instead; the master starts a new one. */
@@ -1050,8 +1050,9 @@ struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg)
 
 	if (ssl) {
 		if (FPM_FAULT_POINT("tls_bev_new")) {
-			/* libevent frees the SSL itself when it fails (bufferevent_openssl.c:1483).
-			 * This fault skips the call, so the SSL is freed here. */
+			/* libevent frees the SSL itself when it fails, but only with
+			 * BEV_OPT_CLOSE_ON_FREE (bufferevent_openssl.c:1404-1405). This fault
+			 * skips the call, so the SSL is freed here. */
 			SSL_free(ssl);
 		} else {
 			bev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE);

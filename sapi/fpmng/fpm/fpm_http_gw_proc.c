@@ -334,8 +334,10 @@ static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void 
 	(void) what;
 	dl->fd = bufferevent_getfd(dl->bev);
 	if (dl->fd < 0) {
-		/* still no fd (should not happen): without the watcher a peer close
-		 * would leave a dangling bev, so drop the deadline entirely */
+		/* still no fd. This is the expected case for a TLS connection that
+		 * fpm_tls_http_refused_bev() refused (#1001): that bufferevent is a
+		 * pair, and a pair has no fd. Without the watcher a peer close would
+		 * leave a dangling bev, so drop the deadline entirely */
 		fpm_http_read_deadline_forget(dl);
 		return;
 	}

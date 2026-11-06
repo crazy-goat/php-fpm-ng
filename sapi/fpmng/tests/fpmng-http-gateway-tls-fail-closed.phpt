@@ -114,6 +114,7 @@ error_log = {{FILE:LOG}}
 [gw]
 pool.type = gateway
 listen = {{ADDR[tls]}}
+http.gateways = 1
 chdir = $root
 http.tls_cert = $root/serving.crt
 http.tls_key = $root/serving.key

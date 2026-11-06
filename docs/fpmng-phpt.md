@@ -537,6 +537,11 @@ FPMNG_FAULT=<point>[:ifenv=<VAR>|:times=<N>][,<point>...]
 succeeds, so one process can refuse a connection and serve the next one (the
 fail-closed TLS tests of issue #1001 use `tls_ssl_new:times=1`).
 
+The count is per process. A forked child (a gateway, an http-direct child or a
+respawned child) starts with the count its parent had. With two gateways, each
+gateway refuses its first `N` connections, so a test that needs one refusal
+sets `http.gateways = 1`.
+
 `ifenv=VAR` arms the point only in a process whose environment has `VAR` set.
 The exec'd master of a reload inherits the environment of the old one, so the
 variable alone cannot tell the first master from the new one. A selective

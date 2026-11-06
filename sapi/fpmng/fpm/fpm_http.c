@@ -1748,9 +1748,11 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 	 * holds the pointer. Ending it here frees it, with its headers and body.
 	 * The guard keeps this to detached requests. libevent frees an attached
 	 * request itself after this callback (libevent 2.1.12 http.c:1229-1238).
-	 * A send on an attached request with empty output and no chunking runs
-	 * evhttp_send_done() inline (http.c:2945-2947), which frees the connection
-	 * a second time while the outer evhttp_connection_free() still uses it.
+	 * A send on an attached request with empty output, no chunking and a
+	 * connection that closes after the reply runs evhttp_send_done() inline
+	 * (http.c:2945-2947), which frees the connection a second time
+	 * (http.c:2777-2786) while the outer evhttp_connection_free() still uses it.
+	 * On a keep-alive connection nothing is freed twice.
 	 * A send on a detached request always frees it (http.c:2931-2934), so it
 	 * goes last, after c is gone (see fpm_http_finish()). */
 	if (req && !evhttp_request_get_connection(req)) {

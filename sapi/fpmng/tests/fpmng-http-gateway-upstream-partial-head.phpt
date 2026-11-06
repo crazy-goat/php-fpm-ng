@@ -271,6 +271,42 @@ function wait_access(string $pattern, float $seconds = 8.0): ?string
     return null;
 }
 
+/* The body the gateway writes for every 502 it answers itself, see
+ * fpm_http_finish() and fpm_http_start_reply(). The access log counts its
+ * bytes (issue #858). */
+const BAD_GATEWAY_BODY = "Bad Gateway\n";
+
+/* Checks one 502 answer: the status, the body on the wire and the bytes field
+ * of the access-log line for $path, which must be unique to this case. */
+function check_bad_gateway(string $resp, string $path, string $what): void
+{
+    check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', "$what: not a 502", $resp);
+    check(body($resp) === BAD_GATEWAY_BODY, "$what: the body is not the gateway's 502 body", $resp);
+    $pattern = '/"GET ' . preg_quote($path, '/') . ' HTTP\/1\.1" 502 (\d+) /';
+    $acc = wait_access($pattern);
+    check($acc !== null, "$what: the access log does not say 502");
+    preg_match($pattern, $acc, $m);
+    $logged = (int) $m[1];
+    $wire = strlen(body($resp));
+    check($logged === $wire && $logged === strlen(BAD_GATEWAY_BODY),
+        "$what: access log counts $logged bytes, the client got $wire, want " . strlen(BAD_GATEWAY_BODY), $resp);
+}
+
+/* True when the gateway closes the client connection within $seconds. */
+function client_closes(float $seconds = 3.0): bool
+{
+    $sock = $GLOBALS['client'];
+    $deadline = microtime(true) + $seconds;
+    while (microtime(true) < $deadline) {
+        if (fread($sock, 1) === '' && feof($sock)) {
+            return true;
+        }
+        usleep(20000);
+    }
+
+    return false;
+}
+
 /* --- configuration: a gateway in front of a FastCGI target -----------
  * A fixed name, not one derived from getmypid(): --CLEAN-- runs in another
  * process and could not find a pid-suffixed directory to remove. No scripts are
@@ -323,7 +359,7 @@ $GLOBALS['server'] = $server;
 
 /* A header block the gateway will buffer but not complete: two complete
  * lines, and no blank line to close them. */
-$partial = "Status: 200 OK\r\nContent-Type: text/plain\r\n";
+$partial = "Status: 200 OK\r\nX-Partial-Head: 1\r\n";
 
 /* ---- 1: the upstream closes the connection mid-header ---------------- */
 $from = strlen(log_tail());
@@ -339,14 +375,12 @@ fwrite($u, fcgi_record(FCGI_STDOUT, $partial));
 usleep(150000);
 fclose($u);
 $resp = client_read();
-check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'closed mid-header: not a 502', $resp);
-check(str_contains($resp, 'Bad Gateway'), 'closed mid-header: no error body', $resp);
-check(str_contains($resp, 'Content-Type: text/plain') === false,
+check_bad_gateway($resp, '/a.php', 'closed mid-header');
+check(str_contains($resp, "\r\nConnection: close\r\n"), 'closed mid-header: no Connection: close', $resp);
+check(str_contains($resp, 'X-Partial-Head') === false,
     'closed mid-header: the incomplete header block was forwarded', $resp);
 check(wait_log('/upstream .* ended its reply after \d+ bytes of an unterminated CGI header block/', $from) !== null,
     'closed mid-header: no WARNING naming the truncation');
-check(wait_access('/"GET \/a\.php HTTP\/1\.1" 502 /') !== null,
-    'closed mid-header: the access log does not say 502');
 echo "closed-mid-header: 502\n";
 
 /* ---- 2: the upstream ends the request cleanly, header block unfinished --
@@ -361,11 +395,9 @@ check($u !== null, 'no second upstream connection');
 upstream_read($u);
 fwrite($u, fcgi_record(FCGI_STDOUT, $partial) . fcgi_record(FCGI_END_REQUEST, fcgi_end()));
 $resp = client_read();
-check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'END_REQUEST mid-header: not a 502', $resp);
+check_bad_gateway($resp, '/b.php', 'END_REQUEST mid-header');
 check(wait_log('/upstream .* ended its reply after \d+ bytes of an unterminated CGI header block/', $from) !== null,
     'END_REQUEST mid-header: no WARNING naming the truncation');
-check(wait_access('/"GET \/b\.php HTTP\/1\.1" 502 /') !== null,
-    'END_REQUEST mid-header: the access log does not say 502');
 echo "end-request-mid-header: 502\n";
 
 /* ---- 3: a complete header block is still served -------------------------
@@ -396,6 +428,51 @@ check(str_contains(substr(log_tail(), $from), 'unterminated CGI header block') =
     'complete header block: reported as a truncation', log_tail());
 echo "complete-header-block: served\n";
 
+/* ---- 4: an invalid Status makes the gateway answer 502 (issue #594) ------
+ * The other 502 shape: a chunked reply that the gateway writes with its own
+ * headers. The same body and the same bytes field as case 1. */
+$from = strlen(log_tail());
+client_open(true);
+client_send("GET /d.php HTTP/1.1\r\nHost: t\r\n\r\n");
+$u = upstream();
+check($u !== null, 'the gateway dialled nothing for the invalid-Status case');
+upstream_read($u);
+fwrite($u, fcgi_record(FCGI_STDOUT, "Status: abc\r\nContent-Type: text/plain\r\n\r\nhello")
+    . fcgi_record(FCGI_END_REQUEST, fcgi_end()));
+$resp = client_read();
+check_bad_gateway($resp, '/d.php', 'invalid Status');
+check(wait_log('/upstream sent invalid Status/', $from) !== null, 'invalid Status: no WARNING');
+echo "invalid-status: 502\n";
+
+/* ---- 5: an upstream that closes without a byte: no answer at all -------- */
+client_open(true);
+client_send("GET /e.php HTTP/1.1\r\nHost: t\r\n\r\n");
+$u = upstream();
+check($u !== null, 'the gateway dialled nothing for the no-answer case');
+upstream_read($u);
+fclose($u);
+$resp = client_read();
+check_bad_gateway($resp, '/e.php', 'no answer');
+check(str_contains($resp, "\r\nConnection: close\r\n"), 'no answer: no Connection: close', $resp);
+check(client_closes(), 'no answer: the connection stayed open after Connection: close');
+echo "no-answer: 502\n";
+
+/* ---- 6: the same for HEAD: no body on the wire, so no bytes counted ----- */
+client_open(true);
+client_send("HEAD /f.php HTTP/1.1\r\nHost: t\r\n\r\n");
+$u = upstream();
+check($u !== null, 'the gateway dialled nothing for the HEAD case');
+upstream_read($u);
+fclose($u);
+$resp = client_read();
+check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'HEAD no answer: not a 502', $resp);
+check(body($resp) === '', 'HEAD no answer: a body on the wire', $resp);
+$acc = wait_access('/"HEAD \/f\.php HTTP\/1\.1" 502 \d+ /');
+check($acc !== null, 'HEAD no answer: the access log does not say 502');
+preg_match('/"HEAD \/f\.php HTTP\/1\.1" 502 (\d+) /', $acc, $m);
+check((int) $m[1] === 0, 'HEAD no answer: access log counts ' . $m[1] . ' bytes, want 0', $resp);
+echo "head-no-answer: 502 without body\n";
+
 fclose($server);
 $tester->terminate();
 $tester->expectLogTerminatingNotices();
@@ -410,6 +487,9 @@ Done
 closed-mid-header: 502
 end-request-mid-header: 502
 complete-header-block: served
+invalid-status: 502
+no-answer: 502
+head-no-answer: 502 without body
 Done
 --CLEAN--
 <?php

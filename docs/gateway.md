@@ -420,7 +420,7 @@ This is one line for a request that went to the `api` target:
 | `uri` | string or `null` | The request target. |
 | `protocol` | string | The protocol, for example `HTTP/1.1`. |
 | `status` | number or `null` | The status code. `null` when the connection failed before a response. |
-| `bytes` | number | The body bytes sent. |
+| `bytes` | number | The body bytes sent. The gateway counts the body of the 502 it writes when an upstream sends no answer or an unfinished header block. It counts 0 for a HEAD reply. Other replies that the gateway writes itself (for example the 504 of an upstream timeout) count 0 for their body. |
 | `referer` | string or `null` | The `Referer` header. |
 | `user_agent` | string or `null` | The `User-Agent` header. |
 | `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
@@ -775,10 +775,14 @@ started, because the only thing left to send would be the terminator, and
 sending it would make a truncated body look complete. Here nothing of the
 reply is on the wire yet, so a 502 is still truthful and costs the client one
 retry instead of a reseted connection. Measured on 2026-10-06 with
-`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets libevent's
-complete `502` page (`Connection: close`, as for every other gateway-generated
-502, not `Transfer-Encoding: chunked`), while the same reply before the fix was
-`200 OK` with the unfinished header block **as the body**:
+`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets a `502` with the
+body `Bad Gateway` (`Content-Type: text/plain`, `Connection: close`, not
+`Transfer-Encoding: chunked`), while the same reply before the fix was
+`200 OK` with the unfinished header block **as the body**. Before the fix the
+gateway wrote libevent's HTML page here, and the access log counted 0 bytes for
+it (issue #858). The access log counts the 12 bytes of the `Bad Gateway` body:
+the same as the invalid-`Status` 502. A HEAD request gets the 502 without a body,
+and the access log counts 0 for it.
 
 ```
 HTTP/1.1 200 OK

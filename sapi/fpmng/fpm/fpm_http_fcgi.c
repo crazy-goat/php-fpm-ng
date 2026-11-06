@@ -794,12 +794,14 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
  * body as a complete one. The only truthful thing left to send is a message
  * that does not end: access-log the request, then shutdown() the client socket
  * -- the same shape as fpm_direct_stream_abort() in fpm_http_direct.c -- so
- * libevent finds the connection dead on its next pass, frees the request there
- * and runs fpm_http_client_closed() for the gauge and the index. The close
- * callback stays registered on purpose; fpm_http_conn_free() has detached this
- * request from it. A reply framed by Content-Length is cut short of its
- * length, a chunked one of its terminator; an HTTP/1.0 client gets a
- * close-delimited reply, which no close can mark as incomplete. */
+ * libevent finds the connection dead on its next pass, detaches the request
+ * and runs fpm_http_client_closed() for the gauge and the index. libevent does
+ * not free a request nobody answered (issue #996), so the close callback has
+ * to: the request pointer goes to it through the client node, because
+ * fpm_http_conn_free() drops c. The close callback stays registered on purpose.
+ * A reply framed by Content-Length is cut short of its length, a chunked one
+ * of its terminator; an HTTP/1.0 client gets a close-delimited reply, which
+ * no close can mark as incomplete. */
 void fpm_http_finish_truncated(fpm_http_conn *c)
 {
 	struct evhttp_connection *evcon = evhttp_request_get_connection(c->req);
@@ -836,6 +838,11 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool);
+	/* Issue #996: the close callback ends this request once libevent has
+	 * detached it, and reaches it only through the client node. */
+	if (c->client) {
+		c->client->req = c->req;
+	}
 	fpm_http_conn_free(c);
 	if (fd >= 0) {
 		shutdown(fd, SHUT_RDWR);

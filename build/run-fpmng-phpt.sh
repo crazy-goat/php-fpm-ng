@@ -79,12 +79,12 @@ LANE_SIZE=1000
 TESTER_BLOCK_SIZE=200
 # HTTP_DIRECT_PORT_ORIGIN is the first port of the fixed-port family the
 # http-direct tests spell out, and HTTP_DIRECT_PORT_FAMILY_END the highest one
-# they reach (fpmng-pack-run.phpt's 28192). Measured over sapi/fpmng/tests/;
+# they reach (fpmng-http-direct-worker-ws-input-tls.phpt's 28199). Measured over sapi/fpmng/tests/;
 # build/test-phpt-port-lane.sh re-derives both from the tests on every run, so a
 # new test that picks a port outside them fails there instead of silently
 # growing past the lane.
 HTTP_DIRECT_PORT_ORIGIN=28054
-HTTP_DIRECT_PORT_FAMILY_END=28192
+HTTP_DIRECT_PORT_FAMILY_END=28199
 # LANE_FAMILY_OFFSET is where the family starts inside the lane, leaving the
 # Tester's block room to grow with the worker count.
 LANE_FAMILY_OFFSET=300
@@ -458,8 +458,8 @@ preflight_fail() {
 #   B+199             the operator endpoint of a gateway pool that names no
 #                     operator.*_listen: the last port of the block getPort()
 #                     never reaches, so it cannot meet a pool listen port
-#   B+300 .. B+438    the historical fixed-port family of the http-direct
-#                     tests, 28054 .. 28192, translated as one block
+#   B+300 .. B+445    the historical fixed-port family of the http-direct
+#                     tests, 28054 .. 28199, translated as one block
 #   B+439 .. B+999    unused; room for the family to grow
 #
 # Why 300 and not 1: the family and the Tester's block must not overlap, and

@@ -250,12 +250,13 @@ above come from one sitting on one toolchain for that reason.
   [Connection limits](#connection-limits-httpmax_connections) — but that is a
   connection count, still not a memory bound.
 - `http.read_timeout` must be positive. It is libevent's **inactivity** timeout
-  for reads/writes, plus — since issue #61 — an absolute deadline on the
-  **first** request of a connection, see
-  [Connection limits](#connection-limits-httpmax_connections). A trickling
-  client can still evade the inactivity timer on the second and later requests
-  of a keep-alive connection. PHP execution blocks this worker's event loop,
-  including its timers.
+  for reads/writes, plus — since issue #61 — an absolute deadline on each
+  request, see [Connection limits](#connection-limits-httpmax_connections).
+  Since issue #1004 this covers every request on a `pool.executor = classic`
+  connection. On `pool.executor = worker`, only the first request has the
+  deadline, so a trickling client can still evade the inactivity timer on a
+  later request. PHP execution blocks this worker's event loop, including its
+  timers.
 - A worker can hold many HTTP connections but execute only one PHP request at a
   time. The shared listener can batch accepts unevenly, and keep-alive connections
   remain attached to their accepting worker. There is no gateway queue that can
@@ -837,7 +838,7 @@ meant to be one — a shared counter would need shared memory on the accept path
 and a child is what owns the fds.
 
 ```ini
-http.read_timeout = 5000              ; ms — also the first-request deadline
+http.read_timeout = 5000              ; ms — also the deadline for each request
 http.max_connections = 64             ; per worker, 0 = unlimited (default)
 http.max_connections_per_client = 8   ; per peer address, per worker, 0 = unlimited
 ```
@@ -849,7 +850,7 @@ The last one is not tidiness: the per-client count is a walk of the connections
 this worker already holds, done once per accepted connection, so without a total
 cap the accept path would grow with the flood the directive exists to survive.
 
-### The first-request deadline
+### The request deadline
 
 `http.read_timeout` is documented as one budget for the whole client-side read.
 On the http gateway it is exactly that; on a direct pool it used to be only
@@ -864,11 +865,23 @@ Measured on the poligon, 2026-09-11, against a direct pool with
 | sends one byte of the request line every 2 s | held the connection **56 s**, then was served normally |
 
 So only the trickle was unbounded — which is the shape of slowloris. Since
-issue #61 a connection whose **first** request has not fully arrived within
-`http.read_timeout` is closed, whatever it has been dripping. The deadline is
-armed on accept and disarmed the moment the first request is complete; libevent
-2.1.12 offers no request-start hook, so later requests on the same keep-alive
-connection are covered by the idle timeout only. The first time a child actually drops a
+issue #61 a connection whose **request** has not fully arrived within
+`http.read_timeout` is closed, whatever it has been dripping.
+
+On `pool.executor = classic`, every request on a keep-alive connection has its
+own budget, which the following rules define:
+
+- The budget starts at the first byte of the request. The idle time before it
+  does not count.
+- The end of any response starts the watch for the next request. This includes
+  a `ping.path` reply and an error reply.
+- A request is served even when its idle time and its transfer are longer
+  together than `http.read_timeout`, if the transfer alone is shorter.
+
+libevent offers no request-start hook, so the first byte is found by a one-shot
+read watcher, as the gateway does. On `pool.executor = worker`, only the first
+request on a connection has a budget. Later requests are covered by the idle
+timeout only. This gap is open. The first time a child actually drops a
 connection this way it says so once, at `NOTICE`; there is no line while nothing
 is being dropped, and the line needs `catch_workers_output = yes` to reach the
 error log at all (issue #73). `http.max_connections_per_client` announces itself
@@ -1388,7 +1401,7 @@ documented spelling.
 | `refused acl` | requests answered `403` by `listen.allowed_clients` |
 | `refused capacity` | requests answered `503` because the pool was stopping or saturated |
 | `refused connections` | connections answered `503` by `http.max_connections_per_client` |
-| `timed out connections` | connections dropped by the first-request deadline |
+| `timed out connections` | connections dropped by the request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
 

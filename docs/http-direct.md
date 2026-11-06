@@ -1647,6 +1647,12 @@ What differs from a fastcgi pool:
   survives), with the query string cut off -- `%Q%q` carries it instead, exactly
   once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller
   application is always `/index.php`; here it is what the client asked for.
+- The renderer escapes the client-controlled fields: `%u`, `%r`, `%q`, `%e{VAR}`,
+  `%o{NAME}`, `%f`, `%m` and `%R`. It uses the same byte rule as the gateway access
+  log (issue #1003).
+  - A quote becomes `\"`. A backslash becomes `\\`.
+  - A control byte or DEL becomes `\?`. A space stays as it is.
+  - A byte of 0x80 or more stays as it is.
 - Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
   are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
   left at zero or `-` rather than carried over from whatever this child served

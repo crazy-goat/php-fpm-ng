@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <netinet/in.h>
 
+#include <event2/buffer.h>
 #include <event2/event.h>
 #include <event2/bufferevent.h>
 
@@ -23,7 +24,7 @@ struct fpm_direct_conn {
 	struct fpm_http_direct_conns *conns;
 	struct bufferevent *bev;	/* one reference of ours, held for the node's whole life */
 	evutil_socket_t fd;		/* -1 until the pickup pass */
-	struct event *deadline;		/* first-request deadline; freed when it is spent */
+	struct event *deadline;		/* request deadline; armed at accept and at each later request's first byte, freed with the node */
 	struct event *watch;		/* first a zero timer (fd pickup), then the EOF watcher */
 	struct sockaddr_storage peer;
 	socklen_t peer_len;
@@ -270,6 +271,9 @@ static void fpm_direct_conn_deadline_fire(evutil_socket_t fd, short what, void *
 
 	(void) fd;
 	(void) what;
+	/* Every fire is a request that started and did not finish in time: the
+	 * deadline is armed at accept, or at the first byte of a later request
+	 * (fpm_http_direct_conns_response_done()), never while a client is idle. */
 	c->conns->timed_out++;
 	/* Once per child, not once per connection: the point is that an operator
 	 * who did not expect this limit to bite finds out that it did, and a line
@@ -278,7 +282,7 @@ static void fpm_direct_conn_deadline_fire(evutil_socket_t fd, short what, void *
 	 * issue #64. */
 	if (!c->conns->said_timed_out) {
 		c->conns->said_timed_out = 1;
-		zlog(ZLOG_NOTICE, "[pool %s] dropping connections whose first request does not arrive "
+		zlog(ZLOG_NOTICE, "[pool %s] dropping connections whose request does not arrive "
 			"within http.read_timeout (%d ms); this is logged once per child",
 			c->conns->limits.pool, c->conns->limits.read_timeout_ms);
 	}
@@ -490,7 +494,7 @@ static void fpm_direct_conn_pickup(evutil_socket_t fd, short what, void *arg)
 	event_assign(c->watch, c->conns->base, c->fd, EV_READ | EV_PERSIST, fpm_direct_conn_eof, c);
 	if (event_add(c->watch, NULL) < 0) {
 		/* Without the watcher nothing would release this node before its
-		 * deadline -- and past the first request there is no deadline -- so it
+		 * deadline -- and between requests there is no deadline -- so it
 		 * would hold its reference, its fd and its http.max_connections slot
 		 * for the life of the child. Untracked and unlimited, as on OOM. */
 		fpm_direct_conn_forget(c);
@@ -645,25 +649,28 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 		if (fpm_direct_conn_check_peer(c, 0) < 0) {
 			return -1;
 		}
+		/* Disarmed, not freed: fpm_http_direct_conns_response_done() arms it
+		 * again when this request's response ends, so the next request on the
+		 * connection has its own budget. */
 		if (c->deadline) {
-			event_free(c->deadline);
-			c->deadline = NULL;
+			event_del(c->deadline);
 		}
 		if (!conns->limits.track_live && !fpm_direct_conn_limited(conns)) {
-			/* Nothing left to track: the deadline is spent, no limit counts
-			 * this connection and no gauge reports it. The node holds a
-			 * bufferevent reference and therefore an fd, and past this point
-			 * only the sweep would give it back -- a caller with neither a
-			 * limit nor track_live has no sweep, so keeping it would leak one
-			 * descriptor per connection (pool.executor = worker,
-			 * fpm_http_direct_worker.c has no periodic tick). */
+			/* Nothing left to track: no limit counts this connection and no
+			 * gauge reports it. The node holds a bufferevent reference and
+			 * therefore an fd, and past this point only the sweep would give
+			 * it back -- a caller with neither a limit nor track_live has no
+			 * sweep, so keeping it would leak one descriptor per connection
+			 * (pool.executor = worker, fpm_http_direct_worker.c has no periodic
+			 * tick). The deadline goes with it, so a later request on such a
+			 * connection is not bounded (see fpm_http_direct_conns_response_done()). */
 			fpm_direct_conn_forget(c);
 			return 0;
 		}
 		/* The EOF watcher goes with the deadline. A persistent, level-
 		 * triggered EV_READ on a connection whose bytes evhttp may leave in
 		 * the socket -- which is what a paused read or a streaming response
-		 * does -- would spin the event loop. Past the first request the sweep
+		 * does -- would spin the event loop. Between requests the sweep
 		 * is what releases this node, one tick later at worst. */
 		event_del(c->watch);
 		c->served = 1;
@@ -677,6 +684,88 @@ int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bu
 		return 0;
 	}
 	return 0;
+}
+
+/* Arms the request deadline, as the accept path does, and as each later request does at its first byte.
+ * Returns 0 when it is armed. On failure the node goes, the same answer as on
+ * accept: without a deadline nothing ends a request that trickles. */
+static int fpm_direct_conn_arm_deadline(struct fpm_direct_conn *c)
+{
+	struct timeval deadline;
+
+	deadline.tv_sec = c->conns->limits.read_timeout_ms / 1000;
+	deadline.tv_usec = (c->conns->limits.read_timeout_ms % 1000) * 1000;
+	if (event_add(c->deadline, &deadline) < 0) {
+		fpm_direct_conn_forget(c);
+		return -1;
+	}
+	return 0;
+}
+
+/* One-shot EV_READ, armed when a response ends. It starts the deadline at the
+ * first byte of the next request, so an idle keep-alive connection has no
+ * budget running, the same as the gateway's fpm_http_client_idle_byte(). The
+ * peek does not consume anything, and evhttp keeps reading its own bytes. */
+static void fpm_direct_conn_first_byte(evutil_socket_t fd, short what, void *arg)
+{
+	struct fpm_direct_conn *c = arg;
+	char byte;
+	ssize_t n;
+
+	(void) fd;
+	(void) what;
+	if (fpm_direct_conn_abandoned(c)) {
+		fpm_direct_conn_forget(c);
+		return;
+	}
+	n = recv(c->fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+	if (n > 0) {
+		fpm_direct_conn_arm_deadline(c);
+		return;
+	}
+	if (n < 0 && fpm_direct_conn_would_block(errno)) {
+		/* Readable, but evhttp read the bytes first: the one-shot watcher has
+		 * fired for nothing, so wait for the next byte. */
+		if (event_add(c->watch, NULL) < 0) {
+			fpm_direct_conn_forget(c);
+		}
+		return;
+	}
+	/* EOF or an error: the peer is gone, and evhttp closes the connection. */
+	fpm_direct_conn_forget(c);
+}
+
+void fpm_http_direct_conns_response_done(struct fpm_http_direct_conns *conns, struct bufferevent *bev)
+{
+	struct fpm_direct_conn *c;
+
+	if (!conns || !bev || conns->limits.read_timeout_ms <= 0) {
+		return;
+	}
+	c = fpm_direct_conn_index_find(conns, bev);
+	/* Only a node that has served a request gets a new budget. Anything else
+	 * still owes its first request the one armed at accept. */
+	if (!c || !c->served || !c->deadline) {
+		return;
+	}
+	if (c->fd < 0 && fpm_direct_conn_resolve(c) < 0) {
+		fpm_direct_conn_forget(c);
+		return;
+	}
+	/* Bytes of the next request already in evhttp's input: that request has
+	 * started, so its budget starts now. The watcher would not fire for them,
+	 * because the socket is already drained. */
+	if (evbuffer_get_length(bufferevent_get_input(bev)) > 0) {
+		fpm_direct_conn_arm_deadline(c);
+		return;
+	}
+	/* Re-assigned, not re-added: a second call for the same response finds
+	 * the watcher still pending, and an event may not be assigned while it is. */
+	event_del(c->watch);
+	event_assign(c->watch, conns->base, c->fd, EV_READ, fpm_direct_conn_first_byte, c);
+	if (event_add(c->watch, NULL) < 0) {
+		fpm_direct_conn_forget(c);
+	}
 }
 
 int fpm_http_direct_conns_may_accept(struct fpm_http_direct_conns *conns)

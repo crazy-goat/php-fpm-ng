@@ -136,7 +136,8 @@ bool fpm_http_direct_header_name_ok(const char *name);
  * always NUL-terminated) with every byte outside printable US-ASCII and every
  * backslash escaped as \xNN. Truncates rather than growing, and returns `out`,
  * so it can be used inline in a log call. A `size` of 4 * max + 1 keeps all of
- * `max` bytes even when each one is escaped. */
+ * `max` bytes even when each one is escaped. A `size` of 0 writes nothing and
+ * returns a static "" instead of `out` (issue #1032). */
 const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size);
 /* Charges one emitted response header line against FPM_HTTP_HEADERS_MAX
  * and returns false when it does not fit, leaving *total unchanged. */

@@ -57,6 +57,7 @@ The script is resolved inside `chdir`; client paths never select a script.
 `PATH_INFO` carries the parsed URL path. Headers map to `HTTP_*` (except Proxy,
 which is not imported as `HTTP_PROXY`, and any header whose name contains `_`, which would collide with its `-` spelling: `X_Real_IP` must not override `X-Real-IP`); content type/length have CGI-compatible
 names. `getallheaders()` and `apache_request_headers()` read HTTP headers directly.
+They omit every header whose name contains `_`, the same as `$_SERVER` (issue #628).
 A header name longer than 1024 bytes cannot become an `HTTP_*` key and the
 request is refused with 400 rather than served with the header missing.
 

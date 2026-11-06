@@ -767,6 +767,12 @@ static ZEND_FUNCTION(fpm_direct_request_headers)
 	array_init(return_value);
 	if (fpm_direct_current && fpm_direct_current->http) {
 		for (kv = evhttp_request_get_input_headers(fpm_direct_current->http)->tqh_first; kv; kv = kv->next.tqe_next) {
+			/* Same underscore rule as the $_SERVER keys and the gateway (issue
+			 * #595). These functions read the raw headers, not the CGI keys, so
+			 * the rule must be applied here too. Issue #628. */
+			if (strchr(kv->key, '_') != NULL) {
+				continue;
+			}
 			add_assoc_string(return_value, kv->key, kv->value);
 		}
 	}

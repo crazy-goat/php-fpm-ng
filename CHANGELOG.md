@@ -16,6 +16,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 ### Fixed
 
 - `pool.type = gateway`: a client that aborted a response, or a reply that the gateway cut short after its head was sent, left the request in the gateway process: libevent detaches such a request and does not free it. Its headers and its whole body (up to `http.max_body`, 32 MiB by default) stayed in memory until the gateway restarted, so repeated aborts could exhaust the host memory. The gateway now ends the detached request when the connection closes (issue #996). New test `fpmng-http-gateway-abort-release.phpt`.
+- Reload: the exit callback of a spared reload survivor no longer deletes a queued timer from inside the timer walk. The timer frees the survivor when it next fires (hardening; the rule is in `docs/timers.md`). By code reading, a normally started master cannot reach the order that makes this a crash. Not reproduced. New test `fpmng-reload-survivor-exits-before-retire.phpt` (issue #1012).
 
 ## [0.17.2] - 2026-10-26
 

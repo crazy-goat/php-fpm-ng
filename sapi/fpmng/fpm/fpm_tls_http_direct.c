@@ -14,6 +14,9 @@
 
 #include <event2/event.h>
 #include <event2/http.h>
+#include <event2/buffer.h>
+#include <event2/bufferevent_ssl.h>
+#include <openssl/ssl.h>
 
 #include "fpm.h"
 #include "fpm_conf.h"
@@ -90,6 +93,41 @@ ev_ssize_t fpm_http_direct_tls_write(struct bufferevent *bev, short *poll_events
 void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
 {
 	fpm_tls_http_notify_written(bev);
+}
+
+/* Issue #974, the TLS half of the upgraded-WebSocket input bound. libevent's
+ * bufferevent_openssl reads at most up to the read watermark (bytes_to_read(),
+ * bufferevent_openssl.c:760-765), so it can stop inside a TLS record and leave
+ * the rest of that record in OpenSSL. Nothing reads that rest later:
+ * consider_reading() runs from be_openssl_enable() only when the bufferevent has
+ * an underlying bufferevent, and a socket bufferevent does not, so a re-enable
+ * re-adds the socket event only. The socket fd carries ciphertext and stays
+ * quiet while the peer is silent, so the bytes would wait for the next
+ * ciphertext. Copying them here, once the buffer is below the mark, lets the
+ * script read them. SSL_pending() bounds the copy to the current record, and
+ * SSL_read() asks for no more than that, so it does no network I/O and cannot
+ * consume a later record (close_notify, KeyUpdate) that libevent still has to
+ * see. */
+size_t fpm_http_direct_tls_pull_pending(struct bufferevent *bev, struct evbuffer *input)
+{
+	SSL *ssl = bufferevent_openssl_get_ssl(bev);
+	char chunk[16384];
+	size_t pulled = 0;
+	int pending;
+
+	if (!ssl) {
+		return 0;
+	}
+	while ((pending = SSL_pending(ssl)) > 0) {
+		int got = SSL_read(ssl, chunk, pending < (int) sizeof(chunk) ? pending : (int) sizeof(chunk));
+
+		if (got <= 0) {
+			break;
+		}
+		evbuffer_add(input, chunk, (size_t) got);
+		pulled += (size_t) got;
+	}
+	return pulled;
 }
 
 int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_events)

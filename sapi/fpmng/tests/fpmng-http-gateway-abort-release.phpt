@@ -20,8 +20,19 @@ require_once "fpmng-operator.inc";
  *              cuts the client connection (fpm_http_finish_truncated()).
  * Each request sends an 8 MiB body, which the gateway buffers whole before it
  * dispatches, so one leaked request costs about 8 MiB. Eight leaked requests
- * per case cost about 64 MiB of VmRSS. The limit is 16 MiB. Growth is read only
- * after connections_open is back at 0, so the close callback has run.
+ * per case cost about 64 MiB of VmRSS. Growth is read only after
+ * connections_open is back at 0, so the close callback has run.
+ *
+ * Measured on the test box (Ubuntu 26.04):
+ *   - without the fix, whole C diff reverted, 4 runs: [abort] +65592 to
+ *     +65596 kB; without the fpm_http_fcgi.c hunk only, 2 runs: [trunc]
+ *     +65576 kB;
+ *   - with the fix, 4 runs: [abort] +8220 kB each, [trunc] +0 kB.
+ * With the fix, [abort] still grows by about 8 MiB. It also grows by 8204 kB
+ * in 3 runs that wait for an idle gateway after every round, so the overlap
+ * of rounds does not cause it. The cause of the 8 MiB is not measured; a
+ * guess is allocator state. The limit of 16 MiB sits between these values:
+ * above the 8 MiB of a correct build, far below the 64 MiB of a leak.
  *
  * pm.max_children is the gateway's upstream budget for the target. An aborted
  * request keeps its upstream until its worker finishes (one second here), so

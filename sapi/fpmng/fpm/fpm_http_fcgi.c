@@ -799,9 +799,9 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
  * not free a request nobody answered (issue #996), so the close callback has
  * to: the request pointer goes to it through the client node, because
  * fpm_http_conn_free() drops c. The close callback stays registered on purpose.
- * A reply framed by Content-Length is cut short of its
- * length, a chunked one of its terminator; an HTTP/1.0 client gets a
- * close-delimited reply, which no close can mark as incomplete. */
+ * A reply framed by Content-Length is cut short of its length, a chunked one
+ * of its terminator; an HTTP/1.0 client gets a close-delimited reply, which
+ * no close can mark as incomplete. */
 void fpm_http_finish_truncated(fpm_http_conn *c)
 {
 	struct evhttp_connection *evcon = evhttp_request_get_connection(c->req);

@@ -214,7 +214,7 @@ The layout inside a lane, and the one sentence for each part of it:
 |---|---|---|
 | `B+1 .. B+200` | the Tester's per-worker block (`tester.inc`'s `portBase()`) | the historical `9000` origin, replaced rather than shifted, so the block lands at `B` whatever `B` is |
 | `B+199` | the operator endpoint of a gateway pool that names no `operator.*_listen` | the last port of the block `getPort()` never reaches, so it cannot meet a pool listen port |
-| `B+300 .. B+438` | the http-direct tests' fixed-port family, `28054 .. 28192`, translated | the family is ~80 independent expressions; translating them as one block keeps the order they had, so two tests that do not share a port today still do not |
+| `B+300 .. B+445` | the http-direct tests' fixed-port family, `28054 .. 28199`, translated | the family is ~80 independent expressions; translating them as one block keeps the order they had, so two tests that do not share a port today still do not |
 | `B+439 .. B+999` | nothing | room for the family to grow |
 
 Five consequences, all of them deliberate:
@@ -280,7 +280,7 @@ length of the run).
 
 The addresses were the lane's own blocks and nothing else: `21001`-`21004` (the
 Tester block), `21199` (the gateway operator default), `21300`-`21438` (the
-http-direct family, the top being `fpmng-pack-run.phpt`'s 28192), and the helper
+http-direct family, the top being `fpmng-http-direct-worker-ws-input-tls.phpt`'s 28199), and the helper
 processes of the four tests listed above on ports of the same block.
 
 **Two lanes, `FPMNG_PHPT_PORT_BASE=21000` and `22000`, the whole owned suite
@@ -313,7 +313,7 @@ build/run-fpmng-phpt.sh, which lays the lane out; this runner does not use it
 
 What keeps the lane honest is `build/test-phpt-port-lane.sh` (hermetic, in the
 `checks` CI job). It re-derives the family bounds from the tests themselves, so
-a new test that picks a port outside `28054 .. 28192` fails the check instead of
+a new test that picks a port outside `28054 .. 28199` fails the check instead of
 growing silently past the lane; it fails any owned test that binds a literal TCP
 address (the places that do are `-t`-only configurations and are listed in the
 script); it drives the runner through the lane, through the `TMPDIR` it hands

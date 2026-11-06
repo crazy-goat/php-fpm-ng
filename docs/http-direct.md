@@ -779,10 +779,26 @@ Semantics worth knowing:
   EOF. `feof()` becomes true only when the peer (or the worker) actually
   closed. Read until `fread()` comes up short, the same rule every stream on
   this executor obeys.
-- **Backpressure is #332's contract**: `fwrite()` returns `0` once the
+- **Output backpressure is #332's contract**: `fwrite()` returns `0` once the
   connection's queued-but-unwritten output reaches
   `worker.send_buffer_limit`, and the write watcher wakes the codec when it
-  drains. There is no WebSocket-specific backpressure.
+  drains.
+- **Input is bounded at 64 KiB per connection** (issue #974). This limit is
+  fixed. It is not a directive. The worker keeps at most 64 KiB of unread
+  input for each upgraded connection. At this bound the worker stops reading
+  the socket, and the peer sees TCP backpressure. Reading resumes when `fread()`
+  drains the buffer below the bound, on plaintext and on TLS.
+  On TLS, the buffer can exceed the bound by libevent's read slack (the space
+  that `evbuffer_reserve_space()` returns beyond the requested length,
+  `bufferevent_openssl.c:597-608`) plus at most one TLS record (16 KiB). No
+  maximum is measured. The TLS test `fpmng-http-direct-worker-ws-input-tls.phpt`
+  checks that every byte arrives. It does not check the bound.
+  A frame larger than 64 KiB is not an error. But the buffer never holds the
+  whole frame at once, so the codec must keep the partial frame in PHP memory
+  between `fread()` calls. The socket does not signal the bytes that are
+  already in the buffer, so the codec must read until `fread()` returns `''`.
+  The cost is at most 64 KiB for each open WebSocket, plus the TLS overshoot described above.
+  This cost is not measured under load.
 - **The hijacked connection is not a pending request**: `worker.max_pending`
   and `worker.request_timeout` do not bound it; it counts towards
   `pm.max_requests` like any answered request. `http.read_timeout` no longer

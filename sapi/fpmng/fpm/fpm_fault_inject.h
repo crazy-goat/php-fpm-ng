@@ -15,8 +15,13 @@
    HOW. A call site asks FPM_FAULT_POINT("name"); it is true when the
    environment variable FPMNG_FAULT selects that point:
 
-       FPMNG_FAULT=<point>[:ifenv=<VAR>][,<point>...]
+       FPMNG_FAULT=<point>[:ifenv=<VAR>|:times=<N>][,<point>...]
 
+   `times=N` arms the point for its first N hits only: the next hit does not
+   fail, so one process can see a failure and then a normal call. It is what a
+   test uses when the process must keep serving after the injected failure.
+   Its counter is a volatile sig_atomic_t, one per entry, that only the hit
+   path decrements; the same entry is not combined with `ifenv=`.
    `ifenv=VAR` arms the point only in a process whose environment has VAR set.
    It is what lets one test fail the NEW master and not the first one: the
    exec'd master inherits the environment of the old one, so the variable
@@ -60,6 +65,11 @@
                            Only an invalid Status reaches it; the 502 has no body.
      http_reply_chunk      fpm_http_response_chunk(): evbuffer_new() for a body piece
                            fails (issue #967). Every piece hits it; the reply is cut.
+     tls_ssl_new           fpm_tls_http_bevcb(): SSL_new() fails (issue #1001). The
+                           connection is refused, never served in cleartext. Used with
+                           `:times=N` by the fail-closed tests.
+     tls_bev_new           fpm_tls_http_bevcb(): bufferevent_openssl_socket_new() fails
+                           (issue #1001). Same outcome as tls_ssl_new.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

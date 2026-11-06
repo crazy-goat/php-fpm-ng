@@ -530,8 +530,12 @@ A binary built with `FPMNG_FAULT_INJECT=1` (`build/libphp-build.sh`;
 site fail when the environment variable `FPMNG_FAULT` selects it:
 
 ```
-FPMNG_FAULT=<point>[:ifenv=<VAR>][,<point>...]
+FPMNG_FAULT=<point>[:ifenv=<VAR>|:times=<N>][,<point>...]
 ```
+
+`times=N` arms the point for its first `N` hits only. The next call then
+succeeds, so one process can refuse a connection and serve the next one (the
+fail-closed TLS tests of issue #1001 use `tls_ssl_new:times=1`).
 
 `ifenv=VAR` arms the point only in a process whose environment has `VAR` set.
 The exec'd master of a reload inherits the environment of the old one, so the

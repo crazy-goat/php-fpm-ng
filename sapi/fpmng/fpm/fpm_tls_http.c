@@ -30,8 +30,11 @@
 #include <openssl/pem.h>
 #include <openssl/rand.h>
 #include <event2/buffer.h>
+#include <event2/bufferevent.h>
 #include <event2/bufferevent_ssl.h>
 
+#include "fpm.h"
+#include "fpm_fault_inject.h"
 #include "zlog.h"
 
 /* Slurps a whole file into a malloc'd, NUL-terminated buffer. Never logs the
@@ -1012,12 +1015,53 @@ int fpm_tls_http_shutdown_step(struct bufferevent *bev, short *poll_events)
 	return FPM_TLS_HTTP_SHUTDOWN_FAILED;
 }
 
+/* A bufferevent that makes evhttp drop the connection without reading it.
+ * It must not be NULL: evhttp takes NULL as "no bufferevent from the bevcb"
+ * and builds a plain socket one (libevent 2.1.12 http.c:4250-4251 and
+ * :2405-2406), which would serve cleartext HTTP on a TLS port.
+ *
+ * A pair has no ctrl, so bufferevent_setfd() fails on it, and evhttp takes its
+ * error path (http.c, evhttp_connection_base_bufferevent_new(), the goto err
+ * after bufferevent_setfd()). The caller then closes the descriptor once
+ * (http.c:4330, evhttp_get_request()). CLOSE_ON_FREE makes evhttp_connection_free()
+ * leave the descriptor alone, so it is not closed twice. */
+static struct bufferevent *fpm_tls_http_refused_bev(struct event_base *base)
+{
+	struct bufferevent *pair[2];
+
+	if (bufferevent_pair_new(base, BEV_OPT_CLOSE_ON_FREE, pair) != 0) {
+		/* Out of memory, and no bufferevent is left that can refuse the
+		 * connection. NULL would serve it in cleartext, so the child exits
+		 * instead; the master starts a new one. */
+		zlog(ZLOG_ERROR, "tls: cannot refuse a TLS connection (out of memory): exiting rather than serving it in cleartext");
+		exit(FPM_EXIT_SOFTWARE);
+	}
+	/* Freeing the partner unlinks it (libevent bufferevent_pair.c:264-274);
+	 * pair[0] is returned and evhttp frees it. */
+	bufferevent_free(pair[1]);
+	return pair[0];
+}
+
 struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg)
 {
 	SSL_CTX *ctx = arg;
-	SSL *ssl = SSL_new(ctx);
+	SSL *ssl = FPM_FAULT_POINT("tls_ssl_new") ? NULL : SSL_new(ctx);
+	struct bufferevent *bev = NULL;
 
-	return bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE);
+	if (ssl) {
+		if (FPM_FAULT_POINT("tls_bev_new")) {
+			/* libevent frees the SSL itself when it fails (bufferevent_openssl.c:1483).
+			 * This fault skips the call, so the SSL is freed here. */
+			SSL_free(ssl);
+		} else {
+			bev = bufferevent_openssl_socket_new(base, -1, ssl, BUFFEREVENT_SSL_ACCEPTING, BEV_OPT_CLOSE_ON_FREE);
+		}
+	}
+	if (!bev) {
+		zlog(ZLOG_WARNING, "tls: cannot set up a TLS connection: the connection is refused, not served in cleartext");
+		bev = fpm_tls_http_refused_bev(base);
+	}
+	return bev;
 }
 
 #endif /* HAVE_FPM_HTTP_TLS */

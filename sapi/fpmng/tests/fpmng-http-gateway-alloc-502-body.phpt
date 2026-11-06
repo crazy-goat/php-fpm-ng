@@ -87,9 +87,12 @@ $body = substr($reply, (int) strpos($reply, "\r\n\r\n") + 4);
 check($body === "0\r\n\r\n", 'the 502 is not a clean empty chunked reply: ' . var_export($body, true));
 echo "502 without body: ok\n";
 
-$errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), "/invalid Status 'abc'/");
+$errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), "/cannot allocate the body of the 502/");
 check(preg_match("/WARNING: \[pool gw\] http: upstream sent invalid Status 'abc'/", $errors) === 1,
     "no WARNING for the invalid Status:\n$errors");
+check(preg_match('/WARNING: \[pool gw\] http: cannot allocate the body of the 502/', $errors) === 1,
+    "no WARNING for the 502 body:\n$errors");
+check(!preg_match('/killed by signal|respawning/', $errors), "the gateway crashed:\n$errors");
 echo "warning: ok\n";
 
 $tester->terminate();

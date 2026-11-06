@@ -178,7 +178,12 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len)
 	 * cut by fpm_http_finish() when the upstream is done, not here: that cut
 	 * frees c, and the callers of this function still use it. The pieces that
 	 * follow are dropped, and they are not counted in bytes_out, because they
-	 * never reached libevent. */
+	 * never reached libevent. The cost of the deferral: a streaming upstream
+	 * (SSE, a long download) keeps producing, so http.upstream_read_timeout
+	 * never fires. The client gets nothing more, and the gateway holds the
+	 * upstream slot and reads the body only to drop it, until the upstream
+	 * ends. The path is out-of-memory only, so a prompt cut (a zero-delay
+	 * timer) is left for a follow-up. */
 	if (c->chunk_lost) {
 		return;
 	}

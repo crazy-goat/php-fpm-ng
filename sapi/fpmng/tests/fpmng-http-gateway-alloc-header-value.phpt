@@ -90,6 +90,7 @@ echo "502: ok\n";
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/cannot copy an upstream header/');
 check(preg_match('/WARNING: \[pool gw\] http: cannot copy an upstream header/', $errors) === 1,
     "no WARNING that names the pool:\n$errors");
+check(!preg_match('/killed by signal|respawning/', $errors), "the gateway crashed:\n$errors");
 echo "warning: ok\n";
 
 $tester->terminate();

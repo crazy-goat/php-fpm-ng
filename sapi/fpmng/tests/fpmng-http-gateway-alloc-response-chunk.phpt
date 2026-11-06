@@ -22,13 +22,14 @@ function check(bool $condition, string $message): void
     if (!$condition) throw new RuntimeException($message);
 }
 
-function fetch(string $addr, string $path): string
+function fetch(string $addr, string $path, ?bool &$timed_out = null): string
 {
     $fp = stream_socket_client("tcp://$addr", $errno, $error, 5);
     check($fp !== false, "connect to $addr failed: $error");
     stream_set_timeout($fp, 5);
     fwrite($fp, "GET $path HTTP/1.1\r\nHost: alloc.test\r\nConnection: close\r\n\r\n");
     $reply = stream_get_contents($fp);
+    $timed_out = stream_get_meta_data($fp)['timed_out'];
     fclose($fp);
     return (string) $reply;
 }
@@ -79,7 +80,11 @@ $tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
 $http = $tester->getAddr('ipv4', '[http]');
 
-$reply = fetch($http, '/s.php');
+$reply = fetch($http, '/s.php', $timed_out);
+/* A reply that is cut lets the gateway close the connection. A connection
+ * that stays open until the 5 s stream timeout returns '' too, so the test
+ * also requires that the read did not time out. */
+check(!$timed_out, 'the connection stayed open until the read timed out: the reply was not cut');
 /* The head may be lost too: shutdown() drops the output libevent has not
  * written yet (issue #635), and the head is written in the same pass as the
  * lost piece. Either way the client gets no complete reply. */
@@ -92,6 +97,7 @@ echo "cut without terminator: ok\n";
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/cannot buffer a response chunk/');
 check(preg_match('/WARNING: \[pool gw\] http: cannot buffer a response chunk/', $errors) === 1,
     "no WARNING that names the pool:\n$errors");
+check(!preg_match('/killed by signal|respawning/', $errors), "the gateway crashed:\n$errors");
 echo "warning: ok\n";
 
 $tester->terminate();

@@ -11,7 +11,7 @@ fpmng_skip_if_pool_type_unsupported('gateway');
 require_once "tester.inc";
 
 /* Issue #967. fpm_http_start_reply() copies every upstream header line with
- * strndup(). The fault point http_reply_header_dup makes that copy of the
+ * strndup(). The fault point http_reply_name_dup makes that copy of the
  * NAME fail, as an out-of-memory would. Before the fix the NULL key reached
  * strcasecmp() and the gateway died on SIGSEGV. Now the reply is a 502 with the
  * upstream's headers and body dropped, and one WARNING names the pool. */
@@ -74,7 +74,7 @@ EOT;
 $tester = new FPM\Tester($cfg);
 @unlink($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR));
 $tester->start([], false, false, [], [], array_merge(getenv(), [
-    'FPMNG_FAULT' => 'http_reply_header_dup',
+    'FPMNG_FAULT' => 'http_reply_name_dup',
 ]));
 $tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
@@ -90,6 +90,7 @@ echo "502: ok\n";
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/cannot copy an upstream header/');
 check(preg_match('/WARNING: \[pool gw\] http: cannot copy an upstream header/', $errors) === 1,
     "no WARNING that names the pool:\n$errors");
+check(!preg_match('/killed by signal|respawning/', $errors), "the gateway crashed:\n$errors");
 echo "warning: ok\n";
 
 $tester->terminate();

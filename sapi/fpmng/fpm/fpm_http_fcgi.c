@@ -413,10 +413,11 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	 * one record. Latent until issue #117 made a 64 KiB header block a
 	 * supported input; measured on 192.168.8.50, 2026-09-09: a 65000-byte
 	 * block produced PARAMS(65083), PARAMS(898), PARAMS(0) with BEGIN_REQUEST
-	 * in the middle. The one thing that can still fail after this point is the
-	 * oversized-pair check below, and that path frees the connection with
-	 * c->out unsent (fpm_http_request() -> fpm_http_conn_free()), so a
-	 * half-built buffer never reaches a worker.
+	 * in the middle. Two things can still fail after this point: the
+	 * oversized-pair check below, and the copy of the Host header for
+	 * SERVER_NAME (issue #967). Both paths free the connection with c->out
+	 * unsent (fpm_http_request() -> fpm_http_conn_free()), so a half-built
+	 * buffer never reaches a worker.
 	 *
 	 * The PARAMS records themselves are still assembled in c->params and
 	 * appended below, because the last one is only complete at the end. */
@@ -451,7 +452,8 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 		/* Issue #967: a request without SERVER_NAME is not forwarded. The worker
 		 * builds its URLs from that variable, so a missing one would be a wrong
 		 * answer, not a smaller one (see the comment on SERVER_ADDR below). 503
-		 * is the same answer as a full pool, and the client may retry. */
+		 * is the status of a transient gateway-side failure, and the client may
+		 * retry. */
 		if (!server_name) {
 			zlog(ZLOG_WARNING, "[pool %s] http: cannot copy the Host header (out of memory), answering 503",
 					c->gw->pool);
@@ -668,7 +670,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				v++;
 				vlen--;
 			}
-			key = FPM_FAULT_POINT("http_reply_header_dup") ? NULL : strndup(line, klen);
+			key = FPM_FAULT_POINT("http_reply_name_dup") ? NULL : strndup(line, klen);
 			value = key && !FPM_FAULT_POINT("http_reply_value_dup") ? strndup(v, vlen) : NULL;
 			if (!key || !value) {
 				/* Issue #967: a failed copy is the out-of-memory case of

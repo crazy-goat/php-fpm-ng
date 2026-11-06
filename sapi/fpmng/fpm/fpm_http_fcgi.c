@@ -70,6 +70,7 @@
 #include "zlog.h"
 
 #include "fpm_http_internal.h"
+#include "fpm_fault_inject.h"
 
 /* ---------------------------------------------------------------- FastCGI encoding */
 
@@ -445,8 +446,18 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	free(decoded);
 
 	if (host) {
-		char *server_name = strdup(host), *colon = strrchr(server_name, ':');
+		char *server_name = FPM_FAULT_POINT("http_request_server_name") ? NULL : strdup(host), *colon;
 
+		/* Issue #967: a request without SERVER_NAME is not forwarded. The worker
+		 * builds its URLs from that variable, so a missing one would be a wrong
+		 * answer, not a smaller one (see the comment on SERVER_ADDR below). 503
+		 * is the same answer as a full pool, and the client may retry. */
+		if (!server_name) {
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot copy the Host header (out of memory), answering 503",
+					c->gw->pool);
+			return FPM_HTTP_SERVICE_UNAVAIL;
+		}
+		colon = strrchr(server_name, ':');
 		if (colon && !strchr(colon, ']')) {
 			*colon = '\0';
 		}
@@ -657,8 +668,21 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				v++;
 				vlen--;
 			}
-			key = strndup(line, klen);
-			value = strndup(v, vlen);
+			key = FPM_FAULT_POINT("http_reply_header_dup") ? NULL : strndup(line, klen);
+			value = key && !FPM_FAULT_POINT("http_reply_value_dup") ? strndup(v, vlen) : NULL;
+			if (!key || !value) {
+				/* Issue #967: a failed copy is the out-of-memory case of
+				 * issue #809, and it cannot be passed on: the key is used at
+				 * once (strcasecmp() below), the value by evhttp_add_header().
+				 * The reply takes the invalid_status path. The loop stops here,
+				 * because each further line needs more memory that is short. */
+				zlog(ZLOG_WARNING, "[pool %s] http: cannot copy an upstream header (out of memory), answering 502",
+						c->gw->pool);
+				free(key);
+				free(value);
+				invalid_status = true;
+				break;
+			}
 			if (strcasecmp(key, "Status") == 0) {
 				/* Issue #605: a bad value is rejected with 502 through
 				 * invalid_status below, which keeps the rest of the untrusted
@@ -715,7 +739,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 		 * request stays alive until then (an evhttp_send_error() here would
 		 * complete it while the upstream is still talking). Mapping to 500
 		 * instead is a maintainer decision (issue #594). */
-		struct evbuffer *msg = evbuffer_new();
+		struct evbuffer *msg = FPM_FAULT_POINT("http_reply_502_body") ? NULL : evbuffer_new();
 
 		evhttp_clear_headers(out);
 		evhttp_add_header(out, "Content-Type", "text/plain");
@@ -723,10 +747,18 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
 		}
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
-		evbuffer_add_printf(msg, "Bad Gateway\n");
-		c->bytes_out += evbuffer_get_length(msg);
-		evhttp_send_reply_chunk(c->req, msg);
-		evbuffer_free(msg);
+		/* Issue #967: without the body buffer the 502 goes out with an empty
+		 * chunked body, which fpm_http_finish() ends like any other reply. The
+		 * body is not worth a second failure, and the status is what matters. */
+		if (msg) {
+			evbuffer_add_printf(msg, "Bad Gateway\n");
+			c->bytes_out += evbuffer_get_length(msg);
+			evhttp_send_reply_chunk(c->req, msg);
+			evbuffer_free(msg);
+		} else {
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot allocate the body of the 502 (out of memory), answering 502 without it",
+					c->gw->pool);
+		}
 		free(reason);
 		c->headers_sent = 1;
 		c->discard_upstream = 1;
@@ -862,6 +894,12 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * END_REQUEST behind it finish the request in the same read; nothing would
 	 * re-arm the read event of an upstream that has no idle timeout. */
 	fpm_http_response_resume(c);
+	/* Issue #967: a body piece was lost (fpm_http_response_chunk()). The head
+	 * is out, so the reply is cut, as in issue #533, and not terminated. */
+	if (c->chunk_lost) {
+		fpm_http_finish_truncated(c);
+		return;
+	}
 	if (c->headers_sent) {
 		/* The reply is under way and is ended below, once c is gone. */
 	} else if (c->cgi_headers.s) {

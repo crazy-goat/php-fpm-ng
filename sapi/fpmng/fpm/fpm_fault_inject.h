@@ -46,6 +46,20 @@
                            poll only skips its check. It writes one hit line per tick
                            (200 ms). The survivor can then exit on its own first (issue
                            #1012). Runs in the new master only, every poll tick.
+     http_request_server_name  fpm_http_build_request(): strdup() of the Host header
+                           for SERVER_NAME fails (issue #967). Every request with a
+                           Host header hits it; the request gets a 503.
+     http_reply_header_dup fpm_http_start_reply(): strndup() of an upstream header
+                           NAME fails (issue #967). Every header line hits it; the
+                           reply gets a 502.
+     http_reply_value_dup  fpm_http_start_reply(): strndup() of an upstream header
+                           VALUE fails (issue #967). Every header line hits it; the
+                           reply gets a 502.
+     http_reply_502_body   fpm_http_start_reply(): evbuffer_new() for the body of the
+                           502 that an invalid upstream Status sends fails (issue #967).
+                           Only an invalid Status reaches it; the 502 has no body.
+     http_reply_chunk      fpm_http_response_chunk(): evbuffer_new() for a body piece
+                           fails (issue #967). Every piece hits it; the reply is cut.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

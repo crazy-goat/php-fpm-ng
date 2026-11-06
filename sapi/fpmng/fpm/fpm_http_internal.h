@@ -418,6 +418,11 @@ struct fpm_http_client_s {
 	struct fpm_http_gateway_s *gw;
 	struct evhttp_connection *evcon;
 	fpm_http_conn *c;
+	/* Issue #996: a request whose state fpm_http_finish_truncated() freed while
+	 * it was still attached to this connection. Nothing else holds it, so the
+	 * close callback must end it: libevent detaches it and never frees it. NULL
+	 * otherwise. */
+	struct evhttp_request *req;
 	/* Issue #642: stamped in fpm_http_client_request_begin() for the request
 	 * in flight on this connection -- the start of the access log's
 	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves

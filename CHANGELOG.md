@@ -13,6 +13,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ## [Unreleased]
 
+### Fixed
+
+- `pool.type = gateway`: a client that aborted a response, or a reply that the gateway cut short after its head was sent, left the request in the gateway process: libevent detaches such a request and does not free it. Its headers and its whole body (up to `http.max_body`, 32 MiB by default) stayed in memory until the gateway restarted, so repeated aborts could exhaust the host memory. The gateway now ends the detached request when the connection closes (issue #996). New test `fpmng-http-gateway-abort-release.phpt`.
+
 ## [0.17.2] - 2026-10-26
 
 ### Security

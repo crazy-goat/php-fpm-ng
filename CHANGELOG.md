@@ -17,6 +17,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - `pool.type = http-direct`: the access log wrote the client-controlled fields `%u`, `%r`, `%q`, `%e`, `%o`, `%f`, `%m` and `%R` without escaping. A Basic auth user name with a line feed wrote a second, forged line (reproduced before the fix by the new test). The fields now use the escape rule of the gateway access log: a quote and a backslash get a backslash in front, and a control byte or DEL becomes `\?`. New test `fpmng-http-direct-access-log-escape.phpt` (issue #1003).
 
+### Changed
+
+- `docker/Dockerfile` pins php-fpm-ng v0.17.2 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.17.0 (issue #1041). On 2026-11-06 the master of the v0.17.2 image started on the patched `libphp8.5-embed 8.5.4-0ubuntu1.5` (issue #994), measured on one host. The v0.17.0 binary is expected to crash there. `docs/install.md` describes the image.
+
 ### Fixed
 
 - `pool.type = http-direct`: `getallheaders()` and `apache_request_headers()` returned request headers whose name contains `_` (for example `X_Custom`), while `$_SERVER` and the gateway drop them (issue #595). Both functions now omit such headers (issue #628). New test `fpmng-http-direct-getallheaders-underscore.phpt`.

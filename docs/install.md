@@ -414,14 +414,14 @@ available. Replace `<version>` with the version of that build.
 The image in `docker/` installs the distribution's libphp while it builds. A
 running container keeps the image that it started from.
 
-On 2026-10-24, `docker build --pull --no-cache` installed
-`libphp8.5-embed 8.5.4-0ubuntu1.5` with php-fpm-ng v0.17.0. The image therefore
-has the crash described above. Rebuilding picks up the patched libphp, but it
-does not change the php-fpm-ng binary. Do not treat the image as fixed until its
-pin names a php-fpm-ng build made against the patched headers
+The image pins php-fpm-ng v0.17.2. On 2026-11-06 the master of this image
+started on `libphp8.5-embed 8.5.4-0ubuntu1.5`, the patched libphp, and served a
+plain PHP request with 200. A PHP fatal error returned 500, and the container
+kept running. This was measured on one Ubuntu 26.04 host. The v0.17.0 binary
+is expected to crash on the same libphp, from the `.deb` measurements
 ([issue #994](https://github.com/crazy-goat/php-fpm-ng/issues/994)).
 
-When the pin names such a build, run these steps:
+To rebuild a running image on the current libphp:
 
 1. Run `docker build --pull --no-cache -t fpmng docker/`.
 2. Stop the running container.

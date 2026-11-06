@@ -16,6 +16,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 ### Security
 
 - `pool.type = http-direct`: the access log wrote the client-controlled fields `%u`, `%r`, `%q`, `%e`, `%o`, `%f`, `%m` and `%R` without escaping. A Basic auth user name with a line feed wrote a second, forged line (reproduced before the fix by the new test). The fields now use the escape rule of the gateway access log: a quote and a backslash get a backslash in front, and a control byte or DEL becomes `\?`. New test `fpmng-http-direct-access-log-escape.phpt` (issue #1003).
+- `pool.type = gateway`: the gateway joined a decoded request path that did not start with `/` to the document root. Such a path could name a file outside the document root. The gateway now answers 400 for it. By code reading, the router already refuses such a path, so no request reached the join on the default configuration. This is hardening (issue #997). The check is `fpm_http_decoded_path_ok()` in `sapi/fpmng/fpm/fpm_http_fcgi.c`. New fuzz harness `fuzz_decoded_path`.
 
 ### Fixed
 

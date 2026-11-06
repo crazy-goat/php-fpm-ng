@@ -288,6 +288,29 @@ const char *fpm_http_method_name(enum evhttp_cmd_type type)
 	return NULL;
 }
 
+/* Issue #997: the checks on the decoded path before fpm_http_build_request()
+ * joins it to the docroot for SCRIPT_FILENAME. The static server has its own
+ * copy of the same rules (fpm_http_static.c:107-108). A path without a leading
+ * '/' is refused: libevent parses the target with EVHTTP_URI_NONCONFORMANT, so
+ * "GET ../x.php" and "GET -old/x.php" reach this point, and their join with
+ * the docroot would name a sibling or a parent of it. The router refuses such
+ * a path first (a prefix must begin with '/', fpm_http_route.c:325, and a
+ * proxy_only gateway has no catch-all row, fpm_pool_type.c:358), so no request
+ * reaches this check today; it stays because this is the place that makes the
+ * SCRIPT_FILENAME join. A leading ".." segment needs no rule of its own: after
+ * the '/' rule, a ".." segment is always "/..", and the two rules below refuse
+ * that. The NUL rule is a length check: a %00 would end the string early. */
+static int fpm_http_decoded_path_ok(const char *decoded, size_t decoded_len)
+{
+	if (decoded_len == 0 || decoded[0] != '/' || decoded_len != strlen(decoded)) {
+		return 0;
+	}
+	if (strstr(decoded, "/../") || (decoded_len >= 3 && memcmp(decoded + decoded_len - 3, "/..", 3) == 0)) {
+		return 0;
+	}
+	return 1;
+}
+
 /* Builds BEGIN_REQUEST, PARAMS and STDIN in c->out. Returns an HTTP error code or 0.
  * script_missing_hint is fpm_http_try_local()'s realpath()/fstat() verdict on the
  * exact path this function would otherwise stat() itself (0 = exists as a regular
@@ -339,9 +362,7 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	if (!decoded) {
 		return HTTP_BADREQUEST;
 	}
-	if (decoded_len != strlen(decoded) || /* embedded NUL */
-			strstr(decoded, "/../") ||
-			(decoded_len >= 3 && memcmp(decoded + decoded_len - 3, "/..", 3) == 0)) {
+	if (!fpm_http_decoded_path_ok(decoded, decoded_len)) {
 		free(decoded);
 		return HTTP_BADREQUEST;
 	}

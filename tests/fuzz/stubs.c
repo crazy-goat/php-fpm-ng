@@ -43,6 +43,12 @@ FUZZ_STUB(fpm_http_transport_connect)
 FUZZ_STUB(fpm_http_access_log_write)
 FUZZ_STUB(fpm_http_method_name)
 FUZZ_STUB(fpm_http_build_request)
+FUZZ_STUB(fpm_http_local_addr)
+FUZZ_STUB(fpm_http_auth_parse)
+FUZZ_STUB(fpm_http_response_unpause)
+FUZZ_STUB(fpm_http_parse_cgi_status)
+FUZZ_STUB(fpm_http_response_chunk)
+FUZZ_STUB(fpm_http_log_response)
 
 /* fpm_http.c and fpm_http_static.c and the rest of the gateway */
 FUZZ_STUB(fpm_http_absolute_authority)

@@ -46,7 +46,8 @@ struct fpm_crash_backoff_entry_s {
 	/* One-shot timer that calls fpm_children_make() at gate_due. The event is
 	 * never fpm_event_del()'d: the timer walk in fpm_event_loop() keeps a pointer
 	 * to the next node, and a delete from a callback can free that node. A new
-	 * deadline is set with fpm_event_add() on the queued node instead. */
+	 * deadline is set with fpm_event_add() on the queued node instead. See
+	 * docs/timers.md. */
 	struct fpm_event_s gate_ev;
 	struct timeval gate_due;
 	int gate_armed; /* 1 while gate_ev is queued */

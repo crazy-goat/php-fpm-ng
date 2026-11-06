@@ -15,24 +15,25 @@ require_once "tester.inc";
  * tracks it: fpm_pool_supervisor_reload_survivor_track() queues poll_ev and the
  * exit callback. The fault point survivor_poll_hold keeps the poll from
  * retiring the survivor, so the survivor exits on its own first: its script
- * kills its own process with kill(1) when its pid is in the die file. The
- * master sends no signal, so this is an exit the master did not ask for. A
- * script that returns does not end the process: the copy parks in pause()
- * (fpm_pool_supervisor_park()).
+ * kills its own process with SIGKILL (exec('kill -9 ...')) when its pid is in
+ * the die file. The master sends no signal, so this is an exit the master did
+ * not ask for. A script that returns does not end the process: the copy parks
+ * in pause() (fpm_pool_supervisor_park()).
  *
- * The exit callback runs inside fpm_children_bury(), which is a timer callback.
- * It must not delete poll_ev there: fpm_event_loop() saved the queue node after
- * poll_ev before it ran the callback, and a delete frees that node. The master
- * must survive the exit and log "reload survivor pid <S> reaped" (a DEBUG line).
+ * The exit callback runs inside fpm_children_bury(), a timer callback, and it
+ * must not delete poll_ev there. fpm_event_loop() saves the node after
+ * children_bury_timer before it runs the callback (fpm_events.c:432). If that
+ * node is poll_ev, a delete frees it. The normal start path does not produce
+ * that order (docs/timers.md, "Why"), so this test does not reproduce the
+ * crash. It checks the new branch instead: the poll frees the survivor after
+ * its exit and logs "freed by its poll timer" (a DEBUG line). The old build
+ * has no such line, so the test fails on it.
  *
- * The survivor is not retired, so no "retiring reload survivor" line may appear.
+ * The master must survive the exit and log "reload survivor pid <S> reaped"
+ * (a DEBUG line). The survivor is not retired, so no "retiring reload
+ * survivor" line may appear.
  *
- * FPMNG_FAULT is set for the whole run. Only the new generation runs the poll.
- *
- * Not reproduced: the use-after-free needs poll_ev to be the queue node saved
- * after children_bury_timer (docs/timers.md). In this scenario that did not
- * happen (a probe on the old build read 0), so this test passes without the
- * bug. It guards the new behaviour: the exit callback leaves the timer alone. */
+ * FPMNG_FAULT is set for the whole run. Only the new generation runs the poll. */
 $stopTimeout = 2;
 $root = sys_get_temp_dir() . '/fpmng-surv-exits-first-' . getmypid();
 @mkdir($root, 0700, true);
@@ -149,6 +150,11 @@ try {
         "the master did not reap the survivor $survivor after its own exit");
     echo "survivor reaped: ok\n";
 
+    /* The poll runs every 200 ms and frees the survivor on its next tick. */
+    check(waitForLog($logFile, "reload survivor pid $survivor freed by its poll timer", 5),
+        "the poll timer did not free the survivor $survivor after its exit");
+    echo "poll freed it: ok\n";
+
     /* Several poll ticks (200 ms each) after the exit, the master must still run. */
     usleep(1500000);
     check(pid_alive($master), 'the master died after the survivor exited on its own');
@@ -175,6 +181,7 @@ try {
 --EXPECT--
 survivor tracked: ok
 survivor reaped: ok
+poll freed it: ok
 master alive: ok
 reaped once, not retired: ok
 Done

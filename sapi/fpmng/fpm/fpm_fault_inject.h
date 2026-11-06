@@ -42,8 +42,10 @@
                            in the new master only, before the children are adopted.
      survivor_poll_hold    fpm_pool_supervisor_reload_survivor_poll(): skips the check, so
                            a #329 survivor is not retired while the point is armed. The
-                           survivor can then exit on its own first (issue #1012). Runs
-                           in the new master only, every poll tick.
+                           point does not fail: the hit line says "fails now", but the
+                           poll only skips its check. It writes one hit line per tick
+                           (200 ms). The survivor can then exit on its own first (issue
+                           #1012). Runs in the new master only, every poll tick.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

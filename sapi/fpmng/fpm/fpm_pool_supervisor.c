@@ -322,6 +322,7 @@ struct fpm_supervisor_reload_survivor_s {
 	struct fpm_event_s kill_ev;			/* issue #890: one-shot backstop, armed by retire() */
 	int kill_armed;					/* issue #890: kill_ev is queued */
 	int reaped;					/* exited; the timer still queued (poll_ev or kill_ev) frees surv */
+	pid_t exited_pid;				/* issue #1012: the pid the exit callback saw; the poll's DEBUG line names it */
 	time_t deadline;				/* epoch; retire unconditionally past this */
 	unsigned long long start;			/* issue #891: start time of the pid, 0 = not recorded */
 };
@@ -818,12 +819,14 @@ static void fpm_pool_supervisor_reload_survivor_exited(void *arg, pid_t pid, int
 		surv->wp->config->name, (int) pid);
 	fpm_pool_supervisor_reload_survivor_unregister(surv);
 	surv->reaped = 1;
+	surv->exited_pid = pid;
 	if (surv->kill_armed || surv->poll_armed) {
 		/* Issue #1012: this callback runs inside a timer callback
 		 * (fpm_children_bury()). Deleting a queued timer here would free the
 		 * queue node that fpm_event_loop() saved as its next element before it
-		 * ran that callback (a use-after-free, issue #890 for kill_ev). The
-		 * queued timer deletes itself and frees surv when it next fires. */
+		 * ran that callback (a use-after-free; for kill_ev this was a SIGBUS in
+		 * fpm_event_loop(), PR #1011, issue #890). The queued timer deletes
+		 * itself and frees surv when it next fires. */
 		return;
 	}
 	fpm_pool_supervisor_reload_survivor_free(surv);
@@ -914,6 +917,8 @@ static void fpm_pool_supervisor_reload_survivor_poll(struct fpm_event_s *ev, sho
 	 * delete). Deleting the timer that fired is safe: fpm_event_loop() reads
 	 * only the saved next node, and not this one again. */
 	if (surv->reaped) {
+		zlog(ZLOG_DEBUG, "[pool %s] supervisor: reload survivor pid %d freed by its poll timer after its exit (issue #1012)",
+			surv->wp->config->name, (int) surv->exited_pid);
 		surv->poll_armed = 0;
 		fpm_event_del(&surv->poll_ev);
 		fpm_pool_supervisor_reload_survivor_free(surv);
@@ -1001,8 +1006,12 @@ static void fpm_pool_supervisor_reload_survivor_track(struct fpm_worker_pool_s *
 	fpm_children_extra_watch(pid, fpm_pool_supervisor_reload_survivor_exited, surv);
 
 	fpm_event_set_timer(&surv->poll_ev, FPM_EV_PERSIST, fpm_pool_supervisor_reload_survivor_poll, surv);
-	fpm_event_add(&surv->poll_ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS);
-	surv->poll_armed = 1;
+	if (fpm_event_add(&surv->poll_ev, FPM_SUPERVISOR_RELOAD_SURVIVOR_POLL_MS) == 0) {
+		surv->poll_armed = 1;
+	} else {
+		zlog(ZLOG_WARNING, "[pool %s] supervisor: cannot queue the poll of reload survivor pid %d; "
+			"this generation does not retire it", wp->config->name, (int) pid);
+	}
 	/* Initialised here. retire() queues it. It stays queued until it fires,
 	 * even if the survivor exits first, because the exit callback must not
 	 * delete it (issue #890): the backstop frees a reaped survivor. */

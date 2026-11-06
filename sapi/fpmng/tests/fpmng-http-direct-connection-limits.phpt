@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: direct HTTP bounds the first request in time and the connections per worker (issue #61)
+fpm-ng: direct HTTP bounds each request in time and the connections per worker (issue #61)
 --SKIPIF--
 <?php include "skipif.inc"; ?>
 --FILE--
@@ -9,7 +9,8 @@ require_once "tester.inc";
 /* Issue #61. Three policies, one pool each, because each of them is only
  * observable when the others are off:
  *
- * - [deadline] http.read_timeout as an absolute budget for the first request.
+ * - [deadline] http.read_timeout as an absolute budget for each request, counted
+ *   from its first byte.
  *   evhttp_set_timeout_tv() alone is an idle timeout that every arriving byte
  *   resets, so before this issue a client trickling one byte at a time held a
  *   direct connection for as long as it liked. Measured on the poligon
@@ -51,6 +52,7 @@ pm.max_children = 2
 chdir = $root
 http.front_controller = /front.php
 http.read_timeout = $readTimeoutMs
+ping.path = /ping
 [total]
 listen = 127.0.0.1:$totalPort
 pool.type = http-direct
@@ -103,6 +105,21 @@ function statusLine($fp, float $seconds): string
     }
     $line = fgets($fp);
     return $line === false ? '' : rtrim($line, "\r\n");
+}
+
+/* Reads one response with a Content-Length body, through the blank line that
+ * ends its header. */
+function readResponse($fp): void
+{
+    $length = 0;
+    while (($line = fgets($fp)) !== false && $line !== "\r\n") {
+        if (stripos($line, 'Content-Length:') === 0) {
+            $length = (int) substr($line, strlen('Content-Length:'));
+        }
+    }
+    if ($length > 0) {
+        fread($fp, $length);
+    }
 }
 
 /* Writes one byte at a time until the peer goes away, and reports how long
@@ -162,6 +179,60 @@ try {
     }
     fclose($fp);
     echo "keep-alive unaffected: ok\n";
+
+    /* 3b. The budget applies to a later request on a keep-alive connection,
+     * not only to the first. The first request is answered; the second one is
+     * a header that never ends, a byte at a time, with the pause under half of
+     * http.read_timeout. evhttp's idle timeout alone is reset by every byte,
+     * so without the deadline re-armed when the first response ended this
+     * connection would be held for all forty of them. */
+    $fp = connect($deadlinePort);
+    fwrite($fp, "GET /app HTTP/1.1\r\nHost: t\r\n\r\n");
+    expect('keep-alive before trickle', statusLine($fp, 5), 'HTTP/1.1 200 OK');
+    while (($line = fgets($fp)) !== false && $line !== "\r\n") {
+    }
+    fread($fp, 2);
+    fwrite($fp, "GET /app HTTP/1.1\r\nHost: t\r\n");
+    $held = dripUntilDropped($fp, str_repeat('a', 40), $readTimeoutMs / 2000);
+    fclose($fp);
+    if ($held < 0 || $held > 4 * $readTimeoutMs / 1000) {
+        throw new RuntimeException("later request on keep-alive: held for {$held}s");
+    }
+    echo "later request dropped: ok\n";
+
+    /* 3c. A response that does not come from PHP still ends a request. ping.path
+     * is answered before the request reaches PHP, and the budget for the next
+     * request on that connection must start anyway. */
+    $fp = connect($deadlinePort);
+    fwrite($fp, "GET /ping HTTP/1.1\r\nHost: t\r\n\r\n");
+    expect('ping before trickle', statusLine($fp, 5), 'HTTP/1.1 200 OK');
+    readResponse($fp);
+    fwrite($fp, "GET /app HTTP/1.1\r\nHost: t\r\n");
+    $held = dripUntilDropped($fp, str_repeat('a', 40), $readTimeoutMs / 2000);
+    fclose($fp);
+    if ($held < 0 || $held > 4 * $readTimeoutMs / 1000) {
+        throw new RuntimeException("request after ping: held for {$held}s");
+    }
+    echo "ping then trickle dropped: ok\n";
+
+    /* 3d. The budget starts at the first byte of the next request, not at the
+     * end of the previous response. The connection sits idle for 0.7 s, then a
+     * POST with a 20-byte body arrives over 0.6 s. Idle and transfer together
+     * are longer than http.read_timeout, but the transfer alone is not, so the
+     * request must be served. The idle time is under http.read_timeout, so
+     * evhttp's own idle timeout does not close the connection first. */
+    $fp = connect($deadlinePort);
+    fwrite($fp, "GET /app HTTP/1.1\r\nHost: t\r\n\r\n");
+    expect('idle before request', statusLine($fp, 5), 'HTTP/1.1 200 OK');
+    readResponse($fp);
+    usleep(700000);
+    fwrite($fp, "POST /app HTTP/1.1\r\nHost: t\r\nContent-Length: 20\r\n\r\n");
+    if (dripUntilDropped($fp, str_repeat('x', 20), 0.03) >= 0) {
+        throw new RuntimeException('idle then request: connection dropped while sending');
+    }
+    expect('idle then request', statusLine($fp, 5), 'HTTP/1.1 200 OK');
+    fclose($fp);
+    echo "idle then request served: ok\n";
 
     /* 4. http.max_connections. The third connection is neither answered nor
      * refused: it stays in the accept queue, which is the documented refusal
@@ -238,6 +309,9 @@ try {
 slow header dropped: ok
 slow body dropped: ok
 keep-alive unaffected: ok
+later request dropped: ok
+ping then trickle dropped: ok
+idle then request served: ok
 total limit reached: ok
 total limit releases: ok
 per-client cap enforced: ok

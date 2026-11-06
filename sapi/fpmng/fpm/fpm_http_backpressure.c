@@ -55,6 +55,7 @@
 
 #include "fpm_http_internal.h"
 #include "zlog.h"
+#include "fpm_fault_inject.h"
 
 /* evhttp has written everything of this client's output: the upstream may be
  * read again. `arg` is the connection's node, which outlives every write
@@ -168,10 +169,35 @@ void fpm_http_response_resume(fpm_http_conn *c)
 
 void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len)
 {
-	struct evbuffer *chunk = evbuffer_new();
+	struct evbuffer *chunk;
 	struct fpm_http_client_s *cl = c->client;
 
-	evbuffer_add(chunk, data, len);
+	/* Issue #967: the head is already on the wire, so a lost piece cannot be
+	 * sent around and the reply cannot end normally: its terminating chunk
+	 * would make a truncated body look complete (issue #533). The reply is
+	 * cut by fpm_http_finish() when the upstream is done, not here: that cut
+	 * frees c, and the callers of this function still use it. The pieces that
+	 * follow are dropped, and they are not counted in bytes_out, because they
+	 * never reached libevent. The cost of the deferral: a streaming upstream
+	 * (SSE, a long download) keeps producing, so http.upstream_read_timeout
+	 * never fires. The client gets nothing more, and the gateway holds the
+	 * upstream slot and reads the body only to drop it, until the upstream
+	 * ends. The path is out-of-memory only, so a prompt cut (a zero-delay
+	 * timer) is left for a follow-up. */
+	if (c->chunk_lost) {
+		return;
+	}
+	chunk = FPM_FAULT_POINT("http_reply_chunk") ? NULL : evbuffer_new();
+	if (!chunk || evbuffer_add(chunk, data, len) < 0) {
+		if (chunk) {
+			evbuffer_free(chunk);
+		}
+		zlog(ZLOG_WARNING, "[pool %s] http: cannot buffer a response chunk (out of memory); the reply is cut short "
+						   "and the connection closed without its terminating chunk",
+				c->gw->pool);
+		c->chunk_lost = 1;
+		return;
+	}
 	/* The callback also fires on every drain while nothing is paused; it then
 	 * finds read_paused clear and does nothing. Passed on every piece, not
 	 * only on the one that crosses the limit, because the next plain

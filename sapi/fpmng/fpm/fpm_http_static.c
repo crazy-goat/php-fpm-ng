@@ -279,7 +279,15 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 		return 1;
 	}
 
-	fd = open(resolved, O_RDONLY | O_CLOEXEC);
+	/* O_NONBLOCK: open() of a FIFO with no writer waits for one, and the
+	 * gateway runs every client on one event loop, so a FIFO in the docroot
+	 * froze all of them (issue #1008). The S_ISREG test below runs on the
+	 * descriptor, so the check is race-free: a path swapped for a FIFO after
+	 * realpath() still opens without waiting, and is then refused. O_NOCTTY
+	 * keeps a terminal device from becoming this process's controlling tty.
+	 * O_NONBLOCK is not cleared afterwards: open(2) says it has no effect on
+	 * regular files, and clearing it would cost two fcntl() calls per hit. */
+	fd = open(resolved, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
 	if (fd < 0) {
 		return 0;
 	}

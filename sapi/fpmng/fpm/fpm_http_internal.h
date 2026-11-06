@@ -895,7 +895,7 @@ struct _fpm_http_conn {
 	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* effective REMOTE_ADDR: fwd.remote_addr or peer_addr */
 	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
 	int status;						/* HTTP status finally sent, -1 until known; for the access log */
-	size_t bytes_out;					/* body bytes sent to the client, for the access log. The gateway's own 502 bodies count (issue #858); the body of a 504 and of the ping and ACME replies is still 0 (not counted yet) */
+	size_t bytes_out;					/* body bytes for the access log. The 502s the gateway writes itself count their body (issue #858), 0 for HEAD. A proxied HEAD reply counts the upstream body length, though no body is sent. Every other reply written with evhttp_send_error() (the 504, the ping, ACME and OOM 502s) still counts 0 */
 
 	/* http.pool_full_policy = wait (issue #309). All three are dead unless
 	 * the pool opted in: when this request was put on gw->waiting, the

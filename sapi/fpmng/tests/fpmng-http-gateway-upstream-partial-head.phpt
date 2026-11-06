@@ -95,12 +95,18 @@ function client_send(string $request): void
     }
 }
 
-/** Length of the first complete response in $b, or null when more bytes are needed. */
-function framed_length(string $b): ?int
+/**
+ * Length of the first complete response in $b, or null when more bytes are needed.
+ * A HEAD reply ends with its head: it carries no body, whatever its headers say.
+ */
+function framed_length(string $b, bool $isHead = false): ?int
 {
     $p = strpos($b, "\r\n\r\n");
     if ($p === false) {
         return null;
+    }
+    if ($isHead) {
+        return $p + 4;
     }
     $head = substr($b, 0, $p);
     $off = $p + 4;
@@ -128,12 +134,12 @@ function framed_length(string $b): ?int
 }
 
 /** The next complete response on the client connection. */
-function client_read(float $seconds = 6.0): string
+function client_read(float $seconds = 6.0, bool $isHead = false): string
 {
     $sock = $GLOBALS['client'];
     $deadline = microtime(true) + $seconds;
     while (microtime(true) < $deadline) {
-        $len = framed_length($GLOBALS['client_buf']);
+        $len = framed_length($GLOBALS['client_buf'], $isHead);
         if ($len !== null) {
             $out = substr($GLOBALS['client_buf'], 0, $len);
             $GLOBALS['client_buf'] = substr($GLOBALS['client_buf'], $len);
@@ -464,7 +470,7 @@ $u = upstream();
 check($u !== null, 'the gateway dialled nothing for the HEAD case');
 upstream_read($u);
 fclose($u);
-$resp = client_read();
+$resp = client_read(6.0, true);
 check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'HEAD no answer: not a 502', $resp);
 check(body($resp) === '', 'HEAD no answer: a body on the wire', $resp);
 $acc = wait_access('/"HEAD \/f\.php HTTP\/1\.1" 502 \d+ /');
@@ -472,6 +478,23 @@ check($acc !== null, 'HEAD no answer: the access log does not say 502');
 preg_match('/"HEAD \/f\.php HTTP\/1\.1" 502 (\d+) /', $acc, $m);
 check((int) $m[1] === 0, 'HEAD no answer: access log counts ' . $m[1] . ' bytes, want 0', $resp);
 echo "head-no-answer: 502 without body\n";
+
+/* ---- 7: HEAD with an invalid Status: libevent drops the chunk, so 0 bytes -- */
+client_open(true);
+client_send("HEAD /g.php HTTP/1.1\r\nHost: t\r\n\r\n");
+$u = upstream();
+check($u !== null, 'the gateway dialled nothing for the HEAD invalid-Status case');
+upstream_read($u);
+fwrite($u, fcgi_record(FCGI_STDOUT, "Status: abc\r\nContent-Type: text/plain\r\n\r\nhello")
+    . fcgi_record(FCGI_END_REQUEST, fcgi_end()));
+$resp = client_read(6.0, true);
+check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'HEAD invalid Status: not a 502', $resp);
+check(body($resp) === '', 'HEAD invalid Status: a body on the wire', $resp);
+$acc = wait_access('/"HEAD \/g\.php HTTP\/1\.1" 502 \d+ /');
+check($acc !== null, 'HEAD invalid Status: the access log does not say 502');
+preg_match('/"HEAD \/g\.php HTTP\/1\.1" 502 (\d+) /', $acc, $m);
+check((int) $m[1] === 0, 'HEAD invalid Status: access log counts ' . $m[1] . ' bytes, want 0', $resp);
+echo "head-invalid-status: 502 without body\n";
 
 fclose($server);
 $tester->terminate();
@@ -490,6 +513,7 @@ complete-header-block: served
 invalid-status: 502
 no-answer: 502
 head-no-answer: 502 without body
+head-invalid-status: 502 without body
 Done
 --CLEAN--
 <?php

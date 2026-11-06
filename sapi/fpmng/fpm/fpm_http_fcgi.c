@@ -775,7 +775,11 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 		 * body is not worth a second failure, and the status is what matters. */
 		if (msg) {
 			evbuffer_add(msg, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN);
-			c->bytes_out += evbuffer_get_length(msg);
+			/* Issue #858: libevent drops the chunk of a HEAD reply, so the body is
+			 * counted only when it goes on the wire. */
+			if (evhttp_request_get_command(c->req) != EVHTTP_REQ_HEAD) {
+				c->bytes_out += evbuffer_get_length(msg);
+			}
 			evhttp_send_reply_chunk(c->req, msg);
 			evbuffer_free(msg);
 		} else {
@@ -969,13 +973,22 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		bad_gateway = 1;
 	}
 	if (bad_gateway) {
+		struct evkeyvalq *out = evhttp_request_get_output_headers(req);
+
 		c->status = FPM_HTTP_BAD_GATEWAY;
 		/* Issue #858: the body is built now, so the access log line counts
 		 * what goes out. evhttp_send_error() wrote libevent's HTML page, whose
 		 * length the gateway cannot read back, and the line said 0. A HEAD
 		 * reply gets no body: evhttp_send_reply() would write one anyway (not
 		 * a HEAD-aware send in this libevent), so none is passed. If the buffer
-		 * cannot be allocated the 502 goes out with no body, counted as 0. */
+		 * cannot be allocated the 502 goes out with no body, counted as 0.
+		 * The headers belong to req, not to c, so they are set here, before
+		 * fpm_http_conn_free(c) (issue #882 reads the request id before that
+		 * free). They are the headers evhttp_send_error() used to set: its HTML
+		 * page is gone, so the close it implied is written out too. */
+		evhttp_clear_headers(out);
+		evhttp_add_header(out, "Content-Type", "text/plain");
+		evhttp_add_header(out, "Connection", "close");
 		if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
 			err_body = evbuffer_new();
 			if (err_body && evbuffer_add(err_body, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN) == 0) {
@@ -996,13 +1009,6 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * the request and, for a closing connection, the connection, and the close
 	 * callback runs on the way. Nothing after this line reads c. */
 	if (bad_gateway) {
-		/* The headers evhttp_send_error() used to set: its HTML page is gone,
-		 * so the close it implied is written out too (docs/gateway.md). */
-		struct evkeyvalq *out = evhttp_request_get_output_headers(req);
-
-		evhttp_clear_headers(out);
-		evhttp_add_header(out, "Content-Type", "text/plain");
-		evhttp_add_header(out, "Connection", "close");
 		evhttp_send_reply(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway", err_body);
 		if (err_body) {
 			evbuffer_free(err_body);

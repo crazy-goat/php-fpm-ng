@@ -130,6 +130,10 @@ struct {								\
  * drift apart. A HEAD reply sends no body and counts 0. */
 #define FPM_HTTP_BAD_GATEWAY_BODY     "Bad Gateway\n"
 #define FPM_HTTP_BAD_GATEWAY_BODY_LEN (sizeof(FPM_HTTP_BAD_GATEWAY_BODY) - 1)
+/* The 504 for http.upstream_* timeouts (issue #1085) carries a counted
+ * plain-text body the same way as the gateway's 502 bodies. */
+#define FPM_HTTP_GATEWAY_TIMEOUT_BODY     "Gateway Timeout\n"
+#define FPM_HTTP_GATEWAY_TIMEOUT_BODY_LEN (sizeof(FPM_HTTP_GATEWAY_TIMEOUT_BODY) - 1)
 
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;

@@ -257,6 +257,10 @@ The rules are these:
    does not begin or end with `-`. A port, a wildcard, an IPv6 literal, an
    underscore, an empty label and a trailing dot are refused. Two entries with
    the same host (in any case) and the same prefix are refused as duplicates.
+   A host name without a dot still passes `-t` with a WARNING that names the
+   entry and suggests the path prefix (`http.route[api] = api` usually meant
+   `/api`), and is not refused: a dot-less name can be valid on a private
+   network. `localhost` gets no warning.
 
 **Only the target pool is selected.** A host-bound entry selects its target
 pool and nothing else. The document root, the static files and

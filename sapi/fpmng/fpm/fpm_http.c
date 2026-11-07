@@ -222,6 +222,7 @@ typedef struct _fpm_http_upstream fpm_http_upstream;
  * there when the HTTP/1.1 client transport arrived; the definitions moved
  * verbatim, comments included. */
 #include "fpm_http_internal.h"
+#include "fpm_http_host.h"
 #include "fpm_http_direct_conn.h"
 
 struct fpm_http_gateway_s *gateways = NULL;
@@ -2637,12 +2638,17 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 	size_t decoded_len;
 	unsigned i;
 	struct fpm_http_target_s *hit;
+	char host[FPM_HTTP_AUTHORITY_MAX];
+	int have_host = 0;
 
 	/* The one-row shortcut below is the old weld's: a table with a single
 	 * "/" row always matches. Issue #388's gateway has no such row, and must
 	 * run the walk even with one route -- so the shortcut is guarded, and the
 	 * fallback row it used to reach for (the last, shortest prefix) is not a
-	 * fallback on the gateway at all. */
+	 * fallback on the gateway at all. Issue #658: a host-bound row is a
+	 * configured row, so it exists only when nroutes >= 2 here (the own row is
+	 * not in a proxy-only table, and an own-pool table has no config rows
+	 * when nroutes < 2). The shortcut therefore never skips a host check. */
 	if (!gw->proxy_only && gw->nroutes < 2) {
 		return gw->routes[0].target;
 	}
@@ -2658,8 +2664,18 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 		return gw->proxy_only ? NULL : gw->routes[gw->nroutes - 1].target;
 	}
 
+	/* Issue #658: a request whose Host is malformed, or missing, or repeated, has
+	 * no name, so it can match only the rows bound to no host. Those are the
+	 * same rows as before, so a table with no host rows never reads the Host. */
+	if (gw->has_host_routes) {
+		have_host = fpm_http_host_of_request(req, host, sizeof(host));
+	}
+
 	hit = gw->proxy_only ? NULL : gw->routes[gw->nroutes - 1].target;
 	for (i = 0; i < gw->nroutes; i++) {
+		if (gw->routes[i].host && (!have_host || strcmp(gw->routes[i].host, host) != 0)) {
+			continue;
+		}
 		if (fpm_http_prefix_covers(gw->routes[i].prefix, gw->routes[i].prefix_len, decoded, decoded_len)) {
 			hit = gw->routes[i].target;
 			break;

@@ -373,11 +373,13 @@ struct fpm_http_target_s {
 };
 
 /* One row of the routing table: a path prefix and the target it selects. The
- * rows are sorted longest prefix first at config time, so the lookup is the
- * first match. */
+ * rows are sorted at config time (fpm_http_routes_sort()), so the lookup is the
+ * first row that matches. A host-bound row (issue #658) also needs the request
+ * Host to equal `host`, which is lowercased and NULL for a row bound to no host. */
 struct fpm_http_route_s {
 	char *prefix;
 	size_t prefix_len;
+	char *host;
 	struct fpm_http_target_s *target;
 };
 
@@ -643,6 +645,9 @@ struct fpm_http_gateway_s {
 	 * re-derive "did this pool configure routing" from the shape of the
 	 * table it already built. */
 	int has_routes;
+	/* Issue #658: true when some http.route[] entry is bound to a host. Gates
+	 * the Host parse per request, so a table without host rows costs nothing. */
+	int has_host_routes;
 
 	/* Issue #389: http.operator. When on, this gateway's public port also
 	 * serves every exposed pool's operator pages at <base>/<pool name>, from

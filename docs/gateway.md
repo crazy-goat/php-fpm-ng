@@ -75,7 +75,7 @@ is honest for a type called `gateway`. Two are new:
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
-| `http.route[<pool>]` | Comma-separated path prefixes routed to `<pool>`. | -- |
+| `http.route[<pool>]` | Comma-separated entries routed to `<pool>`. An entry is a path prefix (`/api`) or a host name with an optional path prefix (`a.example/api`, issue #658). | -- |
 | `http.operator` | Serve every exposed pool's operator pages through this public port. | `no` |
 | `http.operator_allowed_clients` | Who may reach them. Separate from `http.allowed_clients`. | -- (required when `http.operator = yes`) |
 
@@ -226,6 +226,61 @@ the configured sections, the value is free to grow a pattern syntax later, and
 an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
+
+**Host-bound entries (issue #658).** An entry that does not begin with `/`
+names a host: `<host>[/<prefix>]`. An entry with no `/` routes the host's `/`.
+The gateway routes a request by its Host only for an entry bound to that host.
+Example:
+
+```ini
+http.route[site] = a.example/
+http.route[shop] = shop.example/api, shop.example
+http.route[api] = /api
+```
+
+The rules are these:
+
+1. The Host of a request names the host of an entry. The comparison ignores
+   case and the port. An absolute-form request target names its own
+   authority, and that authority replaces Host (RFC 9112 3.2.2, issue #534).
+2. A host-bound entry is chosen before an entry with no host, even when that
+   entry has a longer prefix. Within one group, the longest prefix is chosen
+   first. So a request for `a.example/api/x` goes to `site`, not to `api`.
+3. A malformed Host never selects a host-bound entry. A Host is malformed when
+   it is empty, when its port is empty, not decimal, or above 65535, when it is
+   an IPv6 literal, when its name breaks the grammar in rule 4, or when the
+   request has more than one Host header, or none. The request is then routed as if it
+   had no host, so only entries with no host can match it. The gateway does
+   not answer `400` for it.
+4. `php-fpm-ng -t` refuses an invalid host name. A host name is letters,
+   digits and `-`, in labels separated by `.`. A label is 1 to 63 bytes, and it
+   does not begin or end with `-`. A port, a wildcard, an IPv6 literal, an
+   underscore, an empty label and a trailing dot are refused. Two entries with
+   the same host (in any case) and the same prefix are refused as duplicates.
+
+**Only the target pool is selected.** A host-bound entry selects its target
+pool and nothing else. The document root, the static files and
+`http.front_controller` stay the gateway's for every Host. With `http.static`
+on (the default), the gateway serves static files from its one document root
+for every Host, before it routes a request. A FastCGI target builds
+`SCRIPT_FILENAME` under the same root, for every Host.
+
+To serve two sites from separate files:
+
+1. Create one `http-direct` pool for each site, and set its `chdir` to the
+   site directory. Set its `http.front_controller`. Make it listen on a Unix
+   socket or a loopback address, without `http.tls_cert`. `-t` refuses a
+   target pool that does not obey these two rules.
+2. Route each host to its own pool, as in the example above.
+3. Set `http.static = 0` on the gateway. Otherwise the gateway serves files
+   from its own root for every Host.
+
+An `http-direct` pool uses its `chdir` as its document root, and its
+`http.static` is off by default. This layout is not yet covered by a test.
+
+An entry that begins with `/` has the same meaning as before. An entry such as
+`api/v1` was refused before. It is now a host name `api` with the path `/v1`.
+A gateway with no host entry does not read the Host header for routing.
 
 A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
 document root `SCRIPT_FILENAME` is built under) and, unless every routed path

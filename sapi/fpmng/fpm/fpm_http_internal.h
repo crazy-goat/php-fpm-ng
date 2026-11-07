@@ -136,6 +136,7 @@ typedef struct _fpm_http_upstream fpm_http_upstream;
 
 struct fpm_http_gateway_s;
 struct fpm_gw_ws_s;
+struct fpm_http_sendfile_s;
 
 /* one gateway slot: which gw it belongs to, its index, and its crash-loop
  * bookkeeping (see fpm_http_gateway_on_exit()). Passed as the `arg` to
@@ -510,6 +511,7 @@ struct fpm_http_gateway_s {
 	 * http.gateways alone. */
 	int proxy_only;
 	char *docroot;
+	char *sendfile_root;			/* http.sendfile_root, NULL when unset (issue #649) */
 	int listen_fd;
 	int plain_listen_fd;
 	int backlog;
@@ -895,6 +897,7 @@ struct _fpm_http_conn {
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
 	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
+	struct fpm_http_sendfile_s *sendfile;			/* issue #649: redirect header from the upstream, NULL unless one was seen; see fpm_http_sendfile.h */
 	int chunk_lost;						/* issue #967: a body piece could not be buffered; fpm_http_finish() cuts the reply, see fpm_http_response_chunk() */
 	int read_paused;				/* issue #596: upstream->ev_read is removed because the client has not drained the response; see fpm_http_backpressure.c */
 	/* Issue #705: while read_paused, this one-shot timer re-checks every

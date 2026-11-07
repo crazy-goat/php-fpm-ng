@@ -63,6 +63,7 @@
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
+#include "fpm_http_sendfile.h"
 #include "fpm_child_error_log.h"
 #include "fpm_error_log_follow.h"
 #include "fpm_operator_http.h"
@@ -1474,6 +1475,32 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		/* Issue #736: docroot warning, once in the master, after the routing
 		 * table is built so the presence of a FastCGI target is known. */
 		fpm_http_warn_missing_docroot(wp, gw);
+		/* Issue #649: copied after the failure points above, so the failure
+		 * block below frees it. A failed copy fails the pool, like the
+		 * operator build: a gateway that serves without the directive would
+		 * hand the client the worker's redirect header instead of the file. */
+		if (wp->config->http_sendfile_root) {
+			gw->sendfile_root = strdup(wp->config->http_sendfile_root);
+			if (!gw->sendfile_root) {
+				zlog(ZLOG_ERROR, "[pool %s] http: cannot copy http.sendfile_root (out of memory)", wp->config->name);
+				fpm_http_routes_free(gw);
+				fpm_http_operator_free(gw); /* issue #389 */
+				close(gw->listen_fd);
+				fpm_http_acl_free(gw->acl);
+				free(gw->allowed_clients);
+				fpm_http_acl_free(gw->trusted_proxies_acl);
+				free(gw->trusted_proxies);
+				free(gw->front_controller);
+				free(gw->access_log_path);
+				free(gw->http_listen_override);
+				free(gw->plain_listen_address);
+				free(gw->pool);
+				free(gw->listen_address);
+				free(gw->docroot);
+				free(gw);
+				return -1;
+			}
+		}
 		/* Issue #389: the http.operator forwarding map, built once here in the
 		 * master from every pool's operator routes and inherited by every
 		 * gateway process through fork(). A reload rebuilds it like every
@@ -1494,6 +1521,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
+			free(gw->sendfile_root);
 			free(gw);
 			return -1;
 		}
@@ -1661,6 +1689,9 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
+	if (fpm_http_sendfile_validate(wp->config->name, wp->config->http_sendfile_root) < 0) {
+		return -1;
+	}
 	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways < 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http.gateways must be at least 1", wp->config->name);
 		return -1;

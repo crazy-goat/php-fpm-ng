@@ -71,6 +71,7 @@
 
 #include "fpm_http_internal.h"
 #include "fpm_http_handoff.h"
+#include "fpm_http_host.h"
 
 static int cleanup_registered = 0;
 
@@ -107,6 +108,37 @@ static int fpm_http_route_next_prefix(const char **cursor, const char **out, siz
 	*out = p;
 	*out_len = (size_t) (end - p);
 	return 1;
+}
+
+/* One entry of http.route[], split into its optional host and its path prefix.
+ * An entry that begins with '/' has no host. Any other entry is
+ * "<host>[/<prefix>]" (issue #658): the host runs up to the first '/', and an
+ * entry without a '/' routes the host's "/". The host is not checked here;
+ * fpm_http_validate_routes() does that. */
+struct fpm_http_route_entry_s {
+	const char *host;
+	size_t host_len;
+	const char *path;
+	size_t path_len;
+};
+
+static void fpm_http_route_entry_split(const char *entry, size_t len, struct fpm_http_route_entry_s *out)
+{
+	static const char root[] = "/";
+	const char *slash;
+
+	if (len > 0 && entry[0] == '/') {
+		out->host = NULL;
+		out->host_len = 0;
+		out->path = entry;
+		out->path_len = len;
+		return;
+	}
+	slash = memchr(entry, '/', len);
+	out->host = entry;
+	out->host_len = slash ? (size_t) (slash - entry) : len;
+	out->path = slash ? slash : root;
+	out->path_len = slash ? len - out->host_len : 1;
 }
 
 /* The HTTP/1.1 transport is intentionally cleartext, so it may only connect to
@@ -249,11 +281,13 @@ static struct fpm_worker_pool_s *fpm_http_route_target_pool(struct fpm_worker_po
 	return NULL;
 }
 
-/* One prefix already claimed by this gateway's routes, for the duplicate
- * check. The pool it came from is kept so the refusal can name both sides. */
+/* One entry already claimed by this gateway's routes, for the duplicate check.
+ * The pool it came from is kept so the refusal can name both sides. */
 struct fpm_http_seen_prefix_s {
-	const char *prefix;
-	size_t len;
+	const char *host;
+	size_t host_len;
+	const char *path;
+	size_t path_len;
 	const char *pool;
 };
 
@@ -263,8 +297,11 @@ struct fpm_http_seen_prefix_s {
  * bad route table without anything having started.
  *
  * Refuses, each naming the pool and the offending directive: an unknown target
- * pool, a pool named twice, a target type the gateway cannot speak to, a
- * prefix without a leading '/', and a prefix claimed by two different entries.
+ * pool, a pool named twice, a target type the gateway cannot speak to, an entry
+ * that is neither a path prefix nor a valid host name (issue #658), and an
+ * entry claimed twice. Two entries are the same when their host names are
+ * equal ignoring case, and their path prefixes are equal; an entry with no host
+ * is the same only as another entry with no host.
  * An empty value is refused earlier, by the INI parser (fpm_conf.c), where the
  * line number is still known. */
 static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
@@ -320,18 +357,29 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 		}
 
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			struct fpm_http_route_entry_s e;
 			unsigned i;
 
-			if (prefix_len == 0 || prefix[0] != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' must begin with '/'",
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			/* Issue #658: a host name is refused here, at -t, and never at
+			 * request time. "a.example:80/x" is refused on purpose: the port is
+			 * not part of the name a request is matched on. */
+			if (e.host && !fpm_http_host_valid_name(e.host, e.host_len)) {
+				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: '%.*s' is neither a path prefix (it must begin "
+								 "with '/') nor a valid host name; a host name is letters, digits and '-' in "
+								 "dot-separated labels, with no port, no brackets and no wildcard (issue #658)",
 						name, kv->key, (int) prefix_len, prefix);
 				rc = -1;
 				break;
 			}
 			for (i = 0; i < nseen; i++) {
-				if (seen[i].len == prefix_len && memcmp(seen[i].prefix, prefix, prefix_len) == 0) {
-					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' is already routed "
-									 "to pool '%s'; one prefix selects one target",
+				if (seen[i].path_len == e.path_len && memcmp(seen[i].path, e.path, e.path_len) == 0 &&
+						seen[i].host_len == e.host_len &&
+						(e.host_len == 0 || fpm_http_host_equal(seen[i].host, e.host, e.host_len))) {
+					/* The whole entry is printed, host included: "a.example/x" is what the
+					 * operator wrote, not its path "/x". */
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: entry '%.*s' is already routed "
+									 "to pool '%s'; one entry selects one target",
 							name, kv->key, (int) prefix_len, prefix, seen[i].pool);
 					rc = -1;
 					break;
@@ -340,8 +388,10 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 			if (rc != 0) {
 				break;
 			}
-			seen[nseen].prefix = prefix;
-			seen[nseen].len = prefix_len;
+			seen[nseen].host = e.host;
+			seen[nseen].host_len = e.host_len;
+			seen[nseen].path = e.path;
+			seen[nseen].path_len = e.path_len;
 			seen[nseen].pool = kv->key;
 			nseen++;
 		}
@@ -351,9 +401,22 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 	return rc;
 }
 
-/* Sorts the table longest prefix first, so that the lookup is "the first row
- * that covers this path" and nothing at request time has to compare lengths.
- * An insertion sort over a table an operator wrote by hand. */
+/* Issue #658: the rank of two rows. A host-bound row ranks before a row bound
+ * to no host, whatever the prefix lengths: "a.example/" is the site of
+ * a.example, and it must win over a shared "/api" for every path of that host
+ * (the way nginx picks a server block by name before a location). Within one
+ * group the longest prefix ranks first. */
+static int fpm_http_route_ranks_before(const struct fpm_http_route_s *a, const struct fpm_http_route_s *b)
+{
+	if ((a->host != NULL) != (b->host != NULL)) {
+		return a->host != NULL;
+	}
+	return a->prefix_len > b->prefix_len;
+}
+
+/* Sorts the table so that the lookup is "the first row that covers this path"
+ * and nothing at request time has to compare ranks. An insertion sort over a
+ * table an operator wrote by hand. */
 static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 {
 	unsigned i, j;
@@ -361,7 +424,7 @@ static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 	for (i = 1; i < gw->nroutes; i++) {
 		struct fpm_http_route_s row = gw->routes[i];
 
-		for (j = i; j > 0 && gw->routes[j - 1].prefix_len < row.prefix_len; j--) {
+		for (j = i; j > 0 && fpm_http_route_ranks_before(&row, &gw->routes[j - 1]); j--) {
 			gw->routes[j] = gw->routes[j - 1];
 		}
 		gw->routes[j] = row;
@@ -470,6 +533,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 	int root_claimed = 0;
 
 	gw->has_routes = wp->config->http_routes != NULL;
+	gw->has_host_routes = 0;
 	/* Issue #388: a gateway has no own pool to fall back to, so there is no
 	 * row 0 and at least one route is mandatory. fpm_http_validate_pool()
 	 * already refused the empty case with the operator-facing message; this
@@ -489,8 +553,16 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 
 		nentries++;
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			struct fpm_http_route_entry_s e;
+
 			nprefixes++;
-			if (prefix_len == 1 && prefix[0] == '/') {
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			if (e.host) {
+				gw->has_host_routes = 1;
+			}
+			/* Issue #658: only a row bound to no host claims "/" for every
+			 * request. "a.example/" leaves the own row in place for other hosts. */
+			if (!e.host && e.path_len == 1 && e.path[0] == '/') {
 				root_claimed = 1;
 				if (!gw->proxy_only) {
 					own = 0; /* an entry claims "/" itself, so there is no row 0 to add */
@@ -545,12 +617,22 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 		}
 		fpm_http_target_watch(&gw->targets[ti], target);
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
-			gw->routes[ri].prefix = strndup(prefix, prefix_len);
+			struct fpm_http_route_entry_s e;
+
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			gw->routes[ri].prefix = strndup(e.path, e.path_len);
 			if (!gw->routes[ri].prefix) {
 				zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
 				return -1;
 			}
-			gw->routes[ri].prefix_len = prefix_len;
+			gw->routes[ri].prefix_len = e.path_len;
+			if (e.host) {
+				gw->routes[ri].host = fpm_http_host_dup_lower(e.host, e.host_len);
+				if (!gw->routes[ri].host) {
+					zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
+					return -1;
+				}
+			}
 			gw->routes[ri].target = &gw->targets[ti];
 			ri++;
 		}
@@ -582,6 +664,7 @@ void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
 
 	for (i = 0; i < gw->nroutes; i++) {
 		free(gw->routes[i].prefix);
+		free(gw->routes[i].host);
 	}
 	for (i = 0; i < gw->ntargets; i++) {
 		/* Issue #390: the shared memory is the segment below, not per target --
@@ -1349,12 +1432,14 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 					gw->acl ? ", access-restricted" : "", capacity);
 		}
 		if (wp->config->http_routes) {
-			/* Printed in lookup order, longest prefix first, because that is
-			 * the order a request is matched in and the only way to read the
-			 * table is to read it the way the gateway does. */
+			/* Printed in lookup order, because that is the order a request is
+			 * matched in and the only way to read the table is to read it the
+			 * way the gateway does. A host-bound row prints as "<host><prefix>",
+			 * the form the entry has in the configuration (issue #658). */
 			for (i = 0; i < gw->nroutes; i++) {
-				zlog(ZLOG_NOTICE, "[pool %s] http.route: '%s' -> pool %s (%u persistent connection(s))",
-						wp->config->name, gw->routes[i].prefix, gw->routes[i].target->pool,
+				zlog(ZLOG_NOTICE, "[pool %s] http.route: '%s%s' -> pool %s (%u persistent connection(s))",
+						wp->config->name, gw->routes[i].host ? gw->routes[i].host : "",
+						gw->routes[i].prefix, gw->routes[i].target->pool,
 						gw->routes[i].target->max_upstreams);
 			}
 		}
@@ -1613,9 +1698,13 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			size_t prefix_len;
 
 			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+				struct fpm_http_route_entry_s e;
 				const char *collide = NULL;
 				size_t base_len;
 
+				/* Issue #658: the operator namespace is matched for every Host,
+				 * so a host-bound entry under a base is refused as well. */
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
 				/* At or UNDER the base: "operator paths are checked before
 				 * http.route[]", so /metrics/app is answered by the map (or a
 				 * local 404), never by a route. Segment-aware, exactly like
@@ -1623,18 +1712,18 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 				 * prefix and is not shadowed. */
 				if (mbase) {
 					base_len = strlen(mbase);
-					if (prefix_len >= base_len && !memcmp(prefix, mbase, base_len) && (prefix_len == base_len || prefix[base_len] == '/')) {
+					if (e.path_len >= base_len && !memcmp(e.path, mbase, base_len) && (e.path_len == base_len || e.path[base_len] == '/')) {
 						collide = mbase;
 					}
 				}
 				if (!collide && sbase) {
 					base_len = strlen(sbase);
-					if (prefix_len >= base_len && !memcmp(prefix, sbase, base_len) && (prefix_len == base_len || prefix[base_len] == '/')) {
+					if (e.path_len >= base_len && !memcmp(e.path, sbase, base_len) && (e.path_len == base_len || e.path[base_len] == '/')) {
 						collide = sbase;
 					}
 				}
 				if (collide) {
-					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' falls in the operator "
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: entry '%.*s' falls in the operator "
 									 "namespace of base path '%s'; with http.operator = yes the gateway answers "
 									 "<base>/<pool> there before routing, so a route cannot claim it (issue #389)",
 							wp->config->name, kv->key, (int) prefix_len, prefix, collide);
@@ -1669,7 +1758,10 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			size_t prefix_len;
 
 			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
-				if (prefix_len == 1 && prefix[0] == '/') {
+				struct fpm_http_route_entry_s e;
+
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
+				if (!e.host && e.path_len == 1 && e.path[0] == '/') {
 					root_claimed = 1;
 					break;
 				}

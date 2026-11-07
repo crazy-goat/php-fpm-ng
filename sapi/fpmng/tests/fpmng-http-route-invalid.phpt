@@ -98,10 +98,12 @@ expectConfigFailure(
     ['http.route[api]', "'/a'", 'already routed']
 );
 
+/* Issue #658: "api/v1" is now a host name "api" with the path "/v1", a valid
+ * entry. An entry that is neither a path nor a host name is still refused. */
 expectConfigFailure(
-    'prefix without a leading slash',
-    gateway('http.route[api] = api/v1'),
-    ['http.route[api]', "must begin with '/'"]
+    'entry that is neither a path nor a host name',
+    gateway('http.route[api] = api v1'),
+    ['http.route[api]', "must begin with '/'", 'nor a valid host name']
 );
 
 expectConfigFailure(
@@ -183,7 +185,7 @@ Done
 unknown pool: rejected
 pool named twice: rejected
 duplicate prefix: rejected
-prefix without a leading slash: rejected
+entry that is neither a path nor a host name: rejected
 empty value: rejected
 gateway target: rejected
 http-direct TLS target: rejected

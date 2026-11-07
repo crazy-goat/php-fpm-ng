@@ -22,6 +22,10 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 - `docker/Dockerfile` pins php-fpm-ng v0.17.2 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.17.0 (issue #1041). On 2026-11-06 the master of the v0.17.2 image started on the patched `libphp8.5-embed 8.5.4-0ubuntu1.5` (issue #994), measured on one host. The v0.17.0 binary is expected to crash there. `docs/install.md` describes the image.
 
+### Added
+
+- `pool.type = gateway`: an `http.route[]` entry can name a host, as `<host>[/<prefix>]`. Only a request for that host, compared without case and port, reaches the entry. A host-bound entry is chosen before an entry with no host, so `a.example/` takes every path of that host ahead of a shared `/api`. A malformed Host, one repeated, or none is routed as if it had no host, and the gateway does not answer 400 for it. A host-bound entry selects only its target pool: the document root, the static files and `http.front_controller` stay the gateway's for every Host, and `http.static` is on by default. To serve two sites from separate files, use one `http-direct` pool per site and set `http.static = 0` on the gateway; this layout is not yet covered by a test. `php-fpm-ng -t` refuses an invalid host name. An entry that did not begin with `/` was refused before, so `api/v1` is now the host `api` with the path `/v1`. A gateway with no host entry is unchanged. Documented in `docs/gateway.md` (issue #658). New tests `fpmng-http-route-host.phpt`, `fpmng-http-route-host-malformed.phpt` and `fpmng-http-route-host-invalid.phpt`.
+
 ### Fixed
 
 - `pool.type = http-direct`: `getallheaders()` and `apache_request_headers()` returned request headers whose name contains `_` (for example `X_Custom`), while `$_SERVER` and the gateway drop them (issue #595). Both functions now omit such headers (issue #628). New test `fpmng-http-direct-getallheaders-underscore.phpt`.

@@ -83,6 +83,9 @@ static const char *const fpm_direct_extra_directives[] = {
 	 * never passes through here. Accepting the directive there would read as
 	 * if files were being served when nothing would serve them. */
 	"http.static",
+	/* issue #648. The same executor, so the same reason: the three options act
+	 * on the file serving above and nowhere else. */
+	"http.static.ranges", "http.static.precompressed", "http.static.cache_control",
 	NULL
 };
 
@@ -2272,6 +2275,9 @@ static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_requ
 	 * an application directory, so there "I do not know what this is" is a
 	 * reason to leave the file alone, not to hand it over. */
 	st.known_types_only = 1;
+	st.ranges = w->wp->config->http_static_ranges;
+	st.precompressed = w->wp->config->http_static_precompressed;
+	st.cache_control = w->wp->config->http_static_cache_control;
 	st.log = fpm_direct_static_logged;
 	st.log_ctx = &log;
 	/* Counted and hooked up before the reply, not after it: from the moment

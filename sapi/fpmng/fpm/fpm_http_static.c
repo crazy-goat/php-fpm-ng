@@ -16,12 +16,16 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sys/queue.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 
 #include <event2/buffer.h>
 #include <event2/http.h>
+#include <event2/keyvalq_struct.h>
 
+#include "fpm_http_static_negotiate.h"
+#include "fpm_http_static_range.h"
 #include "zlog.h"
 
 #ifndef MAXPATHLEN
@@ -29,6 +33,8 @@
 #endif
 
 #define FPM_HTTP_STATIC_BAD_GATEWAY 502 /* libevent has no constant for it */
+#define FPM_HTTP_STATIC_NOT_SATISFIABLE 416 /* libevent has no constant for it either */
+#define FPM_HTTP_STATIC_PARTIAL 206 /* and none for this one */
 
 static const struct {
 	const char *ext;
@@ -200,15 +206,148 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 	evbuffer_free(body);
 }
 
+/* The check every served path passes, the original and a sidecar alike: the
+ * resolved path is the root itself or lies below it. */
+static int fpm_http_static_contained(const char *resolved, const char *root, size_t root_len)
+{
+	return strncmp(resolved, root, root_len) == 0 && (!resolved[root_len] || resolved[root_len] == '/');
+}
+
+/* The open() flags and the S_ISREG test of the original (issue #1008), for a
+ * file that is not the original. */
+static int fpm_http_static_open_regular(const char *path, struct stat *stbuf)
+{
+	int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK | O_NOCTTY);
+
+	if (fd < 0) {
+		return -1;
+	}
+	if (fstat(fd, stbuf) < 0 || !S_ISREG(stbuf->st_mode)) {
+		close(fd);
+		return -1;
+	}
+
+	return fd;
+}
+
+/* True when one Accept-Encoding line of the request accepts `coding`. A
+ * request may repeat the header, and each line counts. */
+static int fpm_http_static_header_accepts(const struct evkeyvalq *in, const char *coding)
+{
+	struct evkeyval *kv;
+
+	TAILQ_FOREACH(kv, in, next) {
+		if (!strcasecmp(kv->key, "Accept-Encoding") && fpm_http_static_accepts(kv->value, coding)) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+/* Precompressed sidecars (issue #648), tried in this order: a brotli file, then
+ * gzip. A sidecar is found by appending its suffix to the original's path, and
+ * it gets the same containment check and the same open() as the original, so a
+ * symlink app.css.br that leaves the root is not served. A sidecar that is
+ * missing or refused is not an error: the caller serves the original instead. */
+static const struct {
+	const char *coding;
+	const char *suffix;
+} fpm_http_static_sidecars[] = {
+	{ "br", ".br" },
+	{ "gzip", ".gz" },
+	{ NULL, NULL }
+};
+
+static int fpm_http_static_open_sidecar(const struct fpm_http_static *st, const char *root,
+		size_t root_len, const char *candidate, const struct evkeyvalq *in,
+		struct stat *stbuf, const char **coding)
+{
+	unsigned i;
+
+	for (i = 0; fpm_http_static_sidecars[i].coding; i++) {
+		char side[MAXPATHLEN], resolved[MAXPATHLEN];
+		int fd;
+
+		if (!fpm_http_static_header_accepts(in, fpm_http_static_sidecars[i].coding)) {
+			continue;
+		}
+		if ((size_t) snprintf(side, sizeof(side), "%s%s", candidate, fpm_http_static_sidecars[i].suffix) >= sizeof(side)) {
+			continue;
+		}
+		if (!realpath(side, resolved)) {
+			continue;
+		}
+		if (!fpm_http_static_contained(resolved, root, root_len)) {
+			zlog(ZLOG_NOTICE, "[pool %s] http: refused sidecar '%s' outside the document root", st->pool, side);
+			continue;
+		}
+		fd = fpm_http_static_open_regular(resolved, stbuf);
+		if (fd >= 0) {
+			*coding = fpm_http_static_sidecars[i].coding;
+			return fd;
+		}
+	}
+
+	return -1;
+}
+
+/* Range is evaluated only for a GET that has exactly one Range line, and only
+ * when If-Range, if present, still matches the representation (RFC 9110
+ * 13.1.5, 14.2). Two Range lines would combine into a multi-range set, which
+ * is ignored like any other multi-range request. */
+static enum fpm_http_static_range fpm_http_static_request_range(const struct evkeyvalq *in,
+		off_t size, const char *etag, const char *modified, off_t *first, off_t *last)
+{
+	struct evkeyval *kv;
+	const char *range = NULL, *if_range;
+	int n = 0;
+
+	TAILQ_FOREACH(kv, in, next) {
+		if (!strcasecmp(kv->key, "Range")) {
+			range = kv->value;
+			n++;
+		}
+	}
+	if (n != 1) {
+		return FPM_HTTP_STATIC_RANGE_IGNORE;
+	}
+	if_range = evhttp_find_header(in, "If-Range");
+	if (if_range && !fpm_http_static_if_range_matches(if_range, etag, modified)) {
+		return FPM_HTTP_STATIC_RANGE_IGNORE;
+	}
+
+	return fpm_http_static_parse_range(range, size, first, last);
+}
+
+/* The headers a precompressed or Cache-Control-configured reply carries. Vary
+ * goes on every reply of a precompressed pool, the identity one and the 304
+ * too: a shared cache must not store a br body under a key that ignores
+ * Accept-Encoding, whichever reply it kept. */
+static void fpm_http_static_policy_headers(const struct fpm_http_static *st, struct evkeyvalq *out,
+		const char *path)
+{
+	const char *cache_control = fpm_http_static_cache_control_for(st->cache_control, path);
+
+	if (st->precompressed) {
+		evhttp_add_header(out, "Vary", "Accept-Encoding");
+	}
+	if (cache_control) {
+		evhttp_add_header(out, "Cache-Control", cache_control);
+	}
+}
+
 int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_request *req,
 		const char *path, size_t path_len, int *script_missing)
 {
 	char candidate[MAXPATHLEN], resolved[MAXPATHLEN], root_buf[MAXPATHLEN], etag[64], modified[64];
 	struct evkeyvalq *out;
-	struct stat stbuf;
-	const char *type, *root = st->root;
+	struct stat stbuf, sidebuf;
+	const char *type, *root = st->root, *coding = NULL, *reason = "OK";
+	enum fpm_http_static_range range = FPM_HTTP_STATIC_RANGE_IGNORE;
+	off_t first = 0, last = 0, offset = 0, length;
 	size_t root_len;
-	int fd, cmd;
+	int fd, cmd, status = HTTP_OK;
 
 	if (!root && !st->root_unresolved) {
 		return 0;
@@ -273,7 +412,7 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 	if (script_missing) {
 		*script_missing = 0;	/* the file is there, whatever open()/fstat() below say about it */
 	}
-	if (strncmp(resolved, root, root_len) != 0 || (resolved[root_len] && resolved[root_len] != '/')) {
+	if (!fpm_http_static_contained(resolved, root, root_len)) {
 		zlog(ZLOG_NOTICE, "[pool %s] http: refused '%s' outside the document root", st->pool, path);
 		fpm_http_static_refuse(st, req);
 		return 1;
@@ -307,21 +446,39 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 		return 0;
 	}
 
+	/* The sidecar replaces the original for this reply, and it brings its own
+	 * validators: the ETag below carries the coding, because two
+	 * representations may not share one strong ETag (RFC 9110 8.8.3). The
+	 * Content-Type stays the original's, taken from `resolved` above. */
+	if (st->precompressed) {
+		int sfd = fpm_http_static_open_sidecar(st, root, root_len, candidate,
+			evhttp_request_get_input_headers(req), &sidebuf, &coding);
+
+		if (sfd >= 0) {
+			close(fd);
+			fd = sfd;
+			stbuf = sidebuf;
+		}
+	}
+
 	type = fpm_http_static_content_type(resolved);
 
-	snprintf(etag, sizeof(etag), "\"%llx-%llx\"",
-		(unsigned long long) stbuf.st_mtime, (unsigned long long) stbuf.st_size);
+	snprintf(etag, sizeof(etag), "\"%llx-%llx%s%s\"",
+		(unsigned long long) stbuf.st_mtime, (unsigned long long) stbuf.st_size,
+		coding ? "-" : "", coding ? coding : "");
 	fpm_http_static_http_date(stbuf.st_mtime, modified, sizeof(modified));
 
 	out = evhttp_request_get_output_headers(req);
 	if (fpm_http_static_not_modified(req, etag, modified)) {
 		close(fd);
 		/* A 304 repeats the validators and nothing else, so that the client can
-		 * refresh what it has stored without a body. */
+		 * refresh what it has stored without a body. Cache-Control and Vary
+		 * are the exception: they describe the response a 200 would have had. */
 		evhttp_add_header(out, "ETag", etag);
 		if (modified[0]) {
 			evhttp_add_header(out, "Last-Modified", modified);
 		}
+		fpm_http_static_policy_headers(st, out, path);
 		fpm_http_static_log(st, 304, 0);
 		evhttp_send_reply(req, 304, "Not Modified", NULL);
 		return 1;
@@ -331,6 +488,42 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 	evhttp_add_header(out, "ETag", etag);
 	if (modified[0]) {
 		evhttp_add_header(out, "Last-Modified", modified);
+	}
+	fpm_http_static_policy_headers(st, out, path);
+	if (st->ranges) {
+		evhttp_add_header(out, "Accept-Ranges", "bytes");
+	}
+	if (coding) {
+		evhttp_add_header(out, "Content-Encoding", coding);
+	}
+
+	/* HEAD ignores Range (RFC 9110 14.2), so only a GET reaches the next block. */
+	if (cmd == EVHTTP_REQ_GET && st->ranges) {
+		range = fpm_http_static_request_range(evhttp_request_get_input_headers(req),
+			stbuf.st_size, etag, modified, &first, &last);
+	}
+	if (range == FPM_HTTP_STATIC_RANGE_UNSATISFIABLE) {
+		char crange[64];
+
+		close(fd);
+		snprintf(crange, sizeof(crange), "bytes */%lld", (long long) stbuf.st_size);
+		evhttp_add_header(out, "Content-Range", crange);
+		fpm_http_static_log(st, FPM_HTTP_STATIC_NOT_SATISFIABLE, 0);
+		evhttp_send_reply(req, FPM_HTTP_STATIC_NOT_SATISFIABLE, "Range Not Satisfiable", NULL);
+		return 1;
+	}
+	if (range == FPM_HTTP_STATIC_RANGE_PARTIAL) {
+		char crange[96];
+
+		snprintf(crange, sizeof(crange), "bytes %lld-%lld/%lld", (long long) first, (long long) last,
+			(long long) stbuf.st_size);
+		evhttp_add_header(out, "Content-Range", crange);
+		offset = first;
+		length = last - first + 1;
+		status = FPM_HTTP_STATIC_PARTIAL;
+		reason = "Partial Content";
+	} else {
+		length = stbuf.st_size;
 	}
 
 	if (cmd == EVHTTP_REQ_HEAD) {
@@ -345,23 +538,37 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 		return 1;
 	}
 
+	/* An empty file has no bytes to send. Measured on the test box: a GET of a
+	 * zero-length file reached the 502 below through evbuffer_add_file(), so
+	 * the empty body is sent without it (fpmng-http-direct-static-range.phpt). */
+	if (length == 0) {
+		close(fd);
+		fpm_http_static_log(st, status, 0);
+		evhttp_send_reply(req, status, reason, NULL);
+		return 1;
+	}
+
 	/* evbuffer_add_file takes ownership of fd and uses sendfile/mmap where it
 	 * can, so the bytes never pass through our address space. */
 	{
 		struct evbuffer *body = evbuffer_new();
 
-		if (!body || evbuffer_add_file(body, fd, 0, stbuf.st_size) < 0) {
+		/* A failed evbuffer_add_file() does not own fd: in libevent 2.1.12
+		 * (buffer.c, evbuffer_add_file) a failed evbuffer_file_segment_new()
+		 * returns -1 without closing it, and a failed
+		 * evbuffer_add_file_segment() keeps the segment (and fd) referenced
+		 * by nothing. So close it here on every failure. */
+		if (!body || evbuffer_add_file(body, fd, offset, length) < 0) {
+			close(fd);
 			if (body) {
 				evbuffer_free(body);
-			} else {
-				close(fd);
 			}
 			fpm_http_static_log(st, FPM_HTTP_STATIC_BAD_GATEWAY, 0);
 			evhttp_send_error(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
-		fpm_http_static_log(st, HTTP_OK, (size_t) stbuf.st_size);
-		evhttp_send_reply(req, HTTP_OK, "OK", body);
+		fpm_http_static_log(st, status, (size_t) length);
+		evhttp_send_reply(req, status, reason, body);
 		evbuffer_free(body);
 	}
 

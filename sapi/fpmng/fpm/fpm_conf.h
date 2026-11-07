@@ -189,6 +189,9 @@ struct fpm_worker_pool_config_s {
 	int http_gateways;			/* number of gateway processes, default 2 */
 	int http_reuseport;			/* each gateway gets its own SO_REUSEPORT socket */
 	int http_static;			/* serving static files without PHP, enabled by default */
+	int http_static_ranges;			/* http.static.ranges: single byte ranges (206, 416) for http-direct static files; off by default (issue #648) */
+	int http_static_precompressed;		/* http.static.precompressed: serve .br and .gz sidecars; off by default (issue #648) */
+	struct key_value_s *http_static_cache_control;	/* http.static.cache_control[<prefix>] = <value>: Cache-Control by path prefix (issue #648) */
 	int http_fault_upstream_write;		/* test-only fault injection: fail the Nth write towards the pool with ECONNRESET;
 						 * 0 = off, the default. See fpm_http_upstream_write_must_fail() for why this is a
 						 * directive and not an environment variable. */

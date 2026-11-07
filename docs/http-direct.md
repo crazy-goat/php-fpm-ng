@@ -191,8 +191,8 @@ above come from one sitting on one toolchain for that reason.
   [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
   `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`,
-  `http.stream_write_timeout`, `http.static`, `http.max_connections` and
-  `http.max_connections_per_client` from the gateway's `http.*`
+  `http.stream_write_timeout`, `http.static` with its `http.static.*` options,
+  `http.max_connections` and `http.max_connections_per_client` from the gateway's `http.*`
   directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
@@ -1151,7 +1151,7 @@ that never asked for a file server must not get one on upgrade.
 |---|---|
 | Methods | `GET` and `HEAD`. Everything else goes to PHP. |
 | Files | Regular files with an extension the built-in table has a type for. |
-| Headers | `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`. |
+| Headers | `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`. The options below add `Accept-Ranges`, `Content-Range`, `Content-Encoding`, `Vary` and `Cache-Control`. |
 | Conditional | `If-None-Match` and `If-Modified-Since` (exact IMF-fixdate match) answer `304`. |
 | Delivery | `evbuffer_add_file()`, i.e. `sendfile()`/`mmap` where the platform has it: the bytes never pass through the process. |
 
@@ -1188,14 +1188,95 @@ must not make a URL disappear. `/.env.css` would have been served, so it is
 refused. Either way no file whose path contains a dot-segment ever leaves the
 static path.
 
+### Options: ranges, sidecars and Cache-Control (issue #648)
+
+Three directives add to the file server. Each is off by default, and each needs
+`http.static = yes`. An `http.static.*` directive on a pool without
+`http.static = yes` stops the pool at startup.
+
+```ini
+[app]
+pool.type = http-direct
+chdir = /srv/app/public
+http.front_controller = /index.php
+http.static = yes
+http.static.ranges = yes
+http.static.precompressed = yes
+http.static.cache_control["/assets/"] = "public, max-age=3600"
+```
+
+#### `http.static.ranges`
+
+Set `http.static.ranges = yes` to answer single-range requests. The reply then
+carries `Accept-Ranges: bytes`. The server answers `bytes=a-b`, `bytes=a-` and
+`bytes=-n` with `206`. It answers a range that no byte of the file matches with
+`416`.
+
+- Only `GET` takes a range. `HEAD` ignores `Range`.
+- A request with two or more ranges is ignored. A malformed range, or a range
+  whose end is below its start, is ignored too. The reply is `200` with the
+  whole file.
+- A range end past the file is cut to the last byte.
+- A suffix of `0` bytes is unsatisfiable. Every range of an empty file is
+  unsatisfiable.
+- The `416` reply has `Content-Range: bytes */<size>` and no body.
+- A `Range` is ignored when `If-Range` does not match. A `304` takes precedence
+  over `Range`.
+
+#### `http.static.precompressed`
+
+Set `http.static.precompressed = yes` to send a precompressed file. When the
+client accepts `br`, the server sends `<file>.br`. Otherwise, when the client
+accepts `gzip`, it sends `<file>.gz`. The file must exist beside the original.
+
+- A coding is accepted only when its `q` value is not `0`. `*` does not select a
+  coding.
+- The sidecar passes the same containment check as the original. A sidecar that
+  resolves outside the document root is not served. The original is served
+  instead, without a coding.
+- A sidecar without an original is not served. The request goes on as it would
+  with the option off.
+- The server does not compare the sidecar with the original. A stale sidecar is
+  sent as it is. Rebuild or delete the sidecars each time the originals change.
+- `Content-Type` is the type of the original file, not of `.br` or `.gz`.
+- `Content-Encoding` names the coding. The `ETag` has the coding as a suffix,
+  for example `"6a1f2b3c-7-br"`, so each representation has its own `ETag`.
+- Every static reply carries `Vary: Accept-Encoding`, including the reply
+  without a coding and the `304`.
+
+#### `http.static.cache_control[<prefix>]`
+
+Set `http.static.cache_control["<prefix>"] = "<value>"` to send a
+`Cache-Control` header for each static file whose path starts with `<prefix>`.
+The prefix must start with `/`. An empty value is refused at startup. A prefix
+given twice is refused at startup.
+
+- The longest matching prefix wins. `/assets/vendor/` overrides `/assets/` for
+  the files under it.
+- The match is a plain string prefix. `/assets` also matches `/assets-old/`.
+  Write the trailing `/` for a directory.
+- Quote the value. An unquoted ini value cannot contain `=`, so
+  `max-age=3600` must be in quotes.
+- The header is sent on `200`, `206`, `304` and `416` replies, and on `HEAD`.
+  A file that no prefix matches gets no `Cache-Control`.
+
+#### Ranges and sidecars together
+
+With `http.static.precompressed = yes`, a `Range` applies to the bytes of the
+sidecar that is sent, not to the original. `Content-Range` names the sidecar
+size. A range offset counts coded bytes, so a client that asks for a range must
+send the same `Accept-Encoding` again to get the same bytes.
+
 ### What it deliberately does not do
 
-- **No compression.** No gzip, no brotli, no `Accept-Encoding` negotiation.
-- **No range requests.** No `Accept-Ranges`, no `206`; a `Range` header is
-  ignored and the whole file is sent.
-- **No cache policy.** No `Cache-Control`, no `Expires`, no `max-age`. The
-  validators above are all the caching this offers; an origin that wants a
-  policy puts a CDN or a reverse proxy in front, or serves the asset from PHP.
+- **No compression at request time.** The server never compresses a file
+  itself. Only the `.br` and `.gz` files that exist on disk are sent coded.
+- **No multi-range.** A multi-range request gets `200` with the whole file.
+- **No default cache policy.** Without `http.static.cache_control` a reply has
+  no `Cache-Control`, no `Expires` and no `max-age`. The validators above are
+  the only caching this offers by default. An origin that wants a policy for
+  every file can set a prefix for each path, put a CDN or a reverse proxy in
+  front, or serve the asset from PHP.
 - **No index file.** A directory is not "the directory's `index.html`", it is
   a request for the front controller to route.
 - **No directory listing**, in any configuration.

@@ -19,6 +19,8 @@
 #include <sys/types.h>
 #include <event2/http.h>
 
+struct key_value_s;
+
 struct fpm_http_static {
 	const char *pool; /* for zlog() only */
 	/* Already resolved with realpath(), by whoever owns it: a direct pool
@@ -37,6 +39,12 @@ struct fpm_http_static {
 	 * leaves it 0 and keeps serving unknown extensions as
 	 * application/octet-stream, which is what it has always done. */
 	int known_types_only;
+	/* Options of http-direct static files (issue #648). The gateway leaves them
+	 * zero, which is off, and the direct pool sets them from its
+	 * http.static.* directives. */
+	int ranges; /* single byte range, 206 and 416, Accept-Ranges */
+	int precompressed; /* serve a .br or .gz sidecar the client accepts */
+	const struct key_value_s *cache_control; /* Cache-Control by path prefix */
 	/* Called just before each reply this module sends, or not at all. */
 	void (*log)(void *ctx, int status, size_t bytes);
 	void *log_ctx;

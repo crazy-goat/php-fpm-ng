@@ -1,460 +1,921 @@
 # Changelog
 
+
+
 All notable changes to this project are documented in this file.
 
+
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
+
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+
 The entries for v0.1.0 to v0.11.1 were rebuilt from the tagged history (`git log <previous tag>..<tag>`, merges included),
+
 because the GitHub release notes of those releases carry only the install boilerplate. Issue numbers come from the
+
 commit subjects and from the merge subjects (`Merge pull request #N from crazy-goat/issue/<issue>-...`); an entry
+
 without one is a change whose commits and merge named none. The tags v0.5.0, v0.5.1 and v0.11.0 have no GitHub
+
 release and no entry of their own: they are folded into the next entry (v0.5.2 and v0.11.1), which says so.
+
+
 
 ## [Unreleased]
 
+
+
 ### Security
 
+
+
 - `pool.type = http-direct`: the access log wrote the client-controlled fields `%u`, `%r`, `%q`, `%e`, `%o`, `%f`, `%m` and `%R` without escaping. A Basic auth user name with a line feed wrote a second, forged line (reproduced before the fix by the new test). The fields now use the escape rule of the gateway access log: a quote and a backslash get a backslash in front, and a control byte or DEL becomes `\?`. New test `fpmng-http-direct-access-log-escape.phpt` (issue #1003).
+
 - `pool.type = gateway`: the gateway joined a decoded request path that did not start with `/` to the document root. Such a path could name a file outside the document root. The gateway now answers 400 for it. By code reading, the router already refuses such a path, so no request reached the join on the default configuration. This is hardening (issue #997). The check is `fpm_http_decoded_path_ok()` in `sapi/fpmng/fpm/fpm_http_fcgi.c`. New fuzz harness `fuzz_decoded_path`.
 
+
+
 ### Changed
+
+
 
 - `docker/Dockerfile` pins php-fpm-ng v0.17.2 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.17.0 (issue #1041). On 2026-11-06 the master of the v0.17.2 image started on the patched `libphp8.5-embed 8.5.4-0ubuntu1.5` (issue #994), measured on one host. The v0.17.0 binary is expected to crash there. `docs/install.md` describes the image.
 
+
+
 ### Added
 
+
+
 - `pool.type = gateway`: `http.sendfile_root` (off by default) makes the gateway serve the file that a FastCGI worker names in an `X-Accel-Redirect` or `X-Sendfile` reply header. The name is checked with the static file rules (`realpath()` containment, dot-segment and PHP refusal, regular files only); a refused name gets `404`. The redirect header never reaches the client, and neither do the worker's `Content-Encoding` and `Accept-Ranges`: the file is sent raw and no range is served. The other reply headers of the worker (for example `Content-Disposition`, `Cache-Control`, `Set-Cookie`) reach the client with the file. The file is read in 1 MiB windows, so the gateway memory does not grow with the file size. `php-fpm-ng -t` refuses the directive on the other pool types and refuses the root `/`. Documented in `docs/gateway.md` (issue #649). New tests `fpmng-gateway-sendfile.phpt`, `fpmng-gateway-sendfile-config.phpt`, `fpmng-gateway-sendfile-memory.phpt` and `fpmng-gateway-sendfile-unset.phpt`.
+
 - `pool.type = http-direct` static files, three options, each off by default and each needing `http.static = yes` (issue #648). `http.static.ranges = yes` answers a single byte range with `206`, an unsatisfiable range with `416`, and sends `Accept-Ranges: bytes`; a multi-range request gets `200`. `http.static.precompressed = yes` sends a `.br` or `.gz` file beside the original when the client accepts that coding; the sidecar passes the same containment check, and `Vary: Accept-Encoding` is set on every static reply. `http.static.cache_control["/prefix/"] = "value"` sends `Cache-Control` for files under a prefix, the longest prefix wins. The rules are in `docs/http-direct.md`, section "Options: ranges, sidecars and Cache-Control". New tests `fpmng-http-direct-static-range.phpt`, `fpmng-http-direct-static-precompressed.phpt` and `fpmng-http-direct-static-cache-control.phpt`, and new fuzz harness `fuzz_static_range`.
+
 - `pool.type = gateway`: `http.proxy_protocol = yes` reads a PROXY protocol v1 or v2 header at the start of each connection on the public port. The header's client address (`REMOTE_ADDR`, the access log, `http.allowed_clients`, `http.trusted_proxies`) is used only when the socket peer is in `http.proxy_protocol_trusted`; any other connection is closed with no response. `php-fpm-ng -t` refuses the directive on other pool types and an empty trusted list. A v2 header whose transport nibble is not UNSPEC or STREAM (DGRAM or 3..F) is refused. `http.request_id = propagate` judges an inbound `X-Request-Id` by the same address. A refused connection is closed and released; it does not stay in `connections_open`. Documented in `docs/gateway.md` (issue #651). New tests `fpmng-http-proxy-protocol.phpt`, `fpmng-http-proxy-protocol-tls.phpt`, `fpmng-http-proxy-protocol-refused.phpt` and `fpmng-http-proxy-protocol-request-id.phpt`, and fuzz harness `fuzz_proxy_protocol` with seeds in `tests/fuzz/seeds/proxy_protocol/`.
+
+
+- New fuzz harness `fuzz_http_host` for `fpm_http_host_parse()` (`sapi/fpmng/fpm/fpm_http_host.c`), the parser of the untrusted Host header that host-bound `http.route[]` entries are matched on. The oracle does not repeat the grammar: an accepted name contains only lower-case letters, digits, `.` and `-`, has no empty label, and is never longer than its input. Picked up by `build/fuzz.sh` and the CI job `fuzz` through the glob, no script change (issue #1069).
+
 - `pool.type = gateway`: an `http.route[]` entry can name a host, as `<host>[/<prefix>]`. Only a request for that host, compared without case and port, reaches the entry. A host-bound entry is chosen before an entry with no host, so `a.example/` takes every path of that host ahead of a shared `/api`. A malformed Host, one repeated, or none is routed as if it had no host, and the gateway does not answer 400 for it. A host-bound entry selects only its target pool: the document root, the static files and `http.front_controller` stay the gateway's for every Host, and `http.static` is on by default. To serve two sites from separate files, use one `http-direct` pool per site and set `http.static = 0` on the gateway; this layout is not yet covered by a test. `php-fpm-ng -t` refuses an invalid host name. An entry that did not begin with `/` was refused before, so `api/v1` is now the host `api` with the path `/v1`. A gateway with no host entry is unchanged. Documented in `docs/gateway.md` (issue #658). New tests `fpmng-http-route-host.phpt`, `fpmng-http-route-host-malformed.phpt` and `fpmng-http-route-host-invalid.phpt`.
+
 - `pool.type = gateway`: a WebSocket `Upgrade` can pass through an `http.route[]` entry to a `pool.type = http-direct` pool with `pool.executor = worker`. The operator opts in per prefix with `http.route_upgrade[<prefix>] = websocket`. Without that directive the gateway still answers `501`. After the target answers `101`, the gateway copies bytes both ways with bounded buffers and does not parse frames. `http.upgrade_idle_timeout` (default `300000` ms) and `http.upgrade_max_duration` (default `86400000` ms) close the connection. An upgraded connection counts against `http.max_connections`. `php-fpm-ng -t` refuses a `route_upgrade` whose target does not serve WebSocket upgrades. The access log does not record relayed connections. Documented in `docs/gateway.md` and `docs/http-route.md` (issue #659). A client half-close (EOF) no longer drops the bytes the gateway still holds for the target: they are sent, then the target sees EOF. Upstream bytes not yet in the client output are dropped at a client EOF. A drain or a reload ends open relays after about `process_control_timeout`. New tests `fpmng-http-route-upgrade-relay.phpt`, `fpmng-http-route-upgrade-client-close.phpt`, `fpmng-http-route-upgrade-idle-timeout.phpt`, `fpmng-http-route-upgrade-cap.phpt`, `fpmng-http-route-upgrade-optin-off.phpt`, `fpmng-http-route-upgrade-refused.phpt`, `fpmng-http-route-upgrade-half-close.phpt`, `fpmng-http-route-upgrade-method.phpt`, `fpmng-http-route-upgrade-backpressure.phpt` and `fpmng-http-route-upgrade-max-duration.phpt`.
+
+
 
 ### Fixed
 
-- Static files (`pool.type = http-direct` with `http.static = yes`, and `pool.type = gateway`, where `http.static` is on by default): a GET of an empty file answered `502`, because libevent cannot map a zero-length file. It now answers `200` with an empty body. When the server cannot send a file, it now always closes the file. New case in `fpmng-http-direct-static-range.phpt` (issue #648).
+
+
 - `pool.type = http-direct`: `getallheaders()` and `apache_request_headers()` returned request headers whose name contains `_` (for example `X_Custom`), while `$_SERVER` and the gateway drop them (issue #595). Both functions now omit such headers (issue #628). New test `fpmng-http-direct-getallheaders-underscore.phpt`.
+
 - `pool.type = http-direct` with `pool.executor = classic`: `http.read_timeout` bounded only the first request on a keep-alive connection. A later request that trickled one byte at a time was held for as long as each byte reset the idle timeout, so a client could hold a connection slot and an fd for a long time (slowloris, issue #1004). Each request now has its own budget, which starts at its first byte, so an idle keep-alive connection is not charged for its idle time. The NOTICE that announces a drop now reads "dropping connections whose request does not arrive within http.read_timeout" (it said "first request"), and every drop counts in `timed out connections`. New cases in `fpmng-http-direct-connection-limits.phpt`. Not fixed on `pool.executor = worker`: there a later request is still bounded by the idle timeout only.
+
 - `pool.type = gateway`: a failed allocation in the FastCGI reply path crashed the gateway process (SIGSEGV) instead of answering the request (issue #967). An upstream header name or value that could not be copied now answers 502, and so does the 502 for an invalid upstream `Status:` when its body cannot be allocated, which then goes out with an empty body. A request whose `Host` header cannot be copied for `SERVER_NAME` answers 503 and is not forwarded. A body piece that cannot be buffered cuts the reply short, with no terminating chunk, as a lost reply does. Each case logs a WARNING that names the pool.
+
 - `pool.type = http-direct` with `pool.executor = worker`: an upgraded WebSocket connection had no read limit. Libevent moved every byte the peer sent into the connection's input buffer, whether or not the script read it, so a fast peer and a slow codec could grow the worker's memory without a bound. The input is now bounded at 64 KiB per connection. At the bound the worker stops reading the socket, and reading resumes when the codec drains the buffer, on plaintext and on TLS. On TLS the buffer can exceed the bound by libevent's read slack and by one TLS record; no maximum is measured. The bound is fixed, not configurable. A frame larger than 64 KiB needs the codec to keep the partial frame in PHP memory. Documented in `docs/http-direct.md`, WebSocket section (issue #974). New tests `fpmng-http-direct-worker-ws-input-backpressure.phpt`, `fpmng-http-direct-worker-ws-input-tls.phpt` and `fpmng-http-direct-worker-ws-input-close-release.phpt`.
+
 - `pool.type = gateway`: the access log `bytes` field was 0 for a 502 that the gateway wrote with libevent's HTML page: the 502 for an upstream that sends no answer, and the 502 for a CGI header block that stops before its blank line (issue #636). The gateway now writes the body `Bad Gateway` (`Content-Type: text/plain`, `Connection: close`) and counts its 12 bytes, the same as the invalid-`Status` 502. A HEAD request gets no body, and its access-log line counts 0 for it. The same holds for the invalid-`Status` 502. The HTML page is no longer sent for these two 502s. Measured on the old code: the client received a 94-byte page. The 504 of an upstream timeout still counts 0 (issue #858). New test cases in `fpmng-http-gateway-upstream-partial-head.phpt`.
+
 - `pool.type = gateway`: a client that aborted a response, or a reply that the gateway cut short after its head was sent, left the request in the gateway process: libevent detaches such a request and does not free it. Its headers and its whole body (up to `http.max_body`, 32 MiB by default) stayed in memory until the gateway restarted, so repeated aborts could exhaust the host memory. The gateway now ends the detached request when the connection closes (issue #996). New test `fpmng-http-gateway-abort-release.phpt`.
+
 - `pool.type = http-direct`: `fpm_http_log_escape()` wrote a NUL to `out[0]` when the output buffer size was 0. It now returns an empty string and writes nothing. No current caller passes 0, so this is hardening only (issue #1032). `fuzz_log_escape` now covers size 0, with a seed that does so on the first run.
+
 - Reload: the exit callback of a spared reload survivor no longer deletes a queued timer from inside the timer walk. The timer frees the survivor when it next fires (hardening; the rule is in `docs/timers.md`). By code reading, a normally started master cannot reach the order that makes this a crash. Not reproduced. New test `fpmng-reload-survivor-exits-before-retire.phpt` (issue #1012).
+
 - `pool.type = gateway` and `pool.type = http-direct` with `http.static`: a request for a FIFO or a device node in the document root blocked the process in `open()` (issue #1008). The gateway runs all clients on one event loop, so one such request stopped every client. The static file server now opens the file without waiting, and then checks that it is a regular file. A non-regular file gets the same answer as before: the request goes on to PHP or to the FastCGI worker, which decides the reply. New tests `fpmng-gateway-static-fifo.phpt` and `fpmng-http-direct-static-fifo.phpt`.
+
 - `pool.type = gateway` and `pool.type = http-direct` with `http.tls_cert`: a TLS connection that failed to set up was served as plain HTTP (security fix, issue #1001). The failure happened when `SSL_new()` or `bufferevent_openssl_socket_new()` failed. The bufferevent callback then returned NULL, and libevent made a plain socket connection on the TLS port. The process now refuses such a connection, closes it, and logs a WARNING: `tls: cannot set up a TLS connection`. A TLS port serves no plaintext request. The test seam accepts `FPMNG_FAULT=<point>:times=<N>`, which fails the first N hits only. If even the refusal cannot be allocated (out of memory), the child exits with code 70 instead of serving the connection. The master starts a new child. In a gateway this drops every request in flight in that process. New tests `fpmng-http-gateway-tls-fail-closed.phpt`, `fpmng-http-direct-tls-fail-closed.phpt` and `fpmng-http-gateway-tls-refuse-oom.phpt`.
+
+
 
 ## [0.17.2] - 2026-10-26
 
+
+
 ### Security
+
+
 
 - `pool.type = gateway`: a reply that libevent completed inside the send call caused a use-after-free and a double free in the gateway process (GHSA-jw3f-79v7-7q5h). A non-chunked reply (HTTP/1.0, or a reply with `Content-Length`) whose output buffer was already empty when the request ended made libevent end the request at once. On a closing connection the close callback then freed the connection state, and `fpm_http_finish()` read it again and freed it a second time. A client needed no authentication; a script that flushes its output and then ends was enough. The gateway now writes the access log line and frees its state before the last send. The same order is used at the other gateway reply sites. New test `fpmng-http-gateway-flush-then-end.phpt`.
 
+
+
 ## [0.17.1] - 2026-10-25
+
+
 
 ### Added
 
+
+
 - Testing: libFuzzer harnesses for the HTTP/1.1 response parser, the FastCGI record parser, the static path checks, the WebSocket handshake checks and the header and log helpers (`tests/fuzz/`, `build/fuzz.sh`, CI job `fuzz` on pull requests and pushes to main that touch the fuzzed code; issue #995). No change to the shipped binary.
+
 - Test builds: a failure-injection seam, `FPMNG_FAULT_INJECT=1` for `build/libphp-build.sh` (`--enable-fpmng-fault-inject` for the from-source flow), on the pattern of `FPMNG_DEBUG_CLOCK` (issue #832). The environment variable `FPMNG_FAULT=<point>[:ifenv=<VAR>]` makes a named call site fail. The first point is `pool_type_init_main`. The hit path is async-signal-safe (a fixed table read once before `main()`, no allocation, no `zlog()`), so a call site in a signal handler can use it. It is off by default, the code is not in a default build, and the package scripts refuse a binary that has `fpm_fault_inject_hit`. CI builds with it. New test `fpmng-reload-selective-failed-init-main.phpt` covers the #690 discard in `fpm_pctl_exit()` after a new master fails `init_main()`. The test skips on a binary without the seam. Documented in `docs/fpmng-phpt.md`.
+
+
 
 ### Changed
 
+
+
 - `docker/Dockerfile` pins php-fpm-ng v0.17.0 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.13.0 (issue #992; the other example Dockerfiles are still pinned, see #719). With the patched Ubuntu libphp, both releases print the loader warning and segfault on `-v`, so the pin does not fix that (issue #994).
+
 - `pool.type = http-direct` with `pool.executor = worker`: a worker exit no longer waits 100 ms for its stop drain when no connection has a request to read (issue #905). The drain runs non-blocking, for at most four passes and at most 100 ms. A request whose bytes are already in the socket buffer when the stop starts still gets `503 Worker unavailable` (issue #668). A request that has not yet reached the worker when the drain ends gets the silent close of a keep-alive connection, as in the normal keep-alive close race. Documented in `docs/http-direct.md`.
+
+
 
 ### Fixed
 
+
+
 - Selective reload (`reload.selective = yes`): the workers that a reload spares are no longer orphaned when the new master is killed outright (`SIGKILL`, a crash) before it adopts them (issue #829). Before, nothing signalled them, and they kept their listening sockets with no master. A guard process holds a pipe from the old master until the new master adopts or discards the workers. If every holder of the pipe dies first, the guard sends `SIGTERM` to every carried worker that still runs, adopted or not, after it checks the start time of each pid, and logs one WARNING. The guard covers only the selective survivors (`FPMNG_SELECTIVE_RELOAD_SURVIVORS`). A new master that is killed leaves the children it forked itself (the gateway and the children of changed pools) running, with their listening ports; the guard covers only the carried workers. The #329 survivors and a master killed after the release are not covered (see `docs/reload.md`). New tests `fpmng-reload-selective-guard-sigkill.phpt` and `fpmng-reload-selective-guard-sigkill-daemonize.phpt`; both need the failure-injection seam.
+
 - Reload: a `supervisor` copy that a reload spared (issue #329) is no longer left running when the new master fails before a pool takes it. The new master sends `SIGTERM` to such a copy on its failure paths. The copy's own watchdog then ends it after the pool's `supervisor.stop_timeout`. Before, nothing bounded the copy, and the script ran on with no master. A normal stop of the master sends `SIGTERM` to a survivor of a removed pool that waits for its deadline (issue #889). Covered by `fpmng-reload-survivor-init-fails.phpt`.
+
 - Reload: a `supervisor` survivor of a pool that the new configuration removes, or that a reload renames, gets a stop signal (issue #889). Before, the new master did not track it, so no process signalled it, and it ran until its own script ended. The new master now sends `SIGTERM` to it at its deadline, about 30 seconds after the reload. The survivor's own watchdog then ends it after the old `supervisor.stop_timeout`. The master has no backstop for this case, see `docs/reload.md`. New test `fpmng-reload-survivor-removed-pool.phpt`.
+
 - The start-up ABI check refuses to start when the struct sizes of the loaded libphp differ from the sizes the binary was built with. It compares `executor_globals` and `compiler_globals`, and it prints `FATAL` and exits with status 1 before `main()` (issue #994). Before, the check compared only the PHP version. A distribution can change a struct and keep the version number, so such a binary started, printed the loader warning, and segfaulted on `-v` and on a request that ends in a PHP fatal error. The check does not see a layout change that keeps both sizes. The version messages are unchanged. `build/test-libphp-abi-guard.sh` covers both struct sizes and a libphp whose `executor_globals` differs from the copy in the executable.
+
 - Reload: a `supervisor` survivor whose watchdog cannot be forked is ended by its master (issue #890). When the survivor's `fork()` fails, nothing bounded its exit after the stop signal. The master now sends `SIGKILL` to it `supervisor.stop_timeout` plus one second after the stop signal, if it still runs, and logs one WARNING. The slot expiry of a replaced pool gets one more second of slack, so the slot stays reserved until that kill. Two cases stay open, a reload or a master exit before the backstop, see `docs/reload.md`. New test `fpmng-reload-survivor-watchdog-fork-fails.phpt` injects the `fork()` failure with `FPMNG_FAULT=pool_watchdog_fork`.
+
 - Docs: `docs/install.md` has a section on engine security fixes (issue #992). The fix for CVE-2026-109618 and CVE-2026-109619 comes from the distribution's `libphp8.5-embed` (or `php85-embed`), not from a php-fpm-ng release. On Ubuntu 26.04 the patched `libphp8.5-embed 8.5.4-0ubuntu1.5` keeps the version 8.5.4 and changes the size of `executor_globals`. The PHP 8.5.12 source adds a field to that structure too. php-fpm-ng v0.17.0 expects the older layout: with the patched libphp it prints a loader warning, `php-fpm-ng -v` segfaults, and a request that ends in a PHP fatal error kills its worker. The start-up ABI check of v0.17.0 compares only the PHP version and does not detect this (issue #994 adds a size check). An operator needs the patched libphp and a php-fpm-ng build made against the patched headers. On 2026-10-24 there is no such release (issue #994). The section gives the steps for Debian and Ubuntu, Alpine and the Docker image, for use once that build exists. `README.md` and the `docker/Dockerfile` comment point to it. `php-fpm-ng -v` already prints the PHP version of the loaded libphp, but the version does not identify the layout, so the command needed no change. No code change.
+
 - Docs: the `fpm_http.c:N` citations in the http-direct comments, the `access.log` test comment and `fpm_http_fcgi.c` now point at the current lines, with the function name next to each line number (issue #964). No code change.
+
 - Docs: `docs/reload.md` and the header of `sapi/fpmng/fpm/fpm_http_handoff.h` name the two inherited sockets that the new master leaves open, and the WARNING it logs for a listening socket not bound to the address in its record (issue #960). No code change.
+
 - CI: `ci-ok`, the one required check, fails closed (issue #781). In run 37365615843 the `changes` and `docs` jobs were cancelled in the queue, every heavy job was skipped, `code` was empty, and `ci-ok` still went green on a pull request nothing had built. The verdict is now `build/ci-ok-check.sh`: `changes` and `docs` must be `success`, `code` must be `true` or `false`, every result must be `success` or `skipped`, and `skipped` is accepted only on a docs-only change. `build/test-ci-ok-check.sh` (in the `checks` job) covers the cases and checks that the script gets the result of every job `ci-ok` needs.
+
 - Reload: when the `execvp()` of the master fails after the configuration check passed (the binary was unlinked while the old generation drained), the master retries through `/proc/self/exe` instead of exiting (issue #925). The next generation runs the binary of the old master, keeps the master pid and takes over the gateway listeners. Before, the master exited and the listeners closed. If the retry fails too, the master exits as before. Documented in `docs/reload.md`.
+
 - Selective reload (`reload.selective = yes`) under `daemonize = yes`: `SIGTERM` after a reload that spared a pool now completes (issue #792). The exec'd image forks again there, so the new master is not the parent of the spared workers and gets no `SIGCHLD` for them. Before, `running_children` never reached 0, and the master kept its sockets and sent `SIGKILL` to pids that were gone. While the master runs, a worker that exits on its own was never replaced, so a `pm = static` pool could stay below `pm.max_children`. The master now checks the adopted workers once per second by start time and retires one whose process is gone, as for a normal exit. New test `fpmng-reload-selective-sigterm-daemonize.phpt`. A foreground master (`-F`, `daemonize = no`) is unchanged.
+
 - `pool.type = gateway`: the gateway process, first spawn and respawn, closes the scoreboard and metrics memfd descriptors right after fork, as the pm children already did (issue #691). A compromised gateway no longer has fd-level read, write and resize access to those regions. The mappings stay, so the gateway serves as before (issue #841). The watchdog child needed no change: it forks only from pm children that already closed the descriptors.
+
 - Reload: a selective reload closes an inherited metrics descriptor that fails the size check, so no worker inherits it. The scoreboard descriptor of a spared pool is no longer kept twice. A failed `FD_CLOEXEC` change on a spared pool's scoreboard or metrics region is logged with the pool name (issue #842).
+
 - Docs: the "Symlink deploys" section of `docs/gateway.md` states the exact conditions for the per-request `realpath()` of the document root (issue #828). The #638 entry says GET and HEAD of a non-`.php`, non-directory path. The code calls `realpath()` for a directory requested without a trailing slash, and it does not call `realpath()` for a path with a segment that starts with a dot. No code change.
+
 - The HELP text of `fpmng_pool_respawn_delay_ms` now says what the value is: the wait the master chose for the next child, `0` when no child is pending or once it is forked. Before, it said "Delay the next respawn waits for" (issue #920). Only the `# HELP` line changed; the value and its type did not.
+
 - Docs: `docs/systemd.md` states that the PHP children inherit `NOTIFY_SOCKET` at fork, that PHP code sees it only in a pool with `clear_env = no`, that the children never send, and that `NotifyAccess=main` drops a datagram from a child (issue #915). No code change.
+
 - `pool.type = gateway` and `pool.type = http-direct` (classic executor): the WARNING for an invalid upstream `Status:` no longer writes control bytes to `error_log` as raw bytes. In the value, every byte outside `0x21`–`0x7e` (a space, a control byte, or a byte of 0x80 or more) and the backslash is now written as `\xNN`, as the header-name WARNING already does. The value is still cut at 64 bytes (#838).
+
 - A leading `-` is refused for every integer directive except `process.priority`, `listen.setfib`, `rlimit_core` and `listen.backlog` (issue #862). `listen.backlog` still takes `-1`, the kernel maximum, and refuses every other negative value. Before, the parser accepted a negative value for the other directives, for example `pm.max_requests = -1`. Such a value now fails with `is not a valid number (greater or equal than zero)`, also where a later check reported it before (for example `pm.max_consecutive_failures = -1`).
+
 - Docs: `docs/http-gateway-pool-full.md` names the per-target fields (`target->upstreams_used`, `target->max_upstreams`, `target->waiting`) instead of the removed `gw->` fields (issue #836). The comment in `fpmng-http-front-controller-directory-and-startup.phpt` gives the real reason for `http.gateways = 1` since #735. No code change.
+
 - A gateway no longer takes over a listening socket that is bound to another address when a `FPMNG_HTTP_LISTENERS` record names it (issue #927). The record is ignored and the socket stays open, and the master logs one WARNING. Before, the gateway listened on the wrong socket, and its own address refused connections.
+
 - Selective reload (`reload.selective = yes`): the WARNING after the initial fork loop no longer says that the master is going down. It now says that this master did not adopt the children that a reload carried over (issue #830).
+
 - Selective reload: a pool whose workers the old master could not hand to the new one no longer leaves them alive with the pool's listening socket and no master (issue #830). An allocation failure before any worker is detached now reloads the pool normally. A `setenv()` failure after the detach sends `SIGTERM` to those workers, and the NOTICE no longer reports a spare that did not happen. A pool whose name cannot be carried (`:`, `,` or `;`) now gets the ordinary reload signal at once. Before, its workers missed the first signal and got `SIGTERM` only when the reload escalated after `process_control_timeout`.
+
 - `pool.type = gateway`: when the copy of a valid upstream `Status:` reason phrase fails for lack of memory, the gateway no longer sends the reply with no reason phrase. It answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply, as for an invalid `Status:` (#809).
+
 - `pool.type = gateway`: an invalid upstream `Status:` line now gives a 502 whatever the other `Status:` lines of the same CGI header block say. Before, a valid `Status:` line after an invalid one (for example `Status: abc` then `Status: 404 Valid`) cleared the rejection: the client got `404 Valid` with the upstream headers and body, while the WARNING still said `answering 502` (issue #837).
+
 - `cron.log` is opened by the master at startup and at each reload, not by the pool user at each run (issue #775). Before, a log directory that the pool user cannot write, such as the root-owned `/var/log/php-fpm-ng/`, lost the line of every run, with `cannot open ... (Permission denied)` in the error log. Rotation by rename needs `SIGUSR1` (the master reopens `cron.log` on it, as it reopens the error log), a reload, or `copytruncate`; see `docs/cron.md`. Other pools' children no longer inherit the `cron.log` descriptor. New tests `fpmng-cron-log-opened-by-master.phpt`, `fpmng-cron-log-reopen-sigusr1.phpt` and `fpmng-cron-log-not-inherited.phpt`.
+
 - Reload: a pid that a reload carries over (`FPMNG_RELOAD_SURVIVORS`, `FPMNG_SELECTIVE_RELOAD_SURVIVORS`) is used only when its process still has the start time it had when spared. On Linux the check reads `/proc/<pid>/stat`. It does not depend on parentage, so it also works under `daemonize = yes`. Without `/proc` it falls back to `kill(pid, 0)`. A refused supervisor or selective pid logs one NOTICE with the pool name and the pid, except on the failed-handoff path, which logs no line per pid. Before, the master signalled such a pid with `kill(pid, 0)`, and it could stop an unrelated process (issue #891).
+
+
 
 ### Security
 
+
+
 - `listen.allowed_clients` on an IPv6 listener compared only the first 96 bits of an allowed address in the FastCGI layer (`main/fastcgi.c`, `fcgi_is_allowed()`). A client that matched an allowed IPv6 address only in those bits was accepted: `::1` passed `listen.allowed_clients = ::dead:beef`. The IPv4-mapped form had the same bug: `::ffff:203.0.113.1` admitted the IPv4 client `127.0.0.1`. The vendored php-src moves from php-8.5.9 to php-8.5.12, which compares all 128 bits (issue #991). Tests: upstream `ghsa-62xp-839h-2637-ipv6-allowed-clients.phpt` and `ghsa-62xp-839h-2637-v4mapped-allowed-clients.phpt`. The gateway ACL (`http.allowed_clients`) already compared all 16 bytes and is not affected.
+
 - The same php-src release (GH-19320) refuses a numeric pool `user`, `group`, `listen.owner` or `listen.group` of `4294967295` or more at configuration time, with `user ID '<value>' is out of range` (or `group ID`). `4294967295` is the `-1` that `chown()` reads as "no change". Before, the value was cut to 32 bits: `4294967296` became `0`.
+
+
 
 ## [0.17.0] - 2026-10-09
 
+
+
 ### Added
 
+
+
 - `http.ready_path` on `pool.type = gateway` (issue #646): a readiness probe that the gateway answers itself. It answers `200 ready` when at least one target pool has a child that accepts requests. Before that it answers `503 starting`. From the first moment of a stop or a reload it answers `503 draining`. The master sends `SIGUSR1` to these gateways at that moment. During the window the gateway keeps answering new connections, so a Docker `HEALTHCHECK` or a Kubernetes `httpGet` probe gets the `503`. The window ends at `process_control_timeout` minus 100 ms. Then the gateway drains its in-flight requests for up to the same time again. The children of the pools that such a gateway routes to keep serving until the master signals them, so the application answers too. An ondemand pool forks a child for a new connection in the window. The children get the signal of the stop when the last such gateway exits, or at `process_control_timeout` after the stop at the latest. A `SIGQUIT` stop lets a running request finish. A `SIGTERM` stop, which `docker stop` and the kubelet send by default, cuts a request that is still running at that point, and its client gets `502`; set `STOPSIGNAL SIGQUIT` or `lifecycle.stopSignal` for a graceful drain. A second stop signal, such as `SIGTERM` after `SIGQUIT`, is not held. The master then escalates after another `process_control_timeout`. A stop or a reload of such a pool therefore lasts up to about twice `process_control_timeout`. The stock `process_control_timeout = 0` leaves no window, so set it. The examples in `docs/gateway.md` use 15s and a stop timeout of 35s. The new directive `http.ready_require_target` (default `no`, needs `http.ready_path`) answers `503 no live target` when no child of any target pool accepts requests. `http.ready_path` is refused on `pool.type = fastcgi` and `pool.type = http-direct`, and `http.ready_require_target` is refused on `pool.type = fastcgi`. See `docs/gateway.md`.
+
 - Crash backoff for pm children that fail fast (issue #727). This applies to `pool.type = fastcgi` and to `pool.type = http-direct`. A child that exits within 10 seconds and serves no request is a fast failure. The first fast failure in a row starts a new child at once. The next failures wait 0.5 s to 1 s, then 1 s to 2 s, and so on, up to about 60 s. A child that serves a request, or that lives for a whole window, ends the streak. The new directive `pm.max_consecutive_failures` sets how many fast failures in a row a pool allows. The default is `6`. The value `0` means that the pool never gives up. When the streak reaches this number, the master logs one `ALERT`, and the operator pages show `crash gave up`. After that, the master starts new children at the capped rate. The directive is refused on `pool.type = gateway`, `supervisor` and `cron`. The operator endpoint shows the streak in `fpmng_pool_consecutive_crashes`, `fpmng_pool_crash_gave_up` and `fpmng_pool_respawn_delay_ms`, and in the status pages. New test `fpmng-crash-backoff.phpt`.
+
 - Native systemd notification of the master (issue #643). With `NOTIFY_SOCKET` set, the master sends `READY=1` after every pool has bound its listening socket, `RELOADING=1` with `MONOTONIC_USEC` when a reload passes the configuration check, `RELOADING=1` and then `READY=1` when the configuration check refuses a reload, `STOPPING=1` when the stop starts, and `WATCHDOG=1` at half of `WATCHDOG_USEC` when systemd sets it. The master needs no libsystemd. A failed send writes one WARNING per master process and does not stop the master. Documented in `docs/systemd.md`; new tests `fpmng-sd-notify-lifecycle.phpt`, `fpmng-sd-notify-watchdog.phpt` and `fpmng-sd-notify-unreachable.phpt`.
+
 - `pool.type = gateway` now applies `http.max_connections` (issue #686). It caps the client connections that one gateway process holds, including idle keep-alive connections. With `http.gateways = 2` the pool can hold twice the number. At the cap the process stops accepting: a new client waits in the listen backlog, and no connection is refused.
+
 - `pool.type = gateway` now applies `http.max_connections_per_client` (issue #686). It caps the connections from one peer address inside the process cap. A client over this cap gets either a closed connection without a response, or a `503` response.
+
 - Saturation numbers on the operator pages of `fastcgi` pools and of `http-direct` pools with `pool.executor = classic` (issue #644). The new series are `fpmng_pool_listen_queue`, `fpmng_pool_listen_queue_max` and `fpmng_pool_listen_queue_length` (gauges, TCP listeners in a Linux build only), `fpmng_pool_max_children_reached_total` (counter, only with `pm` set to `dynamic` or `ondemand`) and `fpmng_pool_slow_requests_total` (counter, only with `request_slowlog_timeout`). A series is absent when the pool cannot give a correct number. The status pages show the same numbers under their own key names. The `worker` executor does not report them. Documented in `docs/operator-endpoint.md` and `docs/http-direct.md`; new tests `fpmng-saturation-max-children.phpt`, `fpmng-saturation-slow-requests.phpt` and `fpmng-saturation-selective-reload.phpt`.
+
 - The gateway (`pool.type = gateway`) now counts the responses it pauses. A response pauses its upstream when the client has not read `http.response_buffer` bytes (issue #596), and the pause was not visible before. Two new metrics show it: `fpmng_gateway_responses_paused_total`, a pool-wide counter of the pauses, and `fpmng_gateway_responses_paused`, a gauge of the responses paused at this time. The gauge is kept per gateway process, so a gateway killed while a response is paused leaves no count behind: the master zeroes its block. The `/status` pool row gains `responses_paused` and `responses_paused_total`. Documented in `docs/gateway.md` and `docs/operator-endpoint.md`; new test `fpmng-gateway-responses-paused-metrics.phpt` (issue #706).
+
 - Gateway access log timing fields (issue #642). Each line of `http.access_log` ends with `duration_ms` (time from the end of the request read to the write of the line) and `upstream_ms` (time from the hand-off to a target to the write of the line; `-` when no target got the request). With `http.pool_full_policy = wait`, the line also ends with `queue_ms`, the same value as the `X-Fpmng-Queue-Wait` header.
+
 - `http.access_format` (issue #642): `combined` (default) or `json`. With `json`, each `http.access_log` line is one JSON object with a fixed key set; an unknown value is `null`, and the escaping rules are in `docs/gateway.md`. The directive is refused on `pool.type = http-direct`. With `combined`, the line is the one described in the entry above.
+
 - `http.request_id` (issue #642): `off` (default), `generate` or `propagate`. With `generate` or `propagate`, the gateway makes one id for each request. The id is in a `request_id=` field of the access log, in `HTTP_X_REQUEST_ID` for a FastCGI target, in an `X-Request-Id` header for an HTTP route target, and in an `X-Request-Id` response header. `propagate` keeps an inbound `X-Request-Id` only from a direct peer in `http.trusted_proxies`. The directive is refused on `http-direct`, whose `access.format` can print the id with `%{HTTP_X_REQUEST_ID}e`. `docs/gateway.md` has the rules.
+
 - The gateway (`pool.type = gateway`) has a request-duration histogram for each target, `fpmng_gateway_request_duration_seconds` (issue #652). It uses the Prometheus client default buckets, from 0.005 s to 10 s, and `+Inf`. The duration starts when the gateway reads the whole request. It ends when the gateway finishes the response. It includes the wait for a free connection to the target. Documented in `docs/gateway.md` and `docs/operator-endpoint.md`; new tests `fpmng-gateway-request-duration-histogram.phpt` and `fpmng-gateway-request-duration-plain.phpt`.
+
+
 
 ### Changed
 
+
+
 - The `.deb` unit `php-fpm-ng.service` uses `Type=notify-reload` and `NotifyAccess=main` instead of `Type=exec` (issue #643). This type needs systemd 253 or later. `systemctl start` waits for `READY=1`, which the master sends after its pools bind their sockets. `systemctl reload` waits for the `READY=1` of the new master: the unit runs the configuration check, then sends `SIGUSR2` (`ReloadSignal=`). A refused reload sends `RELOADING=1` and then `READY=1`, so the reload job ends. The watchdog stays off unless a drop-in sets `WatchdogSec=`. See `docs/systemd.md`.
+
 - `php-fpm-ng -t` accepts `http.max_connections` and `http.max_connections_per_client` on a gateway (issue #686). Before, both were refused. Each value must be between 0 and 1000000. `http.max_connections_per_client` requires `http.max_connections` and must not be above it.
+
+
 
 - Gateway access log: each line has the trailing fields above. The fields before `target=` do not change. A parser that expects the line to end after `target=` must accept the new fields.
 
+
+
 - Gateway listeners cross a reload (issue #661). The old master keeps each TCP listener of a gateway open across the reload's `execvp()`, and it passes the socket to the new master in `FPMNG_HTTP_LISTENERS`. A gateway of the new generation takes the socket over when the bind text and the `http.tls_*` settings match. A gateway that moves to another address binds a new socket. A gateway in the NO_CERT state of `http.tls_wait_for_cert` does not take a socket over. A socket in its NO_CERT state is bound but not listening, so the old master does not hand it over either: it closes on the exec. `http.reuseport = on` and a unix public listener work as before. If the reload's own `execvp()` fails after the check passed, the master exits and the listeners close with it, as before. See `docs/reload.md`.
+
 - A reload whose configuration check cannot run `execvp()` is refused (issue #661). The master logs one ERROR line, and the pools that run keep serving. Before, the reload went ahead, and a failed exec left the service down. A `fork()` or `pipe()` failure still logs a WARNING, and the reload goes ahead.
+
+
 
 ### Fixed
 
+
+
 - Supervisor pool (`pool.type = supervisor`): the first start of a copy no longer waits for the pool-wide restart backoff. Before this fix, a copy that reached its restart loop after a sibling's failure waited for the whole `supervisor.restart_delay` before its first start. Each copy now skips that wait on its first start, while the pool has cold-start slots left (`supervisor.processes` per pool). The copy still waits for its own `supervisor.start_jitter` delay. Every later start waits for the backoff as before. A respawned copy can also take a free slot. So the skip is bounded, but not limited to the original copies. `docs/supervisor.md` describes this. `fpmng-supervisor-jitter.phpt` has a new pool without `start_jitter`. The pool catches the regression: on the unfixed binary, a late copy started at offset 601 s (measured on the test box). The test no longer needs the workaround that #731 added (issue #734).
+
 - Test only, no product change: `fpmng-http-direct-worker-saturation-refuses-new.phpt` now proves the `fpm_worker_stopping` part of the worker's refusal check. Before, the held request still in the pending table also refused the idle keep-alive request, so the test passed with that part removed (measured on the test box: 3 of 3 runs). The test now answers the held request first, so only the stopping state can refuse the idle request, and it checks that the refusal is counted as `reason="stopping"` in `fpmng_pool_worker_refused_total` (issue #667).
+
+
 
 - Selective reload (`reload.selective = yes`): a metrics slot that a #329 survivor still writes to is no longer given to a new pool after a second reload. Before this fix, the second reload dropped the survivor from its bookkeeping, and the slot reservation ran out while the survivor still ran. The survivor keeps its deadline across reloads. The deadline starts at the exec of the reload that spares the survivor, not at the spare, because the old master waits for its other children in between. The survivor gets the stop signal at most 30 seconds after that exec. A replaced pool keeps its slots reserved for `supervisor.stop_timeout` plus 2 seconds more than before, counted from that exec, so that its survivor can exit in that time. A later reload carries that expiry and does not extend it. The limits are in `docs/reload.md`, "Back-to-back selective reloads (issue #692)". `fpmng-reload-survivor-back-to-back.phpt` covers the case (issue #692).
 
+
+
 - `pool.executor = worker` (`pool.type = http-direct`): a request that the client sent on an open keep-alive connection just before the worker stopped got no reply, and the connection closed silently. The worker now reads such a request for 100 ms after it stops, and answers it `503 Worker unavailable` (issue #668). A request that arrives after that window still gets no reply; see "Requests that arrive while the worker stops" in `docs/http-direct.md`. Every worker exit takes 100 ms longer.
+
+
 
 - Gateway: a client that connected during a reload got `ECONNREFUSED` (issue #661). The gateway's listening socket was closed before the reload's `execvp()`, and the new master bound it again. Measured on the test box with four clients under load and one reload per run: 140 refused connections in five runs before the change, and none in five runs after it (`docs/NOTES.md`, section 3ak). Still open: a reload under load resets some in-flight requests and answers some with `502`. The order of the reload causes this, and a decision on that order is pending.
 
+
+
 ## [0.16.0] - 2026-10-07
 
+
+
 ### Added
+
+
 
 - The gateway (`pool.type = gateway`) now drains on stop and on reload instead of cutting in-flight requests (issue #641, phase 1). `fpm_http_cleanup()` used to `SIGTERM` every gateway process, so a reload (`SIGUSR2`) and a `systemctl stop` killed an SSE stream or a slow response mid-flight. The master now sends `SIGQUIT`: the gateway stops accepting, closes the connections idle between keep-alive requests, finishes in-flight requests up to the hard deadline and exits, and the master `SIGKILL`s whatever is still alive at the deadline. Only requests already dispatched to a target worker drain: a request whose body is still being uploaded is cut, because the master stops the target pool's workers first and drains the gateways later (`fpm_pctl_action_next()` signals every child, then `fpm_pctl_exec()` → `fpm_http_cleanup()` drains the gateways), so there is no worker left when the upload finally dispatches. `fpmng-gateway-drain-upload.phpt` pins that limitation (measured: with a 4 MiB upload 64 KiB in, the gateway was replaced 0.1 s after `SIGUSR2` with `process_control_timeout = 4`). Making uploads drain needs the gateway drained before the workers are stopped — phase 2 or a follow-up. The deadline is `process_control_timeout` — no new directive; with the stock `0` the gateway is killed at once, as before. `docs/shutdown-timeouts.md` gained the `gateway` row and the prose. New tests `fpmng-gateway-drain-reload.phpt` (an 8 MiB response survives a `SIGUSR2`) and `fpmng-gateway-drain-deadline.phpt` (a client that never reads is cut at the deadline and the reload still finishes); measured against the unfixed binary, the reload cut the first test's response at 1.8 MB of 8 MiB and replaced the gateway of the second in 0.05 s instead of at the 3 s deadline. Not in scope: nginx-style binary hot upgrade and fd handoff across `execvp()` (phase 2).
 
+
+
 - Safe reload (issue #640): a `SIGUSR2` whose configuration does not load no longer takes the service down. Before any child is signalled the master forks a child that runs the binary's own configuration test (`-t`) with the same argv it is about to re-exec (`fpm_reload_config_check.c`); exit status 0 starts the reload sequence exactly as before, anything else logs one `ERROR` naming the file and leaves the master in its current state, so every pool keeps serving the configuration it was started with and the next `SIGUSR2` tries again. A check that cannot be run at all (`fork()`/`execvp()` failure, killed by a signal) logs a `WARNING` and lets the reload proceed, as before — that also keeps `fpm_pctl_exec()`'s own failed-`execvp()` path (#690) reachable. The packaged systemd unit (`packaging/deb/php-fpm-ng.service`) and OpenRC script (`packaging/apk/php-fpm-ng.initd`) run the same `-t` first, so the reason appears on the journal / on the console instead of a silent no-op. `docs/reload.md` gained a section that lists what `-t` does catch, the six things it does **not** (anything needing `bind()` or `fork()`, an unwritable `pid` path, a script or document root that is not there yet, anything PHP resolves later, the TOCTOU window between the check and the `execvp()`, and whether the generation being replaced can be replaced at all), and the cost of the gate (measured: min 7 ms / median 8 ms / p90 9 ms / max 12 ms for a two-pool `http-direct` configuration, against ~600 ms for a full master start). New tests `fpmng-reload-broken-config.phpt` and `fpmng-reload-valid-config.phpt`. There is no directive that disables the gate: a configuration `-t` refuses can no longer be loaded by a reload at all, and stopping and starting the master is what an operator does with such a configuration anyway.
+
 - Gateway (`pool.type = gateway`): two new directives bound what the gateway waits for on the target side. `http.upstream_connect_timeout` (default 5000 ms, `0` = wait forever) cuts a connect towards a target that never completes it and answers the client `504`; `http.upstream_read_timeout` (default 60000 ms, `0` = never) cuts a target that makes no progress on a request in flight, answering `504` while nothing has been sent to the client and closing the client connection without completing the reply afterwards (the rule of #533). The read timeout bounds time *without progress*, not total request time: every byte the target sends re-arms it, and it is stopped while the gateway has paused an upstream because the client is behind (`http.response_buffer`). Before this a hung or very slow target held the client connection and one slot of the target's admission budget for as long as it liked: with the default `request_terminate_timeout = 0` nothing ended it, and a fiber target refuses that directive at all (#610). Both are refused on `http-direct`, like the other gateway-only limits. The two defaults are judgement calls, not measurements -- `5000` matches `http.read_timeout` for a target that is a Unix socket or a loopback address (the only address a route may name for an `http-direct` target), `60000` is nginx's `proxy_read_timeout` default -- and both are documented with that reasoning in `docs/gateway.md`; raise them, or set `0`, for a remote FastCGI target or a script that legitimately computes for longer than a minute before its first byte. New files `sapi/fpmng/fpm/fpm_http_upstream_timeout.c` and tests `fpmng-http-gateway-upstream-connect-timeout.phpt` and `fpmng-http-gateway-upstream-read-timeout.phpt` (#716).
+
 - `build/run-fpmng-phpt.sh` takes `FPMNG_PHPT_PORT_BASE=<B>`: it reserves the 1000 ports `B .. B+999` for the run, moves every listener into them (the Tester's port block to `B+1 .. B+200`, the gateway operator default to `B+199`, the http-direct tests' `28054 .. 28192` family to `B+300 .. B+438`), hands the tests a temporary directory of their own (`<results>/.tmp`), runs the suite serially, records the bounds in `metadata.txt` and prints them. Two suites given different bases can now run concurrently on one host, which the automatic per-run port shift of #674 could not do: both runs probed, both found the same free range and both took it, and the temporary directories they both wrote to were shared too. Measured: a full owned suite with `FPMNG_PHPT_PORT_BASE=21000` had all 49 distinct listening addresses inside 21000-21999 (`ss -Hltnp` sampled every 200 ms, 992 samples, `PASS=212 FAIL=0` of 212), and two full suites at 21000 and 22000 in one network namespace at the same time both ended `PASS=212 FAIL=0` with no "Address already in use" anywhere (282 s together). Without a base the same 212 tests still pass with `Port shift: 0` and `-j`. Four tests that had asked the kernel for a free port (`fpmng-http-direct-worker-buffered-streams.phpt`, `fpmng-http-direct-worker-tls-and-client-tls.phpt`, `fpmng-http-direct-worker-ws-tls.phpt`, and the fake ACME CA in `fpmng-acme-issue.phpt`) now take one of the run's own, so nothing in a lane listens outside it. Two further collisions of the same kind, found by that measurement and fixed with it: fourteen tests name their temporary directory or unix socket with no pid in it, so two lanes in one `/tmp` deleted each other's files mid-test (`fpmng-raw-upstream.inc`'s `fpmng-raw-$name`, `/fpmng-user-ini`, `/fpmng-430-run`, `/fpmng-728-serve` and the rest) — a lane run now gets a `TMPDIR` of its own, `<results>/.tmp`; and `fpmng-http-gateway-type.phpt` counted every `http gateway gw` line of `ps -eo` on the host instead of its own master's children, so it counted the other lane's gateways too, and now filters on the master pid the way `fpmng-gateway-counters.phpt` already did. The base must end below 32768 and the run must be serial; both are refused otherwise, as is a base together with `FPMNG_PHPT_PORT_SHIFT` (which the lane derives itself, negative when the base is below 28054). `build/run-fpm-phpt.sh` refuses the variable rather than half-honouring it. New hermetic check `build/test-phpt-port-lane.sh` (CI job `checks`); the layout is in `docs/fpmng-phpt.md` and the variable in AGENTS.md's "Test box" (#625).
+
+
 
 - New `fpmng-http-route-fastcgi-dies-mid-body-chunked.phpt` and `fpmng-http-route-fastcgi-dies-mid-body-content-length.phpt` use a FastCGI worker's `request_terminate_timeout` after flushed body bytes and assert an unterminated chunked response and a short fixed-length response (#637).
 
+
+
 - New test `fpmng-reload-selective-operator-pid.phpt`: after a selective reload spared a pool, `/status?json&full` reports the carried-over worker as `live:1` with its own pid, and that worker is still the process serving requests afterwards (#631). Issue #631 reported the row reading `live:0, pid:0`; that no longer reproduces since #537, because the scoreboard survives the reload in a memfd and `fpm_reload_shm_prepare_adopt()` hands adoption the slot that already carries the worker's pid, so nothing has to stamp one. The test pins that, so a regression of the scoreboard carry-over is caught rather than discovered. No production change: the pid stamp #631 asked for changes nothing observable, so the issue is closed with the measurement instead.
+
+
 
 ### Fixed
 
+
+
 - The build output directory `out/` (`build/libphp-build.sh <dir>`, `AGENTS.md` "Commands") is no longer tracked: 372 files (objects, dependency files, the compat header, the binary) had landed on `main` in the squash merge of #843 (#640), so every worktree was dirty after every build and a `git add -A` committed object files into a pull request. `git rm -r --cached out`, `/out/` in `.gitignore`, and a new hermetic `build/test-no-tracked-build-output.sh` (CI job `checks`) that fails when a path under `out/` is tracked again or when `.gitignore` stops ignoring it (#847).
+
 - `pool.type = gateway`: a client that trickles its reads could hold a PHP/FastCGI/target worker indefinitely. `http.write_timeout` is a stall timer and restarts on every byte, so a client reading one byte per second was never cut, and since `http.response_buffer` (#596) stopped the gateway reading the upstream while the client lagged, that client kept a worker blocked for as long as it trickled — a few of them could occupy all of `pm.max_children`. The new `http.response_min_rate` (default 256 bytes/s, `0` = no minimum, refused on `http-direct`) requires the client to drain at least that many bytes per second, measured over a fixed 5-second window, while the upstream is held back; below it the gateway closes the connection the same way `http.read_timeout` does and the worker's remaining output is drained, releasing the worker. The rule runs only while the upstream is paused, so a slow upstream is never mistaken for a slow client, and a client that can empty `http.response_buffer` within one window is never cut. New test `fpmng-http-gateway-min-rate.phpt` pins a trickling client being cut and a slow but progressing one being kept (#705).
+
 - `pool.type = gateway`: a client reply cut short by an upstream that failed after the response head (`fpm_http_finish_truncated()`, #533) no longer counts body bytes that were still in libevent's client output buffer when the socket was closed. Those bytes are dropped, not delivered, so the access-log line now subtracts them and reports what left the process; the truncation itself is unchanged. Exact for a `Content-Length` or close-delimited reply, low by the pending chunks' framing for a chunked one. `docs/gateway.md` says so. New test `fpmng-http-route-upstream-dies-mid-body-slow-client.phpt` fails without the fix (measured: `bytes_out 8388608`, client received `1844819`) (#635).
 
+
+
 - `php-fpm-ng serve`: a `SIGUSR2` reload could leave the running server with no configuration file and no socket. The temporary directory is removed by an `atexit()` handler that only the process which armed it may run, and that was decided by `getpid()` — true for the pool children (forks that inherit the handler) but not for a second `exec` of the binary, which is what the reload's configuration test is (issue #640). That child inherits `FPMNG_SERVE_DIR`, armed the handler as itself and unlinked `serve.conf`, `serve.pid` and `php.sock` on its way out. The owner is now the master's pid, recorded next to the path in `FPMNG_SERVE_OWNER` (`fpm_serve_arm_cleanup()`, `fpm_serve.c`); the reload's `execvp()` keeps the pid, so it still cleans up. `fpmng-serve.phpt` asserts the three files are there after a reload.
+
 - `pool.type = gateway`, `fastcgi` target: an upstream that ends its reply before the blank line that closes the CGI header block (a worker killed between header lines, a connection closed mid-head, or an `END_REQUEST` with the block never finished) is now answered `502 Bad Gateway` with the partial block dropped, a WARNING naming how many bytes were buffered, and 502 in the access log. It used to be shipped as a complete `200` whose body was the unfinished header block -- the "truncation looks complete" problem #533 fixed for a body, one step earlier. The connection is **not** aborted as in #533: nothing of the reply is on the wire yet, so a 502 is truthful where a reseted connection teaches the client nothing. An `http.route[]` HTTP target already answered the same failure this way (#463). New test `fpmng-http-gateway-upstream-partial-head.phpt`; `docs/gateway.md` states the decision (#636).
+
 - `pool.type = http-direct` now reduces an absolute-form request-target (`GET http://host/path HTTP/1.1`, RFC 9112 3.2.2) to its origin-form path at the request entry, exactly as `pool.type = gateway` has since #534. Before this the pool answered `400` to every absolute-form target, so `ping.path` was not the probe for a client that sends one, and a network-path reference (`//host/x`) was read as a host plus a path by the static lookup while `REQUEST_URI` reported the whole target -- a request matched on one path and served on another. `ping.path`, the static lookup, `PATH_INFO`, `REQUEST_URI`, `HTTP_HOST` (an authority replaces the `Host` header, as on the gateway) and `access.suppress_path[]` now see one path on both executors, the last of them for every response whichever ending wrote the line, as on the gateway. An authority longer than 261 bytes is answered `400`; asterisk-form stays refused with `400`. `access.format`'s `%r` is unchanged and still the request-target as the client wrote it; unlike the gateway's request-line field it cuts the query string, which `%Q%q` carries. The operator endpoint is **not** covered: it is answered by `fpm_operator_http.c`, which parses the request line itself and answers `404` to an absolute-form target on every pool type including the gateway's, measured before and after this change. That gap is known and left for a separate change. The contract the two ingresses share is now `sapi/fpmng/fpm/fpm_http_target.h`. New test `fpmng-http-direct-absolute-form.phpt`; `docs/http-direct.md` has a section with the table and the operator carve-out (#681).
+
+
 
 - `pool.type = gateway` with `http.gateways > 1`: a request that finds the shared upstream budget held by idle connections of a sibling gateway process no longer waits out `http.pool_full_wait_ms` (policy `wait`) or gets an immediate 503 (default policy). The process now asks its siblings through a shared counter to close their idle connections, and retries on a 10 ms timer; with the default policy it waits up to 100 ms for that before answering 503. Fixes 503 on sequential requests to a one-worker pool (measured); a parallel burst of `pm.max_children` requests was never reproduced on the unfixed binary, so the burst test is only a smoke check. `php-fpm-ng serve` and `tests/frameworks/slim4/bin/run.sh` no longer need `http.gateways = 1`. New tests `fpmng-http-gateway-sibling-reclaim.phpt` and `fpmng-http-gateway-sibling-reclaim-wait.phpt` (the two that fail without the fix) and the smoke check `fpmng-http-gateway-sibling-reclaim-burst.phpt` (#735).
 
+
+
 - `reload.selective = yes`: when the new master gives up before it adopted the spared workers (a changed pool with an invalid directive, a listening address that cannot be bound, a `SIGTERM` between sparing and `execvp()`, or a failed `execvp()`), those workers were orphaned and kept the pool's listening socket. The master now sends `SIGTERM` to every pid still listed in `FPMNG_SELECTIVE_RELOAD_SURVIVORS` on its exit paths and once after the initial fork loop (`fpm_reload_selective_discard_unadopted()`; `SIGTERM`, not `SIGQUIT`) and logs a WARNING. A master that is killed outright is not covered. New tests `fpmng-reload-selective-failed-init.phpt` and `fpmng-reload-selective-failed-exec.phpt`; `docs/reload.md` describes it (#690).
+
+
 
 - The gateway (`pool.type = gateway`) now resolves the document root (`chdir`) with `realpath()` once per request that reaches the static-file lookup (GET/HEAD of a non-`.php`, non-directory path; POST and `.php` requests pay nothing) instead of once per process, so a `current -> releases/N` symlink swap (Deployer, Envoyer, Capistrano) is followed without a reload and static assets no longer come from the previous release. The containment check is unchanged. New test `fpmng-gateway-static-symlink-swap.phpt` (#638). `DOCUMENT_ROOT`/`SCRIPT_FILENAME` still carry the unresolved `chdir`; the optional `http.docroot_resolve` directive is not part of this change.
 
+
+
 - `pool.type = cron` and `supervisor`: a script now gets the CLI variables `$_SERVER['argv']`, `$_SERVER['argc']`, `$argv`, `$argc`, `PHP_SELF`, `SCRIPT_NAME`, `SCRIPT_FILENAME` and `PATH_TRANSLATED`, with the script path as `argv[0]` and the script path in the four `$_SERVER` entries, as in CLI. `DOCUMENT_ROOT` is now defined as an empty string, as in CLI. They also appear when `register_argc_argv` is off (the engine registers them whenever argv is set). Laravel `schedule:run` no longer fails with `Undefined array key "PHP_SELF"`. The fix is in the shared `fpm_pool_script.c`. New test `fpmng-script-pools-cli-variables.phpt`; the wrapper workaround is removed from `docs/guides/framework-recipes.md` (#738).
+
+
 
 - HTTP `http.route[]` transport now drops client header names containing `_`, including `X_Forwarded_For`; an upstream that normalises underscores to hyphens can no longer treat that as a forwarded `X-Forwarded-For` override (#629).
 
+
+
 - `pool.type = gateway`: a pool that routes to a FastCGI target but sets neither `chdir` nor `http.front_controller` now logs a WARNING at startup (`no chdir and no http.front_controller with a FastCGI target`), instead of answering "Primary script unknown" for every request with nothing pointing at the gateway's configuration. New test `fpmng-gateway-missing-docroot-warning.phpt`; `docs/gateway.md` states the docroot requirement and the `http.pool_full_policy` default next to the route example (#736).
+
+
 
 - Test `fpmng-http-direct-respond.phpt`: the keep-alive body read loops until the announced `Content-Length` is reached instead of a single `fread()`, the `early` timing bound is 1200 ms against the script's 1500 ms sleep (a response that waited for the script cannot come in under it, while connect plus scheduling on a loaded box fits), and the `early` marker names its run (`sleeping-buffered` vs `sleeping-stream`) with the buffered marker awaited before the streamed check, so the streamed assertion cannot pass on a late write from the other pool (#671).
 
+
+
 - Docs: `docs/c-style.md` points to the blocking `lint` job and `bin/lint.sh`, with `build/lint-c.sh` identified as its C pass (#796).
+
 - `build/lint-c.sh` no longer lints `sapi/fpmng/fpm/fpm_tls_http_direct.c` against a build made without TLS: that file is compiled only with `FPMNG_TLS=1` and, unlike its guarded TLS siblings, has no `#ifdef HAVE_FPM_HTTP_TLS` fallback, so with a non-TLS flag set clang-tidy reported implicit declarations for what its headers hide. The skip is printed, a TLS build still lints the file, and CI (which builds with `FPMNG_TLS=1`) is unchanged. New hermetic `build/test-lint-c-tls-files.sh` (CI job `checks`) (#683).
+
 - With `reload.selective = yes`, a forked worker no longer keeps the scoreboard and metrics memfd descriptors open: `MFD_CLOEXEC` closes across exec, not across fork, so a PHP script running in the worker could see and resize them through `/proc/self/fd`. The child now closes them right after fork (`fpm_reload_shm_child_init()`, next to `fpm_metrics_child_init()`), keeping the `MAP_SHARED` mappings, which is all it ever uses -- the descriptor uses (`ftruncate()`, `fallocate()`, the `fstat()` size check) all run in the master before any fork, and the master keeps its copies for the next reload. Spared-pool adoption, status and metrics are unchanged. New test `fpmng-reload-selective-worker-no-memfd.phpt` (#691).
+
+
 
 - `pool.type = http-direct`, buffered classic executor: an invalid CGI `Status:` now produces `502 Bad Gateway` and a WARNING with the first 64 bytes of the value. The shared `fpm_http_parse_cgi_status()` replaces `atoi()` and accepts exactly three digits in 200..599, with an optional space and reason phrase without control bytes (#605). It now lives beside `fpm_http_direct_status_final()` and also serves the gateway (#594). The buffered finalizer discards the script's headers and body, counts one rejected response, and records the response status in `access.log`. Other rejection causes retain 500. Measured on Linux with the PHP 8.5.4 SDK: `Status: abc` returned `500 Internal Server Error` before this fix and `502 Bad Gateway` after it. New `fpmng-http-direct-upstream-status.phpt` covers valid and invalid values, WARNING truncation, headers/body, keep-alive, rejection counts, access-log status, and `fpmng_respond()` (#604).
 
+
+
 ## [0.15.0] - 2026-10-06
+
+
 
 ### Added
 
+
+
 - The apk packages (`php-fpm-ng` and `php-fpm-ng-tls`) now depend on `php85-phar`, so a packed application runs on Alpine without a manual install. The apk test rig of `build/ci-package-gate.sh` no longer installs it by hand, so the gate proves the declared dependency (#789).
+
 - New user chapter `docs/guides/single-file-app.md`: the single-file workflow (inputs, `pack`, run, state directory, reload and upgrade, requirements, limits) and a map of which test covers which promise; linked from `README.md`. New `build/test-pack-smoke.sh`, run as a step of the `integration` job in `build-matrix.yml`: packs a fixture PHAR, deletes the inputs, and checks code, include, an `spl_autoload_register` autoload, a resource, embedded-over-host `php.ini`, refusal of a missing input and of a truncated executable, and upgrade by rename plus `SIGUSR2`; it prints `-v` and the SHA-256 of the binary and of the packed output. The apk package pulls in `php85-phar`, see #789.
+
 - `php-fpm-ng pack <app.phar> <php.ini> <fpm.conf> -o <output>`: writes a copy of the running binary with the three mandatory files appended, byte for byte, as one application payload (`kind=2`, archive entries `fpm.conf`, `php.ini`, `app.phar`); the distribution payload in front of it stays byte-identical. Nothing is parsed or run while packing, so no PHAR stub executes and no PHP CLI is needed. It refuses a missing, unreadable, non-regular or empty input, a file that is not a PHAR (no `__HALT_COMPILER`), a NUL byte in `php.ini` or `fpm.conf`, an `<output>` that exists, and a binary that already carries an application payload; the output is written under a temporary name, read back through the runtime reader (SHA-256 included) and only then linked into place. New files `sapi/fpmng/fpm/fpm_pack.c` and `fpm_pack.h`, dispatched from `main()` in `fpm_serve.c` (Linux packages, like `serve`); new test `fpmng-pack.phpt`; `docs/payload.md` documents it. Running a packed executable is #430 (#429).
+
 - A packed `php-fpm-ng` (`php-fpm-ng pack`, #429) now runs its application: the embedded `php.ini` is the only php.ini (no host php.ini, scan directory or `PHPRC`, decision D1), the embedded `fpm.conf` the only configuration, and `fpmng-app://<entry>` in a script path (`http.front_controller` of `http-direct`, `supervisor.script`, `cron.script`) selects an entry of the embedded PHAR. The payload is verified (SHA-256, and a binary cut short is refused instead of running as a plain binary), the PHAR is written read-only to a private, content-addressed state directory (`$FPMNG_APP_DIR`, `$TMPDIR` or `/tmp`, never removed) and the entries are checked against its manifest at startup. A bad payload, PHAR, entry, `fpm.conf` or `extension=` fails before "ready"; requests cannot leave the front controller; SIGUSR1, SIGUSR2 and SIGTERM work, and renaming a repack over the executable plus SIGUSR2 serves the new application. `http.static = yes` is refused for such a pool (public files inside a PHAR are not served), and a leftover temp file in the state directory is replaced instead of blocking every start. Not supported in a packed executable: `gateway`/`fastcgi` script entries and `.user.ini` for the archive front controller. New files `sapi/fpmng/fpm/fpm_pack_run.c` and `fpm_pack_run.h`, `fpm_payload_check_tail()`; new test `fpmng-pack-run.phpt` and shared `fpmng-pack-app.inc`; `fpmng-pack.phpt` now packs a valid PHAR; `docs/payload.md` documents it (#430).
+
 - `php-fpm-ng serve`: a zero-config dev server. It writes the configuration to a private temporary directory (removed on exit, with the private socket and a pid file whose path and the master pid are printed at start for `kill -USR2`) and runs the master in the foreground on it, logs and access log on standard error. Default: `pool.type = gateway` in front of one `fastcgi` pool on a private unix socket; `--direct` is one `http-direct` pool (classic executor); `--worker <file>` is `http-direct` with `pool.executor = worker` (implies `--direct`). Also `--root` (default `public/` if present, else the current directory), `--listen` (default `127.0.0.1:8080`), `--front-controller`, `--workers` (default the CPU count) and `--print-config`, whose output passes `php-fpm-ng -t`; `serve` refuses `-y`, exits 1 when the listen address cannot be bound, and refuses a root, address or front controller containing `"`, `\`, a line break, `${` or `$pool`; other characters (spaces, `&`, parentheses) are written quoted. The vendored `fpm_main.c` is unchanged: `build/libphp-build.sh` compiles it with `-Dmain=fpmng_fpm_main` and the new `sapi/fpmng/fpm/fpm_serve.c` supplies `main()` (not in the from-source flow). New test `fpmng-serve.phpt`, new guide `docs/guides/dev-server.md`, and `docs/guides/getting-started.md` leads with the command (#728).
+
+
 
 ### Changed
 
+
+
 - `release.yml`: a `packages` cell that fails now uploads the failing `.phpt` tests' `.diff`, `.out`, `.exp` and `.log` as `phpt-failure-<cell>` (`if: failure()`, `if-no-files-found: warn`, `retention-days: 3`, the interval between issue #527 opening on 2026-09-30 and its fix landing on 2026-10-03), and a passing cell still uploads nothing. The files were always left behind — `run-tests.php` writes them next to each test and `build/ci-package-gate.sh` keeps the tree it staged under `work/prepared` — but nothing pointed at them, which is why the flaky failure of issue #527 could not be reproduced: that gate uploaded no cell output at all, and the `package-<cell>` artifact that a step with no `if:` now skips on a failure is newer than #527 (it arrived with the parallel matrix of issue #677). `build/ci-package-gate.sh`'s `fail()` now names the directory, `docs/release-workflow.md` §5 and `docs/fpmng-phpt.md` say which of the two places the evidence is in and why the runners' own `results/failed-artifacts/` is not it (the gate hands the runner a tree it did not assemble, `build/run-fpmng-phpt.sh:126`), and the new hermetic `build/test-phpt-failure-artifact.sh` (CI job `checks`) fails when a workflow runs the gate without such a step after it, without all four extensions, with `if-no-files-found: error`, with a retention outside 3–7 days or none at all, or from a directory the gate no longer stages the tree in (#669).
+
 - `release.yml`: the `release-notes` and the four `package-<cell>` artifacts keep a week instead of one day, so re-running only the `release` job (which downloads both) still finishes a release days after a failed attempt instead of failing at `download-artifact`; the one day of `fpmng-canonical-build` in `build-matrix.yml` is right there, where every consumer is a job in the same run, and it is not what issue #261 was about either. The comments at both uploads and above the publish step say so, `docs/release-workflow.md` §5 documents the re-run and what to do once the week is over, and the new hermetic `build/test-release-retention.sh` (CI job `checks`) fails when an artifact the re-runnable `release` job downloads keeps less than that window (#679).
+
+
 
 ### Fixed
 
+
+
 - Packed application and OPcache: the "OPcache does not cache a PHAR" notes in `docs/payload.md`, `docs/guides/single-file-app.md` and `fpm_pack_run.c` were wrong. OPcache skips a script whose mtime is 0, and the `fpmng-pack*.phpt` fixture PHAR wrote mtime 0 for every entry; with a non-zero mtime the entries are cached. The fixture now sets one, `fpmng-pack-run.phpt` asserts cached scripts and that no old-digest key remains after a repack plus SIGUSR2, and the docs say that a PHAR with mtime 0 is silently not cached (#787).
+
 - Test `fpmng-http-gateway-operator-two-gateways.phpt`: app's operator page is now compared across the two reads with `fpmng_pool_workers_idle` and `fpmng_pool_workers_active` dropped, because a `pm = static` child counts itself idle for the first time immediately before it enters the loop that accepts (and again at the end of every request it serves), while the master's "ready to handle connections" NOTICE does not wait for that first report, so an early read of the page could report fewer idle workers than a later one. A mismatch now prints both bodies, and every other line of the page is still compared byte for byte, so a gateway that forwards the wrong page still fails (#743).
+
+
 
 ## [0.14.0] - 2026-10-03
 
+
+
 ### Changed
 
+
+
 - Docs: new `docs/guides/getting-started.md` (install the `.deb`, a combined gateway + FastCGI + cron + supervisor configuration, `-t`, start, verify), migration guides `docs/guides/migrate-php-fpm-nginx.md`, `docs/guides/migrate-nginx-unit.md` and `docs/guides/migrate-supervisord-cron.md` (each with a directive map and the list of what has no equivalent), and `docs/guides/framework-recipes.md` (Symfony and Laravel on the classic executors, tried by hand once, not in CI). New `build/test-doc-configs.sh` (new CI job `doc-configs`, which `ci-ok` needs; `docs/guides/` counts as code for the docs-only skip) runs `php-fpm-ng -t` on every `ini verify` block of those pages and starts the getting-started configuration. `README.md` no longer says "POC", drops the php-src branch status and the "Plan" section that said the SAPI would eventually exist, calls `http-direct` with the classic executor supported as the tier table does, and links the new pages; `docs/http-direct.md` loses the same "POC, not a production frontend" claim (#645).
+
 - `fpmng-cron-jitter` and `fpmng-supervisor-jitter` take `FPMNG_DEBUG_CLOCK_RATE=10`: their assertions read the pool's master-measured `last_start` (and `next_run`) from the operator status page instead of a `gmdate()`/`microtime()` value the job script wrote, so a scaled clock can speed them up. They still fail on a libc `rand()` state shared across `fork()`. Test and `docs/fpmng-phpt.md` only; no operator surface added (#398).
+
 - `tests/frameworks/` is now a Slim 4 smoke test for what `main` ships: the stock `public/index.php` answers through `pool.type = gateway` in front of `fastcgi` and through `http-direct` with `pool.executor = classic`, plain and with PHP-DI plus the Slim route cache, and CI runs it in the new `frameworks` job (`ci-ok` needs it). It needs no MySQL, Redis or Docker. The fiber-only Symfony, Laravel and Slim 4 probes, `run-all.sh` and the Laravel lock moved to `async/tests/frameworks/` on branch `async`; this also ends the failing Dependabot updates for `/tests/frameworks/laravel` (#602).
+
 - Docs: `README.md` and `docs/frameworks.md` no longer describe framework support on `pool.executor = fiber`, and `docs/FASTCGI_NG_OPTIMIZATION.md` is gone. The fiber framework measurements and the `fastcgi-ng` plan live on branch `async` (`async/docs/frameworks-fiber.md`, `async/docs/FASTCGI_NG_OPTIMIZATION.md`); `main` describes only the executors it ships. History documents carry a one-line note (#601).
+
 - `CHANGELOG.md`: the entries v0.1.0 to v0.11.1 are filled in from `git log <previous tag>..<tag>` instead of placeholders; the v0.11.1 entry was checked against its commits; the tags v0.5.0, v0.5.1 and v0.11.0 are folded into the next entry, and the compare links match (#586).
+
 - `examples/` and `docker/` follow the v0.12 build contract: the Tier 1 and Tier 2 example images (`combined`, `cron`, `http`, `status`, `supervisor`) and the new `docker/Dockerfile` are `ubuntu:26.04` and install the released `.deb` (checksum-verified), instead of `ubuntu:24.04` plus a binary built from php-src. `examples/status` is an `operator.*` example on a real pool (it still used the removed `pool.type = status`), `docker/Dockerfile.scratch` (it copied the retired `php-fpm-ng-full`) is replaced, `examples/README.md` no longer describes a php-src build, and `examples/http-direct-worker-mysql/Dockerfile` installs `libevent-openssl-2.1-7t64`, without which the TLS-enabled binary does not start in it. New `build/test-shipped-configs.sh`: `static` (in the `checks` job) greps `examples/` and `docker/` for retired names, `images` (new `examples` job) builds every shipped configuration's image and runs `php-fpm-ng -t` inside it (#639).
+
 - `third_party/php-src/MANIFEST` has three columns (path, upstream path, SHA-256) instead of four: the two hashes were always equal. `build/vendor-php-src.sh` and `build/audit-compile-deps.sh` read the new layout; the "not pristine" refusal is gone because one hash now says both (#676).
+
 - `LICENSE` and `README.md` no longer list `patches/` under the PHP License 3.01: it holds only project-written history notes (MIT). `build/phpt-fixture-patches/` stays listed (#676).
+
 - `patches/0002-upstream-report.md` is English throughout; `docs/NOTES.md` marks the patch 0002/0003 passages as historic and a `build/libphp-build.sh` comment no longer names the removed patches/0006 (#676).
+
 - Owned `.phpt` suite: every test port (the Tester's blocks from 9008 and the http-direct tests from 28054) now also moves by a per-run `FPMNG_PHPT_PORT_SHIFT` that `build/run-fpmng-phpt.sh` picks as the first shift whose blocks nothing listens on, so another php-fpm holding 9201 or 9208 on a shared host no longer fails dozens of tests. Set the variable to pin a shift. The Tester also gives each gateway pool a run-own `operator.*_listen`, so a master holding `127.0.0.1:9253` no longer fails the gateway tests (#674).
+
 - `bin/lint.sh` runs shellcheck at its default (style) severity instead of `warning`. The 22 info/style findings in `build/` and `tests/frameworks/symfony/run.sh` are fixed or silenced with a reasoned `# shellcheck disable` (#584).
+
 - `tests/frameworks/laravel/composer.lock` pins `league/commonmark` 2.10.3 (was 2.10.0), closing Dependabot alerts 2 and 3. Test fixture only, not shipped in the packages (#695).
+
+
 
 ### Fixed
 
+
+
 - `fpm.conf` diagnostics after an `include=` name the real line of the including file: the line counter is put back when the included file has been read, so an error on a later line, and the "Unable to include" message, no longer carry a number from the end of the included file (#545).
+
 - The gateway listeners (the main one and `http.plain_listen`) pause accepting for 100 ms when `accept()` fails with `EMFILE`/`ENFILE` (or another non-retriable error) instead of spinning on one core until a descriptor is freed; the failure is logged at most once every 10 s (#687).
+
 - The `pool.type = http-direct` listeners (classic and worker executor, in every child) pause accepting for 100 ms when `accept()` fails with `EMFILE`/`ENFILE` (or another non-retriable error), reusing the gateway's backoff (the pause is honoured by the accept gate, `http.max_connections` and `worker.accept_threshold`, and ends cleanly when a child retires or stops), instead of spinning on one core until a descriptor is freed; the failure is logged at most once every 10 s per child (#729).
+
 - `third_party/php-src/README.md` states the right file counts (207: 57 for the build, 150 test fixtures), and `build/vendor-php-src.sh check` now fails when the Provenance table disagrees with `MANIFEST` (#665).
+
 - `ci-image.yml` passes the ghcr.io login token and actor through `env:` instead of expanding
+
   `${{ }}` inside the `run:` script, matching `release.yml` (#583).
+
 - Gateway: the upstream response (FastCGI or an `http.route[]` HTTP target) was appended to the client's output buffer as fast as the worker produced it, so a client that stopped reading kept the whole response in the memory of the gateway process that serves every connection of the pool. Now, once more than `http.response_buffer` bytes (new, default 1 MiB, `0` = unlimited as before) of a client's output are unwritten, the gateway stops reading that request's upstream and the worker blocks in its own write; it reads again when the client has drained the buffer, when the request ends or when the client is gone. A client that never reads is still closed by `http.write_timeout`. `http.response_buffer` is refused on `http-direct`. Behaviour change to know about: the worker's blocked time now counts against `http.stream_write_timeout` (streaming `http-direct` targets, total budget, default 10 s) and `request_terminate_timeout` (FastCGI), so a client slower than that gets a cut response unless those limits are raised or `http.response_buffer = 0` is set; and a client that trickles bytes (never cut by `http.write_timeout`, a stall timer) now holds a worker for as long as it trickles (#596).
+
+
 
 ## [0.13.0] - 2026-10-03
 
+
+
 ### Changed
+
 - `release.yml`: the four package-gate cells (`deb`, `apk`, `deb-tls`, `apk-tls`) run as a parallel matrix (`fail-fast: false`) and each uploads its output as an artifact; a `release` job that needs all of them collects the assets and publishes on a tag only. The release notes are checked in a separate first job. A rehearsal now takes about the slowest cell instead of the sum of the four (13.5 min measured on 2026-10-03 instead of about 49); asset names and publish-on-tag-only behaviour are unchanged (#575).
+
 - `pool.type = fastcgi`: TCP_NODELAY is now set on the listening socket by the SAPI (`.listening_socket_nodelay`) and so applies to every accepted TCP connection, not only FCGI_KEEP_CONN ones. It replaces php-src patch `0002` (`main/fastcgi.c`), which is removed; `main` now carries only patch `0001`. No latency change against 0.12.0, which already carried the patch (#590).
+
 - Docs: document that the default operator listener `127.0.0.1:9253` is global to the host: a second master with gateway (or any operator-page) pools on the default fails to bind, and how to avoid it with `operator.*_listen` or `operator.status|metrics = off` (#561).
 
+
+
 ### Removed
+
 - The php-src patch machinery, now that `main` carries no patch (#592): the patch-stack step of `build/prepare.sh` and of `build/vendor-php-src.sh` (and the `php-<minor>/` variant selection), the `patches` line of `third_party/php-src/MANIFEST`, and `build/test-prepare-patch-stack.sh`. `build/vendor-php-src.sh check` now also refuses a vendored file that differs from its pristine upstream hash. `patches/` keeps only history notes; patches live on branch `async`. A PHP upgrade on `main` is a plain re-import.
+
 - php-src patch `0001` (GH-18956, idle/active counting on FastCGI keep-alive connections) and its `php-8.3/` variant; `main` now carries no php-src patch, and `third_party/php-src/` is re-imported unpatched. Known effect, documented in `docs/operator-endpoint.md`, `docs/gateway.md` and `patches/README.md`; it does not affect http-direct pools: on keep-alive connections `accepted conn` and the per-process `requests` count one extra request per kept connection the client closes, a worker waiting on a kept connection shows as `Reading headers` with the idle wait in `request duration`, `max active processes` stays too high, `idle`/`active` can be wrong for up to one heartbeat, and `request_terminate_timeout` can hit an idle worker only with `http.idle_timeout = 0`, a large value or `fastcgi_keep_conn on` behind a proxy; pm scaling is not affected. The owned `fpm_request.c` again offers the `void` `fpm_request_accepting()` / `fpm_request_reading_headers()` that upstream's `fpm_main.c` passes to `fcgi_init_request()`, plus `_ex(bool)` variants for http-direct (#591).
+
 - The dead optimized-transport patches `0003` (buffered read, `accept4`), `0004` (`fcgi_set_optimized_transport()`) and `0005` (`writev`), the `HAVE_ACCEPT4` probe and its binary assert; `third_party/php-src/` is re-imported at php-8.5.9. `main` carries only patches 0001 and 0002 (#589; 0002 was removed in #590, 0001 in #591).
 
+
+
 ### Fixed
+
 - Package gate (`build/ci-package-gate.sh`): stopped pinning `EXPECT_TOTAL`/`EXPECT_PASS`/`EXPECT_SKIP` per flavour, which went stale on every new `.phpt` (#445, #441). The total is now the number of owned tests, and the only non-PASS results are the named lines of the new `build/package-gate-expected.txt` (cells, `SKIP`/`XFAIL`, test, reason). A new test that passes needs no gate edit; an unlisted skip fails as `unexpected SKIP: <name> on <cell>`, and a listed skip that passes fails as stale. The scoring is `build/package-gate-compare.sh`, tested hermetically by `build/test-package-gate-expected.sh` (#678).
+
 - Selective reload (`reload.selective = yes`): a pool spared across the reload kept serving, but its application metrics series vanished and its status page showed 0 processes, because the new master allocated fresh anonymous shared memory the spared workers never wrote to. The scoreboards and the metrics region are now `memfd`-backed and inherited across the master's `execvp()` for spared pools (Linux); a spared pool's counters continue and the status page keeps counting its workers. `fpmng-reload-selective-metrics.phpt` no longer carries `--XFAIL--` (#537).
+
 - Gateway: a client connection was time-limited only until its first request was read. Now `http.read_timeout` also bounds every later request on a keep-alive connection (from its first byte), the new `http.keepalive_timeout` (default 60000 ms, 0 = unlimited) closes an idle keep-alive connection, and the new `http.write_timeout` (default 30000 ms, 0 = unlimited) closes a client that stalls a pending response write. `http.plain_listen` now has a first-request read deadline and the same keep-alive limit. `http.max_connections` and `http.max_connections_per_client` are refused on a gateway (they were silently ignored); both new directives are refused on `http-direct`. Docs corrected: `http.read_timeout` is not libevent's `evhttp_set_timeout_tv()` and `http.idle_timeout` is not a client timeout (#593).
+
 - The `.deb` and `.apk` packages now ship the license texts: one file with the MIT text (and the list of non-MIT files), the PHP License 3.01 text and the BSD-2-Clause FPM text, as `/usr/share/doc/<pkg>/copyright` on Debian and `/usr/share/licenses/<pkg>/LICENSE` on Alpine. It is assembled by the new `build/package-licenses.sh`, and the package gate fails if the installed file differs from it or lacks one of the three texts (#581).
+
 - `pool.type = gateway`: an absolute-form request-target (`GET http://h/path HTTP/1.1`, RFC 9112 3.2.2) is normalized once: `ping.path`, the operator namespace and `http.operator_allowed_clients`, `access.suppress_path[]` and the plain-HTTP redirect now see the origin-form path (before, the request bypassed those checks; the matchers now use the same libevent parse as routing, so `http:/path` is covered too; a target starting with `/`, including `//x`, stays the origin-form path), and the authority replaces the `Host` header / `HTTP_HOST` on both transports; the forwarded target (`REQUEST_URI`, the request line to an `http.route[]` target, the redirect `Location`) comes from the same parse, so the path a request is matched on is the path the application sees; an authority longer than 261 bytes is answered 400 (#534).
+
 - Test `fpmng-http-direct-respond.phpt`: the marker files written after `fpmng_respond()` are now polled for (5 s bound) instead of read once, so a loaded machine can no longer make the test read a marker the script has not written yet (#544).
+
 - Test `fpmng-http-direct-worker-saturation-refuses-new.phpt`: the test now synchronizes explicitly (marker file when the first hold reaches the worker, the idle-connection request written only after the second hold got 503) and the worker script keeps the event loop running after the stop request until the test releases it (10 s bound), instead of relying on scheduler timing (#527).
+
 - `pool.type = gateway` and `pool.type = http-direct`: a request header whose name contains `_` is no longer passed to the worker. `X_Real_IP` and `X-Real-IP` both became `HTTP_X_REAL_IP` and the last one won, so a client could override a header set by the reverse proxy in front (nginx drops such headers by default, `underscores_in_headers off`, and Apache 2.4 drops them too). The header is now dropped; there is no opt-in option (#595).
+
 - `pool.type = gateway`: an upstream FastCGI `Status:` reason phrase containing control bytes (below 0x20 or DEL, e.g. 0x01 or 0x7f through a script; CR and NUL can arrive from a non-PHP upstream, since PHP's own `header()` refuses those) is no longer sent to the client as part of the status line. It is rejected like an invalid code: the gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply (#605).
+
 - `pool.type = gateway`: an upstream FastCGI `Status:` that is not three digits in 200..599 (`abc`, `-5`, `99999`, a 1xx) is no longer sent to the client as the status line. The gateway answers `502 Bad Gateway`, logs a WARNING and drops the rest of the upstream reply. The same applies to an `http.route[]` HTTP target whose status line is outside 200..599 (#594).
+
 - `pool.type = gateway`: when an upstream (FastCGI or `http.route[]` HTTP target) fails after the response head was sent, the gateway now closes the client connection without the terminating chunk and logs a WARNING, so a truncated body is observable. It used to end the reply with `0\r\n\r\n`, which a client or a cache stored as a complete response. A close-delimited upstream body still ends normally (#533).
+
 - The operator `?full` page no longer prints a `live` row with `pid` 0 for a slot whose child is not forked yet; a test (or an operator script) that took that 0 as an address ran `kill -USR1 0`, which signals the whole process group and killed the `fpmng-phpt` runner with exit 138 (#567).
+
 - The test harness refuses to signal a pid below 2 (`build/phpt-fixture-patches/0004`), so such a mistake fails one test instead of the run (#567).
+
+
 
 ## [0.12.0] - 2026-10-02
 
+
+
 ### Added
+
 - `third_party/php-src/`: the bounded php-src subset the SAPI compiles (pinned to php-8.5.9), with a `MANIFEST` and `build/vendor-php-src.sh check` in CI (#421, #536).
+
 - `fpm.conf` can be parsed from memory, diagnostics name the configuration input, and the php.ini bootstrap policy is pinned by tests (#428).
+
 - The fpmng `.phpt` suite runs in parallel with `run-tests.php -j` (#394).
+
 - A selective-reload metrics test, landed as an expected failure for #537 (#384).
+
 - `bin/lint.sh` runs clang-tidy, clang-format, shellcheck and hadolint; CI runs it as the `lint` job (#571).
+
 - `CHANGELOG.md`, `AGENTS.md`, `docs/release-workflow.md`, `.github/dependabot.yml` and the organization's `bin/` worktree scripts.
+
 - CI: `changes`, `docs` and `ci-ok` jobs; the build workflow now also runs on push to `main`.
+
 - A registration stub `async-sync.yml` on `main`, so the weekly `async-sync-trigger` dispatch resolves (#528).
 
+
+
 ### Changed
+
 - Main, CI and the packages build with `build/libphp-build.sh` against a distribution PHP 8.5 SDK, without a php-src tree or `build/prepare.sh` (#418, #422, #424). Other PHP minor versions are refused up front.
+
 - The FPM regression tests run from a bounded fixture bundle and the packaged PHP, without a php-src checkout (#423).
+
 - The package gate refuses a build/test PHP patch-level skew up front; the apk SDK is upgraded (#557). Its expected counts are re-measured (#555); it now runs 179 owned tests.
+
 - `examples/http-direct-worker-mysql` runs on `ubuntu:26.04` with `libphp8.5-embed` (#564).
+
 - License: own code is MIT (Crazy Goat Software); code taken from or patching php-src stays under the PHP License 3.01.
+
 - The development process lives in `docs/workflow.md`; project specifics moved to `AGENTS.md`.
+
 - Releases are published with `gh release create --verify-tag` and use the matching section of this file as notes.
+
 - Own C sources are formatted with clang-format 23 (whitespace only); the remaining files are listed in `build/clang-format-exclude.txt`.
 
+
+
 ### Removed
+
 - The static musl build and its CI job, the `patches` CI job, `build/static-full.sh`, `build/ci-build-tree.sh` and the `php-fpm-ng-ci` image (#424).
+
 - `build/gh-release-create.sh`, replaced by `gh release create` in `release.yml`.
+
 - The local issue templates, in favour of the organization's.
+
 - The vendored upstream `browscap.ini`, replaced by a minimal self-written fixture (#559).
 
+
+
 ### Fixed
+
 - `http.route[]` HTTP transport: hostile upstream framing is rejected with a log line and requests are forwarded in origin-form (#462); the true errno is logged for an oversize head, and a half head plus EOF is logged (#463); bytes after a completed response are logged and end the connection (#464); a forwarded header block over the target's bound is refused (#466).
+
 - Gateway: an unreachable route target answers 502 with the connect error instead of a pool-full 503 (#465).
+
 - http-direct on a UNIX listener no longer exits on the first connection on musl, and its failure-matrix test runs without ext/posix (#467).
+
 - Worker: a closed upgraded stream releases its connection, so fds no longer accumulate (#472).
+
 - `fpm_payload_dist.c` compiles against the php-src PHP-8.6/master stream error API (#435).
+
 - libphp build: no SIGSEGV with `opcache.enable=0` on a libphp with OPcache compiled in (#558).
+
 - phpt: a port collision now fails the test instead of passing as WARN on retry (#562).
+
+
 
 ## [0.11.1] - 2026-09-30
 
+
+
 Also covers the tag v0.11.0 (tagged 2026-09-29, on the 2026-09-25 merge of #525; no GitHub release): v0.11.0 is that merge and v0.11.1 adds one commit on top, so both are listed here.
 
+
+
 ### Added
+
 - `pool.type = fastcgi` can join the shared operator listener on an explicit `pm.metrics_listen` / `pm.status_listen`, so a FastCGI pool exposes its own per-pool metrics (#383).
+
 - `pool.type = supervisor`: the operator page reports the heartbeat age per child (#356).
+
 - Decision records and spike results: the approved PHAR runtime contract (#427), the embedded-PHAR runtime spike (#426) and the verdict on the event API (#190).
+
 - Documentation: the bound for a worker that never checks `fpmng_worker_stopping()` (`docs/shutdown-timeouts.md`, `docs/http-direct.md`), with a test (#365); the gateway and operator endpoint guides brought up to date (#385); a README mention of the http-direct pool executors (#447).
 
+
+
 ### Fixed
+
 - Worker WebSocket: the RFC 6455 handshake now rejects non-conformant clients (#457), both close paths send a TLS close_notify (#458), the 101 head write is checked (#468), and a userland throw after `fpmng_worker_upgrade()` no longer leaves a zero-byte close (#461).
+
 - Worker: a backpressured live stream no longer blocks `fpmng_worker_may_exit()` forever, so retiring a worker no longer ends in the master's SIGKILL that lost the terminating chunk (#459).
+
 - `http.route[]`: a cleartext route to a non-loopback http-direct target is refused (#450).
+
 - Gateway: connection counters no longer scan the client list on every request and disconnect (#490).
+
 - `cron.expect_within`: staleness is checked without an operator scrape (#357), and the duplicate stale-episode warning is gone (#358).
+
 - `supervisor.max_memory` at or below the master's baseline RSS is warned about (#350); `cron.log` failure lines carry a `[pool %s]` prefix (#355).
+
 - Documentation and comment fixes: #446, #448; example SSE clients retry under backpressure (#454, #455).
 
+
+
 ### Changed
+
 - The cron stale and `cron.log` tests run at real speed and the package gate counts were refreshed (#526).
+
+
 
 ## [0.10.0] - 2026-09-22
 
+
+
 ### Added
+
 - `pool.type = gateway`: the HTTP front of the pool, replacing `pool.type = http`. It has its own counters in one shared-memory segment rendered by the operator child, counts the plain listener, and `http.operator` forwards the operator pages of exposed pools (#388, #389, #390).
+
 - `pool.executor = worker` answers `ping.path` after the saturation check (#387).
 
+
+
 ### Changed
+
 - The operator directives moved out of the `pm.` namespace into `operator.*` (#386).
+
 - `pool.type = http` is retired in favour of `pool.type = gateway` (#388).
+
 - The reduced pool type/executor surface was audited against the tier bar (#380) and the persistent-signal build capability was dropped (#420).
+
 - The gateway refuses `listen.allowed_clients` instead of ignoring it (#493); the docs state that gateway metrics `off` is explicit, not unset (#491).
 
+
+
 ### Fixed
+
 - Worker WebSocket: the read watcher no longer spins after EOF and `has_buffered()` no longer doubles as an EOF signal (#460, #456).
+
 - Supervisor: the one-shot restart decision is made per copy instead of pool-wide, and one-shot completion is derived from the per-slot bytes (#347, #492).
+
 - Tests and CI: the in-pool ACME tests skip when the `-n` FPM pool has no openssl (#500); `reload-selective-on` writes the error log and asserts the sparing NOTICE (#405); the Laravel runner never runs its negative controls against shared services (#51); the package gate EXPECT rows are measured (#497).
+
+
 
 ## [0.9.0] - 2026-09-19
 
+
+
 ### Fixed
+
 - `http.route[]`: a 1xx interim response from the target no longer completes the exchange (#451); `X-Forwarded-For` appends the direct peer, not the resolved client (#452); response header names are forwarded up to the maximum length (#453).
+
 - Worker WebSocket: a dead client's pending entry is reaped in the close callback (#444), the orphaned flag guards every stream operation (#443), and the hijacked bufferevent is disarmed before the idle-close shutdown (#442).
+
 - Test-harness helpers (`expectNoLogPattern`, `readHead`) and the package gate counts (136 tests, #445).
+
+
 
 ## [0.8.0] - 2026-09-19
 
+
+
 ### Added
+
 - `http.route[]` routes path prefixes to other pools on one gateway (#340), with per-target accounting (#341) and an HTTP/1.1 client transport so a route can target `http-direct` pools (#344).
+
 - Worker: native WebSocket, `fpmng_worker_upgrade()` hijacks the connection into a `php_stream` (#343); SSE semantics, a clean end on retire and closed clients reported by id (#342).
 
+
+
 ### Changed
+
 - The fiber and async executors were cut out of `main` onto the branch `async` (#373, #374).
 
+
+
 ### Removed
+
 - `pool.type = fastcgi-ng` and its documentation and packaging text (#376, #377, #378).
 
+
+
 ### Fixed
+
 - The gateway answers `ping.path` locally instead of forwarding it upstream (#382).
+
 - `examples/combined` uses per-pool operator endpoints instead of the removed `pool.type = status` (#278).
+
 - clang-analyzer findings are fixed and now fail CI (#414); tests stopped waiting out fixed budgets (#399).
+
+
 
 ## [0.7.0] - 2026-09-18
 
+
+
 ### Added
+
 - `pool.executor = worker`: configurable `max_pending` and `request_timeout` (#331), streaming responses with backpressure (`fpmng_worker_respond_start/chunk/end`, #332), `worker.max_memory` and `worker.max_lifetime` recycling (#334), worker metrics (#333), `fpm_connection_info()` and `fpm_send_early_hints()` by request id (#335), honest request metrics with pending and watcher gauges, an accept ceiling so one child cannot hoard the backlog (#338), and per-slot metrics for capacity, fairness and stall diagnosis (#339).
+
 - `--enable-fpmng-debug-clock`, a virtual clock so the test suite stops waiting on the real one (#396). It is not part of the packages.
 
+
+
 ### Changed
+
 - CI: the package gate left the pull-request path (17 jobs to 8) and the nightly image rebuild is the daily signal for distribution drift (#393).
+
 - Design documents for `pool.type = gateway`, the `operator.*` namespace and the default operator port 9253 (#386, #387).
 
+
+
 ### Fixed
+
 - The operator page derives ages on the same clock that wrote the stamps (#396).
+
 - The test runner fails a full run that passes fewer than half its tests, and reports per-test durations (#393, #396).
+
 - Missing `.phpt` coverage for `pool.executor = worker` (#336).
+
+
 
 ## [0.6.0] - 2026-09-17
 
+
+
 ### Added
+
 - `cron.jitter` / `cron.jitter_mode` spread scheduled pools out (#322); `supervisor.restart_jitter` and `supervisor.start_jitter` break restart-storm lockstep (#323).
+
 - `supervisor.max_memory` recycles a script on memory and `supervisor.stop_signal` is configurable (#324); `cron.stop_signal` for a graceful kill on master shutdown or reload (#325).
+
 - `supervisor.max_runtime`, a runtime cap per script iteration (#326).
+
 - Cron and supervisor expose staleness so a stuck or silently dead job is visible (#327); `cron.output_log` / `supervisor.output_log` give a dedicated per-pool output log (#328).
+
 - Supervisor rolling restart across a reload (#329).
 
+
+
 ### Changed
+
 - A reload restarts only the pools whose configuration changed (#330).
 
+
+
 ### Fixed
+
 - Cron jitter PRNG state across fork; a bind race and an idle-timeout risk in the new cron and supervisor tests.
+
+
 
 ## [0.5.2] - 2026-09-14
 
+
+
 Also covers the tags v0.5.0 and v0.5.1 (both 2026-09-14, no GitHub release): v0.5.1 and v0.5.2 are one commit each on top of v0.5.0, so all three are listed here.
 
+
+
 ### Added
+
 - `pool.type = http-direct`: `fpm_connection_info()` and client-certificate verification (#62); early hints, status codes and method passthrough (#63); `.user.ini` is read from the front controller's directory (#60).
+
 - Gateway: an opt-in `wait` pool-full policy (#309).
+
 - Documentation: recommendations for the gateway pool-full policy (#160) and for the http-direct dynamic and ondemand process managers (#170).
 
+
+
 ### Fixed
+
 - `pm.max_requests` rollover on http-direct drains held connections instead of severing them (#313); a scaled-down child gets its `http.read_timeout` before SIGKILL (#310) and a retiring child's deadline is extended on every completed response (#311).
+
 - Test and CI: the TLS `.deb` and `.apk` are gated on every PR; the connection-info test's SKIPIF gap and supervisor poll were fixed (#320, #321).
+
 - Benchmark harnesses for the pool-full and pm studies were extended (#154, #157, #158, #169).
+
+
 
 ## [0.4.0] - 2026-09-13
 
+
+
 ### Added
+
 - TLS termination is behind `--enable-fpmng-tls`, off by default (#280), and ACME certificate issuance is a build flag that takes its payload with it (#281). A second package, `php-fpm-ng-tls`, is built and gated on a tag (#294).
+
 - Tiers: `.tier` on the pool type, one line per pool at startup and a table in the README (#295).
+
 - `--enable-fpmng-http2` and `--enable-fpmng-quic` are reserved and refused (#282).
 
+
+
 ### Changed
+
 - Breaking for users of in-pool TLS and ACME: the default `php-fpm-ng` package and build no longer contain TLS termination (`http.tls_cert` and friends) or ACME certificate issuance, because the build flags default to off. This is a regression against v0.2.0 for anyone terminating TLS in the pool; install the new `php-fpm-ng-tls` package for them (#280, #281, #294).
 
+
+
 ### Fixed
+
 - http-direct: `SA_RESTART` is restored after every request startup (#259) and the child's own log lines reach the master's error log (#260).
+
 - The three ACME log-leak test assertions were passing on an empty string (#297); the package gate counts a test retried into a pass as a pass (#301).
+
+
 
 ## [0.3.0] - 2026-09-13
 
+
+
 ### Added
+
 - Operator endpoint: one HTTP listener per address serving each pool's own stats and metrics (#274); http-direct serves `pm.status_path` from it (#275); a per-pool metrics path reports its own pool's series (#276) and each pool type has a baseline counter (#277).
+
 - Supervisor warns once when a script restarts at PHP-startup speed (#122).
+
 - Pool types: a reject list can carve out individual directives (#283).
 
+
+
 ### Removed
+
 - `pool.type = status` and the shared status pool; use the operator endpoint (#278).
 
+
+
 ### Changed
+
 - `pool.type = http`: `pm.status_path` is taken off the public listener (the operator listener serves it), and a shared operator listener with two identities is refused (#274).
+
 - CI moved off the self-hosted box onto `ubuntu-latest`, with caches written only by `main`; the modular-build spike was documented.
+
+
 
 ## [0.2.0] - 2026-09-12
 
+
+
 ### Added
+
 - http-direct: static files from the pool's own root (#58), operator parity (ping, status, access log, `allowed_clients`, chroot; #59), a bound on the first request and on connections per worker (#61), per-connection metrics and per-child rows on `pm.status` (#64), retiring one child with SIGUSR1 (#65), `fpmng_respond()` to finish a response early (#57), and TLS streaming with the pool's own `SSL_write` (#195).
+
 - The ACME client is carried inside the binary (#171); the metrics extension is registered on the libphp path and tested from PHP (#216).
+
 - A pm-sizing benchmark harness for http-direct (#163) and installation docs for the packages (#225).
 
+
+
 ### Fixed
+
 - http-direct: one child no longer scoops a whole burst (#53), Nagle is off on the listening socket (#244), and the signal handlers are re-snapshotted after the child installs its own (#256).
+
+
 
 ## [0.1.0] - 2026-09-11
 
+
+
 ### Added
+
 - First release: `.deb` and `.apk` packages with `SHA256SUMS`, unsigned by decision (#223). The tagged history up to this release is the project's initial development; there is no earlier tag to compare with, so no further items are listed.
 
+
+
 [Unreleased]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.2...HEAD
+
 [0.17.2]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.1...v0.17.2
+
 [0.17.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.17.0...v0.17.1
+
 [0.17.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.16.0...v0.17.0
+
 [0.16.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.15.0...v0.16.0
+
 [0.15.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.14.0...v0.15.0
+
 [0.14.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.13.0...v0.14.0
+
 [0.13.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.12.0...v0.13.0
+
 [0.12.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.11.1...v0.12.0
+
 [0.11.1]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.10.0...v0.11.1
+
 [0.10.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.9.0...v0.10.0
+
 [0.9.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.8.0...v0.9.0
+
 [0.8.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.7.0...v0.8.0
+
 [0.7.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.6.0...v0.7.0
+
 [0.6.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.5.2...v0.6.0
+
 [0.5.2]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.4.0...v0.5.2
+
 [0.4.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.3.0...v0.4.0
+
 [0.3.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.2.0...v0.3.0
+
 [0.2.0]: https://github.com/crazy-goat/php-fpm-ng/compare/v0.1.0...v0.2.0
+
 [0.1.0]: https://github.com/crazy-goat/php-fpm-ng/releases/tag/v0.1.0
+

@@ -68,9 +68,28 @@
  * so no header has been sent and no body has been promised. */
 static void fpm_http_upstream_timeout_reply(fpm_http_conn *c)
 {
+	struct evbuffer *err_body = NULL;
 	struct evhttp_request *req = c->req;
+	struct evkeyvalq *out = evhttp_request_get_output_headers(req);
 
 	c->status = FPM_HTTP_GATEWAY_TIMEOUT;
+	/* Issue #1085: evhttp_send_error()'s HTML page cannot be counted
+	 * back, so the access log said 0 for a timeout reply that reached
+	 * the client. Build a known plain-text body and count its length,
+	 * as the gateway's 502 replies do. A HEAD reply gets no body. */
+	evhttp_clear_headers(out);
+	evhttp_add_header(out, "Content-Type", "text/plain");
+	evhttp_add_header(out, "Connection", "close");
+	if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
+		err_body = evbuffer_new();
+		if (err_body && evbuffer_add(err_body, FPM_HTTP_GATEWAY_TIMEOUT_BODY,
+					  FPM_HTTP_GATEWAY_TIMEOUT_BODY_LEN) == 0) {
+			c->bytes_out += FPM_HTTP_GATEWAY_TIMEOUT_BODY_LEN;
+		} else if (err_body) {
+			evbuffer_free(err_body);
+			err_body = NULL;
+		}
+	}
 	fpm_http_log_response(c->gw, req,
 			c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
@@ -78,7 +97,10 @@ static void fpm_http_upstream_timeout_reply(fpm_http_conn *c)
 	fpm_http_conn_free(c);
 	/* Sent last, on the local `req`: the send may end the request, so nothing
 	 * after it may read c (see fpm_http_finish()). */
-	evhttp_send_error(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
+	evhttp_send_reply(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout", err_body);
+	if (err_body) {
+		evbuffer_free(err_body);
+	}
 }
 
 static void fpm_http_upstream_deadline_fire(evutil_socket_t fd, short what, void *arg)

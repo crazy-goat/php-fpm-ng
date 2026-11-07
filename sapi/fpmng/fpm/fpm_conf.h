@@ -192,6 +192,9 @@ struct fpm_worker_pool_config_s {
 	int http_static_ranges;			/* http.static.ranges: single byte ranges (206, 416) for http-direct static files; off by default (issue #648) */
 	int http_static_precompressed;		/* http.static.precompressed: serve .br and .gz sidecars; off by default (issue #648) */
 	struct key_value_s *http_static_cache_control;	/* http.static.cache_control[<prefix>] = <value>: Cache-Control by path prefix (issue #648) */
+	struct key_value_s *http_route_upgrade;	/* http.route_upgrade[<prefix>] = websocket: Upgrade passthrough on that route (issue #659) */
+	int http_upgrade_idle_timeout;		/* ms, http.upgrade_idle_timeout: an upgraded connection with no byte either way this long is closed (issue #659) */
+	int http_upgrade_max_duration;		/* ms, http.upgrade_max_duration: an upgraded connection is closed after this long in total (issue #659) */
 	int http_fault_upstream_write;		/* test-only fault injection: fail the Nth write towards the pool with ECONNRESET;
 						 * 0 = off, the default. See fpm_http_upstream_write_must_fail() for why this is a
 						 * directive and not an environment variable. */

@@ -135,6 +135,7 @@ typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
 
 struct fpm_http_gateway_s;
+struct fpm_gw_ws_s;
 
 /* one gateway slot: which gw it belongs to, its index, and its crash-loop
  * bookkeeping (see fpm_http_gateway_on_exit()). Passed as the `arg` to
@@ -388,6 +389,9 @@ struct fpm_http_route_s {
 	size_t prefix_len;
 	char *host;
 	struct fpm_http_target_s *target;
+	/* Issue #659: http.route_upgrade[<prefix>] names this row's prefix, so a
+	 * WebSocket Upgrade on it is passed through instead of answered 501. */
+	unsigned upgrade:1;
 };
 
 /* Issue #389: one row of the gateway's http.operator forwarding map: a public
@@ -550,6 +554,13 @@ struct fpm_http_gateway_s {
 	 * listener together. See fpm_http_gw_proc.c for the accept gate. */
 	int max_connections;
 	int max_per_client;
+	/* Issue #659: the Upgrade relay's idle and total bounds, copied from
+	 * http.upgrade_idle_timeout and http.upgrade_max_duration. */
+	struct timeval upgrade_idle;
+	struct timeval upgrade_max;
+	/* Issue #659: every upgraded connection this process is relaying, so the
+	 * gateway's teardown can end them before evhttp_free() frees their memory. */
+	struct fpm_gw_ws_s *ws_relays;
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
@@ -831,6 +842,11 @@ struct _fpm_http_conn {
 	 * always has a row that matches, because a table with no "/" row of its
 	 * own gets the gateway's own listener as one. */
 	struct fpm_http_target_s *target;
+	/* Issue #659: the matched route allows an Upgrade passthrough, and this
+	 * request was forwarded with one (write_request). Only then may the target's
+	 * 101 switch the connection to the relay; any other 101 is still an interim. */
+	unsigned upgrade:1;
+	unsigned upgrading:1;
 	struct evhttp_request *req;
 	struct evhttp_connection *evcon;
 	/* Issue #390: the accepted connection behind evcon, so fpm_http_conn_free()
@@ -1101,4 +1117,12 @@ void fpm_http_routes_free(struct fpm_http_gateway_s *gw);
 void fpm_http_operator_free(struct fpm_http_gateway_s *gw);
 
 #endif /* HAVE_FPM_HTTP */
+
+/* Issue #659: Upgrade passthrough (fpm_http_gw_ws.c). */
+void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
+void fpm_http_upstream_release(fpm_http_upstream *up);
+int fpm_http_gw_ws_start(fpm_http_upstream *up, const char *head, size_t head_len,
+	const char *tail, size_t tail_len);
+void fpm_http_gw_ws_close_all(struct fpm_http_gateway_s *gw);
+
 #endif /* FPM_HTTP_INTERNAL_H */

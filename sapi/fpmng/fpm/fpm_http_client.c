@@ -148,6 +148,16 @@ static int fpm_http_http_upgrade_requested(struct evhttp_request *req)
 	return upgrade != NULL && *upgrade != '\0';
 }
 
+/* Issue #659: the one Upgrade a route may pass through is a WebSocket
+ * handshake, which is a GET (RFC 6455 4.1). Anything else is still 501. */
+static int fpm_http_http_websocket_upgrade(struct evhttp_request *req)
+{
+	const char *upgrade = evhttp_find_header(evhttp_request_get_input_headers(req), "Upgrade");
+
+	return evhttp_request_get_command(req) == EVHTTP_REQ_GET
+		&& upgrade != NULL && strcasecmp(upgrade, "websocket") == 0;
+}
+
 /* X-Forwarded-For: the standard proxy append -- an incoming header (only ever
  * from an untrusted client; the gateway's trust decision is c->fwd's) is kept
  * and the address the gateway actually saw is appended, so the target pool's
@@ -172,7 +182,13 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	(void) script_missing_hint;	/* an http-direct target does its own docroot resolution */
 
 	if (fpm_http_http_upgrade_requested(req)) {
-		return 501;	/* Not Implemented -- see fpm_http_http_upgrade_requested() */
+		/* Not Implemented -- see fpm_http_http_upgrade_requested(). Issue #659: a
+		 * route that opted in with http.route_upgrade[] passes a WebSocket
+		 * handshake through; the answer to it is the target's 101 (head_done). */
+		if (!c->upgrade || !fpm_http_http_websocket_upgrade(req)) {
+			return 501;
+		}
+		c->upgrading = 1;
 	}
 
 	body_len = evbuffer_get_length(evhttp_request_get_input_buffer(req));
@@ -273,7 +289,14 @@ static int fpm_http_http_write_request(fpm_http_conn *c, int script_missing_hint
 	/* The gateway owns the connection; ask to keep it. The upstream answers
 	 * with its own preference, which the response side reads and honours
 	 * (st->expect_eof). */
-	smart_str_appends(&c->out, "Connection: keep-alive\r\n\r\n");
+	if (c->upgrading) {
+		/* Issue #659: the handshake's own hop-by-hop headers, which the header loop
+		 * above dropped. Keep-alive would ask the target to keep a connection it is
+		 * about to switch. */
+		smart_str_appends(&c->out, "Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n");
+	} else {
+		smart_str_appends(&c->out, "Connection: keep-alive\r\n\r\n");
+	}
 
 	/* The block just built is bigger than the one that came in: Host
 	 * (if absent), X-Forwarded-*, Content-Length and Connection are added to
@@ -386,7 +409,8 @@ static int fpm_http_http_split_header(const char *line, size_t len,
  * a 1xx interim response -- it is discarded, the parser must reset and the
  * real final head is still to come -- 0 when the reply was started, -1 when
  * the head's framing is invalid (nothing was started; the caller fails the
- * connection with errno = EPROTO). */
+ * connection with errno = EPROTO). Returns 2 for the 101 switch of an upgrade
+ * (issue #659): the head is still in st->head and nothing was started. */
 static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 {
 	fpm_http_conn *c = up->current;
@@ -458,6 +482,12 @@ static int fpm_http_http_head_done(fpm_http_upstream *up, size_t head_len)
 	 * parser for the final head. The gateway does not relay interims to the
 	 * client: early hints would need their own framing discipline on the
 	 * evhttp reply, and nothing this transport serves depends on them. */
+	/* Issue #659: a 101 answering an upgrade this gateway forwarded is not an
+	 * interim: it is the switch to the relay (fpm_http_http_data()). A 101 for
+	 * any other request stays an interim and is discarded like every 1xx. */
+	if (code == 101 && c->upgrading) {
+		return 2;
+	}
 	if (code >= 100 && code < 200) {
 		return 1;
 	}
@@ -848,6 +878,21 @@ rescan:
 			if (interim < 0) {
 				errno = EPROTO;
 				fpm_http_upstream_fail(up, 0);
+				break;
+			}
+			if (interim == 2) {
+				/* Issue #659: the upstream switched protocols. The head (the bytes up
+				 * to tail_off, blank line included) and any bytes behind it go to the
+				 * relay, which copies them, and then the state is freed. The upstream
+				 * struct is released here and freed by the epilogue below. */
+				int rc = fpm_http_gw_ws_start(up, ZSTR_VAL(st->head.s), tail_off,
+					ZSTR_VAL(st->head.s) + tail_off, tail);
+
+				fpm_http_http_state_free(up);
+				if (rc != 0) {
+					errno = ENOMEM;
+					fpm_http_upstream_fail(up, 0);
+				}
 				break;
 			}
 			if (interim) {

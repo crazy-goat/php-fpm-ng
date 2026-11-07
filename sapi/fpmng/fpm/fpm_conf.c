@@ -229,6 +229,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.static.precompressed", &fpm_conf_set_boolean,     WPO(http_static_precompressed) },
 	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
+	{ "http.upgrade_idle_timeout", &fpm_conf_set_integer,    WPO(http_upgrade_idle_timeout) },
+	{ "http.upgrade_max_duration", &fpm_conf_set_integer,    WPO(http_upgrade_max_duration) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
 	{ "http.pool_full_policy",     &fpm_conf_set_pool_full_policy, WPO(http_pool_full_policy) },
 	{ "http.pool_full_queue_max",  &fpm_conf_set_integer,     WPO(http_pool_full_queue_max) },
@@ -1106,6 +1108,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */
 	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_keepalive_timeout = 60000;	/* fpm-ng: FPM_HTTP_KEEPALIVE_TIMEOUT_MS in fpm_http.c */
+	wp->config->http_upgrade_idle_timeout = 300000;	/* issue #659: five minutes with no byte in either direction */
+	wp->config->http_upgrade_max_duration = 86400000;	/* issue #659: one day in total; a WebSocket is not forever */
 	wp->config->http_write_timeout = 30000;	/* fpm-ng: FPM_HTTP_WRITE_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_response_buffer = 1024 * 1024;	/* fpm-ng: FPM_HTTP_RESPONSE_BUFFER in fpm_http.c */
 	wp->config->http_response_min_rate = 256;	/* fpm-ng: FPM_HTTP_RESPONSE_MIN_RATE in fpm_http.c, issue #705 */
@@ -1246,6 +1250,12 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 		free(kv);
 	}
 	for (kv = wpc->http_static_cache_control; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_route_upgrade; kv; kv = kv_next) {
 		kv_next = kv->next;
 		free(kv->key);
 		free(kv->value);
@@ -2430,6 +2440,40 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 		err = fpm_conf_set_array(key, value, &config, 0);
 		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route")) {
 			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.route_upgrade")) {
+		/* http.route_upgrade[<prefix>] = websocket -- issue #659. The key must be
+		 * a prefix that some http.route[] row of this pool also names; that is
+		 * checked in fpm_http_validate_pool(), where every section is read. Only
+		 * the shape is checked here. The one value is "websocket", not on/off, so
+		 * the next protocol that wants the same passthrough names itself. */
+		if (*Z_STRVAL_P(key) != '/') {
+			zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: the path prefix must begin with '/'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		if (strcmp(Z_STRVAL_P(value), "websocket") != 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: the only value is 'websocket'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_route_upgrade; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: this prefix is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_route_upgrade);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route_upgrade")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route_upgrade'", ini_filename, ini_lineno);
 			*error = 1;
 			return;
 		}

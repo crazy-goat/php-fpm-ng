@@ -291,6 +291,55 @@ struct fpm_http_seen_prefix_s {
 	const char *pool;
 };
 
+/* Issue #659: every http.route_upgrade[] key must name a path prefix of some
+ * http.route[] entry, and every route it covers must lead to a target whose type
+ * serves WebSocket upgrades (fpm_pool_type_s.serves_websocket). Any other
+ * target would answer the Upgrade request itself, so a refusal here is
+ * better than a 502 per request. */
+static int fpm_http_validate_upgrade_routes(struct fpm_worker_pool_s *wp)
+{
+	struct key_value_s *up, *kv;
+
+	for (up = wp->config->http_route_upgrade; up; up = up->next) {
+		int found = 0;
+
+		for (kv = wp->config->http_routes; kv; kv = kv->next) {
+			const char *cursor = kv->value, *prefix;
+			size_t prefix_len;
+
+			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+				struct fpm_http_route_entry_s e;
+				enum fpm_http_transport_e transport = FPM_HTTP_TARGET_FASTCGI;
+				struct fpm_worker_pool_s *target;
+				const struct fpm_pool_type_s *type;
+
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
+				if (strlen(up->key) != e.path_len || memcmp(up->key, e.path, e.path_len) != 0) {
+					continue;
+				}
+				found = 1;
+				target = fpm_http_route_target_pool(wp, kv->key, &transport);
+				if (!target) {
+					return -1; /* already logged */
+				}
+				type = fpm_pool_type_resolve(target);
+				if (!type || !type->serves_websocket) {
+					zlog(ZLOG_ERROR, "[pool %s] http.route_upgrade[%s]: pool '%s' does not serve WebSocket upgrades; "
+									 "the target must be a pool.type = http-direct pool with pool.executor = worker (issue #659)",
+							wp->config->name, up->key, kv->key);
+					return -1;
+				}
+			}
+		}
+		if (!found) {
+			zlog(ZLOG_ERROR, "[pool %s] http.route_upgrade[%s]: no http.route[] entry has this path prefix",
+					wp->config->name, up->key);
+			return -1;
+		}
+	}
+	return 0;
+}
+
 /* Everything about http.route[] that can be decided from the configuration
  * alone, checked in the master with every pool section already parsed (issue
  * #340). Called from fpm_http_validate_pool(), so `php-fpm-ng -t` refuses a
@@ -526,6 +575,19 @@ static int fpm_http_counters_alloc(struct fpm_http_gateway_s *gw, unsigned ntarg
 	return 0;
 }
 
+/* Issue #659: whether http.route_upgrade[<prefix>] names this path prefix. */
+static int fpm_http_route_upgrade_wanted(struct fpm_worker_pool_s *wp, const char *path, size_t len)
+{
+	struct key_value_s *kv;
+
+	for (kv = wp->config->http_route_upgrade; kv; kv = kv->next) {
+		if (strlen(kv->key) == len && memcmp(kv->key, path, len) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned own_capacity)
 {
 	struct key_value_s *kv;
@@ -634,6 +696,9 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 				}
 			}
 			gw->routes[ri].target = &gw->targets[ti];
+			/* Issue #659: a row whose prefix is named in http.route_upgrade[] may pass a
+			 * WebSocket Upgrade through. Validation has checked the target type. */
+			gw->routes[ri].upgrade = fpm_http_route_upgrade_wanted(wp, e.path, e.path_len);
 			ri++;
 		}
 		ti++;
@@ -950,6 +1015,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	/* Issue #686: copied as they are; validation refuses a value that cannot apply. */
 	gw->max_connections = wp->config->http_max_connections;
 	gw->max_per_client = wp->config->http_max_connections_per_client;
+	/* Issue #659: the Upgrade relay's bounds, in ms in the config and timevals here. */
+	gw->upgrade_idle.tv_sec = wp->config->http_upgrade_idle_timeout / 1000;
+	gw->upgrade_idle.tv_usec = (wp->config->http_upgrade_idle_timeout % 1000) * 1000;
+	gw->upgrade_max.tv_sec = wp->config->http_upgrade_max_duration / 1000;
+	gw->upgrade_max.tv_usec = (wp->config->http_upgrade_max_duration % 1000) * 1000;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
 	gw->wait_queue_max = wp->config->http_pool_full_queue_max;
@@ -1626,6 +1696,16 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		zlog(ZLOG_ERROR, "[pool %s] http.upstream_read_timeout must not be negative", wp->config->name);
 		return -1;
 	}
+	/* Issue #659: a zero or negative bound would end every upgraded connection at once,
+	 * or never end it, so both are refused. */
+	if (wp->config->http_upgrade_idle_timeout <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upgrade_idle_timeout must be greater than zero", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_upgrade_max_duration <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upgrade_max_duration must be greater than zero", wp->config->name);
+		return -1;
+	}
 	/* Issue #686: the same bounds and the same pairing rule as http-direct
 	 * (fpm_http_direct_request.c). Both limits are per gateway process. */
 	if (wp->config->http_max_connections < 0 || wp->config->http_max_connections > 1000000 ||
@@ -1656,6 +1736,9 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * startup refusal (and a `-t` failure) rather than a 502 per request on a
 	 * prefix the operator believes is configured. */
 	if (fpm_http_validate_routes(wp) != 0) {
+		return -1;
+	}
+	if (fpm_http_validate_upgrade_routes(wp) != 0) {
 		return -1;
 	}
 	/* Issue #389: http.operator. With both base paths empty there is nothing to

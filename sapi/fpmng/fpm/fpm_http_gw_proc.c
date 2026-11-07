@@ -1036,6 +1036,8 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	}
 
 	event_base_dispatch(gw->base);
+	/* Issue #659: upgraded connections are ended before the loop's memory goes. */
+	fpm_http_gw_ws_close_all(gw);
 	exit(FPM_EXIT_OK);
 }
 /* }}} */

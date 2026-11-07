@@ -1112,11 +1112,13 @@ beside the gateway, with `/ping` and `/_fpm_status` in their upstream meaning.
 
 ### Three things the example shows that are easy to forget
 
-- **`[ws]` is not routed through the gateway.** WebSockets cannot be carried
-  over FastCGI at all, and #344's HTTP/1.1 client is not a passthrough either;
-  #343 does them natively on the worker executor. That pool has its own public
-  port, and it is the first place where "the gateway is the entry point" is
-  not the whole truth.
+- **`[ws]` is not routed through the gateway by default.** WebSockets cannot be
+  carried over FastCGI. The gateway passes a WebSocket `Upgrade` on only when
+  the operator sets `http.route_upgrade[<prefix>] = websocket` (issue #659).
+  The target must be a worker-executor `http-direct` pool. Without that
+  directive the gateway answers `501`. The rules, the timeouts and the
+  connection limit are in `docs/http-route.md`. The example's `[ws]` pool has
+  its own public port, which stays the simplest entry point for WebSockets.
 - **`[app]` has status under two names and it is not a duplicate.**
   `pm.status_path` is the page on the FastCGI socket for nginx;
   `operator.status = on` is the page on the operator listener. Two sockets,

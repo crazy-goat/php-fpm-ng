@@ -230,8 +230,9 @@ struct fpm_http_gateway_s *gateways = NULL;
 
 
 void fpm_http_pump(struct fpm_http_gateway_s *gw);
-/* Issue #390: referenced by fpm_http_client_track() before its definition. */
-static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
+/* Issue #390: referenced by fpm_http_client_track() before its definition.
+ * Issue #659: not static any more, the upgrade relay ends its client with it. */
+void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
 /* Issue #390 review: the budget helpers below also maintain this process's own
  * upstreams_held gauge, defined with the other counter helpers further down. */
 static atomic_t *fpm_http_target_held(struct fpm_http_target_s *t);
@@ -719,6 +720,32 @@ static void fpm_http_upstream_detach(fpm_http_upstream *up)
 	up->fd = -1;
 	smart_str_free(&up->pending);
 	fpm_http_budget_give_back(t);
+}
+
+/* Issue #659: the upstream's socket leaves the upstream pool because the target
+ * switched protocols (101). The socket is NOT closed here: the caller already
+ * made a bufferevent that owns it (fpm_http_gw_ws_start()). What this does is
+ * what fpm_http_upstream_detach() does minus the close: the connection slot
+ * goes back, so a queued request can take it, and the struct is marked dead.
+ * Only the readcb of this upstream calls it, so `active` is set and the
+ * struct is freed by the epilogue of fpm_http_http_data(), as for drop(). */
+void fpm_http_upstream_release(fpm_http_upstream *up)
+{
+	struct fpm_http_target_s *t = up->t;
+
+	TAILQ_REMOVE(&t->upstreams, up, link);
+	t->nupstreams--;
+	if (up->ev_read) {
+		event_del(up->ev_read);
+	}
+	if (up->ev_write) {
+		event_del(up->ev_write);
+	}
+	fpm_http_upstream_deadline_stop(up);
+	up->fd = -1;
+	smart_str_free(&up->pending);
+	fpm_http_budget_give_back(t);
+	up->dead = 1;
 }
 
 void fpm_http_upstream_free(fpm_http_upstream *up)
@@ -1701,7 +1728,7 @@ static struct fpm_http_client_s *fpm_http_client_track(struct fpm_http_gateway_s
  * fpm_http_client_track(), not the request: a connection that closed between
  * two keep-alive requests has no request to point at, and the old per-request
  * callback would have leaked its increment instead. */
-static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
+void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 {
 	struct fpm_http_client_s *cl = arg;
 	struct fpm_http_gateway_s *gw = cl->gw;
@@ -2643,13 +2670,13 @@ static int fpm_http_prefix_covers(const char *prefix, size_t prefix_len, const c
  * files are still answered by the gateway itself and are never routed
  * anywhere (issue #382 for ping.path in particular: the probe proves the
  * gateway is alive, not any target's workers). */
-static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
+static struct fpm_http_route_s *fpm_http_route(struct fpm_http_gateway_s *gw, struct evhttp_request *req)
 {
 	const char *path;
 	char *decoded;
 	size_t decoded_len;
 	unsigned i;
-	struct fpm_http_target_s *hit;
+	struct fpm_http_route_s *hit;
 	char host[FPM_HTTP_AUTHORITY_MAX];
 	int have_host = 0;
 
@@ -2662,18 +2689,18 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 	 * not in a proxy-only table, and an own-pool table has no config rows
 	 * when nroutes < 2). The shortcut therefore never skips a host check. */
 	if (!gw->proxy_only && gw->nroutes < 2) {
-		return gw->routes[0].target;
+		return &gw->routes[0];
 	}
 
 	path = fpm_http_request_path(req);
 	if (!path || !*path) {
 		/* No path to route on: the gateway has no implicit target, so this
 		 * is a local 404 (fpm_http_request() answers it). */
-		return gw->proxy_only ? NULL : gw->routes[gw->nroutes - 1].target;
+		return gw->proxy_only ? NULL : &gw->routes[gw->nroutes - 1];
 	}
 	decoded = evhttp_uridecode(path, 0, &decoded_len);
 	if (!decoded) {
-		return gw->proxy_only ? NULL : gw->routes[gw->nroutes - 1].target;
+		return gw->proxy_only ? NULL : &gw->routes[gw->nroutes - 1];
 	}
 
 	/* Issue #658: a request whose Host is malformed, or missing, or repeated, has
@@ -2683,13 +2710,13 @@ static struct fpm_http_target_s *fpm_http_route(struct fpm_http_gateway_s *gw, s
 		have_host = fpm_http_host_of_request(req, host, sizeof(host));
 	}
 
-	hit = gw->proxy_only ? NULL : gw->routes[gw->nroutes - 1].target;
+	hit = gw->proxy_only ? NULL : &gw->routes[gw->nroutes - 1];
 	for (i = 0; i < gw->nroutes; i++) {
 		if (gw->routes[i].host && (!have_host || strcmp(gw->routes[i].host, host) != 0)) {
 			continue;
 		}
 		if (fpm_http_prefix_covers(gw->routes[i].prefix, gw->routes[i].prefix_len, decoded, decoded_len)) {
-			hit = gw->routes[i].target;
+			hit = &gw->routes[i];
 			break;
 		}
 	}
@@ -2914,7 +2941,13 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * wire protocol, so the target has to be known first. With one
 		 * transport the order costs nothing; without it, adding the second one
 		 * (#344) would have to unpick FastCGI framing from the request path. */
-		c->target = fpm_http_route(gw, req);
+		{
+			/* Issue #659: the matched row says whether a WebSocket Upgrade passes through. */
+			struct fpm_http_route_s *row = fpm_http_route(gw, req);
+
+			c->target = row ? row->target : NULL;
+			c->upgrade = row ? row->upgrade : 0;
+		}
 		/* Issue #388: on the gateway a request matching no http.route[]
 		 * prefix is answered here, locally, and is never forwarded anywhere.
 		 * 404 is the gateway's existing "nothing here" (a static miss already

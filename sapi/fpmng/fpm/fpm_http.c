@@ -148,6 +148,7 @@ struct {								\
 #include "fpm_http_acl.h"
 #include "fpm_http_accept_backoff.h"
 #include "fpm_http_forwarded.h"
+#include "fpm_http_proxy.h"
 #include "fpm_acme_challenge.h"
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
@@ -1721,6 +1722,10 @@ static void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg)
 		event_free(cl->ka_watch);
 		cl->ka_watch = NULL;
 	}
+	if (cl->close_timer) {
+		event_free(cl->close_timer);
+		cl->close_timer = NULL;
+	}
 	if (c) {
 		/* Issue #596: the upstream was paused for this client's sake. The
 		 * client is gone, so the worker's remaining output is read and dropped
@@ -1853,8 +1858,9 @@ static void fpm_http_client_request_done(struct evhttp_request *req, void *arg)
 }
 
 /* Issue #642: picks the id of the request starting on cl. With propagate, the
- * client's own X-Request-Id is kept only when the DIRECT peer is in
- * http.trusted_proxies -- the same rule that gates X-Forwarded-*
+ * client's own X-Request-Id is kept only when the peer is in
+ * http.trusted_proxies -- the same rule that gates X-Forwarded-* (the peer is
+ * the PROXY source under http.proxy_protocol, issue #651)
  * (fpm_http_forwarded.h). Any other id is one the client made up. A value
  * that fpm_http_request_id_valid() refuses is replaced, never truncated.
  * Returns false when the caller has to generate one. */
@@ -1869,6 +1875,12 @@ static bool fpm_http_client_request_id_inbound(struct fpm_http_gateway_s *gw,
 		return false;
 	}
 	evhttp_connection_get_peer(cl->evcon, &peer, &port);
+	/* Issue #651, review R2: the same peer as the ACL and X-Forwarded-For checks,
+	 * the PROXY source once the connection has an accepted header. A connection
+	 * whose header has no address (LOCAL) keeps the socket peer. */
+	if (cl->proxy_done && cl->proxy.has_source) {
+		peer = cl->proxy.addr;
+	}
 	inbound = evhttp_find_header(evhttp_request_get_input_headers(req), "X-Request-Id");
 	if (!peer || !inbound || !fpm_http_acl_check(gw->trusted_proxies_acl, peer) || !fpm_http_request_id_valid(inbound)) {
 		return false;
@@ -2770,6 +2782,22 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		fpm_http_counter_incr(&gw->counters->requests_total);
 	}
 	client = fpm_http_client_track(gw, evcon);
+
+	/* Issue #651: with http.proxy_protocol the source is the one the PROXY
+	 * header named, and a connection without an accepted header gets nothing.
+	 * The check runs before the deadline is disarmed, because the header record
+	 * is copied from the deadline node. Fail closed: no fallback to the socket
+	 * peer, and no response. */
+	if (gw->proxy_protocol) {
+		if (!fpm_http_proxy_admit(gw, client, evcon)) {
+			fpm_http_proxy_refuse(gw, client, evcon);
+			return;
+		}
+		if (client->proxy.has_source) {
+			peer_addr = client->proxy.addr;
+			peer_port = client->proxy.port;
+		}
+	}
 	fpm_http_client_request_begin(gw, client, req);
 
 	/* Reaching this callback means the client delivered the whole request
@@ -2784,9 +2812,10 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 	over_client_cap = fpm_http_gateway_request_capped(gw, evcon);
 
 	if (gw->acl && !fpm_http_acl_check(gw->acl, peer_addr)) {
-		/* ACL is about the direct network peer, so it (and its log entry) is
-		 * deliberately NOT run through X-Forwarded-For -- an address rejected
-		 * here is exactly the one that made the TCP connection. */
+		/* ACL judges peer_addr: the PROXY source when http.proxy_protocol gave one,
+		 * else the socket peer. X-Forwarded-For is deliberately NOT run through it,
+		 * so an address rejected here is the one the connection (or its PROXY
+		 * header) named. */
 		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, NULL);
 		evhttp_send_error(req, 403, "Forbidden");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */

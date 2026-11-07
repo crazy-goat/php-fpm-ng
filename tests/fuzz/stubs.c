@@ -53,6 +53,8 @@ FUZZ_STUB(fpm_http_log_response)
 /* fpm_http.c and fpm_http_static.c and the rest of the gateway */
 FUZZ_STUB(fpm_http_absolute_authority)
 FUZZ_STUB(fpm_http_host_of_request)
+FUZZ_STUB(fpm_http_proxy_admit)
+FUZZ_STUB(fpm_http_proxy_refuse)
 FUZZ_STUB(fpm_http_acl_check)
 FUZZ_STUB(fpm_http_acl_free)
 FUZZ_STUB(fpm_http_acl_parse)

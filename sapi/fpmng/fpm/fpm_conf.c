@@ -250,6 +250,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.operator_allowed_clients", &fpm_conf_set_string,  WPO(http_operator_allowed_clients) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
+	{ "http.proxy_protocol",       &fpm_conf_set_boolean,     WPO(http_proxy_protocol) },
+	{ "http.proxy_protocol_trusted", &fpm_conf_set_string,    WPO(http_proxy_protocol_trusted) },
 	{ "http.request_id",           &fpm_conf_set_request_id,  WPO(http_request_id) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
 	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
@@ -1224,6 +1226,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->http_allowed_clients);
 	free(wpc->http_operator_allowed_clients);
 	free(wpc->http_trusted_proxies);
+	free(wpc->http_proxy_protocol_trusted);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
 	free(wpc->http_ready_path);

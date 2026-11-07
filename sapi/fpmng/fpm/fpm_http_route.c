@@ -987,6 +987,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
 		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
 	}
+	/* Issue #651: parsed in the gateway child, see fpm_http_gateway_run(). */
+	gw->proxy_protocol = wp->config->http_proxy_protocol;
+	if (wp->config->http_proxy_protocol_trusted && *wp->config->http_proxy_protocol_trusted) {
+		gw->proxy_trusted = strdup(wp->config->http_proxy_protocol_trusted);
+	}
 	gw->request_id_mode = wp->config->http_request_id; /* issue #642 */
 	gw->access_format = wp->config->http_access_format; /* issue #642 */
 
@@ -1211,6 +1216,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->plain_listen_address);
@@ -1231,6 +1237,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->pool);
@@ -1244,6 +1251,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1260,6 +1268,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1280,6 +1289,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1329,6 +1339,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1348,6 +1359,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				free(gw->allowed_clients);
 				fpm_http_acl_free(gw->trusted_proxies_acl);
 				free(gw->trusted_proxies);
+				free(gw->proxy_trusted);
 				free(gw->front_controller);
 				free(gw->access_log_path);
 				free(gw->http_listen_override);
@@ -1378,6 +1390,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1403,6 +1416,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1813,6 +1827,25 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1; /* fpm_http_acl_parse() already logged which address is bad */
 		}
 		fpm_http_acl_free(tmp);
+	}
+	if (wp->config->http_proxy_protocol) {
+		/* Issue #651. An empty list would make fpm_http_acl_check() allow every
+		 * source, so it is refused here, not read as "no restriction". */
+		struct fpm_http_acl_s *tmp = NULL;
+
+		if (!wp->config->http_proxy_protocol_trusted || !*wp->config->http_proxy_protocol_trusted) {
+			zlog(ZLOG_ERROR, "[pool %s] http.proxy_protocol requires a non-empty http.proxy_protocol_trusted", wp->config->name);
+			return -1;
+		}
+		if (fpm_http_acl_parse(wp->config->name, "http.proxy_protocol_trusted", wp->config->http_proxy_protocol_trusted, &tmp) != 0) {
+			return -1; /* fpm_http_acl_parse() already logged which address is bad */
+		}
+		fpm_http_acl_free(tmp);
+		if (wp->config->http_read_timeout <= 0) {
+			/* the header read is bounded by the client read deadline (issue #593) */
+			zlog(ZLOG_ERROR, "[pool %s] http.proxy_protocol requires http.read_timeout > 0", wp->config->name);
+			return -1;
+		}
 	}
 	if (wp->config->http_front_controller && *wp->config->http_front_controller) {
 		const char *fc = wp->config->http_front_controller;

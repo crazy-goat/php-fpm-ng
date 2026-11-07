@@ -306,6 +306,39 @@ are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
 
+### PROXY protocol: `http.proxy_protocol` (issue #651)
+
+A load balancer in front of the gateway can send the client address in a PROXY
+protocol header. Version 1 is one text line. Version 2 is a binary block. With
+`http.proxy_protocol = yes`, the gateway reads one header at the start of each new
+connection on its public port.
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.proxy_protocol` | `yes`: read a PROXY v1 or v2 header first on each connection. `no`: read no header. | `no` |
+| `http.proxy_protocol_trusted` | Comma-separated list of literal IPv4 and IPv6 addresses, with no CIDR. These sources may send a header. Required when `http.proxy_protocol = yes`. | -- |
+
+The gateway applies these rules:
+
+1. The gateway checks the socket peer against `http.proxy_protocol_trusted` before it reads a byte. It closes a connection from any other address with no response.
+2. The gateway closes a connection that sends no header, a malformed header, or a header that does not complete within `http.read_timeout`. It sends no response.
+3. A v1 header is one line. The line ends with CRLF and is at most 107 bytes. A bare LF is malformed.
+4. A v2 header has a 16-byte fixed part and a body of at most 512 bytes. The low nibble of byte 13 is the transport protocol. The gateway accepts 0 (UNSPEC) and 1 (STREAM). It closes a connection that sends 2 (DGRAM) or 3 to F, because the listener is TCP. The gateway skips the TLVs in the body.
+5. A v1 `UNKNOWN` line, a v2 `LOCAL` command and the v2 `UNSPEC` and `UNIX` families keep the socket peer as the client address.
+6. A v1 `TCP4` or `TCP6` line, or a v2 `INET` or `INET6` address, sets the client address and port. The gateway uses that address for `REMOTE_ADDR`, the client field of the access log, `http.allowed_clients` and `http.trusted_proxies`. With `http.request_id = propagate`, the gateway keeps an inbound `X-Request-Id` only when that address is in `http.trusted_proxies` (`fpmng-http-proxy-protocol-request-id.phpt`).
+7. With TLS on the gateway, the client sends the header first and then the TLS handshake. The gateway reads the header before the handshake. The header can share a write with the ClientHello. `fpmng-http-proxy-protocol-tls.phpt` tests both write shapes.
+8. The plain listener (`http.plain_listen`) reads no header, even when `http.proxy_protocol = yes`. It answers a PROXY line as an invalid request: `HTTP/1.1 400 Bad Request` (measured on the build box, `fpmng-http-proxy-protocol-tls.phpt`). Send the PROXY header only to the TLS listener.
+9. A request on a connection that the gateway refuses (rules 1 and 2) never reaches the target and gets no response. The gateway closes the connection and frees it, so it does not stay in `connections_open` (`fpmng-http-proxy-protocol-refused.phpt`).
+
+`http.max_connections_per_client` counts the connections by the socket peer. It does not use the address in the header. Behind a load balancer, many clients can share one socket peer, and then they share one per-client limit.
+
+`php-fpm-ng -t` refuses:
+
+- `http.proxy_protocol` on any pool type other than `gateway`.
+- `http.proxy_protocol = yes` with an empty `http.proxy_protocol_trusted`.
+- An address in `http.proxy_protocol_trusted` that is not a literal IPv4 or IPv6 address.
+- `http.proxy_protocol = yes` with `http.read_timeout = 0`.
+
 ### Access log fields and request id (issue #642)
 
 The gateway writes one line for each request to `http.access_log`. The Combined

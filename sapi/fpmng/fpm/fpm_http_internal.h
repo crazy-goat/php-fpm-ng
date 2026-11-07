@@ -125,6 +125,11 @@ struct {								\
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
 #define FPM_HTTP_GATEWAY_TIMEOUT 504 /* libevent has no constant for it; http.upstream_* timeout, issue #716 */
 #define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
+/* The body of every 502 the gateway writes itself. The access log counts its
+ * length (issue #858), so the bytes field and the body on the wire cannot
+ * drift apart. A HEAD reply sends no body and counts 0. */
+#define FPM_HTTP_BAD_GATEWAY_BODY     "Bad Gateway\n"
+#define FPM_HTTP_BAD_GATEWAY_BODY_LEN (sizeof(FPM_HTTP_BAD_GATEWAY_BODY) - 1)
 
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
@@ -890,7 +895,7 @@ struct _fpm_http_conn {
 	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* effective REMOTE_ADDR: fwd.remote_addr or peer_addr */
 	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
 	int status;						/* HTTP status finally sent, -1 until known; for the access log */
-	size_t bytes_out;					/* body bytes sent to the client, for the access log */
+	size_t bytes_out;					/* body bytes for the access log. The 502s the gateway writes itself count their body (issue #858), 0 for HEAD. A proxied HEAD reply counts the upstream body length, though no body is sent. Every other reply written with evhttp_send_error() (the 504, the ping, ACME and OOM 502s) still counts 0 */
 
 	/* http.pool_full_policy = wait (issue #309). All three are dead unless
 	 * the pool opted in: when this request was put on gw->waiting, the

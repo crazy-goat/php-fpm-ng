@@ -207,8 +207,13 @@ void fpm_http_response_chunk(fpm_http_conn *c, const char *data, size_t len)
 	} else {
 		evhttp_send_reply_chunk(c->req, chunk);
 	}
+	/* libevent drops the body of a HEAD reply, so do not count forwarded
+	 * response-body bytes in bytes_out (issue #1086): the access log
+	 * reports body bytes sent to the client. */
 	evbuffer_free(chunk);
-	c->bytes_out += len;
+	if (evhttp_request_get_command(c->req) != EVHTTP_REQ_HEAD) {
+		c->bytes_out += len;
+	}
 
 	if (cl && c->gw->response_buffer > 0 && !c->read_paused && c->upstream && c->evcon) {
 		struct bufferevent *bev = evhttp_connection_get_bufferevent(c->evcon);

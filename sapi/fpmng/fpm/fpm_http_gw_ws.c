@@ -16,18 +16,28 @@
  * the same reason as the worker side (fpm_http_direct_ws.c, the hijack comment).
  * evhttp_connection_free() shuts the fd down with SHUT_WR, and it would end the
  * tunnel the moment it started. evhttp keeps owning the bufferevent until
- * fpm_ws_teardown() frees the connection. The connection stays in the gateway's
- * client index and keeps its share of http.max_connections until then.
+ * fpm_gw_ws_teardown() frees the connection. The connection stays in the
+ * gateway's client index and keeps its share of http.max_connections until then.
  *
  * Bounds: a side whose peer has FPM_GW_WS_HIGH bytes unsent stops being read.
  * The idle and total timers come from http.upgrade_idle_timeout and
- * http.upgrade_max_duration. A closed side flushes what it already sent to the
- * other side, and then the other side is shut down (SHUT_WR) and drained for a
- * linger, so a close frame or a TLS close_notify is not cut by an RST.
+ * http.upgrade_max_duration. The two ends of a relay are handled as follows.
+ *  - A client EOF (a half-close, or a full close) sends the bytes the gateway
+ *    still holds for the upstream, then shuts the upstream's write side
+ *    (SHUT_WR) and drains the upstream until its EOF. The upstream's bytes that
+ *    are not yet in the client's output are dropped. The client gets no more
+ *    bytes after its EOF, except those already in its output buffer.
+ *  - An upstream EOF sends the client's pending output, then shuts the client's
+ *    write side (SHUT_WR) and drains the client until its EOF.
+ * Every wait ends at FPM_GW_WS_LINGER_SECONDS at the latest. The client-EOF path
+ * uses one bound for its flush and its drain. No TLS close_notify is sent: the
+ * gateway never calls SSL_shutdown().
  *
  * All callbacks only record the cause and activate `step`. The bufferevents and
- * the connection are freed in fpm_ws_step(), a separate event, never inside a
- * callback of the bufferevent being freed (the use-after-free this avoids). */
+ * the connection are freed in fpm_gw_ws_step(), a separate event, never inside a
+ * callback of the bufferevent being freed (the use-after-free this avoids). The
+ * one exception is the client EOF: its callback only changes the stage and
+ * calls fpm_gw_ws_client_eof(), which frees nothing. */
 #include "fpm_config.h"
 #include "fpm_http.h"
 #include "fpm_http_internal.h"
@@ -53,7 +63,9 @@
 enum fpm_gw_ws_stage_e {
 	FPM_GW_WS_RELAY, /* both directions open */
 	FPM_GW_WS_FLUSH, /* upstream gone: the client's pending output is being sent */
-	FPM_GW_WS_LINGER /* client shut down for writing, draining until its EOF */
+	FPM_GW_WS_LINGER, /* client shut down for writing, draining until its EOF */
+	FPM_GW_WS_UP_FLUSH, /* client EOF: the bytes it sent are being sent upstream */
+	FPM_GW_WS_UP_LINGER /* upstream shut down for writing, draining until its EOF */
 };
 
 struct fpm_gw_ws_s {
@@ -70,6 +82,7 @@ struct fpm_gw_ws_s {
 	unsigned finishing : 1; /* no more bytes are copied */
 	unsigned client_gone : 1; /* the client side ended; nothing to flush to it */
 	unsigned timed_out : 1; /* the deadline of the current stage passed */
+	unsigned up_gone : 1; /* the upstream ended during UP_FLUSH or UP_LINGER */
 	struct fpm_gw_ws_s *prev, *next; /* gw->ws_relays */
 };
 
@@ -147,13 +160,25 @@ static void fpm_gw_ws_writecb(struct bufferevent *bev, void *arg)
 	fpm_gw_ws_move(ws, src, bev);
 }
 
+static void fpm_gw_ws_client_eof(struct fpm_gw_ws_s *ws);
+
 static void fpm_gw_ws_eventcb(struct bufferevent *bev, short what, void *arg)
 {
 	struct fpm_gw_ws_s *ws = arg;
 
-	if (what & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
-		fpm_gw_ws_finish(ws, bev == ws->cbev);
+	if (!(what & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT))) {
+		return;
 	}
+	/* A clean EOF on the client is a half-close: the bytes it sent still go
+	 * upstream. finish() would drop them. libevent ORs BEV_EVENT_READING into
+	 * the flags of a read that hits EOF (0x11, not 0x01), so the EOF bit is
+	 * tested alone, never with ==. Issue #659 round 2: the == test sent every
+	 * client EOF to finish() and lost the bytes still held (probe: 7 EOF events, all 0x11). */
+	if (bev == ws->cbev && (what & BEV_EVENT_EOF) && !(what & (BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) && !ws->finishing) {
+		fpm_gw_ws_client_eof(ws);
+		return;
+	}
+	fpm_gw_ws_finish(ws, bev == ws->cbev);
 }
 
 static void fpm_gw_ws_idle_cb(evutil_socket_t fd, short what, void *arg)
@@ -244,6 +269,54 @@ static void fpm_gw_ws_arm_deadline(struct fpm_gw_ws_s *ws)
 	event_add(ws->deadline, &linger);
 }
 
+static void fpm_gw_ws_up_eventcb(struct bufferevent *bev, short what, void *arg)
+{
+	struct fpm_gw_ws_s *ws = arg;
+
+	(void) bev;
+	if (what & (BEV_EVENT_EOF | BEV_EVENT_ERROR | BEV_EVENT_TIMEOUT)) {
+		ws->up_gone = 1;
+		fpm_gw_ws_kick(ws);
+	}
+}
+
+/* The client ended its sending side. The bytes the gateway still holds for the
+ * upstream go to the upstream's output now, because the client's input is no
+ * longer read and the upstream's bytes are only drained. fpm_gw_ws_up_step()
+ * shuts the upstream's write side once that output is empty. The deadline bounds
+ * the flush and the drain together. */
+static void fpm_gw_ws_client_eof(struct fpm_gw_ws_s *ws)
+{
+	struct bufferevent *cbev = ws->cbev;
+	struct bufferevent *ubev = ws->ubev;
+
+	ws->stage = FPM_GW_WS_UP_FLUSH;
+	event_del(ws->idle);
+	fpm_http_direct_tls_pull_pending(cbev, bufferevent_get_input(cbev));
+	evbuffer_add_buffer(bufferevent_get_output(ubev), bufferevent_get_input(cbev));
+	bufferevent_disable(cbev, EV_READ);
+	bufferevent_setcb(cbev, NULL, NULL, fpm_gw_ws_stage_eventcb, ws);
+	bufferevent_setwatermark(ubev, EV_WRITE, 0, 0);
+	bufferevent_setcb(ubev, fpm_gw_ws_linger_read, fpm_gw_ws_flush_writecb, fpm_gw_ws_up_eventcb, ws);
+	fpm_gw_ws_arm_deadline(ws);
+	fpm_gw_ws_kick(ws);
+}
+
+/* UP_FLUSH and UP_LINGER (after a client EOF). The client's bytes are sent once
+ * the upstream output is empty, and then the upstream's write side is shut. A
+ * bound, a client error, an upstream end or the total timer ends the relay. */
+static void fpm_gw_ws_up_step(struct fpm_gw_ws_s *ws)
+{
+	if (ws->finishing || ws->timed_out || ws->up_gone || ws->client_gone) {
+		fpm_gw_ws_teardown(ws);
+		return;
+	}
+	if (ws->stage == FPM_GW_WS_UP_FLUSH && evbuffer_get_length(bufferevent_get_output(ws->ubev)) == 0) {
+		shutdown(bufferevent_getfd(ws->ubev), SHUT_WR);
+		ws->stage = FPM_GW_WS_UP_LINGER;
+	}
+}
+
 /* The client gets no more bytes from the upstream. Its pending output is sent
  * first, bounded by the linger. The write watermark is 0, so writecb runs when
  * the output is empty. */
@@ -279,6 +352,10 @@ static void fpm_gw_ws_step(evutil_socket_t fd, short what, void *arg)
 
 	(void) fd;
 	(void) what;
+	if (ws->stage == FPM_GW_WS_UP_FLUSH || ws->stage == FPM_GW_WS_UP_LINGER) {
+		fpm_gw_ws_up_step(ws);
+		return;
+	}
 	if (!ws->finishing) {
 		return;
 	}

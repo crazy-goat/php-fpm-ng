@@ -291,19 +291,6 @@ struct fpm_http_seen_prefix_s {
 	const char *pool;
 };
 
-/* Everything about http.route[] that can be decided from the configuration
- * alone, checked in the master with every pool section already parsed (issue
- * #340). Called from fpm_http_validate_pool(), so `php-fpm-ng -t` refuses a
- * bad route table without anything having started.
- *
- * Refuses, each naming the pool and the offending directive: an unknown target
- * pool, a pool named twice, a target type the gateway cannot speak to, an entry
- * that is neither a path prefix nor a valid host name (issue #658), and an
- * entry claimed twice. Two entries are the same when their host names are
- * equal ignoring case, and their path prefixes are equal; an entry with no host
- * is the same only as another entry with no host.
- * An empty value is refused earlier, by the INI parser (fpm_conf.c), where the
- * line number is still known. */
 /* Issue #659: every http.route_upgrade[] key must name a path prefix of some
  * http.route[] entry, and every route it covers must lead to a target whose type
  * serves WebSocket upgrades (fpm_pool_type_s.serves_websocket). Any other
@@ -353,6 +340,19 @@ static int fpm_http_validate_upgrade_routes(struct fpm_worker_pool_s *wp)
 	return 0;
 }
 
+/* Everything about http.route[] that can be decided from the configuration
+ * alone, checked in the master with every pool section already parsed (issue
+ * #340). Called from fpm_http_validate_pool(), so `php-fpm-ng -t` refuses a
+ * bad route table without anything having started.
+ *
+ * Refuses, each naming the pool and the offending directive: an unknown target
+ * pool, a pool named twice, a target type the gateway cannot speak to, an entry
+ * that is neither a path prefix nor a valid host name (issue #658), and an
+ * entry claimed twice. Two entries are the same when their host names are
+ * equal ignoring case, and their path prefixes are equal; an entry with no host
+ * is the same only as another entry with no host.
+ * An empty value is refused earlier, by the INI parser (fpm_conf.c), where the
+ * line number is still known. */
 static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 {
 	struct key_value_s *kv, *kv2;

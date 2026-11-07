@@ -139,8 +139,9 @@ static void fpm_http_http_state_free(fpm_http_upstream *up)
 /* `Upgrade` is refused rather than stripped: a stripped websocket handshake
  * reaches the target pool, its 101 answer gets re-framed as an ordinary
  * response, and the client hangs mid-handshake -- an explicit 501 says what
- * is missing. WebSocket is #343's worker-executor feature; the gateway gains
- * passthrough only if a later issue decides to own it. */
+ * is missing. WebSocket is #343's worker-executor feature. Issue #659 adds
+ * passthrough for a GET WebSocket handshake on an opted-in route
+ * (fpm_http_http_websocket_upgrade()); every other Upgrade is still 501. */
 static int fpm_http_http_upgrade_requested(struct evhttp_request *req)
 {
 	const char *upgrade = evhttp_find_header(evhttp_request_get_input_headers(req), "Upgrade");

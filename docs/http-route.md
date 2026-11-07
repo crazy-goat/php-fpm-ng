@@ -190,7 +190,7 @@ target's address; a full target (the target pool's `pm.max_children` is also
 the connection budget) answers **503 + `Retry-After`**, subject to the same
 `http.pool_full_policy`.
 
-Two deliberate refusals:
+Three deliberate refusals:
 
 - **`Upgrade` is answered 501** by default, not stripped: a stripped websocket
   handshake hangs the client mid-handshake, which is worse than an explicit
@@ -209,7 +209,15 @@ Two deliberate refusals:
     with no traffic in either direction.
   - `http.upgrade_max_duration` (default `86400000` ms) closes a connection
     after this total time.
-  - A close from either side closes the other side.
+  - A close from either side closes the other side. If the client ends its
+    sending side (half-close), the gateway sends the bytes it still holds to
+    the target, then shuts the target's write side. The target's bytes that
+    are not yet in the client's output are dropped. Each wait ends after at
+    most 5 seconds.
+  - A drain or a reload ends open relays after about `process_control_timeout`.
+    Measured with `process_control_timeout = 5`: a relay under steady traffic
+    or a stalled relay ended 5.05 to 5.09 seconds after the signal. An idle
+    relay ends at its own idle timeout. The application must reconnect.
   - The access log does not record upgraded connections.
 - A target that **terminates TLS on its own listener** (`http.tls_cert` on the
   target pool) is refused at startup: this transport speaks cleartext to

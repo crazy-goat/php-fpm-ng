@@ -631,6 +631,84 @@ spec:
         failureThreshold: 1
 ```
 
+### `http.sendfile_root` -- files named by the upstream (issue #649)
+
+`http.sendfile_root` is off by default. When it is set, the gateway can serve a
+file that a FastCGI worker names in its reply. The worker sends one of two headers:
+
+- `X-Accel-Redirect: /path` names a file below the root.
+- `X-Sendfile: /absolute/path` names a file by its full path.
+
+Set the directive to an absolute path of an existing directory other than `/`:
+
+```ini
+[gw]
+pool.type = gateway
+http.sendfile_root = /srv/app/protected
+```
+
+The gateway applies these rules to every named file:
+
+1. It resolves the name with `realpath()`. The result must lie at or below the root.
+2. It refuses a path with a dot-segment below the root.
+3. It refuses a PHP script.
+4. It serves only a regular file.
+5. It answers a refused name with `404 Not Found`. It logs the refusal at NOTICE, with the header name and the reason.
+
+When the gateway serves a file:
+
+- The client gets `200 OK`. The worker body is not sent.
+- The gateway reads the file in windows of 1 MiB with `pread()`. It reads the next window only after the client has taken the previous one. The gateway holds one window per reply, not the file. The gateway does not map the file, so a truncation during the transfer does not stop the gateway.
+- `Content-Length` equals the file size.
+- A `HEAD` request gets the length and no body. An empty file gets `200 OK` with `Content-Length: 0`.
+- The gateway does not support `Range`. A range request gets the whole file.
+- If the gateway cannot read the first window, it answers `502 Bad Gateway`.
+- If the gateway cannot read a later window, it ends the reply early. The client gets a short body, and the connection is shut down. The gateway logs a WARNING that starts with `cannot read the rest of`. `fpmng-gateway-sendfile-truncate.phpt` truncates a file during a transfer and checks this, over plain HTTP and over TLS. A mapped file would raise SIGBUS on TLS, so the TLS case guards the no-mapping rule.
+- The worker may still send its own body when the file reply ends. The gateway reads and drops it. The gateway detaches the upstream from the client before it frees the client. With the HTTP upstream transport, a byte that arrives after the detach fails the upstream and logs a WARNING that ends with `sent response bytes with no request to attach them to` (`sapi/fpmng/fpm/fpm_http_client.c:796`). With the FastCGI transport, the byte is discarded. `fpmng-gateway-sendfile-late-worker.phpt` and `fpmng-gateway-sendfile-worker-sleep.phpt` cover this case.
+
+The headers of the worker reply pass through to the client, with these exceptions:
+
+- The gateway drops `X-Accel-Redirect`, `X-Sendfile`, `Content-Length`, `Content-Range`, `Transfer-Encoding`, `Content-Encoding`, `Accept-Ranges` and `X-Request-Id`.
+- The gateway drops the hop-by-hop headers `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer` and `Upgrade`.
+- The gateway keeps `Content-Disposition`, `Cache-Control`, `Set-Cookie`, `Expires`, `Last-Modified` and the other headers of the worker.
+- The gateway keeps the `Content-Type` of the worker when the worker sets one. Without it, the gateway sets a type from the file name.
+- PHP sends its `default_mimetype` (`text/html` by default) when the script sets no type. A worker that sends a PDF must set `Content-Type` itself.
+- The gateway adds its own `X-Request-Id`. It adds `X-Fpmng-Queue-Wait` when it measured the queue wait.
+
+A refused name gets `404 Not Found` with a body of `Not Found`. The worker headers do not reach the client.
+
+Memory: `sapi/fpmng/tests/fpmng-gateway-sendfile-memory.phpt` sends a 200 MB file to a slow
+reader and checks the VmRSS of the gateway process against a bound of 64 MB. On the
+test box (lane 24000), the build at commit 97a5d0c reaches a peak VmRSS of 187256 kB
+(idle 5856 kB) and fails the test. The build with the windowed reader passes the bound.
+The test does not print the peak of the new build, so that number is not measured.
+
+With the directive unset, the gateway does not act on these headers. It forwards
+them to the client like any other header.
+
+Security notes:
+
+- Set the root to a directory that holds only files you want to serve. Any
+  client can read any file below the root that the worker names.
+- Only the worker chooses the name. Check access in the application before
+  the worker sends the header. A client that can pick the value of the header
+  can pick the file.
+- A symbolic link below the root is resolved. A link that points outside the
+  root is refused.
+- The directive is refused by `pool.type = fastcgi` and by `pool.type = http-direct`.
+  `php-fpm-ng -t` refuses it there.
+- `php-fpm-ng -t` refuses a root that is not an absolute path, that is not an
+  existing directory, or that is `/`.
+- The HTTP upstream transport is not tested. `fpm_http_client.c:537` calls
+  `fpm_http_start_reply()`, so the same hook runs for that transport
+  (`fpm_http_fcgi.c:712`).
+
+Tests: `sapi/fpmng/tests/fpmng-gateway-sendfile.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-config.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-memory.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-truncate.phpt` and
+`sapi/fpmng/tests/fpmng-gateway-sendfile-unset.phpt`.
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,

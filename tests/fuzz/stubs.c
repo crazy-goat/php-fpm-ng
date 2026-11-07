@@ -112,3 +112,9 @@ __attribute__((weak)) void fpmng_zlog_ex(const char *function, int line, int fla
 	(void) vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 }
+
+/* fpm_http_sendfile.c (issue #649): called from fpm_http_fcgi.c, which the upstream
+ * harnesses link without the module. */
+FUZZ_STUB(fpm_http_sendfile_note)
+FUZZ_STUB(fpm_http_sendfile_reply)
+FUZZ_STUB(fpm_http_sendfile_free)

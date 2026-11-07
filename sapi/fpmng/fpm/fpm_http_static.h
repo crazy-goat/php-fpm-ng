@@ -68,6 +68,18 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
  * leaving PHP to produce the error. */
 char *fpm_http_static_decode_path(struct evhttp_request *req, size_t *len);
 
+/* The containment and file checks of this module, exported for
+ * fpm_http_sendfile.c (issue #649): a file named by an upstream header goes
+ * through the same tests as a file named by the request, and a second copy of
+ * them would be a second place to get them wrong. */
+
+/* 1 when `resolved` (a realpath() result) is `root` or lies below it. `root`
+ * is a realpath() result too, with `root_len` bytes. */
+int fpm_http_static_contained(const char *resolved, const char *root, size_t root_len);
+
+/* 1 when any path segment of `path` starts with a dot. */
+int fpm_http_static_path_has_dotfile(const char *path);
+
 /* The extension-to-MIME table this module serves with; exposed because the
  * gateway names it in its own responses too. Never NULL: unknown extensions
  * are application/octet-stream. */

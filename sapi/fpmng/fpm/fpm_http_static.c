@@ -123,7 +123,7 @@ char *fpm_http_static_decode_path(struct evhttp_request *req, size_t *len)
 /* Any path segment starting with a dot is refused: .env, .git, .htaccess and
  * friends must never be served just because they sit under the document root.
  * nginx needs an explicit rule for this; we make it the default. */
-static int fpm_http_static_path_has_dotfile(const char *path)
+int fpm_http_static_path_has_dotfile(const char *path)
 {
 	const char *p = path;
 
@@ -208,7 +208,7 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 
 /* The check every served path passes, the original and a sidecar alike: the
  * resolved path is the root itself or lies below it. */
-static int fpm_http_static_contained(const char *resolved, const char *root, size_t root_len)
+int fpm_http_static_contained(const char *resolved, const char *root, size_t root_len)
 {
 	return strncmp(resolved, root, root_len) == 0 && (!resolved[root_len] || resolved[root_len] == '/');
 }

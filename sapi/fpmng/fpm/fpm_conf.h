@@ -191,6 +191,7 @@ struct fpm_worker_pool_config_s {
 	int http_static;			/* serving static files without PHP, enabled by default */
 	int http_static_ranges;			/* http.static.ranges: single byte ranges (206, 416) for http-direct static files; off by default (issue #648) */
 	int http_static_precompressed;		/* http.static.precompressed: serve .br and .gz sidecars; off by default (issue #648) */
+	char *http_sendfile_root;		/* http.sendfile_root: absolute directory that X-Accel-Redirect and X-Sendfile files are served from (issue #649); NULL = off */
 	struct key_value_s *http_static_cache_control;	/* http.static.cache_control[<prefix>] = <value>: Cache-Control by path prefix (issue #648) */
 	struct key_value_s *http_route_upgrade;	/* http.route_upgrade[<prefix>] = websocket: Upgrade passthrough on that route (issue #659) */
 	int http_upgrade_idle_timeout;		/* ms, http.upgrade_idle_timeout: an upgraded connection with no byte either way this long is closed (issue #659) */

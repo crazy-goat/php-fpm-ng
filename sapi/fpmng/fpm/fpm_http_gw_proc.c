@@ -1481,6 +1481,7 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->pool);
 		free(gw->listen_address);
 		free(gw->docroot);
+		free(gw->sendfile_root);
 		free(gw);
 	}
 	gateways = NULL;

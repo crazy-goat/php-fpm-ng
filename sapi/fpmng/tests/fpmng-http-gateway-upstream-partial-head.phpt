@@ -298,6 +298,33 @@ function check_bad_gateway(string $resp, string $path, string $what): void
         "$what: access log counts $logged bytes, the client got $wire, want " . strlen(BAD_GATEWAY_BODY), $resp);
 }
 
+/*
+ * The bytes that follow a response on the client connection, read until the
+ * peer closes it or $seconds pass. A HEAD reply is framed at the end of its
+ * head (framed_length()), so body() of it is always ''; this is the check that
+ * no body follows it on the wire.
+ */
+function client_rest(float $seconds): string
+{
+    $sock = $GLOBALS['client'];
+    $out = $GLOBALS['client_buf'];
+    $GLOBALS['client_buf'] = '';
+    $deadline = microtime(true) + $seconds;
+    while (microtime(true) < $deadline) {
+        $chunk = fread($sock, 65536);
+        if ($chunk !== '' && $chunk !== false) {
+            $out .= $chunk;
+            continue;
+        }
+        if (feof($sock)) {
+            break;
+        }
+        usleep(20000);
+    }
+
+    return $out;
+}
+
 /* True when the gateway closes the client connection within $seconds. */
 function client_closes(float $seconds = 3.0): bool
 {
@@ -473,6 +500,9 @@ fclose($u);
 $resp = client_read(6.0, true);
 check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'HEAD no answer: not a 502', $resp);
 check(body($resp) === '', 'HEAD no answer: a body on the wire', $resp);
+/* The 502 carries Connection: close, so read to EOF. */
+$rest = client_rest(3.0);
+check($rest === '', 'HEAD no answer: bytes after the head', $rest);
 $acc = wait_access('/"HEAD \/f\.php HTTP\/1\.1" 502 \d+ /');
 check($acc !== null, 'HEAD no answer: the access log does not say 502');
 preg_match('/"HEAD \/f\.php HTTP\/1\.1" 502 (\d+) /', $acc, $m);
@@ -490,6 +520,8 @@ fwrite($u, fcgi_record(FCGI_STDOUT, "Status: abc\r\nContent-Type: text/plain\r\n
 $resp = client_read(6.0, true);
 check(status_line($resp) === 'HTTP/1.1 502 Bad Gateway', 'HEAD invalid Status: not a 502', $resp);
 check(body($resp) === '', 'HEAD invalid Status: a body on the wire', $resp);
+$rest = client_rest(0.5);
+check($rest === '', 'HEAD invalid Status: bytes after the head', $rest);
 $acc = wait_access('/"HEAD \/g\.php HTTP\/1\.1" 502 \d+ /');
 check($acc !== null, 'HEAD invalid Status: the access log does not say 502');
 preg_match('/"HEAD \/g\.php HTTP\/1\.1" 502 (\d+) /', $acc, $m);

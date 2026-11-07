@@ -225,6 +225,7 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
+	{ "http.sendfile_root",        &fpm_conf_set_string,      WPO(http_sendfile_root) },
 	{ "http.static.ranges",        &fpm_conf_set_boolean,     WPO(http_static_ranges) },
 	{ "http.static.precompressed", &fpm_conf_set_boolean,     WPO(http_static_precompressed) },
 	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
@@ -1226,6 +1227,7 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_log);
 	free(wpc->cron_output_log);
 	free(wpc->http_listen);
+	free(wpc->http_sendfile_root);
 	free(wpc->http_plain_listen);
 	free(wpc->http_allowed_clients);
 	free(wpc->http_operator_allowed_clients);

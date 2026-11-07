@@ -90,7 +90,7 @@ struct fpm_http_direct_labels {
 	"fiber.", "supervisor.", "cron.", "worker.",                                                     \
 			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer",                  \
 			"http.response_min_rate", "http.upstream_connect_timeout", "http.upstream_read_timeout", \
-			"http.request_id", "http.access_format", "http.proxy_protocol", "http.proxy_protocol_trusted"
+			"http.request_id", "http.access_format", "http.proxy_protocol", "http.proxy_protocol_trusted", "http.sendfile_root"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {

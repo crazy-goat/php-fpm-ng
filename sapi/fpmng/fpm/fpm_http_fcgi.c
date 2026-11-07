@@ -57,6 +57,7 @@
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_sendfile.h"
 #include "fpm_http_header_cgi.h"
 #include "fpm_children_extra.h"
 #include "fpm_pool_type.h"
@@ -656,6 +657,7 @@ void fpm_http_conn_free(fpm_http_conn *c)
 	 * request without resuming it. This does not re-arm the upstream: the
 	 * callers that free a request this way drop the upstream themselves. */
 	fpm_http_response_unpause(c);
+	fpm_http_sendfile_free(c->sendfile);
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);
@@ -673,6 +675,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 	char *reason = NULL;
 	int code = HTTP_OK;
 	bool invalid_status = false;
+	int taken;
 
 	while (line < end) {
 		const char *nl = memchr(line, '\n', end - line), *next = nl ? nl + 1 : end, *colon;
@@ -706,7 +709,19 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				invalid_status = true;
 				break;
 			}
-			if (strcasecmp(key, "Status") == 0) {
+			taken = c->gw->sendfile_root ? fpm_http_sendfile_note(c, key, value, vlen) : 0;
+			if (taken < 0) {
+				/* Issue #649: the redirect header could not be copied. The
+				 * copy failures above take the same 502. */
+				free(key);
+				free(value);
+				invalid_status = true;
+				break;
+			}
+			if (taken) {
+				/* Issue #649: a redirect header is not copied to the client.
+				 * fpm_http_sendfile_reply() acts on it below. */
+			} else if (strcasecmp(key, "Status") == 0) {
 				/* Issue #605: a bad value is rejected with 502 through
 				 * invalid_status below, which keeps the rest of the untrusted
 				 * reply from being forwarded. The value is strndup()ed, so an
@@ -791,6 +806,15 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 		c->discard_upstream = 1;
 		c->status = FPM_HTTP_BAD_GATEWAY;
 		smart_str_free(&c->cgi_headers);
+		return;
+	}
+
+	/* Issue #649: a redirect header replaces the upstream's reply with the file
+	 * it names. This is after the 502 above, so an invalid Status still wins.
+	 * The rest of the upstream body is dropped by discard_upstream. */
+	if (c->sendfile) {
+		free(reason);
+		fpm_http_sendfile_reply(c);
 		return;
 	}
 
@@ -922,6 +946,14 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * END_REQUEST behind it finish the request in the same read; nothing would
 	 * re-arm the read event of an upstream that has no idle timeout. */
 	fpm_http_response_resume(c);
+	/* Issue #649: a file reply is still being sent, and the last window ends
+	 * it (fpm_http_sendfile_end()). The caller drops the upstream after this
+	 * return, so c must not keep a pointer to it: the close callback would
+	 * reach a freed upstream through c->upstream. */
+	if (c->sendfile && c->sendfile->pumping) {
+		c->upstream = NULL;
+		return;
+	}
 	/* Issue #967: a body piece was lost (fpm_http_response_chunk()). The head
 	 * is out, so the reply is cut, as in issue #533, and not terminated. */
 	if (c->chunk_lost) {

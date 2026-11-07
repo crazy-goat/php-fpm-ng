@@ -92,6 +92,8 @@ struct {								\
 #include <event2/keyvalq_struct.h>
 #include <event2/util.h>
 
+#include "fpm_http_proxy_protocol.h"
+
 #include "php.h"
 #include "zend_smart_str.h"
 
@@ -425,6 +427,16 @@ struct fpm_http_client_s {
 	 * close callback must end it: libevent detaches it and never frees it. NULL
 	 * otherwise. */
 	struct evhttp_request *req;
+	/* Issue #651: the PROXY header that admitted this connection, copied from
+	 * its read deadline node by fpm_http_proxy_admit(). proxy_done is 1 only
+	 * when a header was accepted; with http.proxy_protocol on, a request on a
+	 * connection without it is refused (fail closed). */
+	struct fpm_http_proxy_header_s proxy;
+	int proxy_done;
+	/* Issue #651, review R1: set once fpm_http_proxy_refuse() has scheduled the
+	 * close of this connection, so a request evhttp still dispatches on it
+	 * schedules nothing more. */
+	int proxy_refused;
 	/* Issue #642: stamped in fpm_http_client_request_begin() for the request
 	 * in flight on this connection -- the start of the access log's
 	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves
@@ -459,6 +471,9 @@ struct fpm_http_client_s {
 	 * connection (and its fd) goes. */
 	struct event *ka_timer;
 	struct event *ka_watch;
+	/* Issue #651, review R1: the deferred close of a connection whose PROXY
+	 * header was refused. Freed with ka_timer, before the connection goes. */
+	struct event *close_timer;
 };
 
 /* Process-local open-connection index, copied empty into each gateway child by
@@ -536,6 +551,9 @@ struct fpm_http_gateway_s {
 	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
+	int proxy_protocol;				/* http.proxy_protocol: TLS and main listener read a PROXY header first (issue #651) */
+	char *proxy_trusted;				/* http.proxy_protocol_trusted, raw string kept for fpm_http_acl_parse() */
+	struct fpm_http_acl_s *proxy_trusted_acl;	/* sources allowed to send a PROXY header; NULL when proxy_protocol is off */
 	int request_id_mode; /* http.request_id: FPM_HTTP_REQUEST_ID_OFF/_GENERATE/_PROPAGATE, see fpm_http_request_id.h (#642) */
 	char *access_log_path;				/* http.access_log; NULL = disabled */
 	int access_format;				/* http.access_format: FPM_HTTP_ACCESS_FORMAT_COMBINED or _JSON, see fpm_http_access_log.h (#642) */
@@ -781,6 +799,18 @@ struct fpm_http_read_deadline_s {
 	struct event *ev;			/* the one-shot deadline timer */
 	struct event *ev_eof;			/* first a zero timer (fd pickup), then the persistent EOF watcher */
 	struct fpm_http_read_deadline_s *next;
+	/* Issue #651: PROXY protocol header state, used only when
+	 * http.proxy_protocol is on (see fpm_http_proxy.h). proxy_pending is 1
+	 * while the header is still being read; then ev_eof is the header reader
+	 * and read is disabled on bev. proxy_buf holds the header bytes already
+	 * consumed (NEED_MORE). */
+	int proxy_on;
+	int proxy_pending;
+	int proxy_accepted;
+	short proxy_enabled;			/* bufferevent_get_enabled() before the header read */
+	size_t proxy_len;
+	unsigned char proxy_buf[FPM_HTTP_PROXY_MAX];
+	struct fpm_http_proxy_header_s proxy;
 };
 
 
@@ -1052,6 +1082,7 @@ void fpm_http_cleanup(int which, void *arg);
 void fpm_http_split_bind(char *bind, char **host, char **port);
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
+int fpm_http_read_deadline_proxy_done(struct fpm_http_read_deadline_s *dl, int accepted); /* issue #651, fpm_http_gw_proc.c; 1 when it freed dl */
 
 /* fpm_http_operator_fwd.c */
 const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,

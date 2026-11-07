@@ -7,6 +7,7 @@
 #include "fpm.h"
 #include "fpm_http.h"
 #include "fpm_http_handoff.h"
+#include "fpm_http_proxy.h"
 #include "fpm_pool_type.h"
 
 #ifdef HAVE_FPM_HTTP
@@ -210,6 +211,11 @@ static void fpm_http_read_deadline_fire(evutil_socket_t fd, short what, void *ar
 
 	(void) fd;
 	(void) what;
+	/* Issue #651, review R4: proxy_done() frees dl when the fd is already gone, so
+	 * nothing below may touch dl after a 1. */
+	if (dl->proxy_pending && fpm_http_read_deadline_proxy_done(dl, 0)) {
+		return;
+	}
 	bufferevent_set_timeouts(dl->bev, &now, &now);
 	fpm_http_read_deadline_forget(dl);
 }
@@ -283,7 +289,7 @@ static void fpm_http_read_deadline_forget(struct fpm_http_read_deadline_s *dl)
  * The fd is read from the bev; on a TLS connection it is not yet assigned at
  * bevcb time (bufferevent_setfd happens right after, in evhttp), so the EOF
  * watcher is armed lazily on the first event loop pass via a zero timer. */
-static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct bufferevent *bev)
+static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct bufferevent *bev, int proxy)
 {
 	struct fpm_http_read_deadline_s *dl = calloc(1, sizeof(*dl));
 
@@ -293,6 +299,7 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	dl->gw = gw;
 	dl->bev = bev;
 	dl->fd = -1;
+	dl->proxy_on = proxy;
 	/* A reference of our own, released in forget(). evhttp frees this
 	 * bufferevent as soon as the connection ends, which is routinely BEFORE
 	 * the deadline fires; with a reference outstanding, bufferevent_free()
@@ -316,6 +323,10 @@ static void fpm_http_read_deadline_arm(struct fpm_http_gateway_s *gw, struct buf
 	event_add(dl->ev, &gw->read_timeout);
 	{
 		static const struct timeval zero = { 0, 0 };
+		if (proxy) {
+			/* first pass of the connection: the PROXY header is read here (issue #651) */
+			event_priority_set(dl->ev_eof, 0);
+		}
 		event_add(dl->ev_eof, &zero); /* re-armed as EV_READ once the fd is known */
 	}
 }
@@ -332,6 +343,11 @@ static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void 
 
 	(void) fd;
 	(void) what;
+	if (dl->proxy_on) {
+		/* issue #651: the header comes first; the EOF watcher is armed when it is done */
+		fpm_http_proxy_start(dl);
+		return;
+	}
 	dl->fd = bufferevent_getfd(dl->bev);
 	if (dl->fd < 0) {
 		/* still no fd (should not happen): without the watcher a peer close
@@ -341,6 +357,34 @@ static void fpm_http_read_deadline_arm_eof(evutil_socket_t fd, short what, void 
 	}
 	event_assign(dl->ev_eof, dl->gw->base, dl->fd, EV_READ | EV_PERSIST, fpm_http_read_deadline_eof, dl);
 	event_add(dl->ev_eof, NULL);
+}
+
+/* Ends the PROXY header state of a connection (issue #651). accepted = 1: the
+ * header is consumed and the connection goes on to evhttp. accepted = 0: the
+ * connection is shut down; evhttp then reads EOF and closes it through its own
+ * path. Either way the connection's read mask is restored, and the EOF watcher
+ * takes over the fd. The request admission in fpm_http_proxy_admit() refuses
+ * anything the peer still sends. */
+int fpm_http_read_deadline_proxy_done(struct fpm_http_read_deadline_s *dl, int accepted)
+{
+	struct bufferevent *bev = dl->bev;
+	evutil_socket_t fd = bufferevent_getfd(bev);
+
+	dl->proxy_pending = 0;
+	dl->proxy_accepted = accepted;
+	if (!accepted && fd >= 0) {
+		shutdown(fd, SHUT_RDWR);
+	}
+	bufferevent_enable(bev, dl->proxy_enabled);
+	if (fd < 0) {
+		fpm_http_read_deadline_forget(dl);
+		return 1;
+	}
+	dl->fd = fd;
+	event_del(dl->ev_eof);
+	event_assign(dl->ev_eof, dl->gw->base, fd, EV_READ | EV_PERSIST, fpm_http_read_deadline_eof, dl);
+	event_add(dl->ev_eof, NULL);
+	return 0;
 }
 
 /* The first request on this connection has fully arrived: its deadline is
@@ -475,7 +519,7 @@ static struct bufferevent *fpm_http_bevcb(struct event_base *base, void *arg)
 		bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
 	}
 	if (bev && gw->read_timeout_ms > 0) {
-		fpm_http_read_deadline_arm(gw, bev);
+		fpm_http_read_deadline_arm(gw, bev, gw->proxy_protocol);
 	}
 	fpm_http_gateway_accepted(gw, bev);
 	return bev;
@@ -491,7 +535,7 @@ static struct bufferevent *fpm_http_plain_bevcb(struct event_base *base, void *a
 	struct bufferevent *bev = bufferevent_socket_new(base, -1, BEV_OPT_CLOSE_ON_FREE);
 
 	if (bev && gw->read_timeout_ms > 0) {
-		fpm_http_read_deadline_arm(gw, bev);
+		fpm_http_read_deadline_arm(gw, bev, 0); /* http.plain_listen takes no PROXY header (issue #651) */
 	}
 	fpm_http_gateway_accepted(gw, bev);
 	return bev;
@@ -818,6 +862,18 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 	}
 
 	gw->base = event_base_new();
+	/* Issue #651: the PROXY header read is a priority-0 event. It runs before
+	 * the bufferevent read of the same connection in the same loop pass. Set
+	 * before any event exists on the base: libevent's priority setup is only
+	 * valid then, and the default priority of every other event is the middle
+	 * one (1 of 2), so nothing else moves. */
+	if (gw->proxy_protocol && fpm_http_acl_parse(gw->pool, "http.proxy_protocol_trusted", gw->proxy_trusted, &gw->proxy_trusted_acl) != 0) {
+		exit(FPM_EXIT_SOFTWARE); /* fpm_http_acl_parse() logged the address; -t refuses it earlier */
+	}
+	if (gw->base && gw->proxy_protocol && event_base_priority_init(gw->base, 2) != 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.proxy_protocol: cannot set event priorities: this gateway will not start", gw->pool);
+		exit(FPM_EXIT_SOFTWARE);
+	}
 	gw->http = evhttp_new(gw->base);
 	/* Issue #641: SIGQUIT drains this process. evsignal runs the callback in
 	 * the event loop, so fpm_http_drain_start() may call evhttp safely. If it
@@ -1401,6 +1457,8 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->allowed_clients);
 		fpm_http_acl_free(gw->trusted_proxies_acl);
 		free(gw->trusted_proxies);
+		fpm_http_acl_free(gw->proxy_trusted_acl);
+		free(gw->proxy_trusted);
 		free(gw->front_controller);
 		free(gw->access_log_path);
 		free(gw->http_listen_override);

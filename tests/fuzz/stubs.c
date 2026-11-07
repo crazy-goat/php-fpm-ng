@@ -72,6 +72,12 @@ FUZZ_STUB(fpm_http_request_id_valid)
 FUZZ_STUB(fpm_http_request_path)
 FUZZ_STUB(fpm_http_static_serve)
 FUZZ_STUB(fpm_http_static_decode_path)
+/* fpm_http_static_range.c and fpm_http_static_negotiate.c (issue #648): the
+ * range harness includes the first of them for real. */
+FUZZ_STUB(fpm_http_static_parse_range)
+FUZZ_STUB(fpm_http_static_if_range_matches)
+FUZZ_STUB(fpm_http_static_accepts)
+FUZZ_STUB(fpm_http_static_cache_control_for)
 FUZZ_STUB(fpm_http_header_cgi_key)
 FUZZ_STUB(fpm_http_log_escape)
 FUZZ_STUB(fpm_clock_get)

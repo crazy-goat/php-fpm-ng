@@ -255,6 +255,14 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	if (!fpm_http_direct_declared(c->set_directives, "http.static")) {
 		c->http_static = 0;
 	}
+	/* issue #648. An option for a file server that is off would read as if
+	 * something were being served, so it is refused, as the other
+	 * http.static-only settings are. */
+	if (!c->http_static && (c->http_static_ranges || c->http_static_precompressed || c->http_static_cache_control)) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.static.* needs http.static = yes",
+			c->name, labels->subject);
+		return -1;
+	}
 	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires http.read_timeout > 0 and http.max_body between 1 and 32M",
 			c->name, labels->subject);

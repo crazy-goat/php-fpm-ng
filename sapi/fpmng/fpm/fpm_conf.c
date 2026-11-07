@@ -225,6 +225,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
+	{ "http.static.ranges",        &fpm_conf_set_boolean,     WPO(http_static_ranges) },
+	{ "http.static.precompressed", &fpm_conf_set_boolean,     WPO(http_static_precompressed) },
 	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
@@ -1235,6 +1237,12 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 		free(kv);
 	}
 	for (kv = wpc->http_routes; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_static_cache_control; kv; kv = kv_next) {
 		kv_next = kv->next;
 		free(kv->key);
 		free(kv->value);
@@ -2419,6 +2427,41 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 		err = fpm_conf_set_array(key, value, &config, 0);
 		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route")) {
 			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.static.cache_control")) {
+		/* http.static.cache_control[<prefix>] = <value> -- issue #648. The key is
+		 * matched as a plain string prefix of the request path, so it must begin
+		 * with '/'. A prefix given twice is refused rather than resolved by
+		 * order: fpm_conf_set_array() prepends, so the order would be the
+		 * reverse of the file. Noted, as http.route is, so the reject lists see
+		 * the directive by its name. */
+		if (*Z_STRVAL_P(key) != '/') {
+			zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: the path prefix must begin with '/'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		if (!*Z_STRVAL_P(value)) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: empty value; give a Cache-Control value",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_static_cache_control; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: this prefix is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_static_cache_control);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.static.cache_control")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.static.cache_control'", ini_filename, ini_lineno);
 			*error = 1;
 			return;
 		}

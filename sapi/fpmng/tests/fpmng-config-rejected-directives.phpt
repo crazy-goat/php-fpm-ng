@@ -452,6 +452,36 @@ expectConfigFailure(
     ["'http.ready_require_target' is not supported by pool.type = fastcgi"]
 );
 
+/* Issue #648: the static-file directives belong to http-direct with
+ * http.static = yes. fastcgi and gateway refuse them by name, the worker
+ * executor refuses them because they are not in its extra list, and an
+ * http-direct pool without http.static refuses them as well. */
+expectConfigFailure(
+    'fastcgi-http-static-ranges',
+    $base . "\nhttp.static.ranges = yes",
+    ["'http.static.ranges' is not supported by pool.type = fastcgi"]
+);
+expectConfigFailure(
+    'fastcgi-http-static-cache-control',
+    $base . "\nhttp.static.cache_control[\"/assets/\"] = \"public\"",
+    ["'http.static.cache_control' is not supported by pool.type = fastcgi"]
+);
+expectConfigFailure(
+    'gateway-http-static-precompressed',
+    gatewayConfig("http.static.precompressed = yes\n"),
+    ["'http.static.precompressed' is not supported by pool.type = gateway"]
+);
+expectConfigFailure(
+    'direct-worker-http-static-ranges',
+    $workerBase . "\nphp_admin_value[max_execution_time] = 0\nhttp.static.ranges = yes",
+    ["'http.static.ranges' is not supported by pool.type = http-direct with pool.executor = worker"]
+);
+expectConfigFailure(
+    'direct-static-ranges-without-static',
+    str_replace('[pool]', '[dir]', $base) . "\npool.type = http-direct\nchdir = $workerRoot\nhttp.front_controller = /worker.php\nhttp.static.ranges = yes",
+    ['http.static.* needs http.static = yes']
+);
+
 ?>
 Done
 --EXPECT--
@@ -508,6 +538,11 @@ gateway-ready-path-charset: rejected
 gateway-ready-path-same-as-ping: rejected
 gateway-ready-require-target-no-path: rejected
 fastcgi-ready-require-target: rejected
+fastcgi-http-static-ranges: rejected
+fastcgi-http-static-cache-control: rejected
+gateway-http-static-precompressed: rejected
+direct-worker-http-static-ranges: rejected
+direct-static-ranges-without-static: rejected
 Done
 --CLEAN--
 <?php

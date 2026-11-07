@@ -6,6 +6,7 @@
 
 #include "fpm.h"
 #include "fpm_http.h"
+#include "fpm_http_error.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -1005,22 +1006,16 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		bad_gateway = 1;
 	}
 	if (bad_gateway) {
-		struct evkeyvalq *out = evhttp_request_get_output_headers(req);
-
 		c->status = FPM_HTTP_BAD_GATEWAY;
+		/* The headers belong to req, not to c, so they are set here, before
+		 * fpm_http_conn_free(c). fpm_http_error_prepare() keeps X-Request-Id
+		 * (issue #882). */
+		(void) fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		/* Issue #858: the body is built now, so the access log line counts
-		 * what goes out. evhttp_send_error() wrote libevent's HTML page, whose
-		 * length the gateway cannot read back, and the line said 0. A HEAD
-		 * reply gets no body: evhttp_send_reply() would write one anyway (not
-		 * a HEAD-aware send in this libevent), so none is passed. If the buffer
-		 * cannot be allocated the 502 goes out with no body, counted as 0.
-		 * The headers belong to req, not to c, so they are set here, before
-		 * fpm_http_conn_free(c) (issue #882 reads the request id before that
-		 * free). They are the headers evhttp_send_error() used to set: its HTML
-		 * page is gone, so the close it implied is written out too. */
-		evhttp_clear_headers(out);
-		evhttp_add_header(out, "Content-Type", "text/plain");
-		evhttp_add_header(out, "Connection", "close");
+		 * what goes out. A HEAD reply gets no body: evhttp_send_reply() writes
+		 * the body it is given even for HEAD (libevent 2.1.12, http.c
+		 * evhttp_send), so none is passed. If the buffer cannot be allocated
+		 * the 502 goes out with no body, counted as 0. */
 		if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
 			err_body = evbuffer_new();
 			if (err_body && evbuffer_add(err_body, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN) == 0) {

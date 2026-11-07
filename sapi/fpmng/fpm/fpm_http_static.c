@@ -24,6 +24,7 @@
 #include <event2/http.h>
 #include <event2/keyvalq_struct.h>
 
+#include "fpm_http_error.h"
 #include "fpm_http_static_negotiate.h"
 #include "fpm_http_static_range.h"
 #include "zlog.h"
@@ -195,11 +196,14 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 {
 	struct evbuffer *body = evbuffer_new();
 
-	fpm_http_static_log(st, HTTP_NOTFOUND, 0);
 	if (!body) {
-		evhttp_send_error(req, HTTP_NOTFOUND, NULL);	/* out of memory: the connection is the least of it */
+		/* Out of memory: the connection is the least of it, so this path closes it. */
+		fpm_http_static_log(st, HTTP_NOTFOUND,
+			fpm_http_error_prepare(req, HTTP_NOTFOUND, "Not Found"));
+		fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
 		return;
 	}
+	fpm_http_static_log(st, HTTP_NOTFOUND, 0);
 	evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "text/plain");
 	evbuffer_add(body, "Not Found\n", 10);
 	evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", body);
@@ -563,8 +567,9 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 			if (body) {
 				evbuffer_free(body);
 			}
-			fpm_http_static_log(st, FPM_HTTP_STATIC_BAD_GATEWAY, 0);
-			evhttp_send_error(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway");
+			fpm_http_static_log(st, FPM_HTTP_STATIC_BAD_GATEWAY,
+				fpm_http_error_prepare(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway"));
+			fpm_http_error_send(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
 		fpm_http_static_log(st, status, (size_t) length);

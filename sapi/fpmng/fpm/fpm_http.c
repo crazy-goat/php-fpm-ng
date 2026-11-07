@@ -153,6 +153,7 @@ struct {								\
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_request_id.h"
+#include "fpm_http_error.h"
 #include "fpm_clock.h"
 #include "fpm_scoreboard.h"
 #include "fpm_request.h"
@@ -1917,9 +1918,9 @@ static bool fpm_http_client_request_id_inbound(struct fpm_http_gateway_s *gw,
 }
 
 /* Issue #642: the request's id, if http.request_id is on, and the start time
- * for duration_ms. The id is also the X-Request-Id response header; the
- * header is removed again by any evhttp_send_error() reply, which clears the
- * output headers (see fpm_http_start_reply() for the replies that keep it). */
+ * for duration_ms. The id is also the X-Request-Id response header. Every
+ * error reply keeps it: fpm_http_error_prepare() copies it before it clears
+ * the output headers. evhttp_send_error() would clear it (issue #882). */
 static void fpm_http_client_request_id_assign(struct fpm_http_gateway_s *gw,
 		struct fpm_http_client_s *cl, struct evhttp_request *req)
 {
@@ -2159,8 +2160,8 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 		/* Still answered locally: this namespace belongs to ACME whatever the
 		 * method, and forwarding a POST here to the application would expose
 		 * a path the application never routes. */
-		fpm_http_log_response(gw, req, remote_addr, NULL, 405, 0, NULL);
-		evhttp_send_error(req, 405, "Method Not Allowed");
+		fpm_http_log_response(gw, req, remote_addr, NULL, 405, fpm_http_error_prepare(req, 405, "Method Not Allowed"), NULL);
+		fpm_http_error_send(req, 405, "Method Not Allowed");
 		return 1;
 	}
 
@@ -2168,8 +2169,9 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 		? fpm_acme_challenge_lookup(token, keyauth, sizeof(keyauth))
 		: -1;
 	if (len < 0) {
-		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND, 0, NULL);
-		evhttp_send_error(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
+		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_NOTFOUND,
+			fpm_http_error_prepare(req, HTTP_NOTFOUND, "ACME challenge is not provisioned"), NULL);
+		fpm_http_error_send(req, HTTP_NOTFOUND, "ACME challenge is not provisioned");
 		return 1;
 	}
 
@@ -2195,8 +2197,9 @@ static int fpm_http_serve_acme_challenge(struct fpm_http_gateway_s *gw, struct e
 			if (body) {
 				evbuffer_free(body);
 			}
-			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
-			evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+			fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY,
+				fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway"), NULL);
+			fpm_http_error_send(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
 		fpm_http_log_response(gw, req, remote_addr, NULL, HTTP_OK, (size_t) len, NULL);
@@ -2243,8 +2246,9 @@ static int fpm_http_serve_ping(struct fpm_http_gateway_s *gw, struct evhttp_requ
 		if (body) {
 			evbuffer_free(body);
 		}
-		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
-		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY,
+			fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway"), NULL);
+		fpm_http_error_send(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		return 1;
 	}
 
@@ -2382,8 +2386,9 @@ static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_req
 		if (body) {
 			evbuffer_free(body);
 		}
-		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY, 0, NULL);
-		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		fpm_http_log_response(gw, req, remote_addr, NULL, FPM_HTTP_BAD_GATEWAY,
+			fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway"), NULL);
+		fpm_http_error_send(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		return 1;
 	}
 
@@ -2392,6 +2397,7 @@ static int fpm_http_serve_ready(struct fpm_http_gateway_s *gw, struct evhttp_req
 	/* Same no-cache headers as ping.path: a cached readiness answer is a lie. */
 	evhttp_add_header(out, "Expires", "Thu, 01 Jan 1970 00:00:00 GMT");
 	evhttp_add_header(out, "Cache-Control", "no-cache, no-store, must-revalidate, max-age=0");
+	fpm_http_reply_headers(req, code);
 	bytes = evbuffer_get_length(body);
 	fpm_http_log_response(gw, req, remote_addr, NULL, code, bytes, NULL);
 	evhttp_send_reply(req, code, reason, body);
@@ -2472,7 +2478,7 @@ static int fpm_http_plain_try_acme(struct evhttp_request *req, void *arg)
  * for one request. A connection is judged once, on its first request or when
  * the accept-time pickup gets to it, whichever is first (fpm_http_direct_conn.c).
  * Nonzero means the connection is over the cap: the caller answers 503, and
- * evhttp_send_error() closes the connection because it sends Connection: close. */
+ * the reply closes the connection (Connection: close, fpm_http_error_prepare()). */
 static int fpm_http_gateway_request_capped(struct fpm_http_gateway_s *gw, struct evhttp_connection *evcon)
 {
 	if (!gw || !gw->conns || !evcon) {
@@ -2517,7 +2523,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 	if (over_client_cap) {
 		/* Issue #686: over http.max_connections_per_client. Answered before the
 		 * HTTP-01 challenge and the redirect, as on the public listener. */
-		evhttp_send_error(req, 503, "Too many connections");
+		fpm_http_error_reply(req, 503, "Too many connections");
 		return;
 	}
 
@@ -2540,8 +2546,11 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 		 * worker -- so the challenge answered above remains the only thing
 		 * this listener ever returns before the certificate exists. */
 		if (gw && !gw->tls_ready) {
+			/* 60, not the 1 of every other 503: docs/tls.md documents this one. */
+			fpm_http_error_prepare(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+			evhttp_remove_header(headers, "Retry-After");
 			evhttp_add_header(headers, "Retry-After", "60");
-			evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+			fpm_http_error_send(req, HTTP_SERVUNAVAIL, "Service Unavailable");
 			return;
 		}
 	}
@@ -2552,7 +2561,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 		int have = fpm_http_absolute_authority(uri, authority, sizeof(authority));
 
 		if (have < 0) {
-			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			fpm_http_error_reply(req, HTTP_BADREQUEST, "Bad Request");
 			return;
 		}
 		if (have > 0) {
@@ -2565,7 +2574,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 		uri = ZSTR_VAL(target.s);
 	}
 	if (!host || !*host || strchr(host, '\r') || strchr(host, '\n') || !uri) {
-		evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+		fpm_http_error_reply(req, HTTP_BADREQUEST, "Bad Request");
 		smart_str_free(&target);
 		return;
 	}
@@ -2573,7 +2582,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 		const char *end = strchr(host, ']');
 
 		if (!end || (end[1] && end[1] != ':')) {
-			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			fpm_http_error_reply(req, HTTP_BADREQUEST, "Bad Request");
 			smart_str_free(&target);
 			return;
 		}
@@ -2585,7 +2594,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 	}
 	if (!redirect_host || !*redirect_host) {
 		free(redirect_host);
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		fpm_http_error_reply(req, HTTP_SERVUNAVAIL, "Service Unavailable");
 		smart_str_free(&target);
 		return;
 	}
@@ -2594,7 +2603,7 @@ static void fpm_http_plain_answer(struct evhttp_request *req, void *arg)
 	location = malloc(len);
 	if (!location) {
 		free(redirect_host);
-		evhttp_send_error(req, HTTP_SERVUNAVAIL, "Service Unavailable");
+		fpm_http_error_reply(req, HTTP_SERVUNAVAIL, "Service Unavailable");
 		smart_str_free(&target);
 		return;
 	}
@@ -2738,12 +2747,18 @@ void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int scri
 	if (error) {
 		struct evhttp_request *req = c->req;
 
+		/* write_request() answers 400 or 501 (fpm_http_client.c:175, :302) and
+		 * 400 or 503 (fpm_http_fcgi.c:482, the Host copy failing). */
+		const char *reason = error == HTTP_NOTIMPLEMENTED ? "Not Implemented"
+			: error == FPM_HTTP_SERVICE_UNAVAIL ? "Service Unavailable" : "Bad Request";
+		size_t bytes = fpm_http_error_prepare(req, error, reason);
+
 		fpm_http_log_response(gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
-			c->remote_user, error, 0, target);
+			c->remote_user, error, bytes, target);
 		c->evcon = NULL;
 		fpm_http_conn_free(c);
 		/* Sent last, on the local `req`: see fpm_http_finish(). */
-		evhttp_send_error(req, error, NULL);
+		fpm_http_error_send(req, error, reason);
 		return;
 	}
 
@@ -2843,14 +2858,15 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * else the socket peer. X-Forwarded-For is deliberately NOT run through it,
 		 * so an address rejected here is the one the connection (or its PROXY
 		 * header) named. */
-		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, NULL);
-		evhttp_send_error(req, 403, "Forbidden");
+		fpm_http_log_response(gw, req, peer_addr, NULL, 403, fpm_http_error_prepare(req, 403, "Forbidden"), NULL);
+		fpm_http_error_send(req, 403, "Forbidden");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
 	}
 	if (over_client_cap) {
-		fpm_http_log_response(gw, req, peer_addr, NULL, 503, 0, NULL);
-		evhttp_send_error(req, 503, "Too many connections");
+		fpm_http_log_response(gw, req, peer_addr, NULL, 503,
+			fpm_http_error_prepare(req, 503, "Too many connections"), NULL);
+		fpm_http_error_send(req, 503, "Too many connections");
 		fpm_http_count_local(gw);	/* #390: answered here, not forwarded */
 		return;
 	}
@@ -2862,8 +2878,9 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		char authority[FPM_HTTP_AUTHORITY_MAX];
 
 		if (fpm_http_absolute_authority(evhttp_request_get_uri(req), authority, sizeof(authority)) < 0) {
-			fpm_http_log_response(gw, req, peer_addr, NULL, 400, 0, NULL);
-			evhttp_send_error(req, HTTP_BADREQUEST, "Bad Request");
+			fpm_http_log_response(gw, req, peer_addr, NULL, 400,
+				fpm_http_error_prepare(req, HTTP_BADREQUEST, "Bad Request"), NULL);
+			fpm_http_error_send(req, HTTP_BADREQUEST, "Bad Request");
 			fpm_http_count_local(gw);
 			return;
 		}
@@ -2956,12 +2973,13 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		 * (the NULL passed below), which is what #341's field already means
 		 * for a request this gateway answered itself. */
 		if (!c->target) {
-			fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND, 0, NULL);
+			fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND,
+				fpm_http_error_prepare(req, HTTP_NOTFOUND, "Not Found"), NULL);
 			fpm_http_count_local(gw);	/* #390: no route covers this path */
 			c->evcon = NULL;
 			fpm_http_conn_free(c);
 			/* Sent last: the send may end the request (see fpm_http_finish()). */
-			evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
+			fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
 			return;
 		}
 		/* Issue #341: fpmng_gateway_requests_total{target=...} -- every request

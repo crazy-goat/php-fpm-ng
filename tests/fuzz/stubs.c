@@ -45,6 +45,12 @@ FUZZ_STUB(fpm_http_response_resume)
 FUZZ_STUB(fpm_http_transport_connect)
 FUZZ_STUB(fpm_http_access_log_write)
 FUZZ_STUB(fpm_http_method_name)
+
+/* fpm_http_error.c (issue #882): called from fpm_http.c, fpm_http_fcgi.c and fpm_http_static.c */
+FUZZ_STUB(fpm_http_reply_headers)
+FUZZ_STUB(fpm_http_error_prepare)
+FUZZ_STUB(fpm_http_error_send)
+FUZZ_STUB(fpm_http_error_reply)
 FUZZ_STUB(fpm_http_build_request)
 FUZZ_STUB(fpm_http_local_addr)
 FUZZ_STUB(fpm_http_auth_parse)

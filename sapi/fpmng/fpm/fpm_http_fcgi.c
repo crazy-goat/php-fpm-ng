@@ -1013,8 +1013,8 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		(void) fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		/* Issue #858: the body is built now, so the access log line counts
 		 * what goes out. A HEAD reply gets no body: evhttp_send_reply() writes
-		 * the body it is given even for HEAD (libevent 2.1.12, http.c
-		 * evhttp_send), so none is passed. If the buffer cannot be allocated
+		 * the body it is given even for HEAD (libevent 2.1.12, http.c:628-633),
+		 * so none is passed. If the buffer cannot be allocated
 		 * the 502 goes out with no body, counted as 0. */
 		if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
 			err_body = evbuffer_new();

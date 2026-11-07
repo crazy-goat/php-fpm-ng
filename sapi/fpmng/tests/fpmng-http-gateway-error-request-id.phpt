@@ -16,13 +16,18 @@ require_once "fpmng-raw-upstream.inc";
  * fpm_http_client_request_begin() set. Each reply below is one kind of error the
  * gateway writes itself, and each must carry the id the access log line names:
  *
- *   [404]  no http.route[] entry claims the path: answered locally;
- *   [504]  the target took the request and never answered, and
- *          http.upstream_read_timeout cut it before any head was sent;
- *   [502]  the target's socket is gone: the connect fails.
+ *   [404]    no http.route[] entry claims the path: answered locally;
+ *   [502 a]  the target reads the request and closes without any answer;
+ *   [502 b]  the target sends an unfinished head and closes (issue #636's
+ *            shape, which the http transport answers as no answer);
+ *   [504]    the target took the request and never answered, and
+ *            http.upstream_read_timeout cut it before any head was sent;
+ *   [502 c]  the target's socket is gone: the connect fails.
  *
- * The 504 and the 502 use the same raw target: it is silent until the test
- * removes its socket. The access log is on, so the id is checked on both sides. */
+ * The raw target is the same for all of them. The 504 case leaves a connection
+ * the gateway dialled and the test did not accept, so it runs after the cases
+ * that accept their own connection. The access log is on, so the id is checked
+ * on both sides. */
 
 function check(bool $ok, string $what, FpmngRaw $raw, string $extra = ''): void
 {
@@ -70,6 +75,34 @@ check($id !== null && preg_match('/^[0-9a-f]{32}$/', $id) === 1, '404: no genera
 check(str_contains(accessLine($accessLog, $id), "request_id=$id"), '404: access log does not name the id', $raw);
 echo "404: X-Request-Id kept, access log names it\n";
 
+/* 502, no upstream answer: the target reads the request and closes. */
+$raw->send(fpmng_raw_get('/evil/noanswer'), true);
+$u = $raw->conn();
+check($u !== null, 'no-answer: the gateway never dialled the raw target', $raw);
+$raw->readRequest($u);
+fclose($u);
+$resp = $raw->readResponse();
+check(str_starts_with($resp, 'HTTP/1.1 502'), 'no-answer: not a 502', $raw, $resp);
+$id = requestId($resp);
+check($id !== null && preg_match('/^[0-9a-f]{32}$/', $id) === 1, 'no-answer: no generated X-Request-Id', $raw, $resp);
+check(str_contains(accessLine($accessLog, $id), "request_id=$id"), 'no-answer: access log does not name the id', $raw);
+echo "502 no answer: X-Request-Id kept, access log names it\n";
+
+/* 502, unfinished head: the target sends part of a head and closes. */
+$raw->send(fpmng_raw_get('/evil/halfhead'), true);
+$u = $raw->conn();
+check($u !== null, 'partial-head: the gateway never dialled the raw target', $raw);
+$raw->readRequest($u);
+fwrite($u, "HTTP/1.1 200 OK\r\nX-Partial: yes");
+usleep(150000);
+fclose($u);
+$resp = $raw->readResponse();
+check(str_starts_with($resp, 'HTTP/1.1 502'), 'partial-head: not a 502', $raw, $resp);
+$id = requestId($resp);
+check($id !== null && preg_match('/^[0-9a-f]{32}$/', $id) === 1, 'partial-head: no generated X-Request-Id', $raw, $resp);
+check(str_contains(accessLine($accessLog, $id), "request_id=$id"), 'partial-head: access log does not name the id', $raw);
+echo "502 partial head: X-Request-Id kept, access log names it\n";
+
 /* 504: the target reads nothing back; the gateway cuts it after 1500 ms. */
 $raw->send(fpmng_raw_get('/evil/silent'), true);
 $resp = $raw->readResponse(10.0);
@@ -93,6 +126,8 @@ $raw->finish();
 ?>
 --EXPECT--
 404: X-Request-Id kept, access log names it
+502 no answer: X-Request-Id kept, access log names it
+502 partial head: X-Request-Id kept, access log names it
 504: X-Request-Id kept, access log names it
 502: X-Request-Id kept, access log names it
 --CLEAN--

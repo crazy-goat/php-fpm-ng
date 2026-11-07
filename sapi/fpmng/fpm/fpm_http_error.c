@@ -65,9 +65,9 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	evhttp_add_header(out, "Connection", "close");
 
 	/* A HEAD reply gets no body. evhttp_send_reply() writes whatever body it is
-	 * given, HEAD included (libevent 2.1.12, http.c evhttp_send), so
-	 * fpm_http_error_send() passes none. The access log counts what goes on the
-	 * wire, as the 502 does (issue #858). */
+	 * given, HEAD included (libevent 2.1.12, http.c:628-633 in
+	 * evhttp_make_header()), so fpm_http_error_send() passes none. The access
+	 * log counts what goes on the wire, as the 502 does (issue #858). */
 	if (evhttp_request_get_command(req) == EVHTTP_REQ_HEAD) {
 		return 0;
 	}

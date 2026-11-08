@@ -1222,6 +1222,12 @@ carries `Accept-Ranges: bytes`. The server answers `bytes=a-b`, `bytes=a-` and
 - The `416` reply has `Content-Range: bytes */<size>` and no body.
 - A `Range` is ignored when `If-Range` does not match. A `304` takes precedence
   over `Range`.
+- An `If-Range` date matches when it equals `Last-Modified` exactly. The server
+  does not check that the date is a strong validator (RFC 9110 sections 8.8.2.2
+  and 13.1.5). The `ETag` (`mtime-size`) has the same one-second resolution. So
+  when a file is rewritten twice within one second with the same size, neither
+  the date nor the `ETag` changes, and a resumed download can join bytes of the
+  new file to bytes of the old one. nginx has the same limit.
 
 #### `http.static.precompressed`
 

@@ -418,9 +418,26 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: '%.*s' is neither a path prefix (it must begin "
 								 "with '/') nor a valid host name; a host name is letters, digits and '-' in "
 								 "dot-separated labels, with no port, no brackets and no wildcard (issue #658)",
-						name, kv->key, (int) prefix_len, prefix);
+					name, kv->key, (int) prefix_len, prefix);
 				rc = -1;
 				break;
+			}
+			/* Issue #1070: a dot-less name passes the grammar above and can be a
+			 * real private-network name, so it is a WARNING and not a refusal --
+			 * but the commonest way one gets here is the typo "http.route[api] =
+			 * api" for "/api", which silently routes the host "api", a Host no
+			 * real request sends. 'localhost' is the dot-less name an operator is
+			 * allowed to write without a warning (issue #658's grammar admits it
+			 * and the matching ignores case), so it is exempt. */
+			if (e.host && memchr(e.host, '.', e.host_len) == NULL &&
+					!(e.host_len == sizeof("localhost") - 1 &&
+							fpm_http_host_equal(e.host, "localhost", e.host_len))) {
+				zlog(ZLOG_WARNING, "[pool %s] http.route[%s]: '%.*s' names the dot-less host '%.*s'; a request "
+								 "matches it only when its Host is exactly that name, so this usually routes "
+								 "nothing -- a dot-less name can be valid on a private network, so it is not "
+								 "refused; if a path prefix was meant, write '/%.*s' (issue #1070)",
+					name, kv->key, (int) prefix_len, prefix, (int) e.host_len, e.host,
+					(int) prefix_len, prefix);
 			}
 			for (i = 0; i < nseen; i++) {
 				if (seen[i].path_len == e.path_len && memcmp(seen[i].path, e.path, e.path_len) == 0 &&

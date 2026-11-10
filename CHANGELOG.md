@@ -20,6 +20,7 @@ release and no entry of their own: they are folded into the next entry (v0.5.2 a
 
 ### Changed
 
+- `pool.type = gateway`: `php-fpm-ng -t` logs a WARNING for an `http.route[]` entry that names a dot-less host (`http.route[api] = api`), the commonest spelling of the typo where the path prefix `/api` was meant: such a host matches a request only when its Host is exactly that name. The entry stays accepted -- a dot-less name can be valid on a private network -- and `localhost` gets no warning. Documented in `docs/gateway.md` (issue #1070). New test `fpmng-http-route-host-dotless-warning.phpt`.
 - `docker/Dockerfile` pins php-fpm-ng v0.17.2 (version and SHA256 of its `.deb`, from that release's `SHA256SUMS`) instead of v0.17.0 (issue #1041). On 2026-11-06 the master of the v0.17.2 image started on the patched `libphp8.5-embed 8.5.4-0ubuntu1.5` (issue #994), measured on one host. The v0.17.0 binary is expected to crash there. `docs/install.md` describes the image.
 
 ### Added

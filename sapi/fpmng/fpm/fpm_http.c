@@ -2747,8 +2747,10 @@ void fpm_http_dispatch(struct fpm_http_gateway_s *gw, fpm_http_conn *c, int scri
 	if (error) {
 		struct evhttp_request *req = c->req;
 
-		/* write_request() answers 400 or 501 (fpm_http_client.c:175, :302) and
-		 * 400 or 503 (fpm_http_fcgi.c:482, the Host copy failing). */
+		/* The two ops->write_request implementations answer 400, 501 or 503:
+		 * fpm_http_http_write_request() (400, 501) and fpm_http_build_request()
+		 * (400, and 503 when the Host copy fails). Any other code would get
+		 * "Bad Request" below, so a new return code needs a reason here. */
 		const char *reason = error == HTTP_NOTIMPLEMENTED ? "Not Implemented"
 			: error == FPM_HTTP_SERVICE_UNAVAIL ? "Service Unavailable" : "Bad Request";
 		size_t bytes = fpm_http_error_prepare(req, error, reason);

@@ -65,6 +65,7 @@ chdir = $base
 http.gateways = 1
 http.front_controller = /send.php
 http.sendfile_root = $root
+http.request_id = generate
 http.route[web] = /
 [web]
 pool.type = fastcgi
@@ -165,6 +166,9 @@ try {
         expect("$label accel header stripped", header_value($headers, 'X-Accel-Redirect'), null);
         expect("$label sendfile header stripped", header_value($headers, 'X-Sendfile'), null);
         expect("$label no worker headers", header_value($headers, 'Content-Disposition'), null);
+        /* Issue #882: the refusal clears the worker's headers by hand in
+         * fpm_http_sendfile.c, and must keep the id the client correlates with. */
+        expect("$label X-Request-Id", preg_match('/^[0-9a-f]{32}$/', (string) header_value($headers, 'X-Request-Id')), 1);
         echo "$label refused: ok\n";
     }
     /* The FIFO must not block the event loop: a regular file still answers. */

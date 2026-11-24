@@ -203,7 +203,8 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 		fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
 		return;
 	}
-	fpm_http_static_log(st, HTTP_NOTFOUND, 0);
+	/* 10: the body added below, "Not Found\n" (issue #882). */
+	fpm_http_static_log(st, HTTP_NOTFOUND, 10);
 	evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "text/plain");
 	evbuffer_add(body, "Not Found\n", 10);
 	evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", body);

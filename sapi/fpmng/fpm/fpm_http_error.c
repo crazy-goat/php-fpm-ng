@@ -64,31 +64,27 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	 * refusals) depend on it, so it stays. */
 	evhttp_add_header(out, "Connection", "close");
 
-	/* A HEAD reply gets no body. evhttp_send_reply() writes whatever body it is
-	 * given, HEAD included (libevent 2.1.12, http.c:628-633 in
-	 * evhttp_make_header()), so fpm_http_error_send() passes none. The access
-	 * log counts what goes on the wire, as the 502 does (issue #858). */
+	/* A HEAD reply gets no body: libevent writes whatever body a HEAD reply has
+	 * (2.1.12, http.c:628-633 in evhttp_make_header()). The access log counts
+	 * what goes on the wire, as the 502 does (issue #858). */
 	if (evhttp_request_get_command(req) == EVHTTP_REQ_HEAD) {
 		return 0;
 	}
-	return strlen(reason) + 1;
+	/* The body goes into the request's own output buffer, which libevent
+	 * allocated with the request, so this cannot fail for lack of memory the
+	 * way an evbuffer_new() here could, and several callers are out-of-memory
+	 * paths themselves. The count is the length of what the buffer holds, so it
+	 * is what is sent: 0 if evbuffer_add_printf() fails (the rule of issue #967
+	 * for the 502 body, and of fpm_http_finish()). */
+	evbuffer_add_printf(evhttp_request_get_output_buffer(req), "%s\n", reason);
+	return evbuffer_get_length(evhttp_request_get_output_buffer(req));
 }
 
 void fpm_http_error_send(struct evhttp_request *req, int code, const char *reason)
 {
-	struct evbuffer *body = NULL;
-
-	if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
-		body = evbuffer_new();
-		if (body) {
-			evbuffer_add_printf(body, "%s\n", reason);
-		}
-	}
-	/* Sent last: the send may end the request, and with it the connection. */
-	evhttp_send_reply(req, code, reason, body);
-	if (body) {
-		evbuffer_free(body);
-	}
+	/* The body, if any, is already in the output buffer (see prepare). Sent
+	 * last: the send may end the request, and with it the connection. */
+	evhttp_send_reply(req, code, reason, NULL);
 }
 
 void fpm_http_error_reply(struct evhttp_request *req, int code, const char *reason)

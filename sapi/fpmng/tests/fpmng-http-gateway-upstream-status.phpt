@@ -64,6 +64,7 @@ listen = {{ADDR[http]}}
 chdir = $root
 http.gateways = 1
 http.access_log = {{FILE:LOG:ACC}}
+http.request_id = generate
 http.route[web] = /
 [web]
 pool.type = fastcgi
@@ -80,6 +81,18 @@ $tester->start([], false);
 $tester->switchLogSource('{{FILE:LOG}}');
 $tester->expectLogStartNotices();
 $http = $tester->getAddr('ipv4', '[http]');
+
+/* Issue #882: the invalid-Status 502 clears the upstream's headers by hand in
+ * fpm_http_start_reply(), and must keep the X-Request-Id. */
+$fp = stream_socket_client("tcp://$http", $errno, $error, 5);
+check($fp !== false, "connect to $http failed: $error");
+stream_set_timeout($fp, 5);
+fwrite($fp, "GET /s.php?v=abc&n=id HTTP/1.1\r\nHost: status.test\r\nConnection: close\r\n\r\n");
+$resp = stream_get_contents($fp);
+fclose($fp);
+check(str_starts_with($resp, 'HTTP/1.1 502 '), 'invalid Status with an id: ' . var_export(substr($resp, 0, 40), true));
+check(preg_match('/^X-Request-Id: [0-9a-f]{32}\r$/m', $resp) === 1, "invalid-Status 502 has no X-Request-Id\n$resp");
+echo "invalid-status request id: ok\n";
 
 foreach (['abc' => 'abc', 'big' => '99999', 'neg' => '-5', 'huge' => '99999999999',
           'info' => '103', 'cont' => '100', 'low' => '199', 'high' => '600', 'empty' => ''] as $name => $v) {
@@ -146,6 +159,7 @@ $tester->close();
 ?>
 Done
 --EXPECT--
+invalid-status request id: ok
 abc: 502
 big: 502
 neg: 502

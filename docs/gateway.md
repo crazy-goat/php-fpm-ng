@@ -393,18 +393,24 @@ or accept the value that the client sends.
 
 Every reply that the gateway writes after it has read the request carries the
 `X-Request-Id` response header when the request has an id. That covers the errors the
-gateway writes itself (`403`, `404`, `405`, `502`, `503`, `504`), the pool-full `503`,
-and the ping and ACME error answers. The access log line of the same request has the same
+gateway writes itself (`400`, `403`, `404`, `405`, `501`, `502`, `503`, `504`), the
+pool-full `503`, and the ping and ACME error answers. These replies are `text/plain`
+with the body `<reason>\n` (for example `Not Found`), not libevent's HTML page. A reply
+to a HEAD request has no body. The access log line of the same request has the same
 `request_id=` value.
 
 Two kinds of reply have no id, because the id does not exist yet when libevent writes
 them:
 
 - Replies that libevent writes before the gateway's request callback runs. They use
-  libevent's own HTML page: a request line that libevent cannot parse (`http.c:3477`,
-  `400`), a method that the listener does not allow (`http.c:3484`, `501`), and an
-  `Expect` value that libevent does not know (`http.c:2264`, `417`). Not measured on
-  the box.
+  libevent's own HTML page, and they have no access log line. In libevent 2.1.12
+  (`http.c:661-665`, `:3476-3478`) a request that fails while libevent reads it gets
+  `413` for a body over `http.max_body`, and `400` for every other failure: headers
+  over the limit, an invalid header line, or a request line that libevent cannot parse.
+  Measured on the box: the `413` (a `Content-Length` of 999999999999, a 120-byte page)
+  and the `400` for one 70000-byte header (a 94-byte page). Two more replies are not
+  measured: a method that the listener does not allow (`http.c:3484`, `501`), and an
+  `Expect` value that libevent does not know (`http.c:2264`, `417`).
 - Nothing else is known. With `http.request_id = off`, no reply has the header.
 
 ### Access log format
@@ -436,7 +442,7 @@ This is one line for a request that went to the `api` target:
 | `uri` | string or `null` | The request target. |
 | `protocol` | string | The protocol, for example `HTTP/1.1`. |
 | `status` | number or `null` | The status code. `null` when the connection failed before a response. |
-| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`403`, `404`, `405`, `503`, `504`, and the ping and ACME error answers). A HEAD reply counts 0, because it sends no body. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap. |
+| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`400`, `403`, `404`, `405`, `501`, `503`, `504`, and the ping and ACME error answers), and the `404` that `http.static` sends for a refused path. A HEAD reply counts 0, because it sends no body. If a body cannot be allocated, the count is what was sent. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap. |
 | `referer` | string or `null` | The `Referer` header. |
 | `user_agent` | string or `null` | The `User-Agent` header. |
 | `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |

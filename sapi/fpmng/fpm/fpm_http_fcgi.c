@@ -941,7 +941,6 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 {
 	struct evhttp_request *req = c->req;
 	int bad_gateway = 0;
-	struct evbuffer *err_body = NULL;
 
 	/* Issue #596: the last piece of a read can pause the upstream and the
 	 * END_REQUEST behind it finish the request in the same read; nothing would
@@ -1010,21 +1009,7 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 		/* The headers belong to req, not to c, so they are set here, before
 		 * fpm_http_conn_free(c). fpm_http_error_prepare() keeps X-Request-Id
 		 * (issue #882). */
-		(void) fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
-		/* Issue #858: the body is built now, so the access log line counts
-		 * what goes out. A HEAD reply gets no body: evhttp_send_reply() writes
-		 * the body it is given even for HEAD (libevent 2.1.12, http.c:628-633),
-		 * so none is passed. If the buffer cannot be allocated
-		 * the 502 goes out with no body, counted as 0. */
-		if (evhttp_request_get_command(req) != EVHTTP_REQ_HEAD) {
-			err_body = evbuffer_new();
-			if (err_body && evbuffer_add(err_body, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN) == 0) {
-				c->bytes_out += FPM_HTTP_BAD_GATEWAY_BODY_LEN;
-			} else if (err_body) {
-				evbuffer_free(err_body);
-				err_body = NULL;
-			}
-		}
+		c->bytes_out = fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	}
 	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
@@ -1036,10 +1021,7 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * the request and, for a closing connection, the connection, and the close
 	 * callback runs on the way. Nothing after this line reads c. */
 	if (bad_gateway) {
-		evhttp_send_reply(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway", err_body);
-		if (err_body) {
-			evbuffer_free(err_body);
-		}
+		fpm_http_error_send(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	} else {
 		evhttp_send_reply_end(req);
 	}

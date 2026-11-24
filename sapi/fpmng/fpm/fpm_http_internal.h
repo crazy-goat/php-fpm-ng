@@ -914,7 +914,7 @@ struct _fpm_http_conn {
 	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* effective REMOTE_ADDR: fwd.remote_addr or peer_addr */
 	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
 	int status;						/* HTTP status finally sent, -1 until known; for the access log */
-	size_t bytes_out;					/* body bytes for the access log. The 502s the gateway writes itself count their body (issue #858), 0 for HEAD. A proxied HEAD reply counts the upstream body length, though no body is sent. Other local error replies count their body through fpm_http_error_prepare() (issue #882); fpm_http_reject_queued() (pool full, HTML body) still counts 0 */
+	size_t bytes_out;					/* body bytes for the access log. The 502s the gateway writes itself count their body (issue #858), 0 for HEAD. A proxied HEAD reply counts the upstream body length, though no body is sent. Other local error replies count the body that fpm_http_error_prepare() puts in the output buffer (issue #882), and the static refusal 404 counts its 10; fpm_http_reject_queued() (pool full, HTML body) still counts 0 */
 
 	/* http.pool_full_policy = wait (issue #309). All three are dead unless
 	 * the pool opted in: when this request was put on gw->waiting, the

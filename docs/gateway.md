@@ -399,7 +399,9 @@ pool-full `503`, and the ping and ACME error answers. These replies, except the 
 libevent's HTML page. A reply to a HEAD request has no body. The pool-full `503` keeps
 an HTML body with no `Content-Type`, also for HEAD (`fpm_http_reject_queued()`,
 `fpm_http.c:1170-1185`; code reading, not measured). It is a known gap: see the `bytes`
-row of the access log table. The access log line of the same request has the same
+row of the access log table. With `http.error_page[503]` set, the pool-full `503` sends
+the page instead, with its `Content-Type`, and the access log counts the page bytes
+(0 for HEAD). The access log line of the same request has the same
 `request_id=` value.
 
 One kind of reply has no id, because the id does not exist yet when libevent writes it:
@@ -444,7 +446,7 @@ This is one line for a request that went to the `api` target:
 | `uri` | string or `null` | The request target. |
 | `protocol` | string | The protocol, for example `HTTP/1.1`. |
 | `status` | number or `null` | The status code. `null` when the connection failed before a response. |
-| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`400`, `403`, `404`, `405`, `501`, `503`, `504`, and the ping and ACME error answers), and the `404` that `http.static` sends for a refused path (10 bytes, and 0 for HEAD, which gets no body). A HEAD reply counts 0, because it sends no body. If a body cannot be allocated, the count is what was sent. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap. |
+| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`400`, `403`, `404`, `405`, `501`, `503`, `504`, and the ping and ACME error answers), and the `404` that `http.static` sends for a refused path (10 bytes, and 0 for HEAD, which gets no body). A HEAD reply counts 0, because it sends no body. If a body cannot be allocated, the count is what was sent. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap, except with `http.error_page[503]`, where it counts the page. |
 | `referer` | string or `null` | The `Referer` header. |
 | `user_agent` | string or `null` | The `User-Agent` header. |
 | `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
@@ -654,6 +656,73 @@ spec:
         periodSeconds: 5
         failureThreshold: 1
 ```
+
+### `http.response_header[]` and `http.error_page[]` (issue #650)
+
+Two directives shape the replies of the gateway. Both are off by default. Both belong to
+a gateway pool. `php-fpm-ng -t` refuses them on the other pool types.
+
+```ini
+http.response_header[Strict-Transport-Security] = "max-age=31536000; includeSubDomains"
+http.response_header[X-Frame-Options] = DENY
+http.error_page[404] = /srv/app/errors/404.html
+http.error_page[502] = /srv/app/errors/502.html
+http.error_page[503] = /srv/app/errors/503.json
+```
+
+#### `http.response_header[<Name>] = <value>`
+
+The gateway adds this header to every reply that it sends on the main listener. That covers
+the replies of a FastCGI or an HTTP target, the static files (`200` and `304`), the files
+named by `X-Accel-Redirect` and `X-Sendfile`, and the errors that the gateway writes
+itself (`404` for no route, `502`, `503`, `504`). The header is on the reply once.
+
+- The configured header replaces the header of the same name that the application sends.
+  The gateway drops every copy of the application's header. The name is compared without
+  regard to case.
+- Write a value that has `;` between double quotes. An unquoted `;` starts an INI comment.
+- The name has token characters only. The value is at most 4096 bytes, is not empty, and has
+  no control character. A CR or LF in a value is refused. The INI parser itself refuses a
+  quoted value that spans lines (`syntax error`).
+- `-t` refuses a name that the gateway sets itself: `Content-Length`,
+  `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`,
+  `Content-Type`, `Content-Encoding`, `Content-Range`, `Date`, `Location`, `Status`,
+  `X-Request-Id`, `X-Accel-Redirect` and `X-Sendfile`. It also refuses the prefixes
+  `Proxy-` and `X-Fpmng-`. It refuses the same name twice.
+- The `101` reply of a WebSocket upgrade does not get the headers.
+- The replies on `http.plain_listen` (the `308` redirect and the ACME answers) do not get
+  the headers. RFC 6797 section 7.2 says a host must not send `Strict-Transport-Security`
+  over a non-secure transport.
+
+#### `http.error_page[<code>] = /absolute/path.ext`
+
+The key is `404`, `502` or `503`. The gateway sends the file as the body of the error
+replies that it writes itself with this code: the `404` for no route, the `404` for a refused
+static path or a refused `X-Accel-Redirect` file, the `502` for a failed target or an invalid
+upstream `Status`, and the `503` for a full pool. An error reply of the application passes
+through unchanged, also a `404` or a `503`.
+
+- The master reads each file when it loads the configuration. `-t` refuses a missing file, a
+  file that is not a regular file, an empty file, and a file over 64 KiB (65536 bytes; exactly
+  65536 is accepted). The gateway holds the bytes: a change of the file has an effect after a
+  reload (`SIGUSR2`). A reload to a configuration whose file is gone is refused by the
+  check that runs before the reload (issue #640), and the old generation keeps its page.
+- `Content-Type` comes from the extension of the file, with the same mapping as the static
+  files (`.html` is `text/html; charset=UTF-8`, `.json` is `application/json`). `-t`
+  refuses an extension that has no type.
+- The access log counts the bytes of the page. A HEAD reply has the `Content-Type` and no
+  body, and counts 0.
+- There is no key `504`: `-t` refuses it like any other key.
+- The ACME `404` and the `503` for a missing certificate on `http.plain_listen` also use the
+  page, because they use the same error path. They do not get the configured headers.
+
+#### Why `413` is not a key
+
+libevent 2.1.12 writes the `413` for a body over `http.max_body` itself, before the
+gateway callback runs (see the replies of libevent in the section on `X-Request-Id`).
+The gateway cannot give that reply a page or a header. `-t` refuses
+`http.error_page[413]` and names this section. The same holds for the `400` that libevent
+writes for a request that it cannot read.
 
 ### `http.sendfile_root` -- files named by the upstream (issue #649)
 

@@ -74,14 +74,18 @@ expectConfigFailure(
 
 /* "/" resolves to a directory, but every path below it is refused by the
  * containment check, so the directive would serve nothing. The refusal is by
- * the resolved path, so "//" is refused as well. */
-expectConfigFailure(
-    'gateway-root-slash',
-    "[global]\nerror_log = {{FILE:LOG}}\n[gw]\npool.type = gateway\nlisten = {{ADDR[http]}}\n" .
-        "http.gateways = 1\nhttp.route[web] = /\nhttp.sendfile_root = //\n" .
-        "[web]\npool.type = fastcgi\nlisten = {{ADDR}}\npm = static\npm.max_children = 1",
-    ["http.sendfile_root must not be '/'"]
-);
+ * device and inode of the directory, so "//" and "/." are refused as well.
+ * musl's realpath("//") returns "//" (issue #1107), so a string comparison
+ * with "/" misses it there. */
+foreach (['gateway-root-slash' => '//', 'gateway-root-slash-single' => '/', 'gateway-root-slash-dot' => '/.'] as $label => $root) {
+    expectConfigFailure(
+        $label,
+        "[global]\nerror_log = {{FILE:LOG}}\n[gw]\npool.type = gateway\nlisten = {{ADDR[http]}}\n" .
+            "http.gateways = 1\nhttp.route[web] = /\nhttp.sendfile_root = $root\n" .
+            "[web]\npool.type = fastcgi\nlisten = {{ADDR}}\npm = static\npm.max_children = 1",
+        ["http.sendfile_root must not be '/'"]
+    );
+}
 ?>
 --EXPECT--
 fastcgi-sendfile-root: rejected
@@ -89,5 +93,7 @@ http-direct-sendfile-root: rejected
 gateway-relative-root: rejected
 gateway-missing-root: rejected
 gateway-root-slash: rejected
+gateway-root-slash-single: rejected
+gateway-root-slash-dot: rejected
 --CLEAN--
 <?php require_once "tester.inc"; FPM\Tester::clean(); ?>

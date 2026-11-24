@@ -460,7 +460,7 @@ void fpm_http_sendfile_free(struct fpm_http_sendfile_s *sf)
 int fpm_http_sendfile_validate(const char *pool, const char *root)
 {
 	struct stat stbuf;
-	char resolved[MAXPATHLEN];
+	struct stat rootbuf;
 
 	if (!root) {
 		return 0;
@@ -474,9 +474,12 @@ int fpm_http_sendfile_validate(const char *pool, const char *root)
 		return -1;
 	}
 	/* fpm_http_static_contained() needs a '/' after the root, so with "/" every
-	 * path is refused and the directive serves nothing. The resolved path is
-	 * checked, so "//" and "/." are refused as well. */
-	if (realpath(root, resolved) && strcmp(resolved, "/") == 0) {
+	 * path is refused and the directive serves nothing. The directory is compared
+	 * with "/" by device and inode, not by the string realpath() returns: on musl
+	 * (alpine:edge) realpath("//") returns "//", while realpath("/.") and
+	 * realpath("///") return "/" (measured, issue #1107). So "//", "/." and a
+	 * symlink to "/" are all refused on every libc. */
+	if (stat("/", &rootbuf) == 0 && stbuf.st_dev == rootbuf.st_dev && stbuf.st_ino == rootbuf.st_ino) {
 		zlog(ZLOG_ERROR, "[pool %s] http.sendfile_root must not be '/', name the directory that holds the files to serve", pool);
 		return -1;
 	}

@@ -46,9 +46,15 @@ switch ($_GET['m'] ?? '') {
         http_response_code(404);
         echo 'app not found';
         break;
-    case 'sleep':
-        sleep(2);
-        echo 'slow';
+    case 'hold':
+        /* Pins the worker until the test releases it: $_GET['f'] is both the
+         * "started" marker and, with ".release", the release file. Bounded at
+         * 30 s so a failed test cannot leave the worker busy for ever. */
+        touch($_GET['f']);
+        for ($i = 0; $i < 300 && !file_exists($_GET['f'] . '.release'); $i++) {
+            usleep(100000);
+        }
+        echo 'held';
         break;
     default:
         echo 'ok';
@@ -69,7 +75,11 @@ http.static = 1
 http.front_controller = /front.php
 http.sendfile_root = $base/prot
 http.access_log = {{FILE:LOG:ACC}}
+ping.path = /ping
+http.ready_path = /ready
+http.upstream_read_timeout = 4000
 http.route[web] = /api
+http.route[hang] = /hang
 http.route[slow] = /slow
 http.route[dead] = /dead
 http.response_header[Strict-Transport-Security] = "max-age=31536000; includeSubDomains"
@@ -86,6 +96,12 @@ pm.max_children = 2
 [slow]
 pool.type = fastcgi
 listen = {{ADDR[slow]}}
+chdir = $base
+pm = static
+pm.max_children = 1
+[hang]
+pool.type = fastcgi
+listen = {{ADDR[hang]}}
 chdir = $base
 pm = static
 pm.max_children = 1
@@ -173,17 +189,24 @@ function expectBody(string $what, array $r, string $body, ?string $type): void
     }
 }
 
-function accessLines(string $file, int $count): array
+/* "METHOD URI STATUS BYTES" of the access log lines so far, polled until every
+ * wanted tuple is there or 10 s pass. */
+function accessFound(string $file, array $wants): array
 {
     $deadline = microtime(true) + 10;
     do {
-        $lines = array_values(array_filter(explode("\n", (string) @file_get_contents($file)), 'strlen'));
-        if (count($lines) >= $count) {
+        $found = [];
+        foreach (explode("\n", (string) @file_get_contents($file)) as $l) {
+            if (preg_match('/"(\S+) (\S+) [^"]*" (\d{3}) (\d+) /', $l, $m)) {
+                $found[] = "$m[1] $m[2] $m[3] $m[4]";
+            }
+        }
+        if (!array_diff($wants, $found)) {
             break;
         }
         usleep(100000);
     } while (microtime(true) < $deadline);
-    return $lines;
+    return $found;
 }
 
 $tester = new FPM\Tester($cfg, '<?php');
@@ -263,33 +286,58 @@ try {
     expectBody('dead target 502', $r, '{"error":"bad gateway"}', 'application/json');
     echo "dead target 502: page, headers once\n";
 
-    /* Pool full: pin the single worker, then ask again. */
+    /* ping and ready are answered by the gateway, which sets its own
+     * Cache-Control and Expires: the configured names are refused at -t, so
+     * each header is on these replies once. */
+    foreach (['/ping', '/ready'] as $probe) {
+        $r = req($http, 'GET', $probe);
+        expectHeaders("$probe 200", $r, 200);
+        if (count($r['headers']['cache-control'] ?? []) !== 1 || count($r['headers']['expires'] ?? []) !== 1) {
+            fail("$probe: Cache-Control or Expires not once", json_encode($r['headers']));
+        }
+    }
+    echo "ping and ready: headers once\n";
+
+    /* Pool full: pin the single worker until the test releases it. */
+    $hold = "$base/hold-slow";
     $slow = stream_socket_client("tcp://$http", $errno, $error, 5);
-    fwrite($slow, "GET /slow/x?m=sleep HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
-    usleep(500000);
+    fwrite($slow, "GET /slow/x?m=hold&f=" . urlencode($hold) . " HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    for ($i = 0; $i < 100 && !file_exists($hold); $i++) {
+        usleep(100000);
+    }
+    if (!file_exists($hold)) {
+        fail('the slow worker never started');
+    }
     $r = req($http, 'GET', '/slow/y');
     expectHeaders('pool-full 503', $r, 503);
     expectBody('pool-full 503', $r, '<h1>busy</h1>', HTML);
-    if (($r['headers']['retry-after'] ?? null) === null) {
-        fail('pool-full 503: no Retry-After');
+    if (($r['headers']['retry-after'] ?? null) !== ['1']) {
+        fail('pool-full 503: Retry-After is not the gateway value, once', json_encode($r['headers']));
     }
     $r = req($http, 'HEAD', '/slow/y');
     if ($r['status'] !== 503 || $r['body'] !== '' || ($r['headers']['content-type'][0] ?? '') !== HTML) {
         fail('pool-full 503 HEAD', json_encode($r));
     }
-    echo "pool-full 503: page, headers once, Retry-After kept\n";
+    echo "pool-full 503: page, headers once, Retry-After once\n";
+    touch("$hold.release");
     stream_get_contents($slow);
     fclose($slow);
 
-    /* The access log counts the bytes of each page, and 0 for HEAD. */
-    $lines = accessLines($acc, 20);
-    $found = [];
-    foreach ($lines as $l) {
-        if (preg_match('/"(\S+) (\S+) [^"]*" (\d{3}) (\d+) /', $l, $m)) {
-            $found[] = "$m[1] $m[2] $m[3] $m[4]";
-        }
-    }
-    foreach (['GET /.env.css 404 21', 'GET /other 404 21', 'HEAD /other 404 0', 'GET /dead/x 502 23', 'GET /slow/y 503 13', 'HEAD /slow/y 503 0'] as $want) {
+    /* 504: the worker holds past http.upstream_read_timeout. 504 is not a page
+     * key, so the body is the gateway's own. */
+    $hang = "$base/hold-hang";
+    $r = req($http, 'GET', '/hang/x?m=hold&f=' . urlencode($hang));
+    expectHeaders('504', $r, 504);
+    expectBody('504', $r, "Gateway Timeout\n", 'text/plain');
+    echo "504: headers once, no page\n";
+    touch("$hang.release");
+
+    /* The access log counts the bytes of each page, and 0 for HEAD. Wait for
+     * exactly these lines; the 15 other requests are not asserted. */
+    $wants = ['GET /.env.css 404 21', 'GET /other 404 21', 'HEAD /other 404 0', 'GET /dead/x 502 23',
+        'GET /slow/y 503 13', 'HEAD /slow/y 503 0'];
+    $found = accessFound($acc, $wants);
+    foreach ($wants as $want) {
         if (!in_array($want, $found, true)) {
             fail("access log has no line '$want'", implode("\n", $found));
         }
@@ -318,7 +366,9 @@ route miss 404: page, HEAD has no body
 app 404: body untouched, headers once
 invalid Status 502: page, headers once
 dead target 502: page, headers once
-pool-full 503: page, headers once, Retry-After kept
+ping and ready: headers once
+pool-full 503: page, headers once, Retry-After once
+504: headers once, no page
 access log: page bytes, HEAD 0
 Done
 --CLEAN--

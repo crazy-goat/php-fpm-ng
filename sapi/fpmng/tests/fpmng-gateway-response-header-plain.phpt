@@ -1,5 +1,5 @@
 --TEST--
-fpm-ng: the 308 and the ACME 404 on http.plain_listen carry no http.response_header[], the TLS listener does, and libevent's 413 carries neither the headers nor the page (issue #650)
+fpm-ng: the 308 and the ACME 404 on http.plain_listen carry no http.response_header[] (the 404 has the page), the TLS listener does, and libevent's 413 carries neither the headers nor the page (issue #650)
 --SKIPIF--
 <?php
 include "fpmng-skipif.inc";
@@ -126,6 +126,14 @@ try {
     check(stripos($raw, 'Strict-Transport-Security') === false, 'plain: the 308 carries HSTS', $raw);
     echo "plain 308: no configured header\n";
 
+    /* The ACME 404 on the plain listener goes through the shared error path, so
+     * the 404 page applies by the documented rule, and the headers do not. */
+    $raw = fetch('tcp', $plain, "GET /.well-known/acme-challenge/nothing HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
+    check(str_starts_with($raw, 'HTTP/1.1 404'), 'plain: ACME fetch is not a 404', $raw);
+    check(stripos($raw, 'Strict-Transport-Security') === false, 'plain: the ACME 404 carries HSTS', $raw);
+    check(str_contains($raw, '<h1>nothing here</h1>'), 'plain: the ACME 404 has no page', $raw);
+    echo "plain ACME 404: page, no configured header\n";
+
     $raw = fetch('ssl', $https, "GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n");
     check(str_starts_with($raw, 'HTTP/1.1 200'), 'https: not a 200', $raw);
     check(substr_count(strtolower($raw), 'strict-transport-security: max-age=31536000; includesubdomains') === 1, 'https: HSTS not once', $raw);
@@ -146,6 +154,7 @@ try {
 ?>
 --EXPECT--
 plain 308: no configured header
+plain ACME 404: page, no configured header
 https 200: configured header once
 413 from libevent: no headers
 --CLEAN--

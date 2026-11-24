@@ -85,6 +85,10 @@ expectRefused('control character in the value', gateway("http.response_header[X-
 expectRefused('empty value', gateway('http.response_header[X-A] = ""'), 'empty');
 expectRefused('Content-Length', gateway('http.response_header[Content-Length] = 5'), 'sets this header itself');
 expectRefused('X-Request-Id in other case', gateway('http.response_header[x-request-id] = 5'), 'sets this header itself');
+/* The gateway sets these itself on some of its replies; a configured value would be a second one (Set-Cookie would also drop the application's). */
+foreach (['Retry-After', 'Expires', 'Cache-Control', 'ETag', 'Last-Modified', 'Accept-Ranges', 'Set-Cookie', 'Vary'] as $owned) {
+    expectRefused("$owned", gateway("http.response_header[$owned] = x"), 'sets this header itself');
+}
 expectRefused('Proxy- prefix', gateway('http.response_header[Proxy-Foo] = 5'), 'belong to the gateway');
 expectRefused('X-Fpmng- prefix', gateway('http.response_header[X-Fpmng-Foo] = 5'), 'belong to the gateway');
 expectRefused('the same name in two cases',
@@ -134,6 +138,14 @@ control character in the value: refused
 empty value: refused
 Content-Length: refused
 X-Request-Id in other case: refused
+Retry-After: refused
+Expires: refused
+Cache-Control: refused
+ETag: refused
+Last-Modified: refused
+Accept-Ranges: refused
+Set-Cookie: refused
+Vary: refused
 Proxy- prefix: refused
 X-Fpmng- prefix: refused
 the same name in two cases: refused

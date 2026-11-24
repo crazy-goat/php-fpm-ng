@@ -466,6 +466,12 @@ struct fpm_http_client_s {
 	 * plain wrapper's timing, so the second call must not observe again.
 	 * Reset by fpm_http_client_request_begin(). */
 	unsigned duration_observed;
+	/* Issue #650: 1 when the request in flight came in on the main listener,
+	 * so its replies carry the configured response headers. fpm_http_request()
+	 * sets it, fpm_http_client_request_begin() clears it, and the plain-HTTP
+	 * companion never sets it (RFC 6797 7.2). Read by
+	 * fpm_http_reply_headers_wanted(). */
+	unsigned reply_headers;
 	/* Issue #642: the id of the request in flight, "" when http.request_id is
 	 * off or no id could be made. Sent to the target and logged. */
 	char request_id[FPM_HTTP_REQUEST_ID_SIZE];

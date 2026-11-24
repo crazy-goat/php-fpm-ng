@@ -1513,6 +1513,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);

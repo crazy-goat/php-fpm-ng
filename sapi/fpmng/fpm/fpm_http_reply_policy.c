@@ -38,7 +38,17 @@ static const int fpm_http_error_page_codes[FPM_HTTP_ERROR_PAGE_COUNT] = { 404, 5
 static const char *const fpm_http_response_header_owned[] = {
 	"Content-Length", "Transfer-Encoding", "Connection", "Keep-Alive", "Upgrade", "TE", "Trailer",
 	"Content-Type", "Content-Encoding", "Content-Range", "Date", "Location", "Status",
-	"X-Request-Id", "X-Accel-Redirect", "X-Sendfile", NULL
+	"X-Request-Id", "X-Accel-Redirect", "X-Sendfile",
+	/* The gateway adds these itself on replies it writes, after the configured
+	 * set: Retry-After on every 503 (fpm_http_reply_headers()), Expires and
+	 * Cache-Control on ping and ready, ETag and Last-Modified on a static file.
+	 * Accept-Ranges is stripped from an X-Accel reply (fpm_http_sendfile_strip()),
+	 * and Set-Cookie would drop every cookie of the application, as the
+	 * configured header replaces the application's of the same name. Refusing
+	 * them is simpler than a win-or-lose rule per site, and keeps "the
+	 * configured value is on the reply exactly once" true. Vary goes with
+	 * them: the gateway sets it on a negotiated static file. */
+	"Retry-After", "Expires", "Cache-Control", "ETag", "Last-Modified", "Accept-Ranges", "Set-Cookie", "Vary", NULL
 };
 
 static const struct fpm_http_reply_policy_s *fpm_http_reply_policy_current;

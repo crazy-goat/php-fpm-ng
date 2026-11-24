@@ -49,12 +49,11 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	const char *kept = evhttp_find_header(out, "X-Request-Id");
 	const struct fpm_http_reply_policy_s *policy = fpm_http_reply_policy_installed();
 	const struct fpm_http_error_page_s *page = fpm_http_reply_policy_page(policy, code);
-	/* Issue #650: the configured headers are on the reply only when the
-	 * request came in on the main listener (fpm_http_gencb adds them). The plain
-	 * HTTP companion never has them, and its replies, which come through here
-	 * too, must not get them. The first header stands for all: they are added
-	 * together. */
-	int keep_headers = policy && policy->nheaders && evhttp_find_header(out, policy->headers[0].name);
+	/* Issue #650: the configured headers go back on the reply only when the
+	 * request came in on the main listener, a flag that fpm_http_request() sets
+	 * on the connection's client node. The plain-HTTP companion's replies come
+	 * through here too and must not get them (RFC 6797 7.2). */
+	int keep_headers = policy && policy->nheaders && fpm_http_reply_headers_wanted(req);
 
 	/* The id is copied first: evhttp_clear_headers() frees the value it points
 	 * into. An empty id means the request has none (http.request_id = off, or

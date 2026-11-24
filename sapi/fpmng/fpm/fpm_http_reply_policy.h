@@ -69,6 +69,11 @@ const struct fpm_http_reply_policy_s *fpm_http_reply_policy_installed(void);
 /* The page for `code`, or NULL when there is none (also for p == NULL). */
 const struct fpm_http_error_page_s *fpm_http_reply_policy_page(const struct fpm_http_reply_policy_s *p, int code);
 
+/* 1 when the request in flight on req's connection came in on the main listener
+ * (defined in fpm_http.c). 0 on the plain-HTTP companion and when the
+ * connection is gone. */
+int fpm_http_reply_headers_wanted(struct evhttp_request *req);
+
 /* Adds every configured header to `out`. */
 void fpm_http_reply_headers_add(const struct fpm_http_reply_policy_s *p, struct evkeyvalq *out);
 

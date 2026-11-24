@@ -675,7 +675,7 @@ http.error_page[503] = /srv/app/errors/503.json
 The gateway adds this header to every reply that it sends on the main listener. That covers
 the replies of a FastCGI or an HTTP target, the static files (`200` and `304`), the files
 named by `X-Accel-Redirect` and `X-Sendfile`, and the errors that the gateway writes
-itself (`404` for no route, `502`, `503`, `504`). The header is on the reply once.
+itself (`404` for no route, `502`, `503`, `504`), also the ping and ready answers. The header is on the reply once.
 
 - The configured header replaces the header of the same name that the application sends.
   The gateway drops every copy of the application's header. The name is compared without
@@ -687,7 +687,12 @@ itself (`404` for no route, `502`, `503`, `504`). The header is on the reply onc
 - `-t` refuses a name that the gateway sets itself: `Content-Length`,
   `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`,
   `Content-Type`, `Content-Encoding`, `Content-Range`, `Date`, `Location`, `Status`,
-  `X-Request-Id`, `X-Accel-Redirect` and `X-Sendfile`. It also refuses the prefixes
+  `X-Request-Id`, `X-Accel-Redirect` and `X-Sendfile`. It also refuses the names that
+  the gateway sets on some replies: `Retry-After` (every `503`), `Expires` and
+  `Cache-Control` (ping and ready), `ETag`, `Last-Modified` and `Accept-Ranges` (static
+  files), `Set-Cookie` (it would drop every cookie of the application) and `Vary`. A
+  configured value for one of them would make a second header on the reply, so the
+  header is on every reply once. The directive also refuses the prefixes
   `Proxy-` and `X-Fpmng-`. It refuses the same name twice.
 - The `101` reply of a WebSocket upgrade does not get the headers.
 - The replies on `http.plain_listen` (the `308` redirect and the ACME answers) do not get
@@ -713,8 +718,16 @@ through unchanged, also a `404` or a `503`.
 - The access log counts the bytes of the page. A HEAD reply has the `Content-Type` and no
   body, and counts 0.
 - There is no key `504`: `-t` refuses it like any other key.
-- The ACME `404` and the `503` for a missing certificate on `http.plain_listen` also use the
-  page, because they use the same error path. They do not get the configured headers.
+- The page replaces the body of these replies, because they use the same error path:
+  - the operator `404` and `503` (`fpm_http_operator_fwd.c`);
+  - the `503` for a pool over its cap (`fpm_http.c`, the over-cap refusal);
+  - the `503` of a failed request write to the target;
+  - the ACME `404` on the main listener.
+- On `http.plain_listen` the page replaces the body of the over-cap `503`, the
+  out-of-memory `503` replies, the ACME `404` and the `503` for a missing certificate.
+  These replies do not get the configured headers.
+- The body of the ready-probe `503` does not change. The replies that libevent writes
+  carry neither the page nor the headers.
 
 #### Why `413` is not a key
 

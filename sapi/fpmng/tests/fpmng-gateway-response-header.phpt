@@ -349,6 +349,7 @@ try {
     $tester->close();
     foreach (glob("$base/pages/*") as $f) @unlink($f);
     foreach (glob("$base/prot/*") as $f) @unlink($f);
+    foreach (glob("$base/hold-*") as $f) @unlink($f);
     foreach (glob("$base/{,.}*.{css,php}", GLOB_BRACE) as $f) @unlink($f);
     @rmdir("$base/pages");
     @rmdir("$base/prot");

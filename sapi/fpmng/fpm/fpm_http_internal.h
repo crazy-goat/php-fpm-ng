@@ -125,9 +125,11 @@ struct {								\
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
 #define FPM_HTTP_GATEWAY_TIMEOUT 504 /* libevent has no constant for it; http.upstream_* timeout, issue #716 */
 #define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds on every 503 the gateway writes (fpm_http_error.c); NO_CERT sends 60 instead (docs/tls.md) */
-/* The body of every 502 the gateway writes itself. The access log counts its
- * length (issue #858), so the bytes field and the body on the wire cannot
- * drift apart. A HEAD reply sends no body and counts 0. */
+/* The body of the invalid-Status 502 (fpm_http_fcgi.c). The other 502s the
+ * gateway writes get the same 12 bytes from fpm_http_error_prepare(), and the
+ * tests pin both at 12. The access log counts the length (issue #858), so the
+ * bytes field and the body on the wire cannot drift apart. A HEAD reply sends no
+ * body and counts 0. */
 #define FPM_HTTP_BAD_GATEWAY_BODY     "Bad Gateway\n"
 #define FPM_HTTP_BAD_GATEWAY_BODY_LEN (sizeof(FPM_HTTP_BAD_GATEWAY_BODY) - 1)
 

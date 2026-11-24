@@ -71,11 +71,11 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 		return 0;
 	}
 	/* The body goes into the request's own output buffer, which libevent
-	 * allocated with the request, so this cannot fail for lack of memory the
-	 * way an evbuffer_new() here could, and several callers are out-of-memory
-	 * paths themselves. The count is the length of what the buffer holds, so it
-	 * is what is sent: 0 if evbuffer_add_printf() fails (the rule of issue #967
-	 * for the 502 body, and of fpm_http_finish()). */
+	 * allocated with the request, so no separate buffer is allocated here (several
+	 * callers are out-of-memory paths themselves). evbuffer_add_printf() can still
+	 * fail under out-of-memory. The count is the length of what the buffer holds,
+	 * so it is what is sent: 0 when the body could not be added (the rule of
+	 * issue #967). */
 	evbuffer_add_printf(evhttp_request_get_output_buffer(req), "%s\n", reason);
 	return evbuffer_get_length(evhttp_request_get_output_buffer(req));
 }

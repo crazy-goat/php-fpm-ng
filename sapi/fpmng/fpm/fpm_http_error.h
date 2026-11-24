@@ -17,15 +17,17 @@ void fpm_http_reply_headers(struct evhttp_request *req, int code);
  * the X-Request-Id the request already has, then adds Content-Type,
  * Connection: close and fpm_http_reply_headers(). Returns the body bytes the
  * reply counts for the access log: the length of the body that it puts in the
- * output buffer of req, "<reason>\n", and 0 for HEAD. It allocates nothing, so
- * the count is what is sent. Call it before the access log line, and call
- * fpm_http_error_send() last. */
+ * output buffer of req, "<reason>\n", and 0 for HEAD. It allocates no buffer
+ * of its own and the count is the length of the output buffer, so the count is
+ * what is sent: 0 if the body could not be added. Call it before the access
+ * log line, and call fpm_http_error_send() last. */
 size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *reason);
 
 /* Sends the error reply prepared by fpm_http_error_prepare(), with the body
- * that call left in the output buffer (none for HEAD). Never call evhttp_send_error() on a gateway
- * reply: it clears the output headers, and with them X-Request-Id. The send
- * may end the request, so nothing may read req after this call. */
+ * that call left in the output buffer (none for HEAD). Never call
+ * evhttp_send_error() on a gateway reply: it clears the output headers, and
+ * with them X-Request-Id. The send may end the request, so nothing may read
+ * req after this call. */
 void fpm_http_error_send(struct evhttp_request *req, int code, const char *reason);
 
 /* Prepare and send in one call, for a reply that has no access log line of its

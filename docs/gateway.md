@@ -297,6 +297,13 @@ workers, see the "Several gateway processes" section of
 [`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
 `wait` alternative.
 
+Every `503` that the gateway writes carries `Retry-After`. The value is `1` second,
+except the NO_CERT answer of [TLS](tls.md), which sends `60`. RFC 9110 (section 15.6.4)
+allows the header on a `503` and does not require it. The gateway sends it on every
+`503` so that a client has one rule for all of them. This covers the over-cap refusal,
+the operator refusals, the readiness answer and the failure to copy the Host header.
+The pool-full answer sets the same header.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
@@ -384,12 +391,29 @@ An `http-direct` pool does not make an id. Its `access.format` can print the
 does not check that header. Put the pool behind a gateway with `http.request_id` set,
 or accept the value that the client sends.
 
-Limit: the gateway sends the `X-Request-Id` response header only with the replies that
-it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
-it, because that call clears the response headers first. Examples are `403` and `404`,
-and some `502`, `503` and `504` replies. The pool-full `503` does carry the header,
-because the gateway writes it with `evhttp_send_reply()`. The access log line of such a
-request still has the `request_id=` field.
+Every reply that the gateway writes after it has read the request carries the
+`X-Request-Id` response header when the request has an id. That covers the errors the
+gateway writes itself (`400`, `403`, `404`, `405`, `501`, `502`, `503`, `504`), the
+pool-full `503`, and the ping and ACME error answers. These replies, except the pool-full
+`503`, are `text/plain` with the body `<reason>\n` (for example `Not Found`), not
+libevent's HTML page. A reply to a HEAD request has no body. The pool-full `503` keeps
+an HTML body with no `Content-Type`, also for HEAD (`fpm_http_reject_queued()`,
+`fpm_http.c:1170-1185`; code reading, not measured). It is a known gap: see the `bytes`
+row of the access log table. The access log line of the same request has the same
+`request_id=` value.
+
+One kind of reply has no id, because the id does not exist yet when libevent writes it:
+a reply that libevent writes before the gateway's request callback runs. It uses
+libevent's own HTML page, and it has no access log line. In libevent 2.1.12
+(`http.c:661-665`, `:3476-3478`) a request that fails while libevent reads it gets
+`413` for a body over `http.max_body`, and `400` for every other failure: headers
+over the limit, an invalid header line, or a request line that libevent cannot parse.
+Measured on the box: the `413` (a `Content-Length` of 999999999999, a 120-byte page)
+and the `400` for one 70000-byte header (a 94-byte page). Two more replies are not
+measured: a method that the listener does not allow (`http.c:3484`, `501`), and an
+`Expect` value that libevent does not know (`http.c:2264`, `417`).
+
+No other reply is known to lack the id. With `http.request_id = off`, no reply has the header.
 
 ### Access log format
 
@@ -420,7 +444,7 @@ This is one line for a request that went to the `api` target:
 | `uri` | string or `null` | The request target. |
 | `protocol` | string | The protocol, for example `HTTP/1.1`. |
 | `status` | number or `null` | The status code. `null` when the connection failed before a response. |
-| `bytes` | number | The body bytes counted for the access log. For the three 502s that the gateway writes itself (no answer, unfinished CGI header block, invalid `Status`), it is the 12 bytes of the `Bad Gateway` body, or 0 for a HEAD request, which gets no body. For a proxied reply it is the body length that the upstream sent, and a HEAD reply sends no body. Other replies that the gateway writes with `evhttp_send_error()`, such as the 504 of an upstream timeout, count 0. |
+| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`400`, `403`, `404`, `405`, `501`, `503`, `504`, and the ping and ACME error answers), and the `404` that `http.static` sends for a refused path (10 bytes, and 0 for HEAD, which gets no body). A HEAD reply counts 0, because it sends no body. If a body cannot be allocated, the count is what was sent. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap. |
 | `referer` | string or `null` | The `Referer` header. |
 | `user_agent` | string or `null` | The `User-Agent` header. |
 | `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |

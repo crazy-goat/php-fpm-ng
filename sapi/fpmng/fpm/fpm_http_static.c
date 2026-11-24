@@ -24,6 +24,7 @@
 #include <event2/http.h>
 #include <event2/keyvalq_struct.h>
 
+#include "fpm_http_error.h"
 #include "fpm_http_static_negotiate.h"
 #include "fpm_http_static_range.h"
 #include "zlog.h"
@@ -193,17 +194,31 @@ static int fpm_http_static_not_modified(struct evhttp_request *req, const char *
  * connection is as valid as this one was. */
 static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evhttp_request *req)
 {
-	struct evbuffer *body = evbuffer_new();
+	struct evbuffer *body = evhttp_request_get_output_buffer(req);
 
-	fpm_http_static_log(st, HTTP_NOTFOUND, 0);
-	if (!body) {
-		evhttp_send_error(req, HTTP_NOTFOUND, NULL);	/* out of memory: the connection is the least of it */
+	evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "text/plain");
+	/* A HEAD reply gets no body: libevent writes whatever body a HEAD reply has
+	 * (2.1.12, http.c:628-633), and with no Content-Length the client reads it
+	 * as the start of the next response on a keep-alive connection (issue #882).
+	 * The log counts what goes on the wire, so it counts 0. */
+	if (evhttp_request_get_command(req) == EVHTTP_REQ_HEAD) {
+		fpm_http_static_log(st, HTTP_NOTFOUND, 0);
+		evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
 		return;
 	}
-	evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "text/plain");
+	/* The body goes into the request's own output buffer, and the count is the
+	 * length of what the buffer holds: 10 for "Not Found\n", 0 if it could not
+	 * be added (issue #967). */
 	evbuffer_add(body, "Not Found\n", 10);
-	evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", body);
-	evbuffer_free(body);
+	if (evbuffer_get_length(body) == 0) {
+		/* Out of memory: the connection is the least of it, so this path closes it. */
+		fpm_http_static_log(st, HTTP_NOTFOUND,
+			fpm_http_error_prepare(req, HTTP_NOTFOUND, "Not Found"));
+		fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
+		return;
+	}
+	fpm_http_static_log(st, HTTP_NOTFOUND, evbuffer_get_length(body));
+	evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
 }
 
 /* The check every served path passes, the original and a sidecar alike: the
@@ -563,8 +578,9 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
 			if (body) {
 				evbuffer_free(body);
 			}
-			fpm_http_static_log(st, FPM_HTTP_STATIC_BAD_GATEWAY, 0);
-			evhttp_send_error(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway");
+			fpm_http_static_log(st, FPM_HTTP_STATIC_BAD_GATEWAY,
+				fpm_http_error_prepare(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway"));
+			fpm_http_error_send(req, FPM_HTTP_STATIC_BAD_GATEWAY, "Bad Gateway");
 			return 1;
 		}
 		fpm_http_static_log(st, status, (size_t) length);

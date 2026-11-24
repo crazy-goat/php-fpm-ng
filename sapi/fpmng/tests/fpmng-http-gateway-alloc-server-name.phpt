@@ -15,7 +15,11 @@ require_once "tester.inc";
  * that copy fail, as an out-of-memory would. Before the fix strrchr(NULL, ':')
  * killed the gateway on SIGSEGV. Now the request is not forwarded to the
  * worker: the client gets a 503, and one WARNING names the pool. A missing
- * SERVER_NAME is not an option: frameworks build absolute URLs from it. */
+ * SERVER_NAME is not an option: frameworks build absolute URLs from it.
+ *
+ * Issue #882: this 503 is written by fpm_http_dispatch(), the write_request
+ * error path. It must carry the request's X-Request-Id and Retry-After: 1,
+ * like every other 503 the gateway writes, and the access log names the id. */
 
 function check(bool $condition, string $message): void
 {
@@ -61,6 +65,7 @@ listen = {{ADDR[http]}}
 chdir = $root
 http.gateways = 1
 http.access_log = {{FILE:LOG:ACC}}
+http.request_id = generate
 http.route[web] = /
 [web]
 pool.type = fastcgi
@@ -83,6 +88,10 @@ $reply = fetch($http, '/s.php');
 check(str_starts_with($reply, 'HTTP/1.1 503 Service Unavailable'),
     'no 503 for a Host that could not be copied: ' . var_export(strtok($reply, "\r\n"), true));
 check(!str_contains($reply, 'body'), 'the worker answered a request with no SERVER_NAME');
+check(preg_match('/^Retry-After: 1\r$/mi', $reply) === 1, "503 has no Retry-After: 1:\n$reply");
+check(preg_match('/^X-Request-Id: ([0-9a-f]{32})\r$/mi', $reply, $m) === 1, "503 has no generated X-Request-Id:\n$reply");
+$access = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC), '/request_id=' . $m[1] . '/');
+check(str_contains($access, 'request_id=' . $m[1]), "access log does not name the id {$m[1]}:\n$access");
 echo "503: ok\n";
 
 $errors = file_wait($tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ERR), '/cannot copy the Host header/');

@@ -29,6 +29,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_reply_policy.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
@@ -1258,6 +1259,18 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 		free(kv);
 	}
 	for (kv = wpc->http_route_upgrade; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_response_headers; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_error_pages; kv; kv = kv_next) {
 		kv_next = kv->next;
 		free(kv->key);
 		free(kv->value);
@@ -2511,6 +2524,65 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 		err = fpm_conf_set_array(key, value, &config, 0);
 		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.static.cache_control")) {
 			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.static.cache_control'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.response_header")) {
+		/* http.response_header[<Name>] = "<value>" -- issue #650. The name and
+		 * the value are checked here, where the line is known: a CR or LF in a
+		 * value would split the reply (response splitting). A name given twice,
+		 * in any case, is refused rather than resolved by order. Noted, as
+		 * http.route is, so the reject lists see the directive by its name. */
+		const char *why = "";
+
+		if (fpm_http_reply_policy_check_header(Z_STRVAL_P(key), Z_STRVAL_P(value), Z_STRLEN_P(value), &why) < 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.response_header[%s]: %s", ini_filename, ini_lineno, Z_STRVAL_P(key), why);
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_response_headers; dup; dup = dup->next) {
+			if (!strcasecmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.response_header[%s]: this header is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_response_headers);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.response_header")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.response_header'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.error_page")) {
+		/* http.error_page[<404|502|503>] = <absolute path> -- issue #650. The
+		 * shape of the key and the path is checked here. That the file exists,
+		 * is small enough and has a known extension is checked where the file
+		 * is read: fpm_http_reply_policy_build(), which -t also runs. */
+		const char *why = "";
+		int code = 0;
+
+		if (fpm_http_reply_policy_check_page_key(Z_STRVAL_P(key), &code, &why) < 0 ||
+			fpm_http_reply_policy_check_page_path(Z_STRVAL_P(value), &why) < 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.error_page[%s]: %s", ini_filename, ini_lineno, Z_STRVAL_P(key), why);
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_error_pages; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.error_page[%s]: this key is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_error_pages);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.error_page")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.error_page'", ini_filename, ini_lineno);
 			*error = 1;
 			return;
 		}

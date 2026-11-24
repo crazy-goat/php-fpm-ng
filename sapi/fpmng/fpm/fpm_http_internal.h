@@ -107,6 +107,7 @@ struct {								\
 #include "fpm_tls_reload.h"
 /* The request-target contract both ingresses read, since #681 (fpm_http_target.h). */
 #include "fpm_http_target.h"
+#include "fpm_http_reply_policy.h"
 
 #define FPM_HTTP_MAX_CGI_HEADERS (64 * 1024)
 /* Largest content length we put in a FastCGI record. The protocol allows
@@ -514,6 +515,7 @@ struct fpm_http_gateway_s {
 	int proxy_only;
 	char *docroot;
 	char *sendfile_root;			/* http.sendfile_root, NULL when unset (issue #649) */
+	struct fpm_http_reply_policy_s reply;	/* http.response_header[] and http.error_page[], built in the master (issue #650) */
 	int listen_fd;
 	int plain_listen_fd;
 	int backlog;

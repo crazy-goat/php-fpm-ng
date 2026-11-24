@@ -699,6 +699,11 @@ static void fpm_http_gateway_run(struct fpm_http_gateway_s *gw, unsigned index) 
 
 	fpm_globals.is_child = 1;
 
+	/* Issue #650: fpm_http_error_prepare() and the static refusal read the error
+	 * pages through this pointer, so they need no gateway parameter. The policy
+	 * is the master's copy, inherited by fork(). */
+	fpm_http_reply_policy_install(&gw->reply);
+
 	/* ... which is what stops zlog() from timestamping this process's lines,
 	 * and this process — unlike an upstream FPM child — writes them into the
 	 * master's error_log itself (issue #130, fpm_child_error_log.h). */
@@ -1482,6 +1487,7 @@ void fpm_http_cleanup(int which, void *arg) /* {{{ */
 		free(gw->listen_address);
 		free(gw->docroot);
 		free(gw->sendfile_root);
+		fpm_http_reply_policy_free(&gw->reply);
 		free(gw);
 	}
 	gateways = NULL;

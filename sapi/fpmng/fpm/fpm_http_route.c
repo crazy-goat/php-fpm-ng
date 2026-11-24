@@ -1501,11 +1501,35 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				return -1;
 			}
 		}
+		/* Issue #650: the response headers and the error pages. The page files
+		 * are read here, in the master, so a gateway process never opens one.
+		 * -t read them already (fpm_http_validate_pool()); a file that changed
+		 * since fails this start, and a reload with it is refused. */
+		if (fpm_http_reply_policy_build(wp, &gw->reply) != 0) {
+			fpm_http_routes_free(gw);
+			fpm_http_operator_free(gw);
+			close(gw->listen_fd);
+			fpm_http_acl_free(gw->acl);
+			free(gw->allowed_clients);
+			fpm_http_acl_free(gw->trusted_proxies_acl);
+			free(gw->trusted_proxies);
+			free(gw->front_controller);
+			free(gw->access_log_path);
+			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw->sendfile_root);
+			free(gw);
+			return -1;
+		}
 		/* Issue #389: the http.operator forwarding map, built once here in the
 		 * master from every pool's operator routes and inherited by every
 		 * gateway process through fork(). A reload rebuilds it like every
 		 * other http.* setting. */
 		if (fpm_http_operator_build(wp, gw) != 0) {
+			fpm_http_reply_policy_free(&gw->reply);
 			fpm_http_operator_free(gw);
 			fpm_http_routes_free(gw);
 			close(gw->listen_fd);
@@ -1691,6 +1715,16 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 
 	if (fpm_http_sendfile_validate(wp->config->name, wp->config->http_sendfile_root) < 0) {
 		return -1;
+	}
+	/* Issue #650: -t reads the error page files, so a missing, oversize or
+	 * unknown-type page is a refusal here and not a start that fails later. */
+	{
+		struct fpm_http_reply_policy_s reply;
+
+		if (fpm_http_reply_policy_build(wp, &reply) < 0) {
+			return -1;
+		}
+		fpm_http_reply_policy_free(&reply);
 	}
 	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways < 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http.gateways must be at least 1", wp->config->name);

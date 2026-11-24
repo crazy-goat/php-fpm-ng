@@ -20,6 +20,7 @@
 #include <event2/http.h>
 
 struct key_value_s;
+struct fpm_http_error_page_s;
 
 struct fpm_http_static {
 	const char *pool; /* for zlog() only */
@@ -45,6 +46,10 @@ struct fpm_http_static {
 	int ranges; /* single byte range, 206 and 416, Accept-Ranges */
 	int precompressed; /* serve a .br or .gz sidecar the client accepts */
 	const struct key_value_s *cache_control; /* Cache-Control by path prefix */
+	/* The body of the 404 for a refused path (issue #650). Only the gateway sets
+	 * it, from http.error_page[404]; http-direct leaves it NULL and keeps the
+	 * plain "Not Found" body. */
+	const struct fpm_http_error_page_s *not_found_page;
 	/* Called just before each reply this module sends, or not at all. */
 	void (*log)(void *ctx, int status, size_t bytes);
 	void *log_ctx;

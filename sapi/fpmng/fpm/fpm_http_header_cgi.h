@@ -32,16 +32,21 @@
  * sites. */
 #define FPM_HTTP_HEADER_CGI_KEY_LEN (FPM_HTTP_HEADER_NAME_MAX + sizeof("HTTP_"))
 
+/* True when every byte of the NUL-terminated name is a letter, a digit or
+ * '-'. The classic getallheaders() loop uses it too, so both transports drop
+ * the same names (issue #1002). */
+bool fpm_http_header_name_plain(const char *name);
+
 /* Maps one request header name to the CGI key it is exported under. Returns 0
  * with `out` holding the NUL-terminated key, 1 when the header gets no key
- * (Content-Length, Proxy, a name containing '_', or Content-Type with
- * content_type_skip), and -1 when the name is above FPM_HTTP_HEADER_NAME_MAX
- * or `out` cannot hold the key -- both mean refuse, never truncate: a
- * truncated key could collide two headers into one. `out` must therefore hold
- * FPM_HTTP_HEADER_CGI_KEY_LEN bytes; both callers declare exactly that, so -1
- * for size is unreachable-but-safe. The length check runs first, so an
- * over-long name is refused even when it would otherwise be skipped, matching
- * both callers' up-front scans. */
+ * (Content-Length, Proxy, an empty name, a name with a character outside
+ * [A-Za-z0-9-], or Content-Type with content_type_skip), and -1 when the name
+ * is above FPM_HTTP_HEADER_NAME_MAX or `out` cannot hold the key -- both mean
+ * refuse, never truncate: a truncated key could collide two headers into one.
+ * `out` must therefore hold FPM_HTTP_HEADER_CGI_KEY_LEN bytes; both callers
+ * declare exactly that, so -1 for size is unreachable-but-safe. The length
+ * check runs first, so an over-long name is refused even when it would
+ * otherwise be skipped, matching both callers' up-front scans. */
 int fpm_http_header_cgi_key(const char *name, bool content_type_skip, char *out, size_t out_size);
 
 #endif

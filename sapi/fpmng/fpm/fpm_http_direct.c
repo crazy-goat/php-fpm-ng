@@ -43,6 +43,7 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_http_target.h"
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_php.h"
@@ -770,10 +771,11 @@ static ZEND_FUNCTION(fpm_direct_request_headers)
 	array_init(return_value);
 	if (fpm_direct_current && fpm_direct_current->http) {
 		for (kv = evhttp_request_get_input_headers(fpm_direct_current->http)->tqh_first; kv; kv = kv->next.tqe_next) {
-			/* Same underscore rule as the $_SERVER keys and the gateway (issue
-			 * #595). These functions read the raw headers, not the CGI keys, so
-			 * the rule must be applied here too. Issue #628. */
-			if (strchr(kv->key, '_') != NULL) {
+			/* Same name rule as the $_SERVER keys and the gateway (issues #595
+			 * and #1002): the gateway's getallheaders() shows only names that
+			 * have a CGI key. These functions read the raw headers, not the CGI
+			 * keys, so the rule must be applied here too. Issue #628. */
+			if (!fpm_http_header_name_plain(kv->key)) {
 				continue;
 			}
 			add_assoc_string(return_value, kv->key, kv->value);

@@ -55,9 +55,9 @@ The script is resolved inside `chdir`; client paths never select a script.
 `SCRIPT_NAME` and `PHP_SELF` identify the configured front controller;
 `REQUEST_URI` retains the raw URI, `QUERY_STRING` carries the query, and
 `PATH_INFO` carries the parsed URL path. Headers map to `HTTP_*` (except Proxy,
-which is not imported as `HTTP_PROXY`, and any header whose name contains `_`, which would collide with its `-` spelling: `X_Real_IP` must not override `X-Real-IP`); content type/length have CGI-compatible
+which is not imported as `HTTP_PROXY`, and any header whose name contains a character other than a letter, a digit or `-`: `_` would collide with its `-` spelling (`X_Real_IP` must not override `X-Real-IP`), and `.`, a space or `[` would be rewritten by PHP into a key of another header (`X.Real.IP` overwrote `HTTP_X_REAL_IP`, `X-Forwarded-For[]` made it an array; issue #1002)); content type/length have CGI-compatible
 names. `getallheaders()` and `apache_request_headers()` read HTTP headers directly.
-They omit every header whose name contains `_`, the same as `$_SERVER` (issue #628).
+They omit every header whose name has a character outside letters, digits and `-`, the same names `$_SERVER` drops (issue #628, extended to `.`, space and `[` in issue #1002).
 A header name longer than 1024 bytes cannot become an `HTTP_*` key and the
 request is refused with 400 rather than served with the header missing.
 

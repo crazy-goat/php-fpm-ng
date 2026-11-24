@@ -7,6 +7,25 @@
 
 #include "fpm_http_header_cgi.h"
 
+bool fpm_http_header_name_plain(const char *name) /* {{{ */
+{
+	const char *p;
+
+	/* An empty name would map to the bare key "HTTP_". */
+	if (*name == '\0') {
+		return false;
+	}
+	for (p = name; *p; p++) {
+		unsigned char ch = (unsigned char) *p;
+
+		if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-')) {
+			return false;
+		}
+	}
+	return true;
+}
+/* }}} */
+
 int fpm_http_header_cgi_key(const char *name, bool content_type_skip, char *out, size_t out_size) /* {{{ */
 {
 	size_t len = strlen(name);
@@ -37,15 +56,21 @@ int fpm_http_header_cgi_key(const char *name, bool content_type_skip, char *out,
 	if (strcasecmp(name, "Content-Length") == 0 || strcasecmp(name, "Proxy") == 0) {
 		return 1;
 	}
-	/* A name with "_" would collide with its "-" spelling: the mapping below
-	 * turns "-" into "_", so "X_Real_IP" and "X-Real-IP" both become
-	 * HTTP_X_REAL_IP, and the last pair on the wire wins in $_SERVER
-	 * (fcgi_hash_set replaces an existing key). A client could then override
-	 * a header the reverse proxy in front set. nginx (default
-	 * underscores_in_headers off) and Apache 2.4 drop such headers when they
-	 * build the CGI environment; the gateway is the front server for this hop,
-	 * so it does the same, and so does HTTP-direct. Issue #595. */
-	if (memchr(name, '_', len) != NULL) {
+	/* Only letters, digits and "-" get a key. A "_" would collide with its
+	 * "-" spelling: the mapping below turns "-" into "_", so "X_Real_IP" and
+	 * "X-Real-IP" both become HTTP_X_REAL_IP, and the last pair on the wire
+	 * wins in $_SERVER (fcgi_hash_set replaces an existing key). A client
+	 * could then override a header the reverse proxy in front set. nginx
+	 * (default underscores_in_headers off) and Apache 2.4 drop such headers
+	 * when they build the CGI environment; the gateway is the front server
+	 * for this hop, so it does the same, and so does HTTP-direct. Issue #595.
+	 * ".", " " and "[" are refused for the same reason in another form: PHP
+	 * rewrites "." and " " to "_" and reads "[" as an array index, so
+	 * "X.Real.IP" overwrote HTTP_X_REAL_IP and "X-Forwarded-For[]" turned
+	 * HTTP_X_FORWARDED_FOR into an array (php_register_variable_ex() in
+	 * main/php_variables.c; the line numbers were not re-measured). Issue
+	 * #1002. */
+	if (!fpm_http_header_name_plain(name)) {
 		return 1;
 	}
 	if (strcasecmp(name, "Content-Type") == 0) {

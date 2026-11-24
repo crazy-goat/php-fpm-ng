@@ -85,6 +85,10 @@ try {
     $tester->expectLogStartNotices();
     $http = $tester->getAddr('ipv4', '[http]');
     $log = $tester->getPrefixedFile(FPM\Tester::FILE_EXT_LOG_ACC);
+    /* run-tests.php retries a failed test that uses usleep() in the same
+     * tree, and the retry appends to the same access log. Read only the lines
+     * of this attempt, so a retry reports its own result (#882 review R3-1). */
+    $base = count(accessLines($log, 0));
 
     $fp = stream_socket_client("tcp://$http", $errno, $error, 5);
     stream_set_timeout($fp, 5);
@@ -111,7 +115,7 @@ try {
     expect('GET after HEAD body', fread($fp, 15), 'body{color:red}');
     echo "HEAD refusal: no body, next response parsed\n";
 
-    $lines = accessLines($log, 3);
+    $lines = array_slice(accessLines($log, $base + 3), $base);
     expect('access log lines', count($lines), 3);
     $got = array_map(static fn ($l) => preg_match('/"(\\S+) \\S+ [^"]*" (\\d{3}) (\\d+) /', $l, $m) ? $m[1] . ' ' . $m[2] . ' ' . $m[3] : $l, $lines);
     expect('access log', $got, ['GET 404 10', 'HEAD 404 0', 'GET 200 15']);

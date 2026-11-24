@@ -25,6 +25,7 @@
 #include <event2/keyvalq_struct.h>
 
 #include "fpm_http_error.h"
+#include "fpm_http_reply_policy.h"
 #include "fpm_http_static_negotiate.h"
 #include "fpm_http_static_range.h"
 #include "zlog.h"
@@ -196,6 +197,23 @@ static void fpm_http_static_refuse(const struct fpm_http_static *st, struct evht
 {
 	struct evbuffer *body = evhttp_request_get_output_buffer(req);
 
+	if (st->not_found_page) {
+		/* Issue #650: the page replaces the body. It stays a keep-alive reply, as
+		 * the plain refusal is. The count is the output buffer after the add, 0
+		 * for HEAD (see fpm_http_error_page_put()). */
+		size_t sent = fpm_http_error_page_put(st->not_found_page, req);
+
+		if (sent > 0 || evhttp_request_get_command(req) == EVHTTP_REQ_HEAD) {
+			fpm_http_static_log(st, HTTP_NOTFOUND, sent);
+			evhttp_send_reply(req, HTTP_NOTFOUND, "Not Found", NULL);
+			return;
+		}
+		/* The page could not be added (out of memory): the same close path as
+		 * below, with the plain body. */
+		fpm_http_static_log(st, HTTP_NOTFOUND, fpm_http_error_prepare(req, HTTP_NOTFOUND, "Not Found"));
+		fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
+		return;
+	}
 	evhttp_add_header(evhttp_request_get_output_headers(req), "Content-Type", "text/plain");
 	/* A HEAD reply gets no body: libevent writes whatever body a HEAD reply has
 	 * (2.1.12, http.c:628-633), and with no Content-Length the client reads it

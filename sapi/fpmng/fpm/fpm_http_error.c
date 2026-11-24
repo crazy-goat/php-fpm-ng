@@ -24,6 +24,7 @@
 #include <event2/keyvalq_struct.h>
 
 #include "fpm_http_internal.h"
+#include "fpm_http_reply_policy.h"
 #include "fpm_http_request_id.h"
 
 /* Retry-After on every 503 the gateway writes, not only on the pool-full one.
@@ -46,6 +47,13 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	struct evkeyvalq *out = evhttp_request_get_output_headers(req);
 	char id[FPM_HTTP_REQUEST_ID_SIZE] = "";
 	const char *kept = evhttp_find_header(out, "X-Request-Id");
+	const struct fpm_http_reply_policy_s *policy = fpm_http_reply_policy_installed();
+	const struct fpm_http_error_page_s *page = fpm_http_reply_policy_page(policy, code);
+	/* Issue #650: the configured headers go back on the reply only when the
+	 * request came in on the main listener, a flag that fpm_http_request() sets
+	 * on the connection's client node. The plain-HTTP companion's replies come
+	 * through here too and must not get them (RFC 6797 7.2). */
+	int keep_headers = policy && policy->nheaders && fpm_http_reply_headers_wanted(req);
 
 	/* The id is copied first: evhttp_clear_headers() frees the value it points
 	 * into. An empty id means the request has none (http.request_id = off, or
@@ -57,8 +65,13 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	if (id[0]) {
 		evhttp_add_header(out, "X-Request-Id", id);
 	}
+	if (keep_headers) {
+		fpm_http_reply_headers_add(policy, out);
+	}
 	fpm_http_reply_headers(req, code);
-	evhttp_add_header(out, "Content-Type", "text/plain");
+	if (!page) {
+		evhttp_add_header(out, "Content-Type", "text/plain");
+	}
 	/* evhttp_send_error() forced Connection: close on every reply it wrote.
 	 * Callers that need the connection closed (the over-cap and authority
 	 * refusals) depend on it, so it stays. */
@@ -68,7 +81,17 @@ size_t fpm_http_error_prepare(struct evhttp_request *req, int code, const char *
 	 * (2.1.12, http.c:628-633 in evhttp_make_header()). The access log counts
 	 * what goes on the wire, as the 502 does (issue #858). */
 	if (evhttp_request_get_command(req) == EVHTTP_REQ_HEAD) {
+		/* Issue #650: a HEAD reply has the Content-Type of the page and no body. */
+		if (page) {
+			(void) fpm_http_error_page_put(page, req);
+		}
 		return 0;
+	}
+	if (page) {
+		/* Issue #650: the page replaces "<reason>\n". It is added by reference,
+		 * so the reply copies nothing, and the count is the length of the output
+		 * buffer as for the plain body. */
+		return fpm_http_error_page_put(page, req);
 	}
 	/* The body goes into the request's own output buffer, which libevent
 	 * allocated with the request, so no separate buffer is allocated here (several

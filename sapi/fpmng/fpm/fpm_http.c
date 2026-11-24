@@ -1167,12 +1167,20 @@ static void fpm_http_reject_queued(fpm_http_conn *c)
 		c->gw->pool, c->target->pool);
 	fpm_http_counter_incr(c->target->rejected_total);
 	if (answer) {
-		body = evbuffer_new();
+		const struct fpm_http_error_page_s *page = fpm_http_reply_policy_page(&c->gw->reply, FPM_HTTP_SERVICE_UNAVAIL);
 
 		evhttp_add_header(evhttp_request_get_output_headers(req), "Retry-After", FPM_HTTP_RETRY_AFTER);
-		if (body) {
-			evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
-				"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
+		if (page) {
+			/* Issue #650: the page goes into the output buffer of req, so the
+			 * send below has no body of its own. The access log counts its
+			 * length (0 for HEAD), as every error reply does (issue #882). */
+			c->bytes_out = fpm_http_error_page_put(page, req);
+		} else {
+			body = evbuffer_new();
+			if (body) {
+				evbuffer_add_printf(body, "<HTML><HEAD>\n<TITLE>503 Service Unavailable</TITLE>\n"
+					"</HEAD><BODY>\n<H1>Service Unavailable</H1>\n</BODY></HTML>\n");
+			}
 		}
 	}
 	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
@@ -1956,6 +1964,7 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	/* Issue #652: until the request is routed, it is the gateway's own answer. */
 	cl->duration_row = FPM_HTTP_DURATION_ROW_LOCAL;
 	cl->duration_observed = 0;
+	cl->reply_headers = 0;
 	fpm_http_client_request_id_assign(gw, cl, req);
 	if (cl->ka_timer) {
 		event_del(cl->ka_timer);
@@ -1967,6 +1976,19 @@ static void fpm_http_client_request_begin(struct fpm_http_gateway_s *gw,
 	if (gw->write_timeout_ms > 0 && cl->evcon) {
 		bufferevent_set_timeouts(evhttp_connection_get_bufferevent(cl->evcon), NULL, &gw->write_timeout);
 	}
+}
+
+/* Issue #650: the gateway of this process, set by fpm_http_request(). One
+ * gateway runs per process, and a connection's client node is found through its
+ * index. */
+static struct fpm_http_gateway_s *fpm_http_self;
+
+int fpm_http_reply_headers_wanted(struct evhttp_request *req)
+{
+	struct evhttp_connection *evcon = evhttp_request_get_connection(req);
+	struct fpm_http_client_s *cl = (fpm_http_self && evcon) ? fpm_http_client_index_find(&fpm_http_self->client_index, evcon) : NULL;
+
+	return cl && cl->reply_headers;
 }
 
 /* Issue #641: one step of the graceful drain. A connection is idle when no
@@ -2118,6 +2140,7 @@ static int fpm_http_serve_static(struct fpm_http_gateway_s *gw, struct evhttp_re
 	st.root_unresolved = gw->docroot;	/* resolved per request, after the cheap rejects; NULL or unresolvable serves nothing */
 	st.log = fpm_http_static_log_response;
 	st.log_ctx = &ctx;
+	st.not_found_page = fpm_http_reply_policy_page(&gw->reply, HTTP_NOTFOUND);	/* issue #650 */
 
 	return fpm_http_static_serve(&st, req, path, path_len, script_missing);
 }
@@ -2843,6 +2866,17 @@ void fpm_http_request(struct evhttp_request *req, void *arg)
 		}
 	}
 	fpm_http_client_request_begin(gw, client, req);
+	/* Issue #650: the configured headers, on the main listener only. The
+	 * plain-HTTP companion (308 and ACME) never carries them: RFC 6797 7.2 says
+	 * an HSTS host must not send the header over a non-secure transport. They
+	 * are added here, like X-Request-Id, and every site that clears the output
+	 * headers adds them back (fpm_http_error_prepare(), the invalid-Status 502
+	 * in fpm_http_start_reply(), fpm_http_sendfile_reply()). */
+	fpm_http_reply_headers_add(&gw->reply, evhttp_request_get_output_headers(req));
+	if (client) {
+		client->reply_headers = 1;
+	}
+	fpm_http_self = gw;
 
 	/* Reaching this callback means the client delivered the whole request
 	 * (evhttp buffers headers AND body before dispatching), so its read

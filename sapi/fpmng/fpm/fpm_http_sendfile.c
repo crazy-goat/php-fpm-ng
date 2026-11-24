@@ -48,6 +48,7 @@
 
 #include "fpm_http_internal.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_reply_policy.h"
 #include "fpm_http_static.h"
 #include "zlog.h"
 
@@ -257,6 +258,7 @@ void fpm_http_sendfile_reply(fpm_http_conn *c)
 	char root_buf[MAXPATHLEN], candidate[MAXPATHLEN], resolved[MAXPATHLEN], why[160], clen[32];
 	struct stat stbuf;
 	struct evbuffer *body = NULL;
+	const struct fpm_http_error_page_s *page;
 	size_t root_len = 0, len;
 	off_t length = 0;
 	int fd = -1, code = HTTP_OK, n, head, pump = 0;
@@ -330,10 +332,18 @@ void fpm_http_sendfile_reply(fpm_http_conn *c)
 				fpm_http_log_escape(sf->path, 64, escaped_path, sizeof(escaped_path)), refusal);
 		code = HTTP_NOTFOUND;
 		reason = "Not Found";
-		length = 10;
+		page = fpm_http_reply_policy_page(&c->gw->reply, HTTP_NOTFOUND);
+		length = page ? (off_t) page->len : 10;
+		if (page) {
+			type = page->type; /* issue #650 */
+		}
 		if (!head) {
 			body = evbuffer_new();
-			if (body) {
+			if (body && page) {
+				if (fpm_http_error_page_add(page, body) < 0) {
+					length = 0; /* out of memory: the length says no body */
+				}
+			} else if (body) {
 				evbuffer_add(body, "Not Found\n", 10);
 			} else {
 				length = 0; /* out of memory: a 404 with no body, and the length says so */
@@ -367,6 +377,20 @@ void fpm_http_sendfile_reply(fpm_http_conn *c)
 			reason = "Bad Gateway";
 			type = "text/plain";
 			length = 0;
+			/* Issue #650: the 502 page. The count of the reply is the length of
+			 * the body that is added, so it stays 0 when the page cannot be. */
+			page = fpm_http_reply_policy_page(&c->gw->reply, FPM_HTTP_BAD_GATEWAY);
+			if (page) {
+				type = page->type;
+				if (head) {
+					length = (off_t) page->len;
+				} else {
+					body = evbuffer_new();
+					if (body && fpm_http_error_page_add(page, body) == 0) {
+						length = (off_t) page->len;
+					}
+				}
+			}
 		}
 	}
 
@@ -382,12 +406,15 @@ void fpm_http_sendfile_reply(fpm_http_conn *c)
 		}
 	} else {
 		evhttp_clear_headers(out);
-		evhttp_add_header(out, "Content-Type", "text/plain");
+		evhttp_add_header(out, "Content-Type", type);
 	}
 	snprintf(clen, sizeof(clen), "%lld", (long long) length);
 	evhttp_add_header(out, "Content-Length", clen);
 	if (c->client && c->client->request_id[0]) {
 		evhttp_add_header(out, "X-Request-Id", c->client->request_id);
+	}
+	if (code != HTTP_OK) {
+		fpm_http_reply_headers_add(&c->gw->reply, out); /* issue #650: the clear above dropped them */
 	}
 	/* http.pool_full_policy = wait (issue #309): the same header the normal
 	 * reply carries, added here because this reply returns before that code. */

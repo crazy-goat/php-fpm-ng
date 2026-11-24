@@ -7,6 +7,7 @@
 #include "fpm.h"
 #include "fpm_http.h"
 #include "fpm_http_error.h"
+#include "fpm_http_reply_policy.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -762,6 +763,11 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				/* Issue #642: the gateway's own id is already on this response
 				 * (fpm_http_client_request_id_assign()). A second copy from the
 				 * target would be a second, conflicting id. */
+			} else if (fpm_http_reply_header_owned(&c->gw->reply, key)) {
+				/* Issue #650: the configured value is already on this response, and
+				 * it wins: the operator set a site-wide policy such as HSTS because
+				 * it must hold for every reply, so the application's header of the
+				 * same name, once or repeated, is dropped. */
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -779,18 +785,27 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 		 * complete it while the upstream is still talking). Mapping to 500
 		 * instead is a maintainer decision (issue #594). */
 		struct evbuffer *msg = FPM_FAULT_POINT("http_reply_502_body") ? NULL : evbuffer_new();
+		const struct fpm_http_error_page_s *page = fpm_http_reply_policy_page(&c->gw->reply, FPM_HTTP_BAD_GATEWAY);
 
 		evhttp_clear_headers(out);
-		evhttp_add_header(out, "Content-Type", "text/plain");
 		if (c->client && c->client->request_id[0]) { /* issue #642: the clear above dropped it */
 			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
 		}
+		fpm_http_reply_headers_add(&c->gw->reply, out); /* issue #650: and these */
+		evhttp_add_header(out, "Content-Type", page ? page->type : "text/plain");
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 		/* Issue #967: without the body buffer the 502 goes out with an empty
 		 * chunked body, which fpm_http_finish() ends like any other reply. The
 		 * body is not worth a second failure, and the status is what matters. */
 		if (msg) {
-			evbuffer_add(msg, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN);
+			/* Issue #650: the page, by reference, when there is one. A page that
+			 * cannot be added leaves the chunk empty and the count at 0. */
+			if (!page) {
+				evbuffer_add(msg, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN);
+			} else if (fpm_http_error_page_add(page, msg) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] http: cannot add the 502 error page (out of memory), answering 502 without it",
+						c->gw->pool);
+			}
 			/* Issue #858: libevent drops the chunk of a HEAD reply, so the body is
 			 * counted only when it goes on the wire. */
 			if (evhttp_request_get_command(c->req) != EVHTTP_REQ_HEAD) {

@@ -29,6 +29,7 @@
 #include "fpm_worker_pool.h"
 #include "fpm_pool_type.h"
 #include "fpm_http_access_log.h"
+#include "fpm_http_reply_policy.h"
 #include "fpm_operator_endpoint.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_cleanup.h"
@@ -225,8 +226,13 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.gateways",             &fpm_conf_set_integer,     WPO(http_gateways) },
 	{ "http.reuseport",            &fpm_conf_set_boolean,     WPO(http_reuseport) },
 	{ "http.static",               &fpm_conf_set_boolean,     WPO(http_static) },
+	{ "http.sendfile_root",        &fpm_conf_set_string,      WPO(http_sendfile_root) },
+	{ "http.static.ranges",        &fpm_conf_set_boolean,     WPO(http_static_ranges) },
+	{ "http.static.precompressed", &fpm_conf_set_boolean,     WPO(http_static_precompressed) },
 	{ "http.fault_upstream_write", &fpm_conf_set_integer,     WPO(http_fault_upstream_write) },
 	{ "http.idle_timeout",         &fpm_conf_set_integer,     WPO(http_idle_timeout) },
+	{ "http.upgrade_idle_timeout", &fpm_conf_set_integer,    WPO(http_upgrade_idle_timeout) },
+	{ "http.upgrade_max_duration", &fpm_conf_set_integer,    WPO(http_upgrade_max_duration) },
 	{ "http.read_timeout",         &fpm_conf_set_integer,     WPO(http_read_timeout) },
 	{ "http.pool_full_policy",     &fpm_conf_set_pool_full_policy, WPO(http_pool_full_policy) },
 	{ "http.pool_full_queue_max",  &fpm_conf_set_integer,     WPO(http_pool_full_queue_max) },
@@ -248,6 +254,8 @@ static const struct ini_value_parser_s ini_fpm_pool_options[] = {
 	{ "http.operator_allowed_clients", &fpm_conf_set_string,  WPO(http_operator_allowed_clients) },
 	{ "http.allowed_clients",      &fpm_conf_set_string,      WPO(http_allowed_clients) },
 	{ "http.trusted_proxies",      &fpm_conf_set_string,      WPO(http_trusted_proxies) },
+	{ "http.proxy_protocol",       &fpm_conf_set_boolean,     WPO(http_proxy_protocol) },
+	{ "http.proxy_protocol_trusted", &fpm_conf_set_string,    WPO(http_proxy_protocol_trusted) },
 	{ "http.request_id",           &fpm_conf_set_request_id,  WPO(http_request_id) },
 	{ "http.access_log",           &fpm_conf_set_string,      WPO(http_access_log) },
 	{ "http.access_format",        &fpm_conf_set_access_format, WPO(http_access_format) },
@@ -1111,6 +1119,8 @@ static void *fpm_worker_pool_config_alloc(void)
 	wp->config->http_idle_timeout = 500;	/* fpm-ng: FPM_HTTP_IDLE_MS in fpm_http.c */
 	wp->config->http_read_timeout = 5000;	/* fpm-ng: FPM_HTTP_READ_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_keepalive_timeout = 60000;	/* fpm-ng: FPM_HTTP_KEEPALIVE_TIMEOUT_MS in fpm_http.c */
+	wp->config->http_upgrade_idle_timeout = 300000;	/* issue #659: five minutes with no byte in either direction */
+	wp->config->http_upgrade_max_duration = 86400000;	/* issue #659: one day in total; a WebSocket is not forever */
 	wp->config->http_write_timeout = 30000;	/* fpm-ng: FPM_HTTP_WRITE_TIMEOUT_MS in fpm_http.c */
 	wp->config->http_response_buffer = 1024 * 1024;	/* fpm-ng: FPM_HTTP_RESPONSE_BUFFER in fpm_http.c */
 	wp->config->http_response_min_rate = 256;	/* fpm-ng: FPM_HTTP_RESPONSE_MIN_RATE in fpm_http.c, issue #705 */
@@ -1227,10 +1237,12 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 	free(wpc->cron_log);
 	free(wpc->cron_output_log);
 	free(wpc->http_listen);
+	free(wpc->http_sendfile_root);
 	free(wpc->http_plain_listen);
 	free(wpc->http_allowed_clients);
 	free(wpc->http_operator_allowed_clients);
 	free(wpc->http_trusted_proxies);
+	free(wpc->http_proxy_protocol_trusted);
 	free(wpc->http_access_log);
 	free(wpc->http_front_controller);
 	free(wpc->fiber_isolate_statics);
@@ -1246,6 +1258,30 @@ int fpm_worker_pool_config_free(struct fpm_worker_pool_config_s *wpc) /* {{{ */
 		free(kv);
 	}
 	for (kv = wpc->http_routes; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_static_cache_control; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_route_upgrade; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_response_headers; kv; kv = kv_next) {
+		kv_next = kv->next;
+		free(kv->key);
+		free(kv->value);
+		free(kv);
+	}
+	for (kv = wpc->http_error_pages; kv; kv = kv_next) {
 		kv_next = kv->next;
 		free(kv->key);
 		free(kv->value);
@@ -2430,6 +2466,134 @@ static void fpm_conf_ini_parser_array(zval *name, zval *key, zval *value, void *
 		err = fpm_conf_set_array(key, value, &config, 0);
 		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route")) {
 			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.route_upgrade")) {
+		/* http.route_upgrade[<prefix>] = websocket -- issue #659. The key must be
+		 * a prefix that some http.route[] row of this pool also names; that is
+		 * checked in fpm_http_validate_pool(), where every section is read. Only
+		 * the shape is checked here. The one value is "websocket", not on/off, so
+		 * the next protocol that wants the same passthrough names itself. */
+		if (*Z_STRVAL_P(key) != '/') {
+			zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: the path prefix must begin with '/'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		if (strcmp(Z_STRVAL_P(value), "websocket") != 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: the only value is 'websocket'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_route_upgrade; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.route_upgrade[%s]: this prefix is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_route_upgrade);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.route_upgrade")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.route_upgrade'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.static.cache_control")) {
+		/* http.static.cache_control[<prefix>] = <value> -- issue #648. The key is
+		 * matched as a plain string prefix of the request path, so it must begin
+		 * with '/'. A prefix given twice is refused rather than resolved by
+		 * order: fpm_conf_set_array() prepends, so the order would be the
+		 * reverse of the file. Noted, as http.route is, so the reject lists see
+		 * the directive by its name. */
+		if (*Z_STRVAL_P(key) != '/') {
+			zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: the path prefix must begin with '/'",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		if (!*Z_STRVAL_P(value)) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: empty value; give a Cache-Control value",
+				ini_filename, ini_lineno, Z_STRVAL_P(key));
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_static_cache_control; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.static.cache_control[%s]: this prefix is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_static_cache_control);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.static.cache_control")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.static.cache_control'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.response_header")) {
+		/* http.response_header[<Name>] = "<value>" -- issue #650. The name and
+		 * the value are checked here, where the line is known: a CR or LF in a
+		 * value would split the reply (response splitting). A name given twice,
+		 * in any case, is refused rather than resolved by order. Noted, as
+		 * http.route is, so the reject lists see the directive by its name. */
+		const char *why = "";
+
+		if (fpm_http_reply_policy_check_header(Z_STRVAL_P(key), Z_STRVAL_P(value), Z_STRLEN_P(value), &why) < 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.response_header[%s]: %s", ini_filename, ini_lineno, Z_STRVAL_P(key), why);
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_response_headers; dup; dup = dup->next) {
+			if (!strcasecmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.response_header[%s]: this header is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_response_headers);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.response_header")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.response_header'", ini_filename, ini_lineno);
+			*error = 1;
+			return;
+		}
+
+	} else if (zend_string_equals_literal(Z_STR_P(name), "http.error_page")) {
+		/* http.error_page[<404|502|503>] = <absolute path> -- issue #650. The
+		 * shape of the key and the path is checked here. That the file exists,
+		 * is small enough and has a known extension is checked where the file
+		 * is read: fpm_http_reply_policy_build(), which -t also runs. */
+		const char *why = "";
+		int code = 0;
+
+		if (fpm_http_reply_policy_check_page_key(Z_STRVAL_P(key), &code, &why) < 0 ||
+			fpm_http_reply_policy_check_page_path(Z_STRVAL_P(value), &why) < 0) {
+			zlog(ZLOG_ERROR, "[%s:%d] http.error_page[%s]: %s", ini_filename, ini_lineno, Z_STRVAL_P(key), why);
+			*error = 1;
+			return;
+		}
+		for (struct key_value_s *dup = current_wp->config->http_error_pages; dup; dup = dup->next) {
+			if (!strcmp(dup->key, Z_STRVAL_P(key))) {
+				zlog(ZLOG_ERROR, "[%s:%d] http.error_page[%s]: this key is given twice",
+					ini_filename, ini_lineno, Z_STRVAL_P(key));
+				*error = 1;
+				return;
+			}
+		}
+		config = (char *)current_wp->config + WPO(http_error_pages);
+		err = fpm_conf_set_array(key, value, &config, 0);
+		if (!err && 0 > fpm_conf_note_directive(current_wp->config, "http.error_page")) {
+			zlog(ZLOG_ERROR, "[%s:%d] out of memory noting entry 'http.error_page'", ini_filename, ini_lineno);
 			*error = 1;
 			return;
 		}

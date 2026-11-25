@@ -85,12 +85,15 @@ struct fpm_http_direct_labels {
  * that composes with it (issue #705), and the two http.upstream_* timeouts are
  * the gateway's own upstream deadlines (issue #716), and http.request_id and
  * http.access_format are the gateway's correlation id and access log layout
- * (issue #642); a direct pool reads none of them, so they are refused. */
-#define FPM_HTTP_DIRECT_REJECTS_COMMON                                                               \
-	"fiber.", "supervisor.", "cron.", "worker.",                                                     \
-			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer",                  \
-			"http.response_min_rate", "http.upstream_connect_timeout", "http.upstream_read_timeout", \
-			"http.request_id", "http.access_format"
+ * (issue #642), and http.response_header and http.error_page are the gateway's
+ * own reply headers and error pages (issue #650); a direct pool reads none of
+ * them, so they are refused. */
+#define FPM_HTTP_DIRECT_REJECTS_COMMON                                                                                           \
+	"fiber.", "supervisor.", "cron.", "worker.",                                                                                 \
+			"http.keepalive_timeout", "http.write_timeout", "http.response_buffer",                                              \
+			"http.response_min_rate", "http.upstream_connect_timeout", "http.upstream_read_timeout",                             \
+			"http.request_id", "http.access_format", "http.proxy_protocol", "http.proxy_protocol_trusted", "http.sendfile_root", \
+			"http.response_header", "http.error_page"
 
 /* CGI values that come from the pool rather than from the request. */
 struct fpm_http_direct_env_source {
@@ -136,7 +139,8 @@ bool fpm_http_direct_header_name_ok(const char *name);
  * always NUL-terminated) with every byte outside printable US-ASCII and every
  * backslash escaped as \xNN. Truncates rather than growing, and returns `out`,
  * so it can be used inline in a log call. A `size` of 4 * max + 1 keeps all of
- * `max` bytes even when each one is escaped. */
+ * `max` bytes even when each one is escaped. A `size` of 0 writes nothing and
+ * returns a static "" instead of `out` (issue #1032). */
 const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size);
 /* Charges one emitted response header line against FPM_HTTP_HEADERS_MAX
  * and returns false when it does not fit, leaving *total unchanged. */

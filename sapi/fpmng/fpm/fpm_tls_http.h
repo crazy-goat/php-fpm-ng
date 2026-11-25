@@ -122,7 +122,11 @@ SSL_CTX *fpm_tls_http_ctx_new(const char *pool, struct fpm_tls_http_s *tls);
 
 /* Callback for evhttp_set_bevcb(): `arg` is the SSL_CTX* of the gateway
  * process. evhttp calls it once per incoming connection and attaches the
- * accepted fd itself via bufferevent_setfd() — hence fd = -1 here. */
+ * accepted fd itself via bufferevent_setfd() — hence fd = -1 here.
+ *
+ * Never returns NULL: a connection whose TLS state cannot be built gets a
+ * bufferevent that evhttp refuses, so it is closed and not served in
+ * cleartext (issue #1001). */
 struct bufferevent *fpm_tls_http_bevcb(struct event_base *base, void *arg);
 
 /* Issue #195. Puts the front of an SSL bufferevent's own output buffer on the

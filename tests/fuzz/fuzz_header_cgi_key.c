@@ -10,9 +10,11 @@
  * The output buffer is allocated with exactly out_size bytes, so
  * AddressSanitizer reports any write past it.
  *
- * Oracle: the mapping written out again from the specification. Bytes other
- * than a-z and '-' pass through unchanged. The harness checks the return value,
- * the output on success, and that the output buffer is untouched on refusal.
+ * Oracle: the mapping written out again from the specification. An empty
+ * name, or a name with a byte outside a-z, A-Z, 0-9 and '-', is refused
+ * (return 1). Otherwise a-z is upper-cased and '-' becomes '_'. The harness
+ * checks the return value, the output on success, and that the output buffer
+ * is untouched on refusal.
  */
 #include "fpm_http_header_cgi.c"
 
@@ -33,8 +35,15 @@ static int ref_key(const char *name, int content_type_skip, size_t out_size, cha
 	if (strcasecmp(name, "Content-Length") == 0 || strcasecmp(name, "Proxy") == 0) {
 		return 1;
 	}
-	if (memchr(name, '_', len) != NULL) {
+	if (len == 0) {
 		return 1;
+	}
+	for (i = 0; i < len; i++) {
+		char ch = name[i];
+
+		if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-')) {
+			return 1;
+		}
 	}
 	if (strcasecmp(name, "Content-Type") == 0) {
 		if (content_type_skip) {

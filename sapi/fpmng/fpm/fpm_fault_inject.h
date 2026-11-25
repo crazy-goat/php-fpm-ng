@@ -15,8 +15,16 @@
    HOW. A call site asks FPM_FAULT_POINT("name"); it is true when the
    environment variable FPMNG_FAULT selects that point:
 
-       FPMNG_FAULT=<point>[:ifenv=<VAR>][,<point>...]
+       FPMNG_FAULT=<point>[:ifenv=<VAR>|:times=<N>][,<point>...]
 
+   `times=N` arms the point for its first N hits only: the next hit does not
+   fail, so one process can see a failure and then a normal call. It is what a
+   test uses when the process must keep serving after the injected failure.
+   The count is per process. A forked child (a gateway, an http-direct child or
+   a respawned child) starts with the count its parent had, so N applies to each
+   process. A pool with two gateways refuses N connections per gateway.
+   Its counter is a volatile sig_atomic_t, one per entry, that only the hit
+   path decrements; the same entry is not combined with `ifenv=`.
    `ifenv=VAR` arms the point only in a process whose environment has VAR set.
    It is what lets one test fail the NEW master and not the first one: the
    exec'd master inherits the environment of the old one, so the variable
@@ -40,6 +48,35 @@
                            does not fail: the hit line says "fails now", but the call
                            sleeps and returns. Runs once per pool with spared children,
                            in the new master only, before the children are adopted.
+     survivor_poll_hold    fpm_pool_supervisor_reload_survivor_poll(): skips the check, so
+                           a #329 survivor is not retired while the point is armed. The
+                           point does not fail: the hit line says "fails now", but the
+                           poll only skips its check. It writes one hit line per tick
+                           (200 ms). The survivor can then exit on its own first (issue
+                           #1012). Runs in the new master only, every poll tick.
+     http_request_server_name  fpm_http_build_request(): strdup() of the Host header
+                           for SERVER_NAME fails (issue #967). Every request with a
+                           Host header hits it; the request gets a 503.
+     http_reply_name_dup   fpm_http_start_reply(): strndup() of an upstream header
+                           NAME fails (issue #967). The first header line of each
+                           reply hits it; the reply gets a 502.
+     http_reply_value_dup  fpm_http_start_reply(): strndup() of an upstream header
+                           VALUE fails (issue #967). The first header line whose
+                           name was copied hits it; the reply gets a 502.
+     http_reply_502_body   fpm_http_start_reply(): evbuffer_new() for the body of the
+                           502 that an invalid upstream Status sends fails (issue #967).
+                           Only an invalid Status reaches it; the 502 has no body.
+     http_reply_chunk      fpm_http_response_chunk(): evbuffer_new() for a body piece
+                           fails (issue #967). Every piece hits it; the reply is cut.
+     tls_ssl_new           fpm_tls_http_bevcb(): SSL_new() fails (issue #1001). The
+                           connection is refused, never served in cleartext. Used with
+                           `:times=N` by the fail-closed tests.
+     tls_bev_new           fpm_tls_http_bevcb(): bufferevent_openssl_socket_new() fails
+                           (issue #1001). Same outcome as tls_ssl_new.
+     tls_refuse_pair       fpm_tls_http_refused_bev(): bufferevent_pair_new() fails
+                           (issue #1001). The child cannot refuse the connection, so
+                           it logs an ERROR and exits with code 70. Use it with
+                           tls_ssl_new, which sends the connection to the refusal.
 
    WHY A COMPILE FLAG AND NOT JUST THE ENVIRONMENT VARIABLE. The same reason
    as fpm_debug_clock.h: with --enable-fpmng-fault-inject off -- the default,

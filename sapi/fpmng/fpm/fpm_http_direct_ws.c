@@ -23,10 +23,6 @@
 	for ((var) = TAILQ_FIRST(head); (var); (var) = TAILQ_NEXT(var, field))
 #endif
 #include <event2/bufferevent.h>
-#ifdef HAVE_FPM_HTTP_TLS
-#include <event2/bufferevent_ssl.h>
-#include <openssl/ssl.h>
-#endif
 
 #include "php.h"
 #include "php_streams.h"
@@ -41,10 +37,10 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_direct_tls.h"
 #include "fpm_http_direct_worker.h"
 #include "fpm_http_direct_worker_internal.h"
 #include "fpm_http_direct_conn.h"
-#include "fpm_http_direct_tls.h"
 #include "zlog.h"
 
 /* ------------------------------------------------------------------ issue #343 */
@@ -165,6 +161,17 @@ static void fpm_ws_fire(struct fpm_ws_ctx *ctx, short type)
 	efree(ids);
 }
 
+/* Issue #974: the most unread input one upgraded connection may hold. Without
+ * a read watermark libevent moves every byte the peer sends into the input
+ * evbuffer whether or not userland fread()s it, and that memory is outside
+ * memory_limit. At this mark libevent stops reading the socket, TCP flow control
+ * pushes back on the peer, and reading resumes once fpm_ws_read() drains the
+ * buffer below it. Fixed, not a directive: the issue leaves the bound open, and
+ * a directive would be one more knob. The cost is at most this many bytes per
+ * open WebSocket, plus on TLS the overshoot described in fpm_tls_http_direct.c
+ * (libevent's read slack and one TLS record); not measured under load. */
+#define FPM_WS_INPUT_HIGH_WATER (64 * 1024)
+
 static void fpm_ws_readcb(struct bufferevent *bev, void *arg)
 {
 	(void) bev;
@@ -233,6 +240,15 @@ static void fpm_ws_eventcb(struct bufferevent *bev, short what, void *arg)
 	}
 }
 
+static void fpm_ws_pull_tls_pending(struct fpm_ws_ctx *ctx)
+{
+	/* Issue #974: the TLS layer holds plaintext behind the watermark; see
+	 * fpm_tls_http_direct.c. A plaintext pool returns 0. */
+	if (fpm_http_direct_tls_pull_pending(ctx->bev, bufferevent_get_input(ctx->bev)) > 0) {
+		fpm_ws_fire(ctx, FPM_WORKER_EV_READ);
+	}
+}
+
 static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
 {
 	struct fpm_ws_ctx *ctx = stream->abstract;
@@ -256,6 +272,9 @@ static ssize_t fpm_ws_read(php_stream *stream, char *buf, size_t count)
 	 * flags it. An empty buffer on this stream is the NORMAL state between
 	 * WebSocket messages, not an error and not an end. */
 	take = count ? (size_t) evbuffer_remove(in, buf, count) : 0;
+	if (evbuffer_get_length(in) < FPM_WS_INPUT_HIGH_WATER) {
+		fpm_ws_pull_tls_pending(ctx);
+	}
 	return (ssize_t) take;
 }
 
@@ -1032,6 +1051,7 @@ ZEND_FUNCTION(fpmng_worker_upgrade)
 	/* The point of no return, one run with no loop iteration inside: evhttp's
 	 * callbacks go, ours go in, the 101 is written. */
 	bufferevent_setcb(bev, fpm_ws_readcb, fpm_ws_writecb, fpm_ws_eventcb, ctx);
+	bufferevent_setwatermark(bev, EV_READ, 0, FPM_WS_INPUT_HIGH_WATER);
 	bufferevent_set_timeouts(bev, NULL, NULL);
 	bufferevent_enable(bev, EV_READ | EV_WRITE);
 	evhttp_connection_set_closecb(connection, NULL, NULL);

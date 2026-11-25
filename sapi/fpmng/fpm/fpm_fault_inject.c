@@ -8,12 +8,16 @@
 
 #ifdef HAVE_FPMNG_FAULT_INJECT
 
+#include <errno.h>
+#include <limits.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
 #define FPM_FAULT_INJECT_ENV "FPMNG_FAULT"
 #define FPM_FAULT_INJECT_IFENV ":ifenv="
+#define FPM_FAULT_INJECT_TIMES ":times="
 #define FPM_FAULT_INJECT_MAX_POINTS 16
 #define FPM_FAULT_INJECT_NAME_LEN 64
 
@@ -23,14 +27,32 @@
  * stored, so it never hits. */
 static char fpm_fault_inject_points[FPM_FAULT_INJECT_MAX_POINTS][FPM_FAULT_INJECT_NAME_LEN];
 static int fpm_fault_inject_count;
+/* Hits still to fail for each entry: -1 for every hit, N for `:times=N`, and 0
+ * once the N hits are used up. It is written by the constructor and then only
+ * decremented by the hit path, which a signal handler may run. */
+static volatile sig_atomic_t fpm_fault_inject_left[FPM_FAULT_INJECT_MAX_POINTS];
 
-/* One entry of the list: `point` or `point:ifenv=VAR`. `entry` is a copy that
- * this function edits. */
+/* One entry of the list: `point`, `point:ifenv=VAR` or `point:times=N`.
+ * `entry` is a copy that this function edits. */
 static void fpm_fault_inject_add(char *entry) /* {{{ */
 {
 	char *cond = strchr(entry, ':');
+	int left = -1;
 
-	if (cond) {
+	if (cond && strncmp(cond, FPM_FAULT_INJECT_TIMES, sizeof(FPM_FAULT_INJECT_TIMES) - 1) == 0) {
+		char *digits = cond + sizeof(FPM_FAULT_INJECT_TIMES) - 1, *end = NULL;
+		long n;
+
+		errno = 0;
+		n = strtol(digits, &end, 10);
+		/* `end` must reach the end of the entry: a second condition after
+		 * `:times=N` is refused, as an unknown one is. */
+		if (errno != 0 || end == digits || *end != '\0' || n < 1 || n > INT_MAX) {
+			return;
+		}
+		*cond = '\0';
+		left = (int) n;
+	} else if (cond) {
 		if (strncmp(cond, FPM_FAULT_INJECT_IFENV, sizeof(FPM_FAULT_INJECT_IFENV) - 1) != 0) {
 			/* An unknown condition must not arm the point: a typo would turn a
 			 * test of the new master into a failure of the first start. */
@@ -47,6 +69,7 @@ static void fpm_fault_inject_add(char *entry) /* {{{ */
 		return;
 	}
 
+	fpm_fault_inject_left[fpm_fault_inject_count] = left;
 	strcpy(fpm_fault_inject_points[fpm_fault_inject_count++], entry);
 }
 /* }}} */
@@ -88,8 +111,11 @@ int fpm_fault_inject_hit(const char *point) /* {{{ */
 			break;
 		}
 	}
-	if (i == fpm_fault_inject_count) {
+	if (i == fpm_fault_inject_count || fpm_fault_inject_left[i] == 0) {
 		return 0;
+	}
+	if (fpm_fault_inject_left[i] > 0) {
+		fpm_fault_inject_left[i]--;
 	}
 
 	/* write(2), not zlog(): zlog() is not async-signal-safe. */

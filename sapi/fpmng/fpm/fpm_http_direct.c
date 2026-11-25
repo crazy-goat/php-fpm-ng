@@ -43,6 +43,7 @@
 #include "fpm_http_direct_ops.h"
 #include "fpm_http_direct_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_header_cgi.h"
 #include "fpm_http_target.h"
 #include "fpm_http_direct_user_ini.h"
 #include "fpm_php.h"
@@ -83,6 +84,9 @@ static const char *const fpm_direct_extra_directives[] = {
 	 * never passes through here. Accepting the directive there would read as
 	 * if files were being served when nothing would serve them. */
 	"http.static",
+	/* issue #648. The same executor, so the same reason: the three options act
+	 * on the file serving above and nowhere else. */
+	"http.static.ranges", "http.static.precompressed", "http.static.cache_control",
 	NULL
 };
 
@@ -121,7 +125,7 @@ struct fpm_direct_worker {
 	struct fpm_http_direct_ops *ops;
 	/* access.log; NULL when the pool sets none. */
 	struct fpm_http_direct_access_log_s *access_log;
-	/* issue #61: the first-request deadline and the connection limits. NULL
+	/* issue #61: the request deadline and the connection limits. NULL
 	 * only on OOM at start-up, which is fatal there. */
 	struct fpm_http_direct_conns *conns;
 	/* issue #65. When this child is retiring, the moment after which it stops
@@ -767,6 +771,13 @@ static ZEND_FUNCTION(fpm_direct_request_headers)
 	array_init(return_value);
 	if (fpm_direct_current && fpm_direct_current->http) {
 		for (kv = evhttp_request_get_input_headers(fpm_direct_current->http)->tqh_first; kv; kv = kv->next.tqe_next) {
+			/* Same name rule as the $_SERVER keys and the gateway (issues #595
+			 * and #1002): the gateway's getallheaders() shows only names that
+			 * have a CGI key. These functions read the raw headers, not the CGI
+			 * keys, so the rule must be applied here too. Issue #628. */
+			if (!fpm_http_header_name_plain(kv->key)) {
+				continue;
+			}
 			add_assoc_string(return_value, kv->key, kv->value);
 		}
 	}
@@ -859,10 +870,31 @@ static void fpm_direct_response_closed(struct evhttp_connection *connection, voi
 	if (fpm_direct_stopping && !w->pending) event_base_loopbreak(w->base);
 }
 
+/* The connection may stay open for another request, and that request starts
+ * its budget of http.read_timeout at its first byte. Without this a trickled
+ * later request is held for as long as each byte resets the idle timeout.
+ * Connection: close is harmless: the node is dropped by the sweep once evhttp
+ * lets go. */
+static void fpm_direct_budget_restart(struct evhttp_request *request, struct fpm_direct_worker *w)
+{
+	struct evhttp_connection *connection = evhttp_request_get_connection(request);
+
+	if (connection) {
+		fpm_http_direct_conns_response_done(w->conns, evhttp_connection_get_bufferevent(connection));
+	}
+}
+
+static void fpm_direct_budget_done(struct evhttp_request *request, void *arg)
+{
+	fpm_direct_budget_restart(request, arg);
+}
+
 static void fpm_direct_response_done(struct evhttp_request *request, void *arg)
 {
 	struct fpm_direct_worker *w = arg;
+
 	evhttp_connection_set_closecb(evhttp_request_get_connection(request), NULL, NULL);
+	fpm_direct_budget_restart(request, w);
 	w->pending--;
 	fpm_direct_retire_extend(w);
 	if (fpm_direct_stopping && !w->pending) event_base_loopbreak(w->base);
@@ -2245,6 +2277,9 @@ static int fpm_direct_try_static(struct fpm_direct_worker *w, struct evhttp_requ
 	 * an application directory, so there "I do not know what this is" is a
 	 * reason to leave the file alone, not to hand it over. */
 	st.known_types_only = 1;
+	st.ranges = w->wp->config->http_static_ranges;
+	st.precompressed = w->wp->config->http_static_precompressed;
+	st.cache_control = w->wp->config->http_static_cache_control;
 	st.log = fpm_direct_static_logged;
 	st.log_ctx = &log;
 	/* Counted and hooked up before the reply, not after it: from the moment
@@ -2293,7 +2328,7 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 	gettimeofday(&started, NULL);
 	if (evcon) {
 		evhttp_connection_get_peer(evcon, &peer, &peer_port);
-		/* The first request on this connection has fully arrived -- evhttp
+		/* The request on this connection has fully arrived -- evhttp
 		 * does not call back before it has -- so whatever budget issue #61
 		 * gave it for arriving is spent. It is also where
 		 * http.max_connections_per_client lands when the request beat the
@@ -2317,6 +2352,11 @@ static void fpm_direct_handle(struct evhttp_request *http, void *arg)
 		 * per-client cap becomes something an excluded address can probe. */
 		over_client_cap = fpm_http_direct_conns_request(w->conns,
 			evhttp_connection_get_bufferevent(evcon), &conn_accepted, &conn_requests) < 0;
+		/* The default completion. A reply that installs its own, the PHP and
+		 * static paths, replaces it and restarts the budget there. The rest
+		 * (ping, errors) have none, and without this one
+		 * their connection would keep its next request unbounded. */
+		evhttp_request_set_on_complete_cb(http, fpm_direct_budget_done, w);
 	}
 
 	/* Ingress step one, before the ACL, as on the gateway (fpm_http.c:2714,

@@ -69,6 +69,7 @@
 #include "fpm_operator_endpoint.h"
 #include "zlog.h"
 
+#include "fpm_http_error.h"
 #include "fpm_http_internal.h"
 
 /* ------------------------------------------------------------------ operator forwarding (issue #389) */
@@ -211,24 +212,27 @@ int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	/* The ACL is about the direct network peer, exactly like gw->acl, and is
 	 * checked before the map so denied and nonexistent look the same. */
 	if (gw->operator_acl && !fpm_http_acl_check(gw->operator_acl, peer_addr)) {
-		fpm_http_log_response(gw, req, peer_addr, NULL, 403, 0, "operator");
-		evhttp_send_error(req, 403, "Forbidden");
+		fpm_http_log_response(gw, req, peer_addr, NULL, 403,
+				fpm_http_error_prepare(req, 403, "Forbidden"), "operator");
+		fpm_http_error_send(req, 403, "Forbidden");
 		fpm_http_count_local(gw); /* #390: answered here, not forwarded */
 		return 1;
 	}
 
 	hit = fpm_http_operator_lookup(gw, path);
 	if (!hit) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND, 0, "operator");
-		evhttp_send_error(req, HTTP_NOTFOUND, "Not Found");
+		fpm_http_log_response(gw, req, effective_addr, NULL, HTTP_NOTFOUND,
+				fpm_http_error_prepare(req, HTTP_NOTFOUND, "Not Found"), "operator");
+		fpm_http_error_send(req, HTTP_NOTFOUND, "Not Found");
 		fpm_http_count_local(gw); /* #390: a miss is the gateway's own 404 */
 		return 1;
 	}
 
 	c = calloc(1, sizeof(*c));
 	if (!c) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
-		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
+		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL,
+				fpm_http_error_prepare(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable"), "operator");
+		fpm_http_error_send(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
 		fpm_http_count_local(gw);
 		return 1;
 	}
@@ -261,11 +265,12 @@ int fpm_http_operator_request(struct fpm_http_gateway_s *gw, struct evhttp_reque
 	query_len = query ? strlen(query) + 1 : 0;
 	target_uri = malloc(local_len + query_len + 1);
 	if (!target_uri) {
-		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL, 0, "operator");
+		fpm_http_log_response(gw, req, effective_addr, NULL, FPM_HTTP_SERVICE_UNAVAIL,
+				fpm_http_error_prepare(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable"), "operator");
 		fpm_http_conn_free(c);
 		fpm_http_count_local(gw);
 		/* Sent last: the send may end the request (see fpm_http_finish()). */
-		evhttp_send_error(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
+		fpm_http_error_send(req, FPM_HTTP_SERVICE_UNAVAIL, "Service Unavailable");
 		return 1;
 	}
 	memcpy(target_uri, hit->local_uri, local_len);

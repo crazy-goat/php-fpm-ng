@@ -63,6 +63,7 @@
 #include "fpm_tls_http.h"
 #include "fpm_tls_reload.h"
 #include "fpm_http_static.h"
+#include "fpm_http_sendfile.h"
 #include "fpm_child_error_log.h"
 #include "fpm_error_log_follow.h"
 #include "fpm_operator_http.h"
@@ -71,6 +72,7 @@
 
 #include "fpm_http_internal.h"
 #include "fpm_http_handoff.h"
+#include "fpm_http_host.h"
 
 static int cleanup_registered = 0;
 
@@ -107,6 +109,37 @@ static int fpm_http_route_next_prefix(const char **cursor, const char **out, siz
 	*out = p;
 	*out_len = (size_t) (end - p);
 	return 1;
+}
+
+/* One entry of http.route[], split into its optional host and its path prefix.
+ * An entry that begins with '/' has no host. Any other entry is
+ * "<host>[/<prefix>]" (issue #658): the host runs up to the first '/', and an
+ * entry without a '/' routes the host's "/". The host is not checked here;
+ * fpm_http_validate_routes() does that. */
+struct fpm_http_route_entry_s {
+	const char *host;
+	size_t host_len;
+	const char *path;
+	size_t path_len;
+};
+
+static void fpm_http_route_entry_split(const char *entry, size_t len, struct fpm_http_route_entry_s *out)
+{
+	static const char root[] = "/";
+	const char *slash;
+
+	if (len > 0 && entry[0] == '/') {
+		out->host = NULL;
+		out->host_len = 0;
+		out->path = entry;
+		out->path_len = len;
+		return;
+	}
+	slash = memchr(entry, '/', len);
+	out->host = entry;
+	out->host_len = slash ? (size_t) (slash - entry) : len;
+	out->path = slash ? slash : root;
+	out->path_len = slash ? len - out->host_len : 1;
 }
 
 /* The HTTP/1.1 transport is intentionally cleartext, so it may only connect to
@@ -249,13 +282,64 @@ static struct fpm_worker_pool_s *fpm_http_route_target_pool(struct fpm_worker_po
 	return NULL;
 }
 
-/* One prefix already claimed by this gateway's routes, for the duplicate
- * check. The pool it came from is kept so the refusal can name both sides. */
+/* One entry already claimed by this gateway's routes, for the duplicate check.
+ * The pool it came from is kept so the refusal can name both sides. */
 struct fpm_http_seen_prefix_s {
-	const char *prefix;
-	size_t len;
+	const char *host;
+	size_t host_len;
+	const char *path;
+	size_t path_len;
 	const char *pool;
 };
+
+/* Issue #659: every http.route_upgrade[] key must name a path prefix of some
+ * http.route[] entry, and every route it covers must lead to a target whose type
+ * serves WebSocket upgrades (fpm_pool_type_s.serves_websocket). Any other
+ * target would answer the Upgrade request itself, so a refusal here is
+ * better than a 502 per request. */
+static int fpm_http_validate_upgrade_routes(struct fpm_worker_pool_s *wp)
+{
+	struct key_value_s *up, *kv;
+
+	for (up = wp->config->http_route_upgrade; up; up = up->next) {
+		int found = 0;
+
+		for (kv = wp->config->http_routes; kv; kv = kv->next) {
+			const char *cursor = kv->value, *prefix;
+			size_t prefix_len;
+
+			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+				struct fpm_http_route_entry_s e;
+				enum fpm_http_transport_e transport = FPM_HTTP_TARGET_FASTCGI;
+				struct fpm_worker_pool_s *target;
+				const struct fpm_pool_type_s *type;
+
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
+				if (strlen(up->key) != e.path_len || memcmp(up->key, e.path, e.path_len) != 0) {
+					continue;
+				}
+				found = 1;
+				target = fpm_http_route_target_pool(wp, kv->key, &transport);
+				if (!target) {
+					return -1; /* already logged */
+				}
+				type = fpm_pool_type_resolve(target);
+				if (!type || !type->serves_websocket) {
+					zlog(ZLOG_ERROR, "[pool %s] http.route_upgrade[%s]: pool '%s' does not serve WebSocket upgrades; "
+									 "the target must be a pool.type = http-direct pool with pool.executor = worker (issue #659)",
+							wp->config->name, up->key, kv->key);
+					return -1;
+				}
+			}
+		}
+		if (!found) {
+			zlog(ZLOG_ERROR, "[pool %s] http.route_upgrade[%s]: no http.route[] entry has this path prefix",
+					wp->config->name, up->key);
+			return -1;
+		}
+	}
+	return 0;
+}
 
 /* Everything about http.route[] that can be decided from the configuration
  * alone, checked in the master with every pool section already parsed (issue
@@ -263,8 +347,11 @@ struct fpm_http_seen_prefix_s {
  * bad route table without anything having started.
  *
  * Refuses, each naming the pool and the offending directive: an unknown target
- * pool, a pool named twice, a target type the gateway cannot speak to, a
- * prefix without a leading '/', and a prefix claimed by two different entries.
+ * pool, a pool named twice, a target type the gateway cannot speak to, an entry
+ * that is neither a path prefix nor a valid host name (issue #658), and an
+ * entry claimed twice. Two entries are the same when their host names are
+ * equal ignoring case, and their path prefixes are equal; an entry with no host
+ * is the same only as another entry with no host.
  * An empty value is refused earlier, by the INI parser (fpm_conf.c), where the
  * line number is still known. */
 static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
@@ -320,18 +407,29 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 		}
 
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			struct fpm_http_route_entry_s e;
 			unsigned i;
 
-			if (prefix_len == 0 || prefix[0] != '/') {
-				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' must begin with '/'",
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			/* Issue #658: a host name is refused here, at -t, and never at
+			 * request time. "a.example:80/x" is refused on purpose: the port is
+			 * not part of the name a request is matched on. */
+			if (e.host && !fpm_http_host_valid_name(e.host, e.host_len)) {
+				zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: '%.*s' is neither a path prefix (it must begin "
+								 "with '/') nor a valid host name; a host name is letters, digits and '-' in "
+								 "dot-separated labels, with no port, no brackets and no wildcard (issue #658)",
 						name, kv->key, (int) prefix_len, prefix);
 				rc = -1;
 				break;
 			}
 			for (i = 0; i < nseen; i++) {
-				if (seen[i].len == prefix_len && memcmp(seen[i].prefix, prefix, prefix_len) == 0) {
-					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' is already routed "
-									 "to pool '%s'; one prefix selects one target",
+				if (seen[i].path_len == e.path_len && memcmp(seen[i].path, e.path, e.path_len) == 0 &&
+						seen[i].host_len == e.host_len &&
+						(e.host_len == 0 || fpm_http_host_equal(seen[i].host, e.host, e.host_len))) {
+					/* The whole entry is printed, host included: "a.example/x" is what the
+					 * operator wrote, not its path "/x". */
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: entry '%.*s' is already routed "
+									 "to pool '%s'; one entry selects one target",
 							name, kv->key, (int) prefix_len, prefix, seen[i].pool);
 					rc = -1;
 					break;
@@ -340,8 +438,10 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 			if (rc != 0) {
 				break;
 			}
-			seen[nseen].prefix = prefix;
-			seen[nseen].len = prefix_len;
+			seen[nseen].host = e.host;
+			seen[nseen].host_len = e.host_len;
+			seen[nseen].path = e.path;
+			seen[nseen].path_len = e.path_len;
 			seen[nseen].pool = kv->key;
 			nseen++;
 		}
@@ -351,9 +451,22 @@ static int fpm_http_validate_routes(struct fpm_worker_pool_s *wp)
 	return rc;
 }
 
-/* Sorts the table longest prefix first, so that the lookup is "the first row
- * that covers this path" and nothing at request time has to compare lengths.
- * An insertion sort over a table an operator wrote by hand. */
+/* Issue #658: the rank of two rows. A host-bound row ranks before a row bound
+ * to no host, whatever the prefix lengths: "a.example/" is the site of
+ * a.example, and it must win over a shared "/api" for every path of that host
+ * (the way nginx picks a server block by name before a location). Within one
+ * group the longest prefix ranks first. */
+static int fpm_http_route_ranks_before(const struct fpm_http_route_s *a, const struct fpm_http_route_s *b)
+{
+	if ((a->host != NULL) != (b->host != NULL)) {
+		return a->host != NULL;
+	}
+	return a->prefix_len > b->prefix_len;
+}
+
+/* Sorts the table so that the lookup is "the first row that covers this path"
+ * and nothing at request time has to compare ranks. An insertion sort over a
+ * table an operator wrote by hand. */
 static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 {
 	unsigned i, j;
@@ -361,7 +474,7 @@ static void fpm_http_routes_sort(struct fpm_http_gateway_s *gw)
 	for (i = 1; i < gw->nroutes; i++) {
 		struct fpm_http_route_s row = gw->routes[i];
 
-		for (j = i; j > 0 && gw->routes[j - 1].prefix_len < row.prefix_len; j--) {
+		for (j = i; j > 0 && fpm_http_route_ranks_before(&row, &gw->routes[j - 1]); j--) {
 			gw->routes[j] = gw->routes[j - 1];
 		}
 		gw->routes[j] = row;
@@ -463,6 +576,19 @@ static int fpm_http_counters_alloc(struct fpm_http_gateway_s *gw, unsigned ntarg
 	return 0;
 }
 
+/* Issue #659: whether http.route_upgrade[<prefix>] names this path prefix. */
+static int fpm_http_route_upgrade_wanted(struct fpm_worker_pool_s *wp, const char *path, size_t len)
+{
+	struct key_value_s *kv;
+
+	for (kv = wp->config->http_route_upgrade; kv; kv = kv->next) {
+		if (strlen(kv->key) == len && memcmp(kv->key, path, len) == 0) {
+			return 1;
+		}
+	}
+	return 0;
+}
+
 static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_gateway_s *gw, unsigned own_capacity)
 {
 	struct key_value_s *kv;
@@ -470,6 +596,7 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 	int root_claimed = 0;
 
 	gw->has_routes = wp->config->http_routes != NULL;
+	gw->has_host_routes = 0;
 	/* Issue #388: a gateway has no own pool to fall back to, so there is no
 	 * row 0 and at least one route is mandatory. fpm_http_validate_pool()
 	 * already refused the empty case with the operator-facing message; this
@@ -489,8 +616,16 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 
 		nentries++;
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+			struct fpm_http_route_entry_s e;
+
 			nprefixes++;
-			if (prefix_len == 1 && prefix[0] == '/') {
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			if (e.host) {
+				gw->has_host_routes = 1;
+			}
+			/* Issue #658: only a row bound to no host claims "/" for every
+			 * request. "a.example/" leaves the own row in place for other hosts. */
+			if (!e.host && e.path_len == 1 && e.path[0] == '/') {
 				root_claimed = 1;
 				if (!gw->proxy_only) {
 					own = 0; /* an entry claims "/" itself, so there is no row 0 to add */
@@ -550,13 +685,26 @@ static int fpm_http_routes_build(struct fpm_worker_pool_s *wp, struct fpm_http_g
 		}
 		fpm_http_target_watch(&gw->targets[ti], target);
 		while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
-			gw->routes[ri].prefix = strndup(prefix, prefix_len);
+			struct fpm_http_route_entry_s e;
+
+			fpm_http_route_entry_split(prefix, prefix_len, &e);
+			gw->routes[ri].prefix = strndup(e.path, e.path_len);
 			if (!gw->routes[ri].prefix) {
 				zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
 				return -1;
 			}
-			gw->routes[ri].prefix_len = prefix_len;
+			gw->routes[ri].prefix_len = e.path_len;
+			if (e.host) {
+				gw->routes[ri].host = fpm_http_host_dup_lower(e.host, e.host_len);
+				if (!gw->routes[ri].host) {
+					zlog(ZLOG_ERROR, "[pool %s] http: cannot allocate the routing table", gw->pool);
+					return -1;
+				}
+			}
 			gw->routes[ri].target = &gw->targets[ti];
+			/* Issue #659: a row whose prefix is named in http.route_upgrade[] may pass a
+			 * WebSocket Upgrade through. Validation has checked the target type. */
+			gw->routes[ri].upgrade = fpm_http_route_upgrade_wanted(wp, e.path, e.path_len);
 			ri++;
 		}
 		ti++;
@@ -587,6 +735,7 @@ void fpm_http_routes_free(struct fpm_http_gateway_s *gw)
 
 	for (i = 0; i < gw->nroutes; i++) {
 		free(gw->routes[i].prefix);
+		free(gw->routes[i].host);
 	}
 	for (i = 0; i < gw->ntargets; i++) {
 		/* Issue #390: the shared memory is the segment below, not per target --
@@ -872,6 +1021,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 	/* Issue #686: copied as they are; validation refuses a value that cannot apply. */
 	gw->max_connections = wp->config->http_max_connections;
 	gw->max_per_client = wp->config->http_max_connections_per_client;
+	/* Issue #659: the Upgrade relay's bounds, in ms in the config and timevals here. */
+	gw->upgrade_idle.tv_sec = wp->config->http_upgrade_idle_timeout / 1000;
+	gw->upgrade_idle.tv_usec = (wp->config->http_upgrade_idle_timeout % 1000) * 1000;
+	gw->upgrade_max.tv_sec = wp->config->http_upgrade_max_duration / 1000;
+	gw->upgrade_max.tv_usec = (wp->config->http_upgrade_max_duration % 1000) * 1000;
 
 	gw->wait_policy = wp->config->http_pool_full_policy;
 	gw->wait_queue_max = wp->config->http_pool_full_queue_max;
@@ -908,6 +1062,11 @@ static void fpm_http_gateway_settings(struct fpm_worker_pool_s *wp, struct fpm_h
 
 	if (wp->config->http_trusted_proxies && *wp->config->http_trusted_proxies) {
 		gw->trusted_proxies = strdup(wp->config->http_trusted_proxies);
+	}
+	/* Issue #651: parsed in the gateway child, see fpm_http_gateway_run(). */
+	gw->proxy_protocol = wp->config->http_proxy_protocol;
+	if (wp->config->http_proxy_protocol_trusted && *wp->config->http_proxy_protocol_trusted) {
+		gw->proxy_trusted = strdup(wp->config->http_proxy_protocol_trusted);
 	}
 	gw->request_id_mode = wp->config->http_request_id; /* issue #642 */
 	gw->access_format = wp->config->http_access_format; /* issue #642 */
@@ -1133,6 +1292,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
 			free(gw->plain_listen_address);
@@ -1153,6 +1313,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->pool);
@@ -1166,6 +1327,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_operator_free(gw); /* issue #389 */
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1182,6 +1344,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1202,6 +1365,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1251,6 +1415,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1270,6 +1435,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 				free(gw->allowed_clients);
 				fpm_http_acl_free(gw->trusted_proxies_acl);
 				free(gw->trusted_proxies);
+				free(gw->proxy_trusted);
 				free(gw->front_controller);
 				free(gw->access_log_path);
 				free(gw->http_listen_override);
@@ -1300,6 +1466,7 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1313,18 +1480,45 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 		/* Issue #736: docroot warning, once in the master, after the routing
 		 * table is built so the presence of a FastCGI target is known. */
 		fpm_http_warn_missing_docroot(wp, gw);
-		/* Issue #389: the http.operator forwarding map, built once here in the
-		 * master from every pool's operator routes and inherited by every
-		 * gateway process through fork(). A reload rebuilds it like every
-		 * other http.* setting. */
-		if (fpm_http_operator_build(wp, gw) != 0) {
-			fpm_http_operator_free(gw);
+		/* Issue #649: copied after the failure points above, so the failure
+		 * block below frees it. A failed copy fails the pool, like the
+		 * operator build: a gateway that serves without the directive would
+		 * hand the client the worker's redirect header instead of the file. */
+		if (wp->config->http_sendfile_root) {
+			gw->sendfile_root = strdup(wp->config->http_sendfile_root);
+			if (!gw->sendfile_root) {
+				zlog(ZLOG_ERROR, "[pool %s] http: cannot copy http.sendfile_root (out of memory)", wp->config->name);
+				fpm_http_routes_free(gw);
+				fpm_http_operator_free(gw); /* issue #389 */
+				close(gw->listen_fd);
+				fpm_http_acl_free(gw->acl);
+				free(gw->allowed_clients);
+				fpm_http_acl_free(gw->trusted_proxies_acl);
+				free(gw->trusted_proxies);
+				free(gw->front_controller);
+				free(gw->access_log_path);
+				free(gw->http_listen_override);
+				free(gw->plain_listen_address);
+				free(gw->pool);
+				free(gw->listen_address);
+				free(gw->docroot);
+				free(gw);
+				return -1;
+			}
+		}
+		/* Issue #650: the response headers and the error pages. The page files
+		 * are read here, in the master, so a gateway process never opens one.
+		 * -t read them already (fpm_http_validate_pool()); a file that changed
+		 * since fails this start, and a reload with it is refused. */
+		if (fpm_http_reply_policy_build(wp, &gw->reply) != 0) {
 			fpm_http_routes_free(gw);
+			fpm_http_operator_free(gw);
 			close(gw->listen_fd);
 			fpm_http_acl_free(gw->acl);
 			free(gw->allowed_clients);
 			fpm_http_acl_free(gw->trusted_proxies_acl);
 			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
 			free(gw->front_controller);
 			free(gw->access_log_path);
 			free(gw->http_listen_override);
@@ -1332,6 +1526,32 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 			free(gw->pool);
 			free(gw->listen_address);
 			free(gw->docroot);
+			free(gw->sendfile_root);
+			free(gw);
+			return -1;
+		}
+		/* Issue #389: the http.operator forwarding map, built once here in the
+		 * master from every pool's operator routes and inherited by every
+		 * gateway process through fork(). A reload rebuilds it like every
+		 * other http.* setting. */
+		if (fpm_http_operator_build(wp, gw) != 0) {
+			fpm_http_reply_policy_free(&gw->reply);
+			fpm_http_operator_free(gw);
+			fpm_http_routes_free(gw);
+			close(gw->listen_fd);
+			fpm_http_acl_free(gw->acl);
+			free(gw->allowed_clients);
+			fpm_http_acl_free(gw->trusted_proxies_acl);
+			free(gw->trusted_proxies);
+			free(gw->proxy_trusted);
+			free(gw->front_controller);
+			free(gw->access_log_path);
+			free(gw->http_listen_override);
+			free(gw->plain_listen_address);
+			free(gw->pool);
+			free(gw->listen_address);
+			free(gw->docroot);
+			free(gw->sendfile_root);
 			free(gw);
 			return -1;
 		}
@@ -1354,12 +1574,14 @@ static int fpm_http_init_pool_ex(struct fpm_worker_pool_s *wp, unsigned capacity
 					gw->acl ? ", access-restricted" : "", capacity);
 		}
 		if (wp->config->http_routes) {
-			/* Printed in lookup order, longest prefix first, because that is
-			 * the order a request is matched in and the only way to read the
-			 * table is to read it the way the gateway does. */
+			/* Printed in lookup order, because that is the order a request is
+			 * matched in and the only way to read the table is to read it the
+			 * way the gateway does. A host-bound row prints as "<host><prefix>",
+			 * the form the entry has in the configuration (issue #658). */
 			for (i = 0; i < gw->nroutes; i++) {
-				zlog(ZLOG_NOTICE, "[pool %s] http.route: '%s' -> pool %s (%u persistent connection(s))",
-						wp->config->name, gw->routes[i].prefix, gw->routes[i].target->pool,
+				zlog(ZLOG_NOTICE, "[pool %s] http.route: '%s%s' -> pool %s (%u persistent connection(s))",
+						wp->config->name, gw->routes[i].host ? gw->routes[i].host : "",
+						gw->routes[i].prefix, gw->routes[i].target->pool,
 						gw->routes[i].target->max_upstreams);
 			}
 		}
@@ -1497,6 +1719,19 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		return -1;
 	}
 
+	if (fpm_http_sendfile_validate(wp->config->name, wp->config->http_sendfile_root) < 0) {
+		return -1;
+	}
+	/* Issue #650: -t reads the error page files, so a missing, oversize or
+	 * unknown-type page is a refusal here and not a start that fails later. */
+	{
+		struct fpm_http_reply_policy_s reply;
+
+		if (fpm_http_reply_policy_build(wp, &reply) < 0) {
+			return -1;
+		}
+		fpm_http_reply_policy_free(&reply);
+	}
 	if (fpm_conf_directive_was_set(wp->config, "http.gateways") && wp->config->http_gateways < 1) {
 		zlog(ZLOG_ERROR, "[pool %s] http.gateways must be at least 1", wp->config->name);
 		return -1;
@@ -1532,6 +1767,16 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 		zlog(ZLOG_ERROR, "[pool %s] http.upstream_read_timeout must not be negative", wp->config->name);
 		return -1;
 	}
+	/* Issue #659: a zero or negative bound would end every upgraded connection at once,
+	 * or never end it, so both are refused. */
+	if (wp->config->http_upgrade_idle_timeout <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upgrade_idle_timeout must be greater than zero", wp->config->name);
+		return -1;
+	}
+	if (wp->config->http_upgrade_max_duration <= 0) {
+		zlog(ZLOG_ERROR, "[pool %s] http.upgrade_max_duration must be greater than zero", wp->config->name);
+		return -1;
+	}
 	/* Issue #686: the same bounds and the same pairing rule as http-direct
 	 * (fpm_http_direct_request.c). Both limits are per gateway process. */
 	if (wp->config->http_max_connections < 0 || wp->config->http_max_connections > 1000000 ||
@@ -1562,6 +1807,9 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 	 * startup refusal (and a `-t` failure) rather than a 502 per request on a
 	 * prefix the operator believes is configured. */
 	if (fpm_http_validate_routes(wp) != 0) {
+		return -1;
+	}
+	if (fpm_http_validate_upgrade_routes(wp) != 0) {
 		return -1;
 	}
 	/* Issue #389: http.operator. With both base paths empty there is nothing to
@@ -1618,9 +1866,13 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			size_t prefix_len;
 
 			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
+				struct fpm_http_route_entry_s e;
 				const char *collide = NULL;
 				size_t base_len;
 
+				/* Issue #658: the operator namespace is matched for every Host,
+				 * so a host-bound entry under a base is refused as well. */
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
 				/* At or UNDER the base: "operator paths are checked before
 				 * http.route[]", so /metrics/app is answered by the map (or a
 				 * local 404), never by a route. Segment-aware, exactly like
@@ -1628,18 +1880,18 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 				 * prefix and is not shadowed. */
 				if (mbase) {
 					base_len = strlen(mbase);
-					if (prefix_len >= base_len && !memcmp(prefix, mbase, base_len) && (prefix_len == base_len || prefix[base_len] == '/')) {
+					if (e.path_len >= base_len && !memcmp(e.path, mbase, base_len) && (e.path_len == base_len || e.path[base_len] == '/')) {
 						collide = mbase;
 					}
 				}
 				if (!collide && sbase) {
 					base_len = strlen(sbase);
-					if (prefix_len >= base_len && !memcmp(prefix, sbase, base_len) && (prefix_len == base_len || prefix[base_len] == '/')) {
+					if (e.path_len >= base_len && !memcmp(e.path, sbase, base_len) && (e.path_len == base_len || e.path[base_len] == '/')) {
 						collide = sbase;
 					}
 				}
 				if (collide) {
-					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: path prefix '%.*s' falls in the operator "
+					zlog(ZLOG_ERROR, "[pool %s] http.route[%s]: entry '%.*s' falls in the operator "
 									 "namespace of base path '%s'; with http.operator = yes the gateway answers "
 									 "<base>/<pool> there before routing, so a route cannot claim it (issue #389)",
 							wp->config->name, kv->key, (int) prefix_len, prefix, collide);
@@ -1674,7 +1926,10 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			size_t prefix_len;
 
 			while (fpm_http_route_next_prefix(&cursor, &prefix, &prefix_len)) {
-				if (prefix_len == 1 && prefix[0] == '/') {
+				struct fpm_http_route_entry_s e;
+
+				fpm_http_route_entry_split(prefix, prefix_len, &e);
+				if (!e.host && e.path_len == 1 && e.path[0] == '/') {
 					root_claimed = 1;
 					break;
 				}
@@ -1726,6 +1981,25 @@ int fpm_http_validate_pool(struct fpm_worker_pool_s *wp) /* {{{ */
 			return -1; /* fpm_http_acl_parse() already logged which address is bad */
 		}
 		fpm_http_acl_free(tmp);
+	}
+	if (wp->config->http_proxy_protocol) {
+		/* Issue #651. An empty list would make fpm_http_acl_check() allow every
+		 * source, so it is refused here, not read as "no restriction". */
+		struct fpm_http_acl_s *tmp = NULL;
+
+		if (!wp->config->http_proxy_protocol_trusted || !*wp->config->http_proxy_protocol_trusted) {
+			zlog(ZLOG_ERROR, "[pool %s] http.proxy_protocol requires a non-empty http.proxy_protocol_trusted", wp->config->name);
+			return -1;
+		}
+		if (fpm_http_acl_parse(wp->config->name, "http.proxy_protocol_trusted", wp->config->http_proxy_protocol_trusted, &tmp) != 0) {
+			return -1; /* fpm_http_acl_parse() already logged which address is bad */
+		}
+		fpm_http_acl_free(tmp);
+		if (wp->config->http_read_timeout <= 0) {
+			/* the header read is bounded by the client read deadline (issue #593) */
+			zlog(ZLOG_ERROR, "[pool %s] http.proxy_protocol requires http.read_timeout > 0", wp->config->name);
+			return -1;
+		}
 	}
 	if (wp->config->http_front_controller && *wp->config->http_front_controller) {
 		const char *fc = wp->config->http_front_controller;

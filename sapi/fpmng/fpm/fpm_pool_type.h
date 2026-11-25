@@ -179,6 +179,12 @@ struct fpm_pool_type_s {
 	 * a type that could never be a target. */
 	unsigned serves_fastcgi:1;
 	unsigned serves_http11:1;
+	/* Issue #659: the type answers a WebSocket upgrade with 101 and then speaks
+	 * the protocol itself. Set only on the worker variant of http-direct
+	 * (fpm_http_direct_worker.c, fpmng_worker_upgrade()); a classic http-direct
+	 * pool has no way to hand the connection over, so `http.route_upgrade` refuses
+	 * it at configuration time. */
+	unsigned serves_websocket:1;
 
 	/* This type, in its OWN child, reads another pool's FOREIGN scoreboard
 	 * (the operator endpoint: idle/active/requests of the serves_requests = 1

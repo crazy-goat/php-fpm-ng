@@ -19,6 +19,9 @@
 #include <sys/types.h>
 #include <event2/http.h>
 
+struct key_value_s;
+struct fpm_http_error_page_s;
+
 struct fpm_http_static {
 	const char *pool; /* for zlog() only */
 	/* Already resolved with realpath(), by whoever owns it: a direct pool
@@ -37,6 +40,16 @@ struct fpm_http_static {
 	 * leaves it 0 and keeps serving unknown extensions as
 	 * application/octet-stream, which is what it has always done. */
 	int known_types_only;
+	/* Options of http-direct static files (issue #648). The gateway leaves them
+	 * zero, which is off, and the direct pool sets them from its
+	 * http.static.* directives. */
+	int ranges; /* single byte range, 206 and 416, Accept-Ranges */
+	int precompressed; /* serve a .br or .gz sidecar the client accepts */
+	const struct key_value_s *cache_control; /* Cache-Control by path prefix */
+	/* The body of the 404 for a refused path (issue #650). Only the gateway sets
+	 * it, from http.error_page[404]; http-direct leaves it NULL and keeps the
+	 * plain "Not Found" body. */
+	const struct fpm_http_error_page_s *not_found_page;
 	/* Called just before each reply this module sends, or not at all. */
 	void (*log)(void *ctx, int status, size_t bytes);
 	void *log_ctx;
@@ -59,6 +72,18 @@ int fpm_http_static_serve(const struct fpm_http_static *st, struct evhttp_reques
  * request has no usable path -- which the caller must treat as "not mine",
  * leaving PHP to produce the error. */
 char *fpm_http_static_decode_path(struct evhttp_request *req, size_t *len);
+
+/* The containment and file checks of this module, exported for
+ * fpm_http_sendfile.c (issue #649): a file named by an upstream header goes
+ * through the same tests as a file named by the request, and a second copy of
+ * them would be a second place to get them wrong. */
+
+/* 1 when `resolved` (a realpath() result) is `root` or lies below it. `root`
+ * is a realpath() result too, with `root_len` bytes. */
+int fpm_http_static_contained(const char *resolved, const char *root, size_t root_len);
+
+/* 1 when any path segment of `path` starts with a dot. */
+int fpm_http_static_path_has_dotfile(const char *path);
 
 /* The extension-to-MIME table this module serves with; exposed because the
  * gateway names it in its own responses too. Never NULL: unknown extensions

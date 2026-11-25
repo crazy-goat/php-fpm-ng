@@ -19,6 +19,7 @@
 #include "fpm_conf.h"
 #include "fpm_worker_pool.h"
 #include "fpm_http_direct_access_log.h"
+#include "fpm_http_access_log.h"
 #include "zlog.h"
 
 /* One line is built whole and written with one write(), which is what makes it
@@ -26,7 +27,9 @@
  * is a fixed size: request_uri and query_string are already bounded by the
  * scoreboard's 512/2048 (fpm_scoreboard.h), a header value by
  * FPM_HTTP_HEADERS_MAX for the whole block, so 8 KiB leaves room for a format
- * that prints several of them. A line that still does not fit is truncated
+ * that prints several of them. Those are raw sizes: the escape of a field
+ * (fpm_http_direct_access_puts_escaped) can take two bytes for each one, so a
+ * field can be twice as long on the line (issue #1003). A line that still does not fit is truncated
  * rather than split: half a line in the middle of the file is worse than a
  * short one, and the alternative -- a heap allocation per request -- buys
  * nothing for a case no real format reaches. */
@@ -45,7 +48,6 @@ struct fpm_http_direct_access_log_s {
 struct fpm_http_direct_access_buf {
 	char data[FPM_HTTP_DIRECT_ACCESS_LINE_MAX];
 	size_t len;
-	int truncated;
 };
 
 static void fpm_http_direct_access_puts(struct fpm_http_direct_access_buf *b, const char *s)
@@ -58,7 +60,6 @@ static void fpm_http_direct_access_puts(struct fpm_http_direct_access_buf *b, co
 	len = strlen(s);
 	if (b->len + len >= sizeof(b->data)) {
 		len = sizeof(b->data) - 1 - b->len;
-		b->truncated = 1;
 	}
 	memcpy(b->data + b->len, s, len);
 	b->len += len;
@@ -67,7 +68,6 @@ static void fpm_http_direct_access_puts(struct fpm_http_direct_access_buf *b, co
 static void fpm_http_direct_access_putc(struct fpm_http_direct_access_buf *b, char c)
 {
 	if (b->len + 1 >= sizeof(b->data)) {
-		b->truncated = 1;
 		return;
 	}
 	b->data[b->len++] = c;
@@ -79,7 +79,6 @@ static void fpm_http_direct_access_printf(struct fpm_http_direct_access_buf *b, 
 	int n;
 
 	if (b->len >= sizeof(b->data) - 1) {
-		b->truncated = 1;
 		return;
 	}
 	va_start(ap, fmt);
@@ -90,7 +89,6 @@ static void fpm_http_direct_access_printf(struct fpm_http_direct_access_buf *b, 
 	}
 	if ((size_t) n >= sizeof(b->data) - b->len) {
 		b->len = sizeof(b->data) - 1;
-		b->truncated = 1;
 	} else {
 		b->len += (size_t) n;
 	}
@@ -102,6 +100,28 @@ static void fpm_http_direct_access_printf(struct fpm_http_direct_access_buf *b, 
 static const char *fpm_http_direct_access_or_dash(const char *value)
 {
 	return value && *value ? value : "-";
+}
+
+/* Client-controlled text (%u %r %q %e %o %f %m %R) goes through the gateway's
+ * byte rule, not raw (issue #1003). The Basic auth user keeps the decoded bytes
+ * of the Authorization header, so a raw LF in it writes a second, forged line;
+ * a quote or a bare CR in %r spoofs the fields around it. The rule keeps a
+ * space, which a User-Agent or a Content-Type needs. It is applied one byte at
+ * a time, and an escape is written whole or not at all, so a truncated line
+ * never ends halfway through one. */
+static void fpm_http_direct_access_puts_escaped(struct fpm_http_direct_access_buf *b, const char *s)
+{
+	char pair[2];
+
+	for (; s && *s; s++) {
+		size_t n = fpm_http_access_log_escape_byte((unsigned char) *s, pair);
+
+		if (b->len + n >= sizeof(b->data)) {
+			return;
+		}
+		memcpy(b->data + b->len, pair, n);
+		b->len += n;
+	}
 }
 
 static void fpm_http_direct_access_time(struct fpm_http_direct_access_buf *b, time_t when, const char *fmt)
@@ -214,17 +234,17 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 				break;
 			}
 			case 'e':
-				fpm_http_direct_access_puts(b,
+				fpm_http_direct_access_puts_escaped(b,
 						fpm_http_direct_access_or_dash(fpm_http_direct_access_env(e->env, modifier)));
 				break;
 			case 'f':
-				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(e->script_filename));
+				fpm_http_direct_access_puts_escaped(b, fpm_http_direct_access_or_dash(e->script_filename));
 				break;
 			case 'l':
 				fpm_http_direct_access_printf(b, "%zu", e->content_length);
 				break;
 			case 'm':
-				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(e->method));
+				fpm_http_direct_access_puts_escaped(b, fpm_http_direct_access_or_dash(e->method));
 				break;
 			case 'M':
 				if (!modifier[0] || !strcasecmp(modifier, "bytes")) {
@@ -238,10 +258,12 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 			case 'n':
 				fpm_http_direct_access_puts(b, log->pool);
 				break;
-			case 'o':
-				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(
-													   fpm_http_direct_access_out_header(e->http, modifier)));
+			case 'o': {
+				const char *value = fpm_http_direct_access_out_header(e->http, modifier);
+
+				fpm_http_direct_access_puts_escaped(b, fpm_http_direct_access_or_dash(value));
 				break;
+			}
 			case 'p':
 				fpm_http_direct_access_printf(b, "%ld", (long) getpid());
 				break;
@@ -249,16 +271,16 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 				fpm_http_direct_access_printf(b, "%ld", (long) getppid());
 				break;
 			case 'q':
-				fpm_http_direct_access_puts(b, e->query_string ? e->query_string : "");
+				fpm_http_direct_access_puts_escaped(b, e->query_string ? e->query_string : "");
 				break;
 			case 'Q':
 				fpm_http_direct_access_puts(b, e->query_string && *e->query_string ? "?" : "");
 				break;
 			case 'r':
-				fpm_http_direct_access_puts(b, e->uri ? e->uri : "");
+				fpm_http_direct_access_puts_escaped(b, e->uri ? e->uri : "");
 				break;
 			case 'R':
-				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(e->remote_addr));
+				fpm_http_direct_access_puts_escaped(b, fpm_http_direct_access_or_dash(e->remote_addr));
 				break;
 			case 's':
 				fpm_http_direct_access_printf(b, "%d", e->status);
@@ -270,7 +292,7 @@ static void fpm_http_direct_access_render(struct fpm_http_direct_access_log_s *l
 				fpm_http_direct_access_time(b, time(NULL), modifier);
 				break;
 			case 'u':
-				fpm_http_direct_access_puts(b, fpm_http_direct_access_or_dash(e->remote_user));
+				fpm_http_direct_access_puts_escaped(b, fpm_http_direct_access_or_dash(e->remote_user));
 				break;
 			default:
 				/* Unreachable: fpm_conf.c refused to start with anything
@@ -368,15 +390,15 @@ void fpm_http_direct_access_log_write(struct fpm_http_direct_access_log_s *log,
 	}
 
 	b.len = 0;
-	b.truncated = 0;
 	fpm_http_direct_access_render(log, entry, &b);
-	fpm_http_direct_access_putc(&b, '\n');
-	/* The newline is the one byte that must survive truncation: without it two
-	 * truncated lines merge into one and every line after them is misparsed. */
-	if (b.truncated) {
-		b.data[sizeof(b.data) - 2] = '\n';
-		b.len = sizeof(b.data) - 1;
-	}
+	/* Every writer stops at sizeof(b.data) - 1, so the slot after the content
+	 * always exists, and the newline goes there even on a truncated line. The
+	 * newline is the one byte that must survive truncation: without it two
+	 * truncated lines merge into one and every line after them is misparsed.
+	 * It must also not overwrite the content: the cut falls between whole
+	 * units, so an escape is never split. Writing over the last byte instead
+	 * left a lone backslash before the newline (issue #1003). */
+	b.data[b.len++] = '\n';
 
 	do {
 		written = write(log->fd, b.data, b.len);

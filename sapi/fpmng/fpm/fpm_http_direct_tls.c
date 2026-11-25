@@ -94,6 +94,13 @@ void fpm_http_direct_tls_notify_written(struct bufferevent *bev)
 	(void) bev;
 }
 
+size_t fpm_http_direct_tls_pull_pending(struct bufferevent *bev, struct evbuffer *input)
+{
+	(void) bev;
+	(void) input;
+	return 0;
+}
+
 int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_events)
 {
 	(void) bev;

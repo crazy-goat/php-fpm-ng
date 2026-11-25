@@ -59,6 +59,7 @@
 #include <event2/event.h>
 #include <event2/http.h>
 
+#include "fpm_http_error.h"
 #include "fpm_http_internal.h"
 #include "zlog.h"
 
@@ -69,16 +70,18 @@
 static void fpm_http_upstream_timeout_reply(fpm_http_conn *c)
 {
 	struct evhttp_request *req = c->req;
+	size_t bytes;
 
 	c->status = FPM_HTTP_GATEWAY_TIMEOUT;
+	bytes = fpm_http_error_prepare(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
 	fpm_http_log_response(c->gw, req,
 			c->remote_addr[0] ? c->remote_addr : c->peer_addr,
-			c->remote_user, c->status, c->bytes_out,
+			c->remote_user, c->status, bytes,
 			c->log_target ? c->log_target : c->target->pool);
 	fpm_http_conn_free(c);
 	/* Sent last, on the local `req`: the send may end the request, so nothing
 	 * after it may read c (see fpm_http_finish()). */
-	evhttp_send_error(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
+	fpm_http_error_send(req, FPM_HTTP_GATEWAY_TIMEOUT, "Gateway Timeout");
 }
 
 static void fpm_http_upstream_deadline_fire(evutil_socket_t fd, short what, void *arg)

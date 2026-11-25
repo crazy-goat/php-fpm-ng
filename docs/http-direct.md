@@ -55,8 +55,9 @@ The script is resolved inside `chdir`; client paths never select a script.
 `SCRIPT_NAME` and `PHP_SELF` identify the configured front controller;
 `REQUEST_URI` retains the raw URI, `QUERY_STRING` carries the query, and
 `PATH_INFO` carries the parsed URL path. Headers map to `HTTP_*` (except Proxy,
-which is not imported as `HTTP_PROXY`, and any header whose name contains `_`, which would collide with its `-` spelling: `X_Real_IP` must not override `X-Real-IP`); content type/length have CGI-compatible
+which is not imported as `HTTP_PROXY`, and any header whose name contains a character other than a letter, a digit or `-`: `_` would collide with its `-` spelling (`X_Real_IP` must not override `X-Real-IP`), and `.`, a space or `[` would be rewritten by PHP into a key of another header (`X.Real.IP` overwrote `HTTP_X_REAL_IP`, `X-Forwarded-For[]` made it an array; issue #1002)); content type/length have CGI-compatible
 names. `getallheaders()` and `apache_request_headers()` read HTTP headers directly.
+They omit every header whose name has a character outside letters, digits and `-`, the same names `$_SERVER` drops (issue #628, extended to `.`, space and `[` in issue #1002).
 A header name longer than 1024 bytes cannot become an `HTTP_*` key and the
 request is refused with 400 rather than served with the header missing.
 
@@ -190,8 +191,8 @@ above come from one sitting on one toolchain for that reason.
   [Operating a direct pool](#operating-a-direct-pool).
 - Only `http.front_controller`, `http.max_body`, `http.read_timeout`, the
   `http.tls_*` group and — on `pool.executor = classic` only — `http.stream`,
-  `http.stream_write_timeout`, `http.static`, `http.max_connections` and
-  `http.max_connections_per_client` from the gateway's `http.*`
+  `http.stream_write_timeout`, `http.static` with its `http.static.*` options,
+  `http.max_connections` and `http.max_connections_per_client` from the gateway's `http.*`
   directives are accepted. Other
   gateway options are rejected, even if explicitly set to an otherwise harmless
   default. `listen` is the HTTP endpoint; `http.listen` does not apply.
@@ -249,12 +250,13 @@ above come from one sitting on one toolchain for that reason.
   [Connection limits](#connection-limits-httpmax_connections) — but that is a
   connection count, still not a memory bound.
 - `http.read_timeout` must be positive. It is libevent's **inactivity** timeout
-  for reads/writes, plus — since issue #61 — an absolute deadline on the
-  **first** request of a connection, see
-  [Connection limits](#connection-limits-httpmax_connections). A trickling
-  client can still evade the inactivity timer on the second and later requests
-  of a keep-alive connection. PHP execution blocks this worker's event loop,
-  including its timers.
+  for reads/writes, plus — since issue #61 — an absolute deadline on each
+  request, see [Connection limits](#connection-limits-httpmax_connections).
+  Since issue #1004 this covers every request on a `pool.executor = classic`
+  connection. On `pool.executor = worker`, only the first request has the
+  deadline, so a trickling client can still evade the inactivity timer on a
+  later request. PHP execution blocks this worker's event loop, including its
+  timers.
 - A worker can hold many HTTP connections but execute only one PHP request at a
   time. The shared listener can batch accepts unevenly, and keep-alive connections
   remain attached to their accepting worker. There is no gateway queue that can
@@ -779,10 +781,26 @@ Semantics worth knowing:
   EOF. `feof()` becomes true only when the peer (or the worker) actually
   closed. Read until `fread()` comes up short, the same rule every stream on
   this executor obeys.
-- **Backpressure is #332's contract**: `fwrite()` returns `0` once the
+- **Output backpressure is #332's contract**: `fwrite()` returns `0` once the
   connection's queued-but-unwritten output reaches
   `worker.send_buffer_limit`, and the write watcher wakes the codec when it
-  drains. There is no WebSocket-specific backpressure.
+  drains.
+- **Input is bounded at 64 KiB per connection** (issue #974). This limit is
+  fixed. It is not a directive. The worker keeps at most 64 KiB of unread
+  input for each upgraded connection. At this bound the worker stops reading
+  the socket, and the peer sees TCP backpressure. Reading resumes when `fread()`
+  drains the buffer below the bound, on plaintext and on TLS.
+  On TLS, the buffer can exceed the bound by libevent's read slack (the space
+  that `evbuffer_reserve_space()` returns beyond the requested length,
+  `bufferevent_openssl.c:597-608`) plus at most one TLS record (16 KiB). No
+  maximum is measured. The TLS test `fpmng-http-direct-worker-ws-input-tls.phpt`
+  checks that every byte arrives. It does not check the bound.
+  A frame larger than 64 KiB is not an error. But the buffer never holds the
+  whole frame at once, so the codec must keep the partial frame in PHP memory
+  between `fread()` calls. The socket does not signal the bytes that are
+  already in the buffer, so the codec must read until `fread()` returns `''`.
+  The cost is at most 64 KiB for each open WebSocket, plus the TLS overshoot described above.
+  This cost is not measured under load.
 - **The hijacked connection is not a pending request**: `worker.max_pending`
   and `worker.request_timeout` do not bound it; it counts towards
   `pm.max_requests` like any answered request. `http.read_timeout` no longer
@@ -820,7 +838,7 @@ meant to be one — a shared counter would need shared memory on the accept path
 and a child is what owns the fds.
 
 ```ini
-http.read_timeout = 5000              ; ms — also the first-request deadline
+http.read_timeout = 5000              ; ms — also the deadline for each request
 http.max_connections = 64             ; per worker, 0 = unlimited (default)
 http.max_connections_per_client = 8   ; per peer address, per worker, 0 = unlimited
 ```
@@ -832,7 +850,7 @@ The last one is not tidiness: the per-client count is a walk of the connections
 this worker already holds, done once per accepted connection, so without a total
 cap the accept path would grow with the flood the directive exists to survive.
 
-### The first-request deadline
+### The request deadline
 
 `http.read_timeout` is documented as one budget for the whole client-side read.
 On the http gateway it is exactly that; on a direct pool it used to be only
@@ -847,11 +865,23 @@ Measured on the poligon, 2026-09-11, against a direct pool with
 | sends one byte of the request line every 2 s | held the connection **56 s**, then was served normally |
 
 So only the trickle was unbounded — which is the shape of slowloris. Since
-issue #61 a connection whose **first** request has not fully arrived within
-`http.read_timeout` is closed, whatever it has been dripping. The deadline is
-armed on accept and disarmed the moment the first request is complete; libevent
-2.1.12 offers no request-start hook, so later requests on the same keep-alive
-connection are covered by the idle timeout only. The first time a child actually drops a
+issue #61 a connection whose **request** has not fully arrived within
+`http.read_timeout` is closed, whatever it has been dripping.
+
+On `pool.executor = classic`, every request on a keep-alive connection has its
+own budget, which the following rules define:
+
+- The budget starts at the first byte of the request. The idle time before it
+  does not count.
+- The end of any response starts the watch for the next request. This includes
+  a `ping.path` reply and an error reply.
+- A request is served even when its idle time and its transfer are longer
+  together than `http.read_timeout`, if the transfer alone is shorter.
+
+libevent offers no request-start hook, so the first byte is found by a one-shot
+read watcher, as the gateway does. On `pool.executor = worker`, only the first
+request on a connection has a budget. Later requests are covered by the idle
+timeout only. This gap is open. The first time a child actually drops a
 connection this way it says so once, at `NOTICE`; there is no line while nothing
 is being dropped, and the line needs `catch_workers_output = yes` to reach the
 error log at all (issue #73). `http.max_connections_per_client` announces itself
@@ -1121,7 +1151,7 @@ that never asked for a file server must not get one on upgrade.
 |---|---|
 | Methods | `GET` and `HEAD`. Everything else goes to PHP. |
 | Files | Regular files with an extension the built-in table has a type for. |
-| Headers | `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`. |
+| Headers | `Content-Type`, `Content-Length`, `ETag`, `Last-Modified`. The options below add `Accept-Ranges`, `Content-Range`, `Content-Encoding`, `Vary` and `Cache-Control`. |
 | Conditional | `If-None-Match` and `If-Modified-Since` (exact IMF-fixdate match) answer `304`. |
 | Delivery | `evbuffer_add_file()`, i.e. `sendfile()`/`mmap` where the platform has it: the bytes never pass through the process. |
 
@@ -1158,14 +1188,95 @@ must not make a URL disappear. `/.env.css` would have been served, so it is
 refused. Either way no file whose path contains a dot-segment ever leaves the
 static path.
 
+### Options: ranges, sidecars and Cache-Control (issue #648)
+
+Three directives add to the file server. Each is off by default, and each needs
+`http.static = yes`. An `http.static.*` directive on a pool without
+`http.static = yes` stops the pool at startup.
+
+```ini
+[app]
+pool.type = http-direct
+chdir = /srv/app/public
+http.front_controller = /index.php
+http.static = yes
+http.static.ranges = yes
+http.static.precompressed = yes
+http.static.cache_control["/assets/"] = "public, max-age=3600"
+```
+
+#### `http.static.ranges`
+
+Set `http.static.ranges = yes` to answer single-range requests. The reply then
+carries `Accept-Ranges: bytes`. The server answers `bytes=a-b`, `bytes=a-` and
+`bytes=-n` with `206`. It answers a range that no byte of the file matches with
+`416`.
+
+- Only `GET` takes a range. `HEAD` ignores `Range`.
+- A request with two or more ranges is ignored. A malformed range, or a range
+  whose end is below its start, is ignored too. The reply is `200` with the
+  whole file.
+- A range end past the file is cut to the last byte.
+- A suffix of `0` bytes is unsatisfiable. Every range of an empty file is
+  unsatisfiable.
+- The `416` reply has `Content-Range: bytes */<size>` and no body.
+- A `Range` is ignored when `If-Range` does not match. A `304` takes precedence
+  over `Range`.
+
+#### `http.static.precompressed`
+
+Set `http.static.precompressed = yes` to send a precompressed file. When the
+client accepts `br`, the server sends `<file>.br`. Otherwise, when the client
+accepts `gzip`, it sends `<file>.gz`. The file must exist beside the original.
+
+- A coding is accepted only when its `q` value is not `0`. `*` does not select a
+  coding.
+- The sidecar passes the same containment check as the original. A sidecar that
+  resolves outside the document root is not served. The original is served
+  instead, without a coding.
+- A sidecar without an original is not served. The request goes on as it would
+  with the option off.
+- The server does not compare the sidecar with the original. A stale sidecar is
+  sent as it is. Rebuild or delete the sidecars each time the originals change.
+- `Content-Type` is the type of the original file, not of `.br` or `.gz`.
+- `Content-Encoding` names the coding. The `ETag` has the coding as a suffix,
+  for example `"6a1f2b3c-7-br"`, so each representation has its own `ETag`.
+- Every static reply carries `Vary: Accept-Encoding`, including the reply
+  without a coding and the `304`.
+
+#### `http.static.cache_control[<prefix>]`
+
+Set `http.static.cache_control["<prefix>"] = "<value>"` to send a
+`Cache-Control` header for each static file whose path starts with `<prefix>`.
+The prefix must start with `/`. An empty value is refused at startup. A prefix
+given twice is refused at startup.
+
+- The longest matching prefix wins. `/assets/vendor/` overrides `/assets/` for
+  the files under it.
+- The match is a plain string prefix. `/assets` also matches `/assets-old/`.
+  Write the trailing `/` for a directory.
+- Quote the value. An unquoted ini value cannot contain `=`, so
+  `max-age=3600` must be in quotes.
+- The header is sent on `200`, `206`, `304` and `416` replies, and on `HEAD`.
+  A file that no prefix matches gets no `Cache-Control`.
+
+#### Ranges and sidecars together
+
+With `http.static.precompressed = yes`, a `Range` applies to the bytes of the
+sidecar that is sent, not to the original. `Content-Range` names the sidecar
+size. A range offset counts coded bytes, so a client that asks for a range must
+send the same `Accept-Encoding` again to get the same bytes.
+
 ### What it deliberately does not do
 
-- **No compression.** No gzip, no brotli, no `Accept-Encoding` negotiation.
-- **No range requests.** No `Accept-Ranges`, no `206`; a `Range` header is
-  ignored and the whole file is sent.
-- **No cache policy.** No `Cache-Control`, no `Expires`, no `max-age`. The
-  validators above are all the caching this offers; an origin that wants a
-  policy puts a CDN or a reverse proxy in front, or serves the asset from PHP.
+- **No compression at request time.** The server never compresses a file
+  itself. Only the `.br` and `.gz` files that exist on disk are sent coded.
+- **No multi-range.** A multi-range request gets `200` with the whole file.
+- **No default cache policy.** Without `http.static.cache_control` a reply has
+  no `Cache-Control`, no `Expires` and no `max-age`. The validators above are
+  the only caching this offers by default. An origin that wants a policy for
+  every file can set a prefix for each path, put a CDN or a reverse proxy in
+  front, or serve the asset from PHP.
 - **No index file.** A directory is not "the directory's `index.html`", it is
   a request for the front controller to route.
 - **No directory listing**, in any configuration.
@@ -1371,7 +1482,7 @@ documented spelling.
 | `refused acl` | requests answered `403` by `listen.allowed_clients` |
 | `refused capacity` | requests answered `503` because the pool was stopping or saturated |
 | `refused connections` | connections answered `503` by `http.max_connections_per_client` |
-| `timed out connections` | connections dropped by the first-request deadline |
+| `timed out connections` | connections dropped by the request deadline |
 | `rejected responses` | responses PHP produced that could not be written to the client |
 | `retiring children` | children draining towards their own exit (see below) |
 
@@ -1617,6 +1728,12 @@ What differs from a fastcgi pool:
   survives), with the query string cut off -- `%Q%q` carries it instead, exactly
   once. On a fastcgi pool it is `SCRIPT_NAME`, which for a front-controller
   application is always `/index.php`; here it is what the client asked for.
+- The renderer escapes the client-controlled fields: `%u`, `%r`, `%q`, `%e{VAR}`,
+  `%o{NAME}`, `%f`, `%m` and `%R`. It uses the same byte rule as the gateway access
+  log (issue #1003).
+  - A quote becomes `\"`. A backslash becomes `\\`.
+  - A control byte or DEL becomes `\?`. A space stays as it is.
+  - A byte of 0x80 or more stays as it is.
 - Responses that never ran PHP — a static file, a ping, a `403` or a `503` —
   are logged too, with the fields that do not apply (`%M`, `%C`, `%f`, `%u`)
   left at zero or `-` rather than carried over from whatever this child served

@@ -190,12 +190,35 @@ target's address; a full target (the target pool's `pm.max_children` is also
 the connection budget) answers **503 + `Retry-After`**, subject to the same
 `http.pool_full_policy`.
 
-Two deliberate refusals:
+Three deliberate refusals:
 
-- **`Upgrade` is answered 501**, not stripped: a stripped websocket handshake
-  hangs the client mid-handshake, which is worse than an explicit "not
-  implemented". WebSocket is #343's worker-executor feature; gateway
-  passthrough would be a later decision.
+- **`Upgrade` is answered 501** by default, not stripped: a stripped websocket
+  handshake hangs the client mid-handshake, which is worse than an explicit
+  "not implemented".
+- **WebSocket passthrough is opt-in** (issue #659). Set
+  `http.route_upgrade[<prefix>] = websocket` on the gateway. The `<prefix>`
+  must match a path prefix of an `http.route[]` entry. The target must be a
+  `pool.type = http-direct` pool with `pool.executor = worker`; any other
+  target is refused at startup. Requests for the route then pass the
+  `Upgrade` to the target. The gateway relays bytes only:
+  - The target answers `101`, and the gateway sends that answer to the client.
+  - The gateway frees its upstream slot when the target answers `101`.
+    The upgraded connection still counts against `http.max_connections`
+    until it ends.
+  - `http.upgrade_idle_timeout` (default `300000` ms) closes a connection
+    with no traffic in either direction.
+  - `http.upgrade_max_duration` (default `86400000` ms) closes a connection
+    after this total time.
+  - A close from either side closes the other side. If the client ends its
+    sending side (half-close), the gateway sends the bytes it still holds to
+    the target, then shuts the target's write side. The target's bytes that
+    are not yet in the client's output are dropped. Each wait ends after at
+    most 5 seconds.
+  - A drain or a reload ends open relays after about `process_control_timeout`.
+    Measured with `process_control_timeout = 5`: a relay under steady traffic
+    or a stalled relay ended 5.05 to 5.09 seconds after the signal. An idle
+    relay ends at its own idle timeout. The application must reconnect.
+  - The access log does not record upgraded connections.
 - A target that **terminates TLS on its own listener** (`http.tls_cert` on the
   target pool) is refused at startup: this transport speaks cleartext to
   loopback and unix sockets only.

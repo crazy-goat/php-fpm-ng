@@ -255,6 +255,14 @@ int fpm_http_direct_validate_common(struct fpm_worker_pool_s *wp, const struct f
 	if (!fpm_http_direct_declared(c->set_directives, "http.static")) {
 		c->http_static = 0;
 	}
+	/* issue #648. An option for a file server that is off would read as if
+	 * something were being served, so it is refused, as the other
+	 * http.static-only settings are. */
+	if (!c->http_static && (c->http_static_ranges || c->http_static_precompressed || c->http_static_cache_control)) {
+		zlog(ZLOG_ALERT, "[pool %s] %s: http.static.* needs http.static = yes",
+			c->name, labels->subject);
+		return -1;
+	}
 	if (c->http_read_timeout <= 0 || c->http_max_body == 0 || c->http_max_body > 32 * 1024 * 1024) {
 		zlog(ZLOG_ALERT, "[pool %s] %s requires http.read_timeout > 0 and http.max_body between 1 and 32M",
 			c->name, labels->subject);
@@ -668,12 +676,19 @@ bool fpm_http_direct_header_charge(size_t *total, const char *name, size_t value
  * reply or a script's header() can carry ESC or other controls in the reason
  * phrase, and the WARNING used to print them as raw bytes under %.64s. The
  * escape also bounds the line: a value of 64 bytes, each escaped to four
- * characters, is at most 256 characters. */
+ * characters, is at most 256 characters.
+ *
+ * A zero-size buffer has no room for the NUL, so the function writes nothing
+ * and returns an empty literal. Returning `out` would hand the caller a
+ * pointer into a buffer that holds no valid string (issue #1032). */
 const char *fpm_http_log_escape(const char *in, size_t max, char *out, size_t size)
 {
 	size_t o = 0;
 	const char *c;
 
+	if (size == 0) {
+		return "";
+	}
 	for (c = in; *c && max > 0; c++, max--) {
 		if (*c >= 0x21 && *c <= 0x7e && *c != '\\') {
 			if (o + 1 >= size) {

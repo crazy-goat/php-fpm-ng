@@ -4,19 +4,19 @@
  * as a \xNN escape.
  *
  * Input layout:
- *   byte 0      sets the output buffer size: 1 + byte 0 % 200
+ *   byte 0      sets the output buffer size: byte 0 % 201, so 0 to 200
  *   byte 1      sets max, the number of input bytes the function may read
  *   bytes 2..   the input value, copied and NUL-terminated for the call
  *
  * Invariants, checked on every call:
- *   - the output is NUL-terminated and shorter than the buffer;
+ *   - with a size of 0 the function writes nothing and returns "" (issue #1032);
+ *     the harness does not read the buffer then;
+ *   - otherwise the output is NUL-terminated and shorter than the buffer;
  *   - the output has only the bytes 0x21..0x7e except backslash, or complete
  *     \xNN escapes with lowercase hex digits;
  *   - decoding the output gives exactly the first k input bytes, where
  *     k <= min(max, strlen(input));
  *   - the output stops early only when the next byte would not fit.
- *
- * out_size is at least 1.
  */
 #include "fpm_http_direct_request.c"
 
@@ -51,13 +51,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	if (size < 2) {
 		return 0;
 	}
-	out_size = 1 + data[0] % 200;
+	out_size = data[0] % 201;
 	max = data[1];
 	in_len = size - 2;
 	in = malloc(in_len + 1);
+	/* A size-0 call that writes out[0] must be caught here: under gcc ASan
+	 * the old code reports heap-buffer-overflow at that write (issue #1032). */
 	out = malloc(out_size);
 	dec = malloc(in_len + 1);
-	if (!in || !out || !dec) {
+	if (!in || (out_size && !out) || !dec) {
 		abort();
 	}
 	memcpy(in, data + 2, in_len);
@@ -66,6 +68,15 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 	lim = max < in_len ? max : in_len;
 
 	ret = fpm_http_log_escape(in, max, out, out_size);
+	if (out_size == 0) {
+		if (ret == NULL || ret[0] != '\0') {
+			fail("size 0 does not return an empty string");
+		}
+		free(in);
+		free(out);
+		free(dec);
+		return 0;
+	}
 	if (ret != out) {
 		fail("return value is not the output buffer");
 	}

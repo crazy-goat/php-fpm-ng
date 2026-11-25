@@ -13,15 +13,16 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # 24.04 (no libphp8.5-embed there). The release ships amd64 packages only. To
 # move to a newer release change both ARGs; the checksum is in that release's
 # SHA256SUMS.
-ARG PHP_FPM_NG_VERSION=0.17.0
-ARG PHP_FPM_NG_SHA256=83088d383acc9c0373a7e5579e93fdb2a362db71a9ece362f6fb5208656d6e86
+ARG PHP_FPM_NG_VERSION=0.17.2
+ARG PHP_FPM_NG_SHA256=b466d1c203666ab78b931a6dc1e94a704084da90740fcaa0bf4010bea1ed57b7
 ENV DEBIAN_FRONTEND=noninteractive
 # An example image; it follows the Ubuntu package repository, so versions are not pinned.
-# On Ubuntu 26.04 the distribution's libphp8.5-embed has the engine security fix,
-# which changes the layout php-fpm-ng v0.17.0 was built against, so the binary
-# crashes (issue #994). Rebuilding with `docker build --pull --no-cache` picks up
-# the patched libphp but does not change the binary. See
-# docs/install.md#engine-security-fixes.
+# On Ubuntu 26.04 the distribution's libphp8.5-embed has the engine security fix.
+# That fix changes a struct layout that v0.17.0 was built against, so v0.17.0
+# is expected to crash (issue #994). On 2026-11-06 the master of v0.17.2 started on the patched
+# libphp 8.5.4-0ubuntu1.5 (measured on one host). Rebuilding with
+# `docker build --pull --no-cache` installs the current libphp.
+# See docs/install.md#engine-security-fixes.
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \

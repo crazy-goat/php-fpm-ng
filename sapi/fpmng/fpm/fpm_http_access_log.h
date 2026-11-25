@@ -105,4 +105,8 @@ void fpm_http_access_log_write(struct fpm_http_access_log_s *log, const char *re
 		int status, size_t bytes_sent, const char *referer, const char *user_agent, const char *target,
 		const struct fpm_http_access_log_extra_s *extra);
 
+/* Issue #1003: escapes one byte for a log line, as fpm_http_access_log_write()
+ * escapes its client fields. out[] needs two bytes; the return is 1 or 2. */
+size_t fpm_http_access_log_escape_byte(unsigned char c, char out[2]);
+
 #endif

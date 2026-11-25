@@ -75,7 +75,7 @@ is honest for a type called `gateway`. Two are new:
 
 | Directive | Meaning | Default |
 | --- | --- | --- |
-| `http.route[<pool>]` | Comma-separated path prefixes routed to `<pool>`. | -- |
+| `http.route[<pool>]` | Comma-separated entries routed to `<pool>`. An entry is a path prefix (`/api`) or a host name with an optional path prefix (`a.example/api`, issue #658). | -- |
 | `http.operator` | Serve every exposed pool's operator pages through this public port. | `no` |
 | `http.operator_allowed_clients` | Who may reach them. Separate from `http.allowed_clients`. | -- (required when `http.operator = yes`) |
 
@@ -227,6 +227,61 @@ an INI key cannot sensibly hold `/`, `.` or `|`. Several prefixes may name one
 pool; they share that pool's budget and queue, because one set of workers
 enforces it.
 
+**Host-bound entries (issue #658).** An entry that does not begin with `/`
+names a host: `<host>[/<prefix>]`. An entry with no `/` routes the host's `/`.
+The gateway routes a request by its Host only for an entry bound to that host.
+Example:
+
+```ini
+http.route[site] = a.example/
+http.route[shop] = shop.example/api, shop.example
+http.route[api] = /api
+```
+
+The rules are these:
+
+1. The Host of a request names the host of an entry. The comparison ignores
+   case and the port. An absolute-form request target names its own
+   authority, and that authority replaces Host (RFC 9112 3.2.2, issue #534).
+2. A host-bound entry is chosen before an entry with no host, even when that
+   entry has a longer prefix. Within one group, the longest prefix is chosen
+   first. So a request for `a.example/api/x` goes to `site`, not to `api`.
+3. A malformed Host never selects a host-bound entry. A Host is malformed when
+   it is empty, when its port is empty, not decimal, or above 65535, when it is
+   an IPv6 literal, when its name breaks the grammar in rule 4, or when the
+   request has more than one Host header, or none. The request is then routed as if it
+   had no host, so only entries with no host can match it. The gateway does
+   not answer `400` for it.
+4. `php-fpm-ng -t` refuses an invalid host name. A host name is letters,
+   digits and `-`, in labels separated by `.`. A label is 1 to 63 bytes, and it
+   does not begin or end with `-`. A port, a wildcard, an IPv6 literal, an
+   underscore, an empty label and a trailing dot are refused. Two entries with
+   the same host (in any case) and the same prefix are refused as duplicates.
+
+**Only the target pool is selected.** A host-bound entry selects its target
+pool and nothing else. The document root, the static files and
+`http.front_controller` stay the gateway's for every Host. With `http.static`
+on (the default), the gateway serves static files from its one document root
+for every Host, before it routes a request. A FastCGI target builds
+`SCRIPT_FILENAME` under the same root, for every Host.
+
+To serve two sites from separate files:
+
+1. Create one `http-direct` pool for each site, and set its `chdir` to the
+   site directory. Set its `http.front_controller`. Make it listen on a Unix
+   socket or a loopback address, without `http.tls_cert`. `-t` refuses a
+   target pool that does not obey these two rules.
+2. Route each host to its own pool, as in the example above.
+3. Set `http.static = 0` on the gateway. Otherwise the gateway serves files
+   from its own root for every Host.
+
+An `http-direct` pool uses its `chdir` as its document root, and its
+`http.static` is off by default. This layout is not yet covered by a test.
+
+An entry that begins with `/` has the same meaning as before. An entry such as
+`api/v1` was refused before. It is now a host name `api` with the path `/v1`.
+A gateway with no host entry does not read the Host header for routing.
+
 A gateway pool that routes to a FastCGI pool needs a docroot: `chdir` (the
 document root `SCRIPT_FILENAME` is built under) and, unless every routed path
 names an existing `.php` file, `http.front_controller` (the fallback script
@@ -242,6 +297,13 @@ workers, see the "Several gateway processes" section of
 [`http-gateway-pool-full.md`](http-gateway-pool-full.md) covers the opt-in
 `wait` alternative.
 
+Every `503` that the gateway writes carries `Retry-After`. The value is `1` second,
+except the NO_CERT answer of [TLS](tls.md), which sends `60`. RFC 9110 (section 15.6.4)
+allows the header on a `503` and does not require it. The gateway sends it on every
+`503` so that a client has one rule for all of them. This covers the over-cap refusal,
+the operator refusals, the readiness answer and the failure to copy the Host header.
+The pool-full answer sets the same header.
+
 **Cleartext routing boundary.** FastCGI targets use their FastCGI socket. An
 `http-direct` target is contacted over cleartext HTTP/1.1, so its `listen` must
 be a Unix socket, a numeric IPv4 address in 127/8, or the IPv6 loopback literal
@@ -250,6 +312,39 @@ to a public address), IPv4-mapped IPv6 addresses and other non-loopback targets
 are refused by `php-fpm-ng -t`; TLS-terminating
 `http-direct` targets remain refused too. To route over the network, use a
 transport with TLS rather than exposing the gateway's cleartext target hop.
+
+### PROXY protocol: `http.proxy_protocol` (issue #651)
+
+A load balancer in front of the gateway can send the client address in a PROXY
+protocol header. Version 1 is one text line. Version 2 is a binary block. With
+`http.proxy_protocol = yes`, the gateway reads one header at the start of each new
+connection on its public port.
+
+| Directive | Meaning | Default |
+| --- | --- | --- |
+| `http.proxy_protocol` | `yes`: read a PROXY v1 or v2 header first on each connection. `no`: read no header. | `no` |
+| `http.proxy_protocol_trusted` | Comma-separated list of literal IPv4 and IPv6 addresses, with no CIDR. These sources may send a header. Required when `http.proxy_protocol = yes`. | -- |
+
+The gateway applies these rules:
+
+1. The gateway checks the socket peer against `http.proxy_protocol_trusted` before it reads a byte. It closes a connection from any other address with no response.
+2. The gateway closes a connection that sends no header, a malformed header, or a header that does not complete within `http.read_timeout`. It sends no response.
+3. A v1 header is one line. The line ends with CRLF and is at most 107 bytes. A bare LF is malformed.
+4. A v2 header has a 16-byte fixed part and a body of at most 512 bytes. The low nibble of byte 13 is the transport protocol. The gateway accepts 0 (UNSPEC) and 1 (STREAM). It closes a connection that sends 2 (DGRAM) or 3 to F, because the listener is TCP. The gateway skips the TLVs in the body.
+5. A v1 `UNKNOWN` line, a v2 `LOCAL` command and the v2 `UNSPEC` and `UNIX` families keep the socket peer as the client address.
+6. A v1 `TCP4` or `TCP6` line, or a v2 `INET` or `INET6` address, sets the client address and port. The gateway uses that address for `REMOTE_ADDR`, the client field of the access log, `http.allowed_clients` and `http.trusted_proxies`. With `http.request_id = propagate`, the gateway keeps an inbound `X-Request-Id` only when that address is in `http.trusted_proxies` (`fpmng-http-proxy-protocol-request-id.phpt`).
+7. With TLS on the gateway, the client sends the header first and then the TLS handshake. The gateway reads the header before the handshake. The header can share a write with the ClientHello. `fpmng-http-proxy-protocol-tls.phpt` tests both write shapes.
+8. The plain listener (`http.plain_listen`) reads no header, even when `http.proxy_protocol = yes`. It answers a PROXY line as an invalid request: `HTTP/1.1 400 Bad Request` (measured on the build box, `fpmng-http-proxy-protocol-tls.phpt`). Send the PROXY header only to the TLS listener.
+9. A request on a connection that the gateway refuses (rules 1 and 2) never reaches the target and gets no response. The gateway closes the connection and frees it, so it does not stay in `connections_open` (`fpmng-http-proxy-protocol-refused.phpt`).
+
+`http.max_connections_per_client` counts the connections by the socket peer. It does not use the address in the header. Behind a load balancer, many clients can share one socket peer, and then they share one per-client limit.
+
+`php-fpm-ng -t` refuses:
+
+- `http.proxy_protocol` on any pool type other than `gateway`.
+- `http.proxy_protocol = yes` with an empty `http.proxy_protocol_trusted`.
+- An address in `http.proxy_protocol_trusted` that is not a literal IPv4 or IPv6 address.
+- `http.proxy_protocol = yes` with `http.read_timeout = 0`.
 
 ### Access log fields and request id (issue #642)
 
@@ -296,12 +391,31 @@ An `http-direct` pool does not make an id. Its `access.format` can print the
 does not check that header. Put the pool behind a gateway with `http.request_id` set,
 or accept the value that the client sends.
 
-Limit: the gateway sends the `X-Request-Id` response header only with the replies that
-it writes with its own headers. A reply written by `evhttp_send_error()` does not carry
-it, because that call clears the response headers first. Examples are `403` and `404`,
-and some `502`, `503` and `504` replies. The pool-full `503` does carry the header,
-because the gateway writes it with `evhttp_send_reply()`. The access log line of such a
-request still has the `request_id=` field.
+Every reply that the gateway writes after it has read the request carries the
+`X-Request-Id` response header when the request has an id. That covers the errors the
+gateway writes itself (`400`, `403`, `404`, `405`, `501`, `502`, `503`, `504`), the
+pool-full `503`, and the ping and ACME error answers. These replies, except the pool-full
+`503`, are `text/plain` with the body `<reason>\n` (for example `Not Found`), not
+libevent's HTML page. A reply to a HEAD request has no body. The pool-full `503` keeps
+an HTML body with no `Content-Type`, also for HEAD (`fpm_http_reject_queued()`,
+`fpm_http.c:1170-1185`; code reading, not measured). It is a known gap: see the `bytes`
+row of the access log table. With `http.error_page[503]` set, the pool-full `503` sends
+the page instead, with its `Content-Type`, and the access log counts the page bytes
+(0 for HEAD). The access log line of the same request has the same
+`request_id=` value.
+
+One kind of reply has no id, because the id does not exist yet when libevent writes it:
+a reply that libevent writes before the gateway's request callback runs. It uses
+libevent's own HTML page, and it has no access log line. In libevent 2.1.12
+(`http.c:661-665`, `:3476-3478`) a request that fails while libevent reads it gets
+`413` for a body over `http.max_body`, and `400` for every other failure: headers
+over the limit, an invalid header line, or a request line that libevent cannot parse.
+Measured on the box: the `413` (a `Content-Length` of 999999999999, a 120-byte page)
+and the `400` for one 70000-byte header (a 94-byte page). Two more replies are not
+measured: a method that the listener does not allow (`http.c:3484`, `501`), and an
+`Expect` value that libevent does not know (`http.c:2264`, `417`).
+
+No other reply is known to lack the id. With `http.request_id = off`, no reply has the header.
 
 ### Access log format
 
@@ -332,7 +446,7 @@ This is one line for a request that went to the `api` target:
 | `uri` | string or `null` | The request target. |
 | `protocol` | string | The protocol, for example `HTTP/1.1`. |
 | `status` | number or `null` | The status code. `null` when the connection failed before a response. |
-| `bytes` | number | The body bytes sent. |
+| `bytes` | number | The body bytes counted for the access log. Each error reply that the gateway writes itself counts its body: the 502s, and since issue #882 the other gateway errors (`400`, `403`, `404`, `405`, `501`, `503`, `504`, and the ping and ACME error answers), and the `404` that `http.static` sends for a refused path (10 bytes, and 0 for HEAD, which gets no body). A HEAD reply counts 0, because it sends no body. If a body cannot be allocated, the count is what was sent. For a proxied reply it is the body length that the upstream sent. The pool-full `503` sends an HTML body and counts 0; this is a known gap, except with `http.error_page[503]`, where it counts the page. |
 | `referer` | string or `null` | The `Referer` header. |
 | `user_agent` | string or `null` | The `User-Agent` header. |
 | `target` | string or `null` | The `http.route[]` target. `null` where `combined` prints `target=-`. |
@@ -543,6 +657,164 @@ spec:
         failureThreshold: 1
 ```
 
+### `http.response_header[]` and `http.error_page[]` (issue #650)
+
+Two directives shape the replies of the gateway. Both are off by default. Both belong to
+a gateway pool. `php-fpm-ng -t` refuses them on the other pool types.
+
+```ini
+http.response_header[Strict-Transport-Security] = "max-age=31536000; includeSubDomains"
+http.response_header[X-Frame-Options] = DENY
+http.error_page[404] = /srv/app/errors/404.html
+http.error_page[502] = /srv/app/errors/502.html
+http.error_page[503] = /srv/app/errors/503.json
+```
+
+#### `http.response_header[<Name>] = <value>`
+
+The gateway adds this header to every reply that it sends on the main listener. That covers
+the replies of a FastCGI or an HTTP target, the static files (`200` and `304`), the files
+named by `X-Accel-Redirect` and `X-Sendfile`, and the errors that the gateway writes
+itself (`404` for no route, `502`, `503`, `504`), also the ping and ready answers. The header is on the reply once.
+
+- The configured header replaces the header of the same name that the application sends.
+  The gateway drops every copy of the application's header. The name is compared without
+  regard to case.
+- Write a value that has `;` between double quotes. An unquoted `;` starts an INI comment.
+- The name has token characters only. The value is at most 4096 bytes, is not empty, and has
+  no control character. A CR or LF in a value is refused. The INI parser itself refuses a
+  quoted value that spans lines (`syntax error`).
+- `-t` refuses a name that the gateway sets itself: `Content-Length`,
+  `Transfer-Encoding`, `Connection`, `Keep-Alive`, `Upgrade`, `TE`, `Trailer`,
+  `Content-Type`, `Content-Encoding`, `Content-Range`, `Date`, `Location`, `Status`,
+  `X-Request-Id`, `X-Accel-Redirect` and `X-Sendfile`. It also refuses the names that
+  the gateway sets on some replies: `Retry-After` (every `503`), `Expires` and
+  `Cache-Control` (ping and ready), `ETag`, `Last-Modified` and `Accept-Ranges` (static
+  files), `Set-Cookie` (it would drop every cookie of the application) and `Vary`. A
+  configured value for one of them would make a second header on the reply, so the
+  header is on every reply once. The directive also refuses the prefixes
+  `Proxy-` and `X-Fpmng-`. It refuses the same name twice.
+- The `101` reply of a WebSocket upgrade does not get the headers.
+- The replies on `http.plain_listen` (the `308` redirect and the ACME answers) do not get
+  the headers. RFC 6797 section 7.2 says a host must not send `Strict-Transport-Security`
+  over a non-secure transport.
+
+#### `http.error_page[<code>] = /absolute/path.ext`
+
+The key is `404`, `502` or `503`. The gateway sends the file as the body of the error
+replies that it writes itself with this code: the `404` for no route, the `404` for a refused
+static path or a refused `X-Accel-Redirect` file, the `502` for a failed target or an invalid
+upstream `Status`, and the `503` for a full pool. An error reply of the application passes
+through unchanged, also a `404` or a `503`.
+
+- The master reads each file when it loads the configuration. `-t` refuses a missing file, a
+  file that is not a regular file, an empty file, and a file over 64 KiB (65536 bytes; exactly
+  65536 is accepted). The gateway holds the bytes: a change of the file has an effect after a
+  reload (`SIGUSR2`). A reload to a configuration whose file is gone is refused by the
+  check that runs before the reload (issue #640), and the old generation keeps its page.
+- `Content-Type` comes from the extension of the file, with the same mapping as the static
+  files (`.html` is `text/html; charset=UTF-8`, `.json` is `application/json`). `-t`
+  refuses an extension that has no type.
+- The access log counts the bytes of the page. A HEAD reply has the `Content-Type` and no
+  body, and counts 0.
+- There is no key `504`: `-t` refuses it like any other key.
+- The page replaces the body of these replies, because they use the same error path:
+  - the operator `404` and `503` (`fpm_http_operator_fwd.c`);
+  - the `503` for a pool over its cap (`fpm_http.c`, the over-cap refusal);
+  - the `503` of a failed request write to the target;
+  - the ACME `404` on the main listener.
+- On `http.plain_listen` the page replaces the body of the over-cap `503`, the
+  out-of-memory `503` replies, the ACME `404` and the `503` for a missing certificate.
+  These replies do not get the configured headers.
+- The body of the ready-probe `503` does not change. The replies that libevent writes
+  carry neither the page nor the headers.
+
+#### Why `413` is not a key
+
+libevent 2.1.12 writes the `413` for a body over `http.max_body` itself, before the
+gateway callback runs (see the replies of libevent in the section on `X-Request-Id`).
+The gateway cannot give that reply a page or a header. `-t` refuses
+`http.error_page[413]` and names this section. The same holds for the `400` that libevent
+writes for a request that it cannot read.
+
+### `http.sendfile_root` -- files named by the upstream (issue #649)
+
+`http.sendfile_root` is off by default. When it is set, the gateway can serve a
+file that a FastCGI worker names in its reply. The worker sends one of two headers:
+
+- `X-Accel-Redirect: /path` names a file below the root.
+- `X-Sendfile: /absolute/path` names a file by its full path.
+
+Set the directive to an absolute path of an existing directory other than `/`:
+
+```ini
+[gw]
+pool.type = gateway
+http.sendfile_root = /srv/app/protected
+```
+
+The gateway applies these rules to every named file:
+
+1. It resolves the name with `realpath()`. The result must lie at or below the root.
+2. It refuses a path with a dot-segment below the root.
+3. It refuses a PHP script.
+4. It serves only a regular file.
+5. It answers a refused name with `404 Not Found`. It logs the refusal at NOTICE, with the header name and the reason.
+
+When the gateway serves a file:
+
+- The client gets `200 OK`. The worker body is not sent.
+- The gateway reads the file in windows of 1 MiB with `pread()`. It reads the next window only after the client has taken the previous one. The gateway holds one window per reply, not the file. The gateway does not map the file, so a truncation during the transfer does not stop the gateway.
+- `Content-Length` equals the file size.
+- A `HEAD` request gets the length and no body. An empty file gets `200 OK` with `Content-Length: 0`.
+- The gateway does not support `Range`. A range request gets the whole file.
+- If the gateway cannot read the first window, it answers `502 Bad Gateway`.
+- If the gateway cannot read a later window, it ends the reply early. The client gets a short body, and the connection is shut down. The gateway logs a WARNING that starts with `cannot read the rest of`. `fpmng-gateway-sendfile-truncate.phpt` truncates a file during a transfer and checks this, over plain HTTP and over TLS. A mapped file would raise SIGBUS on TLS, so the TLS case guards the no-mapping rule.
+- The worker may still send its own body when the file reply ends. The gateway reads and drops it. The gateway detaches the upstream from the client before it frees the client. With the HTTP upstream transport, a byte that arrives after the detach fails the upstream and logs a WARNING that ends with `sent response bytes with no request to attach them to` (`sapi/fpmng/fpm/fpm_http_client.c:796`). With the FastCGI transport, the byte is discarded. `fpmng-gateway-sendfile-late-worker.phpt` and `fpmng-gateway-sendfile-worker-sleep.phpt` cover this case.
+
+The headers of the worker reply pass through to the client, with these exceptions:
+
+- The gateway drops `X-Accel-Redirect`, `X-Sendfile`, `Content-Length`, `Content-Range`, `Transfer-Encoding`, `Content-Encoding`, `Accept-Ranges` and `X-Request-Id`.
+- The gateway drops the hop-by-hop headers `Connection`, `Keep-Alive`, `Proxy-Connection`, `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer` and `Upgrade`.
+- The gateway keeps `Content-Disposition`, `Cache-Control`, `Set-Cookie`, `Expires`, `Last-Modified` and the other headers of the worker.
+- The gateway keeps the `Content-Type` of the worker when the worker sets one. Without it, the gateway sets a type from the file name.
+- PHP sends its `default_mimetype` (`text/html` by default) when the script sets no type. A worker that sends a PDF must set `Content-Type` itself.
+- The gateway adds its own `X-Request-Id`. It adds `X-Fpmng-Queue-Wait` when it measured the queue wait.
+
+A refused name gets `404 Not Found` with a body of `Not Found`. The worker headers do not reach the client.
+
+Memory: `sapi/fpmng/tests/fpmng-gateway-sendfile-memory.phpt` sends a 200 MB file to a slow
+reader and checks the VmRSS of the gateway process against a bound of 64 MB. On the
+test box (lane 24000), the build at commit 97a5d0c reaches a peak VmRSS of 187256 kB
+(idle 5856 kB) and fails the test. The build with the windowed reader passes the bound.
+The test does not print the peak of the new build, so that number is not measured.
+
+With the directive unset, the gateway does not act on these headers. It forwards
+them to the client like any other header.
+
+Security notes:
+
+- Set the root to a directory that holds only files you want to serve. Any
+  client can read any file below the root that the worker names.
+- Only the worker chooses the name. Check access in the application before
+  the worker sends the header. A client that can pick the value of the header
+  can pick the file.
+- A symbolic link below the root is resolved. A link that points outside the
+  root is refused.
+- The directive is refused by `pool.type = fastcgi` and by `pool.type = http-direct`.
+  `php-fpm-ng -t` refuses it there.
+- `php-fpm-ng -t` refuses a root that is not an absolute path, that is not an
+  existing directory, or that is `/`.
+- The HTTP upstream transport is not tested. `fpm_http_client.c:537` calls
+  `fpm_http_start_reply()`, so the same hook runs for that transport
+  (`fpm_http_fcgi.c:712`).
+
+Tests: `sapi/fpmng/tests/fpmng-gateway-sendfile.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-config.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-memory.phpt`,
+`sapi/fpmng/tests/fpmng-gateway-sendfile-truncate.phpt` and
+`sapi/fpmng/tests/fpmng-gateway-sendfile-unset.phpt`.
+
 ### What the gateway type refuses
 
 No PHP runs in a gateway, so nothing that configures PHP applies: `pm`,
@@ -687,10 +959,15 @@ started, because the only thing left to send would be the terminator, and
 sending it would make a truncated body look complete. Here nothing of the
 reply is on the wire yet, so a 502 is still truthful and costs the client one
 retry instead of a reseted connection. Measured on 2026-10-06 with
-`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets libevent's
-complete `502` page (`Connection: close`, as for every other gateway-generated
-502, not `Transfer-Encoding: chunked`), while the same reply before the fix was
-`200 OK` with the unfinished header block **as the body**:
+`fpmng-http-gateway-upstream-partial-head.phpt`: the client gets a `502`, and the
+unfinished header block is not sent. Before issue #636, the same reply was
+`200 OK` with the unfinished header block **as the body**. Measured on 2026-11-06
+with the same test: the 502 body is `Bad Gateway` (`Content-Type: text/plain`,
+`Connection: close`, not `Transfer-Encoding: chunked`). Before issue #858, the
+gateway wrote libevent's HTML page here, and the access log counted 0 bytes for it.
+The access log counts the 12 bytes of the `Bad Gateway` body, the same as the
+invalid-`Status` 502. A HEAD request gets this 502 without a body, and the access
+log counts 0 for it.
 
 ```
 HTTP/1.1 200 OK
@@ -1019,11 +1296,13 @@ beside the gateway, with `/ping` and `/_fpm_status` in their upstream meaning.
 
 ### Three things the example shows that are easy to forget
 
-- **`[ws]` is not routed through the gateway.** WebSockets cannot be carried
-  over FastCGI at all, and #344's HTTP/1.1 client is not a passthrough either;
-  #343 does them natively on the worker executor. That pool has its own public
-  port, and it is the first place where "the gateway is the entry point" is
-  not the whole truth.
+- **`[ws]` is not routed through the gateway by default.** WebSockets cannot be
+  carried over FastCGI. The gateway passes a WebSocket `Upgrade` on only when
+  the operator sets `http.route_upgrade[<prefix>] = websocket` (issue #659).
+  The target must be a worker-executor `http-direct` pool. Without that
+  directive the gateway answers `501`. The rules, the timeouts and the
+  connection limit are in `docs/http-route.md`. The example's `[ws]` pool has
+  its own public port, which stays the simplest entry point for WebSockets.
 - **`[app]` has status under two names and it is not a duplicate.**
   `pm.status_path` is the page on the FastCGI socket for nginx;
   `operator.status = on` is the page on the operator listener. Two sockets,

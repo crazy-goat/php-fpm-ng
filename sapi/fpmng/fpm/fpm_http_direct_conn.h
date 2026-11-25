@@ -54,11 +54,19 @@
  * that is still what a caller without a sweep gets -- the node is what holds
  * the fd, and past the first request only the sweep gives it back.
  *
- * What is NOT here, and is rejected by validation rather than ignored:
- * per-connection limits for later requests on a keep-alive connection (the
- * deadline covers the first one; libevent offers no request-start hook), and
- * any limit shared between the children of a pool -- each worker counts its
- * own connections, which is what "per worker" in the documentation means.
+ * Later requests on a keep-alive connection get the deadline too, on a caller
+ * that keeps the node (track_live): the caller calls
+ * fpm_http_direct_conns_response_done() when a response ends. The budget for
+ * the next request starts at its first byte, found by a one-shot read watcher,
+ * so an idle keep-alive connection is not charged for the time it sits idle.
+ * libevent offers no request-start hook, which is why the first byte is found
+ * by a watcher and not by a callback.
+ *
+ * What is NOT here: the connection limits for later requests on a keep-alive
+ * connection. They count connections, and each one is checked once, when the
+ * connection is first served. Also not here: any limit shared between the
+ * children of a pool -- each worker counts its own connections, which is what
+ * "per worker" in the documentation means.
  */
 
 #ifndef FPM_HTTP_DIRECT_CONN_H
@@ -72,7 +80,7 @@ struct fpm_http_direct_conns;
 
 struct fpm_http_direct_conns_limits {
 	const char *pool; /* for log messages */
-	int read_timeout_ms; /* first-request deadline; 0 disables it */
+	int read_timeout_ms; /* budget for each request, from its first byte until it has fully arrived; 0 disables it */
 	int max_connections; /* per worker; 0 = unlimited */
 	int max_per_client; /* per peer address, per worker; 0 = unlimited */
 	/* Keep a node for the whole life of a connection rather than dropping it
@@ -97,9 +105,9 @@ void fpm_http_direct_conns_free(struct fpm_http_direct_conns *conns);
  * so everything that needs them happens one loop pass later. */
 void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct bufferevent *bev);
 
-/* The first request on this connection has fully arrived: its deadline is
- * spent. Safe to call for a connection that is not tracked, and for every
- * request rather than only the first.
+/* A request on this connection has fully arrived: its deadline is spent. Safe
+ * to call for a connection that is not tracked, and for every request rather
+ * than only the first.
  *
  * Returns -1 when this connection is over http.max_connections_per_client. The
  * node is gone by then, but the connection is NOT closed: the caller is inside
@@ -124,6 +132,14 @@ void fpm_http_direct_conns_accepted(struct fpm_http_direct_conns *conns, struct 
  * never created). */
 int fpm_http_direct_conns_request(struct fpm_http_direct_conns *conns, struct bufferevent *bev,
 		struct timeval *accepted_out, unsigned *requests_out);
+
+/* The response to a request on this connection has ended and the connection
+ * stays open. Starts watching for the first byte of the next request, and its
+ * budget of http.read_timeout starts with that byte. Safe to call for
+ * a connection that is not tracked, and for one whose request was never
+ * counted by fpm_http_direct_conns_request(). Not called by the gateway, whose
+ * per-request budget is its own (fpm_http.c, fpm_http_client_request_done). */
+void fpm_http_direct_conns_response_done(struct fpm_http_direct_conns *conns, struct bufferevent *bev);
 
 /* False while this worker is at http.max_connections. The caller keeps its
  * listener disabled for as long as this says so. Not const: it sweeps first,
@@ -154,7 +170,8 @@ unsigned fpm_http_direct_conns_live(const struct fpm_http_direct_conns *conns);
  * may_accept(): pay it where the decision is worth an exact answer, not on the
  * tick of a child that is only publishing a gauge. */
 unsigned fpm_http_direct_conns_live_exact(struct fpm_http_direct_conns *conns);
-/* Connections dropped because the first request did not arrive in time. */
+/* Connections dropped because a request did not arrive in time, whether it was
+ * the first on the connection or a later one. */
 unsigned long fpm_http_direct_conns_timed_out(const struct fpm_http_direct_conns *conns);
 /* Connections refused by http.max_connections_per_client, in either shape. */
 unsigned long fpm_http_direct_conns_refused(const struct fpm_http_direct_conns *conns);

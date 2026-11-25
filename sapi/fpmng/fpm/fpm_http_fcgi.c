@@ -6,6 +6,8 @@
 
 #include "fpm.h"
 #include "fpm_http.h"
+#include "fpm_http_error.h"
+#include "fpm_http_reply_policy.h"
 
 #ifdef HAVE_FPM_HTTP
 
@@ -57,6 +59,7 @@
 #include "fpm_http_auth.h"
 #include "fpm_http_access_log.h"
 #include "fpm_http_direct_request.h"
+#include "fpm_http_sendfile.h"
 #include "fpm_http_header_cgi.h"
 #include "fpm_children_extra.h"
 #include "fpm_pool_type.h"
@@ -70,6 +73,7 @@
 #include "zlog.h"
 
 #include "fpm_http_internal.h"
+#include "fpm_fault_inject.h"
 
 /* ---------------------------------------------------------------- FastCGI encoding */
 
@@ -287,6 +291,29 @@ const char *fpm_http_method_name(enum evhttp_cmd_type type)
 	return NULL;
 }
 
+/* Issue #997: the checks on the decoded path before fpm_http_build_request()
+ * joins it to the docroot for SCRIPT_FILENAME. The static server has its own
+ * copy of the same rules (fpm_http_static.c:107-108). A path without a leading
+ * '/' is refused: libevent parses the target with EVHTTP_URI_NONCONFORMANT, so
+ * "GET ../x.php" and "GET -old/x.php" reach this point, and their join with
+ * the docroot would name a sibling or a parent of it. The router refuses such
+ * a path first (a prefix must begin with '/', fpm_http_route.c:325, and a
+ * proxy_only gateway has no catch-all row, fpm_pool_type.c:358), so no request
+ * reaches this check today; it stays because this is the place that makes the
+ * SCRIPT_FILENAME join. A leading ".." segment needs no rule of its own: after
+ * the '/' rule, a ".." segment is always "/..", and the two rules below refuse
+ * that. The NUL rule is a length check: a %00 would end the string early. */
+static int fpm_http_decoded_path_ok(const char *decoded, size_t decoded_len)
+{
+	if (decoded_len == 0 || decoded[0] != '/' || decoded_len != strlen(decoded)) {
+		return 0;
+	}
+	if (strstr(decoded, "/../") || (decoded_len >= 3 && memcmp(decoded + decoded_len - 3, "/..", 3) == 0)) {
+		return 0;
+	}
+	return 1;
+}
+
 /* Builds BEGIN_REQUEST, PARAMS and STDIN in c->out. Returns an HTTP error code or 0.
  * script_missing_hint is fpm_http_try_local()'s realpath()/fstat() verdict on the
  * exact path this function would otherwise stat() itself (0 = exists as a regular
@@ -338,9 +365,7 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	if (!decoded) {
 		return HTTP_BADREQUEST;
 	}
-	if (decoded_len != strlen(decoded) || /* embedded NUL */
-			strstr(decoded, "/../") ||
-			(decoded_len >= 3 && memcmp(decoded + decoded_len - 3, "/..", 3) == 0)) {
+	if (!fpm_http_decoded_path_ok(decoded, decoded_len)) {
 		free(decoded);
 		return HTTP_BADREQUEST;
 	}
@@ -412,10 +437,11 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	 * one record. Latent until issue #117 made a 64 KiB header block a
 	 * supported input; measured on 192.168.8.50, 2026-09-09: a 65000-byte
 	 * block produced PARAMS(65083), PARAMS(898), PARAMS(0) with BEGIN_REQUEST
-	 * in the middle. The one thing that can still fail after this point is the
-	 * oversized-pair check below, and that path frees the connection with
-	 * c->out unsent (fpm_http_request() -> fpm_http_conn_free()), so a
-	 * half-built buffer never reaches a worker.
+	 * in the middle. Two things can still fail after this point: the
+	 * oversized-pair check below, and the copy of the Host header for
+	 * SERVER_NAME (issue #967). Both paths free the connection with c->out
+	 * unsent (fpm_http_request() -> fpm_http_conn_free()), so a half-built
+	 * buffer never reaches a worker.
 	 *
 	 * The PARAMS records themselves are still assembled in c->params and
 	 * appended below, because the last one is only complete at the end. */
@@ -445,8 +471,19 @@ int fpm_http_build_request(fpm_http_conn *c, int script_missing_hint)
 	free(decoded);
 
 	if (host) {
-		char *server_name = strdup(host), *colon = strrchr(server_name, ':');
+		char *server_name = FPM_FAULT_POINT("http_request_server_name") ? NULL : strdup(host), *colon;
 
+		/* Issue #967: a request without SERVER_NAME is not forwarded. The worker
+		 * builds its URLs from that variable, so a missing one would be a wrong
+		 * answer, not a smaller one (see the comment on SERVER_ADDR below). 503
+		 * is the status of a transient gateway-side failure, and the client may
+		 * retry. */
+		if (!server_name) {
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot copy the Host header (out of memory), answering 503",
+					c->gw->pool);
+			return FPM_HTTP_SERVICE_UNAVAIL;
+		}
+		colon = strrchr(server_name, ':');
 		if (colon && !strchr(colon, ']')) {
 			*colon = '\0';
 		}
@@ -622,6 +659,7 @@ void fpm_http_conn_free(fpm_http_conn *c)
 	 * request without resuming it. This does not re-arm the upstream: the
 	 * callers that free a request this way drop the upstream themselves. */
 	fpm_http_response_unpause(c);
+	fpm_http_sendfile_free(c->sendfile);
 	smart_str_free(&c->params);
 	smart_str_free(&c->out);
 	smart_str_free(&c->cgi_headers);
@@ -639,6 +677,7 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 	char *reason = NULL;
 	int code = HTTP_OK;
 	bool invalid_status = false;
+	int taken;
 
 	while (line < end) {
 		const char *nl = memchr(line, '\n', end - line), *next = nl ? nl + 1 : end, *colon;
@@ -657,9 +696,34 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				v++;
 				vlen--;
 			}
-			key = strndup(line, klen);
-			value = strndup(v, vlen);
-			if (strcasecmp(key, "Status") == 0) {
+			key = FPM_FAULT_POINT("http_reply_name_dup") ? NULL : strndup(line, klen);
+			value = key && !FPM_FAULT_POINT("http_reply_value_dup") ? strndup(v, vlen) : NULL;
+			if (!key || !value) {
+				/* Issue #967: a failed copy is the out-of-memory case of
+				 * issue #809, and it cannot be passed on: the key is used at
+				 * once (strcasecmp() below), the value by evhttp_add_header().
+				 * The reply takes the invalid_status path. The loop stops here,
+				 * because each further line needs more memory that is short. */
+				zlog(ZLOG_WARNING, "[pool %s] http: cannot copy an upstream header (out of memory), answering 502",
+						c->gw->pool);
+				free(key);
+				free(value);
+				invalid_status = true;
+				break;
+			}
+			taken = c->gw->sendfile_root ? fpm_http_sendfile_note(c, key, value, vlen) : 0;
+			if (taken < 0) {
+				/* Issue #649: the redirect header could not be copied. The
+				 * copy failures above take the same 502. */
+				free(key);
+				free(value);
+				invalid_status = true;
+				break;
+			}
+			if (taken) {
+				/* Issue #649: a redirect header is not copied to the client.
+				 * fpm_http_sendfile_reply() acts on it below. */
+			} else if (strcasecmp(key, "Status") == 0) {
 				/* Issue #605: a bad value is rejected with 502 through
 				 * invalid_status below, which keeps the rest of the untrusted
 				 * reply from being forwarded. The value is strndup()ed, so an
@@ -699,6 +763,11 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 				/* Issue #642: the gateway's own id is already on this response
 				 * (fpm_http_client_request_id_assign()). A second copy from the
 				 * target would be a second, conflicting id. */
+			} else if (fpm_http_reply_header_owned(&c->gw->reply, key)) {
+				/* Issue #650: the configured value is already on this response, and
+				 * it wins: the operator set a site-wide policy such as HSTS because
+				 * it must hold for every reply, so the application's header of the
+				 * same name, once or repeated, is dropped. */
 			} else {
 				evhttp_add_header(out, key, value);
 			}
@@ -715,23 +784,53 @@ void fpm_http_start_reply(fpm_http_conn *c, size_t head_len, size_t body_off)
 		 * request stays alive until then (an evhttp_send_error() here would
 		 * complete it while the upstream is still talking). Mapping to 500
 		 * instead is a maintainer decision (issue #594). */
-		struct evbuffer *msg = evbuffer_new();
+		struct evbuffer *msg = FPM_FAULT_POINT("http_reply_502_body") ? NULL : evbuffer_new();
+		const struct fpm_http_error_page_s *page = fpm_http_reply_policy_page(&c->gw->reply, FPM_HTTP_BAD_GATEWAY);
 
 		evhttp_clear_headers(out);
-		evhttp_add_header(out, "Content-Type", "text/plain");
 		if (c->client && c->client->request_id[0]) { /* issue #642: the clear above dropped it */
 			evhttp_add_header(out, "X-Request-Id", c->client->request_id);
 		}
+		fpm_http_reply_headers_add(&c->gw->reply, out); /* issue #650: and these */
+		evhttp_add_header(out, "Content-Type", page ? page->type : "text/plain");
 		evhttp_send_reply_start(c->req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
-		evbuffer_add_printf(msg, "Bad Gateway\n");
-		c->bytes_out += evbuffer_get_length(msg);
-		evhttp_send_reply_chunk(c->req, msg);
-		evbuffer_free(msg);
+		/* Issue #967: without the body buffer the 502 goes out with an empty
+		 * chunked body, which fpm_http_finish() ends like any other reply. The
+		 * body is not worth a second failure, and the status is what matters. */
+		if (msg) {
+			/* Issue #650: the page, by reference, when there is one. A page that
+			 * cannot be added leaves the chunk empty and the count at 0. */
+			if (!page) {
+				evbuffer_add(msg, FPM_HTTP_BAD_GATEWAY_BODY, FPM_HTTP_BAD_GATEWAY_BODY_LEN);
+			} else if (fpm_http_error_page_add(page, msg) < 0) {
+				zlog(ZLOG_WARNING, "[pool %s] http: cannot add the 502 error page (out of memory), answering 502 without it",
+						c->gw->pool);
+			}
+			/* Issue #858: libevent drops the chunk of a HEAD reply, so the body is
+			 * counted only when it goes on the wire. */
+			if (evhttp_request_get_command(c->req) != EVHTTP_REQ_HEAD) {
+				c->bytes_out += evbuffer_get_length(msg);
+			}
+			evhttp_send_reply_chunk(c->req, msg);
+			evbuffer_free(msg);
+		} else {
+			zlog(ZLOG_WARNING, "[pool %s] http: cannot allocate the body of the 502 (out of memory), answering 502 without it",
+					c->gw->pool);
+		}
 		free(reason);
 		c->headers_sent = 1;
 		c->discard_upstream = 1;
 		c->status = FPM_HTTP_BAD_GATEWAY;
 		smart_str_free(&c->cgi_headers);
+		return;
+	}
+
+	/* Issue #649: a redirect header replaces the upstream's reply with the file
+	 * it names. This is after the 502 above, so an invalid Status still wins.
+	 * The rest of the upstream body is dropped by discard_upstream. */
+	if (c->sendfile) {
+		free(reason);
+		fpm_http_sendfile_reply(c);
 		return;
 	}
 
@@ -794,12 +893,14 @@ void fpm_http_stdout(fpm_http_conn *c, const char *data, size_t len)
  * body as a complete one. The only truthful thing left to send is a message
  * that does not end: access-log the request, then shutdown() the client socket
  * -- the same shape as fpm_direct_stream_abort() in fpm_http_direct.c -- so
- * libevent finds the connection dead on its next pass, frees the request there
- * and runs fpm_http_client_closed() for the gauge and the index. The close
- * callback stays registered on purpose; fpm_http_conn_free() has detached this
- * request from it. A reply framed by Content-Length is cut short of its
- * length, a chunked one of its terminator; an HTTP/1.0 client gets a
- * close-delimited reply, which no close can mark as incomplete. */
+ * libevent finds the connection dead on its next pass, detaches the request
+ * and runs fpm_http_client_closed() for the gauge and the index. libevent does
+ * not free a request nobody answered (issue #996), so the close callback has
+ * to: the request pointer goes to it through the client node, because
+ * fpm_http_conn_free() drops c. The close callback stays registered on purpose.
+ * A reply framed by Content-Length is cut short of its length, a chunked one
+ * of its terminator; an HTTP/1.0 client gets a close-delimited reply, which
+ * no close can mark as incomplete. */
 void fpm_http_finish_truncated(fpm_http_conn *c)
 {
 	struct evhttp_connection *evcon = evhttp_request_get_connection(c->req);
@@ -836,6 +937,11 @@ void fpm_http_finish_truncated(fpm_http_conn *c)
 	fpm_http_log_response(c->gw, c->req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
 			c->log_target ? c->log_target : c->target->pool);
+	/* Issue #996: the close callback ends this request once libevent has
+	 * detached it, and reaches it only through the client node. */
+	if (c->client) {
+		c->client->req = c->req;
+	}
 	fpm_http_conn_free(c);
 	if (fd >= 0) {
 		shutdown(fd, SHUT_RDWR);
@@ -855,6 +961,20 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * END_REQUEST behind it finish the request in the same read; nothing would
 	 * re-arm the read event of an upstream that has no idle timeout. */
 	fpm_http_response_resume(c);
+	/* Issue #649: a file reply is still being sent, and the last window ends
+	 * it (fpm_http_sendfile_end()). The caller drops the upstream after this
+	 * return, so c must not keep a pointer to it: the close callback would
+	 * reach a freed upstream through c->upstream. */
+	if (c->sendfile && c->sendfile->pumping) {
+		c->upstream = NULL;
+		return;
+	}
+	/* Issue #967: a body piece was lost (fpm_http_response_chunk()). The head
+	 * is out, so the reply is cut, as in issue #533, and not terminated. */
+	if (c->chunk_lost) {
+		fpm_http_finish_truncated(c);
+		return;
+	}
 	if (c->headers_sent) {
 		/* The reply is under way and is ended below, once c is gone. */
 	} else if (c->cgi_headers.s) {
@@ -901,6 +1021,10 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	}
 	if (bad_gateway) {
 		c->status = FPM_HTTP_BAD_GATEWAY;
+		/* The headers belong to req, not to c, so they are set here, before
+		 * fpm_http_conn_free(c). fpm_http_error_prepare() keeps X-Request-Id
+		 * (issue #882). */
+		c->bytes_out = fpm_http_error_prepare(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	}
 	fpm_http_log_response(c->gw, req, c->remote_addr[0] ? c->remote_addr : c->peer_addr,
 			c->remote_user, c->status, c->bytes_out,
@@ -912,7 +1036,7 @@ void fpm_http_finish(fpm_http_conn *c, int explained)
 	 * the request and, for a closing connection, the connection, and the close
 	 * callback runs on the way. Nothing after this line reads c. */
 	if (bad_gateway) {
-		evhttp_send_error(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
+		fpm_http_error_send(req, FPM_HTTP_BAD_GATEWAY, "Bad Gateway");
 	} else {
 		evhttp_send_reply_end(req);
 	}

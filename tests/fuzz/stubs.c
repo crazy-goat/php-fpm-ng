@@ -37,21 +37,46 @@ FUZZ_STUB(fpm_http_request_done)
 FUZZ_STUB(fpm_http_upstream_drop)
 FUZZ_STUB(fpm_http_upstream_fail)
 FUZZ_STUB(fpm_http_upstream_free)
+FUZZ_STUB(fpm_http_upstream_release)
+FUZZ_STUB(fpm_http_gw_ws_start)
+FUZZ_STUB(fpm_http_gw_ws_close_all)
 FUZZ_STUB(fpm_http_conn_free)
 FUZZ_STUB(fpm_http_response_resume)
 FUZZ_STUB(fpm_http_transport_connect)
 FUZZ_STUB(fpm_http_access_log_write)
 FUZZ_STUB(fpm_http_method_name)
+
+/* fpm_http_error.c (issue #882): called from fpm_http.c, fpm_http_fcgi.c and fpm_http_static.c */
+FUZZ_STUB(fpm_http_reply_headers)
+FUZZ_STUB(fpm_http_error_prepare)
+FUZZ_STUB(fpm_http_error_send)
+FUZZ_STUB(fpm_http_error_reply)
+/* fpm_http_reply_policy.c (issue #650): called from fpm_http_fcgi.c, fpm_http_static.c and fpm_http_sendfile.c */
+FUZZ_STUB(fpm_http_reply_policy_page)
+FUZZ_STUB(fpm_http_reply_headers_add)
+FUZZ_STUB(fpm_http_reply_header_owned)
+FUZZ_STUB(fpm_http_error_page_add)
+FUZZ_STUB(fpm_http_error_page_put)
 FUZZ_STUB(fpm_http_build_request)
+FUZZ_STUB(fpm_http_local_addr)
+FUZZ_STUB(fpm_http_auth_parse)
+FUZZ_STUB(fpm_http_response_unpause)
+FUZZ_STUB(fpm_http_parse_cgi_status)
+FUZZ_STUB(fpm_http_response_chunk)
+FUZZ_STUB(fpm_http_log_response)
 
 /* fpm_http.c and fpm_http_static.c and the rest of the gateway */
 FUZZ_STUB(fpm_http_absolute_authority)
+FUZZ_STUB(fpm_http_host_of_request)
+FUZZ_STUB(fpm_http_proxy_admit)
+FUZZ_STUB(fpm_http_proxy_refuse)
 FUZZ_STUB(fpm_http_acl_check)
 FUZZ_STUB(fpm_http_acl_free)
 FUZZ_STUB(fpm_http_acl_parse)
 FUZZ_STUB(fpm_http_direct_conns_request)
 FUZZ_STUB(fpm_http_direct_header_dropped)
 FUZZ_STUB(fpm_http_direct_header_name_ok)
+FUZZ_STUB(fpm_http_direct_tls_pull_pending)
 FUZZ_STUB(fpm_http_direct_tls_shutdown_step)
 FUZZ_STUB(fpm_http_direct_tls_validate)
 FUZZ_STUB(fpm_http_forwarded_resolve)
@@ -64,6 +89,12 @@ FUZZ_STUB(fpm_http_request_id_valid)
 FUZZ_STUB(fpm_http_request_path)
 FUZZ_STUB(fpm_http_static_serve)
 FUZZ_STUB(fpm_http_static_decode_path)
+/* fpm_http_static_range.c and fpm_http_static_negotiate.c (issue #648): the
+ * range harness includes the first of them for real. */
+FUZZ_STUB(fpm_http_static_parse_range)
+FUZZ_STUB(fpm_http_static_if_range_matches)
+FUZZ_STUB(fpm_http_static_accepts)
+FUZZ_STUB(fpm_http_static_cache_control_for)
 FUZZ_STUB(fpm_http_header_cgi_key)
 FUZZ_STUB(fpm_http_log_escape)
 FUZZ_STUB(fpm_clock_get)
@@ -93,3 +124,9 @@ __attribute__((weak)) void fpmng_zlog_ex(const char *function, int line, int fla
 	(void) vsnprintf(buf, sizeof(buf), fmt, ap);
 	va_end(ap);
 }
+
+/* fpm_http_sendfile.c (issue #649): called from fpm_http_fcgi.c, which the upstream
+ * harnesses link without the module. */
+FUZZ_STUB(fpm_http_sendfile_note)
+FUZZ_STUB(fpm_http_sendfile_reply)
+FUZZ_STUB(fpm_http_sendfile_free)

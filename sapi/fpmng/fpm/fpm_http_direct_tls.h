@@ -30,6 +30,7 @@ struct fpm_worker_pool_s;
 struct event_base;
 struct evhttp;
 struct bufferevent;
+struct evbuffer;
 
 /* This contract has two implementations, picked at build time by
  * --enable-fpmng-tls (issue #280): fpm_tls_http_direct.c, which terminates
@@ -117,6 +118,14 @@ int fpm_http_direct_tls_shutdown_step(struct bufferevent *bev, short *poll_event
  * been sent yet. A no-op in a build without --enable-fpmng-tls and on a plaintext
  * pool, whose write step goes through the descriptor libevent is watching. */
 void fpm_http_direct_tls_notify_written(struct bufferevent *bev);
+
+/* Issue #974. Moves the plaintext that the TLS layer still holds back into the
+ * connection's input buffer. Called once the buffer is below the input bound,
+ * after a read. A plaintext connection holds no such bytes and returns 0. The
+ * return value is the number of bytes added: when it is above 0 the caller
+ * must wake the read watchers, because the fd does not signal those bytes. The
+ * reason is in the implementation in fpm_tls_http_direct.c. */
+size_t fpm_http_direct_tls_pull_pending(struct bufferevent *bev, struct evbuffer *input);
 
 /* Whether this pool terminates TLS, i.e. whether REQUEST_SCHEME is https and
  * HTTPS is on for every request it serves. Answers from configuration, so it

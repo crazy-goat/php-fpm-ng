@@ -98,6 +98,27 @@ struct fpm_http_access_log_s *fpm_http_access_log_reopen(struct fpm_http_access_
 }
 /* }}} */
 
+/* One byte, as the access log writes it. Public so the http-direct access log
+ * (fpm_http_direct_access_log.c) escapes its client fields by the same rule
+ * (issue #1003): one access.format means the same on both transports. Writes
+ * one or two bytes to out[] and returns how many. */
+size_t fpm_http_access_log_escape_byte(unsigned char c, char out[2]) /* {{{ */
+{
+	if (c == '"' || c == '\\') {
+		out[0] = '\\';
+		out[1] = (char) c;
+		return 2;
+	}
+	if (c < 0x20 || c == 0x7f) {
+		out[0] = '\\';
+		out[1] = '?';
+		return 2;
+	}
+	out[0] = (char) c;
+	return 1;
+}
+/* }}} */
+
 /* Escape quotes, backslashes, and control characters — this is a log, not a
  * protocol, so truncate instead of reporting an error. Returns the length
  * written to `out` (without the final NUL). */
@@ -112,17 +133,14 @@ static size_t fpm_http_access_log_escape(const char *in, char *out, size_t out_s
 		return 0;
 	}
 	for (; *in && o + 1 < out_size; in++) {
-		unsigned char c = (unsigned char) *in;
+		char pair[2];
+		size_t n = fpm_http_access_log_escape_byte((unsigned char) *in, pair);
 
-		if (c == '"' || c == '\\' || c < 0x20 || c == 0x7f) {
-			if (o + 2 >= out_size) {
-				break;
-			}
-			out[o++] = '\\';
-			out[o++] = (c == '"' || c == '\\') ? (char) c : '?';
-		} else {
-			out[o++] = (char) c;
+		if (o + n >= out_size) {
+			break;
 		}
+		memcpy(out + o, pair, n);
+		o += n;
 	}
 	out[o] = '\0';
 	return o;

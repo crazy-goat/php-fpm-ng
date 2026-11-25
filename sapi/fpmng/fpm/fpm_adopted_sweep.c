@@ -42,6 +42,8 @@ static int sweep_armed;
 
 static void fpm_adopted_sweep_tick(struct fpm_event_s *ev, short which, void *arg);
 
+/* Deletes sweep_event. Called only from fpm_adopted_sweep_tick(), which is
+ * the timer that fired. See docs/timers.md. */
 static void fpm_adopted_sweep_disarm(void)
 {
 	if (sweep_armed) {

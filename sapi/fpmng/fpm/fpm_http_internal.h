@@ -92,6 +92,8 @@ struct {								\
 #include <event2/keyvalq_struct.h>
 #include <event2/util.h>
 
+#include "fpm_http_proxy_protocol.h"
+
 #include "php.h"
 #include "zend_smart_str.h"
 
@@ -105,6 +107,7 @@ struct {								\
 #include "fpm_tls_reload.h"
 /* The request-target contract both ingresses read, since #681 (fpm_http_target.h). */
 #include "fpm_http_target.h"
+#include "fpm_http_reply_policy.h"
 
 #define FPM_HTTP_MAX_CGI_HEADERS (64 * 1024)
 /* Largest content length we put in a FastCGI record. The protocol allows
@@ -122,12 +125,21 @@ struct {								\
 #define FPM_HTTP_BAD_GATEWAY     502 /* libevent has no constant for it */
 #define FPM_HTTP_SERVICE_UNAVAIL 503 /* libevent has no constant for it */
 #define FPM_HTTP_GATEWAY_TIMEOUT 504 /* libevent has no constant for it; http.upstream_* timeout, issue #716 */
-#define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds sent with a 503 on a full pool */
+#define FPM_HTTP_RETRY_AFTER     "1" /* Retry-After seconds on every 503 the gateway writes (fpm_http_error.c); NO_CERT sends 60 instead (docs/tls.md) */
+/* The body of the invalid-Status 502 (fpm_http_fcgi.c). The other 502s the
+ * gateway writes get the same 12 bytes from fpm_http_error_prepare(), and the
+ * tests pin both at 12. The access log counts the length (issue #858), so the
+ * bytes field and the body on the wire cannot drift apart. A HEAD reply sends no
+ * body and counts 0. */
+#define FPM_HTTP_BAD_GATEWAY_BODY     "Bad Gateway\n"
+#define FPM_HTTP_BAD_GATEWAY_BODY_LEN (sizeof(FPM_HTTP_BAD_GATEWAY_BODY) - 1)
 
 typedef struct _fpm_http_conn fpm_http_conn;
 typedef struct _fpm_http_upstream fpm_http_upstream;
 
 struct fpm_http_gateway_s;
+struct fpm_gw_ws_s;
+struct fpm_http_sendfile_s;
 
 /* one gateway slot: which gw it belongs to, its index, and its crash-loop
  * bookkeeping (see fpm_http_gateway_on_exit()). Passed as the `arg` to
@@ -373,12 +385,17 @@ struct fpm_http_target_s {
 };
 
 /* One row of the routing table: a path prefix and the target it selects. The
- * rows are sorted longest prefix first at config time, so the lookup is the
- * first match. */
+ * rows are sorted at config time (fpm_http_routes_sort()), so the lookup is the
+ * first row that matches. A host-bound row (issue #658) also needs the request
+ * Host to equal `host`, which is lowercased and NULL for a row bound to no host. */
 struct fpm_http_route_s {
 	char *prefix;
 	size_t prefix_len;
+	char *host;
 	struct fpm_http_target_s *target;
+	/* Issue #659: http.route_upgrade[<prefix>] names this row's prefix, so a
+	 * WebSocket Upgrade on it is passed through instead of answered 501. */
+	unsigned upgrade:1;
 };
 
 /* Issue #389: one row of the gateway's http.operator forwarding map: a public
@@ -418,6 +435,21 @@ struct fpm_http_client_s {
 	struct fpm_http_gateway_s *gw;
 	struct evhttp_connection *evcon;
 	fpm_http_conn *c;
+	/* Issue #996: a request whose state fpm_http_finish_truncated() freed while
+	 * it was still attached to this connection. Nothing else holds it, so the
+	 * close callback must end it: libevent detaches it and never frees it. NULL
+	 * otherwise. */
+	struct evhttp_request *req;
+	/* Issue #651: the PROXY header that admitted this connection, copied from
+	 * its read deadline node by fpm_http_proxy_admit(). proxy_done is 1 only
+	 * when a header was accepted; with http.proxy_protocol on, a request on a
+	 * connection without it is refused (fail closed). */
+	struct fpm_http_proxy_header_s proxy;
+	int proxy_done;
+	/* Issue #651, review R1: set once fpm_http_proxy_refuse() has scheduled the
+	 * close of this connection, so a request evhttp still dispatches on it
+	 * schedules nothing more. */
+	int proxy_refused;
 	/* Issue #642: stamped in fpm_http_client_request_begin() for the request
 	 * in flight on this connection -- the start of the access log's
 	 * duration_ms. Monotonic (fpm_clock_get). A keep-alive connection serves
@@ -434,6 +466,12 @@ struct fpm_http_client_s {
 	 * plain wrapper's timing, so the second call must not observe again.
 	 * Reset by fpm_http_client_request_begin(). */
 	unsigned duration_observed;
+	/* Issue #650: 1 when the request in flight came in on the main listener,
+	 * so its replies carry the configured response headers. fpm_http_request()
+	 * sets it, fpm_http_client_request_begin() clears it, and the plain-HTTP
+	 * companion never sets it (RFC 6797 7.2). Read by
+	 * fpm_http_reply_headers_wanted(). */
+	unsigned reply_headers;
 	/* Issue #642: the id of the request in flight, "" when http.request_id is
 	 * off or no id could be made. Sent to the target and logged. */
 	char request_id[FPM_HTTP_REQUEST_ID_SIZE];
@@ -452,6 +490,9 @@ struct fpm_http_client_s {
 	 * connection (and its fd) goes. */
 	struct event *ka_timer;
 	struct event *ka_watch;
+	/* Issue #651, review R1: the deferred close of a connection whose PROXY
+	 * header was refused. Freed with ka_timer, before the connection goes. */
+	struct event *close_timer;
 };
 
 /* Process-local open-connection index, copied empty into each gateway child by
@@ -479,6 +520,8 @@ struct fpm_http_gateway_s {
 	 * http.gateways alone. */
 	int proxy_only;
 	char *docroot;
+	char *sendfile_root;			/* http.sendfile_root, NULL when unset (issue #649) */
+	struct fpm_http_reply_policy_s reply;	/* http.response_header[] and http.error_page[], built in the master (issue #650) */
 	int listen_fd;
 	int plain_listen_fd;
 	int backlog;
@@ -523,12 +566,22 @@ struct fpm_http_gateway_s {
 	 * listener together. See fpm_http_gw_proc.c for the accept gate. */
 	int max_connections;
 	int max_per_client;
+	/* Issue #659: the Upgrade relay's idle and total bounds, copied from
+	 * http.upgrade_idle_timeout and http.upgrade_max_duration. */
+	struct timeval upgrade_idle;
+	struct timeval upgrade_max;
+	/* Issue #659: every upgraded connection this process is relaying, so the
+	 * gateway's teardown can end them before evhttp_free() frees their memory. */
+	struct fpm_gw_ws_s *ws_relays;
 	char *allowed_clients;				/* http.allowed_clients, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *acl;			/* NULL = no restriction, see fpm_http_acl.h */
 	char *http_listen_override;			/* http.listen; NULL = derive from listen_address (port + 1) */
 	char *plain_listen_address;			/* http.plain_listen; redirect-only companion, NULL = disabled */
 	char *trusted_proxies;				/* http.trusted_proxies, raw string kept for fpm_http_acl_parse() */
 	struct fpm_http_acl_s *trusted_proxies_acl;	/* NULL = trust nobody, see fpm_http_forwarded.h */
+	int proxy_protocol;				/* http.proxy_protocol: TLS and main listener read a PROXY header first (issue #651) */
+	char *proxy_trusted;				/* http.proxy_protocol_trusted, raw string kept for fpm_http_acl_parse() */
+	struct fpm_http_acl_s *proxy_trusted_acl;	/* sources allowed to send a PROXY header; NULL when proxy_protocol is off */
 	int request_id_mode; /* http.request_id: FPM_HTTP_REQUEST_ID_OFF/_GENERATE/_PROPAGATE, see fpm_http_request_id.h (#642) */
 	char *access_log_path;				/* http.access_log; NULL = disabled */
 	int access_format;				/* http.access_format: FPM_HTTP_ACCESS_FORMAT_COMBINED or _JSON, see fpm_http_access_log.h (#642) */
@@ -638,6 +691,9 @@ struct fpm_http_gateway_s {
 	 * re-derive "did this pool configure routing" from the shape of the
 	 * table it already built. */
 	int has_routes;
+	/* Issue #658: true when some http.route[] entry is bound to a host. Gates
+	 * the Host parse per request, so a table without host rows costs nothing. */
+	int has_host_routes;
 
 	/* Issue #389: http.operator. When on, this gateway's public port also
 	 * serves every exposed pool's operator pages at <base>/<pool name>, from
@@ -771,6 +827,18 @@ struct fpm_http_read_deadline_s {
 	struct event *ev;			/* the one-shot deadline timer */
 	struct event *ev_eof;			/* first a zero timer (fd pickup), then the persistent EOF watcher */
 	struct fpm_http_read_deadline_s *next;
+	/* Issue #651: PROXY protocol header state, used only when
+	 * http.proxy_protocol is on (see fpm_http_proxy.h). proxy_pending is 1
+	 * while the header is still being read; then ev_eof is the header reader
+	 * and read is disabled on bev. proxy_buf holds the header bytes already
+	 * consumed (NEED_MORE). */
+	int proxy_on;
+	int proxy_pending;
+	int proxy_accepted;
+	short proxy_enabled;			/* bufferevent_get_enabled() before the header read */
+	size_t proxy_len;
+	unsigned char proxy_buf[FPM_HTTP_PROXY_MAX];
+	struct fpm_http_proxy_header_s proxy;
 };
 
 
@@ -786,6 +854,11 @@ struct _fpm_http_conn {
 	 * always has a row that matches, because a table with no "/" row of its
 	 * own gets the gateway's own listener as one. */
 	struct fpm_http_target_s *target;
+	/* Issue #659: the matched route allows an Upgrade passthrough, and this
+	 * request was forwarded with one (write_request). Only then may the target's
+	 * 101 switch the connection to the relay; any other 101 is still an interim. */
+	unsigned upgrade:1;
+	unsigned upgrading:1;
 	struct evhttp_request *req;
 	struct evhttp_connection *evcon;
 	/* Issue #390: the accepted connection behind evcon, so fpm_http_conn_free()
@@ -834,6 +907,8 @@ struct _fpm_http_conn {
 	smart_str cgi_headers;				/* CGI header block until it is complete */
 	int headers_sent;
 	int discard_upstream;				/* issue #594: invalid upstream Status, 502 sent, drop the rest of the reply */
+	struct fpm_http_sendfile_s *sendfile;			/* issue #649: redirect header from the upstream, NULL unless one was seen; see fpm_http_sendfile.h */
+	int chunk_lost;						/* issue #967: a body piece could not be buffered; fpm_http_finish() cuts the reply, see fpm_http_response_chunk() */
 	int read_paused;				/* issue #596: upstream->ev_read is removed because the client has not drained the response; see fpm_http_backpressure.c */
 	/* Issue #705: while read_paused, this one-shot timer re-checks every
 	 * FPM_HTTP_RESPONSE_MIN_RATE_WINDOW_MS that the client has drained at
@@ -849,7 +924,7 @@ struct _fpm_http_conn {
 	char remote_addr[FPM_HTTP_FORWARDED_ADDR_LEN];		/* effective REMOTE_ADDR: fwd.remote_addr or peer_addr */
 	char remote_user[FPM_HTTP_AUTH_USER_LEN];		/* from Authorization: Basic, for CGI var and access log */
 	int status;						/* HTTP status finally sent, -1 until known; for the access log */
-	size_t bytes_out;					/* body bytes sent to the client, for the access log */
+	size_t bytes_out;					/* body bytes for the access log. The 502s the gateway writes itself count their body (issue #858), 0 for HEAD. A proxied HEAD reply counts the upstream body length, though no body is sent. Other local error replies count the body that fpm_http_error_prepare() puts in the output buffer (issue #882); the static refusal 404 does not use this field, fpm_http_static_log_response() passes its count (10, 0 for HEAD) directly; fpm_http_reject_queued() (pool full, HTML body) still counts 0 */
 
 	/* http.pool_full_policy = wait (issue #309). All three are dead unless
 	 * the pool opted in: when this request was put on gw->waiting, the
@@ -1041,6 +1116,7 @@ void fpm_http_cleanup(int which, void *arg);
 void fpm_http_split_bind(char *bind, char **host, char **port);
 int fpm_http_listen(const char *pool, const char *listen_address, const char *http_address, int backlog, int reuseport, int do_listen);
 void fpm_http_read_deadline_disarm(struct fpm_http_gateway_s *gw, struct bufferevent *bev);
+int fpm_http_read_deadline_proxy_done(struct fpm_http_read_deadline_s *dl, int accepted); /* issue #651, fpm_http_gw_proc.c; 1 when it freed dl */
 
 /* fpm_http_operator_fwd.c */
 const char *fpm_http_operator_base(struct fpm_worker_pool_s *wp, int metrics,
@@ -1054,4 +1130,12 @@ void fpm_http_routes_free(struct fpm_http_gateway_s *gw);
 void fpm_http_operator_free(struct fpm_http_gateway_s *gw);
 
 #endif /* HAVE_FPM_HTTP */
+
+/* Issue #659: Upgrade passthrough (fpm_http_gw_ws.c). */
+void fpm_http_client_closed(struct evhttp_connection *evcon, void *arg);
+void fpm_http_upstream_release(fpm_http_upstream *up);
+int fpm_http_gw_ws_start(fpm_http_upstream *up, const char *head, size_t head_len,
+	const char *tail, size_t tail_len);
+void fpm_http_gw_ws_close_all(struct fpm_http_gateway_s *gw);
+
 #endif /* FPM_HTTP_INTERNAL_H */

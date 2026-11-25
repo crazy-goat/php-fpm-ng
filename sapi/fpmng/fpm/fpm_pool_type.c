@@ -84,6 +84,10 @@ static const char *const fpm_pool_gateway_rejects[] = {
 	"process.dumpable",
 	/* AppArmor confines a PHP child; the gateway process is not confined. */
 	"apparmor_hat",
+	/* http-direct static file options (issue #648). The gateway serves its
+	 * files with the same module but takes none of these options, so a value
+	 * here would do nothing. */
+	"http.static.",
 	"fiber.",
 	"worker.",
 	NULL
@@ -180,6 +184,7 @@ static const char *const fpm_http_direct_worker_accepts[] = {
 static const struct fpm_pool_type_s fpm_http_direct_worker = {
 	.name                         = "http-direct",
 	.serves_http11                = 1,
+	.serves_websocket             = 1,
 	/* Issue #295, re-read in #380. Beta, not supported. Criterion 1 of the
 	 * #269 bar holds -- it is covered by CI on every PR (the
 	 * fpmng-http-direct-worker-*.phpt cells) -- and criterion 3 holds: the
